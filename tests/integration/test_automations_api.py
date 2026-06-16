@@ -2708,6 +2708,75 @@ async def test_due_scheduled_cycle_query_ignores_completed_deleted_account(async
 
 
 @pytest.mark.asyncio
+async def test_due_scheduled_cycle_query_ignores_completed_run_with_fallback_account_id(
+    async_client,
+):
+    snapshot_account, fallback_account = await _create_accounts(
+        "auto-due-query-fallback-a",
+        "auto-due-query-fallback-b",
+    )
+    now = utcnow().replace(second=0, microsecond=0)
+
+    async with SessionLocal() as session:
+        automations_repository = AutomationsRepository(session)
+        job = await automations_repository.create_job(
+            name="Fallback account due query",
+            enabled=True,
+            include_paused_accounts=False,
+            schedule_type="daily",
+            schedule_time=now.strftime("%H:%M"),
+            schedule_timezone="UTC",
+            schedule_days=["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+            schedule_threshold_minutes=0,
+            model="gpt-5.3-codex",
+            reasoning_effort=None,
+            prompt="ping",
+            account_ids=[snapshot_account.id],
+        )
+        cycle_key = f"scheduled:{job.id}:{now.isoformat()}"
+        cycle = await automations_repository.create_run_cycle(
+            cycle_key=cycle_key,
+            job_id=job.id,
+            trigger="scheduled",
+            cycle_expected_accounts=1,
+            cycle_window_end=now,
+            accounts=[(snapshot_account.id, now)],
+        )
+        run = await automations_repository.claim_run(
+            job_id=job.id,
+            trigger="scheduled",
+            slot_key=_scheduled_slot_key(job.id, account_id=snapshot_account.id, due_slot=now),
+            cycle_key=cycle.cycle_key,
+            cycle_expected_accounts=cycle.cycle_expected_accounts,
+            cycle_window_end=cycle.cycle_window_end,
+            scheduled_for=now,
+            started_at=now,
+            account_id=snapshot_account.id,
+        )
+        assert run is not None
+        await automations_repository.complete_run(
+            run.id,
+            status="success",
+            finished_at=now + timedelta(seconds=5),
+            account_id=fallback_account.id,
+            error_code=None,
+            error_message=None,
+            attempt_count=1,
+        )
+
+        due_job_ids = await automations_repository.list_due_scheduled_run_cycle_job_ids(
+            now_utc=now + timedelta(minutes=1, seconds=5),
+        )
+        due_cycles = await automations_repository.list_due_scheduled_run_cycles(
+            job_id=job.id,
+            now_utc=now + timedelta(minutes=1, seconds=5),
+        )
+
+    assert due_job_ids == []
+    assert due_cycles == []
+
+
+@pytest.mark.asyncio
 async def test_automations_run_details_omit_ineligible_accounts_that_are_still_pending(async_client):
     accounts = await _create_accounts(
         "auto-ineligible-summary-a",

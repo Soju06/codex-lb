@@ -5,9 +5,11 @@ from datetime import datetime, timedelta
 import pytest
 
 from app.db.models import Account, AccountStatus
+from app.modules.automations.repository import AutomationRunRecord
 from app.modules.automations.service import (
     AutomationsService,
     AutomationValidationError,
+    _AutomationRunCycleSummary,
     _normalize_reasoning_effort,
     _pick_dispatch_offsets_seconds,
     _resolve_effective_status,
@@ -196,3 +198,44 @@ def test_pick_dispatch_offsets_seconds_always_includes_zero_anchor() -> None:
     assert len(offsets) == 4
     assert 0 in offsets
     assert len(set(offsets)) == 4
+
+
+def test_to_run_data_falls_back_to_run_finished_at_when_cycle_summary_finished_at_is_null() -> None:
+    run_started_at = datetime(2026, 6, 1, 10, 0, 0)
+    run_finished_at = datetime(2026, 6, 1, 10, 0, 30)
+    run = AutomationRunRecord(
+        id="run-id",
+        job_id="job-id",
+        job_name="job",
+        model="gpt-5.3-codex",
+        reasoning_effort=None,
+        trigger="scheduled",
+        status="success",
+        slot_key="slot",
+        cycle_key="cycle",
+        cycle_expected_accounts=1,
+        cycle_window_end=run_started_at,
+        scheduled_for=run_started_at,
+        started_at=run_started_at,
+        finished_at=run_finished_at,
+        account_id="account-id",
+        error_code=None,
+        error_message=None,
+        attempt_count=1,
+    )
+    summary = _AutomationRunCycleSummary(
+        cycle_key="cycle",
+        cycle_started_at=run_started_at,
+        cycle_finished_at=None,
+        effective_status="success",
+        total_accounts=1,
+        completed_accounts=1,
+        pending_accounts=0,
+        error_code=None,
+        error_message=None,
+        accounts=[],
+    )
+
+    run_data = AutomationsService._to_run_data(run, summary=summary, apply_cycle_terminal_overrides=True)
+
+    assert run_data.finished_at == run_finished_at

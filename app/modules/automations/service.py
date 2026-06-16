@@ -1884,7 +1884,9 @@ class AutomationsService:
     ) -> AutomationRunData:
         cycle_started_at = summary.cycle_started_at if summary is not None else None
         cycle_finished_at = (
-            summary.cycle_finished_at if summary is not None and apply_cycle_terminal_overrides else None
+            summary.cycle_finished_at
+            if summary is not None and apply_cycle_terminal_overrides and summary.cycle_finished_at is not None
+            else run.finished_at
         )
         error_code = (
             summary.error_code or run.error_code

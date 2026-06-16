@@ -217,15 +217,29 @@ class AutomationsRepository:
         *,
         now_utc: datetime,
     ) -> list[str]:
-        pending_due_account = self._pending_due_scheduled_cycle_account_exists(now_utc=now_utc)
-        result = await self._session.execute(
-            select(AutomationRunCycle.job_id)
-            .where(AutomationRunCycle.trigger == "scheduled")
-            .where(exists(pending_due_account))
-            .distinct()
-            .order_by(AutomationRunCycle.job_id.asc())
-        )
-        return [job_id for (job_id,) in result.all() if job_id]
+        batch_size = 500
+        offset = 0
+        due_job_ids: list[str] = []
+        known_job_ids: set[str] = set()
+        while True:
+            candidates = await self._list_due_scheduled_run_cycle_candidates(
+                job_id=None,
+                limit=batch_size,
+                offset=offset,
+            )
+            if not candidates:
+                break
+
+            due_cycles = await self._filter_due_scheduled_run_cycles(candidates, now_utc=now_utc)
+            for cycle in due_cycles:
+                if cycle.job_id and cycle.job_id not in known_job_ids:
+                    known_job_ids.add(cycle.job_id)
+                    due_job_ids.append(cycle.job_id)
+
+            if len(candidates) < batch_size:
+                break
+            offset += batch_size
+        return due_job_ids
 
     async def get_job(self, job_id: str) -> AutomationJobRecord | None:
         result = await self._session.execute(
@@ -497,7 +511,6 @@ class AutomationsRepository:
         while len(due_cycles) < limit:
             candidates = await self._list_due_scheduled_run_cycle_candidates(
                 job_id=job_id,
-                now_utc=now_utc,
                 limit=batch_size,
                 offset=offset,
             )
@@ -512,22 +525,23 @@ class AutomationsRepository:
     async def _list_due_scheduled_run_cycle_candidates(
         self,
         *,
-        job_id: str,
-        now_utc: datetime,
+        job_id: str | None,
         limit: int,
         offset: int,
     ) -> list[AutomationRunCycleRecord]:
-        pending_due_account = self._pending_due_scheduled_cycle_account_exists(now_utc=now_utc)
-        result = await self._session.execute(
+        stmt = (
             select(AutomationRunCycle)
-            .where(AutomationRunCycle.job_id == job_id)
             .where(AutomationRunCycle.trigger == "scheduled")
-            .where(exists(pending_due_account))
             .options(selectinload(AutomationRunCycle.cycle_accounts))
             .execution_options(populate_existing=True)
             .order_by(AutomationRunCycle.created_at.asc(), AutomationRunCycle.cycle_key.asc())
             .offset(offset)
             .limit(limit)
+        )
+        if job_id is not None:
+            stmt = stmt.where(AutomationRunCycle.job_id == job_id)
+        result = await self._session.execute(
+            stmt
         )
         return [self._run_cycle_from_model(cycle) for cycle in result.scalars().all()]
 
@@ -592,32 +606,6 @@ class AutomationsRepository:
             if has_due_account:
                 due_cycles.append(cycle)
         return due_cycles
-
-    @staticmethod
-    def _pending_due_scheduled_cycle_account_exists(*, now_utc: datetime):
-        stale_started_before = _automation_run_execution_claim_stale_started_before(now_utc)
-        return (
-            select(AutomationRunCycleAccount.account_id)
-            .where(AutomationRunCycleAccount.cycle_key == AutomationRunCycle.cycle_key)
-            .where(AutomationRunCycleAccount.scheduled_for <= now_utc)
-            .where(
-                ~exists(
-                    select(AutomationRun.id)
-                    .where(AutomationRun.cycle_key == AutomationRunCycleAccount.cycle_key)
-                    .where(AutomationRun.account_id == AutomationRunCycleAccount.account_id)
-                    .where(
-                        or_(
-                            AutomationRun.status != "running",
-                            AutomationRun.finished_at.is_not(None),
-                            and_(
-                                AutomationRun.started_at > AutomationRun.scheduled_for,
-                                AutomationRun.started_at >= stale_started_before,
-                            ),
-                        )
-                    )
-                )
-            )
-        )
 
     async def create_run_cycle(
         self,

@@ -136,24 +136,20 @@ def test_assert_project_versions_accepts_pep440_uv_lock_prerelease(tmp_path: Pat
     [
         (
             "pyproject.toml",
-            lambda root: (
-                root / "pyproject.toml"
-            ).write_text(
+            lambda root: (root / "pyproject.toml").write_text(
                 '[project]\nname = "codex-lb"\nversion = "1.20.0b3"\n',
                 encoding="utf-8",
             ),
         ),
         (
             "frontend/package.json",
-            lambda root: (
-                root / "frontend" / "package.json"
-            ).write_text(json.dumps({"name": "frontend", "version": "1.20.0b3"}) + "\n", encoding="utf-8"),
+            lambda root: (root / "frontend" / "package.json").write_text(
+                json.dumps({"name": "frontend", "version": "1.20.0b3"}) + "\n", encoding="utf-8"
+            ),
         ),
         (
             "deploy/helm/codex-lb/Chart.yaml",
-            lambda root: (
-                root / "deploy" / "helm" / "codex-lb" / "Chart.yaml"
-            ).write_text(
+            lambda root: (root / "deploy" / "helm" / "codex-lb" / "Chart.yaml").write_text(
                 "apiVersion: v2\nname: codex-lb\nversion: 1.20.0b3\nappVersion: 1.20.0b3\n",
                 encoding="utf-8",
             ),

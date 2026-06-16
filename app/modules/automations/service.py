@@ -1060,6 +1060,10 @@ class AutomationsService:
         last_attempted_account_id: str | None = forced_account_id
         cached_accounts_by_id: dict[str, Account] | None = None
         account_ids_to_try = list(job.account_ids)
+        if not account_ids_to_try and run.trigger == AUTOMATION_RUN_TRIGGER_SCHEDULED and run.cycle_key:
+            cycle = await self._repository.get_run_cycle(cycle_key=run.cycle_key)
+            if cycle is not None and cycle.accounts:
+                account_ids_to_try = [entry.account_id for entry in cycle.accounts]
         if not account_ids_to_try:
             accounts = await self._accounts_repository.list_accounts()
             account_ids_to_try = [

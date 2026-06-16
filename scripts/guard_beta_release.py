@@ -200,8 +200,14 @@ def _canonical_release_version(value: str) -> str:
     return f"{match.group('base')}-{channel}.{match.group('serial')}"
 
 
+def _canonical_release_version_for_file(name: str, value: str) -> str:
+    if name == "uv.lock":
+        return _canonical_release_version(value)
+    return value
+
+
 def _canonical_release_versions(versions: Mapping[str, str]) -> dict[str, str]:
-    return {name: _canonical_release_version(version) for name, version in versions.items()}
+    return {name: _canonical_release_version_for_file(name, version) for name, version in versions.items()}
 
 
 def read_consistent_release_version(root: Path) -> ReleaseVersion:

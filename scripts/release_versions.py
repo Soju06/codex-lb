@@ -199,12 +199,18 @@ def canonical_release_version(value: str) -> str:
     return f"{match.group('base')}-{channel}.{match.group('serial')}"
 
 
+def canonical_release_version_for_file(name: str, value: str) -> str:
+    if name == "uv.lock":
+        return canonical_release_version(value)
+    return value
+
+
 def assert_project_versions(root: Path, expected_version: str) -> None:
     expected = canonical_release_version(expected_version)
     mismatches = {
         name: actual
         for name, actual in read_project_versions(root).items()
-        if canonical_release_version(actual) != expected
+        if canonical_release_version_for_file(name, actual) != canonical_release_version_for_file(name, expected)
     }
     if mismatches:
         detail = ", ".join(f"{name}={actual!r}" for name, actual in sorted(mismatches.items()))

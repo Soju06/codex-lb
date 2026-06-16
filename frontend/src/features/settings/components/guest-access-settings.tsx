@@ -1,5 +1,6 @@
 import { Eye } from "lucide-react";
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 
 import { AlertMessage } from "@/components/alert-message";
@@ -24,6 +25,7 @@ export function GuestAccessSettings({
   onSave,
   onRefresh,
 }: GuestAccessSettingsProps) {
+  const { t } = useTranslation();
   const [password, setPassword] = useState("");
   const [passwordBusy, setPasswordBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -39,7 +41,7 @@ export function GuestAccessSettings({
       await setGuestPassword({ password });
       setPassword("");
       await onRefresh();
-      toast.success("Guest password saved");
+      toast.success(t("settings.guestAccess.toasts.passwordSaved"));
     } catch (caught) {
       setError(getErrorMessage(caught));
     } finally {
@@ -53,7 +55,7 @@ export function GuestAccessSettings({
     try {
       await removeGuestPassword();
       await onRefresh();
-      toast.success("Guest password removed");
+      toast.success(t("settings.guestAccess.toasts.passwordRemoved"));
     } catch (caught) {
       setError(getErrorMessage(caught));
     } finally {
@@ -70,9 +72,9 @@ export function GuestAccessSettings({
               <Eye className="h-4 w-4 text-primary" aria-hidden="true" />
             </div>
             <div>
-              <h3 className="text-sm font-semibold">Guest access</h3>
+              <h3 className="text-sm font-semibold">{t("settings.guestAccess.title")}</h3>
               <p className="text-xs text-muted-foreground">
-                Share read-only dashboard visibility without admin controls.
+                {t("settings.guestAccess.description")}
               </p>
             </div>
           </div>
@@ -87,11 +89,11 @@ export function GuestAccessSettings({
 
         <div className="flex flex-col gap-3 rounded-lg border p-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
-            <p className="text-sm font-medium">Guest password</p>
+            <p className="text-sm font-medium">{t("settings.guestAccess.password.label")}</p>
             <p className="text-xs text-muted-foreground">
               {settings.guestPasswordConfigured
-                ? "Guest viewers must sign in with the guest password."
-                : "Leave unset to allow passwordless read-only guest access when enabled."}
+                ? t("settings.guestAccess.password.configuredDescription")
+                : t("settings.guestAccess.password.emptyDescription")}
             </p>
           </div>
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
@@ -101,7 +103,7 @@ export function GuestAccessSettings({
               value={password}
               disabled={disabled}
               onChange={(event) => setPassword(event.target.value)}
-              placeholder="Optional guest password"
+              placeholder={t("settings.guestAccess.password.placeholder")}
               className="h-8 text-xs sm:w-56"
             />
             <Button
@@ -112,7 +114,7 @@ export function GuestAccessSettings({
               disabled={disabled || !password.trim()}
               onClick={() => void handleSetPassword()}
             >
-              Save
+              {t("settings.guestAccess.password.save")}
             </Button>
             {settings.guestPasswordConfigured ? (
               <Button
@@ -123,7 +125,7 @@ export function GuestAccessSettings({
                 disabled={disabled}
                 onClick={() => void handleRemovePassword()}
               >
-                Remove
+                {t("settings.guestAccess.password.remove")}
               </Button>
             ) : null}
           </div>

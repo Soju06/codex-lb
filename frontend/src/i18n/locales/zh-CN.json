@@ -43,6 +43,13 @@
       "passwordPlaceholder": "请输入密码",
       "submit": "登录"
     },
+    "guest": {
+      "heading": "访客访问",
+      "subheading": "无需管理员权限即可查看仪表盘。",
+      "passwordLabel": "访客密码",
+      "passwordPlaceholder": "请输入访客密码",
+      "submit": "以访客身份查看"
+    },
     "totp": {
       "title": "两步验证",
       "description": "请输入身份验证器应用中的 6 位验证码。",
@@ -65,10 +72,26 @@
     "page": {
       "title": "设置",
       "subtitle": "配置路由、鉴权、API Key 管理与防火墙。",
-      "guestNotice": "你正在以只读访客权限查看仪表盘。管理员控制项已禁用。",
+      "readOnlyNotice": "你当前以只读访客身份查看仪表盘。管理员控制项已禁用。",
       "trustedHeaderNotice": "仪表盘访问由可信反向代理头部鉴权。密码与 TOTP 仅作为可选的回退登录方式保留。",
       "disabledNotice": "仪表盘鉴权已被配置完全跳过。请仅在网络受限或外部已有访问控制的场景下使用此模式。",
       "savingLabel": "保存设置中..."
+    },
+    "guestAccess": {
+      "title": "访客访问",
+      "description": "在不授予管理员控制的情况下共享只读仪表盘访问。",
+      "password": {
+        "label": "访客密码",
+        "configuredDescription": "访客查看者必须使用访客密码登录。",
+        "emptyDescription": "留空即可在启用后允许无密码的只读访客访问。",
+        "placeholder": "可选访客密码",
+        "save": "保存",
+        "remove": "移除"
+      },
+      "toasts": {
+        "passwordSaved": "访客密码已保存",
+        "passwordRemoved": "访客密码已移除"
+      }
     },
     "appearance": {
       "title": "外观",

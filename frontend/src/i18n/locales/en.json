@@ -43,6 +43,13 @@
       "passwordPlaceholder": "Enter password",
       "submit": "Sign In"
     },
+    "guest": {
+      "heading": "Guest access",
+      "subheading": "View the dashboard without admin controls.",
+      "passwordLabel": "Guest password",
+      "passwordPlaceholder": "Enter guest password",
+      "submit": "View as Guest"
+    },
     "totp": {
       "title": "Two-factor verification",
       "description": "Enter the 6-digit code from your authenticator app.",
@@ -65,10 +72,26 @@
     "page": {
       "title": "Settings",
       "subtitle": "Configure routing, auth, API key management, and firewall.",
-      "guestNotice": "You are viewing the dashboard with read-only guest access. Admin controls are disabled.",
+      "readOnlyNotice": "You are viewing the dashboard with read-only guest access. Admin controls are disabled.",
       "trustedHeaderNotice": "Dashboard access is authenticated by a trusted reverse-proxy header. Password and TOTP stay available only as optional fallback login.",
       "disabledNotice": "Dashboard auth is fully bypassed by configuration. Only use this mode behind network restrictions or external access control.",
       "savingLabel": "Saving settings..."
+    },
+    "guestAccess": {
+      "title": "Guest access",
+      "description": "Share read-only dashboard visibility without admin controls.",
+      "password": {
+        "label": "Guest password",
+        "configuredDescription": "Guest viewers must sign in with the guest password.",
+        "emptyDescription": "Leave unset to allow passwordless read-only guest access when enabled.",
+        "placeholder": "Optional guest password",
+        "save": "Save",
+        "remove": "Remove"
+      },
+      "toasts": {
+        "passwordSaved": "Guest password saved",
+        "passwordRemoved": "Guest password removed"
+      }
     },
     "appearance": {
       "title": "Appearance",

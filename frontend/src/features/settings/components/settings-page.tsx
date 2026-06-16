@@ -10,8 +10,8 @@ import { FirewallSection } from "@/features/firewall/components/firewall-section
 import { QuotaPlannerSection } from "@/features/quota-planner/components/quota-planner-section";
 import { buildSettingsUpdateRequest } from "@/features/settings/payload";
 import { AppearanceSettings } from "@/features/settings/components/appearance-settings";
-import { ImportSettings } from "@/features/settings/components/import-settings";
 import { GuestAccessSettings } from "@/features/settings/components/guest-access-settings";
+import { ImportSettings } from "@/features/settings/components/import-settings";
 import { PasswordSettings } from "@/features/settings/components/password-settings";
 import { RoutingSettings } from "@/features/settings/components/routing-settings";
 import { SessionSettings } from "@/features/settings/components/session-settings";
@@ -82,7 +82,7 @@ export function SettingsPage() {
           {error ? <AlertMessage variant="error">{error}</AlertMessage> : null}
           {!canWrite ? (
             <div className="rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 text-xs font-medium text-foreground">
-              {t("settings.page.guestNotice")}
+              {t("settings.page.readOnlyNotice")}
             </div>
           ) : null}
 

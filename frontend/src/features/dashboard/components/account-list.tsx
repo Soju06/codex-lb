@@ -44,6 +44,10 @@ const SORTABLE_HEADERS: Array<{ key: AccountListSortKey; label: string }> = [
   { key: "warmup", label: "Warm-up" },
 ];
 
+function formatWarmupWindow(window: string): string {
+  return window === "primary" || window === "primary_idle" ? "5h" : "weekly";
+}
+
 function quotaLabel(label: string, percent: number | null, resetAt: string | null | undefined) {
   return {
     label,
@@ -310,7 +314,7 @@ export function AccountList({ accounts, readOnly = false, onAction }: AccountLis
           const compactId = formatCompactAccountId(account.accountId);
           const showAccountId = account.isEmailDuplicate === true;
           const warmupDetail = account.limitWarmup
-            ? `${formatSlug(account.limitWarmup.status)} | ${account.limitWarmup.window === "primary" ? "5h" : "weekly"} | ${formatDateTimeInline(account.limitWarmup.completedAt ?? account.limitWarmup.attemptedAt)}`
+            ? `${formatSlug(account.limitWarmup.status)} | ${formatWarmupWindow(account.limitWarmup.window)} | ${formatDateTimeInline(account.limitWarmup.completedAt ?? account.limitWarmup.attemptedAt)}`
             : "No attempts";
           const availableResetCredits = account.availableResetCredits ?? 0;
           const hasResetCredits = availableResetCredits > 0;

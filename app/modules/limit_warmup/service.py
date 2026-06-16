@@ -693,6 +693,8 @@ def _build_staggered_idle_candidate(
         return None
     if not _usage_entry_refreshed_for_cycle(after, refresh_started_at=refresh_started_at):
         return None
+    if after.reset_at is None:
+        return None
     if usage_core.is_weekly_window_minutes(after.window_minutes):
         return None
     if after.used_percent > 0.0:
@@ -707,7 +709,7 @@ def _build_staggered_idle_candidate(
     )
     if due is None:
         return None
-    return _WarmupCandidate(reset_at=due.cycle_end, window=_IDLE_PRIMARY_WINDOW)
+    return _WarmupCandidate(reset_at=after.reset_at, window=_IDLE_PRIMARY_WINDOW)
 
 
 @dataclass(frozen=True, slots=True)

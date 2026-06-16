@@ -47,6 +47,30 @@ describe("AccountList", () => {
     expect(screen.getByText("On")).toBeInTheDocument();
   });
 
+  it("renders primary idle warm-up attempts as 5h", () => {
+    const attemptedAt = new Date("2026-06-03T12:00:00Z").toISOString();
+    const account = createAccountSummary({
+      accountId: "acc-idle",
+      displayName: "Idle Warmup Account",
+      limitWarmupEnabled: true,
+      limitWarmup: {
+        window: "primary_idle",
+        resetAt: 18_000,
+        status: "succeeded",
+        model: "gpt-5.1-codex-mini",
+        attemptedAt,
+        completedAt: attemptedAt,
+        errorCode: null,
+        errorMessage: null,
+      },
+    });
+
+    render(<AccountList accounts={[account]} />);
+
+    const row = screen.getByTestId("account-list-row");
+    expect(within(row).getByText((text) => text.includes("Succeeded | 5h |"))).toBeInTheDocument();
+  });
+
   it("exposes account actions from list rows", async () => {
     const user = userEvent.setup();
     const onAction = vi.fn();

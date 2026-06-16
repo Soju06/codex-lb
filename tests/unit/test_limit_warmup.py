@@ -858,12 +858,8 @@ async def test_auto_model_unavailable_records_skipped_attempt(monkeypatch) -> No
 def test_staggered_idle_slot_is_stable_and_spread() -> None:
     now = datetime.fromtimestamp(0, tz=timezone.utc).replace(tzinfo=None)
 
-    first = limit_warmup_service._staggered_idle_due(
-        "acc_1", ["acc_1", "acc_2", "acc_3"], now=now, reset_at=18_000
-    )
-    same = limit_warmup_service._staggered_idle_due(
-        "acc_1", ["acc_3", "acc_1", "acc_2"], now=now, reset_at=18_000
-    )
+    first = limit_warmup_service._staggered_idle_due("acc_1", ["acc_1", "acc_2", "acc_3"], now=now, reset_at=18_000)
+    same = limit_warmup_service._staggered_idle_due("acc_1", ["acc_3", "acc_1", "acc_2"], now=now, reset_at=18_000)
     other = limit_warmup_service._staggered_idle_due(
         "acc_2",
         ["acc_1", "acc_2", "acc_3"],

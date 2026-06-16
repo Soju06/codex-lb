@@ -24,6 +24,14 @@ function renderStatusBar() {
   );
 }
 
+function mockSettings(
+  overrides: Parameters<typeof createDashboardSettings>[0] = {},
+) {
+  server.use(
+    http.get("/api/settings", () => HttpResponse.json(createDashboardSettings(overrides))),
+  );
+}
+
 describe("StatusBar", () => {
   it("links to the official GitHub repository", () => {
     renderStatusBar();
@@ -80,18 +88,12 @@ describe("StatusBar", () => {
   it("localizes combined routing labels in zh-CN", async () => {
     await i18n.changeLanguage("zh-CN");
     try {
-      server.use(
-        http.get("/api/settings", () =>
-          HttpResponse.json(
-            createDashboardSettings({
-              routingStrategy: "capacity_weighted",
-              stickyThreadsEnabled: true,
-              preferEarlierResetAccounts: true,
-              preferEarlierResetWindow: "secondary",
-            }),
-          ),
-        ),
-      );
+      mockSettings({
+        routingStrategy: "capacity_weighted",
+        stickyThreadsEnabled: true,
+        preferEarlierResetAccounts: true,
+        preferEarlierResetWindow: "secondary",
+      });
 
       renderStatusBar();
 
@@ -104,5 +106,33 @@ describe("StatusBar", () => {
     } finally {
       await i18n.changeLanguage("en");
     }
+  });
+
+  it("does not show early reset for strategies that do not honor it", async () => {
+    mockSettings({
+      routingStrategy: "round_robin",
+      stickyThreadsEnabled: false,
+      preferEarlierResetAccounts: true,
+      preferEarlierResetWindow: "secondary",
+    });
+
+    renderStatusBar();
+
+    expect(await screen.findByText("Round robin")).toBeInTheDocument();
+    expect(screen.queryByText("Early weekly reset")).not.toBeInTheDocument();
+    expect(screen.queryByText("Round robin + Early weekly reset")).not.toBeInTheDocument();
+  });
+
+  it("still shows early reset for supported strategies", async () => {
+    mockSettings({
+      routingStrategy: "fill_first",
+      stickyThreadsEnabled: false,
+      preferEarlierResetAccounts: true,
+      preferEarlierResetWindow: "secondary",
+    });
+
+    renderStatusBar();
+
+    expect(await screen.findByText("Fill first + Early weekly reset")).toBeInTheDocument();
   });
 });

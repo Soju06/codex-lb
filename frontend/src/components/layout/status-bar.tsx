@@ -33,6 +33,12 @@ const ROUTING_STRATEGY_LABEL_KEYS: Record<RoutingStrategy, string> = {
   reset_drain: "settings.routing.strategy.resetDrain",
 };
 
+const EARLY_RESET_STRATEGIES: ReadonlySet<RoutingStrategy> = new Set([
+  "usage_weighted",
+  "capacity_weighted",
+  "fill_first",
+]);
+
 function getRoutingLabel(
   t: TFunction,
   strategy: RoutingStrategy,
@@ -43,11 +49,13 @@ function getRoutingLabel(
   const strategyLabel = t(ROUTING_STRATEGY_LABEL_KEYS[strategy]);
   const stickyLabel = t("statusBar.routingLabels.stickyThreads");
   const stickyShortLabel = t("statusBar.routingLabels.sticky");
+  const supportsEarlyReset = EARLY_RESET_STRATEGIES.has(strategy);
+  const showEarlyReset = preferEarlier && supportsEarlyReset;
   const earlyResetLabel =
     preferEarlierWindow === "secondary"
       ? t("statusBar.routingLabels.earlyWeeklyReset")
       : t("statusBar.routingLabels.earlyFiveHourReset");
-  if (sticky && preferEarlier) {
+  if (sticky && showEarlyReset) {
     return t("statusBar.routingLabels.withStickyAndEarlyReset", {
       strategy: strategyLabel,
       sticky: stickyShortLabel,
@@ -60,7 +68,7 @@ function getRoutingLabel(
       sticky: stickyLabel,
     });
   }
-  if (preferEarlier) {
+  if (showEarlyReset) {
     return t("statusBar.routingLabels.withEarlyReset", {
       strategy: strategyLabel,
       reset: earlyResetLabel,

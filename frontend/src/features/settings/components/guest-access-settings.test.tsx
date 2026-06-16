@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { removeGuestPassword, setGuestPassword } from "@/features/auth/api";
 import { GuestAccessSettings } from "@/features/settings/components/guest-access-settings";
+import i18n from "@/i18n";
 import { createDashboardSettings } from "@/test/mocks/factories";
 
 vi.mock("@/features/auth/api", () => ({
@@ -63,6 +64,32 @@ describe("GuestAccessSettings", () => {
     expect(setGuestPassword).toHaveBeenCalledWith({ password: "guest-password-123" });
     await waitFor(() => expect(onRefresh).toHaveBeenCalledTimes(1));
     expect(screen.getByPlaceholderText("Optional guest password")).toHaveValue("");
+  });
+
+  it("localizes guest password validation keys instead of showing the raw key", async () => {
+    const user = userEvent.setup();
+    vi.mocked(setGuestPassword).mockRejectedValue(new Error("settings.password.validation.minLength"));
+
+    await i18n.changeLanguage("zh-CN");
+
+    try {
+      render(
+        <GuestAccessSettings
+          settings={createDashboardSettings({ guestPasswordConfigured: false })}
+          busy={false}
+          onSave={vi.fn().mockResolvedValue(undefined)}
+          onRefresh={vi.fn().mockResolvedValue(undefined)}
+        />,
+      );
+
+      await user.type(screen.getByPlaceholderText("可选访客密码"), "short");
+      await user.click(screen.getByRole("button", { name: "保存" }));
+
+      expect(await screen.findByText("密码至少需要 8 个字符。")).toBeInTheDocument();
+      expect(screen.queryByText("settings.password.validation.minLength")).not.toBeInTheDocument();
+    } finally {
+      await i18n.changeLanguage("en");
+    }
   });
 
   it("removes a configured guest password and refreshes settings", async () => {

@@ -19,6 +19,14 @@ export type GuestAccessSettingsProps = {
   onRefresh: () => Promise<unknown>;
 };
 
+function resolveGuestAccessErrorMessage(
+  caught: unknown,
+  t: ReturnType<typeof useTranslation>["t"],
+): string {
+  const message = getErrorMessage(caught);
+  return t(message, { defaultValue: message });
+}
+
 export function GuestAccessSettings({
   settings,
   busy,
@@ -43,7 +51,7 @@ export function GuestAccessSettings({
       await onRefresh();
       toast.success(t("settings.guestAccess.toasts.passwordSaved"));
     } catch (caught) {
-      setError(getErrorMessage(caught));
+      setError(resolveGuestAccessErrorMessage(caught, t));
     } finally {
       setPasswordBusy(false);
     }
@@ -57,7 +65,7 @@ export function GuestAccessSettings({
       await onRefresh();
       toast.success(t("settings.guestAccess.toasts.passwordRemoved"));
     } catch (caught) {
-      setError(getErrorMessage(caught));
+      setError(resolveGuestAccessErrorMessage(caught, t));
     } finally {
       setPasswordBusy(false);
     }

@@ -6,21 +6,7 @@ import { SessionSettings } from "@/features/settings/components/session-settings
 import { buildSettingsUpdateRequest } from "@/features/settings/payload";
 import { createDashboardSettings } from "@/test/mocks/factories";
 
-const LIMIT_WARMUP_DEFAULTS = {
-  limitWarmupEnabled: false,
-  limitWarmupWindows: "both" as const,
-  limitWarmupModel: "auto",
-  limitWarmupPrompt: "Say OK.",
-  limitWarmupCooldownSeconds: 3600,
-  limitWarmupMinAvailablePercent: 100,
-  limitWarmupStaggeredIdleEnabled: false,
-};
-const ADDITIONAL_QUOTA_DEFAULTS = {
-  additionalQuotaRoutingPolicies: {},
-  additionalQuotaPolicies: [],
-};
-
-const baseSettings = {
+const baseSettings = createDashboardSettings({
   stickyThreadsEnabled: true,
   upstreamStreamTransport: "default" as const,
   upstreamProxyRoutingEnabled: false,
@@ -40,9 +26,7 @@ const baseSettings = {
   totpConfigured: true,
   apiKeyAuthEnabled: true,
   guestAccessEnabled: false,
-  ...LIMIT_WARMUP_DEFAULTS,
-  ...ADDITIONAL_QUOTA_DEFAULTS,
-};
+});
 const baseUpdatePayload = buildSettingsUpdateRequest(baseSettings, {});
 
 describe("SessionSettings", () => {

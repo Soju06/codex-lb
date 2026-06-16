@@ -4,6 +4,8 @@ import { HttpResponse, http } from "msw";
 import { describe, expect, it } from "vitest";
 
 import { StatusBar } from "@/components/layout/status-bar";
+import i18n from "@/i18n";
+import { createDashboardSettings } from "@/test/mocks/factories";
 import { server } from "@/test/mocks/server";
 
 function renderStatusBar() {
@@ -73,5 +75,34 @@ describe("StatusBar", () => {
         name: /New version available/,
       }),
     ).not.toBeInTheDocument();
+  });
+
+  it("localizes combined routing labels in zh-CN", async () => {
+    await i18n.changeLanguage("zh-CN");
+    try {
+      server.use(
+        http.get("/api/settings", () =>
+          HttpResponse.json(
+            createDashboardSettings({
+              routingStrategy: "capacity_weighted",
+              stickyThreadsEnabled: true,
+              preferEarlierResetAccounts: true,
+              preferEarlierResetWindow: "secondary",
+            }),
+          ),
+        ),
+      );
+
+      renderStatusBar();
+
+      expect(await screen.findByText(/按容量加权/)).toBeInTheDocument();
+      expect(screen.getByText(/粘性/)).toBeInTheDocument();
+      expect(screen.getByText(/较早周重置/)).toBeInTheDocument();
+      expect(screen.queryByText(/Capacity weighted/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/Sticky threads/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/Early weekly reset/)).not.toBeInTheDocument();
+    } finally {
+      await i18n.changeLanguage("en");
+    }
   });
 });

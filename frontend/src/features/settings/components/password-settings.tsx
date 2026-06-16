@@ -1,5 +1,6 @@
 import { KeyRound } from "lucide-react";
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
@@ -15,6 +16,7 @@ export type PasswordSettingsProps = {
 };
 
 export function PasswordSettings({ disabled = false }: PasswordSettingsProps) {
+  const { t } = useTranslation();
   const passwordRequired = useAuthStore((s) => s.passwordRequired);
   const authMode = useAuthStore((s) => s.authMode);
   const passwordManagementEnabled = useAuthStore((s) => s.passwordManagementEnabled);
@@ -30,6 +32,16 @@ export function PasswordSettings({ disabled = false }: PasswordSettingsProps) {
     }
   };
 
+  const statusMessage = !passwordManagementEnabled
+    ? t("settings.password.status.disabled")
+    : authMode === "trusted_header"
+      ? passwordRequired
+        ? t("settings.password.status.fallbackConfigured")
+        : t("settings.password.status.fallbackMissing")
+      : passwordRequired
+        ? t("settings.password.status.configured")
+        : t("settings.password.status.notSet");
+
   return (
     <section className="rounded-xl border bg-card p-5">
       <div className="space-y-3">
@@ -39,18 +51,8 @@ export function PasswordSettings({ disabled = false }: PasswordSettingsProps) {
               <KeyRound className="h-4 w-4 text-primary" aria-hidden="true" />
             </div>
             <div>
-              <h3 className="text-sm font-semibold">Password</h3>
-              <p className="text-xs text-muted-foreground">
-                {!passwordManagementEnabled
-                  ? "Password login is disabled by the current dashboard auth mode."
-                  : authMode === "trusted_header"
-                    ? passwordRequired
-                      ? "Password is configured as an optional fallback."
-                      : "No fallback password set."
-                    : passwordRequired
-                      ? "Password is configured."
-                      : "No password set."}
-              </p>
+              <h3 className="text-sm font-semibold">{t("settings.password.title")}</h3>
+              <p className="text-xs text-muted-foreground">{statusMessage}</p>
             </div>
           </div>
 
@@ -65,7 +67,7 @@ export function PasswordSettings({ disabled = false }: PasswordSettingsProps) {
                   disabled={lock}
                   onClick={() => setActiveDialog("change")}
                 >
-                  Change
+                  {t("settings.password.actions.change")}
                 </Button>
                 <Button
                   type="button"
@@ -75,7 +77,7 @@ export function PasswordSettings({ disabled = false }: PasswordSettingsProps) {
                   disabled={lock}
                   onClick={() => setActiveDialog("remove")}
                 >
-                  Remove
+                  {t("settings.password.actions.remove")}
                 </Button>
               </>
             ) : passwordRequired && authenticated && !passwordSessionActive ? (
@@ -87,7 +89,7 @@ export function PasswordSettings({ disabled = false }: PasswordSettingsProps) {
                 disabled={disabled}
                 onClick={() => setActiveDialog("verify")}
               >
-                Login to manage
+                {t("settings.password.actions.loginToManage")}
               </Button>
             ) : !passwordRequired ? (
               <Button
@@ -97,7 +99,7 @@ export function PasswordSettings({ disabled = false }: PasswordSettingsProps) {
                 disabled={lock}
                 onClick={() => setActiveDialog("setup")}
               >
-                Set password
+                {t("settings.password.actions.set")}
               </Button>
             ) : null}
           </div>

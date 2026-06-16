@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { Activity, ArrowRightLeft, ArrowUpCircle, Tag } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
+import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 
 import { getDashboardOverview } from "@/features/dashboard/api";
 import { DEFAULT_OVERVIEW_TIMEFRAME } from "@/features/dashboard/schemas";
@@ -20,47 +22,55 @@ type RoutingStrategy =
   | "sequential_drain"
   | "reset_drain";
 
+const ROUTING_STRATEGY_LABEL_KEYS: Record<RoutingStrategy, string> = {
+  usage_weighted: "settings.routing.strategy.usageWeighted",
+  round_robin: "settings.routing.strategy.roundRobin",
+  capacity_weighted: "settings.routing.strategy.capacityWeighted",
+  relative_availability: "settings.routing.strategy.relativeAvailability",
+  fill_first: "settings.routing.strategy.fillFirst",
+  single_account: "settings.routing.strategy.singleAccount",
+  sequential_drain: "settings.routing.strategy.sequentialDrain",
+  reset_drain: "settings.routing.strategy.resetDrain",
+};
+
 function getRoutingLabel(
+  t: TFunction,
   strategy: RoutingStrategy,
   sticky: boolean,
   preferEarlier: boolean,
   preferEarlierWindow: "primary" | "secondary",
 ): string {
-  const earlyResetLabel = preferEarlierWindow === "secondary" ? "Early weekly reset" : "Early 5h reset";
-  if (strategy === "round_robin") {
-    return sticky ? "Round robin + Sticky threads" : "Round robin";
+  const strategyLabel = t(ROUTING_STRATEGY_LABEL_KEYS[strategy]);
+  const stickyLabel = t("statusBar.routingLabels.stickyThreads");
+  const stickyShortLabel = t("statusBar.routingLabels.sticky");
+  const earlyResetLabel =
+    preferEarlierWindow === "secondary"
+      ? t("statusBar.routingLabels.earlyWeeklyReset")
+      : t("statusBar.routingLabels.earlyFiveHourReset");
+  if (sticky && preferEarlier) {
+    return t("statusBar.routingLabels.withStickyAndEarlyReset", {
+      strategy: strategyLabel,
+      sticky: stickyShortLabel,
+      reset: earlyResetLabel,
+    });
   }
-  if (strategy === "capacity_weighted") {
-    if (sticky && preferEarlier) return `Capacity weighted + Sticky + ${earlyResetLabel}`;
-    if (sticky) return "Capacity weighted + Sticky threads";
-    if (preferEarlier) return `Capacity weighted + ${earlyResetLabel}`;
-    return "Capacity weighted";
+  if (sticky) {
+    return t("statusBar.routingLabels.withSticky", {
+      strategy: strategyLabel,
+      sticky: stickyLabel,
+    });
   }
-  if (strategy === "relative_availability") {
-    return sticky ? "Relative availability + Sticky threads" : "Relative availability";
+  if (preferEarlier) {
+    return t("statusBar.routingLabels.withEarlyReset", {
+      strategy: strategyLabel,
+      reset: earlyResetLabel,
+    });
   }
-  if (strategy === "fill_first") {
-    if (sticky && preferEarlier) return `Fill first + Sticky + ${earlyResetLabel}`;
-    if (sticky) return "Fill first + Sticky threads";
-    if (preferEarlier) return `Fill first + ${earlyResetLabel}`;
-    return "Fill first";
-  }
-  if (strategy === "single_account") {
-    return "Single account";
-  }
-  if (strategy === "sequential_drain") {
-    return sticky ? "Sequential drain + Sticky threads" : "Sequential drain";
-  }
-  if (strategy === "reset_drain") {
-    return sticky ? "Reset drain + Sticky threads" : "Reset drain";
-  }
-  if (sticky && preferEarlier) return `Sticky + ${earlyResetLabel}`;
-  if (sticky) return "Sticky threads";
-  if (preferEarlier) return `${earlyResetLabel} preferred`;
-  return "Usage weighted";
+  return strategyLabel;
 }
 
 export function StatusBar() {
+  const { t } = useTranslation();
   const { data: lastSyncAt = null } = useQuery({
     queryKey: ["dashboard", "overview", DEFAULT_OVERVIEW_TIMEFRAME],
     queryFn: () => getDashboardOverview({ timeframe: DEFAULT_OVERVIEW_TIMEFRAME }),
@@ -92,6 +102,7 @@ export function StatusBar() {
 
   const routingLabel = settings
     ? getRoutingLabel(
+        t,
         settings.routingStrategy,
         settings.stickyThreadsEnabled,
         settings.preferEarlierResetAccounts,
@@ -111,19 +122,19 @@ export function StatusBar() {
         <div className="flex min-w-0 flex-wrap items-center gap-x-5 gap-y-1">
           <span className="inline-flex items-center gap-1.5">
             {isLive ? (
-              <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" title="Live" />
+              <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" title={t("statusBar.live")} />
             ) : (
               <Activity className="h-3 w-3" aria-hidden="true" />
             )}
-            <span className="font-medium">Last sync:</span> {lastSync.time}
+            <span className="font-medium">{t("statusBar.lastSync")}</span> {lastSync.time}
           </span>
           <span className="inline-flex items-center gap-1.5">
             <ArrowRightLeft className="h-3 w-3" aria-hidden="true" />
-            <span className="font-medium">Routing:</span> {routingLabel}
+            <span className="font-medium">{t("statusBar.routing")}</span> {routingLabel}
           </span>
           <span className="inline-flex items-center gap-1.5">
             <Tag className="h-3 w-3" aria-hidden="true" />
-            <span className="font-medium">Version:</span> {currentVersion}
+            <span className="font-medium">{t("statusBar.version")}</span> {currentVersion}
             {showUpdateAvailable ? (
               <a
                 aria-label={updateLabel}

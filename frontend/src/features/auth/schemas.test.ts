@@ -102,7 +102,7 @@ describe("dashboard password length cap (#615)", () => {
     });
     expect(result.success).toBe(false);
     if (!result.success) {
-      expect(result.error.issues[0]?.message).toMatch(/72 bytes/);
+      expect(result.error.issues[0]?.message).toBe("settings.password.validation.maxByteLength");
     }
   });
 

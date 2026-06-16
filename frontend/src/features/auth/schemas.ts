@@ -10,11 +10,15 @@ export const MAX_DASHBOARD_PASSWORD_BYTES = 72;
 
 const dashboardPasswordByteLength = (value: string): number => new TextEncoder().encode(value).length;
 
+const PASSWORD_REQUIRED_MESSAGE = "settings.password.validation.required";
+
 const dashboardPasswordSchema = z
   .string()
-  .min(8)
+  .min(8, {
+    message: "settings.password.validation.minLength",
+  })
   .refine((value) => dashboardPasswordByteLength(value) <= MAX_DASHBOARD_PASSWORD_BYTES, {
-    message: `Password must be at most ${MAX_DASHBOARD_PASSWORD_BYTES} bytes when encoded as UTF-8.`,
+    message: "settings.password.validation.maxByteLength",
   });
 
 export const DashboardAuthModeSchema = z.enum(["standard", "trusted_header", "disabled"]);
@@ -55,16 +59,16 @@ export const GuestPasswordSetRequestSchema = z.object({
 });
 
 export const PasswordChangeRequestSchema = z.object({
-  currentPassword: z.string().min(1),
+  currentPassword: z.string().min(1, { message: PASSWORD_REQUIRED_MESSAGE }),
   newPassword: dashboardPasswordSchema,
 });
 
 export const PasswordRemoveRequestSchema = z.object({
-  password: z.string().min(1),
+  password: z.string().min(1, { message: PASSWORD_REQUIRED_MESSAGE }),
 });
 
 export const TotpVerifyRequestSchema = z.object({
-  code: z.string().min(6).max(6),
+  code: z.string().length(6, "settings.totp.validation.codeLength"),
 });
 
 export const TotpSetupConfirmRequestSchema = z.object({

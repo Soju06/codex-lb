@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { AppearanceSettings } from "@/features/settings/components/appearance-settings";
+import i18n from "@/i18n";
 import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
 import { useThemeStore } from "@/hooks/use-theme";
 import { useTimeFormatStore } from "@/hooks/use-time-format";
@@ -74,5 +75,21 @@ describe("AppearanceSettings", () => {
 
     expect(buttonWeekly).toHaveAttribute("aria-pressed", "true");
     expect(useAccountQuotaDisplayStore.getState().quotaDisplay).toBe("weekly");
+  });
+
+  it("localizes the account burn projection row in zh-CN", async () => {
+    await i18n.changeLanguage("zh-CN");
+    try {
+      render(<AppearanceSettings />);
+
+      expect(screen.getByText("账户消耗预测")).toBeInTheDocument();
+      expect(screen.getByText("在仪表盘上显示账户等效预测卡片。")).toBeInTheDocument();
+      expect(screen.queryByText("Account burn projection")).not.toBeInTheDocument();
+      expect(
+        screen.queryByText("Show the account-equivalent projection card on the dashboard."),
+      ).not.toBeInTheDocument();
+    } finally {
+      await i18n.changeLanguage("en");
+    }
   });
 });

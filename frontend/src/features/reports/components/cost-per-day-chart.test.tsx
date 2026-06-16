@@ -6,8 +6,8 @@ import { CostPerDayChart } from "./cost-per-day-chart";
 
 let capturedProps: { margin?: unknown; data?: unknown } | null = null;
 
-vi.mock("recharts", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("recharts")>();
+vi.mock("@/components/lazy-recharts", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/components/lazy-recharts")>();
 
   return {
     ...actual,

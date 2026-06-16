@@ -1,7 +1,37 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import type { ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { DonutChart } from "@/components/donut-chart";
+
+vi.mock("@/components/lazy-recharts", () => ({
+  Cell: () => null,
+  PieChart: ({ children }: { children: ReactNode }) => <svg>{children}</svg>,
+  Pie: ({
+    children,
+    data,
+    onMouseEnter,
+    onMouseLeave,
+  }: {
+    children: ReactNode;
+    data: Array<{ id: string }>;
+    onMouseEnter?: (entry: { payload: { id: string } }, index: number) => void;
+    onMouseLeave?: () => void;
+  }) => (
+    <>
+      {data.map((entry, index) => (
+        <g
+          key={entry.id}
+          className="recharts-pie-sector"
+          onMouseEnter={() => onMouseEnter?.({ payload: entry }, index)}
+          onMouseLeave={() => onMouseLeave?.()}
+        />
+      ))}
+      {children}
+    </>
+  ),
+  Sector: () => <path />,
+}));
 
 const BASE_ITEMS = [
   { label: "Account A", value: 120, color: "#7bb661" },

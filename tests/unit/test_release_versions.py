@@ -121,6 +121,16 @@ def test_update_project_versions_keeps_all_release_files_in_sync(tmp_path: Path)
     assert package_version == "1.19.0-beta.1"
 
 
+def test_assert_project_versions_accepts_pep440_uv_lock_prerelease(tmp_path: Path) -> None:
+    write_minimal_release_files(tmp_path, "1.20.0-beta.3")
+    (tmp_path / "uv.lock").write_text(
+        '[[package]]\nname = "codex-lb"\nversion = "1.20.0b3"\nsource = { editable = "." }\n',
+        encoding="utf-8",
+    )
+
+    assert_project_versions(tmp_path, "1.20.0-beta.3")
+
+
 def test_next_beta_number_uses_existing_tags(tmp_path: Path) -> None:
     write_minimal_release_files(tmp_path)
     init_git_repo(tmp_path)

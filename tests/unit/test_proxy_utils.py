@@ -17420,7 +17420,11 @@ async def test_stream_with_retry_preserves_useragent_on_preflight_timeout(monkey
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
-    monkeypatch.setattr(proxy_service, "_stream_request_budget_seconds", lambda settings, *, request_transport: 0.0)
+    monkeypatch.setattr(
+        proxy_service,
+        "_responses_request_budget_seconds",
+        lambda settings, *, codex_session_affinity, request_transport: 0.0,
+    )
 
     payload = ResponsesRequest.model_validate(
         {"model": "gpt-5.1", "instructions": "continue", "input": [], "stream": True}

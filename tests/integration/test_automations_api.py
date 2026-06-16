@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
+from httpx import ASGITransport, AsyncClient
 from sqlalchemy import update
 
 from app.core.clients.proxy import ProxyResponseError
@@ -213,6 +214,91 @@ async def test_automations_api_crud(async_client):
     list_after_delete = await async_client.get("/api/automations")
     assert list_after_delete.status_code == 200
     assert list_after_delete.json()["items"] == []
+
+
+@pytest.mark.asyncio
+async def test_automations_write_endpoints_require_dashboard_write_access(app_instance):
+    accounts = await _create_accounts("auto-guest-canary")
+    async with app_instance.router.lifespan_context(app_instance):
+        local_transport = ASGITransport(app=app_instance, client=("127.0.0.1", 50000))
+        async with AsyncClient(transport=local_transport, base_url="http://localhost") as local_client:
+            current_settings_response = await local_client.get("/api/settings")
+            assert current_settings_response.status_code == 200
+            current_settings_payload = current_settings_response.json()
+            current_settings_payload["guestAccessEnabled"] = True
+            updated_settings_response = await local_client.put(
+                "/api/settings",
+                json=current_settings_payload,
+            )
+            assert updated_settings_response.status_code == 200
+
+            create_response = await local_client.post(
+                "/api/automations",
+                json={
+                    "name": "Guest read-only canary",
+                    "enabled": True,
+                    "schedule": {
+                        "type": "daily",
+                        "time": "05:00",
+                        "timezone": "UTC",
+                        "days": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+                    },
+                    "model": "gpt-5.3-codex",
+                    "prompt": "ping",
+                    "accountIds": [accounts[0].id],
+                },
+            )
+            assert create_response.status_code == 200
+            automation_id = create_response.json()["id"]
+
+        remote_transport = ASGITransport(app=app_instance, client=("203.0.113.20", 50001))
+        async with AsyncClient(transport=remote_transport, base_url="http://lb.example") as remote_client:
+            session_response = await remote_client.get("/api/dashboard-auth/session")
+            assert session_response.status_code == 200
+            session_payload = session_response.json()
+            assert session_payload["authenticated"] is True
+            assert session_payload["role"] == "guest"
+            assert session_payload["permissions"] == ["read"]
+
+            list_response = await remote_client.get("/api/automations")
+            assert list_response.status_code == 200
+
+            runs_response = await remote_client.get(f"/api/automations/{automation_id}/runs")
+            assert runs_response.status_code == 200
+
+            blocked_create = await remote_client.post(
+                "/api/automations",
+                json={
+                    "name": "Blocked write",
+                    "enabled": True,
+                    "schedule": {
+                        "type": "daily",
+                        "time": "06:00",
+                        "timezone": "UTC",
+                        "days": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+                    },
+                    "model": "gpt-5.3-codex",
+                    "prompt": "nope",
+                    "accountIds": [accounts[0].id],
+                },
+            )
+            assert blocked_create.status_code == 403
+            assert blocked_create.json()["error"]["code"] == "read_only_access"
+
+            blocked_update = await remote_client.patch(
+                f"/api/automations/{automation_id}",
+                json={"prompt": "blocked"},
+            )
+            assert blocked_update.status_code == 403
+            assert blocked_update.json()["error"]["code"] == "read_only_access"
+
+            blocked_delete = await remote_client.delete(f"/api/automations/{automation_id}")
+            assert blocked_delete.status_code == 403
+            assert blocked_delete.json()["error"]["code"] == "read_only_access"
+
+            blocked_run = await remote_client.post(f"/api/automations/{automation_id}/run-now")
+            assert blocked_run.status_code == 403
+            assert blocked_run.json()["error"]["code"] == "read_only_access"
 
 
 @pytest.mark.asyncio

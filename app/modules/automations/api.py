@@ -4,7 +4,11 @@ from typing import Literal, cast
 
 from fastapi import APIRouter, Body, Depends, Query
 
-from app.core.auth.dependencies import set_dashboard_error_format, validate_dashboard_session
+from app.core.auth.dependencies import (
+    require_dashboard_write_access,
+    set_dashboard_error_format,
+    validate_dashboard_session,
+)
 from app.core.exceptions import DashboardBadRequestError, DashboardNotFoundError
 from app.dependencies import AutomationsContext, get_automations_context
 from app.modules.automations.schemas import (
@@ -160,6 +164,7 @@ async def get_automation_run_details(
 @router.post("", response_model=AutomationJobResponse)
 async def create_automation(
     payload: AutomationJobCreateRequest = Body(...),
+    _write_access=Depends(require_dashboard_write_access),
     context: AutomationsContext = Depends(get_automations_context),
 ) -> AutomationJobResponse:
     try:
@@ -188,6 +193,7 @@ async def create_automation(
 async def update_automation(
     automation_id: str,
     payload: AutomationJobUpdateRequest,
+    _write_access=Depends(require_dashboard_write_access),
     context: AutomationsContext = Depends(get_automations_context),
 ) -> AutomationJobResponse:
     try:
@@ -219,6 +225,7 @@ async def update_automation(
 @router.delete("/{automation_id}", response_model=AutomationDeleteResponse)
 async def delete_automation(
     automation_id: str,
+    _write_access=Depends(require_dashboard_write_access),
     context: AutomationsContext = Depends(get_automations_context),
 ) -> AutomationDeleteResponse:
     deleted = await context.service.delete_job(automation_id)
@@ -230,6 +237,7 @@ async def delete_automation(
 @router.post("/{automation_id}/run-now", response_model=AutomationRunResponse, status_code=202)
 async def run_automation_now(
     automation_id: str,
+    _write_access=Depends(require_dashboard_write_access),
     context: AutomationsContext = Depends(get_automations_context),
 ) -> AutomationRunResponse:
     try:

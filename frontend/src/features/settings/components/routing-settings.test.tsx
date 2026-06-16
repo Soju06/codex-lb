@@ -463,26 +463,11 @@ describe("RoutingSettings", () => {
 
     await user.click(screen.getByRole("switch", { name: "Enable staggered idle warm-up" }));
 
-    expect(onSave).toHaveBeenCalledWith({
-      stickyThreadsEnabled: false,
-      upstreamStreamTransport: "default",
-      preferEarlierResetAccounts: true,
-      preferEarlierResetWindow: "secondary",
-      routingStrategy: "usage_weighted",
-      relativeAvailabilityPower: 2,
-      relativeAvailabilityTopK: 5,
-      singleAccountId: null,
-      openaiCacheAffinityMaxAgeSeconds: 300,
-      dashboardSessionTtlSeconds: 43200,
-      warmupModel: BASE_SETTINGS.warmupModel,
-      additionalQuotaRoutingPolicies: {},
-      importWithoutOverwrite: false,
-      totpRequiredOnLogin: false,
-      apiKeyAuthEnabled: true,
-      weeklyPaceWorkingDays: BASE_SETTINGS.weeklyPaceWorkingDays,
-      ...LIMIT_WARMUP_DEFAULTS,
-      limitWarmupEnabled: true,
-      limitWarmupStaggeredIdleEnabled: true,
-    });
+    expect(onSave).toHaveBeenCalledWith(
+      buildSettingsUpdateRequest(
+        { ...BASE_SETTINGS, limitWarmupEnabled: true },
+        { limitWarmupEnabled: true, limitWarmupStaggeredIdleEnabled: true },
+      ),
+    );
   });
 });

@@ -39,6 +39,7 @@ const baseSettings = {
   totpRequiredOnLogin: false,
   totpConfigured: true,
   apiKeyAuthEnabled: true,
+  guestAccessEnabled: false,
   ...LIMIT_WARMUP_DEFAULTS,
   ...ADDITIONAL_QUOTA_DEFAULTS,
 };
@@ -64,7 +65,6 @@ describe("SessionSettings", () => {
     expect(onSave).toHaveBeenCalledWith({
       ...baseUpdatePayload,
       dashboardSessionTtlSeconds: 86400,
-      guestAccessEnabled: false,
     });
   });
 
@@ -116,7 +116,6 @@ describe("SessionSettings", () => {
     expect(onSave).toHaveBeenCalledWith({
       ...baseUpdatePayload,
       dashboardSessionTtlSeconds: 31536000,
-      guestAccessEnabled: false,
     });
   });
 });

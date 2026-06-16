@@ -862,13 +862,48 @@ class AutomationsService:
                 continue
             existing_cycle_run = existing_cycle_runs_by_account.get(cycle_account.account_id)
             if cycle_account.account_id not in eligible_cycle_account_ids:
-                if existing_cycle_run is not None and existing_cycle_run.status != AUTOMATION_RUN_STATUS_RUNNING:
+                if existing_cycle_run is None:
+                    deleted = await self._repository.delete_run_cycle_account(
+                        cycle_key=cycle_key,
+                        account_id=cycle_account.account_id,
+                    )
+                    if deleted:
+                        cycle_expected_accounts = max(0, cycle_expected_accounts - 1)
                     continue
-                await self._repository.delete_run_cycle_account(
-                    cycle_key=cycle_key,
-                    account_id=cycle_account.account_id,
+                if existing_cycle_run.status != AUTOMATION_RUN_STATUS_RUNNING:
+                    continue
+                if _is_unclaimed_run_placeholder(existing_cycle_run):
+                    deleted = await self._repository.delete_run_cycle_account(
+                        cycle_key=cycle_key,
+                        account_id=cycle_account.account_id,
+                    )
+                    if deleted:
+                        cycle_expected_accounts = max(0, cycle_expected_accounts - 1)
+                    continue
+                existing_run_is_stale = (
+                    existing_cycle_run.started_at <= existing_cycle_run.scheduled_for
+                    or existing_cycle_run.started_at < stale_started_before
                 )
-                cycle_expected_accounts = max(0, cycle_expected_accounts - 1)
+                if not existing_run_is_stale:
+                    continue
+                claim = await self._repository.claim_scheduled_cycle_run_execution(
+                    run_id=existing_cycle_run.id,
+                    observed_started_at=existing_cycle_run.started_at,
+                    claimed_started_at=now_utc,
+                    stale_started_before=stale_started_before,
+                )
+                if claim is None:
+                    continue
+                await self._repository.complete_run(
+                    claim.id,
+                    status=AUTOMATION_RUN_STATUS_FAILED,
+                    finished_at=utcnow(),
+                    account_id=cycle_account.account_id,
+                    error_code="no_available_accounts",
+                    error_message="No available accounts configured for automation job",
+                    attempt_count=claim.attempt_count,
+                )
+                executed += 1
                 continue
             if existing_cycle_run is not None:
                 existing_run_is_stale = (

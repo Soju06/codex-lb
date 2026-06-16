@@ -2402,6 +2402,24 @@ async def test_automations_runs_page_reports_in_progress_cycle_and_details(async
     statuses = sorted(entry["status"] for entry in details_payload["accounts"])
     assert statuses == ["pending", "success"]
 
+    filtered_pending_account_response = await async_client.get(
+        "/api/automations/runs",
+        params={
+            "automationId": run["jobId"],
+            "accountId": accounts[1].id,
+            "status": "running",
+            "limit": 10,
+            "offset": 0,
+        },
+    )
+    assert filtered_pending_account_response.status_code == 200
+    filtered_pending_account_payload = filtered_pending_account_response.json()
+    assert filtered_pending_account_payload["total"] == 1
+    filtered_pending_account_item = filtered_pending_account_payload["items"][0]
+    assert filtered_pending_account_item["id"] == run["id"]
+    assert filtered_pending_account_item["effectiveStatus"] == "running"
+    assert filtered_pending_account_item["pendingAccounts"] == 1
+
     filtered_running_response = await async_client.get(
         "/api/automations/runs",
         params={"automationId": run["jobId"], "status": "running", "limit": 10, "offset": 0},
@@ -3748,6 +3766,150 @@ async def test_automations_manual_cycle_reclaims_timed_out_claimed_run(async_cli
     assert stored_run.status == "success"
     assert stored_run.account_id == accounts[0].id
     assert stored_run.started_at > claimed_started_at
+
+
+@pytest.mark.asyncio
+async def test_automations_scheduled_cycle_does_not_skip_claimed_run_when_account_becomes_ineligible(
+    async_client,
+    monkeypatch,
+):
+    accounts = await _create_accounts("auto-scheduled-claimed-ineligible-a")
+    now = utcnow().replace(second=0, microsecond=0)
+    scheduled_for = now - timedelta(hours=3)
+    claimed_started_at = now - timedelta(seconds=5)
+    called_chatgpt_account_ids: list[str | None] = []
+
+    async def _fake_compact(*_args, **kwargs):
+        called_chatgpt_account_ids.append(kwargs.get("account_id"))
+        return SimpleNamespace()
+
+    monkeypatch.setattr("app.modules.automations.service.core_compact_responses", _fake_compact)
+
+    async with SessionLocal() as session:
+        automations_repository = AutomationsRepository(session)
+        accounts_repository = AccountsRepository(session)
+        service = AutomationsService(automations_repository, accounts_repository)
+        job = await automations_repository.create_job(
+            name="Scheduled claimed ineligible guard",
+            enabled=True,
+            include_paused_accounts=False,
+            schedule_type="daily",
+            schedule_time=now.strftime("%H:%M"),
+            schedule_timezone="UTC",
+            schedule_days=["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+            schedule_threshold_minutes=1,
+            model="gpt-5.3-codex",
+            reasoning_effort=None,
+            prompt="ping",
+            account_ids=[accounts[0].id],
+        )
+        cycle_key = f"scheduled:{job.id}:{now.isoformat()}"
+        cycle = await automations_repository.create_run_cycle(
+            cycle_key=cycle_key,
+            job_id=job.id,
+            trigger="scheduled",
+            cycle_expected_accounts=1,
+            cycle_window_end=now,
+            accounts=[(accounts[0].id, scheduled_for)],
+        )
+        run = await automations_repository.claim_run(
+            job_id=job.id,
+            trigger="scheduled",
+            slot_key=_scheduled_slot_key(job.id, account_id=accounts[0].id, due_slot=now),
+            cycle_key=cycle.cycle_key,
+            cycle_expected_accounts=cycle.cycle_expected_accounts,
+            cycle_window_end=cycle.cycle_window_end,
+            scheduled_for=scheduled_for,
+            started_at=claimed_started_at,
+            account_id=accounts[0].id,
+        )
+        assert run is not None
+        quota_updated = await accounts_repository.update_status(accounts[0].id, AccountStatus.QUOTA_EXCEEDED)
+        assert quota_updated is True
+
+        executed = await service.run_due_jobs(now_utc=now)
+        stored_run = await automations_repository.get_run(run.id)
+        stored_cycle = await automations_repository.get_run_cycle(cycle_key=cycle_key)
+
+    assert executed == 0
+    assert called_chatgpt_account_ids == []
+    assert stored_run is not None
+    assert stored_run.status == "running"
+    assert stored_run.account_id == accounts[0].id
+    assert stored_run.started_at == claimed_started_at
+    assert stored_cycle is not None
+    assert [entry.account_id for entry in stored_cycle.accounts] == [accounts[0].id]
+
+
+@pytest.mark.asyncio
+async def test_automations_scheduled_cycle_reclaims_claimed_ineligible_run(async_client, monkeypatch):
+    accounts = await _create_accounts("auto-scheduled-stale-ineligible-a", "auto-scheduled-stale-fallback-a")
+    now = utcnow().replace(second=0, microsecond=0)
+    scheduled_for = now - timedelta(hours=3)
+    claimed_started_at = now - timedelta(hours=2)
+    called_chatgpt_account_ids: list[str | None] = []
+
+    async def _fake_compact(*_args, **kwargs):
+        called_chatgpt_account_ids.append(kwargs.get("account_id"))
+        return SimpleNamespace()
+
+    monkeypatch.setattr("app.modules.automations.service.core_compact_responses", _fake_compact)
+
+    async with SessionLocal() as session:
+        automations_repository = AutomationsRepository(session)
+        accounts_repository = AccountsRepository(session)
+        service = AutomationsService(automations_repository, accounts_repository)
+        job = await automations_repository.create_job(
+            name="Scheduled stale claimed ineligible reclaim",
+            enabled=True,
+            include_paused_accounts=False,
+            schedule_type="daily",
+            schedule_time=now.strftime("%H:%M"),
+            schedule_timezone="UTC",
+            schedule_days=["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+            schedule_threshold_minutes=1,
+            model="gpt-5.3-codex",
+            reasoning_effort=None,
+            prompt="ping",
+            account_ids=[accounts[0].id, accounts[1].id],
+        )
+        cycle_key = f"scheduled:{job.id}:{now.isoformat()}"
+        cycle = await automations_repository.create_run_cycle(
+            cycle_key=cycle_key,
+            job_id=job.id,
+            trigger="scheduled",
+            cycle_expected_accounts=1,
+            cycle_window_end=now,
+            accounts=[(accounts[0].id, scheduled_for)],
+        )
+        run = await automations_repository.claim_run(
+            job_id=job.id,
+            trigger="scheduled",
+            slot_key=_scheduled_slot_key(job.id, account_id=accounts[0].id, due_slot=now),
+            cycle_key=cycle.cycle_key,
+            cycle_expected_accounts=cycle.cycle_expected_accounts,
+            cycle_window_end=cycle.cycle_window_end,
+            scheduled_for=scheduled_for,
+            started_at=claimed_started_at,
+            account_id=accounts[0].id,
+        )
+        assert run is not None
+        quota_updated = await accounts_repository.update_status(accounts[0].id, AccountStatus.QUOTA_EXCEEDED)
+        assert quota_updated is True
+
+        executed = await service.run_due_jobs(now_utc=now)
+        stored_run = await automations_repository.get_run(run.id)
+        stored_cycle = await automations_repository.get_run_cycle(cycle_key=cycle_key)
+
+    assert executed == 1
+    assert called_chatgpt_account_ids == []
+    assert stored_run is not None
+    assert stored_run.status == "failed"
+    assert stored_run.account_id == accounts[0].id
+    assert stored_run.started_at > claimed_started_at
+    assert stored_run.error_code == "no_available_accounts"
+    assert stored_cycle is not None
+    assert [entry.account_id for entry in stored_cycle.accounts] == [accounts[0].id]
 
 
 @pytest.mark.asyncio

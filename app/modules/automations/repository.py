@@ -1004,7 +1004,7 @@ class AutomationsRepository:
     ) -> tuple[list[AutomationRunRecord], int]:
         conditions = self._build_run_conditions(
             search=search,
-            account_ids=account_ids,
+            account_ids=None,
             models=models,
             statuses=None,
             triggers=triggers,
@@ -1026,6 +1026,9 @@ class AutomationsRepository:
         ).join(AutomationJob, AutomationJob.id == AutomationRun.job_id)
         if conditions:
             filtered_runs_stmt = filtered_runs_stmt.where(and_(*conditions))
+        grouped_account_match = self._build_grouped_run_account_match(account_ids=account_ids)
+        if grouped_account_match is not None:
+            filtered_runs_stmt = filtered_runs_stmt.where(grouped_account_match)
         filtered_runs = filtered_runs_stmt.subquery()
         candidate_cycles = select(filtered_runs.c.cycle_key).distinct().subquery()
 
@@ -1236,7 +1239,7 @@ class AutomationsRepository:
         if statuses:
             conditions = self._build_run_conditions(
                 search=search,
-                account_ids=account_ids,
+                account_ids=None,
                 models=models,
                 statuses=None,
                 triggers=triggers,
@@ -1258,6 +1261,9 @@ class AutomationsRepository:
             ).join(AutomationJob, AutomationJob.id == AutomationRun.job_id)
             if conditions:
                 filtered_runs_stmt = filtered_runs_stmt.where(and_(*conditions))
+            grouped_account_match = self._build_grouped_run_account_match(account_ids=account_ids)
+            if grouped_account_match is not None:
+                filtered_runs_stmt = filtered_runs_stmt.where(grouped_account_match)
             filtered_runs = filtered_runs_stmt.subquery()
             candidate_cycles = select(filtered_runs.c.cycle_key).distinct().subquery()
 
@@ -1722,6 +1728,22 @@ class AutomationsRepository:
         if normalized_job_ids:
             conditions.append(AutomationRun.job_id.in_(normalized_job_ids))
         return conditions
+
+    @staticmethod
+    def _build_grouped_run_account_match(
+        *,
+        account_ids: Sequence[str] | None,
+    ):
+        normalized_accounts = [value.strip() for value in (account_ids or []) if value and value.strip()]
+        if not normalized_accounts:
+            return None
+        snapshot_cycle_keys = select(AutomationRunCycleAccount.cycle_key).where(
+            AutomationRunCycleAccount.account_id.in_(normalized_accounts)
+        )
+        return or_(
+            AutomationRun.account_id.in_(normalized_accounts),
+            AutomationRun.cycle_key.in_(snapshot_cycle_keys),
+        )
 
 
 def _parse_schedule_days(value: str | None) -> list[str]:

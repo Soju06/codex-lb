@@ -270,7 +270,10 @@ def guard_pull_request(root: Path, event: dict[str, Any], base_ref: str, head_re
     current_versions = _canonical_release_versions(read_project_versions(root))
     release_from_head: ReleaseVersion | None = None
     if head_ref.startswith("release/beta-"):
-        release_from_head = parse_version(head_ref.removeprefix("release/beta-"))
+        try:
+            release_from_head = parse_version(head_ref.removeprefix("release/beta-"))
+        except ValueError:
+            release_from_head = None
     is_canonical_beta_pr = bool(
         release_from_head is not None
         and release_from_head.channel == "beta"

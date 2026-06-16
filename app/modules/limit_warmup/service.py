@@ -5,7 +5,7 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import AsyncContextManager, Callable, Protocol
 
 from app.core import usage as usage_core
@@ -691,8 +691,6 @@ def _build_staggered_idle_candidate(
     after = after_primary.get(account.id)
     if after is None:
         return None
-    if not _usage_entry_refreshed_for_cycle(after, refresh_started_at=refresh_started_at):
-        return None
     if after.reset_at is None:
         return None
     if usage_core.is_weekly_window_minutes(after.window_minutes):
@@ -708,6 +706,12 @@ def _build_staggered_idle_candidate(
         usage_refresh_interval_seconds=usage_refresh_interval_seconds,
     )
     if due is None:
+        return None
+    if not _usage_entry_refreshed_for_cycle(
+        after,
+        refresh_started_at=refresh_started_at,
+        cycle_end=due.cycle_end,
+    ):
         return None
     return _WarmupCandidate(reset_at=after.reset_at, window=_IDLE_PRIMARY_WINDOW)
 
@@ -756,11 +760,18 @@ def _usage_entry_refreshed_for_cycle(
     entry: UsageHistory,
     *,
     refresh_started_at: datetime | None,
+    cycle_end: int | None,
 ) -> bool:
-    if refresh_started_at is None:
-        return True
     if entry.recorded_at is None:
         return False
+    if cycle_end is not None:
+        cycle_start = cycle_end - _ROLLING_WINDOW_SECONDS
+        if entry.recorded_at < datetime.fromtimestamp(cycle_start, tz=timezone.utc).replace(tzinfo=None):
+            return False
+        if entry.reset_at is not None and entry.reset_at <= cycle_start:
+            return False
+    if refresh_started_at is None:
+        return True
     return entry.recorded_at >= refresh_started_at
 
 

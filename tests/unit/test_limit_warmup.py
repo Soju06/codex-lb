@@ -1126,6 +1126,39 @@ async def test_staggered_idle_warmup_requires_current_refresh_sample(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_staggered_idle_warmup_rejects_stale_entry_from_prior_cycle(monkeypatch) -> None:
+    now = datetime.fromtimestamp(18100, tz=timezone.utc).replace(tzinfo=None)
+    refresh_started_at = datetime.fromtimestamp(17980, tz=timezone.utc).replace(tzinfo=None)
+    monkeypatch.setattr(limit_warmup_service, "utcnow", lambda: now)
+    repo = FakeWarmupRepo()
+    sender = FakeSender()
+    service = LimitWarmupService(repo, FakeRequestLogsRepo(), sender=sender)
+    accounts = [_account("acc_1"), _account("acc_2"), _account("acc_3")]
+    account = accounts[1]
+
+    await service.run_after_usage_refresh(
+        accounts=accounts,
+        settings=_settings(limit_warmup_staggered_idle_enabled=True),
+        before_primary={account.id: _usage(account.id, used_percent=100, reset_at=20000)},
+        before_secondary={},
+        after_primary={
+            account.id: _usage(
+                account.id,
+                used_percent=0,
+                reset_at=17000,
+                recorded_at=refresh_started_at + timedelta(seconds=10),
+            )
+        },
+        after_secondary={},
+        refresh_started_at=refresh_started_at,
+        usage_refresh_interval_seconds=120,
+    )
+
+    assert sender.calls == []
+    assert repo.rows == []
+
+
+@pytest.mark.asyncio
 async def test_recent_attempt_cooldown_blocks_new_reset() -> None:
     repo = FakeWarmupRepo()
     account = _account()

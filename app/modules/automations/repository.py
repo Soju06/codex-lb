@@ -540,9 +540,7 @@ class AutomationsRepository:
         )
         if job_id is not None:
             stmt = stmt.where(AutomationRunCycle.job_id == job_id)
-        result = await self._session.execute(
-            stmt
-        )
+        result = await self._session.execute(stmt)
         return [self._run_cycle_from_model(cycle) for cycle in result.scalars().all()]
 
     async def _filter_due_scheduled_run_cycles(

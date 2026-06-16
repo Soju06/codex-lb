@@ -1059,11 +1059,16 @@ class AutomationsService:
         last_error_message: str | None = "No available accounts configured for automation job"
         last_attempted_account_id: str | None = forced_account_id
         cached_accounts_by_id: dict[str, Account] | None = None
-        account_ids_to_try = list(job.account_ids)
-        if not account_ids_to_try and run.trigger == AUTOMATION_RUN_TRIGGER_SCHEDULED and run.cycle_key:
+        account_ids_to_try: list[str] = []
+        forced_account_id_for_priority = forced_account_id
+        if run.cycle_key:
             cycle = await self._repository.get_run_cycle(cycle_key=run.cycle_key)
             if cycle is not None and cycle.accounts:
                 account_ids_to_try = [entry.account_id for entry in cycle.accounts]
+                if forced_account_id not in account_ids_to_try:
+                    forced_account_id_for_priority = None
+        if not account_ids_to_try:
+            account_ids_to_try = list(job.account_ids)
         if not account_ids_to_try:
             accounts = await self._accounts_repository.list_accounts()
             account_ids_to_try = [
@@ -1075,7 +1080,7 @@ class AutomationsService:
                 )
             ]
             cached_accounts_by_id = {account.id: account for account in accounts}
-        account_ids_to_try = _prioritize_forced_account(account_ids_to_try, forced_account_id)
+        account_ids_to_try = _prioritize_forced_account(account_ids_to_try, forced_account_id_for_priority)
 
         for account_id in account_ids_to_try:
             request_started_at: float | None = None

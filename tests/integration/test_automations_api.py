@@ -3116,6 +3116,79 @@ async def test_automations_scheduler_fails_over_for_retryable_forced_cycle_slot_
 
 
 @pytest.mark.asyncio
+async def test_automations_scheduler_retries_with_persisted_cycle_accounts_after_job_account_edit(
+    async_client,
+    monkeypatch,
+):
+    accounts = await _create_accounts(
+        "auto-snapshot-retry-a",
+        "auto-snapshot-retry-b",
+        "auto-snapshot-retry-c",
+    )
+    now = utcnow().replace(second=0, microsecond=0)
+    called_chatgpt_account_ids: list[str | None] = []
+
+    async def _fake_compact(*_args, **kwargs):
+        account_id = kwargs.get("account_id")
+        called_chatgpt_account_ids.append(account_id)
+        if account_id == accounts[0].chatgpt_account_id:
+            raise ProxyResponseError(
+                429,
+                openai_error("usage_limit_reached", "The usage limit has been reached"),
+            )
+        return SimpleNamespace()
+
+    monkeypatch.setattr("app.modules.automations.service.core_compact_responses", _fake_compact)
+
+    async with SessionLocal() as session:
+        automations_repository = AutomationsRepository(session)
+        accounts_repository = AccountsRepository(session)
+        service = AutomationsService(automations_repository, accounts_repository)
+        job = await automations_repository.create_job(
+            name="Snapshot retry scheduled slot",
+            enabled=True,
+            include_paused_accounts=False,
+            schedule_type="daily",
+            schedule_time=now.strftime("%H:%M"),
+            schedule_timezone="UTC",
+            schedule_days=["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+            schedule_threshold_minutes=0,
+            model="gpt-5.3-codex",
+            reasoning_effort=None,
+            prompt="ping",
+            account_ids=[accounts[0].id, accounts[1].id],
+        )
+        await _set_job_updated_at(job.id, now)
+        cycle_key = f"scheduled:{job.id}:{now.isoformat()}"
+        cycle = await automations_repository.create_run_cycle(
+            cycle_key=cycle_key,
+            job_id=job.id,
+            trigger="scheduled",
+            cycle_expected_accounts=2,
+            cycle_window_end=now,
+            accounts=[
+                (accounts[0].id, now),
+                (accounts[1].id, now),
+            ],
+        )
+        updated = await automations_repository.update_job(job.id, account_ids=[accounts[2].id])
+        assert updated is not None
+
+        executed = await service.run_due_jobs(now_utc=now + timedelta(seconds=5))
+        cycle_runs = await automations_repository.list_runs_for_cycle_key(cycle_key=cycle.cycle_key)
+
+    assert executed == 2
+    assert called_chatgpt_account_ids == [
+        accounts[0].chatgpt_account_id,
+        accounts[1].chatgpt_account_id,
+        accounts[1].chatgpt_account_id,
+    ]
+    assert accounts[2].chatgpt_account_id not in called_chatgpt_account_ids
+    assert sorted(run.status for run in cycle_runs) == ["partial", "success"]
+    assert {run.account_id for run in cycle_runs} == {accounts[1].id}
+
+
+@pytest.mark.asyncio
 async def test_automations_scheduler_reactivates_elapsed_reset_before_delayed_dispatch(
     async_client,
     monkeypatch,

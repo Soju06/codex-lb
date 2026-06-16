@@ -227,6 +227,46 @@ def test_pr_guard_accepts_dependency_only_package_json_edits_on_beta_base(tmp_pa
     assert "No release-managed version files changed" in result.stdout
 
 
+def test_pr_guard_accepts_pep440_uv_lock_beta_version_on_dependency_edits(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    write_minimal_release_files(repo, version="1.20.0-beta.3")
+    (repo / "uv.lock").write_text(
+        '[[package]]\nname = "codex-lb"\nversion = "1.20.0b3"\nsource = { editable = "." }\n'
+        '\n[[package]]\nname = "starlette"\nversion = "1.3.1"\n',
+        encoding="utf-8",
+    )
+    git(repo, "init")
+    git(repo, "config", "user.email", "test@example.com")
+    git(repo, "config", "user.name", "Test")
+    git(repo, "add", ".")
+    git(repo, "commit", "-m", "init")
+    git(repo, "branch", "-M", "main")
+    base = git(repo, "rev-parse", "HEAD")
+
+    (repo / "uv.lock").write_text(
+        '[[package]]\nname = "codex-lb"\nversion = "1.20.0b3"\nsource = { editable = "." }\n'
+        '\n[[package]]\nname = "starlette"\nversion = "1.3.2"\n',
+        encoding="utf-8",
+    )
+    git(repo, "add", "uv.lock")
+    git(repo, "commit", "-m", "chore(deps): bump starlette")
+
+    result = run_guard(
+        Path(__file__).resolve().parents[2],
+        repo,
+        "--mode",
+        "pr",
+        "--base-ref",
+        base,
+        "--head-ref",
+        "dependabot/uv/starlette-1.3.2",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "No release-managed version files changed" in result.stdout
+
+
 def test_pr_guard_rejects_canonical_beta_pr_without_validation_evidence(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()

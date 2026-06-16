@@ -1470,15 +1470,18 @@ class AutomationsService:
         now_utc: datetime,
         cycle_cache: dict[str, _AutomationRunCycleSummary] | None = None,
     ) -> _AutomationRunCycleSummary:
-        due_slot = compute_latest_due_slot_utc(
+        fallback_due_slot = compute_latest_due_slot_utc(
             run.scheduled_for,
             schedule_time=job.schedule_time,
             timezone_name=job.schedule_timezone,
             schedule_days=job.schedule_days,
         )
         cycle_key = (
-            run.cycle_key.strip() if run.cycle_key and run.cycle_key.strip() else _scheduled_cycle_key(job.id, due_slot)
+            run.cycle_key.strip()
+            if run.cycle_key and run.cycle_key.strip()
+            else _scheduled_cycle_key(job.id, fallback_due_slot)
         )
+        due_slot = _parse_scheduled_cycle_due_slot(cycle_key, job_id=job.id) or fallback_due_slot
         if cycle_cache is not None and cycle_key in cycle_cache:
             return cycle_cache[cycle_key]
 

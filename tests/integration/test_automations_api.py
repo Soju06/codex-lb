@@ -2562,6 +2562,11 @@ async def test_automations_run_details_keep_completed_deleted_account_from_rever
             error_message=None,
             attempt_count=1,
         )
+        edited = await automations_repository.update_job(
+            job.id,
+            schedule_time=(now + timedelta(hours=1)).strftime("%H:%M"),
+        )
+        assert edited is not None
         deleted = await accounts_repository.delete(accounts[0].id)
         assert deleted is True
 

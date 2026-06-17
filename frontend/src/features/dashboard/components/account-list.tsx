@@ -10,7 +10,13 @@ import { usePrivacyStore } from "@/hooks/use-privacy";
 import { cn } from "@/lib/utils";
 import { formatCompactAccountId } from "@/utils/account-identifiers";
 import { normalizeStatus, quotaBarColor, quotaBarTrack } from "@/utils/account-status";
-import { formatDateTimeInline, formatPercentNullable, formatQuotaResetLabel, formatSlug } from "@/utils/formatters";
+import {
+  formatDateTimeInline,
+  formatPercentNullable,
+  formatQuotaResetLabel,
+  formatSingleUnitRemaining,
+  formatSlug,
+} from "@/utils/formatters";
 
 const ACCOUNT_LIST_VISIBLE_ROWS = 8;
 const ACCOUNT_LIST_ROW_HEIGHT_REM = 4.5;
@@ -306,6 +312,10 @@ export function AccountList({ accounts, readOnly = false, onAction }: AccountLis
           const warmupDetail = account.limitWarmup
             ? `${formatSlug(account.limitWarmup.status)} | ${account.limitWarmup.window === "primary" ? "5h" : "weekly"} | ${formatDateTimeInline(account.limitWarmup.completedAt ?? account.limitWarmup.attemptedAt)}`
             : "No attempts";
+          const hasResetCredits = (account.availableResetCredits ?? 0) > 0;
+          const resetCountdown = account.resetCreditNearestExpiresAt
+            ? formatSingleUnitRemaining(account.resetCreditNearestExpiresAt)
+            : null;
           return (
             <div
               key={account.accountId}
@@ -348,6 +358,20 @@ export function AccountList({ accounts, readOnly = false, onAction }: AccountLis
                 >
                   <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
                 </Button>
+                {hasResetCredits ? (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    className="h-7 w-7 rounded-md p-0 text-muted-foreground hover:text-foreground"
+                    aria-label={`Redeem reset credit for ${title}`}
+                    title={resetCountdown ? `Reset (${resetCountdown.label})` : "Reset"}
+                    disabled={readOnly}
+                    onClick={() => onAction?.(account, "reset-credit")}
+                  >
+                    <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
+                  </Button>
+                ) : null}
                 <Button
                   type="button"
                   size="sm"

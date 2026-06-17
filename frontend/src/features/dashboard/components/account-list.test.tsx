@@ -55,17 +55,21 @@ describe("AccountList", () => {
       displayName: "Paused Account",
       status: "paused",
       limitWarmupEnabled: false,
+      availableResetCredits: 1,
+      resetCreditNearestExpiresAt: "2026-01-03T12:00:00.000Z",
     });
 
     render(<AccountList accounts={[account]} onAction={onAction} />);
 
     await user.click(screen.getByRole("button", { name: "View details for Paused Account" }));
+    await user.click(screen.getByRole("button", { name: "Redeem reset credit for Paused Account" }));
     await user.click(screen.getByRole("button", { name: "Enable limit warm-up for Paused Account" }));
     await user.click(screen.getByRole("button", { name: "Resume Paused Account" }));
 
     expect(onAction).toHaveBeenNthCalledWith(1, account, "details");
-    expect(onAction).toHaveBeenNthCalledWith(2, account, "warmup-toggle");
-    expect(onAction).toHaveBeenNthCalledWith(3, account, "resume");
+    expect(onAction).toHaveBeenNthCalledWith(2, account, "reset-credit");
+    expect(onAction).toHaveBeenNthCalledWith(3, account, "warmup-toggle");
+    expect(onAction).toHaveBeenNthCalledWith(4, account, "resume");
   });
 
   it("blurs list identity text when privacy mode is enabled", () => {
@@ -214,5 +218,24 @@ describe("AccountList", () => {
     await user.click(screen.getByRole("button", { name: "Credits, sorted ascending" }));
 
     expect(rowNames()).toEqual(["Low Account", "Empty Account", "Unknown Account"]);
+  });
+
+  it("hides the reset action when no reset credits are available", () => {
+    render(
+      <AccountList
+        accounts={[
+          createAccountSummary({
+            accountId: "acc-no-reset",
+            displayName: "No Reset Account",
+            availableResetCredits: 0,
+            resetCreditNearestExpiresAt: null,
+          }),
+        ]}
+      />,
+    );
+
+    expect(
+      screen.queryByRole("button", { name: "Redeem reset credit for No Reset Account" }),
+    ).not.toBeInTheDocument();
   });
 });

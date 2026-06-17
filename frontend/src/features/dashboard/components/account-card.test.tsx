@@ -108,4 +108,23 @@ describe("AccountCard", () => {
 
     expect(screen.getByRole("button", { name: "Enable limit warm-up for Read Only Account" })).toBeDisabled();
   });
+
+  it("shows reset action when reset credits are available", () => {
+    const account = createAccountSummary({
+      availableResetCredits: 2,
+      resetCreditNearestExpiresAt: "2026-01-03T12:00:00.000Z",
+    });
+
+    render(<AccountCard account={account} />);
+
+    expect(screen.getByRole("button", { name: "Reset" })).toBeInTheDocument();
+  });
+
+  it("hides reset action when no reset credits are available", () => {
+    const account = createAccountSummary({ availableResetCredits: 0 });
+
+    render(<AccountCard account={account} />);
+
+    expect(screen.queryByRole("button", { name: "Reset" })).not.toBeInTheDocument();
+  });
 });

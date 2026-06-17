@@ -20,6 +20,7 @@ import {
   formatQuotaResetMeta,
   formatRate,
   formatResetRelative,
+  formatSingleUnitRemaining,
   formatRefreshTokenLabel,
   formatRelative,
   formatTimeLong,
@@ -123,6 +124,29 @@ describe("formatters", () => {
     expect(formatResetRelative((4 * 60 + 13) * 60_000)).toBe("in 4h 13m");
     expect(formatResetRelative((6 * 24 + 13) * 60 * 60_000)).toBe("in 6d 13h");
     expect(formatCountdown(125)).toBe("2:05");
+  });
+
+  it("formats single-unit reset-credit countdowns", () => {
+    expect(formatSingleUnitRemaining("2026-01-08T00:00:00.000Z")).toEqual({
+      label: "7d",
+      expiringSoon: false,
+    });
+    expect(formatSingleUnitRemaining("2026-01-07T00:00:00.000Z")).toEqual({
+      label: "6d",
+      expiringSoon: true,
+    });
+    expect(formatSingleUnitRemaining("2026-01-01T01:00:00.000Z")).toEqual({
+      label: "1h",
+      expiringSoon: true,
+    });
+    expect(formatSingleUnitRemaining("2026-01-01T00:01:00.000Z")).toEqual({
+      label: "1m",
+      expiringSoon: true,
+    });
+    expect(formatSingleUnitRemaining("2025-12-31T23:59:59.000Z")).toEqual({
+      label: "now",
+      expiringSoon: true,
+    });
   });
 
   it("formats quota reset labels", () => {

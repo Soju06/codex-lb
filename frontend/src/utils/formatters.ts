@@ -285,6 +285,35 @@ export function formatQuotaResetLabel(resetAt: string | null | undefined): strin
   return formatResetRelative(diffMs);
 }
 
+const DAY_MS = 86_400_000;
+const HOUR_MS = 3_600_000;
+const MINUTE_MS = 60_000;
+const EXPIRING_SOON_THRESHOLD_MS = 7 * DAY_MS;
+
+export type SingleUnitRemaining = {
+  label: string;
+  expiringSoon: boolean;
+};
+
+export function formatSingleUnitRemaining(expiresAtIso: string): SingleUnitRemaining {
+  const ms = new Date(expiresAtIso).getTime() - Date.now();
+  if (ms <= 0) {
+    return { label: "now", expiringSoon: true };
+  }
+  const days = Math.floor(ms / DAY_MS);
+  const hours = Math.floor(ms / HOUR_MS);
+  const minutes = Math.floor(ms / MINUTE_MS);
+  const label =
+    days >= 1
+      ? `${days}d`
+      : hours >= 1
+        ? `${hours}h`
+        : minutes >= 1
+          ? `${minutes}m`
+          : "now";
+  return { label, expiringSoon: ms < EXPIRING_SOON_THRESHOLD_MS };
+}
+
 export function formatQuotaResetMeta(
   resetAtSecondary: string | null | undefined,
   windowMinutesSecondary: unknown,

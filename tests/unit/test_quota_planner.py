@@ -18,7 +18,7 @@ from app.modules.quota_planner.logic import (
     plan_shadow_actions,
     simulate_pool,
 )
-from app.modules.quota_planner.repository import DemandBin
+from app.modules.quota_planner.repository import DemandBin, _to_db_naive_utc
 
 pytestmark = pytest.mark.unit
 
@@ -90,6 +90,13 @@ def test_planner_settings_default_to_nonblocking_shadow_mode() -> None:
     assert settings.prewarm_enabled is True
     assert settings.allow_synthetic_traffic is False
     assert settings.dry_run is True
+
+
+def test_to_db_naive_utc_normalizes_aware_datetimes() -> None:
+    scheduled_at = datetime(2026, 6, 18, 8, 30, tzinfo=timezone(timedelta(hours=3)))
+
+    assert _to_db_naive_utc(scheduled_at) == datetime(2026, 6, 18, 5, 30)
+    assert _to_db_naive_utc(None) is None
 
 
 def test_candidate_start_times_do_not_floor_now_into_the_past() -> None:

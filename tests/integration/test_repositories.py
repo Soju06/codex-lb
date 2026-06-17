@@ -274,6 +274,33 @@ async def test_account_slot_upgrades_single_legacy_unknown_workspace_row(db_setu
 
 
 @pytest.mark.asyncio
+async def test_account_slot_upgrades_label_only_workspace_when_id_arrives(db_setup):
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+
+        label_only = _make_account("acc_label_only_workspace", "label-only-workspace@example.com")
+        label_only.chatgpt_account_id = "raw_label_only_workspace"
+        label_only.workspace_label = "Legacy Team"
+        stored_label_only = await repo.upsert_account_slot(label_only, preserve_unknown_workspace_duplicates=False)
+
+        upgraded = _make_account("acc_workspace_id", "label-only-workspace@example.com")
+        upgraded.chatgpt_account_id = "raw_label_only_workspace"
+        upgraded.workspace_id = "ws_legacy_team"
+        upgraded.workspace_label = "Legacy Team"
+        upgraded.plan_type = "team"
+
+        stored = await repo.upsert_account_slot(upgraded, preserve_unknown_workspace_duplicates=False)
+
+        assert stored.id == stored_label_only.id
+        assert stored.workspace_id == "ws_legacy_team"
+        assert stored.workspace_label == "Legacy Team"
+        assert stored.plan_type == "team"
+
+        accounts = list((await session.execute(select(Account))).scalars().all())
+        assert [account.id for account in accounts] == [stored_label_only.id]
+
+
+@pytest.mark.asyncio
 async def test_workspace_slot_taken_ignores_same_email_workspace_when_chatgpt_identity_differs(db_setup):
     async with SessionLocal() as session:
         repo = AccountsRepository(session)
@@ -426,6 +453,72 @@ async def test_accounts_upsert_merge_by_chatgpt_identity_reuses_deactivated_row(
         )
         assert len(rows) == 1
         assert rows[0].id == "acc_canonical"
+
+
+@pytest.mark.asyncio
+async def test_accounts_upsert_merge_by_chatgpt_identity_reuses_row_when_email_changes(db_setup):
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+
+        original = _make_account_with_chatgpt_id("acc_email_change", "old-email@example.com", "chatgpt_email_change")
+        await repo.upsert(original, merge_by_email=False)
+
+        reauth = _make_account_with_chatgpt_id("acc_email_change", "new-email@example.com", "chatgpt_email_change")
+        reauth.plan_type = "team"
+        saved = await repo.upsert(reauth, merge_by_email=False, merge_by_chatgpt_identity=True)
+
+        assert saved.id == "acc_email_change"
+        assert saved.email == "new-email@example.com"
+        assert saved.plan_type == "team"
+        rows = list(
+            (await session.execute(select(Account).where(Account.chatgpt_account_id == "chatgpt_email_change")))
+            .scalars()
+            .all()
+        )
+        assert len(rows) == 1
+        assert rows[0].id == "acc_email_change"
+
+
+@pytest.mark.asyncio
+async def test_accounts_upsert_merge_by_chatgpt_identity_matches_email_row_among_collisions(db_setup):
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+
+        original_other_email = _make_account_with_chatgpt_id(
+            "acc_other_email",
+            "other@example.com",
+            "chatgpt_email_collision",
+        )
+        await repo.upsert(original_other_email, merge_by_email=False)
+
+        canonical_email = _make_account_with_chatgpt_id(
+            "acc_matching_email",
+            "current@example.com",
+            "chatgpt_email_collision",
+        )
+        await repo.upsert(canonical_email, merge_by_email=False)
+
+        reauth = _make_account_with_chatgpt_id(
+            "acc_reauth",
+            "current@example.com",
+            "chatgpt_email_collision",
+        )
+        reauth.plan_type = "team"
+        saved = await repo.upsert(reauth, merge_by_email=False, merge_by_chatgpt_identity=True)
+
+        assert saved.id == "acc_matching_email"
+        assert saved.email == "current@example.com"
+        assert saved.plan_type == "team"
+
+        rows = list(
+            (await session.execute(select(Account).where(Account.chatgpt_account_id == "chatgpt_email_collision")))
+            .scalars()
+            .all()
+        )
+        assert {(row.id, row.email) for row in rows} == {
+            ("acc_other_email", "other@example.com"),
+            ("acc_matching_email", "current@example.com"),
+        }
 
 
 @pytest.mark.asyncio

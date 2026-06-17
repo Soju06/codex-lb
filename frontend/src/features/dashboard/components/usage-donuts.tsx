@@ -1,7 +1,7 @@
-import { useMemo, useState } from "react";
+import { lazy, Suspense, useMemo, useState } from "react";
 
-import { DonutChart } from "@/components/donut-chart";
 import { MultiSelectFilter } from "@/features/dashboard/components/filters/multi-select-filter";
+import type { DonutChartProps } from "@/components/donut-chart";
 import type { RemainingItem, SafeLineView } from "@/features/dashboard/utils";
 import { formatSlug } from "@/utils/formatters";
 
@@ -19,6 +19,12 @@ function estimateCapacity(items: RemainingItem[]): number {
 		return sum + Math.max(0, item.value / (item.remainingPercent / 100));
 	}, 0);
 }
+
+const DonutChart = lazy(() =>
+  import("@/components/donut-chart").then((module) => ({
+    default: (props: DonutChartProps) => <module.DonutChart {...props} />,
+  })),
+);
 
 export type UsageDonutsProps = {
 	primaryItems: RemainingItem[];
@@ -97,6 +103,7 @@ export function UsageDonuts({
 				options={statusOptions}
 				onChange={setStatusFilters}
 			/>
+			<Suspense fallback={<div className="grid gap-4 lg:grid-cols-2" />}>
 			<div className="grid gap-4 lg:grid-cols-2">
 			<DonutChart
 				title="5-Hour Credits"
@@ -115,6 +122,7 @@ export function UsageDonuts({
 				centerLayout="credits"
 			/>
 			</div>
+			</Suspense>
 		</div>
 	);
 }

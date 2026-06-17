@@ -10,12 +10,19 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from starlette.requests import HTTPConnection
 
 from app.core.auth.api_key_cache import get_api_key_cache
+from app.core.auth.dashboard_access import (
+    DashboardPermission,
+    DashboardPrincipal,
+    DashboardRole,
+    admin_principal,
+    guest_principal,
+)
 from app.core.auth.dashboard_mode import DashboardAuthMode, get_dashboard_request_auth
 from app.core.clients.usage import UsageFetchError, fetch_usage
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
-from app.core.exceptions import DashboardAuthError, ProxyAuthError, ProxyUpstreamError
+from app.core.exceptions import DashboardAuthError, DashboardPermissionError, ProxyAuthError, ProxyUpstreamError
 from app.core.request_locality import is_local_request
 from app.core.upstream_proxy import UpstreamProxyRouteError, resolve_upstream_route
 from app.core.utils.time import utcnow
@@ -117,23 +124,79 @@ async def validate_usage_api_key(
 # --- Dashboard session auth ---
 
 
-async def validate_dashboard_session(request: Request) -> None:
+def _set_dashboard_principal(request: Request, principal: DashboardPrincipal) -> DashboardPrincipal:
+    request.state.dashboard_principal = principal
+    return principal
+
+
+def _get_cached_dashboard_principal(request: Request) -> DashboardPrincipal | None:
+    principal = getattr(request.state, "dashboard_principal", None)
+    return principal if isinstance(principal, DashboardPrincipal) else None
+
+
+async def validate_dashboard_session(request: Request) -> DashboardPrincipal:
+    cached = _get_cached_dashboard_principal(request)
+    if cached is not None:
+        return cached
+
     request_auth = get_dashboard_request_auth(request)
     if request_auth is not None:
-        return
+        return _set_dashboard_principal(
+            request,
+            admin_principal(auth_mode=request_auth.mode, actor=request_auth.actor),
+        )
 
     settings = await get_settings_cache().get()
     password_required = bool(settings.password_hash)
     requires_auth = password_required or settings.totp_required_on_login
-    if get_dashboard_request_auth_mode() == DashboardAuthMode.TRUSTED_HEADER and not requires_auth:
+    guest_access_enabled = settings.guest_access_enabled
+    guest_password_required = guest_access_enabled and settings.guest_password_hash is not None
+    passwordless_guest_fallback_allowed = not (
+        get_dashboard_request_auth_mode() == DashboardAuthMode.TRUSTED_HEADER
+        and requires_auth
+        and guest_access_enabled
+        and not guest_password_required
+    )
+    session_id = request.cookies.get(DASHBOARD_SESSION_COOKIE)
+    state = get_dashboard_session_store().get(session_id)
+
+    has_admin_fallback_session = (
+        state is not None and state.role == DashboardRole.ADMIN and password_required and state.password_verified
+    )
+    if get_dashboard_request_auth_mode() == DashboardAuthMode.TRUSTED_HEADER and not has_admin_fallback_session:
         raise DashboardAuthError("Reverse proxy authentication is required", code="proxy_auth_required")
+    if (
+        state is not None
+        and state.role == DashboardRole.GUEST
+        and guest_access_enabled
+        and ((not guest_password_required and passwordless_guest_fallback_allowed) or state.guest_verified)
+    ):
+        return _set_dashboard_principal(request, guest_principal())
+    if state is not None and state.role == DashboardRole.ADMIN and password_required and state.password_verified:
+        if settings.totp_required_on_login and not state.totp_verified:
+            raise DashboardAuthError("TOTP verification is required for dashboard access", code="totp_required")
+        return _set_dashboard_principal(
+            request,
+            admin_principal(auth_mode=DashboardAuthMode.STANDARD),
+        )
+
     if not requires_auth:
         if not is_local_request(request):
+            if guest_access_enabled:
+                if not guest_password_required:
+                    return _set_dashboard_principal(request, guest_principal())
+                raise DashboardAuthError("Authentication is required")
             raise DashboardAuthError(
                 "Remote bootstrap is required before dashboard access is allowed",
                 code="bootstrap_required",
             )
-        return
+        return _set_dashboard_principal(
+            request,
+            admin_principal(auth_mode=DashboardAuthMode.STANDARD),
+        )
+
+    if guest_access_enabled and not guest_password_required and passwordless_guest_fallback_allowed:
+        return _set_dashboard_principal(request, guest_principal())
 
     if not password_required and settings.totp_required_on_login:
         logger.warning(
@@ -141,14 +204,28 @@ async def validate_dashboard_session(request: Request) -> None:
             " while totp_required_on_login=true metric=dashboard_auth_migration_inconsistency"
         )
 
-    session_id = request.cookies.get(DASHBOARD_SESSION_COOKIE)
-    state = get_dashboard_session_store().get(session_id)
     if state is None:
+        raise DashboardAuthError("Authentication is required")
+    if state.role != DashboardRole.ADMIN:
         raise DashboardAuthError("Authentication is required")
     if password_required and not state.password_verified:
         raise DashboardAuthError("Authentication is required")
     if settings.totp_required_on_login and not state.totp_verified:
         raise DashboardAuthError("TOTP verification is required for dashboard access", code="totp_required")
+    return _set_dashboard_principal(
+        request,
+        admin_principal(auth_mode=DashboardAuthMode.STANDARD),
+    )
+
+
+async def require_dashboard_write_access(request: Request) -> DashboardPrincipal:
+    principal = await validate_dashboard_session(request)
+    if not principal.can(DashboardPermission.WRITE):
+        raise DashboardPermissionError(
+            "Read-only dashboard access cannot modify dashboard state",
+            code="read_only_access",
+        )
+    return principal
 
 
 def get_dashboard_request_auth_mode() -> DashboardAuthMode:

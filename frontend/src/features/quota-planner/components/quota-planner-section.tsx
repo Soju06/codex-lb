@@ -58,7 +58,11 @@ function settingsDraft(settings: QuotaPlannerSettings): QuotaPlannerSettings {
   return { ...settings, workingDays: [...settings.workingDays] };
 }
 
-export function QuotaPlannerSection() {
+interface QuotaPlannerSectionProps {
+  disabled?: boolean;
+}
+
+export function QuotaPlannerSection({ disabled = false }: QuotaPlannerSectionProps) {
   const {
     settingsQuery,
     decisionsQuery,
@@ -91,9 +95,9 @@ export function QuotaPlannerSection() {
     ],
   );
 
-  const settingsBusy = updateSettingsMutation.isPending;
-  const warmupBusy = warmNowMutation.isPending;
-  const cancelBusy = cancelDecisionMutation.isPending;
+  const settingsBusy = updateSettingsMutation.isPending || disabled;
+  const warmupBusy = warmNowMutation.isPending || disabled;
+  const cancelBusy = cancelDecisionMutation.isPending || disabled;
   const changed = settings && effectiveDraft ? JSON.stringify(settings) !== JSON.stringify(effectiveDraft) : false;
   const forecast = forecastQuery.data;
   const decisions = decisionsQuery.data ?? [];
@@ -112,7 +116,7 @@ export function QuotaPlannerSection() {
         return null;
       }
       const nextDays = checked
-        ? [...new Set([...base.workingDays, day])].sort()
+        ? Array.from(new Set([...base.workingDays, day])).toSorted((a, b) => a - b)
         : base.workingDays.filter((value) => value !== day);
       return { ...base, workingDays: nextDays.length > 0 ? nextDays : base.workingDays };
     });
@@ -143,13 +147,13 @@ export function QuotaPlannerSection() {
           <div className="grid gap-3 lg:grid-cols-[1.2fr_0.8fr]">
             <div className="divide-y rounded-lg border">
               <div className="grid gap-3 p-3 sm:grid-cols-3">
-                <label className="space-y-1 text-xs font-medium">
+                <label htmlFor="quota-planner-mode" className="space-y-1 text-xs font-medium">
                   Mode
                   <Select
                     value={effectiveDraft.mode}
                     onValueChange={(value) => patchDraft({ mode: value as QuotaPlannerMode })}
                   >
-                    <SelectTrigger className="h-8 text-xs" disabled={settingsBusy}>
+                    <SelectTrigger id="quota-planner-mode" className="h-8 text-xs" disabled={settingsBusy}>
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -160,16 +164,17 @@ export function QuotaPlannerSection() {
                     </SelectContent>
                   </Select>
                 </label>
-                <label className="space-y-1 text-xs font-medium">
+                <label htmlFor="quota-planner-timezone" className="space-y-1 text-xs font-medium">
                   Timezone
                   <Input
+                    id="quota-planner-timezone"
                     className="h-8 text-xs"
                     value={effectiveDraft.timezone}
                     disabled={settingsBusy}
                     onChange={(event) => patchDraft({ timezone: event.target.value })}
                   />
                 </label>
-                <label className="space-y-1 text-xs font-medium">
+                <label htmlFor="quota-planner-forecast" className="space-y-1 text-xs font-medium">
                   Forecast
                   <Select
                     value={effectiveDraft.forecastQuantile}
@@ -177,7 +182,7 @@ export function QuotaPlannerSection() {
                       patchDraft({ forecastQuantile: value as QuotaPlannerForecastQuantile })
                     }
                   >
-                    <SelectTrigger className="h-8 text-xs" disabled={settingsBusy}>
+                    <SelectTrigger id="quota-planner-forecast" className="h-8 text-xs" disabled={settingsBusy}>
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -190,9 +195,10 @@ export function QuotaPlannerSection() {
               </div>
 
               <div className="grid gap-3 p-3 sm:grid-cols-4">
-                <label className="space-y-1 text-xs font-medium">
+                <label htmlFor="quota-planner-work-start" className="space-y-1 text-xs font-medium">
                   Work start
                   <Input
+                    id="quota-planner-work-start"
                     className="h-8 text-xs"
                     type="time"
                     value={effectiveDraft.workingHoursStart}
@@ -200,9 +206,10 @@ export function QuotaPlannerSection() {
                     onChange={(event) => patchDraft({ workingHoursStart: event.target.value })}
                   />
                 </label>
-                <label className="space-y-1 text-xs font-medium">
+                <label htmlFor="quota-planner-work-end" className="space-y-1 text-xs font-medium">
                   Work end
                   <Input
+                    id="quota-planner-work-end"
                     className="h-8 text-xs"
                     type="time"
                     value={effectiveDraft.workingHoursEnd}
@@ -210,9 +217,10 @@ export function QuotaPlannerSection() {
                     onChange={(event) => patchDraft({ workingHoursEnd: event.target.value })}
                   />
                 </label>
-                <label className="space-y-1 text-xs font-medium">
+                <label htmlFor="quota-planner-lead-minutes" className="space-y-1 text-xs font-medium">
                   Lead minutes
                   <Input
+                    id="quota-planner-lead-minutes"
                     className="h-8 text-xs"
                     type="number"
                     min={0}
@@ -224,9 +232,10 @@ export function QuotaPlannerSection() {
                     }
                   />
                 </label>
-                <label className="space-y-1 text-xs font-medium">
+                <label htmlFor="quota-planner-max-decisions" className="space-y-1 text-xs font-medium">
                   Max decisions/day
                   <Input
+                    id="quota-planner-max-decisions"
                     className="h-8 text-xs"
                     type="number"
                     min={0}
@@ -283,9 +292,10 @@ export function QuotaPlannerSection() {
               </div>
 
               <div className="grid gap-3 p-3 sm:grid-cols-3">
-                <label className="space-y-1 text-xs font-medium">
+                <label htmlFor="quota-planner-min-expected-gain" className="space-y-1 text-xs font-medium">
                   Min expected gain
                   <Input
+                    id="quota-planner-min-expected-gain"
                     className="h-8 text-xs"
                     type="number"
                     min={0}
@@ -295,9 +305,10 @@ export function QuotaPlannerSection() {
                     onChange={(event) => patchDraft({ minExpectedGain: Number.parseFloat(event.target.value || "0") })}
                   />
                 </label>
-                <label className="space-y-1 text-xs font-medium">
+                <label htmlFor="quota-planner-daily-warmup-credits" className="space-y-1 text-xs font-medium">
                   Daily warmup credits
                   <Input
+                    id="quota-planner-daily-warmup-credits"
                     className="h-8 text-xs"
                     type="number"
                     min={0}
@@ -309,9 +320,10 @@ export function QuotaPlannerSection() {
                     }
                   />
                 </label>
-                <label className="space-y-1 text-xs font-medium">
+                <label htmlFor="quota-planner-warmup-model" className="space-y-1 text-xs font-medium">
                   Warmup model
                   <Input
+                    id="quota-planner-warmup-model"
                     className="h-8 text-xs"
                     value={effectiveDraft.warmupModelPreference ?? ""}
                     disabled={settingsBusy}
@@ -371,8 +383,9 @@ export function QuotaPlannerSection() {
               disabled={warmupBusy}
               onChange={(event) => setWarmAccountId(event.target.value)}
             />
-            <label className="flex h-8 items-center gap-2 rounded-md border px-2 text-xs font-medium">
+            <label htmlFor="quota-planner-force-probe" className="flex h-8 items-center gap-2 rounded-md border px-2 text-xs font-medium">
               <Checkbox
+                id="quota-planner-force-probe"
                 checked={forceWarmupProbe}
                 disabled={warmupBusy}
                 onCheckedChange={(checked) => setForceWarmupProbe(checked === true)}

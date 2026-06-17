@@ -1,4 +1,4 @@
-import { Area, AreaChart, ResponsiveContainer } from "recharts";
+import { Area, AreaChart, ResponsiveContainer } from "@/components/lazy-recharts";
 
 import { useReducedMotion } from "@/hooks/use-reduced-motion";
 

@@ -433,7 +433,7 @@ def create_app() -> FastAPI:
         if not index_html.is_file():
             raise HTTPException(status_code=503, detail=frontend_build_hint)
 
-        return FileResponse(index_html, media_type="text/html")
+        return FileResponse(index_html, media_type="text/html", headers={"Cache-Control": "no-cache"})
 
     return app
 

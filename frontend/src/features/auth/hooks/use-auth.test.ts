@@ -2,31 +2,23 @@ import { beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 
 import {
   getAuthSession,
+  loginGuest,
   loginPassword,
   logout as logoutRequest,
   verifyTotp as verifyTotpRequest,
 } from "@/features/auth/api";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
-import type { AuthSession } from "@/features/auth/schemas";
+import { createDashboardAuthSession } from "@/test/mocks/factories";
 
 vi.mock("@/features/auth/api", () => ({
   getAuthSession: vi.fn(),
   loginPassword: vi.fn(),
+  loginGuest: vi.fn(),
   logout: vi.fn(),
   verifyTotp: vi.fn(),
 }));
 
-const sessionBase: AuthSession = {
-  authenticated: true,
-  passwordRequired: true,
-  totpRequiredOnLogin: false,
-  totpConfigured: true,
-  bootstrapRequired: false,
-  bootstrapTokenConfigured: false,
-  authMode: "standard",
-  passwordManagementEnabled: true,
-  passwordSessionActive: false,
-};
+const sessionBase = createDashboardAuthSession();
 
 function resetAuthStore(): void {
   useAuthStore.setState({
@@ -38,6 +30,13 @@ function resetAuthStore(): void {
     bootstrapTokenConfigured: false,
     authMode: "standard",
     passwordManagementEnabled: true,
+    passwordSessionActive: false,
+    role: "admin",
+    permissions: ["read", "write"],
+    guestAccessEnabled: false,
+    guestPasswordRequired: false,
+    canWrite: true,
+    adminLoginRequested: false,
     loading: false,
     initialized: false,
     error: null,
@@ -75,6 +74,22 @@ describe("useAuthStore actions", () => {
     expect(loginPassword).toHaveBeenCalledWith({ password: "secret-pass" });
     expect(next.authenticated).toBe(true);
     expect(next.error).toBeNull();
+  });
+
+  it("guest login stores read-only permissions", async () => {
+    (loginGuest as Mock).mockResolvedValue({
+      ...sessionBase,
+      role: "guest",
+      permissions: ["read"],
+      guestAccessEnabled: true,
+    });
+
+    await useAuthStore.getState().loginGuest("guest-pass");
+
+    const next = useAuthStore.getState();
+    expect(loginGuest).toHaveBeenCalledWith({ password: "guest-pass" });
+    expect(next.role).toBe("guest");
+    expect(next.canWrite).toBe(false);
   });
 
   it("logout clears auth and refreshes session", async () => {

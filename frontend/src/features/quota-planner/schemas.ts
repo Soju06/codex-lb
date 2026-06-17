@@ -1,7 +1,7 @@
 import { z } from "zod";
 
-export const QuotaPlannerModeSchema = z.enum(["off", "shadow", "suggest", "auto"]);
-export const QuotaPlannerForecastQuantileSchema = z.enum(["p50", "p75", "p90"]);
+const QuotaPlannerModeSchema = z.enum(["off", "shadow", "suggest", "auto"]);
+const QuotaPlannerForecastQuantileSchema = z.enum(["p50", "p75", "p90"]);
 
 export const QuotaPlannerSettingsSchema = z.object({
   mode: QuotaPlannerModeSchema,
@@ -37,14 +37,14 @@ export const QuotaPlannerDecisionSchema = z.object({
   idempotencyKey: z.string(),
 });
 
-export const QuotaPlannerForecastSlotSchema = z.object({
+const QuotaPlannerForecastSlotSchema = z.object({
   slotStart: z.string(),
   demandUnits: z.number(),
   requestCount: z.number(),
   source: z.string(),
 });
 
-export const QuotaPlannerSimulationSchema = z.object({
+const QuotaPlannerSimulationSchema = z.object({
   loss: z.number(),
   unmetDemand: z.number(),
   wastedCapacity: z.number(),

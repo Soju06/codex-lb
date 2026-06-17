@@ -127,7 +127,15 @@ export function useRequestLogs() {
     [filters.accountIds, filters.apiKeyIds, filters.modelOptions, since],
   );
 
-  const logsQuery = useQuery({
+  const {
+    data: logsData,
+    error: logsError,
+    isFetching: logsIsFetching,
+    isLoading: logsIsLoading,
+    isPending: logsIsPending,
+    isSuccess: logsIsSuccess,
+    refetch: refetchLogs,
+  } = useQuery({
     queryKey: ["dashboard", "request-logs", listFilters],
     queryFn: () => getRequestLogs(listFilters),
     refetchInterval: 30_000,
@@ -135,14 +143,40 @@ export function useRequestLogs() {
     refetchOnWindowFocus: true,
     placeholderData: keepPreviousData,
   });
+  const logsQuery = {
+    data: logsData,
+    error: logsError,
+    isFetching: logsIsFetching,
+    isLoading: logsIsLoading,
+    isPending: logsIsPending,
+    isSuccess: logsIsSuccess,
+    refetch: refetchLogs,
+  };
 
-  const optionsQuery = useQuery({
+  const {
+    data: optionsData,
+    error: optionsError,
+    isFetching: optionsIsFetching,
+    isLoading: optionsIsLoading,
+    isPending: optionsIsPending,
+    isSuccess: optionsIsSuccess,
+    refetch: refetchOptions,
+  } = useQuery({
     queryKey: ["dashboard", "request-log-options", facetFilters],
     queryFn: () => getRequestLogOptions(facetFilters),
     refetchInterval: 30_000,
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,
   });
+  const optionsQuery = {
+    data: optionsData,
+    error: optionsError,
+    isFetching: optionsIsFetching,
+    isLoading: optionsIsLoading,
+    isPending: optionsIsPending,
+    isSuccess: optionsIsSuccess,
+    refetch: refetchOptions,
+  };
 
   const updateFilters = (patch: Partial<FilterState>) => {
     const nextState: FilterState = {

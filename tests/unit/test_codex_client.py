@@ -3,10 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, cast
 
+import aiohttp
 import pytest
 
 from app.core.clients.codex import CodexClient, require_route_or_direct_egress_opt_in
-from app.core.clients.codex_tls import codex_tls_kwargs
 from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
 
 pytestmark = pytest.mark.unit
@@ -54,6 +54,45 @@ class _WsFailSession:
         raise _HandshakeFailure("Upgrade Required")
 
 
+class _WsContext:
+    def __init__(self) -> None:
+        self.websocket = object()
+        self.exited = False
+
+    async def __aenter__(self) -> object:
+        return self.websocket
+
+    async def __aexit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        self.exited = True
+
+
+class _SocksWsSession:
+    latest: "_SocksWsSession | None" = None
+
+    def __init__(self, **kwargs: Any) -> None:
+        self.kwargs = kwargs
+        self.calls: list[dict[str, Any]] = []
+        self.context = _WsContext()
+        self.closed = False
+        _SocksWsSession.latest = self
+
+    def ws_connect(self, url: str, **kwargs: Any) -> _WsContext:
+        self.calls.append({"url": url, **kwargs})
+        return self.context
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+class _SocksConnector:
+    calls: list[dict[str, Any]] = []
+
+    @classmethod
+    def from_url(cls, proxy_url: str, **kwargs: Any) -> object:
+        cls.calls.append({"proxy_url": proxy_url, **kwargs})
+        return object()
+
+
 @pytest.fixture
 def route() -> ResolvedUpstreamRoute:
     return ResolvedUpstreamRoute(
@@ -91,16 +130,51 @@ async def test_request_passes_resolver_proxy_and_builtin_fingerprint(route: Reso
     session = _Session()
     client = CodexClient(session)
 
-    await client.request("POST", "https://upstream.test", route=route, json={"x": 1})
+    response = await client.request("POST", "https://upstream.test", route=route, json={"x": 1})
 
     assert session.calls[0]["proxy"] == "http://u:p@proxy.test:8080"
-    for key, value in codex_tls_kwargs().items():
-        assert session.calls[0][key] == value
     assert session.calls[0]["json"] == {"x": 1}
+    assert response.content == b'{"ok": true}'
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("override", ["proxy", "proxies", "impersonate", "ja3", "akamai", "extra_fp"])
+async def test_streaming_request_can_opt_out_of_response_buffering(route: ResolvedUpstreamRoute) -> None:
+    session = _Session()
+    client = CodexClient(session)
+
+    result = await client.request_with_route_metadata(
+        "POST",
+        "https://upstream.test",
+        route=route,
+        buffer_response=False,
+        json={"x": 1},
+    )
+
+    assert session.calls[0]["proxy"] == "http://u:p@proxy.test:8080"
+    assert "buffer_response" not in session.calls[0]
+    assert isinstance(result.response, _Response)
+
+
+@pytest.mark.asyncio
+async def test_request_converts_legacy_files_payload_to_form_data(route: ResolvedUpstreamRoute) -> None:
+    session = _Session()
+    client = CodexClient(session)
+
+    await client.request_with_route_metadata(
+        "POST",
+        "https://upstream.test/transcribe",
+        route=route,
+        files={"file": ("audio.wav", b"abc", "audio/wav")},
+        data={"prompt": "summarize"},
+    )
+
+    assert "files" not in session.calls[0]
+    assert isinstance(session.calls[0]["data"], aiohttp.FormData)
+    assert session.calls[0]["proxy"] == "http://u:p@proxy.test:8080"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("override", ["akamai", "extra_fp", "impersonate", "ja3", "proxies", "proxy"])
 async def test_runtime_route_and_fingerprint_overrides_are_rejected(
     route: ResolvedUpstreamRoute,
     override: str,
@@ -160,3 +234,31 @@ async def test_websocket_transport_error_preserves_handshake_status(route: Resol
         await client.open_ws_with_route_metadata("wss://upstream.test", route=route)
 
     assert getattr(exc_info.value, "status_code") == 426
+
+
+@pytest.mark.asyncio
+async def test_socks_websocket_uses_proxy_connector_and_closes_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    route = ResolvedUpstreamRoute(
+        mode="account_bound",
+        pool_id="pool_1",
+        endpoint=ResolvedProxyEndpoint("ep_1", "socks5h", "proxy.test", 1080, "u", "p"),
+    )
+    _SocksConnector.calls = []
+    _SocksWsSession.latest = None
+    monkeypatch.setattr("app.core.clients.codex.ProxyConnector", _SocksConnector)
+    monkeypatch.setattr("app.core.clients.codex.aiohttp.ClientSession", _SocksWsSession)
+    client = CodexClient(_Session())
+
+    result = await client.open_ws_with_route_metadata("wss://upstream.test", route=route, heartbeat=30)
+
+    session = _SocksWsSession.latest
+    assert session is not None
+    assert _SocksConnector.calls[0]["proxy_url"] == "socks5h://u:p@proxy.test:1080"
+    assert session.calls == [{"url": "wss://upstream.test", "heartbeat": 30}]
+    assert "proxy" not in session.calls[0]
+    assert result.websocket is session.context.websocket
+
+    await result.context.__aexit__(None, None, None)
+
+    assert session.context.exited is True
+    assert session.closed is True

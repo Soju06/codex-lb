@@ -714,3 +714,201 @@ async def test_dashboard_overview_summary_uses_exact_timeframe_even_when_trends_
     assert payload["summary"]["metrics"]["errorCount"] == 1
     assert payload["summary"]["metrics"]["topError"] == "rate_limit_exceeded"
     assert all(point["v"] == 0 for point in payload["trends"]["requests"])
+
+
+@pytest.mark.asyncio
+async def test_dashboard_overview_includes_previous_window_summary_when_history_covers_full_cycle(
+    async_client,
+    db_setup,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    fixed_now = datetime(2026, 4, 3, 10, 37, 0)
+    monkeypatch.setattr("app.modules.dashboard.service.utcnow", lambda: fixed_now)
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+        logs_repo = RequestLogsRepository(session)
+
+        await accounts_repo.upsert(_make_account("acc_compare", "compare@example.com"))
+        await usage_repo.add_entry(
+            "acc_compare",
+            20.0,
+            window="primary",
+            recorded_at=fixed_now - timedelta(minutes=5),
+        )
+        await usage_repo.add_entry(
+            "acc_compare",
+            40.0,
+            window="secondary",
+            recorded_at=fixed_now - timedelta(minutes=2),
+        )
+        await logs_repo.add_log(
+            account_id="acc_compare",
+            request_id="req_compare_coverage",
+            model="gpt-5.1",
+            input_tokens=1,
+            output_tokens=0,
+            latency_ms=50,
+            status="success",
+            error_code=None,
+            requested_at=fixed_now - timedelta(days=2, minutes=1),
+        )
+        await logs_repo.add_log(
+            account_id="acc_compare",
+            request_id="req_compare_previous",
+            model="gpt-5.1",
+            input_tokens=200,
+            output_tokens=100,
+            latency_ms=50,
+            status="success",
+            error_code=None,
+            requested_at=fixed_now - timedelta(days=1, hours=1),
+        )
+        await logs_repo.add_log(
+            account_id="acc_compare",
+            request_id="req_compare_current",
+            model="gpt-5.1",
+            input_tokens=100,
+            output_tokens=50,
+            latency_ms=50,
+            status="success",
+            error_code=None,
+            requested_at=fixed_now - timedelta(hours=2),
+        )
+
+    response = await async_client.get("/api/dashboard/overview?timeframe=1d")
+    assert response.status_code == 200
+
+    payload = response.json()
+    assert payload["summary"]["metrics"]["requests"] == 1
+    assert payload["summary"]["metrics"]["tokens"] == 150
+    assert payload["summary"]["comparison"] == {
+        "canCompare": True,
+        "previous": {
+            "requests": 1,
+            "tokens": 300,
+            "costUsd": pytest.approx(0.00125),
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_dashboard_overview_hides_previous_window_summary_when_history_does_not_cover_full_cycle(
+    async_client,
+    db_setup,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    fixed_now = datetime(2026, 4, 3, 10, 37, 0)
+    monkeypatch.setattr("app.modules.dashboard.service.utcnow", lambda: fixed_now)
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+        logs_repo = RequestLogsRepository(session)
+
+        await accounts_repo.upsert(_make_account("acc_partial_compare", "partial-compare@example.com"))
+        await usage_repo.add_entry(
+            "acc_partial_compare",
+            20.0,
+            window="primary",
+            recorded_at=fixed_now - timedelta(minutes=5),
+        )
+        await usage_repo.add_entry(
+            "acc_partial_compare",
+            40.0,
+            window="secondary",
+            recorded_at=fixed_now - timedelta(minutes=2),
+        )
+        await logs_repo.add_log(
+            account_id="acc_partial_compare",
+            request_id="req_partial_previous",
+            model="gpt-5.1",
+            input_tokens=200,
+            output_tokens=100,
+            latency_ms=50,
+            status="success",
+            error_code=None,
+            requested_at=fixed_now - timedelta(days=1, hours=1),
+        )
+        await logs_repo.add_log(
+            account_id="acc_partial_compare",
+            request_id="req_partial_current",
+            model="gpt-5.1",
+            input_tokens=100,
+            output_tokens=50,
+            latency_ms=50,
+            status="success",
+            error_code=None,
+            requested_at=fixed_now - timedelta(hours=2),
+        )
+
+    response = await async_client.get("/api/dashboard/overview?timeframe=1d")
+    assert response.status_code == 200
+
+    payload = response.json()
+    assert payload["summary"]["comparison"]["canCompare"] is False
+
+
+@pytest.mark.asyncio
+async def test_dashboard_overview_exposes_zero_previous_window_totals_when_full_cycle_has_no_usage(
+    async_client,
+    db_setup,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    fixed_now = datetime(2026, 4, 3, 10, 37, 0)
+    monkeypatch.setattr("app.modules.dashboard.service.utcnow", lambda: fixed_now)
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+        logs_repo = RequestLogsRepository(session)
+
+        await accounts_repo.upsert(_make_account("acc_zero_compare", "zero-compare@example.com"))
+        await usage_repo.add_entry(
+            "acc_zero_compare",
+            20.0,
+            window="primary",
+            recorded_at=fixed_now - timedelta(minutes=5),
+        )
+        await usage_repo.add_entry(
+            "acc_zero_compare",
+            40.0,
+            window="secondary",
+            recorded_at=fixed_now - timedelta(minutes=2),
+        )
+        await logs_repo.add_log(
+            account_id="acc_zero_compare",
+            request_id="req_zero_coverage",
+            model="gpt-5.1",
+            input_tokens=1,
+            output_tokens=0,
+            latency_ms=50,
+            status="success",
+            error_code=None,
+            requested_at=fixed_now - timedelta(days=2, minutes=1),
+        )
+        await logs_repo.add_log(
+            account_id="acc_zero_compare",
+            request_id="req_zero_current",
+            model="gpt-5.1",
+            input_tokens=100,
+            output_tokens=50,
+            latency_ms=50,
+            status="success",
+            error_code=None,
+            requested_at=fixed_now - timedelta(hours=2),
+        )
+
+    response = await async_client.get("/api/dashboard/overview?timeframe=1d")
+    assert response.status_code == 200
+
+    payload = response.json()
+    assert payload["summary"]["comparison"] == {
+        "canCompare": True,
+        "previous": {
+            "requests": 0,
+            "tokens": 0,
+            "costUsd": 0.0,
+        },
+    }

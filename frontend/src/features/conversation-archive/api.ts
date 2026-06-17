@@ -1,9 +1,6 @@
 import { get } from "@/lib/api-client";
 
-import {
-  ConversationArchiveFileSchema,
-  ConversationArchiveRecordsResponseSchema,
-} from "@/features/conversation-archive/schemas";
+import { ConversationArchiveRecordsResponseSchema } from "@/features/conversation-archive/schemas";
 
 const CONVERSATION_ARCHIVE_PATH = "/api/conversation-archive";
 
@@ -17,10 +14,6 @@ export type ConversationArchiveRecordParams = {
   requestId?: string;
   requestedAt?: string;
 };
-
-export function listConversationArchiveFiles() {
-  return get(`${CONVERSATION_ARCHIVE_PATH}/files`, ConversationArchiveFileSchema.array());
-}
 
 export function listConversationArchiveRecords(params: ConversationArchiveRecordParams) {
   const query = new URLSearchParams();

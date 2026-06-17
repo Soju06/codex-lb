@@ -109,6 +109,30 @@ describe("AuthGate", () => {
     await waitFor(() => expect(refreshSession).toHaveBeenCalledTimes(1));
   });
 
+  it("shows reverse proxy notice instead of guest login in trusted header mode", async () => {
+    const refreshSession = vi.fn().mockResolvedValue(undefined);
+    setAuthState({
+      refreshSession,
+      passwordRequired: false,
+      authenticated: false,
+      totpRequiredOnLogin: false,
+      authMode: "trusted_header",
+      guestAccessEnabled: true,
+      guestPasswordRequired: true,
+    });
+
+    render(
+      <AuthGate>
+        <div>Protected content</div>
+      </AuthGate>,
+    );
+
+    expect(screen.getByText("Reverse proxy authentication required")).toBeInTheDocument();
+    expect(screen.queryByText("Sign in")).not.toBeInTheDocument();
+    expect(screen.queryByText("Protected content")).not.toBeInTheDocument();
+    await waitFor(() => expect(refreshSession).toHaveBeenCalledTimes(1));
+  });
+
   it("shows bootstrap setup screen for remote first-run access", async () => {
     const refreshSession = vi.fn().mockResolvedValue(undefined);
     setAuthState({

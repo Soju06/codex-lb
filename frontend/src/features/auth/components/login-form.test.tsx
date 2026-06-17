@@ -10,6 +10,9 @@ describe("LoginForm", () => {
     useAuthStore.setState({
       loading: false,
       error: null,
+      passwordRequired: true,
+      guestAccessEnabled: false,
+      guestPasswordRequired: false,
     });
   });
 

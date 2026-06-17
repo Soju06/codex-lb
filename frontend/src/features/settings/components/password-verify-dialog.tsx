@@ -1,5 +1,5 @@
 import { zodResolver } from "@hookform/resolvers/zod";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 import { useForm } from "react-hook-form";
 import { toast } from "sonner";
 
@@ -62,13 +62,6 @@ export function PasswordVerifyDialog({ open, onOpenChange, disabled = false }: P
     },
     [onOpenChange, resetAll],
   );
-
-  useEffect(() => {
-    if (!open) {
-      passwordForm.reset();
-      totpForm.reset();
-    }
-  }, [open, passwordForm, totpForm]);
 
   const handlePassword = async (values: { password: string }) => {
     setError(null);

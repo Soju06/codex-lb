@@ -2,5 +2,7 @@
 builder = "DOCKERFILE"
 
 [deploy]
-healthcheckPath = "/health/ready"
+healthcheckPath = "/health/live"
 healthcheckTimeout = 300
+ipv6EgressEnabled = false
+overlapSeconds = 0

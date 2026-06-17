@@ -22,6 +22,10 @@ function makeDefaultRule(): LimitRuleCreate {
 }
 
 export function LimitRulesEditor({ rules, onChange }: LimitRulesEditorProps) {
+  const [ruleKeys, setRuleKeys] = useState(() =>
+    rules.map((_, index) => `limit-rule-${index}`),
+  );
+  const [nextRuleKey, setNextRuleKey] = useState(() => rules.length);
   const [advanced, setAdvanced] = useState(() => {
     if (rules.length === 0) return false;
     // If any non-standard rule exists, start in advanced mode
@@ -77,6 +81,8 @@ export function LimitRulesEditor({ rules, onChange }: LimitRulesEditorProps) {
   };
 
   const addRule = () => {
+    setRuleKeys([...ruleKeys, `limit-rule-${nextRuleKey}`]);
+    setNextRuleKey(nextRuleKey + 1);
     onChange([...rules, makeDefaultRule()]);
   };
 
@@ -87,6 +93,7 @@ export function LimitRulesEditor({ rules, onChange }: LimitRulesEditorProps) {
   };
 
   const removeRule = (index: number) => {
+    setRuleKeys(ruleKeys.filter((_, i) => i !== index));
     onChange(rules.filter((_, i) => i !== index));
   };
 
@@ -106,8 +113,9 @@ export function LimitRulesEditor({ rules, onChange }: LimitRulesEditorProps) {
       {!advanced ? (
         <div className="space-y-2">
           <div>
-            <label className="text-xs text-muted-foreground">Weekly token limit</label>
+            <label htmlFor="weekly-token-limit" className="text-xs text-muted-foreground">Weekly token limit</label>
             <Input
+              id="weekly-token-limit"
               type="number"
               min={1}
               value={weeklyTokenRule ? String(weeklyTokenRule.maxValue) : ""}
@@ -116,8 +124,9 @@ export function LimitRulesEditor({ rules, onChange }: LimitRulesEditorProps) {
             />
           </div>
           <div>
-            <label className="text-xs text-muted-foreground">Weekly cost limit ($)</label>
+            <label htmlFor="weekly-cost-limit" className="text-xs text-muted-foreground">Weekly cost limit ($)</label>
             <Input
+              id="weekly-cost-limit"
               type="number"
               min={0.01}
               step={0.01}
@@ -135,7 +144,7 @@ export function LimitRulesEditor({ rules, onChange }: LimitRulesEditorProps) {
         <div className="space-y-2">
           {rules.map((rule, index) => (
             <LimitRuleCard
-              key={index}
+              key={ruleKeys[index] ?? `limit-rule-${index}`}
               rule={rule}
               onChange={(updated) => updateRule(index, updated)}
               onRemove={() => removeRule(index)}

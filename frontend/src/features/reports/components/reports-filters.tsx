@@ -3,7 +3,7 @@ import {
   MultiSelectFilter,
   type MultiSelectOption,
 } from "@/features/dashboard/components/filters/multi-select-filter";
-import { daysAgoLocalISO, localDateISO } from "../date";
+import { localDateISO } from "../date";
 
 export type ReportsFiltersState = {
   startDate: string;
@@ -14,8 +14,10 @@ export type ReportsFiltersState = {
 
 export type ReportsFiltersProps = {
   filters: ReportsFiltersState;
+  selectedPresetDays: number | null;
   accountOptions: MultiSelectOption[];
   modelOptions: MultiSelectOption[];
+  onPresetSelect: (days: number) => void;
   onFiltersChange: (filters: ReportsFiltersState) => void;
 };
 
@@ -27,28 +29,31 @@ const PRESETS = [
 
 export function ReportsFilters({
   filters,
+  selectedPresetDays,
   accountOptions,
   modelOptions,
+  onPresetSelect,
   onFiltersChange,
 }: ReportsFiltersProps) {
+  const maxDate = localDateISO();
+
   return (
     <div className="flex flex-wrap items-center gap-2 rounded-xl border bg-card p-3">
-      {PRESETS.map((preset) => (
-        <Button
-          key={preset.days}
-          variant="outline"
-          size="sm"
-          onClick={() =>
-            onFiltersChange({
-              ...filters,
-              startDate: daysAgoLocalISO(preset.days - 1),
-              endDate: localDateISO(),
-            })
-          }
-        >
-          {preset.label}
-        </Button>
-      ))}
+      {PRESETS.map((preset) => {
+        const isSelected = selectedPresetDays === preset.days;
+
+        return (
+          <Button
+            key={preset.days}
+            variant={isSelected ? "default" : "outline"}
+            size="sm"
+            aria-pressed={isSelected}
+            onClick={() => onPresetSelect(preset.days)}
+          >
+            {preset.label}
+          </Button>
+        );
+      })}
 
       <MultiSelectFilter
         label="Accounts"
@@ -68,6 +73,8 @@ export function ReportsFilters({
       <div className="ml-auto flex items-center gap-2">
         <input
           type="date"
+          aria-label="Start date"
+          max={maxDate}
           value={filters.startDate}
           onChange={(e) => onFiltersChange({ ...filters, startDate: e.target.value })}
           className="h-8 rounded-md border bg-transparent px-2 text-xs text-foreground"
@@ -75,6 +82,8 @@ export function ReportsFilters({
         <span className="text-xs text-muted-foreground">—</span>
         <input
           type="date"
+          aria-label="End date"
+          max={maxDate}
           value={filters.endDate}
           onChange={(e) => onFiltersChange({ ...filters, endDate: e.target.value })}
           className="h-8 rounded-md border bg-transparent px-2 text-xs text-foreground"

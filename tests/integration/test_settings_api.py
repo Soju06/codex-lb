@@ -218,6 +218,12 @@ async def test_settings_api_returns_known_additional_quota_policies(async_client
     assert updated["additionalQuotaRoutingPolicies"] == {"codex_spark": "preserve"}
     assert updated["additionalQuotaPolicies"][0]["routingPolicy"] == "preserve"
 
+    response = await async_client.get("/api/settings")
+    assert response.status_code == 200
+    persisted = response.json()
+    assert persisted["additionalQuotaRoutingPolicies"] == {"codex_spark": "preserve"}
+    assert persisted["additionalQuotaPolicies"][0]["routingPolicy"] == "preserve"
+
 
 @pytest.mark.asyncio
 async def test_settings_legacy_sticky_threshold_updates_primary_threshold(async_client):

@@ -573,7 +573,7 @@ class OauthService:
         workspace_id = clean_account_identity_part(auth_claims.workspace_id or claims.workspace_id)
         workspace_label = clean_account_identity_part(auth_claims.workspace_label or claims.workspace_label)
         seat_type = normalize_seat_type(auth_claims.seat_type or claims.seat_type)
-        account_id = generate_unique_account_id(raw_account_id, email, workspace_id)
+        account_id = generate_unique_account_id(raw_account_id, email, workspace_id, workspace_label)
         plan_type = coerce_account_plan_type(
             auth_claims.chatgpt_plan_type or claims.chatgpt_plan_type,
             DEFAULT_PLAN,
@@ -596,19 +596,17 @@ class OauthService:
         )
         if self._repo_factory:
             async with self._repo_factory() as repo:
-                if raw_account_id and workspace_id is None:
-                    await repo.upsert(account, merge_by_email=False, merge_by_chatgpt_identity=True)
-                else:
-                    await repo.upsert_account_slot(account, preserve_unknown_workspace_duplicates=False)
-        else:
-            if raw_account_id and workspace_id is None:
-                await self._accounts_repo.upsert(
+                await repo.upsert_account_slot(
                     account,
-                    merge_by_email=False,
-                    merge_by_chatgpt_identity=True,
+                    preserve_unknown_workspace_duplicates=False,
+                    preserve_identity_slots=True,
                 )
-            else:
-                await self._accounts_repo.upsert_account_slot(account, preserve_unknown_workspace_duplicates=False)
+        else:
+            await self._accounts_repo.upsert_account_slot(
+                account,
+                preserve_unknown_workspace_duplicates=False,
+                preserve_identity_slots=True,
+            )
 
         await self._invalidate_account_routing_caches()
 

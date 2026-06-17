@@ -50,6 +50,11 @@ class DashboardAuthError(AppError):
     code = "authentication_required"
 
 
+class DashboardPermissionError(AppError):
+    status_code = 403
+    code = "permission_denied"
+
+
 class DashboardNotFoundError(AppError):
     status_code = 404
     code = "not_found"

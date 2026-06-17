@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const RoutingStrategySchema = z.enum([
+const RoutingStrategySchema = z.enum([
   "usage_weighted",
   "round_robin",
   "capacity_weighted",
@@ -10,24 +10,24 @@ export const RoutingStrategySchema = z.enum([
   "relative_availability",
   "fill_first",
 ]);
-export const UpstreamStreamTransportSchema = z.enum([
+const UpstreamStreamTransportSchema = z.enum([
   "default",
   "auto",
   "http",
   "websocket",
 ]);
-export const LimitWarmupWindowsSchema = z.enum([
+const LimitWarmupWindowsSchema = z.enum([
   "primary",
   "secondary",
   "both",
 ]);
-export const AdditionalQuotaRoutingPolicySchema = z.enum([
+const AdditionalQuotaRoutingPolicySchema = z.enum([
   "inherit",
   "normal",
   "burn_first",
   "preserve",
 ]);
-export const AdditionalQuotaPolicySchema = z.object({
+const AdditionalQuotaPolicySchema = z.object({
   quotaKey: z.string(),
   displayLabel: z.string(),
   routingPolicy: AdditionalQuotaRoutingPolicySchema,
@@ -93,6 +93,8 @@ export const DashboardSettingsSchema = z
       .optional()
       .default(100),
     weeklyPaceWorkingDays: WeeklyPaceWorkingDaysSchema,
+    guestAccessEnabled: z.boolean().optional().default(false),
+    guestPasswordConfigured: z.boolean().optional().default(false),
   })
   .transform((settings) => {
     const legacyProvided = settings.stickyReallocationBudgetThresholdPct !== undefined;
@@ -147,6 +149,7 @@ export const SettingsUpdateRequestSchema = z.object({
   limitWarmupCooldownSeconds: z.number().int().min(60).optional(),
   limitWarmupMinAvailablePercent: z.number().positive().max(100).optional(),
   weeklyPaceWorkingDays: WeeklyPaceWorkingDaysValueSchema.optional(),
+  guestAccessEnabled: z.boolean().optional(),
 });
 
 type ParsedDashboardSettings = z.infer<typeof DashboardSettingsSchema>;

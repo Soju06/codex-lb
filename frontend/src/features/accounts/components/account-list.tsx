@@ -1,4 +1,4 @@
-import { ChevronDown, ChevronUp, Plus, Search, Upload } from "lucide-react";
+import { ChevronDown, ChevronUp, Plus, Search } from "lucide-react";
 import { useMemo, useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -11,6 +11,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { AccountListItem } from "@/features/accounts/components/account-list-item";
+import { AddAccountDialog } from "@/features/accounts/components/add-account-dialog";
 import { WindowsOauthHelp } from "@/features/accounts/components/windows-oauth-help";
 import type { AccountSummary } from "@/features/accounts/schemas";
 import {
@@ -32,6 +33,7 @@ export type AccountListProps = {
   onOpenOauth: () => void;
   sortMode?: AccountSortMode;
   onSortModeChange?: (sortMode: AccountSortMode) => void;
+  readOnly?: boolean;
 };
 
 export function AccountList({
@@ -42,10 +44,12 @@ export function AccountList({
   onOpenOauth,
   sortMode,
   onSortModeChange,
+  readOnly = false,
 }: AccountListProps) {
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [helpOpen, setHelpOpen] = useState(false);
+  const [chooserOpen, setChooserOpen] = useState(false);
   const quotaDisplay = useAccountQuotaDisplayStore((s) => s.quotaDisplay);
   const activeSortMode = sortMode ?? DEFAULT_ACCOUNT_SORT_MODE;
 
@@ -117,18 +121,7 @@ export function AccountList({
         </Select>
       </div>
 
-      <div className="flex gap-2">
-        <Button type="button" size="sm" variant="outline" onClick={onOpenImport} className="h-8 flex-1 gap-1.5 text-xs">
-          <Upload className="h-3.5 w-3.5" />
-          Import
-        </Button>
-        <Button type="button" size="sm" onClick={onOpenOauth} className="h-8 flex-1 gap-1.5 text-xs">
-          <Plus className="h-3.5 w-3.5" />
-          Add Account
-        </Button>
-      </div>
-
-      <div>
+      <div className="flex items-center justify-between gap-3">
         <Button
           type="button"
           variant="link"
@@ -139,11 +132,21 @@ export function AccountList({
           Need help?
           {helpOpen ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
         </Button>
+        <Button
+          type="button"
+          size="sm"
+          className="gap-1.5"
+          disabled={readOnly}
+          onClick={() => setChooserOpen(true)}
+        >
+          <Plus className="h-3.5 w-3.5" />
+          Add account
+        </Button>
       </div>
 
       {helpOpen ? <WindowsOauthHelp /> : null}
 
-      <div className="max-h-[calc(100vh-16rem)] space-y-1 overflow-y-auto p-1">
+      <div className="max-h-[calc(100vh-16rem)] space-y-1 overflow-y-auto p-1" data-testid="account-list-scroll-region">
         {filtered.length === 0 ? (
           <div className="flex flex-col items-center gap-2 rounded-lg border border-dashed p-6 text-center">
             <p className="text-sm font-medium text-muted-foreground">No matching accounts</p>
@@ -161,6 +164,13 @@ export function AccountList({
           ))
         )}
       </div>
+
+      <AddAccountDialog
+        open={chooserOpen}
+        onOpenChange={setChooserOpen}
+        onImport={onOpenImport}
+        onAddAccount={onOpenOauth}
+      />
     </div>
   );
 }

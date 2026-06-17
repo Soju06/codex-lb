@@ -63,6 +63,14 @@ When a pull request from the canonical repository's `release/beta-*` branch is m
 - **THEN** it fails before deciding whether the change is stable or beta
 - **AND** it reports the mismatched release-managed file versions
 
+#### Scenario: dependency-only lockfile edits accept PEP 440 beta package version
+
+- **GIVEN** release-managed files contain `1.20.0-beta.3`
+- **AND** `uv.lock` records the editable `codex-lb` package as the equivalent PEP 440 version `1.20.0b3`
+- **WHEN** a dependency-only pull request changes `uv.lock`
+- **THEN** the CI beta release guard treats those release versions as equivalent
+- **AND** it does not block the dependency pull request as inconsistent release metadata
+
 #### Scenario: non-canonical beta metadata PR is blocked
 
 - **GIVEN** a pull request changes release-managed files to `1.20.0-beta.3`

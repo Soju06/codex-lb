@@ -1,5 +1,5 @@
 import { Check, CircleAlert, Copy, ExternalLink, Loader2, RefreshCw } from "lucide-react";
-import { useCallback, useEffect, useRef, useState, type MouseEvent } from "react";
+import { useCallback, useState, type MouseEvent } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -115,6 +115,7 @@ function ManualCallbackInputBody({
       <div className="flex items-center gap-2">
         <input
           type="text"
+          aria-label="OAuth callback URL"
           value={callbackUrl}
           onChange={(e) => setCallbackUrl(e.target.value)}
           disabled={disabled}
@@ -150,24 +151,12 @@ export function OauthDialog({
   state,
   onOpenChange,
   onStart,
-  onComplete,
   onManualCallback,
   onReset,
 }: OauthDialogProps) {
   const [selectedMethod, setSelectedMethod] = useState<"browser" | "device">("browser");
   const stage = getStage(state);
-  const completedRef = useRef(false);
   const browserRefreshInProgress = stage === "browser" && state.status === "starting";
-
-  useEffect(() => {
-    if (stage === "success" && !completedRef.current) {
-      completedRef.current = true;
-      void onComplete();
-    }
-    if (stage === "intro") {
-      completedRef.current = false;
-    }
-  }, [stage, onComplete]);
 
   const close = (next: boolean) => {
     onOpenChange(next);

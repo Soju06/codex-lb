@@ -6,6 +6,7 @@ from app.core import usage as usage_core
 from app.core.usage.types import UsageWindowRow
 from app.db.models import Account
 from app.modules.dashboard.schemas import (
+    DashboardMetricsComparison,
     DashboardOverviewSummary,
     DashboardOverviewTimeframe,
     DashboardOverviewTimeframeKey,
@@ -73,6 +74,7 @@ def build_dashboard_overview_summary(
     secondary_rows: list[UsageWindowRow],
     activity_cost: ActivityCostSummary,
     activity_metrics: ActivityMetricsSummary,
+    comparison: DashboardMetricsComparison | None = None,
 ) -> DashboardOverviewSummary:
     account_map = {account.id: account for account in accounts}
     primary_summary = usage_core.summarize_usage_window(primary_rows, account_map, "primary")
@@ -98,4 +100,5 @@ def build_dashboard_overview_summary(
                 "top_error": activity_metrics.top_error,
             }
         ),
+        comparison=comparison,
     )

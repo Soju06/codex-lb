@@ -6,8 +6,9 @@ import {
   CartesianGrid,
   Tooltip,
   ResponsiveContainer,
-} from "recharts";
+} from "@/components/lazy-recharts";
 import type { DailyReportRow } from "../schemas";
+import { ChartTooltip } from "./chart-tooltip";
 
 export type CostPerDayChartProps = {
   data: DailyReportRow[];
@@ -21,10 +22,10 @@ export function CostPerDayChart({ data }: CostPerDayChartProps) {
 
   return (
     <div className="rounded-xl border bg-card p-5">
-      <div className="text-sm font-semibold text-foreground">Custo por Dia</div>
+      <div className="text-sm font-semibold text-foreground">Cost by Day</div>
       <div className="mt-4 h-[200px]">
         <ResponsiveContainer width="100%" height="100%">
-          <AreaChart data={chartData} margin={{ top: 5, right: 10, left: 0, bottom: 0 }}>
+          <AreaChart data={chartData} margin={{ top: 5, right: 10, left: 10, bottom: 0 }}>
             <defs>
               <linearGradient id="costGrad" x1="0" y1="0" x2="0" y2="1">
                 <stop offset="0%" stopColor="#3b82f6" stopOpacity={0.3} />
@@ -34,26 +35,18 @@ export function CostPerDayChart({ data }: CostPerDayChartProps) {
             <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" vertical={false} />
             <XAxis
               dataKey="date"
-              tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }}
+              tick={{ fontSize: 10, fill: "var(--muted-foreground)" }}
               axisLine={false}
               tickLine={false}
             />
             <YAxis
-              tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }}
+              tick={{ fontSize: 10, fill: "var(--muted-foreground)" }}
               axisLine={false}
               tickLine={false}
               tickFormatter={(v: number) => `$${v}`}
             />
             <Tooltip
-              contentStyle={{
-                borderRadius: "8px",
-                border: "1px solid hsl(var(--border))",
-                background: "hsl(var(--popover))",
-              }}
-              formatter={(value) => {
-                if (typeof value !== "number") return [String(value), "Custo"];
-                return [`$${value.toFixed(2)}`, "Custo"];
-              }}
+              content={<ChartTooltip names={{ cost: "Cost" }} formatValue={(v) => `$${v.toFixed(2)}`} />}
             />
             <Area
               type="monotone"

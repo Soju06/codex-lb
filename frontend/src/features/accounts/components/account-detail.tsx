@@ -1,8 +1,11 @@
-import { User } from "lucide-react";
+import { Check, Pencil, User, X } from "lucide-react";
+import { useState } from "react";
 
 import { isEmailLabel } from "@/components/blur-email";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { cn } from "@/lib/utils";
 import { usePrivacyStore } from "@/hooks/use-privacy";
-import { AccountAliasForm } from "@/features/accounts/components/account-alias-form";
 import { AccountActions } from "@/features/accounts/components/account-actions";
 import { AccountProxyBinding } from "@/features/accounts/components/account-proxy-binding";
 import { AccountTokenInfo } from "@/features/accounts/components/account-token-info";
@@ -20,6 +23,7 @@ export type AccountDetailProps = {
   account: AccountSummary | null;
   showAccountId?: boolean;
   busy: boolean;
+  readOnly?: boolean;
   onPause: (accountId: string) => void;
   onResume: (accountId: string) => void;
   onProbe: (accountId: string) => void;
@@ -41,6 +45,7 @@ export function AccountDetail({
   account,
   showAccountId = false,
   busy,
+  readOnly = false,
   onPause,
   onResume,
   onProbe,
@@ -73,15 +78,16 @@ export function AccountDetail({
     );
   }
 
-  const title = account.displayName || account.email;
-  const titleIsEmail = isEmailLabel(title, account.email);
+  const aliasLabel = account.alias?.trim() ?? "";
+  const localLabel = aliasLabel || account.displayName || account.email;
+  const labelIsEmail = !aliasLabel && isEmailLabel(localLabel, account.email);
   const compactId = formatCompactAccountId(account.accountId);
   const emailSubtitle =
-    account.displayName && account.displayName !== account.email
+    aliasLabel || (account.displayName && account.displayName !== account.email)
       ? account.email
       : null;
   const idSuffix = showAccountId ? ` (${compactId})` : "";
-  const workspaceLabel = account.workspaceLabel || account.workspaceId || "Personal / unknown workspace";
+  const workspaceLabel = account.chatgptAccountId || account.workspaceLabel || account.workspaceId || "Personal / unknown workspace";
   const seatLabel = account.seatType ? ` | ${formatSlug(account.seatType)}` : "";
 
   return (
@@ -91,19 +97,18 @@ export function AccountDetail({
     >
       {/* Account header */}
       <div>
-        <h2 className="text-base font-semibold">
-          {titleIsEmail ? (
-            <>
-              <span className={blurred ? "privacy-blur" : ""}>{title}</span>
-              {idSuffix}
-            </>
-          ) : (
-            <>
-              {title}
-              {!emailSubtitle ? idSuffix : ""}
-            </>
-          )}
-        </h2>
+        <AccountNameField
+          key={account.accountId}
+          accountId={account.accountId}
+          alias={account.alias ?? null}
+          localLabel={localLabel}
+          labelIsEmail={labelIsEmail}
+          idSuffix={emailSubtitle ? "" : idSuffix}
+          blurred={blurred}
+          busy={busy}
+          readOnly={readOnly}
+          onSetAlias={onSetAlias}
+        />
         {emailSubtitle ? (
           <p
             className="mt-0.5 text-xs text-muted-foreground"
@@ -122,12 +127,12 @@ export function AccountDetail({
         </p>
       </div>
 
-      <AccountAliasForm account={account} busy={busy} onSetAlias={onSetAlias} />
       {onProxyBindingSave ? (
         <AccountProxyBinding
           account={account}
           admin={upstreamProxyAdmin}
           busy={busy}
+          readOnly={readOnly}
           onSave={onProxyBindingSave}
         />
       ) : null}
@@ -136,6 +141,7 @@ export function AccountDetail({
       <AccountActions
         account={account}
         busy={busy}
+        readOnly={readOnly}
         onPause={onPause}
         onResume={onResume}
         onProbe={onProbe}
@@ -146,6 +152,127 @@ export function AccountDetail({
         onRoutingPolicyChange={onRoutingPolicyChange}
         onSecurityWorkAuthorizedChange={onSecurityWorkAuthorizedChange}
       />
+    </div>
+  );
+}
+
+type AccountNameFieldProps = {
+  accountId: string;
+  alias: string | null;
+  localLabel: string;
+  labelIsEmail: boolean;
+  idSuffix: string;
+  blurred: boolean;
+  busy: boolean;
+  readOnly: boolean;
+  onSetAlias: (accountId: string, alias: string | null) => Promise<unknown>;
+};
+
+function AccountNameField({
+  accountId,
+  alias,
+  localLabel,
+  labelIsEmail,
+  idSuffix,
+  blurred,
+  busy,
+  readOnly,
+  onSetAlias,
+}: AccountNameFieldProps) {
+  const [isEditing, setIsEditing] = useState(false);
+  const [aliasDraft, setAliasDraft] = useState(alias ?? "");
+
+  const handleSave = async () => {
+    const trimmed = aliasDraft.trim();
+    await onSetAlias(accountId, trimmed === "" ? null : trimmed);
+    setIsEditing(false);
+  };
+
+  const handleCancel = () => {
+    setAliasDraft(alias ?? "");
+    setIsEditing(false);
+  };
+
+  if (isEditing) {
+    return (
+      <div className="space-y-1.5">
+        <div className="flex items-center gap-1.5">
+          <Input
+            id="account-alias"
+            aria-label="Account alias"
+            className="h-8 text-sm"
+            maxLength={255}
+            placeholder="Personal Plus"
+            value={aliasDraft}
+            autoFocus
+            disabled={busy || readOnly}
+            onChange={(event) => setAliasDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                void handleSave();
+              } else if (event.key === "Escape") {
+                event.preventDefault();
+                handleCancel();
+              }
+            }}
+          />
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            aria-label="Save alias"
+            disabled={busy || readOnly}
+            onClick={() => void handleSave()}
+          >
+            <Check className="size-4" />
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            aria-label="Cancel"
+            onClick={handleCancel}
+          >
+            <X className="size-4" />
+          </Button>
+        </div>
+        <p className="text-xs text-muted-foreground">
+          Use a local label to distinguish accounts that share the same email.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex items-center gap-1.5">
+      <h2 className="min-w-0 truncate text-base font-semibold">
+        {labelIsEmail ? (
+          <>
+            <span className={cn(blurred && "privacy-blur")}>{localLabel}</span>
+            {idSuffix}
+          </>
+        ) : (
+          <>
+            {localLabel}
+            {idSuffix}
+          </>
+        )}
+      </h2>
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon-xs"
+        aria-label="Edit alias"
+        title="Use a local label to distinguish accounts that share the same email."
+        disabled={busy || readOnly}
+        onClick={() => {
+          setAliasDraft(alias ?? "");
+          setIsEditing(true);
+        }}
+      >
+        <Pencil className="size-3.5" />
+      </Button>
     </div>
   );
 }

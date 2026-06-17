@@ -68,8 +68,21 @@ class DashboardRepository:
     async def aggregate_activity_since(self, since: datetime) -> RequestActivityAggregate:
         return await self._logs_repo.aggregate_activity_since(since)
 
+    async def aggregate_activity_between(
+        self,
+        since: datetime,
+        until: datetime,
+    ) -> RequestActivityAggregate:
+        return await self._logs_repo.aggregate_activity_between(since, until)
+
     async def top_error_since(self, since: datetime) -> str | None:
         return await self._logs_repo.top_error_since(since)
+
+    async def top_error_between(self, since: datetime, until: datetime) -> str | None:
+        return await self._logs_repo.top_error_between(since, until)
+
+    async def earliest_activity_at(self) -> datetime | None:
+        return await self._logs_repo.earliest_activity_at()
 
     async def list_additional_quota_keys(
         self,

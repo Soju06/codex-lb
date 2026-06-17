@@ -8,7 +8,7 @@ import {
   Tooltip,
   XAxis,
   YAxis,
-} from "recharts";
+} from "@/components/lazy-recharts";
 
 import { useChartColors } from "@/hooks/use-chart-colors";
 import { useReducedMotion } from "@/hooks/use-reduced-motion";
@@ -99,10 +99,12 @@ export type AccountTrendChartProps = {
   secondaryScheduled?: UsageTrendPoint[];
 };
 
+const EMPTY_TREND_POINTS: UsageTrendPoint[] = [];
+
 export function AccountTrendChart({
   primary,
   secondary,
-  secondaryScheduled = [],
+  secondaryScheduled = EMPTY_TREND_POINTS,
 }: AccountTrendChartProps) {
   const chartColors = useChartColors();
   const reducedMotion = useReducedMotion();

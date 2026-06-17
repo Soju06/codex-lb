@@ -25,7 +25,11 @@ function modeLabel(mode: "allow_all" | "allowlist_active"): string {
   return mode === "allow_all" ? "Allow all" : "Allowlist active";
 }
 
-export function FirewallSection() {
+export type FirewallSectionProps = {
+  disabled?: boolean;
+};
+
+export function FirewallSection({ disabled = false }: FirewallSectionProps) {
   const [ipAddress, setIpAddress] = useState("");
   const { firewallQuery, createMutation, deleteMutation } = useFirewall();
   const deleteDialog = useDialogState<string>();
@@ -40,7 +44,7 @@ export function FirewallSection() {
 
   const entries = firewallQuery.data?.entries ?? [];
   const mode = firewallQuery.data?.mode ?? "allow_all";
-  const busy = createMutation.isPending || deleteMutation.isPending;
+  const busy = disabled || createMutation.isPending || deleteMutation.isPending;
 
   const handleAdd = async () => {
     const normalized = ipAddress.trim();

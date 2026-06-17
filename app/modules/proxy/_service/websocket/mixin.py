@@ -291,6 +291,7 @@ from app.modules.proxy._service.support import (
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
     _REQUEST_TRANSPORT_WEBSOCKET,
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
+    _account_capacity_wait_payload,
     _clear_websocket_request_error_overrides,
     _DownstreamWebSocketActivity,
     _event_type_from_payload,
@@ -298,6 +299,7 @@ from app.modules.proxy._service.support import (
     _record_response_event,
     _record_websocket_route_metadata,
     _request_log_useragent_fields,
+    _sleep_for_account_selection_recovery,
     _stream_settlement_error_payload,
     _StreamSettlement,
     _wait_for_websocket_continuity_gap,
@@ -1365,6 +1367,7 @@ class _WebSocketMixin:
         api_key: ApiKeyData | None,
         client_send_lock: anyio.Lock,
         websocket: WebSocket,
+        downstream_activity: _DownstreamWebSocketActivity | None = None,
         reallocate_sticky: bool = False,
         sticky_max_age_seconds: int | None = None,
     ) -> tuple[Account | None, UpstreamResponsesWebSocket | None]:
@@ -1398,6 +1401,7 @@ class _WebSocketMixin:
                     api_key=api_key,
                     client_send_lock=client_send_lock,
                     websocket=websocket,
+                    downstream_activity=downstream_activity,
                     reallocate_sticky=True if is_retry else reallocate_sticky,
                     sticky_max_age_seconds=sticky_max_age_seconds,
                     exclude_account_ids=excluded_account_ids,
@@ -1517,6 +1521,7 @@ class _WebSocketMixin:
         api_key: ApiKeyData | None,
         client_send_lock: anyio.Lock,
         websocket: WebSocket,
+        downstream_activity: _DownstreamWebSocketActivity | None = None,
         reallocate_sticky: bool,
         sticky_max_age_seconds: int | None,
         exclude_account_ids: set[str],
@@ -1527,40 +1532,71 @@ class _WebSocketMixin:
     ) -> Account | None:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
-        try:
-            selection = await proxy._select_account_with_budget_compatible(
-                deadline,
+        while True:
+            try:
+                selection = await proxy._select_account_with_budget_compatible(
+                    deadline,
+                    request_id=request_state.request_log_id or request_state.request_id,
+                    kind="websocket",
+                    api_key=api_key,
+                    sticky_key=sticky_key,
+                    sticky_kind=sticky_kind,
+                    reallocate_sticky=reallocate_sticky,
+                    sticky_max_age_seconds=sticky_max_age_seconds,
+                    prefer_earlier_reset_accounts=prefer_earlier_reset,
+                    prefer_earlier_reset_window=prefer_earlier_reset_window,
+                    routing_strategy=routing_strategy,
+                    model=model,
+                    exclude_account_ids=exclude_account_ids,
+                    preferred_account_id=preferred_account_id,
+                    require_security_work_authorized=require_security_work_authorized,
+                    lease_kind="stream",
+                    estimated_lease_tokens=_facade()._estimated_lease_tokens_from_request_usage_budget(
+                        request_state.request_usage_budget
+                    ),
+                    fallback_on_preferred_account_unavailable=not require_preferred_account,
+                )
+            except ProxyResponseError as exc:
+                if _facade()._is_proxy_budget_exhausted_error(exc):
+                    await proxy._emit_websocket_connect_timeout(
+                        websocket=websocket,
+                        client_send_lock=client_send_lock,
+                        account_id=None,
+                        api_key=api_key,
+                        request_state=request_state,
+                    )
+                    raise _WebSocketConnectFailureEmitted
+                raise
+
+            account = selection.account
+            if account is not None:
+                break
+
+            async def _heartbeat(remaining_seconds: float) -> None:
+                event = _account_capacity_wait_payload(
+                    request_state,
+                    request_id=request_state.request_log_id or request_state.request_id,
+                    reason=selection.error_message,
+                    retry_after_seconds=remaining_seconds,
+                )
+                await proxy._send_downstream_websocket_text(
+                    websocket,
+                    client_send_lock=client_send_lock,
+                    text=json.dumps(event, ensure_ascii=True, separators=(",", ":")),
+                    downstream_activity=downstream_activity,
+                )
+
+            if not await _sleep_for_account_selection_recovery(
+                selection,
                 request_id=request_state.request_log_id or request_state.request_id,
                 kind="websocket",
-                api_key=api_key,
-                sticky_key=sticky_key,
-                sticky_kind=sticky_kind,
-                reallocate_sticky=reallocate_sticky,
-                sticky_max_age_seconds=sticky_max_age_seconds,
-                prefer_earlier_reset_accounts=prefer_earlier_reset,
-                prefer_earlier_reset_window=prefer_earlier_reset_window,
-                routing_strategy=routing_strategy,
+                request_stage=request_state.request_stage,
                 model=model,
-                exclude_account_ids=exclude_account_ids,
-                preferred_account_id=preferred_account_id,
-                require_security_work_authorized=require_security_work_authorized,
-                lease_kind="stream",
-                estimated_lease_tokens=_facade()._estimated_lease_tokens_from_request_usage_budget(
-                    request_state.request_usage_budget
-                ),
-                fallback_on_preferred_account_unavailable=not require_preferred_account,
-            )
-        except ProxyResponseError as exc:
-            if _facade()._is_proxy_budget_exhausted_error(exc):
-                await proxy._emit_websocket_connect_timeout(
-                    websocket=websocket,
-                    client_send_lock=client_send_lock,
-                    account_id=None,
-                    api_key=api_key,
-                    request_state=request_state,
-                )
-                raise _WebSocketConnectFailureEmitted
-            raise
+                max_sleep_seconds=_facade()._remaining_budget_seconds(deadline),
+                request_state=request_state,
+                heartbeat=_heartbeat,
+            ):
+                break
 
         account = selection.account
         if (

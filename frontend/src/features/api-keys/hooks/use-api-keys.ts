@@ -16,20 +16,17 @@ import type {
 export function useApiKeys() {
   const queryClient = useQueryClient();
 
-  const apiKeysQuery = useQuery({
+  const { data, error, isFetching, isLoading, isPending, isSuccess, refetch } = useQuery({
     queryKey: ["api-keys", "list"],
     queryFn: listApiKeys,
   });
-
-  const invalidate = () => {
-    void queryClient.invalidateQueries({ queryKey: ["api-keys", "list"] });
-  };
+  const apiKeysQuery = { data, error, isFetching, isLoading, isPending, isSuccess, refetch };
 
   const createMutation = useMutation({
     mutationFn: (payload: ApiKeyCreateRequest) => createApiKey(payload),
     onSuccess: () => {
       toast.success("API key created");
-      invalidate();
+      void queryClient.invalidateQueries({ queryKey: ["api-keys", "list"] });
     },
     onError: (error: Error) => {
       toast.error(error.message || "Failed to create API key");
@@ -41,7 +38,7 @@ export function useApiKeys() {
       updateApiKey(keyId, payload),
     onSuccess: () => {
       toast.success("API key updated");
-      invalidate();
+      void queryClient.invalidateQueries({ queryKey: ["api-keys", "list"] });
     },
     onError: (error: Error) => {
       toast.error(error.message || "Failed to update API key");
@@ -52,7 +49,7 @@ export function useApiKeys() {
     mutationFn: (keyId: string) => deleteApiKey(keyId),
     onSuccess: () => {
       toast.success("API key deleted");
-      invalidate();
+      void queryClient.invalidateQueries({ queryKey: ["api-keys", "list"] });
     },
     onError: (error: Error) => {
       toast.error(error.message || "Failed to delete API key");
@@ -63,7 +60,7 @@ export function useApiKeys() {
     mutationFn: (keyId: string) => regenerateApiKey(keyId),
     onSuccess: () => {
       toast.success("API key regenerated");
-      invalidate();
+      void queryClient.invalidateQueries({ queryKey: ["api-keys", "list"] });
     },
     onError: (error: Error) => {
       toast.error(error.message || "Failed to regenerate API key");

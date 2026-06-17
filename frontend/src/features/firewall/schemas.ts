@@ -1,12 +1,12 @@
 import { z } from "zod";
 
-export const FIREWALL_MODES = ["allow_all", "allowlist_active"] as const;
+const FIREWALL_MODES = ["allow_all", "allowlist_active"] as const;
 
-export const FirewallModeSchema = z.enum(FIREWALL_MODES);
+const FirewallModeSchema = z.enum(FIREWALL_MODES);
 
 export const FirewallIpEntrySchema = z.object({
   ipAddress: z.string().min(1),
-  createdAt: z.string().datetime({ offset: true }),
+  createdAt: z.iso.datetime({ offset: true }),
 });
 
 export const FirewallIpsResponseSchema = z.object({

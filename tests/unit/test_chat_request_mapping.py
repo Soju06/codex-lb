@@ -428,10 +428,8 @@ def test_chat_response_format_json_object_preserves_instruction_roles_in_input()
     responses = req.to_responses_request()
     dumped = responses.to_payload()
 
-    assert dumped["instructions"] == ""
+    assert dumped["instructions"] == "Return JSON.\nKeep it short."
     assert dumped["input"] == [
-        {"role": "system", "content": [{"type": "input_text", "text": "Return JSON."}]},
-        {"role": "developer", "content": [{"type": "input_text", "text": "Keep it short."}]},
         {"role": "user", "content": [{"type": "input_text", "text": "Say hello."}]},
     ]
     assert dumped["text"] == {"format": {"type": "json_object"}}

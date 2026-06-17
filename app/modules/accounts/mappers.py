@@ -59,7 +59,7 @@ def build_account_summaries(
 
 
 def _duplicate_detection_keys_appearing_more_than_once(accounts: list[Account]) -> set[tuple[str, str, str | None]]:
-    """Return duplicate (email, ChatGPT account id, workspace id) keys in this list.
+    """Return duplicate (email, ChatGPT account id, workspace slot key) keys in this list.
 
     Emails are compared case-sensitively to match the storage normalization
     already performed at OAuth-import time. Blank/None emails, the legacy
@@ -81,7 +81,7 @@ def _duplicate_detection_key(account: Account) -> tuple[str, str, str | None] | 
     chatgpt_account_id = account.chatgpt_account_id
     if not _is_duplicate_detection_email(email) or not chatgpt_account_id:
         return None
-    return email, chatgpt_account_id, account.workspace_id
+    return email, chatgpt_account_id, account.workspace_id or account.workspace_label
 
 
 def _is_duplicate_detection_email(email: str | None) -> bool:
@@ -222,6 +222,7 @@ def _account_to_summary(
     )
     return AccountSummary(
         account_id=account.id,
+        chatgpt_account_id=account.chatgpt_account_id,
         email=account.email,
         alias=account.alias,
         display_name=account.alias or account.email,

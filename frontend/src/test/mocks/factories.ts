@@ -92,6 +92,7 @@ export function createAccountSummary(
 ): AccountSummary {
 	return AccountSummarySchema.parse({
 		accountId: "acc_primary",
+		chatgptAccountId: "chatgpt_acc_primary",
 		email: "primary@example.com",
 		alias: null,
 		displayName: "primary@example.com",
@@ -408,8 +409,15 @@ export function createDashboardAuthSession(
 		passwordRequired: true,
 		totpRequiredOnLogin: false,
 		totpConfigured: true,
+		bootstrapRequired: false,
+		bootstrapTokenConfigured: false,
 		authMode: "standard",
 		passwordManagementEnabled: true,
+		passwordSessionActive: false,
+		role: "admin",
+		permissions: ["read", "write"],
+		guestAccessEnabled: false,
+		guestPasswordRequired: false,
 		...overrides,
 	});
 }
@@ -445,6 +453,8 @@ export function createDashboardSettings(
 		limitWarmupPrompt: "Say OK.",
 		limitWarmupCooldownSeconds: 3600,
 		limitWarmupMinAvailablePercent: 100,
+		guestAccessEnabled: false,
+		guestPasswordConfigured: false,
 		...overrides,
 	});
 }

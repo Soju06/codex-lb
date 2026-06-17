@@ -9613,6 +9613,69 @@ async def test_prepare_websocket_response_create_request_captures_client_full_re
     assert fresh_payload["input"] == full_resend_input
 
 
+@pytest.mark.asyncio
+async def test_prepare_websocket_response_create_request_does_not_fresh_retry_tool_output_delta(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    reserve_usage = AsyncMock(return_value=None)
+    api_key = ApiKeyData(
+        id="key_ws_tool_delta",
+        name="ws-tool-delta",
+        key_prefix="sk-ws-tool-delta",
+        allowed_models=["gpt-5.1"],
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+
+    class Settings:
+        log_proxy_request_payload = False
+        log_proxy_request_shape = False
+        log_proxy_request_shape_raw_cache_key = False
+        log_proxy_service_tier_trace = False
+        openai_prompt_cache_key_derivation_enabled = True
+
+    tool_output_delta: list[JsonValue] = [
+        {"type": "function_call_output", "call_id": "call_delta_a", "output": "ok"},
+        {"type": "function_call_output", "call_id": "call_delta_b", "output": "ok"},
+        {"type": "function_call_output", "call_id": "call_delta_c", "output": "ok"},
+    ]
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: Settings())
+    monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", reserve_usage)
+    monkeypatch.setattr(service, "_refresh_websocket_api_key_policy", AsyncMock(return_value=api_key))
+
+    prepared = await service._prepare_websocket_response_create_request(
+        cast(
+            dict[str, JsonValue],
+            {
+                "type": "response.create",
+                "model": "gpt-5.1",
+                "previous_response_id": "resp_client_anchor",
+                "input": tool_output_delta,
+            },
+        ),
+        headers={"session_id": "turn_ws_tool_delta"},
+        codex_session_affinity=True,
+        openai_cache_affinity=True,
+        sticky_threads_enabled=False,
+        openai_cache_affinity_max_age_seconds=300,
+        api_key=api_key,
+        continuity_state=None,
+    )
+
+    upstream_payload = json.loads(prepared.text_data)
+    assert upstream_payload["previous_response_id"] == "resp_client_anchor"
+    assert upstream_payload["input"] == tool_output_delta
+    assert prepared.request_state.previous_response_id == "resp_client_anchor"
+    assert prepared.request_state.fresh_upstream_request_is_retry_safe is False
+    assert prepared.request_state.fresh_upstream_request_text is None
+
+
 def test_websocket_client_previous_response_full_resend_retry_requires_matching_prefix() -> None:
     stored_prefix: list[JsonValue] = [{"role": "user", "content": [{"type": "input_text", "text": "old question"}]}]
     continuity_state = proxy_service._WebSocketContinuityState(
@@ -9633,6 +9696,56 @@ def test_websocket_client_previous_response_full_resend_retry_requires_matching_
             continuity_state=continuity_state,
         )
         is False
+    )
+
+
+def test_websocket_client_previous_response_full_resend_retry_rejects_tool_output_delta() -> None:
+    tool_output_delta: list[JsonValue] = [
+        {"type": "function_call_output", "call_id": "call_a", "output": "ok"},
+        {"type": "function_call_output", "call_id": "call_b", "output": "ok"},
+    ]
+
+    assert (
+        proxy_service._websocket_client_previous_response_full_resend_is_retry_safe(
+            previous_response_id="resp_client_anchor",
+            input_value=tool_output_delta,
+            continuity_state=None,
+        )
+        is False
+    )
+
+
+def test_websocket_client_previous_response_full_resend_retry_rejects_output_before_call() -> None:
+    reordered_tool_history: list[JsonValue] = [
+        {"type": "function_call_output", "call_id": "call_late", "output": "ok"},
+        {"type": "function_call", "name": "shell_command", "call_id": "call_late", "arguments": "{}"},
+    ]
+
+    assert (
+        proxy_service._websocket_client_previous_response_full_resend_is_retry_safe(
+            previous_response_id="resp_client_anchor",
+            input_value=reordered_tool_history,
+            continuity_state=None,
+        )
+        is False
+    )
+
+
+def test_websocket_client_previous_response_full_resend_retry_allows_self_contained_tool_history() -> None:
+    self_contained_tool_history: list[JsonValue] = [
+        {"role": "user", "content": [{"type": "input_text", "text": "run a command"}]},
+        {"type": "function_call", "name": "shell_command", "call_id": "call_ok", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "call_ok", "output": "ok"},
+        {"role": "user", "content": [{"type": "input_text", "text": "continue"}]},
+    ]
+
+    assert (
+        proxy_service._websocket_client_previous_response_full_resend_is_retry_safe(
+            previous_response_id="resp_client_anchor",
+            input_value=self_contained_tool_history,
+            continuity_state=None,
+        )
+        is True
     )
 
 

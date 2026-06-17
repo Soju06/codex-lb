@@ -378,8 +378,7 @@ class RequestLogsRepository:
             exclude_soft_deleted=True,
         )
 
-        total_col = func.count().over().label("_total")
-        stmt = select(RequestLog, total_col).order_by(RequestLog.requested_at.desc(), RequestLog.id.desc())
+        stmt = select(RequestLog).order_by(RequestLog.requested_at.desc(), RequestLog.id.desc())
         stmt = self._apply_related_search_joins(stmt, filters.needs_related_search_joins)
         if filters.conditions:
             stmt = stmt.where(and_(*filters.conditions))
@@ -388,11 +387,8 @@ class RequestLogsRepository:
         if limit:
             stmt = stmt.limit(limit)
         result = await self._session.execute(stmt)
-        rows = result.all()
-        if not rows:
-            return [], await self._count_recent(filters)
-        logs = [row[0] for row in rows]
-        total = rows[0][1]
+        logs = list(result.scalars().all())
+        total = await self._count_recent(filters)
         return logs, total
 
     async def _count_recent(self, filters: _RequestLogFilters) -> int:

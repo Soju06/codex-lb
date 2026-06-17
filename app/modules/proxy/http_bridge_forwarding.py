@@ -11,7 +11,7 @@ from typing import cast
 
 import aiohttp
 
-from app.core.clients.proxy import ProxyResponseError
+from app.core.clients.proxy import ProxyResponseError, filter_inbound_headers
 from app.core.config.settings import get_settings
 from app.core.crypto import get_or_create_key
 from app.core.errors import OpenAIErrorEnvelope, openai_error, response_failed_event
@@ -21,6 +21,26 @@ from app.core.utils.request_id import get_request_id
 from app.core.utils.sse import format_sse_event
 from app.modules.api_keys.service import ApiKeyUsageReservationData
 from app.modules.proxy._service.http_bridge.helpers import _http_bridge_request_budget_seconds
+
+# HTTP-only and hop-by-hop headers that must not be forwarded through the
+# internal bridge. These headers are either illegal in WebSocket handshakes or
+# carry HTTP framing semantics that the aiohttp upstream session manages itself.
+# Applies on top of filter_inbound_headers (which already strips authorization,
+# host, content-length, and x-forwarded-* / cf-* headers).
+_BRIDGE_UNSAFE_HEADER_NAMES = frozenset(
+    {
+        "accept",
+        "accept-encoding",
+        "connection",
+        "content-type",
+        "cookie",
+        "keep-alive",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+    }
+)
 
 HTTP_BRIDGE_INTERNAL_FORWARD_PATH = "/internal/bridge/responses"
 HTTP_BRIDGE_FORWARDED_HEADER = "x-codex-bridge-forwarded"
@@ -136,9 +156,8 @@ def build_owner_forward_headers(
     payload: ResponsesRequest,
     context: HTTPBridgeForwardContext,
 ) -> dict[str, str]:
-    forwarded = dict(headers)
-    forwarded.pop("host", None)
-    forwarded.pop("content-length", None)
+    filtered = filter_inbound_headers(headers)
+    forwarded = {key: value for key, value in filtered.items() if key.lower() not in _BRIDGE_UNSAFE_HEADER_NAMES}
     forwarded[HTTP_BRIDGE_FORWARDED_HEADER] = "1"
     forwarded[HTTP_BRIDGE_ORIGIN_INSTANCE_HEADER] = context.origin_instance
     forwarded[HTTP_BRIDGE_TARGET_INSTANCE_HEADER] = context.target_instance

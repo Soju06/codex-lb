@@ -338,3 +338,62 @@ async def test_owner_forward_uses_direct_session_without_env_proxy(monkeypatch: 
     assert '"type":"response.failed"' in events[0]
     assert '"code":"stream_incomplete"' in events[0]
     assert captured["trust_env"] is False
+
+
+def test_build_owner_forward_headers_strips_hop_by_hop_headers() -> None:
+    payload = _payload()
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=False,
+        downstream_turn_state=None,
+    )
+    inbound = {
+        "Accept": "application/json",
+        "Accept-Encoding": "gzip, deflate",
+        "Connection": "keep-alive",
+        "Content-Type": "application/json",
+        "Cookie": "session=abc",
+        "x-request-id": "req-123",
+    }
+
+    headers = build_owner_forward_headers(headers=inbound, payload=payload, context=context)
+
+    assert "Accept" not in headers
+    assert "accept" not in headers
+    assert "Accept-Encoding" not in headers
+    assert "accept-encoding" not in headers
+    assert "Connection" not in headers
+    assert "connection" not in headers
+    assert "Content-Type" not in headers
+    assert "content-type" not in headers
+    assert "Cookie" not in headers
+    assert "cookie" not in headers
+    assert headers.get("x-request-id") == "req-123"
+    assert HTTP_BRIDGE_FORWARDED_HEADER in headers
+    assert HTTP_BRIDGE_TARGET_INSTANCE_HEADER in headers
+
+
+def test_build_owner_forward_headers_strips_authorization_and_host() -> None:
+    payload = _payload()
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=False,
+        downstream_turn_state=None,
+    )
+    inbound = {
+        "Authorization": "Bearer downstream-key",
+        "Host": "client.example.com",
+        "content-length": "42",
+        "x-openai-client-version": "1.2.3",
+    }
+
+    headers = build_owner_forward_headers(headers=inbound, payload=payload, context=context)
+
+    assert "Authorization" not in headers
+    assert "authorization" not in headers
+    assert "Host" not in headers
+    assert "host" not in headers
+    assert "content-length" not in headers
+    assert headers.get("x-openai-client-version") == "1.2.3"

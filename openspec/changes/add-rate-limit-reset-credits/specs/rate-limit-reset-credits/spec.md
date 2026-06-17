@@ -2,10 +2,10 @@
 
 ### Requirement: Reset credits are polled per account on a fixed cadence
 
-The system SHALL poll upstream `GET /wham/rate-limit-reset-credits` for each eligible account on a configurable cadence that defaults to 60 seconds, using that account's stored OAuth bearer token and `chatgpt-account-id`. The poll SHALL be leader-gated so that only one replica performs the polling in a multi-replica deployment. The poll SHALL skip any account that is paused, deactivated, or lacks a usable `chatgpt-account-id`.
+The system SHALL poll upstream `GET /wham/rate-limit-reset-credits` for each eligible account on a configurable cadence that defaults to 60 seconds, using that account's stored OAuth bearer token and `chatgpt-account-id`. The scheduler SHALL always start with the application lifespan. The poll SHALL be leader-gated so that only one replica performs the polling in a multi-replica deployment. The poll SHALL skip any account that is paused, deactivated, or lacks a usable `chatgpt-account-id`.
 
 #### Scenario: Default cadence polls every 60 seconds
-- **WHEN** the reset-credits refresh scheduler is enabled with default settings
+- **WHEN** the application starts with default settings
 - **THEN** each eligible account's credits are fetched from upstream at most once per 60 seconds
 
 #### Scenario: Non-leader replica does not poll
@@ -76,12 +76,11 @@ The reset-credits refresh scheduler SHALL NOT transition any account's persisted
 - **THEN** the cached snapshot is retained
 - **AND** the failure is logged
 
-### Requirement: Reset credit polling is independently toggleable
+### Requirement: Reset credit polling interval is configurable
 
-The system SHALL expose settings `rate_limit_reset_credits_refresh_enabled` (default `true`) and `rate_limit_reset_credits_refresh_interval_seconds` (default `60`). When disabled, the scheduler SHALL perform no upstream reset-credits fetches and the in-memory store SHALL remain empty; the dashboard SHALL render zero reset affordances for every account.
+The system SHALL expose setting `rate_limit_reset_credits_refresh_interval_seconds` (default `60`) to control the polling cadence. The system SHALL NOT expose a separate enable/disable toggle for reset-credit polling.
 
-#### Scenario: Disabled scheduler produces empty store
-- **GIVEN** `rate_limit_reset_credits_refresh_enabled` is `false`
+#### Scenario: Operator tunes the polling interval
+- **GIVEN** `rate_limit_reset_credits_refresh_interval_seconds` is set to `120`
 - **WHEN** the application starts and runs
-- **THEN** no upstream reset-credits fetches are performed
-- **AND** every account summary exposes `available_reset_credits: 0` and `reset_credit_nearest_expires_at: null`
+- **THEN** each eligible account's credits are fetched from upstream at most once per 120 seconds

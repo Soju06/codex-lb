@@ -213,7 +213,7 @@ async def test_refresh_once_skips_when_not_leader(monkeypatch: pytest.MonkeyPatc
 
     monkeypatch.setattr(scheduler_module, "get_background_session", _forbidden_session)
 
-    scheduler = RateLimitResetCreditsRefreshScheduler(interval_seconds=60, enabled=True)
+    scheduler = RateLimitResetCreditsRefreshScheduler(interval_seconds=60)
     await scheduler._refresh_once()
 
     assert session_entered is False
@@ -262,7 +262,7 @@ async def test_refresh_once_leader_path_caches_snapshots(monkeypatch: pytest.Mon
 
     monkeypatch.setattr(scheduler_module, "fetch_reset_credits", fetch_fn)
 
-    scheduler = RateLimitResetCreditsRefreshScheduler(interval_seconds=60, enabled=True)
+    scheduler = RateLimitResetCreditsRefreshScheduler(interval_seconds=60)
     await scheduler._refresh_once()
 
     assert ("fetch", "token-for-acc_leader", "workspace-x") in captured

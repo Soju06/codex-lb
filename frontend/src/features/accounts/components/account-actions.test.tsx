@@ -182,7 +182,7 @@ describe("AccountActions", () => {
       />,
     );
 
-    await user.click(screen.getByRole("button", { name: "Reset" }));
+    await user.click(screen.getByRole("button", { name: "Reset (3)" }));
 
     expect(onResetCredit).toHaveBeenCalledWith(account.accountId);
   });
@@ -210,6 +210,6 @@ describe("AccountActions", () => {
       />,
     );
 
-    expect(screen.queryByRole("button", { name: "Reset" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Reset \(/ })).not.toBeInTheDocument();
   });
 });

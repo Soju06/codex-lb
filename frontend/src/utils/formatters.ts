@@ -226,6 +226,18 @@ export function formatDateTimeInline(iso: string | null | undefined): string {
   return formatted.time === "--" ? "--" : `${formatted.time} ${formatted.date}`;
 }
 
+function padTwo(value: number): string {
+  return String(value).padStart(2, "0");
+}
+
+export function formatLocalDateTimeSeconds(iso: string | null | undefined): string {
+  const date = parseDate(iso);
+  if (!date) {
+    return "--";
+  }
+  return `${date.getFullYear()}-${padTwo(date.getMonth() + 1)}-${padTwo(date.getDate())} ${padTwo(date.getHours())}:${padTwo(date.getMinutes())}:${padTwo(date.getSeconds())}`;
+}
+
 export function formatChartDateTime(iso: string | null | undefined): string {
   const date = parseDate(iso);
   return date ? getChartDateTimeFormatter().format(date) : "--";

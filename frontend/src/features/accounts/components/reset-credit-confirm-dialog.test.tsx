@@ -85,6 +85,7 @@ describe("ResetCreditConfirmDialog", () => {
 
     // Snapshot loads the soonest credit title.
     expect(await screen.findByText("Banked rate-limit reset")).toBeInTheDocument();
+    expect(screen.getByText(/Expires \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/)).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Redeem credit" }));
 
@@ -139,4 +140,3 @@ describe("ResetCreditConfirmDialog", () => {
     expect(onOpenChange).not.toHaveBeenCalledWith(false);
   });
 });
-

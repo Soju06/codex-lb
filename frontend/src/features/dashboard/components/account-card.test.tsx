@@ -117,7 +117,7 @@ describe("AccountCard", () => {
 
     render(<AccountCard account={account} />);
 
-    expect(screen.getByRole("button", { name: "Reset" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Reset (2)" })).toBeInTheDocument();
   });
 
   it("hides reset action when no reset credits are available", () => {
@@ -125,6 +125,6 @@ describe("AccountCard", () => {
 
     render(<AccountCard account={account} />);
 
-    expect(screen.queryByRole("button", { name: "Reset" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Reset \(/ })).not.toBeInTheDocument();
   });
 });

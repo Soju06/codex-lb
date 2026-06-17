@@ -42,14 +42,11 @@ def _get_leader_election() -> _LeaderElectionLike:
 @dataclass(slots=True)
 class RateLimitResetCreditsRefreshScheduler:
     interval_seconds: int
-    enabled: bool
     _task: asyncio.Task[None] | None = None
     _stop: asyncio.Event = field(default_factory=asyncio.Event)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     async def start(self) -> None:
-        if not self.enabled:
-            return
         if self._task and not self._task.done():
             return
         self._stop.clear()
@@ -137,5 +134,4 @@ def build_rate_limit_reset_credits_scheduler() -> RateLimitResetCreditsRefreshSc
     settings = get_settings()
     return RateLimitResetCreditsRefreshScheduler(
         interval_seconds=settings.rate_limit_reset_credits_refresh_interval_seconds,
-        enabled=settings.rate_limit_reset_credits_refresh_enabled,
     )

@@ -7,7 +7,7 @@ import {
 } from "@/features/accounts/hooks/use-accounts";
 import type { RateLimitResetCreditItem } from "@/features/accounts/schemas";
 import { cn } from "@/lib/utils";
-import { formatDateTimeInline, formatSingleUnitRemaining } from "@/utils/formatters";
+import { formatLocalDateTimeSeconds, formatSingleUnitRemaining } from "@/utils/formatters";
 
 export type ResetCreditConfirmDialogProps = {
   open: boolean;
@@ -88,7 +88,7 @@ export function ResetCreditConfirmDialog({
           <p className="font-medium">{title}</p>
           {expiresAt ? (
             <p className="mt-1 text-xs text-muted-foreground">
-              Expires {formatDateTimeInline(expiresAt)}
+              Expires {formatLocalDateTimeSeconds(expiresAt)}
               {countdown ? (
                 <span
                   className={cn(

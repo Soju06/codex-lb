@@ -1,6 +1,6 @@
 ## 1. Backend foundation (settings, upstream client, in-memory store)
 
-- [x] 1.1 Add settings `rate_limit_reset_credits_refresh_enabled` (default `true`) and `rate_limit_reset_credits_refresh_interval_seconds` (default `60`) to `app/core/config/settings.py`, mirroring the usage-refresh flags
+- [x] 1.1 Add setting `rate_limit_reset_credits_refresh_interval_seconds` (default `60`) to `app/core/config/settings.py`; reset-credit polling itself is always on
 - [x] 1.2 Create `app/core/clients/rate_limit_reset_credits.py` mirroring `app/core/clients/usage.py`: `fetch_reset_credits(access_token, account_id, *, base_url, timeout)` → GET `/wham/rate-limit-reset-credits`, and `consume_reset_credit(access_token, account_id, credit_id, *, base_url, timeout)` → POST `/wham/rate-limit-reset-credits/consume` with body `{credit_id, redeem_request_id: uuid4()}`. Reuse the same header-construction rules (skip `chatgpt-account-id` for `email_`/`local_` prefixes) and base-url normalization
 - [x] 1.3 Define pydantic models for the upstream payloads: `ResetCreditItem` (id, reset_type, status, granted_at, expires_at, title, description, redeem_started_at, redeemed_at), `ResetCreditsResponse` (credits: list, available_count: int), `ConsumeResetCreditResponse` (code, credit, windows_reset)
 - [x] 1.4 Create `app/modules/rate_limit_reset_credits/store.py` mirroring `app/modules/proxy/rate_limit_cache.py`: `RateLimitResetCreditsStore` with `anyio.Lock`-guarded `set(account_id, snapshot)`, `get(account_id) -> Snapshot | None`, `invalidate(account_id=None)`. Snapshot exposes `available_count`, `nearest_expires_at`, and the items list. Expose a module-level singleton + `get_rate_limit_reset_credits_store()` accessor
@@ -22,11 +22,12 @@
 ## 4. Frontend UI components
 
 - [x] 4.1 Add the count badge to `frontend/src/features/accounts/components/account-list-item.tsx`: an absolutely-positioned circle on the right-upper radius showing the integer count or `"99+"` when `> 99`. Render only when `availableResetCredits > 0`
-- [x] 4.2 Add the "Reset" button to `frontend/src/features/accounts/components/account-actions.tsx` immediately after the Export button, matching its `size="sm" variant="outline" className="h-8 gap-1.5 text-xs"` style, with a `RotateCcw` icon, a single-unit countdown label (using 3.3) placed at the button's right-upper radius, and destructive/red label color when `expiringSoon`. Render only when `availableResetCredits > 0`. Wire `onClick` to open the confirmation dialog
-- [x] 4.3 Add a "Reset" action to `frontend/src/features/dashboard/components/account-list.tsx` (table view) inside the existing Details action cell, matching the `h-7 w-7` icon-button style with the countdown as a `title` tooltip. Render only when `availableResetCredits > 0`
-- [x] 4.4 Add a "Reset" button to `frontend/src/features/dashboard/components/account-card.tsx` (grid view) next to the Details button, matching the `h-7 gap-1.5` text style with the single-unit countdown label. Render only when `availableResetCredits > 0`
-- [x] 4.5 Implement the confirmation dialog (reuse `frontend/src/components/confirm-dialog.tsx` + `frontend/src/hooks/use-dialog-state.ts`, same shape as the delete-account dialog): body shows the soonest credit's title and `expires_at`, plus the "credit is consumed even if the window doesn't move" warning. On confirm → call `consumeRateLimitResetCredit(accountId)` → success/failure toast → query invalidation
+- [x] 4.2 Add the `Reset (N)` button to `frontend/src/features/accounts/components/account-actions.tsx` immediately after the Export button, matching its `size="sm" variant="outline" className="h-8 gap-1.5 text-xs"` style, with a `RotateCcw` icon, a single-unit countdown label (using 3.3) placed at the button's right-upper radius, and destructive/red label color when `expiringSoon`. Render only when `availableResetCredits > 0`. Wire `onClick` to open the confirmation dialog
+- [x] 4.3 Add a reset action to `frontend/src/features/dashboard/components/account-list.tsx` (table view) inside the existing Details action cell, matching the `h-7 w-7` icon-button style with the countdown and count exposed in the `title` tooltip. Render only when `availableResetCredits > 0`
+- [x] 4.4 Add a `Reset (N)` button to `frontend/src/features/dashboard/components/account-card.tsx` (grid view) next to the Details button, matching the `h-7 gap-1.5` text style with the single-unit countdown label. Render only when `availableResetCredits > 0`
+- [x] 4.5 Implement the confirmation dialog (reuse `frontend/src/components/confirm-dialog.tsx` + `frontend/src/hooks/use-dialog-state.ts`, same shape as the delete-account dialog): body shows the soonest credit's title and `expires_at` formatted as local `YYYY-MM-DD HH:MM:SS`, plus the "credit is consumed even if the window doesn't move" warning. On confirm → call `consumeRateLimitResetCredit(accountId)` → success/failure toast → query invalidation
 - [x] 4.6 Add a "Most reset credits" option to the Accounts page sort selector in `frontend/src/features/accounts/sorting.ts`: comparator orders by `availableResetCredits` desc, tiebreak by `resetCreditNearestExpiresAt` asc (soonest first), accounts with null expiry last. Add the localized dropdown label
+- [x] 4.7 Add a summed reset-credit badge to `frontend/src/components/layout/app-header.tsx` for the Accounts nav tab, capped at `99+`
 
 ## 5. Tests
 
@@ -38,8 +39,9 @@
 - [x] 5.6 Frontend — `formatSingleUnitRemaining`: boundaries at 7d (color flip), 1d, 1h, 1m, and `now`; sub-minute and past timestamps both yield `"now"`
 - [x] 5.7 Frontend — `AccountListItem` badge: renders count, `"99+"` at 100+, absent at 0
 - [x] 5.8 Frontend — Reset button visibility: rendered when `availableResetCredits > 0`, absent at 0, in all three surfaces (account-actions, dashboard table, dashboard grid)
-- [x] 5.9 Frontend — confirm dialog → consume: confirmation calls `consumeRateLimitResetCredit`, success path invalidates queries, failure path surfaces a toast and does not invalidate
+- [x] 5.9 Frontend — confirm dialog → consume: confirmation calls `consumeRateLimitResetCredit`, shows the expiry in local `YYYY-MM-DD HH:MM:SS`, success path invalidates queries, failure path surfaces a toast and does not invalidate
 - [x] 5.10 Frontend — "Most reset credits" sort: comparator orders by count desc with soonest-expiry tiebreak, null-expiry accounts last
+- [x] 5.11 Frontend — Accounts nav badge: shows the summed total, caps at `99+`, and hides at zero
 
 ## 6. Validation and OpenSpec hygiene
 
@@ -47,4 +49,4 @@
 - [x] 6.2 Run `openspec validate --specs --strict` to confirm no main-spec drift
 - [ ] 6.3 Run backend checks: `uv run ruff check && uv run ruff format --check && uv run pytest` (or the repo's documented equivalent)
 - [x] 6.4 Run frontend checks: `pnpm -C frontend lint && pnpm -C frontend typecheck && pnpm -C frontend test` (or the repo's documented equivalent)
-- [ ] 6.5 Manually verify the three Reset button placements, the badge cap behavior, the countdown color flip at 7d, the confirm flow, and the new sort option against the spec scenarios
+- [ ] 6.5 Manually verify the three Reset button placements, the per-button count labels, the Accounts-nav total badge cap behavior, the countdown color flip at 7d, the local expiry timestamp, the confirm flow, and the new sort option against the spec scenarios

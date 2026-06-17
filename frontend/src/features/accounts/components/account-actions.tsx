@@ -67,7 +67,8 @@ export function AccountActions({
   const resetCountdown = account.resetCreditNearestExpiresAt
     ? formatSingleUnitRemaining(account.resetCreditNearestExpiresAt)
     : null;
-  const hasResetCredits = (account.availableResetCredits ?? 0) > 0;
+  const availableResetCredits = account.availableResetCredits ?? 0;
+  const hasResetCredits = availableResetCredits > 0;
 
   return (
     <div className="space-y-3 border-t pt-4">
@@ -209,7 +210,7 @@ export function AccountActions({
             disabled={busy || readOnly}
           >
             <RotateCcw className="h-3.5 w-3.5" />
-            Reset
+            {`Reset (${availableResetCredits})`}
             {resetCountdown ? (
               <span
                 aria-hidden="true"

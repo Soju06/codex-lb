@@ -18,7 +18,6 @@ os.environ["CODEX_LB_DATABASE_URL"] = os.environ.get(
 )
 os.environ["CODEX_LB_UPSTREAM_BASE_URL"] = "https://example.invalid/backend-api"
 os.environ["CODEX_LB_USAGE_REFRESH_ENABLED"] = "false"
-os.environ["CODEX_LB_RATE_LIMIT_RESET_CREDITS_REFRESH_ENABLED"] = "false"
 os.environ["CODEX_LB_MODEL_REGISTRY_ENABLED"] = "false"
 os.environ["CODEX_LB_STICKY_SESSION_CLEANUP_ENABLED"] = "false"
 os.environ["CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_ENABLED"] = "false"
@@ -27,6 +26,14 @@ os.environ["CODEX_LB_QUOTA_PLANNER_SCHEDULER_ENABLED"] = "false"
 from app.db.models import Base  # noqa: E402
 from app.db.session import engine  # noqa: E402
 from app.main import create_app  # noqa: E402
+
+
+class _NoopScheduler:
+    async def start(self) -> None:
+        return None
+
+    async def stop(self) -> None:
+        return None
 
 
 def _drop_test_migration_tables(sync_conn) -> None:
@@ -63,8 +70,16 @@ async def app_instance(_reset_db_state, monkeypatch):
         return None
 
     monkeypatch.setattr(main_module, "init_db", _noop_init_db)
+    monkeypatch.setattr(main_module, "build_rate_limit_reset_credits_scheduler", lambda: _NoopScheduler())
     app = create_app()
     return app
+
+
+@pytest.fixture(autouse=True)
+def _disable_rate_limit_reset_credits_scheduler_startup(monkeypatch):
+    import app.main as main_module
+
+    monkeypatch.setattr(main_module, "build_rate_limit_reset_credits_scheduler", lambda: _NoopScheduler())
 
 
 @pytest_asyncio.fixture(scope="session", autouse=True)

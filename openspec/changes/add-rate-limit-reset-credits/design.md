@@ -15,6 +15,7 @@ The reference is a single-account CLI; codex-lb needs a multi-account, dashboard
 - Per-account background poll of reset credits every 60s, cached in-memory keyed by account id
 - Dashboard operators can see, per account: how many banked credits are available and when the soonest one expires
 - Dashboard operators can redeem the soonest-expiring credit for any account from three surfaces (Accounts action bar, Dashboard table, Dashboard grid) with a confirmation dialog
+- Dashboard operators can see the summed available reset-credit count on the top-nav Accounts tab
 - Sort the Accounts page by available reset credits
 - Reuse existing token decryption, scheduler shape, in-memory cache shape, dashboard auth, confirmation dialog, and formatter conventions — no new frameworks
 
@@ -29,7 +30,7 @@ The reference is a single-account CLI; codex-lb needs a multi-account, dashboard
 ## Decisions
 
 ### Decision: Dedicated module + scheduler, mirroring `usage_refresh` (not folding into the usage loop)
-**Rationale:** Usage refresh owns account-status derivation and has a dense, scenario-heavy spec (`usage-refresh-policy`) tying it to quota reconciliation, cooldowns, and warm-up. Bolting credits onto that loop would couple two upstream calls and their failure modes, and muddy the usage-refresh contract. A dedicated `RateLimitResetCreditsRefreshScheduler` reuses the exact `UsageRefreshScheduler` shape (leader-gated, `asyncio.Lock`-guarded `_refresh_once`, `interval_seconds` + `enabled` settings) and is independently toggleable.
+**Rationale:** Usage refresh owns account-status derivation and has a dense, scenario-heavy spec (`usage-refresh-policy`) tying it to quota reconciliation, cooldowns, and warm-up. Bolting credits onto that loop would couple two upstream calls and their failure modes, and muddy the usage-refresh contract. A dedicated `RateLimitResetCreditsRefreshScheduler` reuses the exact `UsageRefreshScheduler` shape (leader-gated, `asyncio.Lock`-guarded `_refresh_once`, interval-only configuration) and always starts with the application.
 **Alternatives considered:** (a) Fold into `UsageRefreshScheduler._refresh_once` — rejected for the coupling above. (b) Pure passthrough via the local `wham_router` proxy — rejected because the dashboard needs the in-memory store and per-account token decryption that the proxy router does not have, and the requirement is "refresh every 60s + store in-memory."
 
 ### Decision: Server picks the soonest-expiring credit at consume time
@@ -41,7 +42,7 @@ The reference is a single-account CLI; codex-lb needs a multi-account, dashboard
 **Alternatives considered:** Separate `/api/accounts/{id}/rate-limit-reset-credits` GET consumed per-card — rejected because it adds N round-trips and N re-renders; the count belongs on the summary the UI already fetches.
 
 ### Decision: Countdown is single-unit and goes red under 7 days
-**Rationale:** User requirement: one unit only ("6d" / "13h" / "45m" / "now"), red when `< 7d`. A new `formatSingleUnitRemaining(expiresAtIso)` helper sits next to existing `formatQuotaResetLabel` / `formatResetRelative` in `utils/formatters.ts`; the caller colors it via `ms < 7 * DAY_MS`. We do NOT add a ticking hook (matches the existing reset-label pattern).
+**Rationale:** User requirement: one unit only ("6d" / "13h" / "45m" / "now"), red when `< 7d`. A new `formatSingleUnitRemaining(expiresAtIso)` helper sits next to existing `formatQuotaResetLabel` / `formatResetRelative` in `utils/formatters.ts`; the caller colors it via `ms < 7 * DAY_MS`. We do NOT add a ticking hook (matches the existing reset-label pattern). The confirmation dialog uses a separate local-time formatter with exact `YYYY-MM-DD HH:MM:SS` output so operators can see the precise expiry instant in their own timezone.
 **Alternatives considered:** Reuse `formatResetRelative` — rejected because it returns multi-unit ("6d 13h") output.
 
 ### Decision: Reset credit refresh never mutates account status
@@ -59,9 +60,9 @@ The reference is a single-account CLI; codex-lb needs a multi-account, dashboard
 
 ## Migration Plan
 
-- No DB migration (in-memory only). No env var required (settings default to enabled + 60s).
+- No DB migration (in-memory only). No env var required beyond the refresh interval setting.
 - Deploy is a single rolling restart; the first tick after boot repopulates snapshots within 60s.
-- Rollback: set `rate_limit_reset_credits_refresh_enabled=false` (or revert the deploy) — the UI hides all reset affordances as soon as the cached count is 0/missing.
+- Rollback: revert the deploy; there is no separate disable toggle for reset-credit polling.
 
 ## Open Questions
 

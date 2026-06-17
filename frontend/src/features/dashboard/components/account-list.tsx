@@ -312,7 +312,8 @@ export function AccountList({ accounts, readOnly = false, onAction }: AccountLis
           const warmupDetail = account.limitWarmup
             ? `${formatSlug(account.limitWarmup.status)} | ${account.limitWarmup.window === "primary" ? "5h" : "weekly"} | ${formatDateTimeInline(account.limitWarmup.completedAt ?? account.limitWarmup.attemptedAt)}`
             : "No attempts";
-          const hasResetCredits = (account.availableResetCredits ?? 0) > 0;
+          const availableResetCredits = account.availableResetCredits ?? 0;
+          const hasResetCredits = availableResetCredits > 0;
           const resetCountdown = account.resetCreditNearestExpiresAt
             ? formatSingleUnitRemaining(account.resetCreditNearestExpiresAt)
             : null;
@@ -362,13 +363,13 @@ export function AccountList({ accounts, readOnly = false, onAction }: AccountLis
                   <Button
                     type="button"
                     size="sm"
-                    variant="ghost"
-                    className="h-7 w-7 rounded-md p-0 text-muted-foreground hover:text-foreground"
-                    aria-label={`Redeem reset credit for ${title}`}
-                    title={resetCountdown ? `Reset (${resetCountdown.label})` : "Reset"}
-                    disabled={readOnly}
-                    onClick={() => onAction?.(account, "reset-credit")}
-                  >
+                     variant="ghost"
+                     className="h-7 w-7 rounded-md p-0 text-muted-foreground hover:text-foreground"
+                     aria-label={`Redeem reset credit for ${title}`}
+                     title={resetCountdown ? `Reset (${availableResetCredits}) · ${resetCountdown.label}` : `Reset (${availableResetCredits})`}
+                     disabled={readOnly}
+                     onClick={() => onAction?.(account, "reset-credit")}
+                   >
                     <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
                   </Button>
                 ) : null}

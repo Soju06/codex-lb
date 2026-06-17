@@ -111,7 +111,8 @@ export function AccountCard({ account, showAccountId = false, readOnly = false, 
   const warmupDetail = account.limitWarmup
     ? `${formatSlug(account.limitWarmup.status)} | ${account.limitWarmup.window === "primary" ? "5h" : "weekly"} | ${formatSlug(account.limitWarmup.model)} | ${formatDateTimeInline(account.limitWarmup.completedAt ?? account.limitWarmup.attemptedAt)}`
     : "No attempts";
-  const hasResetCredits = (account.availableResetCredits ?? 0) > 0;
+  const availableResetCredits = account.availableResetCredits ?? 0;
+  const hasResetCredits = availableResetCredits > 0;
   const resetCountdown = account.resetCreditNearestExpiresAt
     ? formatSingleUnitRemaining(account.resetCreditNearestExpiresAt)
     : null;
@@ -204,7 +205,7 @@ export function AccountCard({ account, showAccountId = false, readOnly = false, 
             onClick={() => onAction?.(account, "reset-credit")}
           >
             <RotateCcw className="h-3 w-3" />
-            Reset
+            {`Reset (${availableResetCredits})`}
             {resetCountdown ? (
               <span
                 aria-hidden="true"

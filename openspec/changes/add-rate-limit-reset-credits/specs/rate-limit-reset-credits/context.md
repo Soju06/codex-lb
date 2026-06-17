@@ -39,7 +39,8 @@ client treats non-200/non-JSON responses defensively.
   snapshot; it does not deactivate, rate-limit, or quota-block any account.
 - **Dedicated scheduler, not folded into usage refresh.** Reuses the exact
   `UsageRefreshScheduler` shape (leader-gated, `asyncio.Lock`-guarded, configurable
-  cadence) but keeps the two upstream calls decoupled. See `design.md` for the rationale.
+  cadence) but keeps the two upstream calls decoupled. The scheduler always starts with
+  the app; only the interval is configurable. See `design.md` for the rationale.
 
 ## Failure Modes
 
@@ -95,8 +96,6 @@ client treats non-200/non-JSON responses defensively.
 
 ## Operational Notes
 
-- Toggle polling without a deploy by setting `rate_limit_reset_credits_refresh_enabled=false`
-  and restarting. The store empties and all UI reset affordances disappear.
 - The 60s cadence matches usage refresh; both are leader-gated, so adding accounts scales
   upstream load by the same factor usage refresh already does.
 - A credit is consumed as soon as upstream returns 200 — treat the confirmation dialog as

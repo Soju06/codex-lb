@@ -7,6 +7,7 @@ import {
   formatDateTimeInline,
   formatAccessTokenLabel,
   formatCachedTokensMeta,
+  formatLocalDateTimeSeconds,
   formatCompactNumber,
   formatCountdown,
   formatCurrency,
@@ -114,6 +115,15 @@ describe("formatters", () => {
     expect(twentyFourHour).not.toMatch(/AM|PM/);
     expect(formatDateTimeInline(iso)).toContain(twentyFourHour);
     expect(formatChartDateTime(iso)).not.toMatch(/AM|PM/);
+  });
+
+  it("formats local timestamps as yyyy-mm-dd hh:mm:ss", () => {
+    const iso = "2026-01-01T00:00:00.000Z";
+    const local = new Date(iso);
+    const expected = `${local.getFullYear()}-${String(local.getMonth() + 1).padStart(2, "0")}-${String(local.getDate()).padStart(2, "0")} ${String(local.getHours()).padStart(2, "0")}:${String(local.getMinutes()).padStart(2, "0")}:${String(local.getSeconds()).padStart(2, "0")}`;
+
+    expect(formatLocalDateTimeSeconds(iso)).toBe(expected);
+    expect(formatLocalDateTimeSeconds("bad-date")).toBe("--");
   });
 
   it("formats relative and countdown values", () => {

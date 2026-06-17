@@ -115,6 +115,12 @@ class AccountSummary(DashboardModel):
     # surface a "delete older" action without requiring the operator to
     # group rows by email themselves. See codex-lb #787 (B).
     is_email_duplicate: bool = False
+    # Banked rate-limit reset credits joined from the in-memory snapshot
+    # (refreshed by the leader-gated reset-credits scheduler). ``0`` / ``null``
+    # when no snapshot is cached yet (e.g. right after restart); the dashboard
+    # hides all reset affordances in that case.
+    available_reset_credits: int = 0
+    reset_credit_nearest_expires_at: datetime | None = None
 
 
 class AccountsResponse(DashboardModel):

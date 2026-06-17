@@ -18,6 +18,7 @@ os.environ["CODEX_LB_DATABASE_URL"] = os.environ.get(
 )
 os.environ["CODEX_LB_UPSTREAM_BASE_URL"] = "https://example.invalid/backend-api"
 os.environ["CODEX_LB_USAGE_REFRESH_ENABLED"] = "false"
+os.environ["CODEX_LB_RATE_LIMIT_RESET_CREDITS_REFRESH_ENABLED"] = "false"
 os.environ["CODEX_LB_MODEL_REGISTRY_ENABLED"] = "false"
 os.environ["CODEX_LB_STICKY_SESSION_CLEANUP_ENABLED"] = "false"
 os.environ["CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_ENABLED"] = "false"

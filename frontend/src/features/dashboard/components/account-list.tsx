@@ -19,12 +19,14 @@ const ACCOUNT_LIST_COLUMNS = "minmax(13rem,1.3fr) 7.75rem 5rem minmax(14rem,1.2f
 type AccountListProps = {
   accounts: AccountSummary[];
   readOnly?: boolean;
+  sort?: AccountListSort;
+  onSortChange?: (sort: AccountListSort) => void;
   onAction?: (account: AccountSummary, action: AccountAction) => void;
 };
 
-type AccountListSortKey = "account" | "status" | "plan" | "quota" | "credits" | "warmup";
-type SortDirection = "asc" | "desc";
-type AccountListSort = {
+export type AccountListSortKey = "account" | "status" | "plan" | "quota" | "credits" | "warmup";
+export type SortDirection = "asc" | "desc";
+export type AccountListSort = {
   key: AccountListSortKey;
   direction: SortDirection;
 } | null;
@@ -238,9 +240,16 @@ function QuotaMeter({ percent }: { percent: number | null }) {
   );
 }
 
-export function AccountList({ accounts, readOnly = false, onAction }: AccountListProps) {
+export function AccountList({
+  accounts,
+  readOnly = false,
+  sort: controlledSort,
+  onSortChange,
+  onAction,
+}: AccountListProps) {
   const blurred = usePrivacyStore((s) => s.blurred);
-  const [sort, setSort] = useState<AccountListSort>(null);
+  const [uncontrolledSort, setUncontrolledSort] = useState<AccountListSort>(null);
+  const sort = controlledSort === undefined ? uncontrolledSort : controlledSort;
   const sortedAccounts = useMemo(() => {
     if (!sort) {
       return accounts;
@@ -252,12 +261,13 @@ export function AccountList({ accounts, readOnly = false, onAction }: AccountLis
   }, [accounts, sort]);
 
   const handleSort = (key: AccountListSortKey) => {
-    setSort((current) => {
-      if (current?.key !== key) {
-        return { key, direction: "asc" };
-      }
-      return { key, direction: current.direction === "asc" ? "desc" : "asc" };
-    });
+    const nextSort: AccountListSort = sort?.key === key
+      ? { key, direction: sort.direction === "asc" ? "desc" : "asc" }
+      : { key, direction: "asc" };
+    if (controlledSort === undefined) {
+      setUncontrolledSort(nextSort);
+    }
+    onSortChange?.(nextSort);
   };
 
   if (accounts.length === 0) {

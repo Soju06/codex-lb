@@ -114,6 +114,27 @@ describe("AccountList", () => {
     expect(screen.getByRole("button", { name: "Account, sorted descending" })).toBeInTheDocument();
   });
 
+  it("uses controlled sort state and reports the next header sort", async () => {
+    const user = userEvent.setup();
+    const onSortChange = vi.fn();
+    render(
+      <AccountList
+        accounts={[
+          createAccountSummary({ accountId: "acc-b", displayName: "Beta Account" }),
+          createAccountSummary({ accountId: "acc-a", displayName: "Alpha Account" }),
+        ]}
+        sort={{ key: "account", direction: "asc" }}
+        onSortChange={onSortChange}
+      />,
+    );
+
+    expect(rowNames()).toEqual(["Alpha Account", "Beta Account"]);
+
+    await user.click(screen.getByRole("button", { name: "Account, sorted ascending" }));
+
+    expect(onSortChange).toHaveBeenCalledWith({ key: "account", direction: "desc" });
+  });
+
   it("sorts quota by the lowest visible remaining quota percent", async () => {
     const user = userEvent.setup();
     render(

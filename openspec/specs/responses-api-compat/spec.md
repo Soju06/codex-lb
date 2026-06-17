@@ -103,7 +103,7 @@ When an HTTP bridge session receives an anonymous upstream `previous_response_no
 - **AND** the downstream error code is not `previous_response_not_found`
 
 ### Requirement: WebSocket full-resend previous-response misses retry without stale anchor
-When a direct WebSocket `response.create` request includes both `previous_response_id` and a full resend payload, the service MUST retain a safe replay body without `previous_response_id`. If upstream rejects the anchor with `previous_response_not_found` before `response.created`, the service MUST reconnect and replay the retained full payload as a fresh turn instead of forwarding the raw upstream invalid-request error.
+When a direct WebSocket `response.create` request includes both `previous_response_id` and a self-contained full resend payload, the service MUST retain a safe replay body without `previous_response_id`. If upstream rejects the anchor with `previous_response_not_found` before `response.created`, the service MUST reconnect and replay the retained full payload as a fresh turn instead of forwarding the raw upstream invalid-request error. A payload that only carries incremental tool outputs for tool calls that are not also present in the same request is not self-contained and MUST NOT be replayed as a fresh turn without `previous_response_id`.
 
 #### Scenario: full-resend WebSocket follow-up loses just-completed anchor
 - **WHEN** a WebSocket `/v1/responses` or `/backend-api/codex/responses` follow-up has `previous_response_id`
@@ -112,6 +112,13 @@ When a direct WebSocket `response.create` request includes both `previous_respon
 - **THEN** the service reconnects the upstream WebSocket
 - **AND** it replays the same request without `previous_response_id`
 - **AND** the downstream client receives the recovered response events, not the raw `previous_response_not_found` error
+
+#### Scenario: output-only WebSocket tool delta is not replayed as a fresh turn
+- **WHEN** a WebSocket `/v1/responses` or `/backend-api/codex/responses` follow-up has `previous_response_id`
+- **AND** the request payload carries `function_call_output`, `custom_tool_call_output`, or `apply_patch_call_output` items without their matching tool-call items in the same payload
+- **AND** upstream emits `previous_response_not_found` before assigning a response id
+- **THEN** the service MUST NOT replay that payload as a fresh turn without `previous_response_id`
+- **AND** the downstream client receives a retryable continuity failure rather than a fabricated fresh turn
 
 ### Requirement: Public Responses errors mask previous-response misses
 Public Responses endpoints MUST NOT return an OpenAI-shaped `previous_response_not_found` error to clients. If a lower layer still raises or collects that error, the API layer MUST rewrite it to a retryable `stream_incomplete` continuity failure and remove the missing response id from the public payload.

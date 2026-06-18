@@ -6,6 +6,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+import yaml
 
 pytestmark = pytest.mark.unit
 
@@ -44,6 +45,28 @@ def _helm_template(*args: str) -> str:
         text=True,
     )
     return completed.stdout
+
+
+def _helm_documents(rendered: str) -> list[dict]:
+    return [document for document in yaml.safe_load_all(rendered) if document]
+
+
+def _smoke_install_command(script: str, log_message: str) -> str:
+    lines = script.splitlines()
+    start = next(index for index, line in enumerate(lines) if f'log_step "{log_message}"' in line)
+    command_start = next(
+        index for index in range(start + 1, len(lines)) if re.match(r"\s*helm upgrade --install\b", lines[index])
+    )
+    command_lines = []
+    for line in lines[command_start:]:
+        command_lines.append(line.strip())
+        if not line.rstrip().endswith("\\"):
+            break
+    return " ".join(command_lines).replace("\\", " ")
+
+
+def _command_sets_value(command: str, value: str) -> bool:
+    return re.search(rf"(?:^|\s)--set(?:\s+|=){re.escape(value)}(?:\s|$)", command) is not None
 
 
 def _deployment_annotation(rendered: str, key: str) -> str:
@@ -394,15 +417,30 @@ def test_helm_test_pod_image_can_be_overridden() -> None:
     assert "imagePullPolicy: Never" in rendered
     assert "docker.io/library/busybox:1.37" not in rendered
 
+    (test_pod,) = _helm_documents(rendered)
+    (container,) = test_pod["spec"]["containers"]
+    assert container["command"][:2] == ["sh", "-c"]
+    script = container["command"][2]
+    assert "if command -v python >/dev/null 2>&1; then" in script
+    assert "python - <<'PY'" in script
+    assert "import urllib.request" in script
+    assert "urllib.request.urlopen(url, timeout=10)" in script
+    assert "else" in script
+    assert "wget --spider --timeout=10 http://codex-lb:2455/health || exit 1" in script
+    assert "wget -qO- --timeout=10 http://codex-lb:2455/health/ready || exit 1" in script
+
 
 def test_kind_smoke_overrides_helm_test_image_and_external_db_replicas() -> None:
     script = (_REPO_ROOT / "scripts" / "helm-kind-smoke.sh").read_text()
+    bundled_install = _smoke_install_command(script, "installing bundled release ${release}")
+    external_db_install = _smoke_install_command(script, "installing external DB release ${release}")
 
     assert '--set test.image.registry="${IMAGE_REGISTRY}"' in script
     assert '--set test.image.repository="${IMAGE_REPOSITORY}"' in script
     assert '--set test.image.tag="${IMAGE_TAG}"' in script
     assert "--set test.image.pullPolicy=IfNotPresent" in script
-    assert "--set replicaCount=1" in script
+    assert _command_sets_value(external_db_install, "replicaCount=1")
+    assert not _command_sets_value(bundled_install, "replicaCount=1")
 
 
 def test_kind_smoke_logs_timestamped_major_steps() -> None:

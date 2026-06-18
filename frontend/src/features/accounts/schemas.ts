@@ -97,7 +97,7 @@ export const AccountSummarySchema = z.object({
 
 const RateLimitResetCreditItemSchema = z.object({
   id: z.string(),
-  status: z.string(),
+  status: z.string().nullable().optional(),
   resetType: z.string().nullable().optional(),
   grantedAt: z.iso.datetime({ offset: true }).nullable().optional(),
   expiresAt: z.iso.datetime({ offset: true }).nullable().optional(),
@@ -114,8 +114,8 @@ export const RateLimitResetCreditsSnapshotSchema = z.object({
 });
 
 export const ConsumeRateLimitResetCreditResponseSchema = z.object({
-  code: z.string(),
-  windowsReset: z.number(),
+  code: z.string().nullable().optional(),
+  windowsReset: z.number().nullable().optional(),
   redeemedAt: z.iso.datetime({ offset: true }).nullable(),
 });
 

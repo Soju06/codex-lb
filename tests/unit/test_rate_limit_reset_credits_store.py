@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 import pytest
 
-from app.core.clients.rate_limit_reset_credits import RateLimitResetCreditsSnapshot
+from app.core.clients.rate_limit_reset_credits import RateLimitResetCreditsSnapshot, ResetCreditItem
 from app.modules.rate_limit_reset_credits.store import (
     RateLimitResetCreditsStore,
     get_rate_limit_reset_credits_store,
@@ -13,6 +15,10 @@ pytestmark = pytest.mark.unit
 
 def _snapshot(available_count: int = 1) -> RateLimitResetCreditsSnapshot:
     return RateLimitResetCreditsSnapshot(available_count=available_count)
+
+
+def _credit(credit_id: str, *, expires_at: str, status: str = "available") -> ResetCreditItem:
+    return ResetCreditItem.model_validate({"id": credit_id, "expires_at": expires_at, "status": status})
 
 
 @pytest.mark.asyncio
@@ -41,6 +47,44 @@ async def test_set_overwrites_prior_snapshot() -> None:
     snapshot = store.get("acc_a")
     assert snapshot is not None
     assert snapshot.available_count == 5
+
+
+@pytest.mark.asyncio
+async def test_generation_changes_are_scoped_to_account() -> None:
+    store = RateLimitResetCreditsStore()
+    await store.set("acc_a", _snapshot(1))
+    await store.set("acc_b", _snapshot(2))
+    generation_b = store.generation("acc_b")
+
+    await store.set("acc_a", _snapshot(9))
+
+    assert await store.set_if_generation("acc_b", _snapshot(7), generation_b)
+    snapshot_b = store.get("acc_b")
+    assert snapshot_b is not None
+    assert snapshot_b.available_count == 7
+
+
+@pytest.mark.asyncio
+async def test_same_account_generation_change_rejects_stale_write() -> None:
+    store = RateLimitResetCreditsStore()
+    await store.set("acc_a", _snapshot(1))
+    generation = store.generation("acc_a")
+
+    await store.invalidate("acc_a")
+
+    assert not await store.set_if_generation("acc_a", _snapshot(7), generation)
+    assert store.get("acc_a") is None
+
+
+@pytest.mark.asyncio
+async def test_invalidate_all_rejects_in_flight_writes_for_any_account() -> None:
+    store = RateLimitResetCreditsStore()
+    generation = store.generation("acc_a")
+
+    await store.invalidate()
+
+    assert not await store.set_if_generation("acc_a", _snapshot(7), generation)
+    assert store.get("acc_a") is None
 
 
 @pytest.mark.asyncio
@@ -74,6 +118,32 @@ async def test_invalidate_missing_account_is_noop() -> None:
     store = RateLimitResetCreditsStore()
     await store.invalidate("never_existed")  # must not raise
     assert store.get("never_existed") is None
+
+
+@pytest.mark.asyncio
+async def test_mark_credit_redeemed_preserves_remaining_available_credits() -> None:
+    store = RateLimitResetCreditsStore()
+    await store.set(
+        "acc_a",
+        RateLimitResetCreditsSnapshot(
+            available_count=2,
+            nearest_expires_at=datetime.fromisoformat("2026-06-20T00:00:00+00:00"),
+            credits=[
+                _credit("soon", expires_at="2026-06-20T00:00:00Z"),
+                _credit("late", expires_at="2026-07-10T00:00:00Z"),
+            ],
+        ),
+    )
+    redeemed_at = datetime.fromisoformat("2026-06-18T12:00:00+00:00")
+
+    await store.mark_credit_redeemed("acc_a", "soon", redeemed_at=redeemed_at)
+
+    snapshot = store.get("acc_a")
+    assert snapshot is not None
+    assert snapshot.available_count == 1
+    assert snapshot.nearest_expires_at == datetime.fromisoformat("2026-07-10T00:00:00+00:00")
+    assert [(credit.id, credit.status) for credit in snapshot.credits] == [("soon", "redeemed"), ("late", "available")]
+    assert snapshot.credits[0].redeemed_at == redeemed_at
 
 
 @pytest.mark.asyncio

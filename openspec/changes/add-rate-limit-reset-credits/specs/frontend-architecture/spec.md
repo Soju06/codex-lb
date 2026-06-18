@@ -40,10 +40,10 @@ The Accounts page `AccountListItem` SHALL render a count badge pinned to the rig
 
 ### Requirement: Accounts page can sort by available reset credits
 
-The Accounts page sort selector SHALL offer a "Most reset credits" option that orders accounts by `available_reset_credits` descending. Ties SHALL be broken by `reset_credit_nearest_expires_at` ascending (soonest expiring first), and accounts with no expiry SHALL sort after accounts that have one.
+The Accounts page sort selector SHALL offer a "Most reset credits" option and SHALL use it as the default Accounts page ordering. That ordering SHALL sort accounts by `available_reset_credits` descending. Ties SHALL be broken by `reset_credit_nearest_expires_at` ascending (soonest expiring first), and accounts with no expiry SHALL sort after accounts that have one.
 
 #### Scenario: More available credits sorts first
-- **WHEN** the operator selects "Most reset credits"
+- **WHEN** the operator opens the Accounts page with the default sort mode
 - **AND** account A has `available_reset_credits: 4` and account B has `available_reset_credits: 1`
 - **THEN** account A appears before account B
 

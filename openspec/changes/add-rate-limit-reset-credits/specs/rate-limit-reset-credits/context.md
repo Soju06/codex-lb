@@ -25,22 +25,23 @@ These endpoints are undocumented and were reverse-engineered from the official
 [`aaamosh/codex-reset`](https://github.com/aaamosh/codex-reset) — a single-account CLI
 implementation that codex-lb's multi-account, dashboard-driven, in-memory-cached variant
 is based on. OpenAI may rename, gate, or remove these endpoints at any time; the codex-lb
-client treats non-200/non-JSON responses defensively.
+client treats non-200, non-JSON, and schema-drifted 200 responses defensively.
 
 ## Decisions
 
-- **In-memory only.** No DB column, no migration. Snapshots repopulate within one tick of
-  startup. Restart cost: up to 60s of `available_reset_credits: 0` everywhere.
+- **In-memory only.** No DB column, no migration. Each replica refreshes its own process-local
+  snapshots, which repopulate within one tick of startup. Restart cost: up to 60s of
+  `available_reset_credits: 0` on that replica.
 - **Server picks the credit, not the client.** `POST /consume` takes only the account id;
   the server selects the soonest-expiring available credit from the freshest snapshot and
   generates the `redeem_request_id`. Avoids stale-UI and clock-skew races.
 - **Never mutates account status.** Account status is owned by usage refresh
   (see `usage-refresh-policy`). Reset-credit polling failure logs and retains the prior
   snapshot; it does not deactivate, rate-limit, or quota-block any account.
-- **Dedicated scheduler, not folded into usage refresh.** Reuses the exact
-  `UsageRefreshScheduler` shape (leader-gated, `asyncio.Lock`-guarded, configurable
-  cadence) but keeps the two upstream calls decoupled. The scheduler always starts with
-  the app; only the interval is configurable. See `design.md` for the rationale.
+- **Dedicated scheduler, not folded into usage refresh.** Reuses the `UsageRefreshScheduler`
+  loop shape (`asyncio.Lock`-guarded, configurable cadence) but intentionally does not use
+  leader election because the cache is process-local. The scheduler always starts with the
+  app; only the interval is configurable. See `design.md` for the rationale.
 
 ## Failure Modes
 
@@ -52,9 +53,13 @@ client treats non-200/non-JSON responses defensively.
 - **Upstream 401/403/auth-expired.** Logged; prior snapshot retained. Does NOT deactivate
   the account. If the token is genuinely expired, usage refresh / OAuth refresh owns the
   deactivation path.
-- **Concurrent consume clicks.** Server re-selects from the snapshot each call; the second
-  click either consumes a different credit (if multiple were available) or surfaces
-  upstream's "no available credit" error.
+- **Concurrent consume clicks.** Redemption is serialized per account so two overlapping
+  consume requests cannot forward the same cached `credit_id` upstream. After the first
+  request finishes, the second request re-reads the account snapshot and either sees a
+  refreshed state or fails with a dashboard conflict when no credit is still available.
+- **Upstream consume failures.** Client-facing upstream failures are preserved as dashboard
+  errors (`401`, `403`, `409`), while other consume failures surface as dashboard `503`
+  responses instead of falling into the generic internal-error handler.
 
 ## Example: list response
 
@@ -96,8 +101,8 @@ client treats non-200/non-JSON responses defensively.
 
 ## Operational Notes
 
-- The 60s cadence matches usage refresh; both are leader-gated, so adding accounts scales
-  upstream load by the same factor usage refresh already does.
+- The 60s cadence matches usage refresh, but each replica polls because each replica serves
+  dashboard reads from its own process-local snapshot cache.
 - A credit is consumed as soon as upstream returns 200 — treat the confirmation dialog as
   the point of no return.
 

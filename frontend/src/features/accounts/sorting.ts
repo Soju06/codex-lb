@@ -17,7 +17,7 @@ export const ACCOUNT_SORT_OPTIONS: readonly { value: AccountSortMode; label: str
   { value: "name_desc", label: "Name (Z-A)" },
 ] as const;
 
-export const DEFAULT_ACCOUNT_SORT_MODE: AccountSortMode = "reset_soonest";
+export const DEFAULT_ACCOUNT_SORT_MODE: AccountSortMode = "most_reset_credits";
 
 function visibleQuotaResetTimestamps(
   account: AccountSummary,

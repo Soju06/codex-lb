@@ -30,7 +30,7 @@ The reference is a single-account CLI; codex-lb needs a multi-account, dashboard
 ## Decisions
 
 ### Decision: Dedicated module + scheduler, mirroring `usage_refresh` (not folding into the usage loop)
-**Rationale:** Usage refresh owns account-status derivation and has a dense, scenario-heavy spec (`usage-refresh-policy`) tying it to quota reconciliation, cooldowns, and warm-up. Bolting credits onto that loop would couple two upstream calls and their failure modes, and muddy the usage-refresh contract. A dedicated `RateLimitResetCreditsRefreshScheduler` reuses the exact `UsageRefreshScheduler` shape (leader-gated, `asyncio.Lock`-guarded `_refresh_once`, interval-only configuration) and always starts with the application.
+**Rationale:** Usage refresh owns account-status derivation and has a dense, scenario-heavy spec (`usage-refresh-policy`) tying it to quota reconciliation, cooldowns, and warm-up. Bolting credits onto that loop would couple two upstream calls and their failure modes, and muddy the usage-refresh contract. A dedicated `RateLimitResetCreditsRefreshScheduler` reuses the `UsageRefreshScheduler` loop shape (`asyncio.Lock`-guarded `_refresh_once`, interval-only configuration) and always starts with the application. Unlike usage refresh, it deliberately runs on every replica because reset-credit snapshots are process-local and dashboard reads must be consistent regardless of which replica handles the request.
 **Alternatives considered:** (a) Fold into `UsageRefreshScheduler._refresh_once` — rejected for the coupling above. (b) Pure passthrough via the local `wham_router` proxy — rejected because the dashboard needs the in-memory store and per-account token decryption that the proxy router does not have, and the requirement is "refresh every 60s + store in-memory."
 
 ### Decision: Server picks the soonest-expiring credit at consume time
@@ -55,7 +55,7 @@ The reference is a single-account CLI; codex-lb needs a multi-account, dashboard
 - **[In-memory cache lost on restart]** → Mitigation: acceptable per requirements; the next 60s tick repopulates. UI treats missing snapshot as `available_reset_credits: 0` (hidden affordances), not an error.
 - **[Credit consumed even on partial reset]** (upstream behavior: "if POST returns 200, the credit is gone") → Mitigation: confirmation dialog explicitly warns that the credit is consumed regardless of whether the rate-limit window moves. On success we invalidate the cache and let the next tick reconcile.
 - **[Race: credit expires between render and click]** → Mitigation: server re-selects from the freshest cached snapshot at consume time and surfaces upstream's error if the chosen credit is no longer redeemable.
-- **[Many accounts = many upstream calls per tick]** → Mitigation: existing per-account usage-refresh already pays this cost on the same cadence; leader-gated so only one replica polls. Reuses the same skip rules (paused/deactivated/missing chatgpt-account-id).
+- **[Many accounts = many upstream calls per tick]** → Mitigation: reuse the same skip rules (paused/deactivated/missing chatgpt-account-id) and keep the interval configurable. Each replica polls so its process-local cache is useful for dashboard reads; moving snapshots to shared storage can later reduce duplicate polling if upstream load becomes a problem.
 - **[Guest read-only dashboard users]** → Mitigation: `POST /consume` requires `require_dashboard_write_access`; guests can see the badge/button (count is read off `AccountSummary`) but cannot redeem.
 
 ## Migration Plan

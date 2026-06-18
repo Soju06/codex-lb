@@ -157,7 +157,26 @@ def build_owner_forward_headers(
     context: HTTPBridgeForwardContext,
 ) -> dict[str, str]:
     filtered = filter_inbound_headers(headers)
-    forwarded = {key: value for key, value in filtered.items() if key.lower() not in _BRIDGE_UNSAFE_HEADER_NAMES}
+    # Per the hop-by-hop contract, also drop any header named by the inbound
+    # Connection header in addition to the fixed unsafe set.
+    connection_value = next(
+        (value for key, value in headers.items() if key.lower() == "connection"),
+        "",
+    )
+    connection_named = {token.strip().lower() for token in connection_value.split(",") if token.strip()}
+    drop = _BRIDGE_UNSAFE_HEADER_NAMES | connection_named
+    forwarded = {key: value for key, value in filtered.items() if key.lower() not in drop}
+    # filter_inbound_headers strips Authorization, but the owner instance
+    # re-validates the client API key from this header (see
+    # _validate_internal_bridge_api_key) before swapping in its own upstream
+    # access token. Preserve it so api_key_auth_enabled deployments still
+    # authenticate forwarded bridge requests.
+    authorization = next(
+        (value for key, value in headers.items() if key.lower() == "authorization"),
+        None,
+    )
+    if authorization is not None:
+        forwarded["authorization"] = authorization
     forwarded[HTTP_BRIDGE_FORWARDED_HEADER] = "1"
     forwarded[HTTP_BRIDGE_ORIGIN_INSTANCE_HEADER] = context.origin_instance
     forwarded[HTTP_BRIDGE_TARGET_INSTANCE_HEADER] = context.target_instance

@@ -374,7 +374,7 @@ def test_build_owner_forward_headers_strips_hop_by_hop_headers() -> None:
     assert HTTP_BRIDGE_TARGET_INSTANCE_HEADER in headers
 
 
-def test_build_owner_forward_headers_strips_authorization_and_host() -> None:
+def test_build_owner_forward_headers_preserves_authorization_strips_host() -> None:
     payload = _payload()
     context = HTTPBridgeForwardContext(
         origin_instance="instance-a",
@@ -391,9 +391,34 @@ def test_build_owner_forward_headers_strips_authorization_and_host() -> None:
 
     headers = build_owner_forward_headers(headers=inbound, payload=payload, context=context)
 
-    assert "Authorization" not in headers
-    assert "authorization" not in headers
+    # The owner instance re-validates the client API key from Authorization
+    # (see _validate_internal_bridge_api_key) before swapping in its own
+    # upstream token, so the header must survive the forward.
+    assert headers.get("authorization") == "Bearer downstream-key"
     assert "Host" not in headers
     assert "host" not in headers
     assert "content-length" not in headers
     assert headers.get("x-openai-client-version") == "1.2.3"
+
+
+def test_build_owner_forward_headers_drops_connection_named_headers() -> None:
+    payload = _payload()
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=False,
+        downstream_turn_state=None,
+    )
+    inbound = {
+        "Connection": "keep-alive, X-Custom-Hop",
+        "X-Custom-Hop": "drop-me",
+        "x-request-id": "req-123",
+    }
+
+    headers = build_owner_forward_headers(headers=inbound, payload=payload, context=context)
+
+    assert "X-Custom-Hop" not in headers
+    assert "x-custom-hop" not in headers
+    assert "Connection" not in headers
+    assert "connection" not in headers
+    assert headers.get("x-request-id") == "req-123"

@@ -487,7 +487,7 @@ The service SHALL accept built-in Responses tool definitions on `/backend-api/co
 - **THEN** the proxy forwards those tool objects upstream instead of returning a local `invalid_request_error`
 
 ### Requirement: Compact requests drop tool-only fields
-The service SHALL remove `tools`, `tool_choice`, and `parallel_tool_calls` from compact request payloads before calling the upstream compact endpoint.
+The service SHALL remove `tools` and `tool_choice` from compact request payloads, and set `parallel_tool_calls` to `false`, before calling the upstream compact endpoint.
 
 #### Scenario: compact request reuses a full Responses payload shape
 - **WHEN** a client sends `/backend-api/codex/responses/compact` or `/v1/responses/compact` with `tools`, `tool_choice`, or `parallel_tool_calls`

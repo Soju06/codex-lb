@@ -1,5 +1,3 @@
-import { AlertTriangle } from "lucide-react";
-
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import {
   useAccountMutations,
@@ -36,6 +34,38 @@ function pickSoonestAvailableCredit(
   });
 }
 
+function CreditExpiryLine({
+  expiresAt,
+  label,
+  suffix,
+  colorClass,
+}: {
+  expiresAt: string | null | undefined;
+  label: string;
+  suffix?: string;
+  colorClass?: string;
+}) {
+  if (!expiresAt) {
+    return <p className="text-xs text-muted-foreground">{label}{suffix ? ` ${suffix}` : ""}</p>;
+  }
+  const countdown = formatSingleUnitRemaining(expiresAt);
+  return (
+    <p className="text-xs text-muted-foreground">
+      {label}{" "}
+      {formatLocalDateTimeSeconds(expiresAt)}
+      <span
+        className={cn(
+          "tabular-nums",
+          colorClass ?? (countdown.expiringSoon ? "text-destructive" : "text-foreground"),
+        )}
+      >
+        ({countdown.label})
+      </span>
+      {suffix ? ` ${suffix}` : ""}
+    </p>
+  );
+}
+
 export function ResetCreditConfirmDialog({
   open,
   onOpenChange,
@@ -44,9 +74,10 @@ export function ResetCreditConfirmDialog({
   const { resetCreditConsumeMutation } = useAccountMutations();
   const snapshotQuery = useRateLimitResetCredits(accountId, open);
   const soonest = pickSoonestAvailableCredit(snapshotQuery.data?.credits);
-  const title = soonest?.title?.trim() || "Rate-limit reset credit";
-  const expiresAt = soonest?.expiresAt ?? null;
-  const countdown = expiresAt ? formatSingleUnitRemaining(expiresAt) : null;
+  const otherCredits = (snapshotQuery.data?.credits ?? []).filter(
+    (c) => c.status === "available" && c.id !== soonest?.id,
+  );
+  const availableCount = snapshotQuery.data?.availableCount ?? 0;
   const pending = resetCreditConsumeMutation.isPending;
 
   const handleConfirm = () => {
@@ -84,33 +115,32 @@ export function ResetCreditConfirmDialog({
       onOpenChange={handleOpenChange}
       onConfirm={handleConfirm}
     >
-      <div className="space-y-3 text-sm">
-        <div className="rounded-md border bg-muted/30 px-3 py-2">
-          <p className="font-medium">{title}</p>
-          {expiresAt ? (
-            <p className="mt-1 text-xs text-muted-foreground">
-              Expires {formatLocalDateTimeSeconds(expiresAt)}
-              {countdown ? (
-                <span
-                  className={cn(
-                    "ml-1 tabular-nums",
-                    countdown.expiringSoon ? "text-destructive" : "text-foreground",
-                  )}
-                >
-                  ({countdown.label})
-                </span>
-              ) : null}
-            </p>
-          ) : (
-            <p className="mt-1 text-xs text-muted-foreground">No expiry provided.</p>
-          )}
-        </div>
-        <p className="flex items-start gap-2 text-xs text-muted-foreground">
-          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden="true" />
-          <span>
-            This credit is consumed even if the rate-limit window doesn&apos;t move.
-          </span>
+      <div className="text-sm">
+        <p className="font-medium">
+          {availableCount} free rate limit reset{availableCount !== 1 ? "s" : ""}
         </p>
+        {soonest ? (
+          <div className="mt-2 space-y-1">
+            <CreditExpiryLine
+              expiresAt={soonest.expiresAt}
+              label="Reset expires on"
+              suffix="will be used"
+            />
+            {otherCredits.map((credit) => (
+              <CreditExpiryLine
+                key={credit.id}
+                expiresAt={credit.expiresAt}
+                label="Other expires on"
+                colorClass="text-muted-foreground"
+              />
+            ))}
+            {!soonest.expiresAt && otherCredits.length === 0 ? (
+              <p className="text-xs text-muted-foreground">No upcoming expiry data available.</p>
+            ) : null}
+          </div>
+        ) : availableCount > 0 ? (
+          <p className="mt-1 text-xs text-muted-foreground">No upcoming expiry data available.</p>
+        ) : null}
       </div>
     </ConfirmDialog>
   );

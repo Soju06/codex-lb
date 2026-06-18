@@ -1,0 +1,4 @@
+- [x] 1. Add regression coverage for configurable Helm test pod image, CI smoke overrides, external DB replica override, and timestamped smoke logging.
+- [x] 2. Add chart values/schema/template support for the Helm test image while preserving the BusyBox default.
+- [x] 3. Update kind smoke script to use the loaded CI image for Helm tests, set external DB replicas to one, and log major phases with UTC timestamps.
+- [x] 4. Run targeted pytest, Helm chart validation where available, `openspec validate --specs`, and `git diff --check`.

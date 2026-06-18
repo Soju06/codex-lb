@@ -366,6 +366,56 @@ def test_bundled_kind_smoke_preserves_primary_ingress_paths() -> None:
     assert "--wait \\" in script
 
 
+def test_helm_test_pod_uses_configurable_default_image() -> None:
+    rendered = _helm_template(
+        "--show-only",
+        "templates/tests/test-connection.yaml",
+    )
+
+    assert "image: docker.io/library/busybox:1.37" in rendered
+    assert "imagePullPolicy: IfNotPresent" in rendered
+
+
+def test_helm_test_pod_image_can_be_overridden() -> None:
+    rendered = _helm_template(
+        "--show-only",
+        "templates/tests/test-connection.yaml",
+        "--set",
+        "test.image.registry=ghcr.io",
+        "--set",
+        "test.image.repository=soju06/codex-lb",
+        "--set",
+        "test.image.tag=ci",
+        "--set",
+        "test.image.pullPolicy=Never",
+    )
+
+    assert "image: ghcr.io/soju06/codex-lb:ci" in rendered
+    assert "imagePullPolicy: Never" in rendered
+    assert "docker.io/library/busybox:1.37" not in rendered
+
+
+def test_kind_smoke_overrides_helm_test_image_and_external_db_replicas() -> None:
+    script = (_REPO_ROOT / "scripts" / "helm-kind-smoke.sh").read_text()
+
+    assert '--set test.image.registry="${IMAGE_REGISTRY}"' in script
+    assert '--set test.image.repository="${IMAGE_REPOSITORY}"' in script
+    assert '--set test.image.tag="${IMAGE_TAG}"' in script
+    assert "--set test.image.pullPolicy=IfNotPresent" in script
+    assert "--set replicaCount=1" in script
+
+
+def test_kind_smoke_logs_timestamped_major_steps() -> None:
+    script = (_REPO_ROOT / "scripts" / "helm-kind-smoke.sh").read_text()
+
+    assert 'date -u +"%Y-%m-%dT%H:%M:%SZ"' in script
+    assert "log_step" in script
+    assert 'log_step "building Helm dependencies"' in script
+    assert 'log_step "installing bundled release ${release}"' in script
+    assert 'log_step "installing external PostgreSQL release ${db_release}"' in script
+    assert 'log_step "running helm test for ${release} in ${namespace}"' in script
+
+
 def test_auto_advertise_bridge_url_uses_service_port() -> None:
     rendered = _helm_template(
         "--show-only",

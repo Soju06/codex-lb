@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.20.1](https://github.com/Soju06/codex-lb/compare/v1.20.0...v1.20.1) (2026-06-18)
+
+
+### Bug Fixes
+
+* **release:** guard stable artifact publishing ([#1049](https://github.com/Soju06/codex-lb/issues/1049)) ([30aa30e](https://github.com/Soju06/codex-lb/commit/30aa30e45f8e3ed5a0542c2973f4d9da6e65c97c))
+
+
+### Performance Improvements
+
+* **dashboard:** split request log page count ([#1038](https://github.com/Soju06/codex-lb/issues/1038)) ([ea6dc8b](https://github.com/Soju06/codex-lb/commit/ea6dc8bf98236c0bf48f7510a9f9c88adf4bc7e4))
+
 ## [1.20.0](https://github.com/Soju06/codex-lb/compare/v1.19.0...v1.20.0) (2026-06-16)
 
 

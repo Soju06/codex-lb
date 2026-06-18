@@ -21,18 +21,19 @@ function pickSoonestAvailableCredit(
   if (!credits || credits.length === 0) {
     return null;
   }
-  const available = credits.filter(
-    (credit) => credit.status === "available" && credit.expiresAt != null,
-  );
+  const available = credits.filter((credit) => credit.status === "available");
   if (available.length === 0) {
     return null;
   }
-  return available.reduce((soonest, credit) =>
-    new Date(credit.expiresAt as string).getTime() <
-    new Date((soonest.expiresAt as string) ?? 0).getTime()
-      ? credit
-      : soonest,
-  );
+  return available.reduce((soonest, credit) => {
+    const creditExpiresAt = credit.expiresAt
+      ? new Date(credit.expiresAt).getTime()
+      : Number.POSITIVE_INFINITY;
+    const soonestExpiresAt = soonest.expiresAt
+      ? new Date(soonest.expiresAt).getTime()
+      : Number.POSITIVE_INFINITY;
+    return creditExpiresAt < soonestExpiresAt ? credit : soonest;
+  });
 }
 
 export function ResetCreditConfirmDialog({
@@ -101,7 +102,7 @@ export function ResetCreditConfirmDialog({
               ) : null}
             </p>
           ) : (
-            <p className="mt-1 text-xs text-muted-foreground">No active credit snapshot available.</p>
+            <p className="mt-1 text-xs text-muted-foreground">No expiry provided.</p>
           )}
         </div>
         <p className="flex items-start gap-2 text-xs text-muted-foreground">

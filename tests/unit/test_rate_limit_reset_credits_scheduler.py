@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any
@@ -165,6 +166,69 @@ async def test_upstream_error_retains_prior_snapshot_and_does_not_mutate_status(
 
 
 @pytest.mark.asyncio
+async def test_refresh_does_not_resurrect_snapshot_invalidated_during_fetch() -> None:
+    store = RateLimitResetCreditsStore()
+    prior = RateLimitResetCreditsSnapshot(available_count=1)
+    await store.set("acc_redeemed", prior)
+    account = _make_account("acc_redeemed", status=AccountStatus.ACTIVE)
+    fetch_started = asyncio.Event()
+    release_fetch = asyncio.Event()
+
+    async def fetch_fn(access_token: str, account_id: str | None) -> ResetCreditsResponse:
+        fetch_started.set()
+        await release_fetch.wait()
+        return _response(available_count=1)
+
+    refresh_task = asyncio.create_task(
+        refresh_reset_credits_for_accounts(
+            accounts=[account],
+            encryptor=StubEncryptor(),
+            store=store,
+            fetch_fn=fetch_fn,
+        )
+    )
+    await fetch_started.wait()
+
+    await store.invalidate("acc_redeemed")
+    release_fetch.set()
+    await refresh_task
+
+    assert store.get("acc_redeemed") is None
+
+
+@pytest.mark.asyncio
+async def test_unrelated_account_write_does_not_drop_in_flight_refresh() -> None:
+    store = RateLimitResetCreditsStore()
+    await store.set("acc_a", RateLimitResetCreditsSnapshot(available_count=1))
+    account = _make_account("acc_b", status=AccountStatus.ACTIVE)
+    fetch_started = asyncio.Event()
+    release_fetch = asyncio.Event()
+
+    async def fetch_fn(access_token: str, account_id: str | None) -> ResetCreditsResponse:
+        fetch_started.set()
+        await release_fetch.wait()
+        return _response(available_count=4)
+
+    refresh_task = asyncio.create_task(
+        refresh_reset_credits_for_accounts(
+            accounts=[account],
+            encryptor=StubEncryptor(),
+            store=store,
+            fetch_fn=fetch_fn,
+        )
+    )
+    await fetch_started.wait()
+
+    await store.set("acc_a", RateLimitResetCreditsSnapshot(available_count=9))
+    release_fetch.set()
+    await refresh_task
+
+    snapshot_b = store.get("acc_b")
+    assert snapshot_b is not None
+    assert snapshot_b.available_count == 4
+
+
+@pytest.mark.asyncio
 async def test_refresh_never_calls_account_status_writes() -> None:
     """The scheduler must not transition account status under any path.
 
@@ -194,42 +258,10 @@ async def test_refresh_never_calls_account_status_writes() -> None:
 
 
 @pytest.mark.asyncio
-async def test_refresh_once_skips_when_not_leader(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Non-leader replicas perform no upstream fetches and open no DB session."""
+async def test_refresh_once_caches_snapshots_on_each_replica(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each process refreshes its own in-memory cache without leader gating."""
 
-    class NonLeader:
-        async def try_acquire(self) -> bool:
-            return False
-
-    monkeypatch.setattr(scheduler_module, "_get_leader_election", lambda: NonLeader())
-
-    session_entered = False
-
-    @asynccontextmanager
-    async def _forbidden_session():  # type: ignore[no-untyped-def]
-        nonlocal session_entered
-        session_entered = True
-        yield None
-
-    monkeypatch.setattr(scheduler_module, "get_background_session", _forbidden_session)
-
-    scheduler = RateLimitResetCreditsRefreshScheduler(interval_seconds=60)
-    await scheduler._refresh_once()
-
-    assert session_entered is False
-
-
-@pytest.mark.asyncio
-async def test_refresh_once_leader_path_caches_snapshots(monkeypatch: pytest.MonkeyPatch) -> None:
-    """End-to-end leader-gated tick wires accounts -> store without status writes."""
-
-    class Leader:
-        async def try_acquire(self) -> bool:
-            return True
-
-    monkeypatch.setattr(scheduler_module, "_get_leader_election", lambda: Leader())
-
-    account = _make_account("acc_leader")
+    account = _make_account("acc_replica")
     store = RateLimitResetCreditsStore()
 
     captured: list[Any] = []
@@ -265,8 +297,8 @@ async def test_refresh_once_leader_path_caches_snapshots(monkeypatch: pytest.Mon
     scheduler = RateLimitResetCreditsRefreshScheduler(interval_seconds=60)
     await scheduler._refresh_once()
 
-    assert ("fetch", "token-for-acc_leader", "workspace-x") in captured
-    leader_snapshot = store.get("acc_leader")
-    assert leader_snapshot is not None
-    assert leader_snapshot.available_count == 7
+    assert ("fetch", "token-for-acc_replica", "workspace-x") in captured
+    snapshot = store.get("acc_replica")
+    assert snapshot is not None
+    assert snapshot.available_count == 7
     assert account.status == AccountStatus.ACTIVE

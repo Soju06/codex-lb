@@ -1,12 +1,16 @@
 import { describe, expect, it } from "vitest";
 
-import { sortAccountsForDisplay } from "@/features/accounts/sorting";
+import { DEFAULT_ACCOUNT_SORT_MODE, sortAccountsForDisplay } from "@/features/accounts/sorting";
 import type { AccountSummary } from "@/features/accounts/schemas";
 import { createAccountSummary } from "@/test/mocks/factories";
 
 const BOTH = "both";
 
 describe("sortAccountsForDisplay — most_reset_credits", () => {
+  it("uses most reset credits as the default sort mode", () => {
+    expect(DEFAULT_ACCOUNT_SORT_MODE).toBe("most_reset_credits");
+  });
+
   it("orders accounts by available reset credits descending", () => {
     const fewer = createAccountSummary({
       accountId: "acc-fewer",

@@ -22,12 +22,12 @@ pytestmark = pytest.mark.unit
 
 
 class StubResponse:
-    def __init__(self, status: int, payload: dict | None, text: str) -> None:
+    def __init__(self, status: int, payload: object | None, text: str) -> None:
         self.status = status
         self._payload = payload
         self._text = text
 
-    async def json(self, content_type: str | None = None) -> dict:
+    async def json(self, content_type: str | None = None) -> object:
         if self._payload is None:
             raise ValueError("no json")
         return self._payload
@@ -235,6 +235,42 @@ async def test_fetch_reset_credits_handles_non_json_body() -> None:
 
 
 @pytest.mark.asyncio
+async def test_fetch_reset_credits_rejects_malformed_success_body() -> None:
+    state = ClientState()
+    client = StubRetryClient([StubResponse(200, ["not", "an", "object"], "")], state)
+
+    with pytest.raises(ResetCreditFetchError) as excinfo:
+        await fetch_reset_credits(
+            "access-token",
+            None,
+            base_url="http://upstream.test/backend-api",
+            timeout_seconds=2.0,
+            max_retries=0,
+            client=cast(Any, client),
+        )
+
+    assert excinfo.value.status_code == 502
+
+
+@pytest.mark.asyncio
+async def test_fetch_reset_credits_rejects_success_body_missing_contract_fields() -> None:
+    state = ClientState()
+    client = StubRetryClient([StubResponse(200, {"credits": []}, "")], state)
+
+    with pytest.raises(ResetCreditFetchError) as excinfo:
+        await fetch_reset_credits(
+            "access-token",
+            None,
+            base_url="http://upstream.test/backend-api",
+            timeout_seconds=2.0,
+            max_retries=0,
+            client=cast(Any, client),
+        )
+
+    assert excinfo.value.status_code == 502
+
+
+@pytest.mark.asyncio
 async def test_consume_reset_credit_sends_credit_id_and_uuid_redeem_request_id() -> None:
     state = ClientState()
     client = StubRetryClient(
@@ -330,6 +366,44 @@ async def test_consume_reset_credit_raises_on_non_200() -> None:
 
     assert excinfo.value.status_code == 409
     assert excinfo.value.code == "no_credit"
+
+
+@pytest.mark.asyncio
+async def test_consume_reset_credit_rejects_malformed_success_body() -> None:
+    state = ClientState()
+    client = StubRetryClient([StubResponse(200, "<html>not json</html>", "")], state)
+
+    with pytest.raises(ConsumeResetCreditError) as excinfo:
+        await consume_reset_credit(
+            "access-token",
+            None,
+            "RateLimitResetCredit_test",
+            base_url="http://upstream.test/backend-api",
+            timeout_seconds=2.0,
+            max_retries=0,
+            client=cast(Any, client),
+        )
+
+    assert excinfo.value.status_code == 502
+
+
+@pytest.mark.asyncio
+async def test_consume_reset_credit_rejects_success_body_missing_contract_fields() -> None:
+    state = ClientState()
+    client = StubRetryClient([StubResponse(200, {"code": "reset"}, "")], state)
+
+    with pytest.raises(ConsumeResetCreditError) as excinfo:
+        await consume_reset_credit(
+            "access-token",
+            None,
+            "RateLimitResetCredit_test",
+            base_url="http://upstream.test/backend-api",
+            timeout_seconds=2.0,
+            max_retries=0,
+            client=cast(Any, client),
+        )
+
+    assert excinfo.value.status_code == 502
 
 
 def test_build_snapshot_projects_nearest_available_expiry() -> None:

@@ -4,7 +4,6 @@ import asyncio
 import logging
 import uuid
 from datetime import datetime
-from typing import cast
 
 import aiohttp
 from aiohttp_retry import ExponentialRetry, RetryClient
@@ -56,8 +55,8 @@ class ResetCreditItem(BaseModel):
 class ResetCreditsResponse(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
-    credits: list[ResetCreditItem] = Field(default_factory=list)
-    available_count: int = 0
+    credits: list[ResetCreditItem]
+    available_count: int
 
 
 class ConsumeResetCreditCredit(BaseModel):
@@ -72,9 +71,9 @@ class ConsumeResetCreditCredit(BaseModel):
 class ConsumeResetCreditResponse(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
-    code: str | None = None
-    credit: ConsumeResetCreditCredit | None = None
-    windows_reset: int | None = None
+    code: str
+    credit: ConsumeResetCreditCredit
+    windows_reset: int
 
 
 class RateLimitResetCreditsSnapshot(BaseModel):
@@ -131,8 +130,8 @@ async def fetch_reset_credits(
                     )
                     raise ResetCreditFetchError(resp.status, message, code=code)
                 try:
-                    return ResetCreditsResponse.model_validate(data)
-                except ValidationError as exc:
+                    return ResetCreditsResponse.model_validate(_success_payload(data))
+                except (ValueError, ValidationError) as exc:
                     logger.warning("Reset credits fetch invalid payload request_id=%s", get_request_id())
                     raise ResetCreditFetchError(502, "Invalid reset credits payload") from exc
     except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
@@ -187,8 +186,8 @@ async def consume_reset_credit(
                     )
                     raise ConsumeResetCreditError(resp.status, message, code=code)
                 try:
-                    return ConsumeResetCreditResponse.model_validate(data)
-                except ValidationError as exc:
+                    return ConsumeResetCreditResponse.model_validate(_success_payload(data))
+                except (ValueError, ValidationError) as exc:
                     logger.warning("Reset credits consume invalid payload request_id=%s", get_request_id())
                     raise ConsumeResetCreditError(502, "Invalid reset credits consume payload") from exc
     except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
@@ -230,7 +229,13 @@ async def _safe_json(resp: aiohttp.ClientResponse) -> JsonObject:
     except Exception:
         text = await resp.text()
         return {"error": {"message": text.strip()}}
-    return data if isinstance(data, dict) else cast(JsonObject, {"error": {"message": str(data)}})
+    return data if isinstance(data, dict) else {"error": {"message": str(data)}}
+
+
+def _success_payload(payload: JsonObject) -> JsonObject:
+    if "error" in payload:
+        raise ValueError("success response carried error payload")
+    return payload
 
 
 class _ErrorEnvelope(BaseModel):

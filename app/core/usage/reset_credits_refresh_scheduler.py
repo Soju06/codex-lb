@@ -2,11 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import importlib
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Protocol, cast
 
 from app.core.clients.rate_limit_reset_credits import (
     ResetCreditsResponse,
@@ -28,15 +26,6 @@ logger = logging.getLogger(__name__)
 _RESET_CREDITS_SKIP_STATUSES = frozenset({AccountStatus.PAUSED, AccountStatus.DEACTIVATED})
 
 ResetCreditsFetchFn = Callable[..., Awaitable[ResetCreditsResponse]]
-
-
-class _LeaderElectionLike(Protocol):
-    async def try_acquire(self) -> bool: ...
-
-
-def _get_leader_election() -> _LeaderElectionLike:
-    module = importlib.import_module("app.core.scheduling.leader_election")
-    return cast(_LeaderElectionLike, module.get_leader_election())
 
 
 @dataclass(slots=True)
@@ -70,8 +59,6 @@ class RateLimitResetCreditsRefreshScheduler:
                 continue
 
     async def _refresh_once(self) -> None:
-        if not await _get_leader_election().try_acquire():
-            return
         async with self._lock:
             try:
                 async with get_background_session() as session:
@@ -116,6 +103,7 @@ async def _refresh_account_reset_credits(
     store: RateLimitResetCreditsStore,
     fetch_fn: ResetCreditsFetchFn,
 ) -> None:
+    snapshot_generation = store.generation(account.id)
     try:
         access_token = encryptor.decrypt(account.access_token_encrypted)
         response = await fetch_fn(access_token, account.chatgpt_account_id)
@@ -127,7 +115,12 @@ async def _refresh_account_reset_credits(
         )
         return
     snapshot = build_snapshot(response)
-    await store.set(account.id, snapshot)
+    stored = await store.set_if_generation(account.id, snapshot, snapshot_generation)
+    if not stored:
+        logger.info(
+            "Skipped stale reset credits snapshot account_id=%s",
+            account.id,
+        )
 
 
 def build_rate_limit_reset_credits_scheduler() -> RateLimitResetCreditsRefreshScheduler:

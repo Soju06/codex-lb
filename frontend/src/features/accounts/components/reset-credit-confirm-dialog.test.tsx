@@ -139,4 +139,53 @@ describe("ResetCreditConfirmDialog", () => {
     // Failure leaves the dialog open for retry.
     expect(onOpenChange).not.toHaveBeenCalledWith(false);
   });
+
+  it("allows redeeming an available credit when expiry is null", async () => {
+    const user = userEvent.setup();
+    const consumeCalled = vi.fn();
+    server.use(
+      http.get(SNAPSHOT_URL, () =>
+        HttpResponse.json({
+          availableCount: 1,
+          nearestExpiresAt: null,
+          credits: [
+            {
+              id: "credit_no_expiry",
+              status: "available",
+              resetType: "rate_limit_reset",
+              grantedAt: "2025-12-31T12:00:00.000Z",
+              expiresAt: null,
+              title: "Persistent banked reset",
+              description: "Redeems a reset credit without an upstream expiry.",
+              redeemedAt: null,
+              redeemStartedAt: null,
+            },
+          ],
+        }),
+      ),
+      http.post(CONSUME_URL, () => {
+        consumeCalled();
+        return HttpResponse.json({
+          code: "rate_limit_reset",
+          windowsReset: 1,
+          redeemedAt: "2026-01-01T12:00:00.000Z",
+        });
+      }),
+    );
+
+    renderWithClient(
+      <ResetCreditConfirmDialog
+        open
+        onOpenChange={vi.fn()}
+        accountId="acc_primary"
+      />,
+    );
+
+    expect(await screen.findByText("Persistent banked reset")).toBeInTheDocument();
+    expect(screen.getByText("No expiry provided.")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Redeem credit" }));
+
+    await vi.waitFor(() => expect(consumeCalled).toHaveBeenCalledTimes(1));
+  });
 });

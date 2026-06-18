@@ -8,6 +8,7 @@ The kind-based Helm smoke path currently pulls the chart test pod image from Doc
 - Override the CI smoke test pod image to the already-built kind-loaded application image.
 - Keep external DB smoke coverage focused on external database wiring by running one app replica.
 - Add timestamped step logs around major smoke phases.
+- Bound `helm test` waits with a configurable timeout so failing test pods do not spend Helm's default timeout window.
 
 ## Impact
 

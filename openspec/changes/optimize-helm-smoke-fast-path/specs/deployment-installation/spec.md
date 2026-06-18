@@ -2,7 +2,7 @@
 
 ### Requirement: Helm install modes are smoke-tested
 
-The project MUST run automated Helm smoke installs for the easy-setup install modes in CI. CI Helm smoke installs MUST avoid avoidable external image pulls for chart test pods when the application image has already been built and loaded into the disposable cluster. Smoke scripts MUST emit timestamped logs for major phases so CI output identifies where time is spent.
+The project MUST run automated Helm smoke installs for the easy-setup install modes in CI. CI Helm smoke installs MUST avoid avoidable external image pulls for chart test pods when the application image has already been built and loaded into the disposable cluster. Smoke scripts MUST emit timestamped logs for major phases so CI output identifies where time is spent. Smoke scripts MUST bound Helm test waits with a configurable timeout.
 
 #### Scenario: Bundled and external DB modes are smoke tested
 
@@ -27,3 +27,9 @@ The project MUST run automated Helm smoke installs for the easy-setup install mo
 
 - **WHEN** CI runs kind-based Helm smoke checks
 - **THEN** major phases emit UTC timestamped log lines
+
+#### Scenario: Helm test wait is bounded
+
+- **WHEN** CI runs kind-based Helm smoke checks
+- **THEN** each `helm test` invocation uses the configured Helm test timeout
+- **AND** the default timeout is shorter than Helm's default wait window

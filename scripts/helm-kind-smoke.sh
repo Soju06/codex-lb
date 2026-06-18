@@ -10,6 +10,7 @@ IMAGE_REGISTRY="${IMAGE_REGISTRY:-ghcr.io}"
 IMAGE_REPOSITORY="${IMAGE_REPOSITORY:-soju06/codex-lb}"
 IMAGE_TAG="${IMAGE_TAG:-ci}"
 DB_PASSWORD="${DB_PASSWORD:-smoke-password}"
+HELM_TEST_TIMEOUT="${HELM_TEST_TIMEOUT:-60s}"
 
 log_step() {
   printf '[%s] [helm-kind-smoke] %s\n' "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" "$*" >&2
@@ -24,7 +25,7 @@ wait_for_release() {
   log_step "listing pods for ${release} in ${namespace}"
   kubectl --context "${KUBE_CONTEXT}" -n "${namespace}" get pods
   log_step "running helm test for ${release} in ${namespace}"
-  helm test "${release}" --namespace "${namespace}" --kube-context "${KUBE_CONTEXT}"
+  helm test "${release}" --namespace "${namespace}" --kube-context "${KUBE_CONTEXT}" --timeout "${HELM_TEST_TIMEOUT}"
 }
 
 dump_namespace_debug() {

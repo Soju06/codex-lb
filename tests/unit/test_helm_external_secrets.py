@@ -454,6 +454,16 @@ def test_kind_smoke_logs_timestamped_major_steps() -> None:
     assert 'log_step "running helm test for ${release} in ${namespace}"' in script
 
 
+def test_kind_smoke_bounds_helm_test_wait() -> None:
+    script = (_REPO_ROOT / "scripts" / "helm-kind-smoke.sh").read_text()
+
+    assert 'HELM_TEST_TIMEOUT="${HELM_TEST_TIMEOUT:-60s}"' in script
+    assert (
+        'helm test "${release}" --namespace "${namespace}" --kube-context "${KUBE_CONTEXT}" '
+        '--timeout "${HELM_TEST_TIMEOUT}"'
+    ) in script
+
+
 def test_auto_advertise_bridge_url_uses_service_port() -> None:
     rendered = _helm_template(
         "--show-only",

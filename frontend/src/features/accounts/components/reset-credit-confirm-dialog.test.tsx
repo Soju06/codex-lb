@@ -83,9 +83,9 @@ describe("ResetCreditConfirmDialog", () => {
     );
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
 
-    // Snapshot loads the soonest credit title.
-    expect(await screen.findByText("Banked rate-limit reset")).toBeInTheDocument();
-    expect(screen.getByText(/Expires \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/)).toBeInTheDocument();
+    // Snapshot loads the available count and soonest credit expiry.
+    expect(await screen.findByText("1 free rate limit reset")).toBeInTheDocument();
+    expect(screen.getByText(/Reset expires on \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/)).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Redeem credit" }));
 
@@ -127,7 +127,7 @@ describe("ResetCreditConfirmDialog", () => {
     );
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
 
-    expect(await screen.findByText("Banked rate-limit reset")).toBeInTheDocument();
+    expect(await screen.findByText("1 free rate limit reset")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Redeem credit" }));
 
@@ -181,8 +181,8 @@ describe("ResetCreditConfirmDialog", () => {
       />,
     );
 
-    expect(await screen.findByText("Persistent banked reset")).toBeInTheDocument();
-    expect(screen.getByText("No expiry provided.")).toBeInTheDocument();
+    expect(await screen.findByText("1 free rate limit reset")).toBeInTheDocument();
+    expect(screen.getByText("No upcoming expiry data available.")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Redeem credit" }));
 

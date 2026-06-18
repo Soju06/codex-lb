@@ -17,3 +17,21 @@ def test_parse_retry_after_milliseconds():
 
 def test_parse_retry_after_missing():
     assert parse_retry_after("no retry info") is None
+
+
+def test_parse_retry_after_minutes():
+    assert parse_retry_after("Try again in 20m") == 1200.0
+
+
+def test_parse_retry_after_compound_minutes_seconds():
+    assert parse_retry_after("Please try again in 6m0s.") == 360.0
+    assert parse_retry_after("Try again in 1m30s") == 90.0
+
+
+def test_parse_retry_after_compound_hours():
+    assert parse_retry_after("Try again in 1h2m3s") == 3723.0
+
+
+def test_parse_retry_after_word_units():
+    assert parse_retry_after("Try again in 30 seconds") == 30.0
+    assert parse_retry_after("Try again in 2 minutes") == 120.0

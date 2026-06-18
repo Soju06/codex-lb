@@ -51,24 +51,25 @@ function formatMetricValue(metric: UsageMetric, value: number): string {
 }
 
 function buildBreakdownRows(apiKeys: ApiKey[], metric: UsageMetric): BreakdownRow[] {
-  const rows = apiKeys
-    .map((apiKey) => {
-      const usage = apiKey.usageSummary;
-      const value =
-        metric === "cost"
-          ? usage?.totalCostUsd ?? 0
-          : metric === "tokens"
-            ? usage?.totalTokens ?? 0
-            : usage?.requestCount ?? 0;
+  const rows = apiKeys.reduce<Array<Omit<BreakdownRow, "share">>>((nextRows, apiKey) => {
+    const usage = apiKey.usageSummary;
+    const value =
+      metric === "cost"
+        ? usage?.totalCostUsd ?? 0
+        : metric === "tokens"
+          ? usage?.totalTokens ?? 0
+          : usage?.requestCount ?? 0;
 
-      return {
+    if (value > 0) {
+      nextRows.push({
         id: apiKey.id,
         label: apiKey.name,
         labelSuffix: apiKey.keyPrefix ? ` · ${apiKey.keyPrefix}` : "",
         value,
-      };
-    })
-    .filter((row) => row.value > 0)
+      });
+    }
+    return nextRows;
+  }, [])
     .sort((a, b) => b.value - a.value);
 
   const total = rows.reduce((sum, row) => sum + row.value, 0);

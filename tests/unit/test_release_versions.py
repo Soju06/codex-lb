@@ -121,6 +121,51 @@ def test_update_project_versions_keeps_all_release_files_in_sync(tmp_path: Path)
     assert package_version == "1.19.0-beta.1"
 
 
+def test_assert_project_versions_accepts_pep440_uv_lock_prerelease(tmp_path: Path) -> None:
+    write_minimal_release_files(tmp_path, "1.20.0-beta.3")
+    (tmp_path / "uv.lock").write_text(
+        '[[package]]\nname = "codex-lb"\nversion = "1.20.0b3"\nsource = { editable = "." }\n',
+        encoding="utf-8",
+    )
+
+    assert_project_versions(tmp_path, "1.20.0-beta.3")
+
+
+@pytest.mark.parametrize(
+    ("path", "writer"),
+    [
+        (
+            "pyproject.toml",
+            lambda root: (root / "pyproject.toml").write_text(
+                '[project]\nname = "codex-lb"\nversion = "1.20.0b3"\n',
+                encoding="utf-8",
+            ),
+        ),
+        (
+            "frontend/package.json",
+            lambda root: (root / "frontend" / "package.json").write_text(
+                json.dumps({"name": "frontend", "version": "1.20.0b3"}) + "\n", encoding="utf-8"
+            ),
+        ),
+        (
+            "deploy/helm/codex-lb/Chart.yaml",
+            lambda root: (root / "deploy" / "helm" / "codex-lb" / "Chart.yaml").write_text(
+                "apiVersion: v2\nname: codex-lb\nversion: 1.20.0b3\nappVersion: 1.20.0b3\n",
+                encoding="utf-8",
+            ),
+        ),
+    ],
+)
+def test_assert_project_versions_rejects_pep440_beta_in_non_uv_lock_release_files(
+    tmp_path: Path, path: str, writer
+) -> None:
+    write_minimal_release_files(tmp_path, "1.20.0-beta.3")
+    writer(tmp_path)
+
+    with pytest.raises(ValueError):
+        assert_project_versions(tmp_path, "1.20.0-beta.3")
+
+
 def test_next_beta_number_uses_existing_tags(tmp_path: Path) -> None:
     write_minimal_release_files(tmp_path)
     init_git_repo(tmp_path)

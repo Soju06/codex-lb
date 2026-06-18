@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+from collections.abc import Mapping
 from types import SimpleNamespace
 from typing import cast
 
@@ -13,6 +14,7 @@ import app.core.clients.proxy as proxy_client_module
 import app.modules.proxy.service as proxy_module
 from app.core.auth import generate_unique_account_id
 from app.core.config.settings import Settings
+from app.core.openai.models import CompactResponsePayload
 from app.db.models import Account, DashboardSettings, RequestLog
 from app.db.session import SessionLocal
 from app.modules.request_logs.repository import RequestLogsRepository
@@ -216,6 +218,223 @@ async def test_proxy_responses_repeated_401_after_refresh_fails_over(async_clien
     assert event["response"]["id"] == "resp_stream_failover"
     assert captured_account_ids[0] == invalidated_account_id
     assert captured_account_ids[1] != invalidated_account_id
+
+
+@pytest.mark.asyncio
+async def test_proxy_responses_compaction_trigger_streams_single_compaction_item(async_client, monkeypatch):
+    email = "compact-trigger@example.com"
+    raw_account_id = "acc_compact_trigger"
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    other_email = "compact-trigger-other@example.com"
+    other_raw_account_id = "acc_compact_trigger_other"
+    other_auth_json = _make_auth_json(other_raw_account_id, other_email)
+    other_files = {"auth_json": ("auth.json", json.dumps(other_auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=other_files)
+    assert response.status_code == 200
+
+    async with SessionLocal() as session:
+        accounts = {
+            account.chatgpt_account_id: account
+            for account in (await session.execute(select(Account))).scalars().all()
+            if account.chatgpt_account_id in {raw_account_id, other_raw_account_id}
+        }
+        owner_account = accounts[raw_account_id]
+        session.add(
+            RequestLog(
+                account_id=owner_account.id,
+                session_id="sid_compact_trigger",
+                request_id="resp_compact_anchor",
+                request_kind="response_create",
+                model="gpt-5.1",
+                status="success",
+            )
+        )
+        await session.commit()
+
+    seen_payload: dict[str, object] = {}
+    selection_preferred_ids: list[str | None] = []
+
+    async def fake_select_account(self, deadline: float, **kwargs):
+        del self, deadline
+        preferred_account_id = cast(str | None, kwargs.get("preferred_account_id"))
+        selection_preferred_ids.append(preferred_account_id)
+        assert preferred_account_id == owner_account.id
+        return proxy_module.AccountSelection(account=owner_account, error_message=None, error_code=None)
+
+    async def fake_compact(payload, headers, access_token, account_id, **kwargs):
+        del headers, access_token, kwargs
+        seen_payload["payload"] = payload.model_dump(mode="json", exclude_none=True)
+        seen_payload["input"] = payload.input
+        seen_payload["model"] = payload.model
+        seen_payload["previous_response_id"] = getattr(payload, "previous_response_id", None)
+        seen_payload["conversation"] = getattr(payload, "conversation", None)
+        seen_payload["account_id"] = account_id
+        return CompactResponsePayload.model_validate(
+            {
+                "object": "response.compaction",
+                "compaction_summary": {
+                    "encrypted_content": "ENCRYPTED_CONTEXT_COMPACTION_SUMMARY",
+                    "summary_text": "condensed thread state",
+                },
+                "usage": {"input_tokens": 12, "output_tokens": 3, "total_tokens": 15},
+            }
+        )
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget_compatible", fake_select_account)
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "compact this turn",
+        "input": [
+            {"role": "user", "content": "hello"},
+            {"type": "compaction_trigger"},
+        ],
+        "previous_response_id": "resp_compact_anchor",
+        "promptCacheKey": "compact-cache-affinity",
+        "include": [],
+        "stream": True,
+    }
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        json=payload,
+        headers={"session_id": "sid_compact_trigger"},
+    ) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    events = list(_iter_sse_events(lines))
+    assert [event["type"] for event in events] == ["response.output_item.done", "response.completed"]
+    assert selection_preferred_ids == [owner_account.id]
+    assert seen_payload["model"] == "gpt-5.1"
+    assert seen_payload["input"] == [{"role": "user", "content": "hello"}]
+    assert seen_payload["previous_response_id"] == "resp_compact_anchor"
+    assert seen_payload["account_id"] == raw_account_id
+    compact_payload = cast(Mapping[str, object], seen_payload["payload"])
+    assert compact_payload["prompt_cache_key"] == "compact-cache-affinity"
+    assert "include" not in compact_payload
+    assert "stream" not in compact_payload
+    assert events[0]["item"] == {
+        "type": "compaction",
+        "encrypted_content": "ENCRYPTED_CONTEXT_COMPACTION_SUMMARY",
+    }
+    assert events[1]["response"]["output"] == [
+        {
+            "type": "compaction",
+            "encrypted_content": "ENCRYPTED_CONTEXT_COMPACTION_SUMMARY",
+        }
+    ]
+    assert events[1]["response"]["usage"] == {"input_tokens": 12, "output_tokens": 3, "total_tokens": 15}
+    assert lines[-1] == "data: [DONE]"
+
+
+@pytest.mark.asyncio
+async def test_proxy_responses_compaction_trigger_preserves_conversation(async_client, monkeypatch):
+    email = "compact-trigger-conversation@example.com"
+    raw_account_id = "acc_compact_trigger_conversation"
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    async with SessionLocal() as session:
+        owner_account = (
+            await session.execute(select(Account).where(Account.chatgpt_account_id == raw_account_id))
+        ).scalar_one()
+
+    seen_payload: dict[str, object] = {}
+
+    async def fake_select_account(self, deadline: float, **kwargs):
+        del self, deadline, kwargs
+        return proxy_module.AccountSelection(account=owner_account, error_message=None, error_code=None)
+
+    async def fake_compact(payload, headers, access_token, account_id, **kwargs):
+        del headers, access_token, kwargs
+        seen_payload["payload"] = payload.model_dump(mode="json", exclude_none=True)
+        seen_payload["conversation"] = getattr(payload, "conversation", None)
+        seen_payload["account_id"] = account_id
+        return CompactResponsePayload.model_validate(
+            {
+                "object": "response.compaction",
+                "compaction_summary": {
+                    "encrypted_content": "ENCRYPTED_CONTEXT_COMPACTION_SUMMARY",
+                    "summary_text": "condensed thread state",
+                },
+            }
+        )
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget_compatible", fake_select_account)
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+
+    payload = {
+        "model": "gpt-5.1",
+        "input": [
+            {"role": "user", "content": "hello"},
+            {"type": "compaction_trigger"},
+        ],
+        "conversation": "conv_compact_anchor",
+        "include": [],
+        "stream": True,
+    }
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        json=payload,
+        headers={"session_id": "sid_compact_trigger_conversation"},
+    ) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    events = list(_iter_sse_events(lines))
+    assert [event["type"] for event in events] == ["response.output_item.done", "response.completed"]
+    assert seen_payload["conversation"] == "conv_compact_anchor"
+    assert seen_payload["account_id"] == raw_account_id
+    compact_payload = cast(Mapping[str, object], seen_payload["payload"])
+    assert compact_payload["conversation"] == "conv_compact_anchor"
+    assert "include" not in compact_payload
+    assert "stream" not in compact_payload
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "input_items",
+    [
+        [{"type": "compaction_trigger"}, {"role": "user", "content": "hello"}],
+        [{"role": "user", "content": "hello"}, {"type": "compaction_trigger"}, {"type": "compaction_trigger"}],
+    ],
+)
+async def test_proxy_responses_rejects_malformed_compaction_trigger(async_client, monkeypatch, input_items):
+    email = "compact-trigger-invalid@example.com"
+    raw_account_id = "acc_compact_trigger_invalid"
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    async def fake_compact(*args, **kwargs):
+        del args, kwargs
+        pytest.fail("compact should not be called for malformed compaction_trigger placement")
+
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "compact this turn",
+        "input": input_items,
+        "stream": True,
+    }
+    response = await async_client.post("/backend-api/codex/responses", json=payload)
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body["error"]["type"] == "invalid_request_error"
+    assert body["error"]["code"] == "invalid_request_error"
+    assert body["error"]["param"] == "input"
 
 
 @pytest.mark.asyncio

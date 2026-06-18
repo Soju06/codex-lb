@@ -79,6 +79,15 @@ class _CompactServiceProtocol(Protocol):
 
     async def _select_account_with_budget_compatible(self, deadline: float, **kwargs: object) -> AccountSelection: ...
 
+    async def _resolve_websocket_previous_response_owner(
+        self,
+        *,
+        previous_response_id: str | None,
+        api_key: ApiKeyData | None,
+        session_id: str | None = None,
+        surface: str,
+    ) -> str | None: ...
+
     async def _ensure_fresh_with_budget(
         self, account: Account, *, force: bool = False, timeout_seconds: float | None = None
     ) -> Account: ...
@@ -419,12 +428,50 @@ class _CompactMixin:
             prompt_cache_key_set=_prompt_cache_key_from_request_model(payload) is not None,
         )
         routing_strategy = _routing_strategy(settings)
+        previous_response_id = getattr(payload, "previous_response_id", None)
+        previous_response_preferred_account_id: str | None = None
+        previous_response_lookup_session_id: str | None = None
+        if isinstance(previous_response_id, str) and previous_response_id.strip():
+            previous_response_id = previous_response_id.strip()
+            previous_response_lookup_session_id = _owner_lookup_session_id_from_headers(headers)
+            previous_response_preferred_account_id = await proxy._resolve_websocket_previous_response_owner(
+                previous_response_id=previous_response_id,
+                api_key=api_key,
+                session_id=previous_response_lookup_session_id,
+                surface="compact",
+            )
+            if previous_response_preferred_account_id is None:
+                selection_inputs = await proxy._load_balancer._load_selection_inputs(
+                    model=payload.model,
+                    additional_limit_name=None,
+                    account_ids=api_key.assigned_account_ids
+                    if api_key is not None and api_key.account_assignment_scope_enabled
+                    else None,
+                )
+                if len(selection_inputs.accounts) != 1:
+                    message = "Previous response owner account is unavailable; retry later."
+                    _record_continuity_fail_closed(
+                        surface="compact",
+                        reason="owner_account_unavailable",
+                        previous_response_id=previous_response_id,
+                        session_id=previous_response_lookup_session_id,
+                        upstream_error_code="owner_lookup_miss",
+                    )
+                    raise ProxyResponseError(
+                        502,
+                        openai_error(
+                            "previous_response_owner_unavailable",
+                            message,
+                            error_type="server_error",
+                        ),
+                    )
+
         # ``input_file.file_id`` references must land on the account that
         # registered the upload (chatgpt-account-id-scoped). The helper
         # returns ``None`` when stronger affinity signals are present
         # (prompt_cache_key / session header / turn_state header /
         # previous_response_id), so existing routing wins.
-        file_preferred_account_id = rewritten_file_account_id
+        file_preferred_account_id = previous_response_preferred_account_id or rewritten_file_account_id
         if file_preferred_account_id is None:
             file_preferred_account_id = await proxy._resolve_file_account_for_responses(payload, headers)
         try:

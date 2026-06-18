@@ -38,6 +38,20 @@ image:
   # @param image.pullSecrets Container image pull secrets
   pullSecrets: []
 
+# @section Helm test parameters
+test:
+  image:
+    # @param test.image.registry Helm test pod image registry
+    registry: docker.io
+    # @param test.image.repository Helm test pod image repository
+    repository: library/busybox
+    # @param test.image.tag Helm test pod image tag
+    tag: "1.37"
+    # @param test.image.digest Helm test pod image digest (overrides tag when set)
+    digest: ""
+    # @param test.image.pullPolicy Helm test pod image pull policy
+    pullPolicy: IfNotPresent
+
 # @section Workload parameters
 # @param replicaCount Number of replicas
 replicaCount: 2

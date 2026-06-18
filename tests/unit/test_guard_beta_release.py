@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 from scripts.release_versions import update_project_versions
 
@@ -91,9 +94,21 @@ Validated candidate: {sha}
 
 
 def run_guard(project_root: Path, repo_root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    github_env_keys = (
+        "BETA_RELEASE_PR_BODY",
+        "GITHUB_EVENT_NAME",
+        "GITHUB_EVENT_PATH",
+        "GITHUB_HEAD_REF",
+        "GITHUB_REPOSITORY",
+    )
+    for key in github_env_keys:
+        env.pop(key, None)
+
     return subprocess.run(
         [sys.executable, "-m", "scripts.guard_beta_release", "--root", str(repo_root), *args],
         cwd=project_root,
+        env=env,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -120,6 +135,111 @@ def test_pr_guard_rejects_beta_metadata_from_noncanonical_branch(tmp_path: Path)
     assert result.returncode == 1
     assert "canonical beta release branch" in result.stderr
     assert "release/beta-1.20.0-beta.3" in result.stderr
+
+
+def test_pr_guard_accepts_dependency_only_release_managed_file_edits(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo_with_beta_commit(repo)
+    (repo / "pyproject.toml").write_text(
+        '[project]\nname = "codex-lb"\nversion = "1.20.0-beta.3"\ndependencies = ["aiohttp-socks>=0.10.1"]\n',
+        encoding="utf-8",
+    )
+    (repo / "uv.lock").write_text(
+        '[[package]]\nname = "codex-lb"\nversion = "1.20.0-beta.3"\nsource = { editable = "." }\n'
+        'dependencies = [{ name = "aiohttp-socks" }]\n',
+        encoding="utf-8",
+    )
+    git(repo, "add", "pyproject.toml", "uv.lock")
+    git(repo, "commit", "-m", "deps: add aiohttp socks adapter")
+    sha = git(repo, "rev-parse", "HEAD")
+    branch = "fix/aiohttp-socks-adapter"
+    event = event_file(tmp_path, head_ref=branch, head_sha=sha, body="")
+
+    result = run_guard(
+        Path(__file__).resolve().parents[2],
+        repo,
+        "--base-ref",
+        "HEAD~1",
+        "--head-ref",
+        branch,
+        "--event-path",
+        str(event),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "No release-managed version files changed" in result.stdout
+
+
+def test_pr_guard_accepts_noncanonical_noop_on_inconsistent_release_metadata_base(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    write_minimal_release_files(repo)
+    (repo / "app" / "__init__.py").write_text('__version__ = "1.20.0-beta.3"\n', encoding="utf-8")
+    git(repo, "init")
+    git(repo, "config", "user.email", "test@example.com")
+    git(repo, "config", "user.name", "Test")
+    git(repo, "add", ".")
+    git(repo, "commit", "-m", "chore: inconsistent partial release state")
+    git(repo, "branch", "-M", "main")
+    (repo / "pyproject.toml").write_text(
+        '[project]\nname = "codex-lb"\nversion = "1.20.0"\ndependencies = ["aiohttp-socks>=0.10.1"]\n',
+        encoding="utf-8",
+    )
+    git(repo, "add", "pyproject.toml")
+    git(repo, "commit", "-m", "deps: add aiohttp socks adapter")
+    sha = git(repo, "rev-parse", "HEAD")
+    branch = "fix/aiohttp-socks-adapter"
+    event = event_file(tmp_path, head_ref=branch, head_sha=sha, body="")
+
+    result = run_guard(
+        Path(__file__).resolve().parents[2],
+        repo,
+        "--base-ref",
+        "HEAD~1",
+        "--head-ref",
+        branch,
+        "--event-path",
+        str(event),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "No release-managed version files changed" in result.stdout
+
+
+def test_pr_guard_accepts_invalid_beta_prefixed_branch_when_release_metadata_is_unchanged(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    write_minimal_release_files(repo, version="1.20.0-beta.3")
+    git(repo, "init")
+    git(repo, "config", "user.email", "test@example.com")
+    git(repo, "config", "user.name", "Test")
+    git(repo, "add", ".")
+    git(repo, "commit", "-m", "chore: release v1.20.0-beta.3")
+    git(repo, "branch", "-M", "main")
+    (repo / "pyproject.toml").write_text(
+        '[project]\nname = "codex-lb"\nversion = "1.20.0-beta.3"\ndependencies = ["aiohttp-socks>=0.10.1"]\n',
+        encoding="utf-8",
+    )
+    git(repo, "add", "pyproject.toml")
+    git(repo, "commit", "-m", "deps: add aiohttp socks adapter")
+    sha = git(repo, "rev-parse", "HEAD")
+    branch = "release/beta-doc-fix"
+    event = event_file(tmp_path, head_ref=branch, head_sha=sha, body="")
+
+    result = run_guard(
+        Path(__file__).resolve().parents[2],
+        repo,
+        "--base-ref",
+        "HEAD~1",
+        "--head-ref",
+        branch,
+        "--event-path",
+        str(event),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "No release-managed version files changed" in result.stdout
 
 
 def test_pr_guard_rejects_inconsistent_release_managed_beta_metadata(tmp_path: Path) -> None:
@@ -156,6 +276,138 @@ def test_pr_guard_rejects_inconsistent_release_managed_beta_metadata(tmp_path: P
     assert "pyproject.toml='1.20.0'" in result.stderr
 
 
+@pytest.mark.parametrize(
+    ("path", "writer"),
+    [
+        (
+            "pyproject.toml",
+            lambda repo: (repo / "pyproject.toml").write_text(
+                '[project]\nname = "codex-lb"\nversion = "1.20.0b3"\n',
+                encoding="utf-8",
+            ),
+        ),
+        (
+            "frontend/package.json",
+            lambda repo: (repo / "frontend" / "package.json").write_text(
+                json.dumps({"name": "frontend", "version": "1.20.0b3"}) + "\n",
+                encoding="utf-8",
+            ),
+        ),
+    ],
+)
+def test_pr_guard_rejects_pep440_beta_version_in_non_lock_release_file_on_beta_base(
+    tmp_path: Path, path: str, writer
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    write_minimal_release_files(repo, version="1.20.0-beta.3")
+    git(repo, "init")
+    git(repo, "config", "user.email", "test@example.com")
+    git(repo, "config", "user.name", "Test")
+    git(repo, "add", ".")
+    git(repo, "commit", "-m", "init")
+    git(repo, "branch", "-M", "main")
+
+    writer(repo)
+    git(repo, "add", path)
+    git(repo, "commit", "-m", "chore: make version spelling PEP 440")
+    sha = git(repo, "rev-parse", "HEAD")
+    branch = "dependabot/bad-version-spelling"
+    event = event_file(tmp_path, head_ref=branch, head_sha=sha, body="")
+
+    result = run_guard(
+        Path(__file__).resolve().parents[2],
+        repo,
+        "--base-ref",
+        "HEAD~1",
+        "--head-ref",
+        branch,
+        "--event-path",
+        str(event),
+    )
+
+    assert result.returncode == 1
+    assert "Release-managed version files must agree before beta release gating" in result.stderr
+    assert "1.20.0b3" in result.stderr
+
+
+def test_pr_guard_accepts_dependency_only_package_json_edits_on_beta_base(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    write_minimal_release_files(repo, version="1.20.0-beta.3")
+    git(repo, "init")
+    git(repo, "config", "user.email", "test@example.com")
+    git(repo, "config", "user.name", "Test")
+    git(repo, "add", ".")
+    git(repo, "commit", "-m", "init")
+    git(repo, "branch", "-M", "main")
+
+    package_json = repo / "frontend" / "package.json"
+    package_json.write_text(
+        json.dumps({"name": "frontend", "version": "1.20.0-beta.3", "dependencies": {"radix-ui": "^1.5.0"}}) + "\n",
+        encoding="utf-8",
+    )
+    git(repo, "add", "frontend/package.json")
+    git(repo, "commit", "-m", "chore(deps): bump frontend dependencies")
+    sha = git(repo, "rev-parse", "HEAD")
+    branch = "dependabot/bun/frontend/frontend-minor-patch"
+    event = event_file(tmp_path, head_ref=branch, head_sha=sha, body="")
+
+    result = run_guard(
+        Path(__file__).resolve().parents[2],
+        repo,
+        "--base-ref",
+        "HEAD~1",
+        "--head-ref",
+        branch,
+        "--event-path",
+        str(event),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "No release-managed version files changed" in result.stdout
+
+
+def test_pr_guard_accepts_pep440_uv_lock_beta_version_on_dependency_edits(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    write_minimal_release_files(repo, version="1.20.0-beta.3")
+    (repo / "uv.lock").write_text(
+        '[[package]]\nname = "codex-lb"\nversion = "1.20.0b3"\nsource = { editable = "." }\n'
+        '\n[[package]]\nname = "starlette"\nversion = "1.3.1"\n',
+        encoding="utf-8",
+    )
+    git(repo, "init")
+    git(repo, "config", "user.email", "test@example.com")
+    git(repo, "config", "user.name", "Test")
+    git(repo, "add", ".")
+    git(repo, "commit", "-m", "init")
+    git(repo, "branch", "-M", "main")
+    base = git(repo, "rev-parse", "HEAD")
+
+    (repo / "uv.lock").write_text(
+        '[[package]]\nname = "codex-lb"\nversion = "1.20.0b3"\nsource = { editable = "." }\n'
+        '\n[[package]]\nname = "starlette"\nversion = "1.3.2"\n',
+        encoding="utf-8",
+    )
+    git(repo, "add", "uv.lock")
+    git(repo, "commit", "-m", "chore(deps): bump starlette")
+
+    result = run_guard(
+        Path(__file__).resolve().parents[2],
+        repo,
+        "--mode",
+        "pr",
+        "--base-ref",
+        base,
+        "--head-ref",
+        "dependabot/uv/starlette-1.3.2",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "No release-managed version files changed" in result.stdout
+
+
 def test_pr_guard_rejects_canonical_beta_pr_without_validation_evidence(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -168,6 +420,38 @@ def test_pr_guard_rejects_canonical_beta_pr_without_validation_evidence(tmp_path
         repo,
         "--base-ref",
         "HEAD~1",
+        "--head-ref",
+        branch,
+        "--event-path",
+        str(event),
+    )
+
+    assert result.returncode == 1
+    assert "release-candidate validation evidence" in result.stderr
+    assert sha in result.stderr
+
+
+def test_pr_guard_rejects_canonical_beta_pr_without_validation_evidence_when_metadata_unchanged(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    write_minimal_release_files(repo, version="1.20.0-beta.3")
+    git(repo, "init")
+    git(repo, "config", "user.email", "test@example.com")
+    git(repo, "config", "user.name", "Test")
+    git(repo, "add", ".")
+    git(repo, "commit", "-m", "chore: release v1.20.0-beta.3")
+    git(repo, "branch", "-M", "main")
+    sha = git(repo, "rev-parse", "HEAD")
+    branch = "release/beta-1.20.0-beta.3"
+    event = event_file(tmp_path, head_ref=branch, head_sha=sha, body="## Summary\nRelease beta3")
+
+    result = run_guard(
+        Path(__file__).resolve().parents[2],
+        repo,
+        "--base-ref",
+        "HEAD",
         "--head-ref",
         branch,
         "--event-path",

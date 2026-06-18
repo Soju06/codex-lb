@@ -40,6 +40,7 @@ describe("accounts flow integration", () => {
     renderWithProviders(<App />);
 
     expect(await screen.findByRole("heading", { name: "Accounts" })).toBeInTheDocument();
+    await user.click(await screen.findByRole("button", { name: "Edit alias" }));
     const aliasInput = await screen.findByLabelText("Account alias");
     await user.clear(aliasInput);
     await user.type(aliasInput, "Personal Plus");
@@ -53,7 +54,10 @@ describe("accounts flow integration", () => {
     expect(screen.getAllByText("Personal Plus").length).toBeGreaterThan(0);
     expect(screen.queryByText("secondary@example.com")).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "Clear alias" }));
+    await user.click(await screen.findByRole("button", { name: "Edit alias" }));
+    const aliasInputToClear = await screen.findByLabelText("Account alias");
+    await user.clear(aliasInputToClear);
+    await user.click(screen.getByRole("button", { name: "Save alias" }));
     await waitFor(() => {
       expect(screen.getByRole("heading", { name: "primary@example.com" })).toBeInTheDocument();
     });

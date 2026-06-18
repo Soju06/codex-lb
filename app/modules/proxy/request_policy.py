@@ -15,6 +15,7 @@ from app.core.openai.strict_schema import (
 )
 from app.core.openai.v1_requests import V1ResponsesRequest
 from app.core.types import JsonValue
+from app.core.utils.json_guards import is_json_list, is_json_mapping
 from app.core.utils.request_id import get_request_id
 from app.modules.api_keys.service import ApiKeyData
 
@@ -360,6 +361,34 @@ def normalize_responses_request_payload(
     enforce_strict_text_format(responses)
     enforce_strict_function_tools_format(responses.tools)
     return responses
+
+
+def strip_terminal_compaction_trigger_input(payload: ResponsesRequest) -> list[JsonValue] | None:
+    input_value = payload.input
+    if not is_json_list(input_value):
+        return None
+
+    stripped_input: list[JsonValue] = []
+    trigger_seen = False
+    last_index = len(input_value) - 1
+
+    for index, item in enumerate(input_value):
+        if not (is_json_mapping(item) and item.get("type") == "compaction_trigger"):
+            stripped_input.append(item)
+            continue
+
+        if trigger_seen or index != last_index:
+            raise ClientPayloadError(
+                "compaction_trigger must appear exactly once as the final top-level input item",
+                param="input",
+                code="invalid_request_error",
+                error_type="invalid_request_error",
+            )
+        trigger_seen = True
+
+    if not trigger_seen:
+        return None
+    return stripped_input
 
 
 def enforce_strict_text_format(request: ResponsesRequest) -> None:

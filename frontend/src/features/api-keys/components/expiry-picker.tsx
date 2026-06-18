@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { addDays, format } from "date-fns";
 import { CalendarIcon, ChevronDown, Infinity as InfinityIcon } from "lucide-react";
 
@@ -23,8 +23,23 @@ export type ExpiryPickerProps = {
 export function ExpiryPicker({ value, onChange }: ExpiryPickerProps) {
   const [open, setOpen] = useState(false);
   const [showCalendar, setShowCalendar] = useState(false);
+  const [todayStart] = useState(() => {
+    const nextTodayStart = new Date();
+    nextTodayStart.setHours(0, 0, 0, 0);
+    return nextTodayStart;
+  });
 
   const activePresetDays = getActivePreset(value);
+  const presetDateLabels = useMemo(
+    () =>
+      new Map(
+        PRESETS.map((preset) => [
+          preset.days,
+          todayStart ? format(addDays(todayStart, preset.days), "yyyy-MM-dd") : "",
+        ]),
+      ),
+    [todayStart],
+  );
 
   function handleNever() {
     onChange(null);
@@ -96,7 +111,7 @@ export function ExpiryPicker({ value, onChange }: ExpiryPickerProps) {
               mode="single"
               selected={value ?? undefined}
               onSelect={handleCalendarSelect}
-              disabled={(date) => date < new Date(new Date().setHours(0, 0, 0, 0))}
+              disabled={(date) => (todayStart ? date < todayStart : false)}
               autoFocus
             />
           </div>
@@ -120,7 +135,7 @@ export function ExpiryPicker({ value, onChange }: ExpiryPickerProps) {
               >
                 {preset.label}
                 <span className="ml-auto text-xs text-muted-foreground">
-                  {format(addDays(new Date(), preset.days), "yyyy-MM-dd")}
+                  {presetDateLabels.get(preset.days)}
                 </span>
               </OptionItem>
             ))}

@@ -39,4 +39,18 @@ describe("AccountProxyBinding", () => {
       isActive: false,
     });
   });
+
+  it("disables account proxy controls for read-only guests", () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const account = createAccountSummary({ accountId: "acc_primary" });
+    const admin = createUpstreamProxyAdmin({
+      bindings: [{ accountId: "acc_primary", poolId: "pool_primary", isActive: true }],
+    });
+
+    render(<AccountProxyBinding account={account} admin={admin} busy={false} readOnly onSave={onSave} />);
+
+    expect(screen.getByRole("switch", { name: "Enable account proxy binding" })).toBeDisabled();
+    expect(screen.getByRole("combobox", { name: "Account proxy pool" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Save binding" })).toBeDisabled();
+  });
 });

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from pydantic import Field
+
+from app.core.auth.dashboard_access import DashboardPermission, DashboardRole
 from app.core.auth.dashboard_mode import DashboardAuthMode
 from app.modules.shared.schemas import DashboardModel
 
@@ -14,6 +17,12 @@ class DashboardAuthSessionResponse(DashboardModel):
     auth_mode: DashboardAuthMode = DashboardAuthMode.STANDARD
     password_management_enabled: bool = True
     password_session_active: bool = False
+    role: DashboardRole = DashboardRole.ADMIN
+    permissions: list[DashboardPermission] = Field(
+        default_factory=lambda: [DashboardPermission.READ, DashboardPermission.WRITE]
+    )
+    guest_access_enabled: bool = False
+    guest_password_required: bool = False
 
 
 class TotpSetupStartResponse(DashboardModel):
@@ -37,6 +46,14 @@ class PasswordSetupRequest(DashboardModel):
 
 
 class PasswordLoginRequest(DashboardModel):
+    password: str
+
+
+class GuestLoginRequest(DashboardModel):
+    password: str | None = None
+
+
+class GuestPasswordSetRequest(DashboardModel):
     password: str
 
 

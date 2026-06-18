@@ -14,25 +14,76 @@ import type { QuotaPlannerSettingsUpdateRequest, QuotaPlannerWarmNowRequest } fr
 export function useQuotaPlanner() {
   const queryClient = useQueryClient();
 
-  const settingsQuery = useQuery({
+  const {
+    data: settingsData,
+    error: settingsError,
+    isFetching: settingsIsFetching,
+    isLoading: settingsIsLoading,
+    isPending: settingsIsPending,
+    isSuccess: settingsIsSuccess,
+    refetch: refetchSettings,
+  } = useQuery({
     queryKey: ["quota-planner", "settings"],
     queryFn: getQuotaPlannerSettings,
     refetchOnWindowFocus: true,
   });
+  const settingsQuery = {
+    data: settingsData,
+    error: settingsError,
+    isFetching: settingsIsFetching,
+    isLoading: settingsIsLoading,
+    isPending: settingsIsPending,
+    isSuccess: settingsIsSuccess,
+    refetch: refetchSettings,
+  };
 
-  const decisionsQuery = useQuery({
+  const {
+    data: decisionsData,
+    error: decisionsError,
+    isFetching: decisionsIsFetching,
+    isLoading: decisionsIsLoading,
+    isPending: decisionsIsPending,
+    isSuccess: decisionsIsSuccess,
+    refetch: refetchDecisions,
+  } = useQuery({
     queryKey: ["quota-planner", "decisions"],
     queryFn: () => listQuotaPlannerDecisions(20),
     refetchInterval: 30_000,
     refetchIntervalInBackground: false,
   });
+  const decisionsQuery = {
+    data: decisionsData,
+    error: decisionsError,
+    isFetching: decisionsIsFetching,
+    isLoading: decisionsIsLoading,
+    isPending: decisionsIsPending,
+    isSuccess: decisionsIsSuccess,
+    refetch: refetchDecisions,
+  };
 
-  const forecastQuery = useQuery({
+  const {
+    data: forecastData,
+    error: forecastError,
+    isFetching: forecastIsFetching,
+    isLoading: forecastIsLoading,
+    isPending: forecastIsPending,
+    isSuccess: forecastIsSuccess,
+    refetch: refetchForecast,
+  } = useQuery({
     queryKey: ["quota-planner", "forecast"],
     queryFn: () => getQuotaPlannerForecast(36),
     refetchInterval: 60_000,
     refetchIntervalInBackground: false,
   });
+  const forecastQuery = {
+    data: forecastData,
+    error: forecastError,
+    isFetching: forecastIsFetching,
+    isLoading: forecastIsLoading,
+    isPending: forecastIsPending,
+    isSuccess: forecastIsSuccess,
+    refetch: refetchForecast,
+  };
 
   const updateSettingsMutation = useMutation({
     mutationFn: (payload: QuotaPlannerSettingsUpdateRequest) => updateQuotaPlannerSettings(payload),

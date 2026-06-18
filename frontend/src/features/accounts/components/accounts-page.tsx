@@ -21,6 +21,7 @@ import { useOauth } from "@/features/accounts/hooks/use-oauth";
 import { useUpstreamProxyAdmin } from "@/features/settings/hooks/use-settings";
 import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
 import type { AccountAuthExportResponse } from "@/features/accounts/schemas";
+import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import { getErrorMessageOrNull } from "@/utils/errors";
 
 const OauthDialog = lazy(() =>
@@ -47,6 +48,7 @@ export function AccountsPage() {
   } = useAccounts();
   const { upstreamProxyQuery, accountBindingMutation } = useUpstreamProxyAdmin();
   const oauth = useOauth();
+  const canWrite = useAuthStore((state) => state.canWrite);
 
   const importDialog = useDialogState();
   const oauthDialog = useDialogState();
@@ -151,6 +153,7 @@ export function AccountsPage() {
               onSortModeChange={setAccountSortMode}
               onOpenImport={() => importDialog.show()}
               onOpenOauth={() => oauthDialog.show()}
+              readOnly={!canWrite}
             />
           </div>
 
@@ -158,6 +161,7 @@ export function AccountsPage() {
             account={selectedAccount}
             showAccountId={selectedAccount?.isEmailDuplicate === true}
             busy={mutationBusy}
+            readOnly={!canWrite}
             onPause={(accountId) => void pauseMutation.mutateAsync(accountId)}
             onResume={(accountId) => void resumeMutation.mutateAsync(accountId)}
             onProbe={(accountId) =>
@@ -216,7 +220,6 @@ export function AccountsPage() {
             await oauth.start(method);
           }}
           onComplete={async () => {
-            await oauth.complete();
             await accountsQuery.refetch();
           }}
           onManualCallback={async (callbackUrl) => {

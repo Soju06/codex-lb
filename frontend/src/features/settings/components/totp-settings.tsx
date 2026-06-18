@@ -1,7 +1,7 @@
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useQueryClient } from "@tanstack/react-query";
 import { Shield } from "lucide-react";
-import { useState } from "react";
+import { useReducer } from "react";
 import { useForm } from "react-hook-form";
 import { toast } from "sonner";
 import { z } from "zod";
@@ -36,6 +36,29 @@ const totpCodeSchema = z.object({
 type TotpCodeValues = z.infer<typeof totpCodeSchema>;
 type TotpDialog = "setup" | "disable" | null;
 
+type TotpSettingsState = {
+  activeDialog: TotpDialog;
+  setupSecret: string | null;
+  setupQrDataUri: string | null;
+  prefetching: boolean;
+  error: string | null;
+};
+
+const initialTotpSettingsState: TotpSettingsState = {
+  activeDialog: null,
+  setupSecret: null,
+  setupQrDataUri: null,
+  prefetching: false,
+  error: null,
+};
+
+function totpSettingsReducer(
+  state: TotpSettingsState,
+  patch: Partial<TotpSettingsState>,
+): TotpSettingsState {
+  return { ...state, ...patch };
+}
+
 export type TotpSettingsProps = {
   settings: DashboardSettings;
   disabled?: boolean;
@@ -46,11 +69,7 @@ export function TotpSettings({ settings, disabled = false, onSave }: TotpSetting
   const queryClient = useQueryClient();
   const refreshSession = useAuthStore((state) => state.refreshSession);
 
-  const [activeDialog, setActiveDialog] = useState<TotpDialog>(null);
-  const [setupSecret, setSetupSecret] = useState<string | null>(null);
-  const [setupQrDataUri, setSetupQrDataUri] = useState<string | null>(null);
-  const [prefetching, setPrefetching] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [state, updateState] = useReducer(totpSettingsReducer, initialTotpSettingsState);
 
   const confirmForm = useForm<TotpCodeValues>({
     resolver: zodResolver(totpCodeSchema),
@@ -62,48 +81,42 @@ export function TotpSettings({ settings, disabled = false, onSave }: TotpSetting
     defaultValues: { code: "" },
   });
 
-  const lock = disabled || prefetching || confirmForm.formState.isSubmitting || disableForm.formState.isSubmitting;
+  const lock = disabled || state.prefetching || confirmForm.formState.isSubmitting || disableForm.formState.isSubmitting;
 
   const closeDialog = () => {
-    setActiveDialog(null);
-    setError(null);
-    setSetupSecret(null);
-    setSetupQrDataUri(null);
+    updateState(initialTotpSettingsState);
     confirmForm.reset();
     disableForm.reset();
   };
 
   const handleOpenSetup = async () => {
-    setActiveDialog("setup");
-    setPrefetching(true);
-    setError(null);
+    updateState({ activeDialog: "setup", prefetching: true, error: null });
     try {
       const response = await startTotpSetup();
-      setSetupSecret(response.secret);
-      setSetupQrDataUri(response.qrSvgDataUri);
+      updateState({ setupSecret: response.secret, setupQrDataUri: response.qrSvgDataUri });
     } catch (caught) {
-      setError(getErrorMessage(caught));
+      updateState({ error: getErrorMessage(caught) });
     } finally {
-      setPrefetching(false);
+      updateState({ prefetching: false });
     }
   };
 
   const handleConfirmSetup = async (values: TotpCodeValues) => {
-    if (!setupSecret) return;
-    setError(null);
+    if (!state.setupSecret) return;
+    updateState({ error: null });
     try {
-      await confirmTotpSetup({ secret: setupSecret, code: values.code });
+      await confirmTotpSetup({ secret: state.setupSecret, code: values.code });
       await refreshSession();
       void queryClient.invalidateQueries({ queryKey: ["settings", "detail"] });
       toast.success("TOTP configured");
       closeDialog();
     } catch (caught) {
-      setError(getErrorMessage(caught));
+      updateState({ error: getErrorMessage(caught) });
     }
   };
 
   const handleDisable = async (values: TotpCodeValues) => {
-    setError(null);
+    updateState({ error: null });
     try {
       await disableTotp({ code: values.code });
       await refreshSession();
@@ -111,7 +124,7 @@ export function TotpSettings({ settings, disabled = false, onSave }: TotpSetting
       toast.success("TOTP disabled");
       closeDialog();
     } catch (caught) {
-      setError(getErrorMessage(caught));
+      updateState({ error: getErrorMessage(caught) });
     }
   };
 
@@ -140,7 +153,7 @@ export function TotpSettings({ settings, disabled = false, onSave }: TotpSetting
                 variant="outline"
                 className="h-8 text-xs text-destructive hover:text-destructive"
                 disabled={lock}
-                onClick={() => setActiveDialog("disable")}
+                onClick={() => updateState({ activeDialog: "disable" })}
               >
                 Disable
               </Button>
@@ -175,7 +188,7 @@ export function TotpSettings({ settings, disabled = false, onSave }: TotpSetting
       </div>
 
       {/* Setup dialog */}
-      <Dialog open={activeDialog === "setup"} onOpenChange={(open) => !open && closeDialog()}>
+      <Dialog open={state.activeDialog === "setup"} onOpenChange={(open) => !open && closeDialog()}>
         <DialogContent className="sm:max-w-sm">
           <DialogHeader>
             <DialogTitle>Enable TOTP</DialogTitle>
@@ -183,21 +196,21 @@ export function TotpSettings({ settings, disabled = false, onSave }: TotpSetting
               Scan the QR code with your authenticator app, then enter the verification code.
             </DialogDescription>
           </DialogHeader>
-          {error ? <AlertMessage variant="error">{error}</AlertMessage> : null}
+          {state.error ? <AlertMessage variant="error">{state.error}</AlertMessage> : null}
 
-          {setupQrDataUri ? (
+          {state.setupQrDataUri ? (
             <div className="flex justify-center rounded-lg border bg-card p-4 dark:bg-white/95">
-              <img src={setupQrDataUri} alt="TOTP QR code" className="h-40 w-40" />
+              <img src={state.setupQrDataUri} alt="TOTP QR code" className="h-40 w-40" />
             </div>
           ) : null}
 
-          {setupSecret ? (
+          {state.setupSecret ? (
             <p className="rounded-lg border bg-muted/30 px-3 py-2 font-mono text-xs">
-              Secret: {setupSecret}
+              Secret: {state.setupSecret}
             </p>
           ) : null}
 
-          {setupSecret ? (
+          {state.setupSecret ? (
             <Form {...confirmForm}>
               <form onSubmit={confirmForm.handleSubmit(handleConfirmSetup)} className="space-y-4">
                 <FormField
@@ -230,7 +243,7 @@ export function TotpSettings({ settings, disabled = false, onSave }: TotpSetting
                   )}
                 />
                 <DialogFooter>
-                  <Button type="button" variant="outline" onClick={closeDialog} disabled={prefetching}>
+                  <Button type="button" variant="outline" onClick={closeDialog} disabled={state.prefetching}>
                     Cancel
                   </Button>
                   <Button type="submit" disabled={lock}>
@@ -244,13 +257,13 @@ export function TotpSettings({ settings, disabled = false, onSave }: TotpSetting
       </Dialog>
 
       {/* Disable dialog */}
-      <Dialog open={activeDialog === "disable"} onOpenChange={(open) => !open && closeDialog()}>
+      <Dialog open={state.activeDialog === "disable"} onOpenChange={(open) => !open && closeDialog()}>
         <DialogContent className="sm:max-w-sm">
           <DialogHeader>
             <DialogTitle>Disable TOTP</DialogTitle>
             <DialogDescription>Enter your current TOTP code to disable two-factor authentication.</DialogDescription>
           </DialogHeader>
-          {error ? <AlertMessage variant="error">{error}</AlertMessage> : null}
+          {state.error ? <AlertMessage variant="error">{state.error}</AlertMessage> : null}
           <Form {...disableForm}>
             <form onSubmit={disableForm.handleSubmit(handleDisable)} className="space-y-4">
               <FormField

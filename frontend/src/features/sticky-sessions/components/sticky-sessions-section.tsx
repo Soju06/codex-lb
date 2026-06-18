@@ -61,7 +61,11 @@ function sortIndicator(currentSortBy: StickySessionSortBy, currentSortDir: Stick
   return currentSortDir === "asc" ? " ↑" : " ↓";
 }
 
-export function StickySessionsSection() {
+export type StickySessionsSectionProps = {
+  disabled?: boolean;
+};
+
+export function StickySessionsSection({ disabled = false }: StickySessionsSectionProps) {
   const {
     params,
     setAccountQuery,
@@ -93,7 +97,7 @@ export function StickySessionsSection() {
   const staleCount = stickySessionsQuery.data?.stalePromptCacheCount ?? 0;
   const total = stickySessionsQuery.data?.total ?? 0;
   const hasMore = stickySessionsQuery.data?.hasMore ?? false;
-  const busy = deleteMutation.isPending || deleteFilteredMutation.isPending || purgeMutation.isPending;
+  const busy = disabled || deleteMutation.isPending || deleteFilteredMutation.isPending || purgeMutation.isPending;
   const hasEntries = entries.length > 0;
   const hasAnyRows = total > 0;
   const hasActiveTextFilter = params.accountQuery.trim().length > 0 || params.keyQuery.trim().length > 0;
@@ -101,9 +105,12 @@ export function StickySessionsSection() {
   const selectedRowIdSet = useMemo(() => new Set(selectedRowIds), [selectedRowIds]);
   const selectedEntries = useMemo(
     () =>
-      entries
-        .filter((entry) => selectedRowIdSet.has(stickySessionRowId(entry)))
-        .map(({ key, kind }) => ({ key, kind })),
+      entries.reduce<StickySessionIdentifier[]>((selected, entry) => {
+        if (selectedRowIdSet.has(stickySessionRowId(entry))) {
+          selected.push({ key: entry.key, kind: entry.kind });
+        }
+        return selected;
+      }, []),
     [entries, selectedRowIdSet],
   );
   const selectedCount = selectedEntries.length;

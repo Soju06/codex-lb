@@ -6,14 +6,14 @@ export const LIMIT_WINDOWS = ["daily", "weekly", "monthly", "5h", "7d"] as const
 export type LimitType = (typeof LIMIT_TYPES)[number];
 export type LimitWindowType = (typeof LIMIT_WINDOWS)[number];
 
-export const LimitRuleSchema = z.object({
+const LimitRuleSchema = z.object({
   id: z.number(),
   limitType: z.enum(LIMIT_TYPES),
   limitWindow: z.enum(LIMIT_WINDOWS),
   maxValue: z.number(),
   currentValue: z.number(),
   modelFilter: z.string().nullable(),
-  resetAt: z.string().datetime({ offset: true }),
+  resetAt: z.iso.datetime({ offset: true }),
 });
 
 export const LimitRuleCreateSchema = z.object({
@@ -23,14 +23,14 @@ export const LimitRuleCreateSchema = z.object({
   modelFilter: z.string().nullable().optional(),
 });
 
-export const ApiKeyUsageSummarySchema = z.object({
+const ApiKeyUsageSummarySchema = z.object({
   requestCount: z.number().int().nonnegative(),
   totalTokens: z.number().int().nonnegative(),
   cachedInputTokens: z.number().int().nonnegative(),
   totalCostUsd: z.number().nonnegative().default(0),
 });
 
-export const SERVICE_TIERS = ["auto", "default", "priority", "flex"] as const;
+const SERVICE_TIERS = ["auto", "default", "priority", "flex"] as const;
 export type ServiceTierType = (typeof SERVICE_TIERS)[number];
 
 export const TRAFFIC_CLASSES = ["foreground", "opportunistic"] as const;
@@ -54,12 +54,12 @@ export const ApiKeySchema = z.object({
     .enum(SERVICE_TIERS)
     .nullable()
     .default(null),
-  expiresAt: z.string().datetime({ offset: true }).nullable(),
+  expiresAt: z.iso.datetime({ offset: true }).nullable(),
   isActive: z.boolean(),
   accountAssignmentScopeEnabled: z.boolean().default(false),
   assignedAccountIds: z.array(z.string()).default([]),
-  createdAt: z.string().datetime({ offset: true }),
-  lastUsedAt: z.string().datetime({ offset: true }).nullable(),
+  createdAt: z.iso.datetime({ offset: true }),
+  lastUsedAt: z.iso.datetime({ offset: true }).nullable(),
   limits: z.array(LimitRuleSchema).default([]),
   usageSummary: ApiKeyUsageSummarySchema.nullable().default(null),
   pooledRemainingPercentPrimary: z.number().nullable().default(null),
@@ -82,7 +82,7 @@ export const ApiKeyCreateRequestSchema = z.object({
     .nullable()
     .optional(),
   weeklyTokenLimit: z.number().int().positive().nullable().optional(),
-  expiresAt: z.string().datetime({ offset: true }).nullable().optional(),
+  expiresAt: z.iso.datetime({ offset: true }).nullable().optional(),
   assignedAccountIds: z.array(z.string()).optional(),
   limits: z.array(LimitRuleCreateSchema).optional(),
 });
@@ -106,7 +106,7 @@ export const ApiKeyUpdateRequestSchema = z.object({
     .nullable()
     .optional(),
   weeklyTokenLimit: z.number().int().positive().nullable().optional(),
-  expiresAt: z.string().datetime({ offset: true }).nullable().optional(),
+  expiresAt: z.iso.datetime({ offset: true }).nullable().optional(),
   isActive: z.boolean().optional(),
   assignedAccountIds: z.array(z.string()).optional(),
   limits: z.array(LimitRuleCreateSchema).optional(),
@@ -122,6 +122,6 @@ export type ApiKeyCreateRequest = z.infer<typeof ApiKeyCreateRequestSchema>;
 export type ApiKeyCreateResponse = z.infer<typeof ApiKeyCreateResponseSchema>;
 export type ApiKeyUpdateRequest = z.infer<typeof ApiKeyUpdateRequestSchema>;
 
-export const ModelItemSchema = z.object({ id: z.string(), name: z.string() });
+const ModelItemSchema = z.object({ id: z.string(), name: z.string() });
 export const ModelsResponseSchema = z.object({ models: z.array(ModelItemSchema) });
 export type ModelItem = z.infer<typeof ModelItemSchema>;

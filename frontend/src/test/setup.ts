@@ -6,6 +6,11 @@ import { ensureLocalStorageShim } from "@/test/local-storage-shim";
 import { resetMockState } from "@/test/mocks/handlers";
 import { server, startMockServer } from "@/test/mocks/server";
 
+vi.mock("@/components/lazy-recharts", async () => {
+  const recharts = await import("recharts");
+  return { ...recharts };
+});
+
 if (typeof window !== "undefined" && typeof window.matchMedia !== "function") {
   Object.defineProperty(window, "matchMedia", {
     writable: true,

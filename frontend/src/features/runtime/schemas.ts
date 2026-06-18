@@ -6,7 +6,7 @@ export const RuntimeVersionSchema = z.object({
   updateAvailable: z.boolean(),
   checkedAt: z.string(),
   source: z.string().nullable().optional(),
-  releaseUrl: z.string().url(),
+  releaseUrl: z.url(),
 });
 
 export type RuntimeVersion = z.infer<typeof RuntimeVersionSchema>;

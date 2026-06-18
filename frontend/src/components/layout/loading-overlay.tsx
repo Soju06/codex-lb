@@ -18,12 +18,11 @@ export function LoadingOverlay({
   }
 
   return (
-    <div
+    <output
       className={cn(
         "fixed inset-0 z-50 flex items-center justify-center bg-background/60 backdrop-blur-sm",
         className,
       )}
-      role="status"
       aria-live="polite"
       aria-label={label}
     >
@@ -31,6 +30,6 @@ export function LoadingOverlay({
         <Spinner size="sm" />
         <span className="font-medium">{label}</span>
       </div>
-    </div>
+    </output>
   );
 }

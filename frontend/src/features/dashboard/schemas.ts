@@ -1,13 +1,13 @@
 import { z } from "zod";
 
-import { AccountAdditionalQuotaSchema, AccountSummarySchema, AccountUsageSchema } from "@/features/accounts/schemas";
+import { AccountAdditionalQuotaSchema, AccountSummarySchema } from "@/features/accounts/schemas";
 import type { AccountSummary } from "@/features/accounts/schemas";
 
-export { AccountAdditionalQuotaSchema, AccountSummarySchema, AccountUsageSchema };
+export { AccountAdditionalQuotaSchema, AccountSummarySchema };
 export type { AccountSummary };
 export type { AccountAdditionalQuota as AdditionalQuota } from "@/features/accounts/schemas";
 
-export const OverviewTimeframeKeySchema = z.enum(["1d", "7d", "30d"]);
+const OverviewTimeframeKeySchema = z.enum(["1d", "7d", "30d"]);
 export type OverviewTimeframe = z.infer<typeof OverviewTimeframeKeySchema>;
 export const DEFAULT_OVERVIEW_TIMEFRAME: OverviewTimeframe = "7d";
 
@@ -16,7 +16,7 @@ export function parseOverviewTimeframe(value: string | null | undefined): Overvi
   return parsed.success ? parsed.data : DEFAULT_OVERVIEW_TIMEFRAME;
 }
 
-export const UsageHistoryItemSchema = z.object({
+const UsageHistoryItemSchema = z.object({
   accountId: z.string(),
   remainingPercentAvg: z.number().nullable(),
   capacityCredits: z.number(),
@@ -29,27 +29,27 @@ export const UsageWindowSchema = z.object({
   accounts: z.array(UsageHistoryItemSchema),
 });
 
-export const UsageSummaryWindowSchema = z.object({
+const UsageSummaryWindowSchema = z.object({
   remainingPercent: z.number(),
   capacityCredits: z.number(),
   remainingCredits: z.number(),
-  resetAt: z.string().datetime({ offset: true }).nullable(),
+  resetAt: z.iso.datetime({ offset: true }).nullable(),
   windowMinutes: z.number().nullable(),
 });
 
-export const DashboardOverviewTimeframeSchema = z.object({
+const DashboardOverviewTimeframeSchema = z.object({
   key: OverviewTimeframeKeySchema,
   windowMinutes: z.number().int().positive(),
   bucketSeconds: z.number().int().positive(),
   bucketCount: z.number().int().positive(),
 });
 
-export const UsageCostSchema = z.object({
+const UsageCostSchema = z.object({
   currency: z.string(),
   totalUsd: z.number(),
 });
 
-export const DashboardMetricsSchema = z.object({
+const DashboardMetricsSchema = z.object({
   requests: z.number().nullable(),
   tokens: z.number().nullable(),
   cachedInputTokens: z.number().nullable(),
@@ -58,12 +58,23 @@ export const DashboardMetricsSchema = z.object({
   topError: z.string().nullable(),
 });
 
-export const TrendPointSchema = z.object({
-  t: z.string().datetime({ offset: true }),
+const DashboardMetricsComparisonPreviousSchema = z.object({
+  requests: z.number(),
+  tokens: z.number(),
+  costUsd: z.number(),
+});
+
+const DashboardMetricsComparisonSchema = z.object({
+  canCompare: z.boolean(),
+  previous: DashboardMetricsComparisonPreviousSchema,
+});
+
+const TrendPointSchema = z.object({
+  t: z.iso.datetime({ offset: true }),
   v: z.number(),
 });
 
-export const MetricsTrendsSchema = z.object({
+const MetricsTrendsSchema = z.object({
   requests: z.array(TrendPointSchema),
   tokens: z.array(TrendPointSchema),
   cost: z.array(TrendPointSchema),
@@ -75,11 +86,11 @@ export const DepletionSchema = z.object({
   riskLevel: z.enum(["safe", "warning", "danger", "critical"]),
   burnRate: z.number(),
   safeUsagePercent: z.number(),
-  projectedExhaustionAt: z.string().datetime({ offset: true }).nullable().optional(),
+  projectedExhaustionAt: z.iso.datetime({ offset: true }).nullable().optional(),
   secondsUntilExhaustion: z.number().nullable().optional(),
 });
 
-export const WeeklyCreditPaceSchema = z.object({
+const WeeklyCreditPaceSchema = z.object({
   totalFullCredits: z.number(),
   totalActualRemainingCredits: z.number(),
   totalExpectedRemainingCredits: z.number(),
@@ -107,7 +118,7 @@ export const WeeklyCreditPaceSchema = z.object({
 });
 
 export const DashboardOverviewSchema = z.object({
-  lastSyncAt: z.string().datetime({ offset: true }).nullable(),
+  lastSyncAt: z.iso.datetime({ offset: true }).nullable(),
   timeframe: DashboardOverviewTimeframeSchema,
   accounts: z.array(AccountSummarySchema),
   summary: z.object({
@@ -115,6 +126,7 @@ export const DashboardOverviewSchema = z.object({
     secondaryWindow: UsageSummaryWindowSchema.nullable(),
     cost: UsageCostSchema,
     metrics: DashboardMetricsSchema.nullable(),
+    comparison: DashboardMetricsComparisonSchema.optional(),
   }),
   windows: z.object({
     primary: UsageWindowSchema,
@@ -133,7 +145,7 @@ export const DashboardProjectionsSchema = z.object({
   weeklyCreditPace: WeeklyCreditPaceSchema.nullable().optional(),
 });
 
-export const RequestLogCostBreakdownSchema = z.object({
+const RequestLogCostBreakdownSchema = z.object({
   inputUsd: z.number().nullable().optional().default(null),
   cachedInputUsd: z.number().nullable().optional().default(null),
   outputUsd: z.number().nullable().optional().default(null),
@@ -141,7 +153,7 @@ export const RequestLogCostBreakdownSchema = z.object({
 });
 
 export const RequestLogSchema = z.object({
-  requestedAt: z.string().datetime({ offset: true }),
+  requestedAt: z.iso.datetime({ offset: true }),
   accountId: z.string().nullable(),
   planType: z.string().nullable().optional().default(null),
   apiKeyName: z.string().nullable().optional().default(null),
@@ -181,12 +193,12 @@ export const RequestLogsResponseSchema = z.object({
   hasMore: z.boolean(),
 });
 
-export const RequestLogModelOptionSchema = z.object({
+const RequestLogModelOptionSchema = z.object({
   model: z.string(),
   reasoningEffort: z.string().nullable(),
 });
 
-export const RequestLogApiKeyOptionSchema = z.object({
+const RequestLogApiKeyOptionSchema = z.object({
   id: z.string(),
   name: z.string(),
   keyPrefix: z.string().nullable().optional().default(null),
@@ -211,6 +223,7 @@ export const FilterStateSchema = z.object({
 });
 
 export type DashboardMetrics = z.infer<typeof DashboardMetricsSchema>;
+export type DashboardMetricsComparison = z.infer<typeof DashboardMetricsComparisonSchema>;
 export type DashboardOverview = z.infer<typeof DashboardOverviewSchema>;
 export type DashboardProjections = z.infer<typeof DashboardProjectionsSchema>;
 export type DashboardOverviewTimeframe = z.infer<typeof DashboardOverviewTimeframeSchema>;

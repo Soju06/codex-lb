@@ -28,8 +28,12 @@ function limitRuleSortKey(rule: NormalizedLimitRule): string {
 
 export function normalizeLimitRules(rules: LimitRuleCreate[]): NormalizedLimitRule[] {
   return rules
-    .filter((rule) => rule.maxValue > 0)
-    .map(normalizeLimitRule)
+    .reduce<NormalizedLimitRule[]>((normalizedRules, rule) => {
+      if (rule.maxValue > 0) {
+        normalizedRules.push(normalizeLimitRule(rule));
+      }
+      return normalizedRules;
+    }, [])
     .sort((left, right) => limitRuleSortKey(left).localeCompare(limitRuleSortKey(right)));
 }
 

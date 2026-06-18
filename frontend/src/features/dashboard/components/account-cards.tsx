@@ -11,10 +11,11 @@ const ACCOUNT_CARD_ROW_GAP_REM = 1;
 
 export type AccountCardsProps = {
   accounts: AccountSummary[];
+  readOnly?: boolean;
   onAction?: AccountCardProps["onAction"];
 };
 
-export function AccountCards({ accounts, onAction }: AccountCardsProps) {
+export function AccountCards({ accounts, readOnly = false, onAction }: AccountCardsProps) {
   if (accounts.length === 0) {
     return (
       <EmptyState
@@ -38,6 +39,7 @@ export function AccountCards({ accounts, onAction }: AccountCardsProps) {
           <AccountCard
             account={account}
             showAccountId={account.isEmailDuplicate === true}
+            readOnly={readOnly}
             onAction={onAction}
           />
         </div>

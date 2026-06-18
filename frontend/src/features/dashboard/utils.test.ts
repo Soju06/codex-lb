@@ -975,4 +975,214 @@ describe("buildDashboardView", () => {
     expect(burn.value).toBe("0.0 / 1.0");
     expect(burn.meta).toBe("Projected account-equivalents: 0.0/5h · 1.0/7d");
   });
+
+  it("shows only the averaged cost text on the estimated cost card", () => {
+    const weeklyView = buildDashboardView(
+      createDashboardOverview({
+        summary: {
+          primaryWindow: {
+            remainingPercent: 63.5,
+            capacityCredits: 225,
+            remainingCredits: 142.875,
+            resetAt: null,
+            windowMinutes: 300,
+          },
+          secondaryWindow: {
+            remainingPercent: 55.2,
+            capacityCredits: 7560,
+            remainingCredits: 4173.12,
+            resetAt: null,
+            windowMinutes: 10080,
+          },
+          cost: {
+            currency: "USD",
+            totalUsd: 56,
+          },
+          metrics: {
+            requests: 228,
+            tokens: 45000,
+            cachedInputTokens: 8200,
+            errorRate: 0.028,
+            errorCount: 6,
+            topError: "rate_limit_exceeded",
+          },
+        },
+      }),
+      createDefaultRequestLogs(),
+      false,
+    );
+
+    const dailyView = buildDashboardView(
+      createDashboardOverview({
+        timeframe: {
+          key: "1d",
+          windowMinutes: 1440,
+          bucketSeconds: 3600,
+          bucketCount: 24,
+        },
+        summary: {
+          primaryWindow: {
+            remainingPercent: 63.5,
+            capacityCredits: 225,
+            remainingCredits: 142.875,
+            resetAt: null,
+            windowMinutes: 300,
+          },
+          secondaryWindow: {
+            remainingPercent: 55.2,
+            capacityCredits: 7560,
+            remainingCredits: 4173.12,
+            resetAt: null,
+            windowMinutes: 10080,
+          },
+          cost: {
+            currency: "USD",
+            totalUsd: 24,
+          },
+          metrics: {
+            requests: 228,
+            tokens: 45000,
+            cachedInputTokens: 8200,
+            errorRate: 0.028,
+            errorCount: 6,
+            topError: "rate_limit_exceeded",
+          },
+        },
+      }),
+      createDefaultRequestLogs(),
+      false,
+    );
+
+    expect(weeklyView.stats[2]?.meta).toBe("Avg/day $8.00");
+    expect(dailyView.stats[2]?.meta).toBe("Avg/hr $1.00");
+  });
+
+  it("adds previous-window comparison indicators to requests tokens and cost cards", () => {
+    const overview = createDashboardOverview();
+
+    const view = buildDashboardView(
+      {
+        ...overview,
+        summary: {
+          ...overview.summary,
+          metrics: {
+            requests: 1500,
+            tokens: 450,
+            cachedInputTokens: 0,
+            errorRate: 0.028,
+            errorCount: 6,
+            topError: "rate_limit_exceeded",
+          },
+          cost: {
+            currency: "USD",
+            totalUsd: 15,
+          },
+          comparison: {
+            canCompare: true,
+            previous: {
+              requests: 1000,
+              tokens: 900,
+              costUsd: 10,
+            },
+          },
+        },
+      },
+      createDefaultRequestLogs(),
+      false,
+    );
+
+    expect(view.stats[0]?.comparison).toEqual({ text: "▲ 50%", tone: "positive" });
+    expect(view.stats[1]?.comparison).toEqual({ text: "▼ 50%", tone: "negative" });
+    expect(view.stats[2]?.comparison).toEqual({ text: "▲ 50%", tone: "positive" });
+    expect(view.stats[view.stats.length - 1]?.comparison).toBeUndefined();
+  });
+
+  it("hides comparison indicators for sub-percent deltas that would round to 0%", () => {
+    const overview = createDashboardOverview();
+
+    const view = buildDashboardView(
+      {
+        ...overview,
+        summary: {
+          ...overview.summary,
+          metrics: {
+            requests: 1001,
+            tokens: 999,
+            cachedInputTokens: 0,
+            errorRate: 0.028,
+            errorCount: 6,
+            topError: "rate_limit_exceeded",
+          },
+          cost: {
+            currency: "USD",
+            totalUsd: 10.04,
+          },
+          comparison: {
+            canCompare: true,
+            previous: {
+              requests: 1000,
+              tokens: 1000,
+              costUsd: 10,
+            },
+          },
+        },
+      },
+      createDefaultRequestLogs(),
+      false,
+    );
+
+    expect(view.stats[0]?.comparison).toBeUndefined();
+    expect(view.stats[1]?.comparison).toBeUndefined();
+    expect(view.stats[2]?.comparison).toBeUndefined();
+  });
+
+  it("hides previous-window comparison indicators when comparison is unavailable or previous totals are zero", () => {
+    const overview = createDashboardOverview();
+
+    const unavailableView = buildDashboardView(
+      {
+        ...overview,
+        summary: {
+          ...overview.summary,
+          comparison: {
+            canCompare: false,
+            previous: {
+              requests: 1000,
+              tokens: 1000,
+              costUsd: 10,
+            },
+          },
+        },
+      },
+      createDefaultRequestLogs(),
+      false,
+    );
+
+    expect(unavailableView.stats[0]?.comparison).toBeUndefined();
+    expect(unavailableView.stats[1]?.comparison).toBeUndefined();
+    expect(unavailableView.stats[2]?.comparison).toBeUndefined();
+
+    const zeroPreviousView = buildDashboardView(
+      {
+        ...overview,
+        summary: {
+          ...overview.summary,
+          comparison: {
+            canCompare: true,
+            previous: {
+              requests: 0,
+              tokens: 0,
+              costUsd: 0,
+            },
+          },
+        },
+      },
+      createDefaultRequestLogs(),
+      false,
+    );
+
+    expect(zeroPreviousView.stats[0]?.comparison).toBeUndefined();
+    expect(zeroPreviousView.stats[1]?.comparison).toBeUndefined();
+    expect(zeroPreviousView.stats[2]?.comparison).toBeUndefined();
+  });
 });

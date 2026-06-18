@@ -6,23 +6,20 @@ import { createFirewallIp, deleteFirewallIp, listFirewallIps } from "@/features/
 export function useFirewall() {
   const queryClient = useQueryClient();
 
-  const firewallQuery = useQuery({
+  const { data, error, isFetching, isLoading, isPending, isSuccess, refetch } = useQuery({
     queryKey: ["firewall", "ips"],
     queryFn: listFirewallIps,
     refetchInterval: 30_000,
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,
   });
-
-  const invalidate = () => {
-    void queryClient.invalidateQueries({ queryKey: ["firewall", "ips"] });
-  };
+  const firewallQuery = { data, error, isFetching, isLoading, isPending, isSuccess, refetch };
 
   const createMutation = useMutation({
     mutationFn: (ipAddress: string) => createFirewallIp({ ipAddress }),
     onSuccess: () => {
       toast.success("IP added to firewall");
-      invalidate();
+      void queryClient.invalidateQueries({ queryKey: ["firewall", "ips"] });
     },
     onError: (error: Error) => {
       toast.error(error.message || "Failed to add firewall IP");
@@ -33,7 +30,7 @@ export function useFirewall() {
     mutationFn: (ipAddress: string) => deleteFirewallIp(ipAddress),
     onSuccess: () => {
       toast.success("IP removed from firewall");
-      invalidate();
+      void queryClient.invalidateQueries({ queryKey: ["firewall", "ips"] });
     },
     onError: (error: Error) => {
       toast.error(error.message || "Failed to remove firewall IP");

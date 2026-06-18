@@ -1881,7 +1881,10 @@ def _state_from_account(
     db_reset_at = (
         None if ignore_zero_capacity_primary_runtime_reset else (float(account.reset_at) if account.reset_at else None)
     )
-    effective_runtime_reset = db_reset_at or runtime.reset_at
+    if status_seed in (AccountStatus.RATE_LIMITED, AccountStatus.QUOTA_EXCEEDED) or runtime.blocked_at is not None:
+        effective_runtime_reset = db_reset_at or runtime.reset_at
+    else:
+        effective_runtime_reset = None
     effective_blocked_at = float(account.blocked_at) if account.blocked_at is not None else runtime.blocked_at
 
     if (
@@ -1941,6 +1944,7 @@ def _state_from_account(
         credits_has=credits_has,
         credits_unlimited=credits_unlimited,
         credits_balance=credits_balance,
+        infer_status_from_usage=False,
     )
 
     if status == AccountStatus.QUOTA_EXCEEDED:

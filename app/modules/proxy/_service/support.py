@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from collections import deque
-from collections.abc import Callable, Coroutine, Mapping
+from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -22,7 +23,7 @@ from app.modules.api_keys.service import (
     ApiKeyUsageReservationData,
 )
 from app.modules.proxy.affinity import _AffinityPolicy
-from app.modules.proxy.load_balancer import AccountLease
+from app.modules.proxy.load_balancer import AccountLease, AccountSelection
 from app.modules.proxy.work_admission import AdmissionLease
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,123 @@ _REQUEST_TRANSPORT_WEBSOCKET = "websocket"
 _WEBSOCKET_FULL_REPLAY_WAIT_MIN_ITEMS = 20
 _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS = 0.05
 _HARD_HTTP_BRIDGE_AFFINITY_KINDS = frozenset({"turn_state_header", "session_header"})
+_ACCOUNT_SELECTION_RECOVERY_MIN_SLEEP_SECONDS = 1.0
+_ACCOUNT_SELECTION_RECOVERY_DEFAULT_SLEEP_SECONDS = 30.0
+_ACCOUNT_SELECTION_RECOVERY_MAX_SLEEP_SECONDS = 300.0
+_ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS = 10.0
+_ACCOUNT_SELECTION_RETRY_HINT_RE = re.compile(r"try again in\s+([0-9]+(?:\.[0-9]+)?)s", re.IGNORECASE)
+
+
+def _account_selection_recovery_sleep_seconds_from_message(message: str | None) -> float | None:
+    message = (message or "").strip()
+    if not message:
+        return None
+
+    lowered = message.lower()
+    if (
+        "require re-authentication" in lowered
+        or "all accounts are paused" in lowered
+        or "no accounts with a plan" in lowered
+        or "no accounts with available additional quota" in lowered
+        or "no fresh additional quota data" in lowered
+    ):
+        return None
+
+    retry_hint = _ACCOUNT_SELECTION_RETRY_HINT_RE.search(message)
+    if retry_hint is not None:
+        try:
+            hinted_seconds = float(retry_hint.group(1))
+        except ValueError:
+            hinted_seconds = _ACCOUNT_SELECTION_RECOVERY_DEFAULT_SLEEP_SECONDS
+        return min(
+            max(hinted_seconds, _ACCOUNT_SELECTION_RECOVERY_MIN_SLEEP_SECONDS),
+            _ACCOUNT_SELECTION_RECOVERY_MAX_SLEEP_SECONDS,
+        )
+
+    if "hit your spend cap set by the owner of your workspace" in lowered:
+        return _ACCOUNT_SELECTION_RECOVERY_DEFAULT_SLEEP_SECONDS
+
+    return None
+
+
+def _account_selection_recovery_sleep_seconds(selection: AccountSelection) -> float | None:
+    return _account_selection_recovery_sleep_seconds_from_message(selection.error_message)
+
+
+def _account_capacity_wait_payload(
+    request_state: "_WebSocketRequestState | None",
+    *,
+    request_id: str | None,
+    reason: str | None,
+    retry_after_seconds: float | None,
+    started_at: float | None = None,
+) -> dict[str, JsonValue]:
+    wait_started_at = request_state.account_capacity_wait_started_at if request_state is not None else started_at
+    waited_seconds = int(max(0.0, time.monotonic() - wait_started_at)) if wait_started_at is not None else 0
+    payload: dict[str, JsonValue] = {
+        "type": "codex.keepalive",
+        "status": "waiting_for_account_capacity",
+        "request_id": request_id or (request_state.request_id if request_state is not None else None),
+        "waited_seconds": waited_seconds,
+    }
+    if reason:
+        payload["reason"] = reason
+    if retry_after_seconds is not None:
+        payload["retry_after_seconds"] = int(max(0.0, retry_after_seconds))
+    return payload
+
+
+async def _sleep_for_account_selection_recovery(
+    selection: AccountSelection,
+    *,
+    request_id: str | None,
+    kind: str,
+    request_stage: str,
+    model: str | None,
+    max_sleep_seconds: float | None = None,
+    request_state: "_WebSocketRequestState | None" = None,
+    heartbeat: Callable[[float], Awaitable[None]] | None = None,
+) -> bool:
+    sleep_seconds = _account_selection_recovery_sleep_seconds(selection)
+    if sleep_seconds is None:
+        return False
+    if max_sleep_seconds is not None:
+        if max_sleep_seconds <= 0:
+            return False
+        sleep_seconds = min(sleep_seconds, max_sleep_seconds)
+
+    if request_state is not None:
+        request_state.account_capacity_waiting = True
+        request_state.account_capacity_wait_reason = selection.error_message
+        request_state.account_capacity_wait_started_at = (
+            request_state.account_capacity_wait_started_at or time.monotonic()
+        )
+        request_state.account_capacity_wait_retry_after_seconds = sleep_seconds
+
+    logger.info(
+        "Waiting for an account to recover before retrying selection request_id=%s kind=%s "
+        "request_stage=%s model=%s sleep_seconds=%.1f error=%s",
+        request_id,
+        kind,
+        request_stage,
+        model,
+        sleep_seconds,
+        selection.error_message,
+    )
+    remaining = sleep_seconds
+    try:
+        while remaining > 0:
+            if heartbeat is not None:
+                await heartbeat(remaining)
+            chunk = min(remaining, _ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS)
+            await asyncio.sleep(chunk)
+            remaining -= chunk
+    finally:
+        if request_state is not None:
+            request_state.account_capacity_waiting = False
+            request_state.account_capacity_wait_reason = None
+            request_state.account_capacity_wait_retry_after_seconds = None
+    return True
 
 
 def _request_log_useragent_fields(headers: Mapping[str, str]) -> tuple[str | None, str | None]:
@@ -211,6 +329,10 @@ class _WebSocketRequestState:
     suppress_next_created_downstream: bool = False
     replay_downstream_response_id: str | None = None
     draining_until_terminal: bool = False
+    account_capacity_waiting: bool = False
+    account_capacity_wait_reason: str | None = None
+    account_capacity_wait_started_at: float | None = None
+    account_capacity_wait_retry_after_seconds: float | None = None
 
 
 @dataclass(frozen=True, slots=True)

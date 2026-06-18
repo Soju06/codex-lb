@@ -1,5 +1,6 @@
-import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from "recharts";
+import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip } from "@/components/lazy-recharts";
 import type { ModelCostEntry } from "../schemas";
+import { ChartTooltip } from "./chart-tooltip";
 
 export type ModelDistributionDonutProps = {
   data: ModelCostEntry[];
@@ -10,9 +11,9 @@ const COLORS = ["#3b82f6", "#10b981", "#f59e0b", "#ec4899", "#8b5cf6", "#06b6d4"
 export function ModelDistributionDonut({ data }: ModelDistributionDonutProps) {
   return (
     <div className="rounded-xl border bg-card p-5">
-      <div className="text-sm font-semibold text-foreground">Distribuição por Modelo</div>
+      <div className="text-sm font-semibold text-foreground">Distribution by Model</div>
       <div className="mt-4 flex items-center gap-4">
-        <div className="h-[140px] w-[140px] shrink-0">
+        <div className="relative h-[140px] w-[140px] shrink-0">
           <ResponsiveContainer width="100%" height="100%">
             <PieChart>
               <Pie
@@ -25,20 +26,12 @@ export function ModelDistributionDonut({ data }: ModelDistributionDonutProps) {
                 outerRadius={65}
                 strokeWidth={0}
               >
-                {data.map((_, i) => (
-                  <Cell key={i} fill={COLORS[i % COLORS.length]} />
+                {data.map((entry, i) => (
+                  <Cell key={entry.model} fill={COLORS[i % COLORS.length]} />
                 ))}
               </Pie>
               <Tooltip
-                contentStyle={{
-                  borderRadius: "8px",
-                  border: "1px solid hsl(var(--border))",
-                  background: "hsl(var(--popover))",
-                }}
-                formatter={(value) => {
-                  if (typeof value !== "number") return [String(value), "Custo"];
-                  return [`$${value.toFixed(2)}`, "Custo"];
-                }}
+                content={<ChartTooltip names={{ costUsd: "Cost" }} formatValue={(v) => `$${v.toFixed(2)}`} />}
               />
             </PieChart>
           </ResponsiveContainer>

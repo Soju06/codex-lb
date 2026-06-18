@@ -7,6 +7,13 @@ import { useConversationArchiveRecords } from "@/features/conversation-archive/h
 import type { ConversationArchiveRecord } from "@/features/conversation-archive/schemas";
 
 const REQUEST_ARCHIVE_LIMIT = 200;
+const archiveDateTimeFormatter = new Intl.DateTimeFormat(undefined, {
+  month: "short",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+});
 
 export function RequestArchivePanel({
   requestId,
@@ -68,7 +75,7 @@ export function RequestArchivePanel({
           {records.map((record, index) => {
             const expanded = expandedIndex === index;
             return (
-              <div key={`${record.fileName ?? "archive"}-${record.timestamp ?? index}-${index}`} className="border-b last:border-b-0">
+              <div key={archiveRecordKey(record)} className="border-b last:border-b-0">
                 <button
                   type="button"
                   className="flex w-full items-center gap-3 px-3 py-2 text-left hover:bg-muted/60"
@@ -93,6 +100,16 @@ export function RequestArchivePanel({
       ) : null}
     </section>
   );
+}
+
+function archiveRecordKey(record: ConversationArchiveRecord): string {
+  return [
+    record.fileName ?? "archive",
+    record.timestamp ?? "unknown-time",
+    record.requestId ?? "unknown-request",
+    record.direction ?? "unknown-direction",
+    record.kind ?? "unknown-kind",
+  ].join(":");
 }
 
 function ArchiveRecordSummary({ record }: { record: ConversationArchiveRecord }) {
@@ -152,11 +169,5 @@ function formatDateTime(value: string | null): string {
   if (Number.isNaN(date.getTime())) {
     return value;
   }
-  return new Intl.DateTimeFormat(undefined, {
-    month: "short",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  }).format(date);
+  return archiveDateTimeFormatter.format(date);
 }

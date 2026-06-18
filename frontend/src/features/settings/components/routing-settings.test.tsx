@@ -3,8 +3,8 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
 import { RoutingSettings } from "@/features/settings/components/routing-settings";
-import type { DashboardSettings } from "@/features/settings/schemas";
-import { createAccountSummary } from "@/test/mocks/factories";
+import { buildSettingsUpdateRequest } from "@/features/settings/payload";
+import { createAccountSummary, createDashboardSettings } from "@/test/mocks/factories";
 
 if (!HTMLElement.prototype.hasPointerCapture) {
   HTMLElement.prototype.hasPointerCapture = () => false;
@@ -19,38 +19,12 @@ if (!HTMLElement.prototype.scrollIntoView) {
   HTMLElement.prototype.scrollIntoView = () => undefined;
 }
 
-const LIMIT_WARMUP_DEFAULTS = {
-  limitWarmupEnabled: false,
-  limitWarmupWindows: "both" as const,
-  limitWarmupModel: "auto",
-  limitWarmupPrompt: "Say OK.",
-  limitWarmupCooldownSeconds: 3600,
-  limitWarmupMinAvailablePercent: 100,
-};
-
-const BASE_SETTINGS: DashboardSettings = {
+const BASE_SETTINGS = createDashboardSettings({
   stickyThreadsEnabled: false,
-  upstreamStreamTransport: "default",
-  upstreamProxyRoutingEnabled: false,
-  upstreamProxyDefaultPoolId: null,
   preferEarlierResetAccounts: true,
-  preferEarlierResetWindow: "secondary",
-  routingStrategy: "usage_weighted",
-  relativeAvailabilityPower: 2,
-  relativeAvailabilityTopK: 5,
-  singleAccountId: null,
-  weeklyPaceWorkingDays: "0,1,2,3,4,5,6",
-  openaiCacheAffinityMaxAgeSeconds: 300,
-  dashboardSessionTtlSeconds: 43200,
-  warmupModel: "gpt-5.4-mini",
-  importWithoutOverwrite: false,
-  totpRequiredOnLogin: false,
   totpConfigured: false,
-  apiKeyAuthEnabled: true,
-  additionalQuotaRoutingPolicies: {},
-  additionalQuotaPolicies: [],
-  ...LIMIT_WARMUP_DEFAULTS,
-};
+});
+const BASE_UPDATE_PAYLOAD = buildSettingsUpdateRequest(BASE_SETTINGS, {});
 
 describe("RoutingSettings", () => {
   it("saves a new prompt-cache affinity ttl from the button and Enter key", async () => {
@@ -66,23 +40,10 @@ describe("RoutingSettings", () => {
     await user.click(screen.getByRole("button", { name: "Save TTL" }));
 
     expect(onSave).toHaveBeenCalledWith({
+      ...BASE_UPDATE_PAYLOAD,
       stickyThreadsEnabled: false,
-      upstreamStreamTransport: "default",
-      preferEarlierResetAccounts: true,
-      preferEarlierResetWindow: "secondary",
-      routingStrategy: "usage_weighted",
-      relativeAvailabilityPower: 2,
-      relativeAvailabilityTopK: 5,
-      singleAccountId: null,
       openaiCacheAffinityMaxAgeSeconds: 180,
-      dashboardSessionTtlSeconds: 43200,
-      warmupModel: BASE_SETTINGS.warmupModel,
-      weeklyPaceWorkingDays: BASE_SETTINGS.weeklyPaceWorkingDays,
-      additionalQuotaRoutingPolicies: {},
-      importWithoutOverwrite: false,
-      totpRequiredOnLogin: false,
-      apiKeyAuthEnabled: true,
-      ...LIMIT_WARMUP_DEFAULTS,
+      guestAccessEnabled: false,
     });
 
     rerender(
@@ -97,23 +58,10 @@ describe("RoutingSettings", () => {
     await user.type(screen.getByRole("spinbutton", { name: "Prompt-cache affinity TTL" }), "240{Enter}");
 
     expect(onSave).toHaveBeenLastCalledWith({
+      ...BASE_UPDATE_PAYLOAD,
       stickyThreadsEnabled: false,
-      upstreamStreamTransport: "default",
-      preferEarlierResetAccounts: true,
-      preferEarlierResetWindow: "secondary",
-      routingStrategy: "usage_weighted",
-      relativeAvailabilityPower: 2,
-      relativeAvailabilityTopK: 5,
-      singleAccountId: null,
       openaiCacheAffinityMaxAgeSeconds: 240,
-      dashboardSessionTtlSeconds: 43200,
-      warmupModel: BASE_SETTINGS.warmupModel,
-      weeklyPaceWorkingDays: BASE_SETTINGS.weeklyPaceWorkingDays,
-      additionalQuotaRoutingPolicies: {},
-      importWithoutOverwrite: false,
-      totpRequiredOnLogin: false,
-      apiKeyAuthEnabled: true,
-      ...LIMIT_WARMUP_DEFAULTS,
+      guestAccessEnabled: false,
     });
   });
 
@@ -133,23 +81,10 @@ describe("RoutingSettings", () => {
     await user.click(screen.getByRole("switch", { name: "Enable sticky threads" }));
 
     expect(onSave).toHaveBeenCalledWith({
+      ...BASE_UPDATE_PAYLOAD,
       stickyThreadsEnabled: true,
-      upstreamStreamTransport: "default",
-      preferEarlierResetAccounts: true,
-      preferEarlierResetWindow: "secondary",
-      routingStrategy: "usage_weighted",
-      relativeAvailabilityPower: 2,
-      relativeAvailabilityTopK: 5,
-      singleAccountId: null,
       openaiCacheAffinityMaxAgeSeconds: 300,
-      dashboardSessionTtlSeconds: 43200,
-      warmupModel: BASE_SETTINGS.warmupModel,
-      weeklyPaceWorkingDays: BASE_SETTINGS.weeklyPaceWorkingDays,
-      additionalQuotaRoutingPolicies: {},
-      importWithoutOverwrite: false,
-      totpRequiredOnLogin: false,
-      apiKeyAuthEnabled: true,
-      ...LIMIT_WARMUP_DEFAULTS,
+      guestAccessEnabled: false,
     });
   });
 
@@ -168,23 +103,9 @@ describe("RoutingSettings", () => {
     await user.click(screen.getByRole("button", { name: "Save power" }));
 
     expect(onSave).toHaveBeenCalledWith({
-      stickyThreadsEnabled: false,
-      upstreamStreamTransport: "default",
-      preferEarlierResetAccounts: true,
-      preferEarlierResetWindow: "secondary",
+      ...BASE_UPDATE_PAYLOAD,
       routingStrategy: "relative_availability",
       relativeAvailabilityPower: 1.5,
-      relativeAvailabilityTopK: 5,
-      singleAccountId: null,
-      openaiCacheAffinityMaxAgeSeconds: 300,
-      dashboardSessionTtlSeconds: 43200,
-      warmupModel: BASE_SETTINGS.warmupModel,
-      weeklyPaceWorkingDays: BASE_SETTINGS.weeklyPaceWorkingDays,
-      additionalQuotaRoutingPolicies: {},
-      importWithoutOverwrite: false,
-      totpRequiredOnLogin: false,
-      apiKeyAuthEnabled: true,
-      ...LIMIT_WARMUP_DEFAULTS,
     });
 
     rerender(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={onSave} />);
@@ -285,23 +206,9 @@ describe("RoutingSettings", () => {
     await user.click(saveTopK);
 
     expect(onSave).toHaveBeenCalledWith({
-      stickyThreadsEnabled: false,
-      upstreamStreamTransport: "default",
-      preferEarlierResetAccounts: true,
-      preferEarlierResetWindow: "secondary",
+      ...BASE_UPDATE_PAYLOAD,
       routingStrategy: "relative_availability",
-      relativeAvailabilityPower: 2,
       relativeAvailabilityTopK: 6,
-      singleAccountId: null,
-      openaiCacheAffinityMaxAgeSeconds: 300,
-      dashboardSessionTtlSeconds: 43200,
-      warmupModel: BASE_SETTINGS.warmupModel,
-      weeklyPaceWorkingDays: BASE_SETTINGS.weeklyPaceWorkingDays,
-      additionalQuotaRoutingPolicies: {},
-      importWithoutOverwrite: false,
-      totpRequiredOnLogin: false,
-      apiKeyAuthEnabled: true,
-      ...LIMIT_WARMUP_DEFAULTS,
     });
   });
 
@@ -349,23 +256,9 @@ describe("RoutingSettings", () => {
     await user.click(await screen.findByRole("option", { name: /two@example.com/i }));
 
     expect(onSave).toHaveBeenCalledWith({
-      stickyThreadsEnabled: false,
-      upstreamStreamTransport: "default",
-      preferEarlierResetAccounts: true,
-      preferEarlierResetWindow: "secondary",
+      ...BASE_UPDATE_PAYLOAD,
       routingStrategy: "single_account",
-      relativeAvailabilityPower: 2,
-      relativeAvailabilityTopK: 5,
       singleAccountId: "acc-two",
-      openaiCacheAffinityMaxAgeSeconds: 300,
-      dashboardSessionTtlSeconds: 43200,
-      warmupModel: BASE_SETTINGS.warmupModel,
-      weeklyPaceWorkingDays: BASE_SETTINGS.weeklyPaceWorkingDays,
-      additionalQuotaRoutingPolicies: {},
-      importWithoutOverwrite: false,
-      totpRequiredOnLogin: false,
-      apiKeyAuthEnabled: true,
-      ...LIMIT_WARMUP_DEFAULTS,
     });
   });
 
@@ -429,23 +322,9 @@ describe("RoutingSettings", () => {
     await user.click(await screen.findByRole("option", { name: "Single account" }));
 
     expect(onSave).toHaveBeenCalledWith({
-      stickyThreadsEnabled: false,
-      upstreamStreamTransport: "default",
-      preferEarlierResetAccounts: true,
-      preferEarlierResetWindow: "secondary",
+      ...BASE_UPDATE_PAYLOAD,
       routingStrategy: "single_account",
-      relativeAvailabilityPower: 2,
-      relativeAvailabilityTopK: 5,
       singleAccountId: "acc-one",
-      openaiCacheAffinityMaxAgeSeconds: 300,
-      dashboardSessionTtlSeconds: 43200,
-      warmupModel: BASE_SETTINGS.warmupModel,
-      weeklyPaceWorkingDays: BASE_SETTINGS.weeklyPaceWorkingDays,
-      additionalQuotaRoutingPolicies: {},
-      importWithoutOverwrite: false,
-      totpRequiredOnLogin: false,
-      apiKeyAuthEnabled: true,
-      ...LIMIT_WARMUP_DEFAULTS,
     });
   });
 
@@ -468,23 +347,8 @@ describe("RoutingSettings", () => {
     await user.click(screen.getByRole("checkbox", { name: "Use Sat in weekly pace" }));
 
     expect(onSave).toHaveBeenCalledWith({
-      stickyThreadsEnabled: false,
-      upstreamStreamTransport: "default",
-      preferEarlierResetAccounts: true,
-      preferEarlierResetWindow: "secondary",
-      routingStrategy: "usage_weighted",
-      relativeAvailabilityPower: 2,
-      relativeAvailabilityTopK: 5,
-      singleAccountId: null,
-      openaiCacheAffinityMaxAgeSeconds: 300,
-      dashboardSessionTtlSeconds: 43200,
-      warmupModel: BASE_SETTINGS.warmupModel,
+      ...BASE_UPDATE_PAYLOAD,
       weeklyPaceWorkingDays: "0,1,2,3,4,6",
-      additionalQuotaRoutingPolicies: {},
-      importWithoutOverwrite: false,
-      totpRequiredOnLogin: false,
-      apiKeyAuthEnabled: true,
-      ...LIMIT_WARMUP_DEFAULTS,
     });
   });
 
@@ -535,23 +399,8 @@ describe("RoutingSettings", () => {
     await user.click(await screen.findByText("5h quota"));
 
     expect(onSave).toHaveBeenCalledWith({
-      stickyThreadsEnabled: false,
-      upstreamStreamTransport: "default",
-      preferEarlierResetAccounts: true,
+      ...BASE_UPDATE_PAYLOAD,
       preferEarlierResetWindow: "primary",
-      routingStrategy: "usage_weighted",
-      relativeAvailabilityPower: 2,
-      relativeAvailabilityTopK: 5,
-      singleAccountId: null,
-      openaiCacheAffinityMaxAgeSeconds: 300,
-      dashboardSessionTtlSeconds: 43200,
-      warmupModel: BASE_SETTINGS.warmupModel,
-      weeklyPaceWorkingDays: BASE_SETTINGS.weeklyPaceWorkingDays,
-      additionalQuotaRoutingPolicies: {},
-      importWithoutOverwrite: false,
-      totpRequiredOnLogin: false,
-      apiKeyAuthEnabled: true,
-      ...LIMIT_WARMUP_DEFAULTS,
     });
   });
 

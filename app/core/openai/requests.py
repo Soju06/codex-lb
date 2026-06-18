@@ -271,6 +271,97 @@ def _sanitize_input_items(input_items: list[JsonValue]) -> list[JsonValue]:
     return sanitized_input
 
 
+def _normalize_responses_input_instructions(data: JsonValue) -> JsonValue:
+    if not is_json_mapping(data):
+        return data
+    input_value = data.get("input")
+    if not is_json_list(input_value):
+        return data
+
+    instruction_parts: list[str] = []
+    input_items: list[JsonValue] = []
+    changed = False
+    for item in input_value:
+        item_mapping = _json_mapping_or_none(item)
+        if item_mapping is None:
+            input_items.append(item)
+            continue
+        role = item_mapping.get("role")
+        if role not in ("system", "developer"):
+            input_items.append(item)
+            continue
+        instruction_text, preserved_content = _split_responses_instruction_item_content(item_mapping)
+        if instruction_text:
+            instruction_parts.append(instruction_text)
+        if preserved_content is not None:
+            preserved_item = dict(item_mapping)
+            preserved_item["role"] = "user"
+            preserved_item["content"] = preserved_content
+            input_items.append(preserved_item)
+        changed = True
+
+    if not changed:
+        return data
+
+    normalized: MutableJsonObject = dict(data)
+    existing_instructions = normalized.get("instructions")
+    merged_instructions = _merge_responses_instructions(
+        existing_instructions if isinstance(existing_instructions, str) else "",
+        instruction_parts,
+    )
+    normalized["instructions"] = merged_instructions
+    normalized["input"] = input_items
+    return normalized
+
+
+def _merge_responses_instructions(existing: str, extra_parts: list[str]) -> str:
+    extra = "\n".join(part for part in extra_parts if part)
+    if not extra:
+        return existing
+    if existing:
+        return f"{existing}\n{extra}"
+    return extra
+
+
+def _split_responses_instruction_item_content(item: Mapping[str, JsonValue]) -> tuple[str, JsonValue | None]:
+    content = item.get("content")
+    if content is None:
+        return "", None
+    if isinstance(content, str):
+        return content, None
+    if is_json_list(content):
+        instruction_parts: list[str] = []
+        preserved_parts: list[JsonValue] = []
+        for part in _json_parts(content):
+            text = _responses_instruction_content_text(part)
+            if text is not None:
+                if text:
+                    instruction_parts.append(text)
+                continue
+            preserved_parts.append(part)
+        preserved_content: JsonValue | None = preserved_parts if preserved_parts else None
+        return "\n".join(instruction_parts), preserved_content
+    text = _responses_instruction_content_text(content)
+    if text is not None:
+        return text, None
+    return "", content
+
+
+def _responses_instruction_item_text(item: Mapping[str, JsonValue]) -> str:
+    instruction_text, _ = _split_responses_instruction_item_content(item)
+    return instruction_text
+
+
+def _responses_instruction_content_text(content: JsonValue) -> str | None:
+    if isinstance(content, str):
+        return content
+    content_mapping = _json_mapping_or_none(content)
+    if content_mapping is None:
+        return None
+    text = content_mapping.get("text")
+    return text if isinstance(text, str) else None
+
+
 def _sanitize_interleaved_reasoning_input_item(item: JsonValue) -> JsonValue | None:
     item_mapping = _json_mapping_or_none(item)
     if item_mapping is None:
@@ -457,6 +548,11 @@ class ResponsesTextControls(BaseModel):
 class ResponsesRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
 
+    @model_validator(mode="before")
+    @classmethod
+    def _move_input_instruction_messages(cls, data: JsonValue) -> JsonValue:
+        return _normalize_responses_input_instructions(data)
+
     model: str = Field(min_length=1)
     instructions: str
     input: JsonValue
@@ -551,6 +647,11 @@ class ResponsesRequest(BaseModel):
 
 class ResponsesCompactRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _move_input_instruction_messages(cls, data: JsonValue) -> JsonValue:
+        return _normalize_responses_input_instructions(data)
 
     model: str = Field(min_length=1)
     instructions: str

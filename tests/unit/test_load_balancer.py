@@ -621,13 +621,13 @@ def test_select_account_single_account_returns_selected_candidate():
     assert result.account.account_id == "selected"
 
 
-def test_select_account_single_account_rejects_exhausted_candidate():
+def test_select_account_single_account_uses_active_candidate_even_if_local_usage_exhausted():
     states = [
         AccountState("selected", AccountStatus.ACTIVE, used_percent=100.0, secondary_used_percent=20.0),
     ]
     result = select_account(states, routing_strategy="single_account")
-    assert result.account is None
-    assert result.error_message == "Selected account is exhausted or unavailable"
+    assert result.account is not None
+    assert result.account.account_id == "selected"
 
 
 def test_select_account_sequential_drain_uses_lowest_capacity_first_until_exhausted():
@@ -647,7 +647,7 @@ def test_select_account_sequential_drain_uses_lowest_capacity_first_until_exhaus
     assert result.account.account_id == "free"
 
 
-def test_select_account_sequential_drain_skips_exhausted_lowest_capacity_account():
+def test_select_account_sequential_drain_keeps_lowest_capacity_active_candidate_when_local_usage_exhausted():
     states = [
         AccountState(
             "free", AccountStatus.ACTIVE, used_percent=100.0, secondary_used_percent=99.0, capacity_credits=1_134.0
@@ -661,7 +661,7 @@ def test_select_account_sequential_drain_skips_exhausted_lowest_capacity_account
     ]
     result = select_account(states, routing_strategy="sequential_drain")
     assert result.account is not None
-    assert result.account.account_id == "plus"
+    assert result.account.account_id == "free"
 
 
 def test_select_account_sequential_drain_does_not_switch_on_draining_health_tier():
@@ -1439,6 +1439,123 @@ def _epoch_to_naive_utc(epoch: float) -> datetime:
     return datetime.fromtimestamp(epoch, timezone.utc).replace(tzinfo=None)
 
 
+def test_state_from_account_keeps_active_account_selectable_when_primary_usage_snapshot_is_exhausted(
+    monkeypatch,
+):
+    now = 1_700_000_000.0
+    future_reset = int(now + 300)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+
+    state = _state_from_account(
+        account=_make_test_account(status=AccountStatus.ACTIVE),
+        primary_entry=_make_test_usage(
+            window="primary",
+            used_percent=100.0,
+            reset_at=future_reset,
+            recorded_at=_epoch_to_naive_utc(now - 30),
+        ),
+        secondary_entry=None,
+        runtime=RuntimeState(),
+    )
+
+    assert state.status == AccountStatus.ACTIVE
+    assert state.used_percent == 100.0
+    assert state.reset_at is None
+    assert state.primary_reset_at == future_reset
+    selection = select_account([state], routing_strategy="single_account")
+    assert selection.account is not None
+    assert selection.account.account_id == state.account_id
+
+
+def test_state_from_account_clears_stale_advisory_account_reset_for_active_account(monkeypatch):
+    now = 1_700_000_000.0
+    future_reset = int(now + 300)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr("app.core.balancer.logic.time.time", lambda: now)
+
+    state = _state_from_account(
+        account=_make_test_account(status=AccountStatus.ACTIVE, reset_at=future_reset),
+        primary_entry=_make_test_usage(
+            window="primary",
+            used_percent=100.0,
+            reset_at=future_reset,
+            recorded_at=_epoch_to_naive_utc(now - 30),
+        ),
+        secondary_entry=None,
+        runtime=RuntimeState(reset_at=future_reset),
+    )
+
+    assert state.status == AccountStatus.ACTIVE
+    assert state.used_percent == 100.0
+    assert state.reset_at is None
+    assert state.primary_reset_at == future_reset
+
+    handle_rate_limit(state, {"message": "rate limit"})
+    assert state.status == AccountStatus.RATE_LIMITED
+    assert state.reset_at is None
+    assert state.cooldown_until is not None
+    assert now + 0.18 <= state.cooldown_until <= now + 0.22
+
+
+def test_state_from_account_uses_runtime_cooldown_not_advisory_reset_after_resetless_rate_limit(
+    monkeypatch,
+):
+    now = 1_700_000_000.0
+    future_reset = int(now + 300)
+    cooldown_until = now + 0.2
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+
+    state = _state_from_account(
+        account=_make_test_account(status=AccountStatus.RATE_LIMITED, reset_at=None),
+        primary_entry=_make_test_usage(
+            window="primary",
+            used_percent=100.0,
+            reset_at=future_reset,
+            recorded_at=_epoch_to_naive_utc(now - 30),
+        ),
+        secondary_entry=None,
+        runtime=RuntimeState(cooldown_until=cooldown_until, blocked_at=now - 1),
+    )
+
+    assert state.status == AccountStatus.ACTIVE
+    assert state.used_percent == 100.0
+    assert state.reset_at is None
+    assert state.primary_reset_at == future_reset
+    assert state.cooldown_until == cooldown_until
+
+
+def test_state_from_account_keeps_active_account_selectable_when_secondary_usage_snapshot_is_exhausted(
+    monkeypatch,
+):
+    now = 1_700_000_000.0
+    future_reset = int(now + 7 * 24 * 3600)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+
+    state = _state_from_account(
+        account=_make_test_account(status=AccountStatus.ACTIVE),
+        primary_entry=None,
+        secondary_entry=_make_test_usage(
+            window="secondary",
+            used_percent=100.0,
+            reset_at=future_reset,
+            recorded_at=_epoch_to_naive_utc(now - 30),
+        ),
+        runtime=RuntimeState(),
+    )
+
+    assert state.status == AccountStatus.ACTIVE
+    assert state.reset_at is None
+    assert state.secondary_used_percent == 100.0
+    assert state.secondary_reset_at == future_reset
+    selection = select_account([state], routing_strategy="single_account")
+    assert selection.account is not None
+    assert selection.account.account_id == state.account_id
+
+
 def test_state_from_account_zeroes_stale_exhausted_primary_usage_after_reset(monkeypatch):
     now = 1_700_000_000.0
     monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
@@ -1482,7 +1599,7 @@ def test_state_from_account_zeroes_stale_exhausted_secondary_usage_after_reset(m
     assert state.secondary_reset_at is None
 
 
-def test_state_from_account_treats_monthly_usage_as_long_window_quota(monkeypatch):
+def test_state_from_account_treats_monthly_usage_as_advisory_long_window_pressure(monkeypatch):
     now = 1_700_000_000.0
     future_reset = int(now + 30 * 24 * 3600)
     monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
@@ -1501,7 +1618,8 @@ def test_state_from_account_treats_monthly_usage_as_long_window_quota(monkeypatc
         runtime=RuntimeState(),
     )
 
-    assert state.status == AccountStatus.QUOTA_EXCEEDED
+    assert state.status == AccountStatus.ACTIVE
+    assert state.reset_at is None
     assert state.secondary_used_percent == 100.0
     assert state.secondary_reset_at == future_reset
     assert state.capacity_credits == usage_core.capacity_for_plan("free", "monthly")

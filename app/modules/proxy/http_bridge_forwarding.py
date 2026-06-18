@@ -20,6 +20,7 @@ from app.core.utils.json_guards import is_json_mapping
 from app.core.utils.request_id import get_request_id
 from app.core.utils.sse import format_sse_event
 from app.modules.api_keys.service import ApiKeyUsageReservationData
+from app.modules.proxy._service.http_bridge.helpers import _http_bridge_request_budget_seconds
 
 HTTP_BRIDGE_INTERNAL_FORWARD_PATH = "/internal/bridge/responses"
 HTTP_BRIDGE_FORWARDED_HEADER = "x-codex-bridge-forwarded"
@@ -104,7 +105,7 @@ class HTTPBridgeOwnerClient:
                     async for event_block in _iter_sse_event_blocks(
                         response,
                         request_started_at=request_started_at,
-                        proxy_request_budget_seconds=settings.http_responses_session_bridge_request_budget_seconds,
+                        proxy_request_budget_seconds=_http_bridge_request_budget_seconds(settings),
                         stream_idle_timeout_seconds=settings.stream_idle_timeout_seconds,
                     ):
                         yielded_event = True

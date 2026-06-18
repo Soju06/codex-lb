@@ -1,4 +1,5 @@
 import { Trash2 } from "lucide-react";
+import { useId } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -52,6 +53,7 @@ export type LimitRuleCardProps = {
 };
 
 export function LimitRuleCard({ rule, onChange, onRemove }: LimitRuleCardProps) {
+  const fieldId = useId();
   const isCost = rule.limitType === "cost_usd";
   const isCredits = rule.limitType === "credits";
   const displayValue = isCost && rule.maxValue > 0
@@ -107,9 +109,9 @@ export function LimitRuleCard({ rule, onChange, onRemove }: LimitRuleCardProps) 
 
       <div className="grid grid-cols-2 gap-2">
         <div>
-          <label className="text-xs text-muted-foreground">Type</label>
+          <label htmlFor={`${fieldId}-type`} className="text-xs text-muted-foreground">Type</label>
           <Select value={rule.limitType} onValueChange={handleLimitTypeChange}>
-            <SelectTrigger className="h-8 text-xs">
+            <SelectTrigger id={`${fieldId}-type`} className="h-8 text-xs">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -123,9 +125,9 @@ export function LimitRuleCard({ rule, onChange, onRemove }: LimitRuleCardProps) 
         </div>
 
         <div>
-          <label className="text-xs text-muted-foreground">Window</label>
+          <label htmlFor={`${fieldId}-window`} className="text-xs text-muted-foreground">Window</label>
           <Select value={rule.limitWindow} onValueChange={handleWindowChange}>
-            <SelectTrigger className="h-8 text-xs">
+            <SelectTrigger id={`${fieldId}-window`} className="h-8 text-xs">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -140,10 +142,11 @@ export function LimitRuleCard({ rule, onChange, onRemove }: LimitRuleCardProps) 
       </div>
 
       <div>
-        <label className="text-xs text-muted-foreground">
+        <label htmlFor={`${fieldId}-max-value`} className="text-xs text-muted-foreground">
           {isCost ? "Max value (USD)" : isCredits ? "Max value (credits)" : "Max value (tokens)"}
         </label>
         <Input
+          id={`${fieldId}-max-value`}
           type="number"
           min={isCost ? 0.01 : 1}
           step={isCost ? 0.01 : 1}
@@ -154,7 +157,7 @@ export function LimitRuleCard({ rule, onChange, onRemove }: LimitRuleCardProps) 
       </div>
 
       <div>
-        <label className="text-xs text-muted-foreground">Model filter</label>
+        <p className="text-xs text-muted-foreground">Model filter</p>
         <ModelMultiSelect
           value={modelFilterArray}
           onChange={(models) => {

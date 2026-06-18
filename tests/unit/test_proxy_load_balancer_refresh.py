@@ -2684,7 +2684,9 @@ async def test_select_account_allows_plus_plan_without_additional_quota_rows(mon
 
 
 @pytest.mark.asyncio
-async def test_select_account_keeps_standard_quota_for_plus_gated_model_without_additional_rows(monkeypatch) -> None:
+async def test_select_account_treats_standard_quota_as_advisory_for_plus_gated_model_without_additional_rows(
+    monkeypatch,
+) -> None:
     account = _make_account("acc-plus-standard-exhausted", "plus-standard-exhausted@example.com")
     now = utcnow()
     now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
@@ -2717,7 +2719,8 @@ async def test_select_account_keeps_standard_quota_for_plus_gated_model_without_
     )
     selection = await balancer.select_account(model="gpt-5.3-codex-spark")
 
-    assert selection.account is None
+    assert selection.account is not None
+    assert selection.account.id == account.id
 
 
 @pytest.mark.asyncio

@@ -6,7 +6,7 @@ import {
 	RefreshCw,
 	Trash2,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { lazy, Suspense, useMemo, useState } from "react";
 import { AlertMessage } from "@/components/alert-message";
 import { Button } from "@/components/ui/button";
 import {
@@ -17,10 +17,21 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Switch } from "@/components/ui/switch";
 import type { ApiKey } from "@/features/api-keys/schemas";
-import { AccountCostDonut } from "@/features/apis/components/account-cost-donut";
+import type { AccountCostDonutProps } from "@/features/apis/components/account-cost-donut";
 import { ApiKeyInfo } from "@/features/apis/components/api-key-info";
-import { ApiTrendChart } from "@/features/apis/components/api-trend-chart";
+import type { ApiTrendChartProps } from "@/features/apis/components/api-trend-chart";
 import type { ApiKeyUsage7DayResponse } from "@/features/apis/schemas";
+
+const AccountCostDonut = lazy(() =>
+	import("@/features/apis/components/account-cost-donut").then((module) => ({
+		default: (props: AccountCostDonutProps) => <module.AccountCostDonut {...props} />,
+	})),
+);
+const ApiTrendChart = lazy(() =>
+	import("@/features/apis/components/api-trend-chart").then((module) => ({
+		default: (props: ApiTrendChartProps) => <module.ApiTrendChart {...props} />,
+	})),
+);
 
 export type ApiDetailProps = {
 	apiKey: ApiKey | null;
@@ -146,10 +157,12 @@ export function ApiDetail({
 				>
 					{hasDonutData && (
 						<div className={hasTrends ? "lg:w-[25%] lg:shrink-0 lg:pr-4" : "lg:w-full"}>
-							<AccountCostDonut
-								accountCosts={usage7Day.accountCosts}
-								totalCostUsd={usage7Day.totalCostUsd}
-							/>
+							<Suspense fallback={<div className="h-[240px]" />}>
+								<AccountCostDonut
+									accountCosts={usage7Day.accountCosts}
+									totalCostUsd={usage7Day.totalCostUsd}
+								/>
+							</Suspense>
 						</div>
 					)}
 					{hasTrends ? (
@@ -189,7 +202,9 @@ export function ApiDetail({
 								</div>
 							</div>
 							{chartData ? (
-								<ApiTrendChart cost={chartData.cost} tokens={chartData.tokens} />
+								<Suspense fallback={<div className="h-[260px]" />}>
+									<ApiTrendChart cost={chartData.cost} tokens={chartData.tokens} />
+								</Suspense>
 							) : null}
 						</div>
 					) : null}

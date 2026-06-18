@@ -46,46 +46,38 @@ const STATUS_ORDER = ["ok", "rate_limit", "quota", "error"] as const;
 
 // ── Zod schemas for mock request bodies ──
 
-const OauthStartPayloadSchema = z
-  .object({
-    forceMethod: z.string().optional(),
-  })
-  .passthrough();
+const OauthStartPayloadSchema = z.looseObject({
+  forceMethod: z.string().optional(),
+});
 
-const ApiKeyCreatePayloadSchema = z
-  .object({
-    name: z.string().optional(),
-    trafficClass: z.enum(TRAFFIC_CLASSES).optional(),
-    assignedAccountIds: z.array(z.string()).optional(),
-  })
-  .passthrough();
+const ApiKeyCreatePayloadSchema = z.looseObject({
+  name: z.string().optional(),
+  trafficClass: z.enum(TRAFFIC_CLASSES).optional(),
+  assignedAccountIds: z.array(z.string()).optional(),
+});
 
-const FirewallIpCreatePayloadSchema = z
-  .object({
-    ipAddress: z.string().optional(),
-  })
-  .passthrough();
+const FirewallIpCreatePayloadSchema = z.looseObject({
+  ipAddress: z.string().optional(),
+});
 
-const ApiKeyUpdatePayloadSchema = z
-  .object({
-    name: z.string().optional(),
-    allowedModels: z.array(z.string()).nullable().optional(),
-    trafficClass: z.enum(TRAFFIC_CLASSES).optional(),
-    isActive: z.boolean().optional(),
-    assignedAccountIds: z.array(z.string()).optional(),
-    resetUsage: z.boolean().optional(),
-    limits: z
-      .array(
-        z.object({
-          limitType: z.enum(LIMIT_TYPES),
-          limitWindow: z.enum(LIMIT_WINDOWS),
-          maxValue: z.number(),
-          modelFilter: z.string().nullable().optional(),
-        }),
-      )
-      .optional(),
-  })
-  .passthrough();
+const ApiKeyUpdatePayloadSchema = z.looseObject({
+  name: z.string().optional(),
+  allowedModels: z.array(z.string()).nullable().optional(),
+  trafficClass: z.enum(TRAFFIC_CLASSES).optional(),
+  isActive: z.boolean().optional(),
+  assignedAccountIds: z.array(z.string()).optional(),
+  resetUsage: z.boolean().optional(),
+  limits: z
+    .array(
+      z.object({
+        limitType: z.enum(LIMIT_TYPES),
+        limitWindow: z.enum(LIMIT_WINDOWS),
+        maxValue: z.number(),
+        modelFilter: z.string().nullable().optional(),
+      }),
+    )
+    .optional(),
+});
 
 const AccountAliasPayloadSchema = z.object({
   alias: z.string().max(255).nullable(),
@@ -95,67 +87,63 @@ const AccountRoutingPolicyPayloadSchema = z.object({
   routingPolicy: z.enum(["normal", "burn_first", "preserve"]),
 });
 
-const SettingsPayloadSchema = z
-  .object({
-    stickyThreadsEnabled: z.boolean().optional(),
-    upstreamStreamTransport: z
-      .enum(["default", "auto", "http", "websocket"])
-      .optional(),
-    upstreamProxyRoutingEnabled: z.boolean().optional(),
-    upstreamProxyDefaultPoolId: z.string().nullable().optional(),
-    preferEarlierResetAccounts: z.boolean().optional(),
-    routingStrategy: z
-      .enum([
-        "usage_weighted",
-        "round_robin",
-        "capacity_weighted",
-        "relative_availability",
-        "fill_first",
-        "sequential_drain",
-        "reset_drain",
-        "single_account",
-      ])
-      .optional(),
-    relativeAvailabilityPower: z.number().positive().optional(),
-    relativeAvailabilityTopK: z.number().int().min(1).max(20).optional(),
-    singleAccountId: z.string().nullable().optional(),
-    openaiCacheAffinityMaxAgeSeconds: z.number().int().positive().optional(),
-    stickyReallocationBudgetThresholdPct: z.number().min(0).max(100).optional(),
-    stickyReallocationPrimaryBudgetThresholdPct: z
-      .number()
-      .min(0)
-      .max(100)
-      .optional(),
-    stickyReallocationSecondaryBudgetThresholdPct: z
-      .number()
-      .min(0)
-      .max(100)
-      .optional(),
-    importWithoutOverwrite: z.boolean().optional(),
-    totpRequiredOnLogin: z.boolean().optional(),
-    totpConfigured: z.boolean().optional(),
-    apiKeyAuthEnabled: z.boolean().optional(),
-  })
-  .passthrough();
+const SettingsPayloadSchema = z.looseObject({
+  stickyThreadsEnabled: z.boolean().optional(),
+  upstreamStreamTransport: z
+    .enum(["default", "auto", "http", "websocket"])
+    .optional(),
+  upstreamProxyRoutingEnabled: z.boolean().optional(),
+  upstreamProxyDefaultPoolId: z.string().nullable().optional(),
+  preferEarlierResetAccounts: z.boolean().optional(),
+  routingStrategy: z
+    .enum([
+      "usage_weighted",
+      "round_robin",
+      "capacity_weighted",
+      "relative_availability",
+      "fill_first",
+      "sequential_drain",
+      "reset_drain",
+      "single_account",
+    ])
+    .optional(),
+  relativeAvailabilityPower: z.number().positive().optional(),
+  relativeAvailabilityTopK: z.number().int().min(1).max(20).optional(),
+  singleAccountId: z.string().nullable().optional(),
+  openaiCacheAffinityMaxAgeSeconds: z.number().int().positive().optional(),
+  stickyReallocationBudgetThresholdPct: z.number().min(0).max(100).optional(),
+  stickyReallocationPrimaryBudgetThresholdPct: z
+    .number()
+    .min(0)
+    .max(100)
+    .optional(),
+  stickyReallocationSecondaryBudgetThresholdPct: z
+    .number()
+    .min(0)
+    .max(100)
+    .optional(),
+  importWithoutOverwrite: z.boolean().optional(),
+  totpRequiredOnLogin: z.boolean().optional(),
+  totpConfigured: z.boolean().optional(),
+  apiKeyAuthEnabled: z.boolean().optional(),
+});
 
-const QuotaPlannerSettingsPayloadSchema = z
-	.object({
-		mode: z.enum(["off", "shadow", "suggest", "auto"]).optional(),
-		timezone: z.string().optional(),
-		workingDays: z.array(z.number().int().min(0).max(6)).optional(),
-		workingHoursStart: z.string().optional(),
-		workingHoursEnd: z.string().optional(),
-		prewarmEnabled: z.boolean().optional(),
-		prewarmLeadMinutes: z.number().int().min(0).optional(),
-		maxWarmupsPerDay: z.number().int().min(0).optional(),
-		maxWarmupCreditsPerDay: z.number().min(0).optional(),
-		minExpectedGain: z.number().min(0).optional(),
-		forecastQuantile: z.enum(["p50", "p75", "p90"]).optional(),
-		allowSyntheticTraffic: z.boolean().optional(),
-		warmupModelPreference: z.string().nullable().optional(),
-		dryRun: z.boolean().optional(),
-	})
-	.passthrough();
+const QuotaPlannerSettingsPayloadSchema = z.looseObject({
+  mode: z.enum(["off", "shadow", "suggest", "auto"]).optional(),
+  timezone: z.string().optional(),
+  workingDays: z.array(z.number().int().min(0).max(6)).optional(),
+  workingHoursStart: z.string().optional(),
+  workingHoursEnd: z.string().optional(),
+  prewarmEnabled: z.boolean().optional(),
+  prewarmLeadMinutes: z.number().int().min(0).optional(),
+  maxWarmupsPerDay: z.number().int().min(0).optional(),
+  maxWarmupCreditsPerDay: z.number().min(0).optional(),
+  minExpectedGain: z.number().min(0).optional(),
+  forecastQuantile: z.enum(["p50", "p75", "p90"]).optional(),
+  allowSyntheticTraffic: z.boolean().optional(),
+  warmupModelPreference: z.string().nullable().optional(),
+  dryRun: z.boolean().optional(),
+});
 
 // ── Helpers ──
 
@@ -783,16 +771,14 @@ export const handlers = [
   http.post("/api/settings/upstream-proxy/endpoints", async ({ request }) => {
     const payload = await parseJsonBody(
       request,
-      z
-        .object({
+      z.looseObject({
           name: z.string().min(1),
           scheme: z.enum(["http", "https", "socks5", "socks5h"]),
           host: z.string().min(1),
           port: z.number().int(),
           username: z.string().nullable().optional(),
           isActive: z.boolean().optional(),
-        })
-        .passthrough(),
+        }),
     );
     if (!payload) {
       return HttpResponse.json(
@@ -824,13 +810,11 @@ export const handlers = [
   http.post("/api/settings/upstream-proxy/pools", async ({ request }) => {
     const payload = await parseJsonBody(
       request,
-      z
-        .object({
+      z.looseObject({
           name: z.string().min(1),
           endpointIds: z.array(z.string()).optional(),
           isActive: z.boolean().optional(),
-        })
-        .passthrough(),
+        }),
     );
     if (!payload) {
       return HttpResponse.json(
@@ -857,7 +841,7 @@ export const handlers = [
       const poolId = String(params.poolId);
       const payload = await parseJsonBody(
         request,
-        z.object({ endpointId: z.string().min(1) }).passthrough(),
+        z.looseObject({ endpointId: z.string().min(1) }),
       );
       const pool = state.upstreamProxyAdmin.pools.find(
         (item) => item.id === poolId,
@@ -904,9 +888,7 @@ export const handlers = [
       const accountId = String(params.accountId);
       const payload = await parseJsonBody(
         request,
-        z
-          .object({ poolId: z.string().min(1), isActive: z.boolean().optional() })
-          .passthrough(),
+        z.looseObject({ poolId: z.string().min(1), isActive: z.boolean().optional() }),
       );
       if (!payload) {
         return HttpResponse.json(
@@ -965,6 +947,27 @@ export const handlers = [
     return HttpResponse.json(created);
   }),
 
+	http.post("/api/dashboard-auth/password/login", () => {
+		state.authSession = createDashboardAuthSession({
+			...state.authSession,
+			authenticated: !state.authSession.totpRequiredOnLogin,
+			role: "admin",
+			permissions: ["read", "write"],
+		});
+		return HttpResponse.json(state.authSession);
+	}),
+
+	http.post("/api/dashboard-auth/guest/login", () => {
+		state.authSession = createDashboardAuthSession({
+			...state.authSession,
+			authenticated: true,
+			role: "guest",
+			permissions: ["read"],
+			guestAccessEnabled: true,
+		});
+		return HttpResponse.json(state.authSession);
+	}),
+
   http.delete("/api/firewall/ips/:ipAddress", ({ params }) => {
     const ipAddress = decodeURIComponent(String(params.ipAddress));
     const exists = state.firewallEntries.some(
@@ -985,6 +988,40 @@ export const handlers = [
   http.get("/api/quota-planner/settings", () =>
     HttpResponse.json(state.quotaPlannerSettings),
   ),
+
+	http.post("/api/dashboard-auth/guest/password", () => {
+		state.settings = createDashboardSettings({
+			...state.settings,
+			guestPasswordConfigured: true,
+		});
+		state.authSession = createDashboardAuthSession({
+			...state.authSession,
+			guestPasswordRequired: true,
+		});
+		return HttpResponse.json({ status: "ok" });
+	}),
+
+	http.delete("/api/dashboard-auth/guest/password", () => {
+		state.settings = createDashboardSettings({
+			...state.settings,
+			guestPasswordConfigured: false,
+		});
+		state.authSession = createDashboardAuthSession({
+			...state.authSession,
+			guestPasswordRequired: false,
+		});
+		return HttpResponse.json({ status: "ok" });
+	}),
+
+	http.delete("/api/dashboard-auth/password", () => {
+		state.authSession = createDashboardAuthSession({
+			authenticated: false,
+			passwordRequired: false,
+			totpRequiredOnLogin: false,
+			totpConfigured: false,
+		});
+		return HttpResponse.json({ status: "ok" });
+	}),
 
   http.put("/api/quota-planner/settings", async ({ request }) => {
     const payload = await parseJsonBody(

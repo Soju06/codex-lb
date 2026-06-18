@@ -1,6 +1,9 @@
 import { del, get, post } from "@/lib/api-client";
 import {
   AuthSessionSchema,
+  GuestPasswordSetRequestSchema,
+  type GuestLoginRequest,
+  type GuestPasswordSetRequest,
   type LoginRequest,
   type PasswordChangeRequest,
   type PasswordRemoveRequest,
@@ -26,7 +29,26 @@ export function setupPassword(payload: PasswordSetupRequest) {
 export function loginPassword(payload: LoginRequest) {
   return post(`${AUTH_BASE_PATH}/password/login`, AuthSessionSchema, {
     body: payload,
+    suppressUnauthorizedHandler: true,
   });
+}
+
+export function loginGuest(payload: GuestLoginRequest = {}) {
+  return post(`${AUTH_BASE_PATH}/guest/login`, AuthSessionSchema, {
+    body: payload,
+    suppressUnauthorizedHandler: true,
+  });
+}
+
+export function setGuestPassword(payload: GuestPasswordSetRequest) {
+  const validated = GuestPasswordSetRequestSchema.parse(payload);
+  return post(`${AUTH_BASE_PATH}/guest/password`, StatusResponseSchema, {
+    body: validated,
+  });
+}
+
+export function removeGuestPassword() {
+  return del(`${AUTH_BASE_PATH}/guest/password`, StatusResponseSchema);
 }
 
 export function changePassword(payload: PasswordChangeRequest) {

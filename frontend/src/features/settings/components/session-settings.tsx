@@ -24,7 +24,7 @@ function formatStoredHours(ttlSeconds: number): string {
 }
 
 export function SessionSettings({ settings, busy, onSave }: SessionSettingsProps) {
-  const [sessionHours, setSessionHours] = useState(formatStoredHours(settings.dashboardSessionTtlSeconds));
+  const [sessionHours, setSessionHours] = useState(() => formatStoredHours(settings.dashboardSessionTtlSeconds));
 
   const trimmed = sessionHours.trim();
   const isInteger = INTEGER_HOURS_PATTERN.test(trimmed);

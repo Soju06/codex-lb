@@ -60,8 +60,6 @@ export const DONUT_COLORS_DARK = [
   "#0891b2",
 ] as const;
 
-export const DONUT_COLORS = DONUT_COLORS_LIGHT;
-
 export const MESSAGE_TONE_META = {
   success: {
     label: "Success",

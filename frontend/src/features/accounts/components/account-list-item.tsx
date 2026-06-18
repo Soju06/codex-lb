@@ -41,7 +41,7 @@ export function AccountListItem({
   const emailSubtitle = account.displayName && account.displayName !== account.email
     ? account.email
     : null;
-  const workspaceLabel = account.workspaceLabel || account.workspaceId || "Personal / unknown workspace";
+  const workspaceLabel = account.chatgptAccountId || account.workspaceLabel || account.workspaceId || "Personal / unknown workspace";
   const seatLabel = account.seatType ? ` | ${formatSlug(account.seatType)}` : "";
   const slotSubtitle = `${formatSlug(account.planType)} | ${workspaceLabel}${seatLabel}`;
   const idSuffix = showAccountId ? ` | ID ${formatCompactAccountId(account.accountId)}` : "";
@@ -153,7 +153,7 @@ function RoutingPolicyBadge({
     return (
       <Badge
         variant="outline"
-        className="shrink-0 gap-1 border-amber-300 bg-amber-50 px-1.5 text-[11px] text-amber-700"
+        className="shrink-0 gap-1 border-amber-300 bg-amber-50 px-1.5 text-[11px] text-amber-700 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300"
       >
         <Flame className="h-3 w-3" aria-hidden="true" />
         Burn first
@@ -164,7 +164,7 @@ function RoutingPolicyBadge({
     return (
       <Badge
         variant="outline"
-        className="shrink-0 gap-1 border-sky-300 bg-sky-50 px-1.5 text-[11px] text-sky-700"
+        className="shrink-0 gap-1 border-sky-300 bg-sky-50 px-1.5 text-[11px] text-sky-700 dark:border-sky-500/30 dark:bg-sky-500/10 dark:text-sky-300"
       >
         <Shield className="h-3 w-3" aria-hidden="true" />
         Preserve

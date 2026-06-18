@@ -17,16 +17,6 @@ import {
 } from "@/features/accounts/api";
 import type { AccountRoutingPolicy } from "@/features/accounts/schemas";
 
-function invalidateAccountRelatedQueries(queryClient: ReturnType<typeof useQueryClient>, accountId?: string) {
-  void queryClient.invalidateQueries({ queryKey: ["accounts", "list"] });
-  void queryClient.invalidateQueries({ queryKey: ["accounts", "trends"] });
-  void queryClient.invalidateQueries({ queryKey: ["dashboard", "overview"] });
-  void queryClient.invalidateQueries({ queryKey: ["dashboard", "projections"] });
-  if (accountId) {
-    void queryClient.invalidateQueries({ queryKey: ["accounts", "trends", accountId] });
-  }
-}
-
 /**
  * Account mutation actions without the polling query.
  * Use this when you need account actions but already have account data
@@ -39,7 +29,10 @@ export function useAccountMutations() {
     mutationFn: importAccount,
     onSuccess: () => {
       toast.success("Account imported");
-      invalidateAccountRelatedQueries(queryClient);
+      void queryClient.invalidateQueries({ queryKey: ["accounts", "list"] });
+      void queryClient.invalidateQueries({ queryKey: ["accounts", "trends"] });
+      void queryClient.invalidateQueries({ queryKey: ["dashboard", "overview"] });
+      void queryClient.invalidateQueries({ queryKey: ["dashboard", "projections"] });
     },
     onError: (error: Error) => {
       toast.error(error.message || "Import failed");
@@ -50,7 +43,10 @@ export function useAccountMutations() {
     mutationFn: pauseAccount,
     onSuccess: () => {
       toast.success("Account paused");
-      invalidateAccountRelatedQueries(queryClient);
+      void queryClient.invalidateQueries({ queryKey: ["accounts", "list"] });
+      void queryClient.invalidateQueries({ queryKey: ["accounts", "trends"] });
+      void queryClient.invalidateQueries({ queryKey: ["dashboard", "overview"] });
+      void queryClient.invalidateQueries({ queryKey: ["dashboard", "projections"] });
     },
     onError: (error: Error) => {
       toast.error(error.message || "Pause failed");
@@ -61,7 +57,10 @@ export function useAccountMutations() {
     mutationFn: reactivateAccount,
     onSuccess: () => {
       toast.success("Account resumed");
-      invalidateAccountRelatedQueries(queryClient);
+      void queryClient.invalidateQueries({ queryKey: ["accounts", "list"] });
+      void queryClient.invalidateQueries({ queryKey: ["accounts", "trends"] });
+      void queryClient.invalidateQueries({ queryKey: ["dashboard", "overview"] });
+      void queryClient.invalidateQueries({ queryKey: ["dashboard", "projections"] });
     },
     onError: (error: Error) => {
       toast.error(error.message || "Resume failed");
@@ -73,7 +72,10 @@ export function useAccountMutations() {
       setAccountAlias(accountId, alias),
     onSuccess: () => {
       toast.success("Account alias updated");
-      invalidateAccountRelatedQueries(queryClient);
+      void queryClient.invalidateQueries({ queryKey: ["accounts", "list"] });
+      void queryClient.invalidateQueries({ queryKey: ["accounts", "trends"] });
+      void queryClient.invalidateQueries({ queryKey: ["dashboard", "overview"] });
+      void queryClient.invalidateQueries({ queryKey: ["dashboard", "projections"] });
     },
     onError: (error: Error) => {
       toast.error(error.message || "Alias update failed");
@@ -85,7 +87,10 @@ export function useAccountMutations() {
       deleteAccount(accountId, deleteHistory),
     onSuccess: () => {
       toast.success("Account deleted");
-      invalidateAccountRelatedQueries(queryClient);
+      void queryClient.invalidateQueries({ queryKey: ["accounts", "list"] });
+      void queryClient.invalidateQueries({ queryKey: ["accounts", "trends"] });
+      void queryClient.invalidateQueries({ queryKey: ["dashboard", "overview"] });
+      void queryClient.invalidateQueries({ queryKey: ["dashboard", "projections"] });
     },
     onError: (error: Error) => {
       toast.error(error.message || "Delete failed");
@@ -97,7 +102,13 @@ export function useAccountMutations() {
       probeAccount(accountId, model ? { model } : undefined),
     onSuccess: (_data, variables) => {
       toast.success("Account probed");
-      invalidateAccountRelatedQueries(queryClient, variables.accountId);
+      void queryClient.invalidateQueries({ queryKey: ["accounts", "list"] });
+      void queryClient.invalidateQueries({ queryKey: ["accounts", "trends"] });
+      void queryClient.invalidateQueries({
+        queryKey: ["accounts", "trends", variables.accountId],
+      });
+      void queryClient.invalidateQueries({ queryKey: ["dashboard", "overview"] });
+      void queryClient.invalidateQueries({ queryKey: ["dashboard", "projections"] });
     },
     onError: (error: Error) => {
       toast.error(error.message || "Probe failed");
@@ -109,7 +120,10 @@ export function useAccountMutations() {
       updateAccountLimitWarmup(accountId, enabled),
     onSuccess: (data) => {
       toast.success(data.enabled ? "Limit warm-up enabled" : "Limit warm-up disabled");
-      invalidateAccountRelatedQueries(queryClient);
+      void queryClient.invalidateQueries({ queryKey: ["accounts", "list"] });
+      void queryClient.invalidateQueries({ queryKey: ["accounts", "trends"] });
+      void queryClient.invalidateQueries({ queryKey: ["dashboard", "overview"] });
+      void queryClient.invalidateQueries({ queryKey: ["dashboard", "projections"] });
     },
     onError: (error: Error) => {
       toast.error(error.message || "Limit warm-up update failed");
@@ -128,7 +142,10 @@ export function useAccountMutations() {
       const label =
         data.routingPolicy === "normal" ? "normal" : data.routingPolicy.replace("_", "-");
       toast.success(`Account routing policy set to ${label}`);
-      invalidateAccountRelatedQueries(queryClient);
+      void queryClient.invalidateQueries({ queryKey: ["accounts", "list"] });
+      void queryClient.invalidateQueries({ queryKey: ["accounts", "trends"] });
+      void queryClient.invalidateQueries({ queryKey: ["dashboard", "overview"] });
+      void queryClient.invalidateQueries({ queryKey: ["dashboard", "projections"] });
     },
     onError: (error: Error) => {
       toast.error(error.message || "Routing policy update failed");
@@ -150,7 +167,10 @@ export function useAccountMutations() {
       updateAccount(accountId, { securityWorkAuthorized }),
     onSuccess: () => {
       toast.success("Account updated");
-      invalidateAccountRelatedQueries(queryClient);
+      void queryClient.invalidateQueries({ queryKey: ["accounts", "list"] });
+      void queryClient.invalidateQueries({ queryKey: ["accounts", "trends"] });
+      void queryClient.invalidateQueries({ queryKey: ["dashboard", "overview"] });
+      void queryClient.invalidateQueries({ queryKey: ["dashboard", "projections"] });
     },
     onError: (error: Error) => {
       toast.error(error.message || "Update failed");
@@ -183,13 +203,14 @@ export function useAccountTrends(accountId: string | null) {
 }
 
 export function useAccounts() {
-  const accountsQuery = useQuery({
+  const { data, error, isFetching, isLoading, isPending, isSuccess, refetch } = useQuery({
     queryKey: ["accounts", "list"],
     queryFn: listAccounts,
     select: (data) => data.accounts,
     refetchInterval: 30_000,
     refetchIntervalInBackground: false,
   });
+  const accountsQuery = { data, error, isFetching, isLoading, isPending, isSuccess, refetch };
 
   const mutations = useAccountMutations();
 

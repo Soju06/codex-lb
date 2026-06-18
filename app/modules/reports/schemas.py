@@ -41,8 +41,20 @@ class ReportSummary(DashboardModel):
     avg_requests_per_day: float = 0.0
 
 
+class ReportComparisonPrevious(DashboardModel):
+    total_cost_usd: float
+    total_tokens: int
+    total_requests: int
+
+
+class ReportComparison(DashboardModel):
+    can_compare: bool
+    previous: ReportComparisonPrevious
+
+
 class ReportsResponse(DashboardModel):
     summary: ReportSummary
+    comparison: ReportComparison
     daily: list[DailyReportRow] = Field(default_factory=list)
     by_model: list[ModelCostEntry] = Field(default_factory=list)
     by_account: list[AccountCostEntry] = Field(default_factory=list)

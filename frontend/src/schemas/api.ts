@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const DashboardApiErrorDetailSchema = z.object({
+const DashboardApiErrorDetailSchema = z.object({
   code: z.string(),
   message: z.string(),
 });
@@ -9,7 +9,7 @@ export const DashboardApiErrorSchema = z.object({
   error: DashboardApiErrorDetailSchema,
 });
 
-export const OpenAIApiErrorDetailSchema = z.object({
+const OpenAIApiErrorDetailSchema = z.object({
   message: z.string().optional(),
   type: z.string().optional(),
   code: z.string().optional(),

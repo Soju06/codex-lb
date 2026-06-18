@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Protocol, cast
 from urllib.parse import urlparse, urlunparse
 
-from curl_cffi.const import CurlWsFlag
+import aiohttp
 from websockets.asyncio.client import ClientConnection
 from websockets.asyncio.client import connect as websocket_connect
 from websockets.datastructures import Headers
@@ -150,17 +150,30 @@ class CodexResponsesWebSocket:
 
     async def receive(self) -> UpstreamWebSocketMessage:
         try:
-            data, flags = await self._websocket.recv()
+            msg = await self._websocket.receive()
         except Exception as exc:
             return UpstreamWebSocketMessage(
                 kind="error",
                 error=codex_transport_error_message("websocket receive", self._endpoint_id, exc),
             )
-        if flags & int(CurlWsFlag.CLOSE):
+        if msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSING, aiohttp.WSMsgType.CLOSED):
             return UpstreamWebSocketMessage(kind="close")
-        if flags & int(CurlWsFlag.TEXT):
-            return UpstreamWebSocketMessage(kind="text", text=data.decode("utf-8", errors="replace"))
-        return UpstreamWebSocketMessage(kind="binary", data=bytes(data))
+        if msg.type == aiohttp.WSMsgType.ERROR:
+            exception = msg.data if isinstance(msg.data, BaseException) else None
+            return UpstreamWebSocketMessage(
+                kind="error",
+                error=(
+                    codex_transport_error_message("websocket receive", self._endpoint_id, exception)
+                    if exception is not None
+                    else "Upstream websocket error"
+                ),
+            )
+        if msg.type == aiohttp.WSMsgType.TEXT:
+            text = msg.data if isinstance(msg.data, str) else str(msg.data)
+            return UpstreamWebSocketMessage(kind="text", text=text)
+        if msg.type == aiohttp.WSMsgType.BINARY:
+            return UpstreamWebSocketMessage(kind="binary", data=bytes(msg.data) if isinstance(msg.data, bytes) else b"")
+        return UpstreamWebSocketMessage(kind="error", error=f"Unexpected ws type: {msg.type!r}")
 
     async def close(self) -> None:
         try:
@@ -358,7 +371,7 @@ async def connect_responses_websocket(
                     route=route,
                     headers=upstream_headers,
                     timeout=settings.upstream_connect_timeout_seconds,
-                    max_message_size=settings.max_sse_event_bytes,
+                    max_msg_size=settings.max_sse_event_bytes,
                 )
                 context = result.context
                 websocket = result.websocket
@@ -371,7 +384,7 @@ async def connect_responses_websocket(
                     route=route,
                     headers=upstream_headers,
                     timeout=settings.upstream_connect_timeout_seconds,
-                    max_message_size=settings.max_sse_event_bytes,
+                    max_msg_size=settings.max_sse_event_bytes,
                 )
                 websocket = await context.__aenter__() if hasattr(context, "__aenter__") else context
                 if not hasattr(context, "__aenter__"):

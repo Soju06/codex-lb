@@ -16,6 +16,8 @@ from app.modules.dashboard.builders import (
 )
 from app.modules.dashboard.repository import DashboardRepository
 from app.modules.dashboard.schemas import (
+    DashboardMetricsComparison,
+    DashboardMetricsComparisonPrevious,
     DashboardOverviewResponse,
     DashboardOverviewTimeframeKey,
     DashboardProjectionsResponse,
@@ -104,11 +106,23 @@ class DashboardService:
             bucket_seconds=overview_timeframe.bucket_seconds,
             bucket_count=overview_timeframe.bucket_count,
         )
-        activity_aggregate = await self._repo.aggregate_activity_since(bucket_since)
-        top_error = await self._repo.top_error_since(bucket_since)
+        previous_window_start = bucket_since - timedelta(minutes=overview_timeframe.window_minutes)
+        activity_aggregate = await self._repo.aggregate_activity_between(bucket_since, now)
+        previous_activity_aggregate = await self._repo.aggregate_activity_between(previous_window_start, bucket_since)
+        top_error = await self._repo.top_error_between(bucket_since, now)
+        earliest_activity_at = await self._repo.earliest_activity_at()
         activity_metrics, activity_cost = build_activity_summaries(
             activity_aggregate,
             top_error=top_error,
+        )
+        previous_metrics, previous_cost = build_activity_summaries(previous_activity_aggregate)
+        comparison = DashboardMetricsComparison(
+            canCompare=earliest_activity_at is not None and earliest_activity_at <= previous_window_start,
+            previous=DashboardMetricsComparisonPrevious(
+                requests=previous_metrics.requests or 0,
+                tokens=previous_metrics.tokens or 0,
+                costUsd=previous_cost.total_usd,
+            ),
         )
 
         summary = build_dashboard_overview_summary(
@@ -117,6 +131,7 @@ class DashboardService:
             secondary_rows=secondary_rows,
             activity_metrics=activity_metrics,
             activity_cost=activity_cost,
+            comparison=comparison,
         )
 
         secondary_minutes = usage_core.resolve_window_minutes("secondary", secondary_rows)

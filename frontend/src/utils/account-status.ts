@@ -1,14 +1,5 @@
 export type DashboardAccountStatus = "active" | "paused" | "limited" | "exceeded" | "reauth" | "deactivated";
 
-export const STATUS_DOT: Record<DashboardAccountStatus, string> = {
-  active: "bg-emerald-500",
-  paused: "bg-amber-500",
-  limited: "bg-orange-500",
-  exceeded: "bg-red-500",
-  reauth: "bg-sky-500",
-  deactivated: "bg-zinc-400",
-};
-
 export function quotaBarColor(percent: number): string {
   if (percent >= 70) return "bg-emerald-500";
   if (percent >= 30) return "bg-amber-500";
@@ -19,12 +10,6 @@ export function quotaBarTrack(percent: number): string {
   if (percent >= 70) return "bg-emerald-500/15";
   if (percent >= 30) return "bg-amber-500/15";
   return "bg-red-500/15";
-}
-
-export function quotaStrokeColor(percent: number): string {
-  if (percent >= 70) return "#10b981";
-  if (percent >= 30) return "#f59e0b";
-  return "#ef4444";
 }
 
 export function normalizeStatus(status: string): DashboardAccountStatus {

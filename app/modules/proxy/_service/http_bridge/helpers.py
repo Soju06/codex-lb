@@ -1034,6 +1034,16 @@ def _http_bridge_runtime_config(
     )
 
 
+def _http_bridge_request_budget_seconds(settings: object) -> float:
+    return float(
+        getattr(
+            settings,
+            "http_responses_session_bridge_request_budget_seconds",
+            getattr(settings, "proxy_request_budget_seconds", 600.0),
+        )
+    )
+
+
 def _http_bridge_owner_check_required(
     key: _HTTPBridgeSessionKey,
     *,

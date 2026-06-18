@@ -22,8 +22,8 @@ spec:
   {{- end }}
   containers:
     - name: test-health
-      image: {{ printf "%s/library/busybox:1.37" (.Values.global.imageRegistry | default "docker.io") }}
-      imagePullPolicy: IfNotPresent
+      image: {{ include "codex-lb.testImage" . }}
+      imagePullPolicy: {{ .Values.test.image.pullPolicy }}
       securityContext:
         allowPrivilegeEscalation: false
         readOnlyRootFilesystem: true
@@ -34,10 +34,32 @@ spec:
         - sh
         - -c
         - |
-          echo "=== Health endpoint ==="
-          wget --spider --timeout=10 http://{{ include "codex-lb.fullname" . }}:{{ .Values.service.port | default 2455 }}/health || exit 1
-          echo "Health check passed!"
+          if command -v python >/dev/null 2>&1; then
+            python - <<'PY'
+          import sys
+          import urllib.request
 
-          echo "=== Startup probe ==="
-          wget -qO- --timeout=10 http://{{ include "codex-lb.fullname" . }}:{{ .Values.service.port | default 2455 }}/health/ready || exit 1
-          echo "Readiness check passed!"
+          checks = [
+              ("Health endpoint", "http://{{ include "codex-lb.fullname" . }}:{{ .Values.service.port | default 2455 }}/health"),
+              ("Startup probe", "http://{{ include "codex-lb.fullname" . }}:{{ .Values.service.port | default 2455 }}/health/ready"),
+          ]
+          for name, url in checks:
+              print(f"=== {name} ===")
+              try:
+                  with urllib.request.urlopen(url, timeout=10) as response:
+                      if response.status >= 400:
+                          raise RuntimeError(f"{url} returned HTTP {response.status}")
+              except Exception as exc:
+                  print(exc, file=sys.stderr)
+                  raise SystemExit(1) from exc
+          print("Health checks passed!")
+          PY
+          else
+            echo "=== Health endpoint ==="
+            wget --spider --timeout=10 http://{{ include "codex-lb.fullname" . }}:{{ .Values.service.port | default 2455 }}/health || exit 1
+            echo "Health check passed!"
+
+            echo "=== Startup probe ==="
+            wget -qO- --timeout=10 http://{{ include "codex-lb.fullname" . }}:{{ .Values.service.port | default 2455 }}/health/ready || exit 1
+            echo "Readiness check passed!"
+          fi

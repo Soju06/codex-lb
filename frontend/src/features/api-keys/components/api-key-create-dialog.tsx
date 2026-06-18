@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useReducer } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useForm } from "react-hook-form";
 import { z } from "zod";
@@ -47,37 +47,60 @@ type ApiKeyCreateFormProps = {
   onSubmit: (payload: ApiKeyCreateRequest) => Promise<void>;
 };
 
+type ApiKeyCreateDraft = {
+  selectedModels: string[];
+  selectedAccountIds: string[];
+  limitRules: LimitRuleCreate[];
+  expiresAt: Date | null;
+  enforcedModel: string;
+  enforcedReasoningEffort: string;
+  enforcedServiceTier: string;
+  trafficClass: TrafficClass;
+  applyToCodexModel: boolean;
+};
+
+const initialApiKeyCreateDraft: ApiKeyCreateDraft = {
+  selectedModels: [],
+  selectedAccountIds: [],
+  limitRules: [],
+  expiresAt: null,
+  enforcedModel: "",
+  enforcedReasoningEffort: "none",
+  enforcedServiceTier: "none",
+  trafficClass: "foreground",
+  applyToCodexModel: false,
+};
+
+function apiKeyCreateDraftReducer(
+  state: ApiKeyCreateDraft,
+  patch: Partial<ApiKeyCreateDraft>,
+): ApiKeyCreateDraft {
+  return { ...state, ...patch };
+}
+
 function ApiKeyCreateForm({ busy, onClose, onSubmit }: ApiKeyCreateFormProps) {
   const form = useForm<FormValues>({
     resolver: zodResolver(formSchema),
     defaultValues: { name: "" },
   });
 
-  const [selectedModels, setSelectedModels] = useState<string[]>([]);
-  const [selectedAccountIds, setSelectedAccountIds] = useState<string[]>([]);
-  const [limitRules, setLimitRules] = useState<LimitRuleCreate[]>([]);
-  const [expiresAt, setExpiresAt] = useState<Date | null>(null);
-  const [enforcedModel, setEnforcedModel] = useState("");
-  const [enforcedReasoningEffort, setEnforcedReasoningEffort] = useState("none");
-  const [enforcedServiceTier, setEnforcedServiceTier] = useState("none");
-  const [trafficClass, setTrafficClass] = useState<TrafficClass>("foreground");
-  const [applyToCodexModel, setApplyToCodexModel] = useState(false);
+  const [draft, updateDraft] = useReducer(apiKeyCreateDraftReducer, initialApiKeyCreateDraft);
 
   const handleSubmit = async (values: FormValues) => {
-    const validLimits = limitRules.filter((rule) => rule.maxValue > 0);
+    const validLimits = draft.limitRules.filter((rule) => rule.maxValue > 0);
     const payload: ApiKeyCreateRequest = {
       name: values.name,
-      allowedModels: selectedModels.length > 0 ? selectedModels : undefined,
-      applyToCodexModel,
-      ...(selectedAccountIds.length > 0 ? { assignedAccountIds: selectedAccountIds } : {}),
-      enforcedModel: enforcedModel.trim() ? enforcedModel.trim() : null,
+      allowedModels: draft.selectedModels.length > 0 ? draft.selectedModels : undefined,
+      applyToCodexModel: draft.applyToCodexModel,
+      ...(draft.selectedAccountIds.length > 0 ? { assignedAccountIds: draft.selectedAccountIds } : {}),
+      enforcedModel: draft.enforcedModel.trim() ? draft.enforcedModel.trim() : null,
       enforcedReasoningEffort:
-        enforcedReasoningEffort === "none"
+        draft.enforcedReasoningEffort === "none"
           ? null
-          : enforcedReasoningEffort as "minimal" | "low" | "medium" | "high" | "xhigh",
-      enforcedServiceTier: enforcedServiceTier === "none" ? null : enforcedServiceTier as ServiceTierType,
-      trafficClass,
-      expiresAt: expiresAt?.toISOString(),
+          : draft.enforcedReasoningEffort as "minimal" | "low" | "medium" | "high" | "xhigh",
+      enforcedServiceTier: draft.enforcedServiceTier === "none" ? null : draft.enforcedServiceTier as ServiceTierType,
+      trafficClass: draft.trafficClass,
+      expiresAt: draft.expiresAt?.toISOString(),
       limits: validLimits.length > 0 ? validLimits : undefined,
     };
 
@@ -112,15 +135,15 @@ function ApiKeyCreateForm({ busy, onClose, onSubmit }: ApiKeyCreateFormProps) {
             />
 
             <div className="space-y-1">
-              <label className="text-sm font-medium">Allowed models</label>
-              <ModelMultiSelect value={selectedModels} onChange={setSelectedModels} />
+              <p className="text-sm font-medium">Allowed models</p>
+              <ModelMultiSelect value={draft.selectedModels} onChange={(selectedModels) => updateDraft({ selectedModels })} />
             </div>
 
             <div className="flex items-center gap-2 rounded-md border p-2 text-sm">
               <Checkbox
                 id="create-api-key-apply-to-codex-model"
-                checked={applyToCodexModel}
-                onCheckedChange={(checked) => setApplyToCodexModel(checked === true)}
+                checked={draft.applyToCodexModel}
+                onCheckedChange={(checked) => updateDraft({ applyToCodexModel: checked === true })}
               />
               <label htmlFor="create-api-key-apply-to-codex-model" className="cursor-pointer">
                 Apply to codex /model
@@ -128,24 +151,25 @@ function ApiKeyCreateForm({ busy, onClose, onSubmit }: ApiKeyCreateFormProps) {
             </div>
 
             <div className="space-y-1">
-              <label className="text-sm font-medium">Assigned accounts</label>
-              <AccountMultiSelect value={selectedAccountIds} onChange={setSelectedAccountIds} />
+              <p className="text-sm font-medium">Assigned accounts</p>
+              <AccountMultiSelect value={draft.selectedAccountIds} onChange={(selectedAccountIds) => updateDraft({ selectedAccountIds })} />
             </div>
 
             <div className="space-y-1">
-              <label className="text-sm font-medium">Enforced model</label>
+              <label htmlFor="create-api-key-enforced-model" className="text-sm font-medium">Enforced model</label>
               <Input
-                value={enforcedModel}
-                onChange={(e) => setEnforcedModel(e.target.value)}
+                id="create-api-key-enforced-model"
+                value={draft.enforcedModel}
+                onChange={(e) => updateDraft({ enforcedModel: e.target.value })}
                 placeholder="e.g. gpt-5.3-codex"
                 autoComplete="off"
               />
             </div>
 
             <div className="space-y-1">
-              <label className="text-sm font-medium">Enforced reasoning</label>
-              <Select value={enforcedReasoningEffort} onValueChange={setEnforcedReasoningEffort}>
-                <SelectTrigger>
+              <label htmlFor="create-api-key-enforced-reasoning" className="text-sm font-medium">Enforced reasoning</label>
+              <Select value={draft.enforcedReasoningEffort} onValueChange={(enforcedReasoningEffort) => updateDraft({ enforcedReasoningEffort })}>
+                <SelectTrigger id="create-api-key-enforced-reasoning">
                   <SelectValue placeholder="None" />
                 </SelectTrigger>
                 <SelectContent>
@@ -160,9 +184,9 @@ function ApiKeyCreateForm({ busy, onClose, onSubmit }: ApiKeyCreateFormProps) {
             </div>
 
             <div className="space-y-1">
-              <label className="text-sm font-medium">Enforced service tier</label>
-              <Select value={enforcedServiceTier} onValueChange={setEnforcedServiceTier}>
-                <SelectTrigger>
+              <label htmlFor="create-api-key-enforced-service-tier" className="text-sm font-medium">Enforced service tier</label>
+              <Select value={draft.enforcedServiceTier} onValueChange={(enforcedServiceTier) => updateDraft({ enforcedServiceTier })}>
+                <SelectTrigger id="create-api-key-enforced-service-tier">
                   <SelectValue placeholder="None" />
                 </SelectTrigger>
                 <SelectContent>
@@ -177,7 +201,7 @@ function ApiKeyCreateForm({ busy, onClose, onSubmit }: ApiKeyCreateFormProps) {
 
             <div className="space-y-1">
               <FormLabel htmlFor="create-api-key-traffic-class">Traffic class</FormLabel>
-              <Select value={trafficClass} onValueChange={(value) => setTrafficClass(value as TrafficClass)}>
+              <Select value={draft.trafficClass} onValueChange={(value) => updateDraft({ trafficClass: value as TrafficClass })}>
                 <SelectTrigger id="create-api-key-traffic-class">
                   <SelectValue placeholder="Foreground" />
                 </SelectTrigger>
@@ -189,14 +213,14 @@ function ApiKeyCreateForm({ busy, onClose, onSubmit }: ApiKeyCreateFormProps) {
             </div>
 
             <div className="space-y-1">
-              <label className="text-sm font-medium">Expiry</label>
-              <ExpiryPicker value={expiresAt} onChange={setExpiresAt} />
+              <p className="text-sm font-medium">Expiry</p>
+              <ExpiryPicker value={draft.expiresAt} onChange={(expiresAt) => updateDraft({ expiresAt })} />
             </div>
           </div>
 
           <div className="max-h-[55vh] space-y-3 overflow-y-auto overscroll-contain pl-1 pr-2 max-sm:mt-3 max-sm:border-t max-sm:pt-3">
             <h4 className="sticky top-0 bg-background pb-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Limits</h4>
-            <LimitRulesEditor rules={limitRules} onChange={setLimitRules} />
+            <LimitRulesEditor rules={draft.limitRules} onChange={(limitRules) => updateDraft({ limitRules })} />
           </div>
         </div>
 

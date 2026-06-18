@@ -18,6 +18,7 @@ def apply_usage_quota(
     credits_has: bool | None = None,
     credits_unlimited: bool | None = None,
     credits_balance: float | None = None,
+    infer_status_from_usage: bool = True,
 ) -> tuple[AccountStatus, float | None, float | None]:
     used_percent = primary_used
     reset_at = runtime_reset
@@ -37,18 +38,19 @@ def apply_usage_quota(
                     status = AccountStatus.ACTIVE
                     reset_at = None
             else:
-                status = AccountStatus.QUOTA_EXCEEDED
                 used_percent = 100.0
-                if secondary_reset is not None:
-                    reset_at = secondary_reset
-                return status, used_percent, reset_at
-        elif status == AccountStatus.QUOTA_EXCEEDED:
+                if infer_status_from_usage:
+                    if secondary_reset is not None:
+                        reset_at = secondary_reset
+                    status = AccountStatus.QUOTA_EXCEEDED
+                    return status, used_percent, reset_at
+        if status == AccountStatus.QUOTA_EXCEEDED:
             if runtime_reset and runtime_reset > time.time():
                 reset_at = runtime_reset
             else:
                 status = AccountStatus.ACTIVE
                 reset_at = None
-    elif status == AccountStatus.QUOTA_EXCEEDED and secondary_reset is not None:
+    elif status == AccountStatus.QUOTA_EXCEEDED and secondary_reset is not None and infer_status_from_usage:
         reset_at = secondary_reset
 
     if has_credit_override and status == AccountStatus.QUOTA_EXCEEDED:
@@ -59,13 +61,14 @@ def apply_usage_quota(
 
     if primary_used is not None:
         if primary_used >= 100.0:
-            status = AccountStatus.RATE_LIMITED
             used_percent = 100.0
-            if primary_reset is not None:
-                reset_at = primary_reset
-            else:
-                reset_at = _fallback_primary_reset(primary_window_minutes) or reset_at
-            return status, used_percent, reset_at
+            if infer_status_from_usage:
+                if primary_reset is not None:
+                    reset_at = primary_reset
+                else:
+                    reset_at = _fallback_primary_reset(primary_window_minutes) or reset_at
+                status = AccountStatus.RATE_LIMITED
+                return status, used_percent, reset_at
         if status == AccountStatus.RATE_LIMITED:
             if runtime_reset and runtime_reset > time.time():
                 reset_at = runtime_reset

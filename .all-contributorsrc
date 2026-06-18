@@ -688,6 +688,84 @@
         "code",
         "test"
       ]
+    },
+    {
+      "login": "neoclaw",
+      "name": "NeoClaw",
+      "avatar_url": "https://avatars.githubusercontent.com/u/261536598?v=4",
+      "profile": "https://github.com/NeoClaw",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "abarsegov",
+      "name": "abarsegov",
+      "avatar_url": "https://avatars.githubusercontent.com/u/181010154?v=4",
+      "profile": "https://github.com/abarsegov",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "KakatkarAkshay",
+      "name": "Akshay Kakatkar",
+      "avatar_url": "https://avatars.githubusercontent.com/u/49910222?v=4",
+      "profile": "https://github.com/KakatkarAkshay",
+      "contributions": [
+        "code",
+        "test"
+      ]
+    },
+    {
+      "login": "softkleenex",
+      "name": "softkleenex",
+      "avatar_url": "https://avatars.githubusercontent.com/u/92619941?v=4",
+      "profile": "https://github.com/softkleenex",
+      "contributions": [
+        "code",
+        "test"
+      ]
+    },
+    {
+      "login": "plastictaste",
+      "name": "plastictaste",
+      "avatar_url": "https://avatars.githubusercontent.com/u/261646970?v=4",
+      "profile": "https://github.com/plastictaste",
+      "contributions": [
+        "code",
+        "test",
+        "doc"
+      ]
+    },
+    {
+      "login": "n3crosis",
+      "name": "n3crosis",
+      "avatar_url": "https://avatars.githubusercontent.com/u/11072158?v=4",
+      "profile": "https://github.com/n3crosis",
+      "contributions": [
+        "code",
+        "test"
+      ]
+    },
+    {
+      "login": "copilot",
+      "name": "copilot",
+      "avatar_url": "https://github.com/copilot.png",
+      "profile": "https://github.com/copilot",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "geoHeil",
+      "name": "geoHeil",
+      "avatar_url": "https://avatars.githubusercontent.com/u/1694964?v=4",
+      "profile": "https://github.com/geoHeil",
+      "contributions": [
+        "code",
+        "test"
+      ]
     }
   ],
   "contributorsPerLine": 7,

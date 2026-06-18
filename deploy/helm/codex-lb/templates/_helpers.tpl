@@ -181,6 +181,19 @@ Image string — resolves registry/repository:tag with optional digest override
 {{- end }}
 
 {{/*
+Helm test image string — resolves registry/repository:tag with optional digest override
+*/}}
+{{- define "codex-lb.testImage" -}}
+{{- $registry := .Values.global.imageRegistry | default .Values.test.image.registry }}
+{{- $repository := .Values.test.image.repository }}
+{{- if .Values.test.image.digest }}
+{{- printf "%s/%s@%s" $registry $repository .Values.test.image.digest }}
+{{- else }}
+{{- printf "%s/%s:%s" $registry $repository .Values.test.image.tag }}
+{{- end }}
+{{- end }}
+
+{{/*
 Merged nodeSelector: global.nodeSelector + local nodeSelector (local wins).
 */}}
 {{- define "codex-lb.nodeSelector" -}}

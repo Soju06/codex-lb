@@ -19,6 +19,12 @@ _VERSION_RE = re.compile(r"^(?P<base>\d+\.\d+\.\d+)(?:-(?P<channel>alpha|beta|rc
 _TAG_RE = re.compile(r"^v(?P<version>\d+\.\d+\.\d+(?:-(?:alpha|beta|rc)\.[1-9]\d*)?)$")
 _CONVENTIONAL_SUBJECT_RE = re.compile(r"^(?P<type>[a-z][a-z0-9-]*)(?:\([^)]+\))?(?P<breaking>!)?: (?P<description>.+)$")
 _RELEASABLE_CONVENTIONAL_TYPES = frozenset({"deps", "feat", "fix", "perf", "revert"})
+_PEP440_PRERELEASE_RE = re.compile(r"^(?P<base>\d+\.\d+\.\d+)(?P<channel>a|b|rc)(?P<serial>[1-9]\d*)$")
+_PEP440_CHANNELS = {
+    "a": "alpha",
+    "b": "beta",
+    "rc": "rc",
+}
 
 
 @dataclass(frozen=True)
@@ -185,8 +191,27 @@ def read_project_versions(root: Path) -> dict[str, str]:
     }
 
 
+def canonical_release_version(value: str) -> str:
+    match = _PEP440_PRERELEASE_RE.fullmatch(value)
+    if match is None:
+        return value
+    channel = _PEP440_CHANNELS[match.group("channel")]
+    return f"{match.group('base')}-{channel}.{match.group('serial')}"
+
+
+def canonical_release_version_for_file(name: str, value: str) -> str:
+    if name == "uv.lock":
+        return canonical_release_version(value)
+    return value
+
+
 def assert_project_versions(root: Path, expected_version: str) -> None:
-    mismatches = {name: actual for name, actual in read_project_versions(root).items() if actual != expected_version}
+    expected = canonical_release_version(expected_version)
+    mismatches = {
+        name: actual
+        for name, actual in read_project_versions(root).items()
+        if canonical_release_version_for_file(name, actual) != canonical_release_version_for_file(name, expected)
+    }
     if mismatches:
         detail = ", ".join(f"{name}={actual!r}" for name, actual in sorted(mismatches.items()))
         raise ValueError(f"release version drift: expected {expected_version!r}; {detail}")

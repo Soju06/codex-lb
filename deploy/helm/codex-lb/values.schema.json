@@ -22,6 +22,37 @@
       },
       "required": ["repository"]
     },
+    "test": {
+      "type": "object",
+      "properties": {
+        "image": {
+          "type": "object",
+          "properties": {
+            "registry": {
+              "type": "string",
+              "description": "Helm test pod image registry"
+            },
+            "repository": {
+              "type": "string",
+              "description": "Helm test pod image repository"
+            },
+            "tag": {
+              "type": "string",
+              "description": "Helm test pod image tag"
+            },
+            "digest": {
+              "type": "string",
+              "description": "Helm test pod image digest"
+            },
+            "pullPolicy": {
+              "type": "string",
+              "enum": ["Always", "IfNotPresent", "Never"],
+              "description": "Helm test pod image pull policy"
+            }
+          }
+        }
+      }
+    },
     "auth": {
       "type": "object",
       "properties": {

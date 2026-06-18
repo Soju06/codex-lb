@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 
 import { AlertMessage } from "@/components/alert-message";
@@ -8,11 +8,30 @@ import { useReports } from "@/features/reports/hooks/use-reports";
 import { getErrorMessageOrNull } from "@/utils/errors";
 import { ReportsFilters, type ReportsFiltersState } from "./reports-filters";
 import { ReportsSummaryCards } from "./reports-summary-cards";
-import { CostPerDayChart } from "./cost-per-day-chart";
-import { TokensPerDayChart } from "./tokens-per-day-chart";
-import { ModelDistributionDonut } from "./model-distribution-donut";
+import type { CostPerDayChartProps } from "./cost-per-day-chart";
+import type { TokensPerDayChartProps } from "./tokens-per-day-chart";
+import type { ModelDistributionDonutProps } from "./model-distribution-donut";
 import { DailyDetailTable } from "./daily-detail-table";
-import { daysAgoLocalISO, localDateISO } from "../date";
+import { daysAgoLocalISO, getBrowserReportsTimeZone, localDateISO } from "../date";
+
+const CostPerDayChart = lazy(() =>
+  import("./cost-per-day-chart").then((module) => ({
+    default: (props: CostPerDayChartProps) => <module.CostPerDayChart {...props} />,
+  })),
+);
+const TokensPerDayChart = lazy(() =>
+  import("./tokens-per-day-chart").then((module) => ({
+    default: (props: TokensPerDayChartProps) => <module.TokensPerDayChart {...props} />,
+  })),
+);
+const ModelDistributionDonut = lazy(() =>
+  import("./model-distribution-donut").then((module) => ({
+    default: (props: ModelDistributionDonutProps) => <module.ModelDistributionDonut {...props} />,
+  })),
+);
+
+const REPORTS_TIMEZONE_REFRESH_INTERVAL_MS = 60_000;
+const DEFAULT_PRESET_DAYS = 7;
 
 const createDefaultFilters = (): ReportsFiltersState => ({
   startDate: daysAgoLocalISO(6),
@@ -30,20 +49,54 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
     ...createDefaultFilters(),
     ...initialFilters,
   }));
-  const reportsQuery = useReports(filters);
+  const [selectedPresetDays, setSelectedPresetDays] = useState<number | null>(
+    DEFAULT_PRESET_DAYS,
+  );
+  const [reportsTimeZone, setReportsTimeZone] = useState<string | undefined>(() =>
+    getBrowserReportsTimeZone(),
+  );
+
+  useEffect(() => {
+    const refreshReportsTimeZone = () => {
+      setReportsTimeZone((currentTimeZone) => {
+        const nextTimeZone = getBrowserReportsTimeZone();
+        return currentTimeZone === nextTimeZone ? currentTimeZone : nextTimeZone;
+      });
+    };
+
+    const intervalId = window.setInterval(
+      refreshReportsTimeZone,
+      REPORTS_TIMEZONE_REFRESH_INTERVAL_MS,
+    );
+
+    window.addEventListener("focus", refreshReportsTimeZone);
+    document.addEventListener("visibilitychange", refreshReportsTimeZone);
+
+    return () => {
+      window.clearInterval(intervalId);
+      window.removeEventListener("focus", refreshReportsTimeZone);
+      document.removeEventListener("visibilitychange", refreshReportsTimeZone);
+    };
+  }, []);
+
+  const reportsQuery = useReports(filters, reportsTimeZone);
   const modelCatalogFilters = useMemo(
     () => ({ ...filters, model: "" }),
     [filters],
   );
-  const modelCatalogQuery = useReports(modelCatalogFilters);
-  const accountsQuery = useQuery({
+  const modelCatalogQuery = useReports(modelCatalogFilters, reportsTimeZone);
+  const {
+    data: accountsData,
+    error: accountsError,
+    refetch: refetchAccounts,
+  } = useQuery({
     queryKey: ["accounts", "reports-filter"],
     queryFn: listAccounts,
   });
 
   const accountOptions = useMemo(
     () =>
-      (accountsQuery.data?.accounts ?? []).map((account) => ({
+      (accountsData?.accounts ?? []).map((account) => ({
         value: account.accountId,
         label:
           account.alias ||
@@ -52,7 +105,7 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
           account.accountId,
         isEmail: !account.alias,
       })),
-    [accountsQuery.data],
+    [accountsData],
   );
 
   const modelOptions = useMemo(
@@ -66,7 +119,7 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
 
   const mainReportsError = getErrorMessageOrNull(reportsQuery.error);
   const modelOptionsError = getErrorMessageOrNull(modelCatalogQuery.error);
-  const accountOptionsError = getErrorMessageOrNull(accountsQuery.error);
+  const accountOptionsError = getErrorMessageOrNull(accountsError);
 
   const hasAnyError = Boolean(
     mainReportsError || modelOptionsError || accountOptionsError,
@@ -76,26 +129,47 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
     await Promise.allSettled([
       reportsQuery.refetch(),
       modelCatalogQuery.refetch(),
-      accountsQuery.refetch(),
+      refetchAccounts(),
     ]);
+  };
+
+  const handlePresetSelect = (days: number) => {
+    setSelectedPresetDays(days);
+    setFilters((current) => ({
+      ...current,
+      startDate: daysAgoLocalISO(days - 1),
+      endDate: localDateISO(),
+    }));
+  };
+
+  const handleFiltersChange = (nextFilters: ReportsFiltersState) => {
+    if (
+      nextFilters.startDate !== filters.startDate ||
+      nextFilters.endDate !== filters.endDate
+    ) {
+      setSelectedPresetDays(null);
+    }
+    setFilters(nextFilters);
   };
 
   return (
     <div className="mx-auto w-full max-w-[1500px] flex-1 space-y-6 px-4 py-8 sm:px-6">
       <div>
         <h1 className="text-2xl font-semibold tracking-tight text-foreground">
-          Relatório de Custo
+          Cost Report
         </h1>
         <p className="text-sm text-muted-foreground">
-          Histórico de utilização por período
+          Usage history by date range
         </p>
       </div>
 
       <ReportsFilters
         filters={filters}
+        selectedPresetDays={selectedPresetDays}
         accountOptions={accountOptions}
         modelOptions={modelOptions}
-        onFiltersChange={setFilters}
+        onPresetSelect={handlePresetSelect}
+        onFiltersChange={handleFiltersChange}
       />
 
       {mainReportsError ? (
@@ -116,21 +190,34 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
 
       {reportsQuery.isLoading ? (
         <div className="flex items-center justify-center py-20 text-sm text-muted-foreground">
-          Carregando...
+          Loading...
         </div>
       ) : reportsQuery.data ? (
         <>
-          <ReportsSummaryCards summary={reportsQuery.data.summary} />
+          <ReportsSummaryCards
+            summary={reportsQuery.data.summary}
+            comparison={reportsQuery.data.comparison}
+          />
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-            <CostPerDayChart data={reportsQuery.data.daily} />
-            <TokensPerDayChart data={reportsQuery.data.daily} />
+            <Suspense fallback={<div className="h-[270px] rounded-xl border bg-card" />}>
+              <CostPerDayChart data={reportsQuery.data.daily} />
+            </Suspense>
+            <Suspense fallback={<div className="h-[270px] rounded-xl border bg-card" />}>
+              <TokensPerDayChart data={reportsQuery.data.daily} />
+            </Suspense>
           </div>
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
             <div className="lg:col-span-1">
-              <ModelDistributionDonut data={reportsQuery.data.byModel} />
+              <Suspense fallback={<div className="h-[220px] rounded-xl border bg-card" />}>
+                <ModelDistributionDonut data={reportsQuery.data.byModel} />
+              </Suspense>
             </div>
             <div className="lg:col-span-2">
-              <DailyDetailTable data={reportsQuery.data.daily} />
+              <DailyDetailTable
+                startDate={filters.startDate}
+                endDate={filters.endDate}
+                data={reportsQuery.data.daily}
+              />
             </div>
           </div>
         </>

@@ -10,14 +10,22 @@ IMAGE_REGISTRY="${IMAGE_REGISTRY:-ghcr.io}"
 IMAGE_REPOSITORY="${IMAGE_REPOSITORY:-soju06/codex-lb}"
 IMAGE_TAG="${IMAGE_TAG:-ci}"
 DB_PASSWORD="${DB_PASSWORD:-smoke-password}"
+HELM_TEST_TIMEOUT="${HELM_TEST_TIMEOUT:-60s}"
 
+log_step() {
+  printf '[%s] [helm-kind-smoke] %s\n' "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" "$*" >&2
+}
+
+log_step "building Helm dependencies"
 helm dependency build "${CHART_DIR}" >/dev/null
 
 wait_for_release() {
   local release="$1"
   local namespace="$2"
+  log_step "listing pods for ${release} in ${namespace}"
   kubectl --context "${KUBE_CONTEXT}" -n "${namespace}" get pods
-  helm test "${release}" --namespace "${namespace}" --kube-context "${KUBE_CONTEXT}"
+  log_step "running helm test for ${release} in ${namespace}"
+  helm test "${release}" --namespace "${namespace}" --kube-context "${KUBE_CONTEXT}" --timeout "${HELM_TEST_TIMEOUT}"
 }
 
 dump_namespace_debug() {
@@ -44,6 +52,7 @@ install_bundled() {
 
   trap 'dump_namespace_debug "${namespace}"' ERR
 
+  log_step "installing bundled release ${release}"
   helm upgrade --install "${release}" "${CHART_DIR}" \
     --kube-context "${KUBE_CONTEXT}" \
     --namespace "${namespace}" \
@@ -53,6 +62,10 @@ install_bundled() {
     --set image.repository="${IMAGE_REPOSITORY}" \
     --set image.tag="${IMAGE_TAG}" \
     --set image.pullPolicy=IfNotPresent \
+    --set test.image.registry="${IMAGE_REGISTRY}" \
+    --set test.image.repository="${IMAGE_REPOSITORY}" \
+    --set test.image.tag="${IMAGE_TAG}" \
+    --set test.image.pullPolicy=IfNotPresent \
     --set postgresql.auth.password="${DB_PASSWORD}" \
     --set config.sessionBridgeCodexPrewarmEnabled=false \
     --set ingress.enabled=true \
@@ -85,6 +98,7 @@ print(base64.urlsafe_b64encode(os.urandom(32)).decode())
 PY
 )
 
+  log_step "installing external PostgreSQL release ${db_release}"
   helm upgrade --install "${db_release}" oci://registry-1.docker.io/bitnamicharts/postgresql \
     --kube-context "${KUBE_CONTEXT}" \
     --namespace "${namespace}" \
@@ -96,11 +110,13 @@ PY
     --wait \
     --timeout 10m
 
+  log_step "creating external DB application secret ${app_secret}"
   kubectl --context "${KUBE_CONTEXT}" -n "${namespace}" delete secret "${app_secret}" --ignore-not-found
   kubectl --context "${KUBE_CONTEXT}" -n "${namespace}" create secret generic "${app_secret}" \
     --from-literal=database-url="postgresql+asyncpg://codexlb:${DB_PASSWORD}@${db_release}-postgresql:5432/codexlb" \
     --from-literal=encryption-key="${encryption_key}"
 
+  log_step "installing external DB release ${release}"
   helm upgrade --install "${release}" "${CHART_DIR}" \
     --kube-context "${KUBE_CONTEXT}" \
     --namespace "${namespace}" \
@@ -110,7 +126,12 @@ PY
     --set image.repository="${IMAGE_REPOSITORY}" \
     --set image.tag="${IMAGE_TAG}" \
     --set image.pullPolicy=IfNotPresent \
+    --set test.image.registry="${IMAGE_REGISTRY}" \
+    --set test.image.repository="${IMAGE_REPOSITORY}" \
+    --set test.image.tag="${IMAGE_TAG}" \
+    --set test.image.pullPolicy=IfNotPresent \
     --set auth.existingSecret="${app_secret}" \
+    --set replicaCount=1 \
     --wait \
     --timeout 10m
 

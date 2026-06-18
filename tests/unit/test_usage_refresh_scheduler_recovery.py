@@ -563,7 +563,7 @@ async def test_reconcile_recoverable_account_statuses_restores_quota_exceeded_fr
 
 
 @pytest.mark.asyncio
-async def test_reconcile_recoverable_account_statuses_does_not_demote_quota_exceeded_to_rate_limited(
+async def test_reconcile_recoverable_account_statuses_recovers_quota_exceeded_and_clears_advisory_primary_reset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     now = 1_700_000_000.0
@@ -610,11 +610,11 @@ async def test_reconcile_recoverable_account_statuses_does_not_demote_quota_exce
         accounts=[account],
     )
 
-    assert recovered == 0
-    assert account.status == AccountStatus.QUOTA_EXCEEDED
-    assert account.reset_at == secondary_reset
-    assert account.blocked_at == blocked_at
-    assert accounts_repo.status_updates == []
+    assert recovered == 1
+    assert account.status == AccountStatus.ACTIVE
+    assert account.reset_at is None
+    assert account.blocked_at is None
+    assert len(accounts_repo.status_updates) == 1
 
 
 @pytest.mark.asyncio

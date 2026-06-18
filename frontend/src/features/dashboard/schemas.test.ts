@@ -53,6 +53,14 @@ describe("DashboardOverviewSchema", () => {
           errorCount: 10,
           topError: null,
         },
+        comparison: {
+          canCompare: true,
+          previous: {
+            requests: 250,
+            tokens: 1000,
+            costUsd: 6.25,
+          },
+        },
       },
       windows: {
         primary: {
@@ -66,6 +74,7 @@ describe("DashboardOverviewSchema", () => {
     });
 
     expect(parsed.accounts).toHaveLength(0);
+    expect(parsed.summary.comparison?.previous.requests).toBe(250);
   });
 
   it("drops legacy request_logs field from parse result", () => {
@@ -106,6 +115,45 @@ describe("DashboardOverviewSchema", () => {
     });
 
     expect(parsed).not.toHaveProperty("request_logs");
+  });
+
+  it("accepts overview payloads without comparison block for backward compatibility", () => {
+    const parsed = DashboardOverviewSchema.parse({
+      lastSyncAt: ISO,
+      timeframe: {
+        key: "7d",
+        windowMinutes: 10080,
+        bucketSeconds: 21600,
+        bucketCount: 28,
+      },
+      accounts: [],
+      summary: {
+        primaryWindow: {
+          remainingPercent: 70,
+          capacityCredits: 100,
+          remainingCredits: 70,
+          resetAt: ISO,
+          windowMinutes: 300,
+        },
+        secondaryWindow: null,
+        cost: {
+          currency: "USD",
+          totalUsd: 0,
+        },
+        metrics: null,
+      },
+      windows: {
+        primary: {
+          windowKey: "primary",
+          windowMinutes: 300,
+          accounts: [],
+        },
+        secondary: null,
+      },
+      trends: EMPTY_TRENDS,
+    });
+
+    expect(parsed.summary.comparison).toBeUndefined();
   });
 });
 

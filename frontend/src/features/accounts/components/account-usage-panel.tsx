@@ -1,7 +1,8 @@
+import { lazy, Suspense } from "react";
 import { Clock, Flame } from "lucide-react";
 
 import { cn } from "@/lib/utils";
-import { AccountTrendChart } from "@/features/accounts/components/account-trend-chart";
+import type { AccountTrendChartProps } from "@/features/accounts/components/account-trend-chart";
 import type { AccountSummary, AccountTrendsResponse } from "@/features/accounts/schemas";
 import { quotaBarColor, quotaBarTrack } from "@/utils/account-status";
 import {
@@ -13,6 +14,12 @@ import {
   formatWindowLabel,
   formatAbsoluteResetTime,
 } from "@/utils/formatters";
+
+const AccountTrendChart = lazy(() =>
+  import("@/features/accounts/components/account-trend-chart").then((module) => ({
+    default: (props: AccountTrendChartProps) => <module.AccountTrendChart {...props} />,
+  })),
+);
 
 export type AccountUsagePanelProps = {
   account: AccountSummary;
@@ -227,11 +234,13 @@ export function AccountUsagePanel({ account, trends }: AccountUsagePanelProps) {
               ) : null}
             </div>
           </div>
-          <AccountTrendChart
-            primary={primaryTrendPoints}
-            secondary={secondaryTrendPoints}
-            secondaryScheduled={secondaryScheduledTrendPoints}
-          />
+          <Suspense fallback={<div className="h-[220px]" />}>
+            <AccountTrendChart
+              primary={primaryTrendPoints}
+              secondary={secondaryTrendPoints}
+              secondaryScheduled={secondaryScheduledTrendPoints}
+            />
+          </Suspense>
         </div>
       )}
     </div>

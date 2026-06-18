@@ -3,7 +3,11 @@ from __future__ import annotations
 from fastapi import APIRouter, Body, Depends, Request, Response
 
 from app.core.audit.service import AuditService
-from app.core.auth.dependencies import set_dashboard_error_format, validate_dashboard_session
+from app.core.auth.dependencies import (
+    require_dashboard_write_access,
+    set_dashboard_error_format,
+    validate_dashboard_session,
+)
 from app.core.exceptions import DashboardBadRequestError, DashboardNotFoundError
 from app.dependencies import ApiKeysContext, get_api_keys_context
 from app.modules.api_keys.schemas import (
@@ -114,6 +118,7 @@ def _build_limit_inputs(payload: ApiKeyCreateRequest | ApiKeyUpdateRequest) -> l
 async def create_api_key(
     request: Request,
     payload: ApiKeyCreateRequest = Body(...),
+    _write_access=Depends(require_dashboard_write_access),
     context: ApiKeysContext = Depends(get_api_keys_context),
 ) -> ApiKeyCreateResponse:
     limit_inputs = _build_limit_inputs(payload)
@@ -160,6 +165,7 @@ async def update_api_key(
     request: Request,
     key_id: str,
     payload: ApiKeyUpdateRequest = Body(...),
+    _write_access=Depends(require_dashboard_write_access),
     context: ApiKeysContext = Depends(get_api_keys_context),
 ) -> ApiKeyResponse:
     fields = payload.model_fields_set
@@ -211,6 +217,7 @@ async def update_api_key(
 async def delete_api_key(
     request: Request,
     key_id: str,
+    _write_access=Depends(require_dashboard_write_access),
     context: ApiKeysContext = Depends(get_api_keys_context),
 ) -> Response:
     try:
@@ -228,6 +235,7 @@ async def delete_api_key(
 @router.post("/{key_id}/regenerate", response_model=ApiKeyCreateResponse)
 async def regenerate_api_key(
     key_id: str,
+    _write_access=Depends(require_dashboard_write_access),
     context: ApiKeysContext = Depends(get_api_keys_context),
 ) -> ApiKeyCreateResponse:
     try:

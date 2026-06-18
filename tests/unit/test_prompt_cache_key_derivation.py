@@ -142,7 +142,9 @@ class TestExtractInstructionInput:
                 ]
             ),
         )
-        assert _extract_instruction_input(payload) == "Return JSON.\nKeep it short."
+        assert payload.instructions == "Return JSON.\nKeep it short."
+        assert payload.input == [{"role": "user", "content": "hello"}]
+        assert _extract_instruction_input(payload) is None
 
     def test_ignores_string_input(self):
         payload = ResponsesRequest(model="gpt-5.4", instructions="", input="hello")

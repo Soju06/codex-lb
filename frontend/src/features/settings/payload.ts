@@ -33,6 +33,7 @@ export function buildSettingsUpdateRequest(
     limitWarmupCooldownSeconds: settings.limitWarmupCooldownSeconds,
     limitWarmupMinAvailablePercent: settings.limitWarmupMinAvailablePercent,
     weeklyPaceWorkingDays: settings.weeklyPaceWorkingDays,
+    guestAccessEnabled: settings.guestAccessEnabled,
     ...patch,
   };
   if (

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 
 import {
   completeOauth,
@@ -6,6 +7,7 @@ import {
   startOauth,
   submitManualOauthCallback,
 } from "@/features/accounts/api";
+import { invalidateAccountRelatedQueries } from "@/features/accounts/query-invalidation";
 import { OAuthStateSchema, type OAuthState } from "@/features/accounts/schemas";
 
 const INITIAL_OAUTH_STATE: OAuthState = OAuthStateSchema.parse({
@@ -22,10 +24,22 @@ const INITIAL_OAUTH_STATE: OAuthState = OAuthStateSchema.parse({
   errorMessage: null,
 });
 
+const DEFAULT_BROWSER_OAUTH_POLL_INTERVAL_SECONDS = 2;
+
 export function useOauth() {
+  const queryClient = useQueryClient();
   const [state, setState] = useState<OAuthState>(INITIAL_OAUTH_STATE);
+  const stateRef = useRef<OAuthState>(INITIAL_OAUTH_STATE);
   const pollTimerRef = useRef<number | null>(null);
   const countdownTimerRef = useRef<number | null>(null);
+
+  const setOauthState = useCallback((updater: OAuthState | ((current: OAuthState) => OAuthState)) => {
+    setState((current) => {
+      const next = typeof updater === "function" ? updater(current) : updater;
+      stateRef.current = next;
+      return next;
+    });
+  }, []);
 
   const clearPollTimer = useCallback(() => {
     if (pollTimerRef.current !== null) {
@@ -44,13 +58,37 @@ export function useOauth() {
   const reset = useCallback(() => {
     clearPollTimer();
     clearCountdownTimer();
-    setState(INITIAL_OAUTH_STATE);
-  }, [clearCountdownTimer, clearPollTimer]);
+    setOauthState(INITIAL_OAUTH_STATE);
+  }, [clearCountdownTimer, clearPollTimer, setOauthState]);
 
   const poll = useCallback(async () => {
     try {
-      const status = await getOauthStatus(state.flowId ?? undefined);
-      setState((prev) =>
+      const status = await getOauthStatus(stateRef.current.flowId ?? undefined);
+      if (status.status === "success") {
+        const response = await completeOauth({
+          ...(stateRef.current.flowId ? { flowId: stateRef.current.flowId } : {}),
+          deviceAuthId: stateRef.current.deviceAuthId ?? undefined,
+          userCode: stateRef.current.userCode ?? undefined,
+        });
+        setOauthState((prev) =>
+          OAuthStateSchema.parse({
+            ...prev,
+            status: response.status === "success" ? "success" : response.status === "error" ? "error" : "pending",
+            errorMessage: response.errorMessage ?? null,
+          }),
+        );
+        if (response.status === "success") {
+          invalidateAccountRelatedQueries(queryClient);
+          clearPollTimer();
+          clearCountdownTimer();
+        } else if (response.status === "error") {
+          clearPollTimer();
+          clearCountdownTimer();
+        }
+        return;
+      }
+
+      setOauthState((prev) =>
         OAuthStateSchema.parse({
           ...prev,
           status:
@@ -62,8 +100,14 @@ export function useOauth() {
           errorMessage: status.errorMessage,
         }),
       );
+      if (status.status === "error") {
+        clearPollTimer();
+        clearCountdownTimer();
+      }
     } catch (error) {
-      setState((prev) =>
+      clearPollTimer();
+      clearCountdownTimer();
+      setOauthState((prev) =>
         OAuthStateSchema.parse({
           ...prev,
           status: "error",
@@ -71,29 +115,63 @@ export function useOauth() {
         }),
       );
     }
-  }, [state.flowId]);
+  }, [clearCountdownTimer, clearPollTimer, queryClient, setOauthState]);
+
+  const schedulePollTimer = useCallback((intervalSeconds: number | null) => {
+    clearPollTimer();
+    if (!intervalSeconds || intervalSeconds <= 0) {
+      return;
+    }
+    pollTimerRef.current = window.setInterval(() => {
+      void poll();
+    }, intervalSeconds * 1000);
+  }, [clearPollTimer, poll]);
+
+  const scheduleCountdownTimer = useCallback((expiresInSeconds: number | null) => {
+    clearCountdownTimer();
+    if (!expiresInSeconds || expiresInSeconds <= 0) {
+      return;
+    }
+    countdownTimerRef.current = window.setInterval(() => {
+      setOauthState((prev) => {
+        const expiresInSeconds = Math.max(0, (prev.expiresInSeconds ?? 0) - 1);
+        if (expiresInSeconds === 0) {
+          clearCountdownTimer();
+        }
+        return OAuthStateSchema.parse({
+          ...prev,
+          expiresInSeconds,
+        });
+      });
+    }, 1000);
+  }, [clearCountdownTimer, setOauthState]);
 
   const start = useCallback(async (forceMethod?: "browser" | "device") => {
     clearPollTimer();
     clearCountdownTimer();
-    setState((prev) => ({ ...prev, status: "starting", errorMessage: null }));
+    setOauthState((prev) => ({ ...prev, status: "starting", errorMessage: null }));
 
     try {
       const response = await startOauth({ forceMethod });
+      const method = response.method === "device" ? "device" : "browser";
       const nextState = OAuthStateSchema.parse({
         flowId: response.flowId ?? null,
         status: "pending",
-        method: response.method === "device" ? "device" : "browser",
+        method,
         authorizationUrl: response.authorizationUrl,
         callbackUrl: response.callbackUrl,
         verificationUrl: response.verificationUrl,
         userCode: response.userCode,
         deviceAuthId: response.deviceAuthId,
-        intervalSeconds: response.intervalSeconds,
+        intervalSeconds:
+          response.intervalSeconds
+          ?? (method === "browser" && response.flowId ? DEFAULT_BROWSER_OAUTH_POLL_INTERVAL_SECONDS : null),
         expiresInSeconds: response.expiresInSeconds,
         errorMessage: null,
       });
-      setState(nextState);
+      setOauthState(nextState);
+      schedulePollTimer(nextState.intervalSeconds);
+      scheduleCountdownTimer(nextState.expiresInSeconds);
 
       if (
         nextState.method === "device"
@@ -110,7 +188,9 @@ export function useOauth() {
       return nextState;
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to start OAuth";
-      setState((prev) =>
+      clearPollTimer();
+      clearCountdownTimer();
+      setOauthState((prev) =>
         OAuthStateSchema.parse({
           ...prev,
           status: "error",
@@ -119,23 +199,34 @@ export function useOauth() {
       );
       throw error;
     }
-  }, [clearCountdownTimer, clearPollTimer]);
+  }, [clearCountdownTimer, clearPollTimer, scheduleCountdownTimer, schedulePollTimer, setOauthState]);
 
   const complete = useCallback(async () => {
     try {
-      await completeOauth({
-        ...(state.flowId ? { flowId: state.flowId } : {}),
-        deviceAuthId: state.deviceAuthId ?? undefined,
-        userCode: state.userCode ?? undefined,
+      const response = await completeOauth({
+        ...(stateRef.current.flowId ? { flowId: stateRef.current.flowId } : {}),
+        deviceAuthId: stateRef.current.deviceAuthId ?? undefined,
+        userCode: stateRef.current.userCode ?? undefined,
       });
-      setState((prev) =>
+      setOauthState((prev) =>
         OAuthStateSchema.parse({
           ...prev,
-          status: "success",
+          status: response.status === "success" ? "success" : response.status === "error" ? "error" : "pending",
+          errorMessage: response.errorMessage ?? null,
         }),
       );
+      if (response.status === "success") {
+        invalidateAccountRelatedQueries(queryClient);
+        clearPollTimer();
+        clearCountdownTimer();
+      } else if (response.status === "error") {
+        clearPollTimer();
+        clearCountdownTimer();
+      }
     } catch (error) {
-      setState((prev) =>
+      clearPollTimer();
+      clearCountdownTimer();
+      setOauthState((prev) =>
         OAuthStateSchema.parse({
           ...prev,
           status: "error",
@@ -144,24 +235,34 @@ export function useOauth() {
       );
       throw error;
     }
-  }, [state.deviceAuthId, state.flowId, state.userCode]);
+  }, [clearCountdownTimer, clearPollTimer, queryClient, setOauthState]);
 
   const manualCallback = useCallback(async (callbackUrl: string) => {
     try {
       const response = await submitManualOauthCallback({
         callbackUrl,
-        ...(state.flowId ? { flowId: state.flowId } : {}),
+        ...(stateRef.current.flowId ? { flowId: stateRef.current.flowId } : {}),
       });
-      setState((prev) =>
+      setOauthState((prev) =>
         OAuthStateSchema.parse({
           ...prev,
           status: response.status === "success" ? "success" : "error",
           errorMessage: response.errorMessage,
         }),
       );
+      if (response.status === "success") {
+        invalidateAccountRelatedQueries(queryClient);
+        clearPollTimer();
+        clearCountdownTimer();
+      } else {
+        clearPollTimer();
+        clearCountdownTimer();
+      }
       return response;
     } catch (error) {
-      setState((prev) =>
+      clearPollTimer();
+      clearCountdownTimer();
+      setOauthState((prev) =>
         OAuthStateSchema.parse({
           ...prev,
           status: "error",
@@ -170,43 +271,14 @@ export function useOauth() {
       );
       throw error;
     }
-  }, [state.flowId]);
+  }, [clearCountdownTimer, clearPollTimer, queryClient, setOauthState]);
 
   useEffect(() => {
-    if (state.status !== "pending" || !state.intervalSeconds || state.intervalSeconds <= 0) {
-      clearPollTimer();
-      return;
-    }
-    clearPollTimer();
-    pollTimerRef.current = window.setInterval(() => {
-      void poll();
-    }, state.intervalSeconds * 1000);
-    return clearPollTimer;
-  }, [clearPollTimer, poll, state.intervalSeconds, state.status]);
-
-  useEffect(() => {
-    if (state.status !== "pending" || !state.expiresInSeconds || state.expiresInSeconds <= 0) {
-      clearCountdownTimer();
-      return;
-    }
-    clearCountdownTimer();
-    countdownTimerRef.current = window.setInterval(() => {
-      setState((prev) =>
-        OAuthStateSchema.parse({
-          ...prev,
-          expiresInSeconds: Math.max(0, (prev.expiresInSeconds ?? 0) - 1),
-        }),
-      );
-    }, 1000);
-    return clearCountdownTimer;
-  }, [clearCountdownTimer, state.expiresInSeconds, state.status]);
-
-  useEffect(() => {
-    if (state.status === "success" || state.status === "error") {
+    return () => {
       clearPollTimer();
       clearCountdownTimer();
-    }
-  }, [clearCountdownTimer, clearPollTimer, state.status]);
+    };
+  }, [clearCountdownTimer, clearPollTimer]);
 
   return {
     state,

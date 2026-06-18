@@ -88,17 +88,22 @@ reasoning effort, request kind, status, and token/cost totals.
 
 ## Dashboard
 
-The Settings page includes a quota planner section with:
+The Settings page includes a compact quota planner card. The card itself stays read-only and scannable: it shows the
+current mode, prewarm on/off, forecast quantile, and a four-stat 36-hour forecast/simulation summary (demand, unmet,
+peak, peak slot). All editing and operational surfaces are reached through dialogs opened from the card, so the
+section no longer expands every control inline:
 
-- mode and dry-run controls;
-- working days/hours and prewarm lead configuration;
-- forecast quantile and gain/budget knobs;
-- current 36-hour forecast/simulation summary;
-- recent decision timeline with action status, scheduled time, target peak, expected gain/cost, skip/no-op reason, and
-  `warmup_cycle` where available.
+- a **Configure** dialog holds the full settings form, grouped into "Mode & schedule" (mode, prewarm, timezone,
+  working days/hours, prewarm lead), an explicit "Synthetic traffic" group (separate allow-synthetic and dry-run
+  switches), and a collapsed "Advanced" group (forecast quantile and gain/budget/credit knobs, warmup model). Jargon
+  fields carry inline help tooltips, and Reset/Save Planner live in the dialog footer;
+- a **Run manual probe** dialog issues warm-now requests (account id, force probe);
+- a **Recent decisions** dialog lists the decision timeline with action status, scheduled time, target peak, expected
+  gain/cost, skip/no-op reason, and `warmup_cycle` where available, with per-row cancel for planned/skipped entries.
 
-The UI mirrors the safe defaults. Enabling synthetic traffic is visible and explicit, and warm-now/cancel actions call
-server-side gates rather than bypassing policy.
+The UI mirrors the safe defaults. Enabling synthetic traffic remains visible and explicit — allow-synthetic and dry-run
+stay as two distinct switches, with a highlighted warning state when synthetic traffic would actually be sent — and
+warm-now/cancel actions call server-side gates rather than bypassing policy.
 
 ## Warmup Accounting And Effects
 

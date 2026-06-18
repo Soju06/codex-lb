@@ -3,42 +3,11 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
 import { SessionSettings } from "@/features/settings/components/session-settings";
+import { buildSettingsUpdateRequest } from "@/features/settings/payload";
+import { createDashboardSettings } from "@/test/mocks/factories";
 
-const LIMIT_WARMUP_DEFAULTS = {
-  limitWarmupEnabled: false,
-  limitWarmupWindows: "both" as const,
-  limitWarmupModel: "auto",
-  limitWarmupPrompt: "Say OK.",
-  limitWarmupCooldownSeconds: 3600,
-  limitWarmupMinAvailablePercent: 100,
-};
-const ADDITIONAL_QUOTA_DEFAULTS = {
-  additionalQuotaRoutingPolicies: {},
-  additionalQuotaPolicies: [],
-};
-
-const baseSettings = {
-  stickyThreadsEnabled: true,
-  upstreamStreamTransport: "default" as const,
-  upstreamProxyRoutingEnabled: false,
-  upstreamProxyDefaultPoolId: null,
-  preferEarlierResetAccounts: false,
-  preferEarlierResetWindow: "secondary" as const,
-  routingStrategy: "usage_weighted" as const,
-  relativeAvailabilityPower: 2,
-  relativeAvailabilityTopK: 5,
-  singleAccountId: null,
-  weeklyPaceWorkingDays: "0,1,2,3,4,5,6",
-  openaiCacheAffinityMaxAgeSeconds: 300,
-  dashboardSessionTtlSeconds: 43200,
-  warmupModel: "gpt-5.4-mini",
-  importWithoutOverwrite: false,
-  totpRequiredOnLogin: false,
-  totpConfigured: true,
-  apiKeyAuthEnabled: true,
-  ...LIMIT_WARMUP_DEFAULTS,
-  ...ADDITIONAL_QUOTA_DEFAULTS,
-};
+const baseSettings = createDashboardSettings();
+const baseUpdatePayload = buildSettingsUpdateRequest(baseSettings, {});
 
 describe("SessionSettings", () => {
   it("shows the current dashboard session lifetime in hours", () => {
@@ -58,23 +27,9 @@ describe("SessionSettings", () => {
     await user.click(screen.getByRole("button", { name: "Save lifetime" }));
 
     expect(onSave).toHaveBeenCalledWith({
-      stickyThreadsEnabled: true,
-      upstreamStreamTransport: "default",
-      preferEarlierResetAccounts: false,
-      preferEarlierResetWindow: "secondary",
-      routingStrategy: "usage_weighted",
-      relativeAvailabilityPower: 2,
-      relativeAvailabilityTopK: 5,
-      singleAccountId: null,
-      openaiCacheAffinityMaxAgeSeconds: 300,
+      ...baseUpdatePayload,
       dashboardSessionTtlSeconds: 86400,
-      warmupModel: baseSettings.warmupModel,
-      weeklyPaceWorkingDays: baseSettings.weeklyPaceWorkingDays,
-      additionalQuotaRoutingPolicies: {},
-      importWithoutOverwrite: false,
-      totpRequiredOnLogin: false,
-      apiKeyAuthEnabled: true,
-      ...LIMIT_WARMUP_DEFAULTS,
+      guestAccessEnabled: false,
     });
   });
 
@@ -124,23 +79,9 @@ describe("SessionSettings", () => {
     await user.click(screen.getByRole("button", { name: "Save lifetime" }));
 
     expect(onSave).toHaveBeenCalledWith({
-      stickyThreadsEnabled: true,
-      upstreamStreamTransport: "default",
-      preferEarlierResetAccounts: false,
-      preferEarlierResetWindow: "secondary",
-      routingStrategy: "usage_weighted",
-      relativeAvailabilityPower: 2,
-      relativeAvailabilityTopK: 5,
-      singleAccountId: null,
-      openaiCacheAffinityMaxAgeSeconds: 300,
+      ...baseUpdatePayload,
       dashboardSessionTtlSeconds: 31536000,
-      warmupModel: baseSettings.warmupModel,
-      weeklyPaceWorkingDays: baseSettings.weeklyPaceWorkingDays,
-      additionalQuotaRoutingPolicies: {},
-      importWithoutOverwrite: false,
-      totpRequiredOnLogin: false,
-      apiKeyAuthEnabled: true,
-      ...LIMIT_WARMUP_DEFAULTS,
+      guestAccessEnabled: false,
     });
   });
 });

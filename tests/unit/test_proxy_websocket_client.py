@@ -5,6 +5,7 @@ import contextlib
 from types import SimpleNamespace
 from typing import Any, cast
 
+import aiohttp
 import pytest
 from websockets.asyncio.server import serve as websocket_serve
 from websockets.datastructures import Headers
@@ -117,14 +118,30 @@ class _FakeCodexWebSocket:
     async def recv(self) -> tuple[bytes, int]:
         return b'{"type":"response.completed"}', 1
 
+    async def receive(self) -> object:
+        return b'{"type":"response.completed"}'
+
     async def close(self) -> None:
         self.closed = True
 
 
+class _FakeCodexErrorWebSocket(_FakeCodexWebSocket):
+    def __init__(self, error: BaseException) -> None:
+        super().__init__()
+        self.error = error
+
+    async def receive(self) -> aiohttp.WSMessage:
+        return aiohttp.WSMessage(
+            aiohttp.WSMsgType.ERROR,
+            self.error,
+            None,
+        )
+
+
 class _FakeCodexClient:
-    def __init__(self) -> None:
+    def __init__(self, websocket: _FakeCodexWebSocket | None = None) -> None:
         self.calls: list[dict[str, object]] = []
-        self.websocket = _FakeCodexWebSocket()
+        self.websocket = websocket or _FakeCodexWebSocket()
 
     async def open_ws_with_route_metadata(
         self,
@@ -258,7 +275,7 @@ async def test_connect_responses_websocket_routed_codex_call_preserves_size_limi
     assert call["url"] == "wss://chatgpt.com/backend-api/codex/responses"
     assert call["route"] is route
     assert call["timeout"] == 7.0
-    assert call["max_message_size"] == 4321
+    assert call["max_msg_size"] == 4321
     assert "max_size" not in call
     assert websocket.response_header("x-codex-turn-state") == "turn-routed"
 
@@ -451,6 +468,45 @@ async def test_connect_responses_websocket_disables_proxy_when_env_proxy_is_unse
 
     kwargs = cast(dict[str, object], seen["kwargs"])
     assert kwargs["proxy"] is None
+
+
+@pytest.mark.asyncio
+async def test_connect_responses_websocket_sanitizes_ws_error_payload(monkeypatch):
+    route = ResolvedUpstreamRoute(
+        mode="account_bound",
+        pool_id="pool_1",
+        endpoint=ResolvedProxyEndpoint("ep_1", "http", "proxy.test", 8080),
+    )
+    codex_client = _FakeCodexClient(
+        _FakeCodexErrorWebSocket(OSError("proxy http://user:pass@proxy.local:8080 websocket failed"))
+    )
+    monkeypatch.setattr(
+        proxy_websocket_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            upstream_base_url="https://chatgpt.com/backend-api",
+            upstream_connect_timeout_seconds=7.0,
+            max_sse_event_bytes=4321,
+            upstream_websocket_trust_env=True,
+        ),
+    )
+    websocket = await connect_responses_websocket(
+        {"openai-beta": "responses_websockets=2026-02-06"},
+        "access-token",
+        "account-123",
+        route=route,
+        codex_client=cast(Any, codex_client),
+        allow_direct_egress=True,
+    )
+    message = await websocket.receive()
+    await websocket.close()
+
+    assert message.kind == "error"
+    assert message.error is not None
+    assert "OSError" in message.error
+    assert "user:pass" not in message.error
+    assert "proxy.local:8080" not in message.error
+    assert message.error == "Codex upstream websocket receive failed via proxy endpoint ep_1: OSError"
 
 
 @pytest.mark.asyncio

@@ -17,11 +17,13 @@ export function AuthGate({ children }: PropsWithChildren) {
   const bootstrapRequired = useAuthStore((state) => state.bootstrapRequired);
   const totpRequiredOnLogin = useAuthStore((state) => state.totpRequiredOnLogin);
   const authMode = useAuthStore((state) => state.authMode);
+  const adminLoginRequested = useAuthStore((state) => state.adminLoginRequested);
+  const guestAccessEnabled = useAuthStore((state) => state.guestAccessEnabled);
+  const guestPasswordRequired = useAuthStore((state) => state.guestPasswordRequired);
 
   useEffect(() => {
     void refreshSessionStable();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [refreshSessionStable]);
 
   if (!initialized && loading) {
     return (
@@ -35,7 +37,10 @@ export function AuthGate({ children }: PropsWithChildren) {
     return <BootstrapSetupScreen />;
   }
 
-  if (passwordRequired && !authenticated) {
+  if (
+    (passwordRequired || (authMode === "standard" && guestAccessEnabled && guestPasswordRequired)) &&
+    (!authenticated || adminLoginRequested)
+  ) {
     if (totpRequiredOnLogin) {
       return <TotpDialog open />;
     }

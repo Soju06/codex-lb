@@ -13,6 +13,7 @@ from app.core.clients.rate_limit_reset_credits import (
 )
 from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
+from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError, resolve_upstream_route
 from app.db.models import Account, AccountStatus
 from app.db.session import get_background_session
 from app.modules.accounts.repository import AccountsRepository
@@ -26,6 +27,7 @@ logger = logging.getLogger(__name__)
 _RESET_CREDITS_SKIP_STATUSES = frozenset({AccountStatus.PAUSED, AccountStatus.DEACTIVATED})
 
 ResetCreditsFetchFn = Callable[..., Awaitable[ResetCreditsResponse]]
+UpstreamRouteResolver = Callable[[Account], Awaitable[ResolvedUpstreamRoute | None]]
 
 
 @dataclass(slots=True)
@@ -69,6 +71,7 @@ class RateLimitResetCreditsRefreshScheduler:
                         encryptor=TokenEncryptor(),
                         store=get_rate_limit_reset_credits_store(),
                         fetch_fn=fetch_reset_credits,
+                        route_resolver=_resolve_upstream_route_for_account,
                     )
             except Exception:
                 logger.exception("Reset credits refresh loop failed")
@@ -80,6 +83,7 @@ async def refresh_reset_credits_for_accounts(
     encryptor: TokenEncryptor,
     store: RateLimitResetCreditsStore,
     fetch_fn: ResetCreditsFetchFn = fetch_reset_credits,
+    route_resolver: UpstreamRouteResolver | None = None,
 ) -> None:
     """Refresh the cached reset-credits snapshot for each eligible account.
 
@@ -93,7 +97,13 @@ async def refresh_reset_credits_for_accounts(
             continue
         if not account.chatgpt_account_id:
             continue
-        await _refresh_account_reset_credits(account, encryptor=encryptor, store=store, fetch_fn=fetch_fn)
+        await _refresh_account_reset_credits(
+            account,
+            encryptor=encryptor,
+            store=store,
+            fetch_fn=fetch_fn,
+            route_resolver=route_resolver,
+        )
 
 
 async def _refresh_account_reset_credits(
@@ -102,11 +112,25 @@ async def _refresh_account_reset_credits(
     encryptor: TokenEncryptor,
     store: RateLimitResetCreditsStore,
     fetch_fn: ResetCreditsFetchFn,
+    route_resolver: UpstreamRouteResolver | None,
 ) -> None:
     snapshot_generation = store.generation(account.id)
     try:
         access_token = encryptor.decrypt(account.access_token_encrypted)
-        response = await fetch_fn(access_token, account.chatgpt_account_id)
+        route = await route_resolver(account) if route_resolver is not None else None
+        response = await fetch_fn(
+            access_token,
+            account.chatgpt_account_id,
+            route=route,
+            allow_direct_egress=route is None,
+        )
+    except UpstreamProxyRouteError as exc:
+        logger.warning(
+            "Reset credits route resolution failed account_id=%s reason=%s",
+            account.id,
+            exc.reason,
+        )
+        return
     except Exception as exc:  # scheduler must never crash the loop or mutate account status
         logger.warning(
             "Reset credits refresh failed account_id=%s error=%s",
@@ -120,6 +144,16 @@ async def _refresh_account_reset_credits(
         logger.info(
             "Skipped stale reset credits snapshot account_id=%s",
             account.id,
+        )
+
+
+async def _resolve_upstream_route_for_account(account: Account) -> ResolvedUpstreamRoute | None:
+    async with get_background_session() as session:
+        return await resolve_upstream_route(
+            session,
+            account_id=account.id,
+            operation="reset_credits_refresh",
+            scope="account",
         )
 
 

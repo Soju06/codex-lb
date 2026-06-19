@@ -214,7 +214,7 @@ describe("RateLimitResetCreditsSnapshotSchema", () => {
 });
 
 describe("ConsumeRateLimitResetCreditResponseSchema", () => {
-  it("requires a non-null success payload", () => {
+  it("parses successful consume responses with optional redeemedAt", () => {
     expect(
       ConsumeRateLimitResetCreditResponseSchema.parse({
         code: "rate_limit_reset",
@@ -227,6 +227,28 @@ describe("ConsumeRateLimitResetCreditResponseSchema", () => {
       redeemedAt: ISO,
     });
 
+    expect(
+      ConsumeRateLimitResetCreditResponseSchema.parse({
+        code: "rate_limit_reset",
+        windowsReset: 1,
+        redeemedAt: null,
+      }),
+    ).toMatchObject({
+      code: "rate_limit_reset",
+      windowsReset: 1,
+      redeemedAt: null,
+    });
+
+    expect(
+      ConsumeRateLimitResetCreditResponseSchema.parse({
+        code: "rate_limit_reset",
+        windowsReset: 1,
+      }),
+    ).toMatchObject({
+      code: "rate_limit_reset",
+      windowsReset: 1,
+    });
+
     expect(() =>
       ConsumeRateLimitResetCreditResponseSchema.parse({
         redeemedAt: ISO,
@@ -237,7 +259,6 @@ describe("ConsumeRateLimitResetCreditResponseSchema", () => {
       ConsumeRateLimitResetCreditResponseSchema.parse({
         code: null,
         windowsReset: null,
-        redeemedAt: null,
       }),
     ).toThrow();
   });

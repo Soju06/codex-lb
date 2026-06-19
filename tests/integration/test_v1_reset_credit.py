@@ -43,7 +43,7 @@ def _encode_jwt(payload: dict[str, object]) -> str:
 
 
 def _make_auth_json(account_id: str, email: str) -> dict[str, object]:
-    payload = {
+    payload: dict[str, object] = {
         "email": email,
         "chatgpt_account_id": account_id,
         "https://api.openai.com/auth": {"chatgpt_plan_type": "plus"},
@@ -173,7 +173,7 @@ async def test_v1_reset_credit_scoped_pool_returns_all_available_credits_for_ass
             "email": assigned_email,
             "redeem_id": "credit-later",
             "expiredAt": "2031-01-02T05:04:05Z",
-        }
+        },
     ]
 
 
@@ -241,7 +241,7 @@ async def test_v1_reset_credit_mixed_null_expiry_orders_dated_credit_before_null
             "email": email,
             "redeem_id": "credit-null-expiry",
             "expiredAt": None,
-        }
+        },
     ]
 
 
@@ -435,7 +435,9 @@ async def test_v1_reset_credit_post_consumes_exact_credit_and_invalidates_snapsh
         "redeemed_at": "2031-05-01T03:30:00Z",
     }
     consume_mock.assert_awaited_once()
-    assert consume_mock.await_args.args[2] == "credit-later"
+    consume_args = consume_mock.await_args
+    assert consume_args is not None
+    assert consume_args.args[2] == "credit-later"
     assert get_rate_limit_reset_credits_store().get(account_id) is None
 
 

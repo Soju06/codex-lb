@@ -17,6 +17,7 @@ from app.core.clients.rate_limit_reset_credits import (
     fetch_reset_credits,
 )
 from app.core.clients.usage import _usage_headers
+from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
 
 pytestmark = pytest.mark.unit
 
@@ -112,6 +113,24 @@ class StubRetryClient:
         )
 
 
+class StubCodexClient:
+    def __init__(self, response: object) -> None:
+        self.response = response
+        self.calls: list[dict[str, Any]] = []
+
+    async def request(self, method: str, url: str, **kwargs: Any) -> object:
+        self.calls.append({"method": method, "url": url, **kwargs})
+        return self.response
+
+
+def _route() -> ResolvedUpstreamRoute:
+    return ResolvedUpstreamRoute(
+        mode="account_bound",
+        pool_id="pool_1",
+        endpoint=ResolvedProxyEndpoint(id="endpoint_1", scheme="http", host="proxy.local", port=8080),
+    )
+
+
 def _list_payload() -> dict:
     return {
         "credits": [
@@ -148,6 +167,7 @@ async def test_fetch_reset_credits_sends_bearer_and_account_id_headers() -> None
         timeout_seconds=2.0,
         max_retries=0,
         client=cast(Any, client),
+        allow_direct_egress=True,
     )
 
     assert isinstance(data, ResetCreditsResponse)
@@ -158,6 +178,29 @@ async def test_fetch_reset_credits_sends_bearer_and_account_id_headers() -> None
     assert state.headers is not None
     assert state.headers["Authorization"] == "Bearer access-token"
     assert state.headers["chatgpt-account-id"] == "acc_workspace"
+
+
+@pytest.mark.asyncio
+async def test_fetch_reset_credits_uses_resolved_route_when_provided() -> None:
+    route = _route()
+    codex_client = StubCodexClient(StubResponse(200, _list_payload(), ""))
+
+    data = await fetch_reset_credits(
+        "access-token",
+        "acc_workspace",
+        base_url="http://upstream.test/backend-api",
+        timeout_seconds=2.0,
+        max_retries=0,
+        route=route,
+        codex_client=cast(Any, codex_client),
+    )
+
+    assert data.available_count == 1
+    assert len(codex_client.calls) == 1
+    call = codex_client.calls[0]
+    assert call["method"] == "GET"
+    assert call["route"] is route
+    assert call["url"] == "http://upstream.test/backend-api/wham/rate-limit-reset-credits"
 
 
 @pytest.mark.asyncio
@@ -172,6 +215,7 @@ async def test_fetch_reset_credits_skips_account_id_header_for_email_and_local_p
             timeout_seconds=2.0,
             max_retries=0,
             client=cast(Any, client),
+            allow_direct_egress=True,
         )
         assert state.headers is not None
         assert "chatgpt-account-id" not in state.headers, account_id
@@ -189,6 +233,7 @@ async def test_fetch_reset_credits_normalizes_base_url_without_backend_api_segme
         timeout_seconds=2.0,
         max_retries=0,
         client=cast(Any, client),
+        allow_direct_egress=True,
     )
 
     assert state.url == "http://upstream.test/backend-api/wham/rate-limit-reset-credits"
@@ -210,6 +255,7 @@ async def test_fetch_reset_credits_raises_on_non_200() -> None:
             timeout_seconds=2.0,
             max_retries=0,
             client=cast(Any, client),
+            allow_direct_egress=True,
         )
 
     assert excinfo.value.status_code == 401
@@ -229,6 +275,7 @@ async def test_fetch_reset_credits_handles_non_json_body() -> None:
             timeout_seconds=2.0,
             max_retries=0,
             client=cast(Any, client),
+            allow_direct_egress=True,
         )
 
     assert excinfo.value.status_code == 502
@@ -247,6 +294,7 @@ async def test_fetch_reset_credits_rejects_malformed_success_body() -> None:
             timeout_seconds=2.0,
             max_retries=0,
             client=cast(Any, client),
+            allow_direct_egress=True,
         )
 
     assert excinfo.value.status_code == 502
@@ -265,6 +313,7 @@ async def test_fetch_reset_credits_rejects_success_body_missing_contract_fields(
             timeout_seconds=2.0,
             max_retries=0,
             client=cast(Any, client),
+            allow_direct_egress=True,
         )
 
     assert excinfo.value.status_code == 502
@@ -300,6 +349,7 @@ async def test_consume_reset_credit_sends_credit_id_and_uuid_redeem_request_id()
         timeout_seconds=2.0,
         max_retries=0,
         client=cast(Any, client),
+        allow_direct_egress=True,
     )
 
     assert isinstance(result, ConsumeResetCreditResponse)
@@ -323,6 +373,39 @@ async def test_consume_reset_credit_sends_credit_id_and_uuid_redeem_request_id()
 
 
 @pytest.mark.asyncio
+async def test_consume_reset_credit_uses_resolved_route_when_provided() -> None:
+    route = _route()
+    codex_client = StubCodexClient(
+        StubResponse(
+            200,
+            {
+                "code": "reset",
+                "credit": {"id": "RateLimitResetCredit_test", "status": "redeemed"},
+                "windows_reset": 1,
+            },
+            "",
+        )
+    )
+
+    result = await consume_reset_credit(
+        "access-token",
+        "acc_workspace",
+        "RateLimitResetCredit_test",
+        base_url="http://upstream.test/backend-api",
+        timeout_seconds=2.0,
+        route=route,
+        codex_client=cast(Any, codex_client),
+    )
+
+    assert result.windows_reset == 1
+    assert len(codex_client.calls) == 1
+    call = codex_client.calls[0]
+    assert call["method"] == "POST"
+    assert call["route"] is route
+    assert call["json"]["credit_id"] == "RateLimitResetCredit_test"
+
+
+@pytest.mark.asyncio
 async def test_consume_reset_credit_generates_fresh_redeem_request_id_each_call() -> None:
     ids: list[str] = []
     for _ in range(2):
@@ -339,6 +422,7 @@ async def test_consume_reset_credit_generates_fresh_redeem_request_id_each_call(
             timeout_seconds=2.0,
             max_retries=0,
             client=cast(Any, client),
+            allow_direct_egress=True,
         )
         assert state.json_body is not None
         ids.append(state.json_body["redeem_request_id"])
@@ -362,6 +446,7 @@ async def test_consume_reset_credit_raises_on_non_200() -> None:
             timeout_seconds=2.0,
             max_retries=0,
             client=cast(Any, client),
+            allow_direct_egress=True,
         )
 
     assert excinfo.value.status_code == 409
@@ -382,6 +467,7 @@ async def test_consume_reset_credit_rejects_malformed_success_body() -> None:
             timeout_seconds=2.0,
             max_retries=0,
             client=cast(Any, client),
+            allow_direct_egress=True,
         )
 
     assert excinfo.value.status_code == 502
@@ -401,6 +487,7 @@ async def test_consume_reset_credit_rejects_success_body_missing_contract_fields
             timeout_seconds=2.0,
             max_retries=0,
             client=cast(Any, client),
+            allow_direct_egress=True,
         )
 
     assert excinfo.value.status_code == 502

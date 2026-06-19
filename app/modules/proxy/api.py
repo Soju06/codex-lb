@@ -80,6 +80,7 @@ from app.core.openai.v1_requests import V1ResponsesCompactRequest, V1ResponsesRe
 from app.core.resilience.overload import is_local_overload_error_code, merge_retry_after_headers
 from app.core.runtime_logging import log_error_response
 from app.core.types import JsonValue
+from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError, resolve_upstream_route
 from app.core.utils.json_guards import is_json_mapping
 from app.core.utils.request_id import get_request_id
 from app.core.utils.sse import (
@@ -793,7 +794,7 @@ def _translate_v1_reset_credit_consume_error(exc: ConsumeResetCreditError) -> HT
     return HTTPException(status_code=status_code, detail=exc.message)
 
 
-@v1_router.get("/reset-credit", response_model=list[V1ResetCreditEntry])
+@usage_router.get("/v1/reset-credit", response_model=list[V1ResetCreditEntry])
 async def v1_reset_credit(
     api_key: ApiKeyData = Security(validate_usage_api_key),
 ) -> list[V1ResetCreditEntry]:
@@ -807,7 +808,7 @@ async def v1_reset_credit(
     return response
 
 
-@v1_router.post("/reset-credit", response_model=V1ResetCreditRedeemResponse)
+@usage_router.post("/v1/reset-credit", response_model=V1ResetCreditRedeemResponse)
 async def v1_redeem_reset_credit(
     payload: V1ResetCreditRedeemRequest,
     api_key: ApiKeyData = Security(validate_usage_api_key),
@@ -818,6 +819,10 @@ async def v1_redeem_reset_credit(
             raise HTTPException(status_code=403, detail="Account is outside the API key pool")
         if account is None:
             raise HTTPException(status_code=403, detail="Account is outside the API key pool")
+        try:
+            route = await _resolve_reset_credit_route(session, account.id)
+        except UpstreamProxyRouteError as exc:
+            raise HTTPException(status_code=503, detail="Unable to resolve upstream proxy route") from exc
         account_id = account.id
         access_token_encrypted = account.access_token_encrypted
         chatgpt_account_id = account.chatgpt_account_id
@@ -829,7 +834,13 @@ async def v1_redeem_reset_credit(
             raise HTTPException(status_code=409, detail="Requested reset credit is unavailable")
         access_token = TokenEncryptor().decrypt(access_token_encrypted)
         try:
-            result = await consume_reset_credit(access_token, chatgpt_account_id, credit.id)
+            result = await consume_reset_credit(
+                access_token,
+                chatgpt_account_id,
+                credit.id,
+                route=route,
+                allow_direct_egress=route is None,
+            )
         except ConsumeResetCreditError as exc:
             raise _translate_v1_reset_credit_consume_error(exc) from exc
         await get_rate_limit_reset_credits_store().invalidate(account_id)
@@ -839,6 +850,15 @@ async def v1_redeem_reset_credit(
             windows_reset=result.windows_reset,
             redeemed_at=redeemed_at,
         )
+
+
+async def _resolve_reset_credit_route(session: AsyncSession, account_id: str) -> ResolvedUpstreamRoute | None:
+    return await resolve_upstream_route(
+        session,
+        account_id=account_id,
+        operation="reset_credits_consume",
+        scope="account",
+    )
 
 
 async def _run_v1_warmup(

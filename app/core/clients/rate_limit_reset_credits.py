@@ -9,10 +9,17 @@ import aiohttp
 from aiohttp_retry import ExponentialRetry, RetryClient
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from app.core.clients.codex import (
+    CodexClient,
+    CodexTransportError,
+    create_codex_session,
+    require_route_or_direct_egress_opt_in,
+)
 from app.core.clients.headers import build_chatgpt_auth_headers
 from app.core.clients.http import lease_retry_client
 from app.core.config.settings import get_settings
 from app.core.types import JsonObject
+from app.core.upstream_proxy import ResolvedUpstreamRoute
 from app.core.utils.request_id import get_request_id
 
 RETRYABLE_STATUS = {408, 429, 500, 502, 503, 504}
@@ -99,6 +106,9 @@ async def fetch_reset_credits(
     timeout_seconds: float | None = None,
     max_retries: int | None = None,
     client: RetryClient | None = None,
+    route: ResolvedUpstreamRoute | None = None,
+    codex_client: CodexClient | None = None,
+    allow_direct_egress: bool = False,
 ) -> ResetCreditsResponse:
     settings = get_settings()
     usage_base = base_url or settings.upstream_base_url
@@ -107,8 +117,22 @@ async def fetch_reset_credits(
     retries = max_retries if max_retries is not None else settings.usage_fetch_max_retries
     headers = build_chatgpt_auth_headers(access_token, account_id)
     retry_options = _retry_options(retries + 1)
+    require_route_or_direct_egress_opt_in(
+        route=route,
+        allow_direct_egress=allow_direct_egress,
+        operation="reset credits fetch",
+    )
 
     try:
+        if route is not None:
+            return await _fetch_reset_credits_via_codex(
+                url=url,
+                route=route,
+                headers=headers,
+                timeout_seconds=timeout_seconds or settings.usage_fetch_timeout_seconds,
+                retries=retries,
+                codex_client=codex_client,
+            )
         async with lease_retry_client(client) as retry_client:
             async with retry_client.request(
                 "GET",
@@ -134,7 +158,7 @@ async def fetch_reset_credits(
                 except (ValueError, ValidationError) as exc:
                     logger.warning("Reset credits fetch invalid payload request_id=%s", get_request_id())
                     raise ResetCreditFetchError(502, "Invalid reset credits payload") from exc
-    except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+    except (aiohttp.ClientError, asyncio.TimeoutError, CodexTransportError) as exc:
         logger.warning("Reset credits fetch error request_id=%s error=%s", get_request_id(), exc)
         raise ResetCreditFetchError(0, f"Reset credits fetch failed: {exc}") from exc
 
@@ -148,12 +172,15 @@ async def consume_reset_credit(
     timeout_seconds: float | None = None,
     max_retries: int | None = None,
     client: RetryClient | None = None,
+    route: ResolvedUpstreamRoute | None = None,
+    codex_client: CodexClient | None = None,
+    allow_direct_egress: bool = False,
 ) -> ConsumeResetCreditResponse:
     settings = get_settings()
     usage_base = base_url or settings.upstream_base_url
     url = _consume_url(usage_base)
     timeout = aiohttp.ClientTimeout(total=timeout_seconds or settings.usage_fetch_timeout_seconds)
-    retries = max_retries if max_retries is not None else settings.usage_fetch_max_retries
+    retries = max_retries if max_retries is not None else 0
     headers = build_chatgpt_auth_headers(
         access_token,
         account_id,
@@ -162,8 +189,23 @@ async def consume_reset_credit(
     redeem_request_id = str(uuid.uuid4())
     body = {"credit_id": credit_id, "redeem_request_id": redeem_request_id}
     retry_options = _retry_options(retries + 1)
+    require_route_or_direct_egress_opt_in(
+        route=route,
+        allow_direct_egress=allow_direct_egress,
+        operation="reset credits consume",
+    )
 
     try:
+        if route is not None:
+            return await _consume_reset_credit_via_codex(
+                url=url,
+                route=route,
+                headers=headers,
+                body=body,
+                timeout_seconds=timeout_seconds or settings.usage_fetch_timeout_seconds,
+                retries=retries,
+                codex_client=codex_client,
+            )
         async with lease_retry_client(client) as retry_client:
             async with retry_client.request(
                 "POST",
@@ -190,9 +232,126 @@ async def consume_reset_credit(
                 except (ValueError, ValidationError) as exc:
                     logger.warning("Reset credits consume invalid payload request_id=%s", get_request_id())
                     raise ConsumeResetCreditError(502, "Invalid reset credits consume payload") from exc
-    except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+    except (aiohttp.ClientError, asyncio.TimeoutError, CodexTransportError) as exc:
         logger.warning("Reset credits consume error request_id=%s error=%s", get_request_id(), exc)
         raise ConsumeResetCreditError(0, f"Reset credits consume failed: {exc}") from exc
+
+
+async def _fetch_reset_credits_via_codex(
+    *,
+    url: str,
+    route: ResolvedUpstreamRoute,
+    headers: dict[str, str],
+    timeout_seconds: float,
+    retries: int,
+    codex_client: CodexClient | None,
+) -> ResetCreditsResponse:
+    attempts = max(1, retries + 1)
+    owns_codex_client = codex_client is None
+    active_codex_client = codex_client or CodexClient(create_codex_session())
+    try:
+        for attempt in range(attempts):
+            try:
+                data, status = await _request_json_via_codex(
+                    active_codex_client,
+                    "GET",
+                    url,
+                    route=route,
+                    headers=headers,
+                    timeout_seconds=timeout_seconds,
+                )
+            except CodexTransportError:
+                if attempt < attempts - 1:
+                    await asyncio.sleep(_retry_delay_seconds(attempt))
+                    continue
+                raise
+            if status in RETRYABLE_STATUS and attempt < attempts - 1:
+                await asyncio.sleep(_retry_delay_seconds(attempt))
+                continue
+            if status >= 400:
+                code = _extract_error_code(data)
+                message = _extract_error_message(data) or f"Reset credits fetch failed ({status})"
+                raise ResetCreditFetchError(status, message, code=code)
+            try:
+                return ResetCreditsResponse.model_validate(_success_payload(data))
+            except (ValueError, ValidationError) as exc:
+                raise ResetCreditFetchError(502, "Invalid reset credits payload") from exc
+    finally:
+        if owns_codex_client:
+            close = getattr(active_codex_client, "close", None)
+            if callable(close):
+                await close()
+    raise RuntimeError("unreachable reset credits fetch retry state")
+
+
+async def _consume_reset_credit_via_codex(
+    *,
+    url: str,
+    route: ResolvedUpstreamRoute,
+    headers: dict[str, str],
+    body: JsonObject,
+    timeout_seconds: float,
+    retries: int,
+    codex_client: CodexClient | None,
+) -> ConsumeResetCreditResponse:
+    attempts = max(1, retries + 1)
+    owns_codex_client = codex_client is None
+    active_codex_client = codex_client or CodexClient(create_codex_session())
+    try:
+        for attempt in range(attempts):
+            try:
+                data, status = await _request_json_via_codex(
+                    active_codex_client,
+                    "POST",
+                    url,
+                    route=route,
+                    headers=headers,
+                    json_body=body,
+                    timeout_seconds=timeout_seconds,
+                )
+            except CodexTransportError:
+                if attempt < attempts - 1:
+                    await asyncio.sleep(_retry_delay_seconds(attempt))
+                    continue
+                raise
+            if status in RETRYABLE_STATUS and attempt < attempts - 1:
+                await asyncio.sleep(_retry_delay_seconds(attempt))
+                continue
+            if status >= 400:
+                code = _extract_error_code(data)
+                message = _extract_error_message(data) or f"Reset credits consume failed ({status})"
+                raise ConsumeResetCreditError(status, message, code=code)
+            try:
+                return ConsumeResetCreditResponse.model_validate(_success_payload(data))
+            except (ValueError, ValidationError) as exc:
+                raise ConsumeResetCreditError(502, "Invalid reset credits consume payload") from exc
+    finally:
+        if owns_codex_client:
+            close = getattr(active_codex_client, "close", None)
+            if callable(close):
+                await close()
+    raise RuntimeError("unreachable reset credits consume retry state")
+
+
+async def _request_json_via_codex(
+    codex_client: CodexClient,
+    method: str,
+    url: str,
+    *,
+    route: ResolvedUpstreamRoute,
+    headers: dict[str, str],
+    timeout_seconds: float,
+    json_body: JsonObject | None = None,
+) -> tuple[JsonObject, int]:
+    request_kwargs: dict[str, object] = {
+        "route": route,
+        "headers": headers,
+        "timeout": timeout_seconds,
+    }
+    if json_body is not None:
+        request_kwargs["json"] = json_body
+    resp = await codex_client.request(method, url, **request_kwargs)
+    return await _safe_codex_json(resp), _codex_response_status(resp)
 
 
 def build_snapshot(response: ResetCreditsResponse) -> RateLimitResetCreditsSnapshot:
@@ -221,6 +380,41 @@ def _reset_credits_url(base_url: str) -> str:
 
 def _consume_url(base_url: str) -> str:
     return f"{_reset_credits_url(base_url)}/consume"
+
+
+def _codex_response_status(response: object) -> int:
+    value = getattr(response, "status_code", getattr(response, "status", None))
+    if value is None:
+        return 0
+    return int(value)
+
+
+async def _safe_codex_json(response: object) -> JsonObject:
+    try:
+        json_method = getattr(response, "json", None)
+        if callable(json_method):
+            data = json_method()
+            if asyncio.iscoroutine(data):
+                data = await data
+            return data if isinstance(data, dict) else {"error": {"message": str(data)}}
+    except Exception:
+        pass
+    content = getattr(response, "content", None)
+    if isinstance(content, bytes):
+        return {"error": {"message": content.decode("utf-8", errors="replace").strip()}}
+    if isinstance(content, str):
+        return {"error": {"message": content.strip()}}
+    text_method = getattr(response, "text", None)
+    if callable(text_method):
+        try:
+            text = text_method()
+            if asyncio.iscoroutine(text):
+                text = await text
+            if isinstance(text, str):
+                return {"error": {"message": text.strip()}}
+        except Exception:
+            pass
+    return {"error": {"message": ""}}
 
 
 async def _safe_json(resp: aiohttp.ClientResponse) -> JsonObject:
@@ -282,3 +476,7 @@ def _retry_options(attempts: int) -> ExponentialRetry:
         exceptions={aiohttp.ClientError, asyncio.TimeoutError},
         retry_all_server_errors=False,
     )
+
+
+def _retry_delay_seconds(attempt: int) -> float:
+    return min(RETRY_MAX_TIMEOUT, RETRY_START_TIMEOUT * (2.0**attempt))

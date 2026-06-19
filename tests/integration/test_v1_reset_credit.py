@@ -124,6 +124,42 @@ async def test_v1_reset_credit_requires_valid_bearer_key(async_client):
 
 
 @pytest.mark.asyncio
+async def test_v1_reset_credit_accepts_valid_bearer_key_when_proxy_auth_disabled(async_client):
+    account_id = await _import_account(
+        async_client,
+        "acc-reset-self-service",
+        "self-service@example.com",
+    )
+    _, key = await _create_api_key(async_client, name="reset-credit-self-service")
+    await _seed_snapshot(
+        account_id,
+        available_count=1,
+        credits=[
+            ResetCreditItem(
+                id="credit-self-service",
+                status="available",
+                expires_at=datetime(2031, 1, 2, 3, 4, 5, tzinfo=timezone.utc),
+            )
+        ],
+    )
+
+    response = await async_client.get(
+        "/v1/reset-credit",
+        headers={"Authorization": f"Bearer {key}"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == [
+        {
+            "account_id": account_id,
+            "email": "self-service@example.com",
+            "redeem_id": "credit-self-service",
+            "expiredAt": "2031-01-02T03:04:05Z",
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_v1_reset_credit_scoped_pool_returns_all_available_credits_for_assigned_account(async_client):
     await _enable_api_key_auth(async_client)
     assigned_email = "real-assigned@example.com"
@@ -508,11 +544,20 @@ async def test_v1_reset_credit_post_closes_session_before_lock_and_upstream_cons
         assert requested_account_id == account_id
         return StubLock()
 
-    async def fake_consume(access_token: str, chatgpt_account_id: str, credit_id: str):
+    async def fake_consume(
+        access_token: str,
+        chatgpt_account_id: str,
+        credit_id: str,
+        *,
+        route: object | None = None,
+        allow_direct_egress: bool = False,
+    ):
         events.append("consume")
         assert access_token == "access-token"
         assert chatgpt_account_id == "chatgpt-session-lifecycle"
         assert credit_id == "credit-session-lifecycle"
+        assert route is None
+        assert allow_direct_egress is True
         return ConsumeResetCreditResponse.model_validate(
             {
                 "code": "reset",
@@ -525,8 +570,15 @@ async def test_v1_reset_credit_post_closes_session_before_lock_and_upstream_cons
             }
         )
 
+    async def fake_resolve_route(route_session, requested_account_id: str):
+        events.append("route_resolve")
+        assert route_session is session
+        assert requested_account_id == account_id
+        return None
+
     monkeypatch.setattr("app.modules.proxy.api.get_background_session", lambda: SessionManager())
     monkeypatch.setattr("app.modules.proxy.api.AccountsRepository", StubAccountsRepository)
+    monkeypatch.setattr("app.modules.proxy.api._resolve_reset_credit_route", fake_resolve_route)
     monkeypatch.setattr("app.modules.proxy.api.get_reset_credit_redeem_lock", fake_get_lock)
     monkeypatch.setattr("app.modules.proxy.api.consume_reset_credit", fake_consume)
 
@@ -546,6 +598,7 @@ async def test_v1_reset_credit_post_closes_session_before_lock_and_upstream_cons
         "session_enter",
         "repo_init",
         "repo_get",
+        "route_resolve",
         "session_exit",
         "lock_wait",
         "lock_enter",

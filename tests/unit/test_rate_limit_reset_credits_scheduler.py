@@ -68,7 +68,7 @@ async def test_refresh_skips_paused_and_deactivated_accounts() -> None:
     store = RateLimitResetCreditsStore()
     fetched: list[str] = []
 
-    async def fetch_fn(access_token: str, account_id: str | None) -> ResetCreditsResponse:
+    async def fetch_fn(access_token: str, account_id: str | None, **kwargs: Any) -> ResetCreditsResponse:
         fetched.append(access_token)
         return _response()
 
@@ -97,7 +97,7 @@ async def test_refresh_skips_account_without_chatgpt_account_id() -> None:
     store = RateLimitResetCreditsStore()
     fetched: list[str] = []
 
-    async def fetch_fn(access_token: str, account_id: str | None) -> ResetCreditsResponse:
+    async def fetch_fn(access_token: str, account_id: str | None, **kwargs: Any) -> ResetCreditsResponse:
         fetched.append(access_token)
         return _response()
 
@@ -117,7 +117,7 @@ async def test_one_account_failure_does_not_break_the_loop() -> None:
     store = RateLimitResetCreditsStore()
     fetched: list[str] = []
 
-    async def fetch_fn(access_token: str, account_id: str | None) -> ResetCreditsResponse:
+    async def fetch_fn(access_token: str, account_id: str | None, **kwargs: Any) -> ResetCreditsResponse:
         fetched.append(access_token)
         if access_token == "token-for-acc_fail":
             raise ResetCreditFetchError(500, "boom")
@@ -148,7 +148,7 @@ async def test_upstream_error_retains_prior_snapshot_and_does_not_mutate_status(
     await store.set("acc_retain", prior)
     account = _make_account("acc_retain", status=AccountStatus.ACTIVE)
 
-    async def fetch_fn(access_token: str, account_id: str | None) -> ResetCreditsResponse:
+    async def fetch_fn(access_token: str, account_id: str | None, **kwargs: Any) -> ResetCreditsResponse:
         raise ResetCreditFetchError(503, "busy")
 
     await refresh_reset_credits_for_accounts(
@@ -174,7 +174,7 @@ async def test_refresh_does_not_resurrect_snapshot_invalidated_during_fetch() ->
     fetch_started = asyncio.Event()
     release_fetch = asyncio.Event()
 
-    async def fetch_fn(access_token: str, account_id: str | None) -> ResetCreditsResponse:
+    async def fetch_fn(access_token: str, account_id: str | None, **kwargs: Any) -> ResetCreditsResponse:
         fetch_started.set()
         await release_fetch.wait()
         return _response(available_count=1)
@@ -204,7 +204,7 @@ async def test_unrelated_account_write_does_not_drop_in_flight_refresh() -> None
     fetch_started = asyncio.Event()
     release_fetch = asyncio.Event()
 
-    async def fetch_fn(access_token: str, account_id: str | None) -> ResetCreditsResponse:
+    async def fetch_fn(access_token: str, account_id: str | None, **kwargs: Any) -> ResetCreditsResponse:
         fetch_started.set()
         await release_fetch.wait()
         return _response(available_count=4)
@@ -239,7 +239,7 @@ async def test_refresh_never_calls_account_status_writes() -> None:
     """
     store = RateLimitResetCreditsStore()
 
-    async def fetch_fn(access_token: str, account_id: str | None) -> ResetCreditsResponse:
+    async def fetch_fn(access_token: str, account_id: str | None, **kwargs: Any) -> ResetCreditsResponse:
         if access_token == "token-for-acc_fail":
             raise ResetCreditFetchError(401, "unauthorized")
         return _response()
@@ -287,8 +287,9 @@ async def test_refresh_once_caches_snapshots_on_each_replica(monkeypatch: pytest
     monkeypatch.setattr(scheduler_module, "AccountsRepository", lambda session: _FakeRepo())
     monkeypatch.setattr(scheduler_module, "TokenEncryptor", lambda: StubEncryptor())
     monkeypatch.setattr(scheduler_module, "get_rate_limit_reset_credits_store", lambda: store)
+    monkeypatch.setattr(scheduler_module, "_resolve_upstream_route_for_account", lambda account: _async_none())
 
-    async def fetch_fn(access_token: str, account_id: str | None) -> ResetCreditsResponse:
+    async def fetch_fn(access_token: str, account_id: str | None, **kwargs: Any) -> ResetCreditsResponse:
         captured.append(("fetch", access_token, account_id))
         return _response(available_count=7)
 
@@ -302,3 +303,7 @@ async def test_refresh_once_caches_snapshots_on_each_replica(monkeypatch: pytest
     assert snapshot is not None
     assert snapshot.available_count == 7
     assert account.status == AccountStatus.ACTIVE
+
+
+async def _async_none() -> None:
+    return None

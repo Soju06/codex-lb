@@ -59,10 +59,15 @@ stays `RATE_LIMITED` or `QUOTA_EXCEEDED` until upstream catches up.
 - Wait first. The next request through that account usually wakes the upstream
   rate limiter; codex-lb auto-recovers on the next refresh tick after the
   upstream payload changes.
-- A force-probe action is planned in
-  [#677](https://github.com/Soju06/codex-lb/issues/677). The dashboard should
-  expose a per-account button that fires one minimal `responses.create` against
-  the affected account to nudge the upstream limiter to re-evaluate the window.
+- **Force probe** ([#677](https://github.com/Soju06/codex-lb/issues/677), shipped in
+  v1.20.0): fires one minimal `responses.create` against the affected account to
+  nudge the upstream limiter to re-evaluate the window. This does not spend a
+  banked reset credit.
+- **Apply saved reset** ([#1014](https://github.com/Soju06/codex-lb/issues/1014)):
+  when `/wham/usage` reports `rate_limit_reset_credits.available_count > 0`, the
+  dashboard exposes **Apply reset**. That calls
+  `POST /wham/rate-limit-reset-credits/consume`, spends one upstream credit, and
+  triggers an immediate usage refresh. Consuming a credit is irreversible.
 - Do not manually flip the codex-lb account state to `ACTIVE` while
   `/wham/usage` still reports the account as fully used. That only masks the
   upstream state and can route traffic back to an account that the upstream
@@ -85,10 +90,21 @@ curl -s https://chatgpt.com/backend-api/wham/usage \
 
 If `primary_window.used_percent` is still `100` here while Settings -> Account
 shows the account as reset, codex-lb has nothing fresher to mirror. The account
-is inside the upstream propagation window, and the practical fix is to wait or,
-once #677 lands, use the Probe action.
+is inside the upstream propagation window, and the practical fix is to wait,
+use **Force probe** when the limiter is lazy, or use **Apply reset** when a
+banked credit is available.
+
+To inspect banked reset availability directly:
+
+```bash
+curl -s https://chatgpt.com/backend-api/wham/usage \
+  -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+  -H "chatgpt-account-id: ${ACCOUNT_ID}" \
+  -H "Accept: application/json" | jq '.rate_limit_reset_credits'
+```
 
 ## Related Work
 
 - [#676 - initial bug report on `/wham/usage` vs. Settings UI divergence](https://github.com/Soju06/codex-lb/issues/676)
 - [#677 - dashboard per-account force-probe action](https://github.com/Soju06/codex-lb/issues/677)
+- [#1014 - expose banked reset availability and apply-reset operator action](https://github.com/Soju06/codex-lb/issues/1014)

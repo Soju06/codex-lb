@@ -55,6 +55,7 @@ class UsageRepositoryPort(Protocol):
         credits_has: bool | None = None,
         credits_unlimited: bool | None = None,
         credits_balance: float | None = None,
+        rate_limit_reset_available_count: int | None = None,
     ) -> UsageHistory | None: ...
 
 
@@ -531,6 +532,7 @@ class UsageUpdater:
             additional_synced = self._additional_usage_repo is not None and payload.additional_rate_limits is not None
             return AccountRefreshResult(usage_written=additional_synced)
         credits_has, credits_unlimited, credits_balance = _credits_snapshot(payload)
+        rate_limit_reset_available_count = _rate_limit_reset_snapshot(payload)
         usage_written = False
 
         if primary and primary.used_percent is not None:
@@ -545,6 +547,7 @@ class UsageUpdater:
                 credits_has=credits_has,
                 credits_unlimited=credits_unlimited,
                 credits_balance=credits_balance,
+                rate_limit_reset_available_count=rate_limit_reset_available_count,
             )
             usage_written = usage_written or _usage_entry_written(entry)
 
@@ -744,6 +747,13 @@ def _credits_snapshot(payload: UsagePayload) -> tuple[bool | None, bool | None, 
     credits_unlimited = credits.unlimited
     balance_value = credits.balance
     return credits_has, credits_unlimited, _parse_credits_balance(balance_value)
+
+
+def _rate_limit_reset_snapshot(payload: UsagePayload) -> int | None:
+    reset_credits = payload.rate_limit_reset_credits
+    if reset_credits is None:
+        return None
+    return reset_credits.available_count
 
 
 def _payload_mismatches_account_slot(account: Account, payload: UsagePayload) -> bool:

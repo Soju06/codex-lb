@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import uuid
 from datetime import timedelta
 from typing import cast
 
@@ -20,6 +21,13 @@ from app.core.auth import (
 from app.core.auth.api_key_cache import get_api_key_cache
 from app.core.cache.invalidation import NAMESPACE_API_KEY, get_cache_invalidation_poller
 from app.core.clients.http import lease_http_session
+from app.core.clients.rate_limit_reset import (
+    ConsumeRateLimitResetCode,
+    RateLimitResetConsumeError,
+    consume_rate_limit_reset,
+    fetch_rate_limit_reset_credits,
+    pick_available_reset_credit_id,
+)
 from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
@@ -38,6 +46,7 @@ from app.modules.accounts.schemas import (
     AccountOpenCodeAuthExportAccount,
     AccountOpenCodeAuthExportResponse,
     AccountProbeResponse,
+    AccountUsageResetResponse,
     AccountRequestUsage,
     AccountSummary,
     AccountTrendsResponse,
@@ -53,7 +62,8 @@ from app.modules.usage.additional_quota_keys import (
     get_additional_quota_routing_policy,
 )
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
-from app.modules.usage.updater import AdditionalUsageRepositoryPort, UsageUpdater
+from app.core.upstream_proxy import UpstreamProxyRouteError
+from app.modules.usage.updater import AdditionalUsageRepositoryPort, UsageUpdater, _resolve_upstream_route_for_account
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +85,22 @@ class InvalidAuthJsonError(Exception):
 
 class AccountNotProbableError(Exception):
     """Raised when an account is in a status that disallows probing."""
+
+
+class AccountNotResetApplicableError(Exception):
+    """Raised when an account is in a status that disallows applying a saved reset."""
+
+
+class AccountUsageResetNoCreditError(Exception):
+    """Raised when an account has no banked reset credits available."""
+
+
+class AccountUsageResetRejectedError(Exception):
+    """Raised when upstream rejects a reset consume request."""
+
+    def __init__(self, message: str, *, code: str) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class AccountStateTransitionError(Exception):
@@ -479,6 +505,114 @@ class AccountsService:
             account_status_before=status_before,
             account_status_after=refreshed.status.value,
         )
+
+    async def apply_usage_reset(self, account_id: str) -> AccountUsageResetResponse | None:
+        """Consume one banked upstream rate-limit reset credit for a single account."""
+        account = await self._repo.get_by_id(account_id)
+        if account is None:
+            return None
+        if account.status in (AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
+            raise AccountNotResetApplicableError(f"Account is {account.status.value} and cannot apply a saved reset")
+
+        primary_before, secondary_before = await self._latest_usage_percents(account_id)
+        reset_count_before = await self._latest_rate_limit_reset_available_count(account_id)
+        if reset_count_before is None or reset_count_before <= 0:
+            raise AccountUsageResetNoCreditError("Account has no saved reset credits available")
+        status_before = account.status.value
+
+        reset_account = account
+        if self._auth_manager is not None:
+            reset_account = await self._auth_manager.ensure_fresh(account, force=False)
+
+        access_token = self._encryptor.decrypt(reset_account.access_token_encrypted)
+        consume_result = await self._send_usage_reset_consume(
+            access_token=access_token,
+            chatgpt_account_id=reset_account.chatgpt_account_id,
+            account=reset_account,
+        )
+        if consume_result.code in {
+            ConsumeRateLimitResetCode.NO_CREDIT,
+            ConsumeRateLimitResetCode.NOTHING_TO_RESET,
+        }:
+            raise AccountUsageResetRejectedError(
+                f"Upstream rejected saved reset consume: {consume_result.code.value}",
+                code=consume_result.code.value,
+            )
+
+        if self._usage_repo and self._usage_updater:
+            await self._usage_updater.force_refresh(reset_account)
+            get_account_selection_cache().invalidate()
+
+        refreshed = await self._repo.get_by_id(account_id) or account
+        primary_after, secondary_after = await self._latest_usage_percents(account_id)
+        reset_count_after = await self._latest_rate_limit_reset_available_count(account_id)
+
+        return AccountUsageResetResponse(
+            status="applied",
+            account_id=account_id,
+            consume_code=consume_result.code.value,
+            windows_reset=consume_result.windows_reset,
+            rate_limit_reset_available_count_before=reset_count_before,
+            rate_limit_reset_available_count_after=reset_count_after,
+            primary_used_percent_before=primary_before,
+            primary_used_percent_after=primary_after,
+            secondary_used_percent_before=secondary_before,
+            secondary_used_percent_after=secondary_after,
+            account_status_before=status_before,
+            account_status_after=refreshed.status.value,
+        )
+
+    async def _latest_rate_limit_reset_available_count(self, account_id: str) -> int | None:
+        if self._usage_repo is None:
+            return None
+        primary_entry = await self._usage_repo.latest_entry_for_account(account_id, window="primary")
+        if primary_entry is None:
+            return None
+        return primary_entry.rate_limit_reset_available_count
+
+    async def _send_usage_reset_consume(
+        self,
+        *,
+        access_token: str,
+        chatgpt_account_id: str | None,
+        account: Account,
+    ):
+        try:
+            route = await _resolve_upstream_route_for_account(account, operation="usage_reset_consume")
+        except UpstreamProxyRouteError as exc:
+            logger.warning(
+                "Usage reset consume upstream proxy route unavailable account_id=%s reason=%s",
+                account.id,
+                exc.reason,
+            )
+            raise RateLimitResetConsumeError(0, f"Upstream proxy route unavailable: {exc.reason}") from exc
+        try:
+            credits_payload = await fetch_rate_limit_reset_credits(
+                access_token=access_token,
+                account_id=chatgpt_account_id,
+                route=route,
+                allow_direct_egress=route is None,
+            )
+            credit_id = pick_available_reset_credit_id(credits_payload)
+            if credit_id is None:
+                raise RateLimitResetConsumeError(409, "No available rate limit reset credits upstream")
+            return await consume_rate_limit_reset(
+                access_token=access_token,
+                account_id=chatgpt_account_id,
+                credit_id=credit_id,
+                redeem_request_id=str(uuid.uuid4()),
+                route=route,
+                allow_direct_egress=route is None,
+            )
+        except RateLimitResetConsumeError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "Usage reset consume failed account=%s error=%s",
+                chatgpt_account_id,
+                exc,
+            )
+            raise RateLimitResetConsumeError(0, f"Usage reset consume failed: {exc}") from exc
 
     async def _latest_usage_percents(self, account_id: str) -> tuple[float | None, float | None]:
         if self._usage_repo is None:

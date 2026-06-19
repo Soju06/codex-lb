@@ -15,6 +15,7 @@ import {
   AccountTrendsResponseSchema,
   AccountProbeRequestSchema,
   AccountProbeResponseSchema,
+  AccountUsageResetResponseSchema,
   ManualOauthCallbackRequestSchema,
   ManualOauthCallbackResponseSchema,
   OauthCompleteRequestSchema,
@@ -107,6 +108,13 @@ export function probeAccount(accountId: string, payload?: unknown) {
     `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/probe`,
     AccountProbeResponseSchema,
     validated ? { body: validated } : undefined,
+  );
+}
+
+export function applyAccountUsageReset(accountId: string) {
+  return post(
+    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/usage-reset/apply`,
+    AccountUsageResetResponseSchema,
   );
 }
 

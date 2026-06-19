@@ -170,3 +170,9 @@ def test_normalize_account_routing_policy() -> None:
     assert _normalize_account_routing_policy("preserve") == "preserve"
     assert _normalize_account_routing_policy("legacy") == "normal"
     assert _normalize_account_routing_policy(None) == "normal"
+
+
+def test_extract_rate_limit_reset_available_count_from_primary_usage() -> None:
+    primary = _primary_usage(rate_limit_reset_available_count=2)
+    assert mappers._extract_rate_limit_reset_available_count(primary) == 2
+    assert mappers._extract_rate_limit_reset_available_count(None) is None

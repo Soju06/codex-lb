@@ -4,6 +4,7 @@ import {
   AccountAuthExportResponseSchema,
   AccountProbeResponseSchema,
   AccountSummarySchema,
+  AccountUsageResetResponseSchema,
   ImportStateSchema,
   OAuthStateSchema,
 } from "@/features/accounts/schemas";
@@ -56,6 +57,19 @@ describe("AccountSummarySchema", () => {
     expect(parsed.windowMinutesSecondary).toBe(10080);
     expect(parsed.windowMinutesMonthly).toBe(43200);
     expect(parsed.requestUsage?.totalCostUsd).toBe(0.02);
+  });
+
+  it("parses saved reset availability", () => {
+    const parsed = AccountSummarySchema.parse({
+      accountId: "acc-1",
+      email: "user@example.com",
+      displayName: "User",
+      planType: "pro",
+      status: "active",
+      rateLimitResetAvailableCount: 2,
+    });
+
+    expect(parsed.rateLimitResetAvailableCount).toBe(2);
   });
 
   it("parses manual routing policy", () => {
@@ -185,5 +199,28 @@ describe("AccountProbeResponseSchema", () => {
 
     expect(parsed.probeStatusCode).toBe(200);
     expect(parsed.accountId).toBe("acc-1");
+  });
+});
+
+describe("AccountUsageResetResponseSchema", () => {
+  it("parses usage reset response payloads", () => {
+    const parsed = AccountUsageResetResponseSchema.parse({
+      status: "applied",
+      accountId: "acc-1",
+      consumeCode: "reset",
+      windowsReset: 2,
+      rateLimitResetAvailableCountBefore: 1,
+      rateLimitResetAvailableCountAfter: 0,
+      primaryUsedPercentBefore: 100,
+      primaryUsedPercentAfter: 0,
+      secondaryUsedPercentBefore: 80,
+      secondaryUsedPercentAfter: 10,
+      accountStatusBefore: "rate_limited",
+      accountStatusAfter: "active",
+    });
+
+    expect(parsed.consumeCode).toBe("reset");
+    expect(parsed.windowsReset).toBe(2);
+    expect(parsed.rateLimitResetAvailableCountBefore).toBe(1);
   });
 });

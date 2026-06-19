@@ -155,6 +155,29 @@ async def test_latest_by_account_sqlite_avoids_window_function_for_latest_rows(d
 
 
 @pytest.mark.asyncio
+async def test_latest_by_account_sqlite_includes_rate_limit_reset_available_count(db_setup):
+    now = utcnow()
+    async with SessionLocal() as session:
+        if _dialect_name(session) != "sqlite":
+            pytest.skip("SQLite-only SQL shape test")
+
+        accounts_repo = AccountsRepository(session)
+        repo = UsageRepository(session)
+        await accounts_repo.upsert(_make_account("acc1"))
+        await repo.add_entry(
+            "acc1",
+            20.0,
+            window="primary",
+            recorded_at=now,
+            rate_limit_reset_available_count=2,
+        )
+
+        latest = await repo.latest_by_account(window="primary")
+
+    assert latest["acc1"].rate_limit_reset_available_count == 2
+
+
+@pytest.mark.asyncio
 async def test_latest_by_account_primary_query_plan_uses_normalized_window_index(db_setup):
     now = utcnow()
     async with SessionLocal() as session:

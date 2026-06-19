@@ -133,3 +133,14 @@ def test_usage_payload_parses_fixture():
     assert payload.additional_rate_limits is not None
     assert len(payload.additional_rate_limits) >= 1
     assert payload.additional_rate_limits[0].limit_name == "codex_other"
+
+
+def test_usage_payload_parses_rate_limit_reset_credits() -> None:
+    payload = UsagePayload.model_validate(
+        {
+            "plan_type": "pro",
+            "rate_limit_reset_credits": {"available_count": 1},
+        }
+    )
+    assert payload.rate_limit_reset_credits is not None
+    assert payload.rate_limit_reset_credits.available_count == 1

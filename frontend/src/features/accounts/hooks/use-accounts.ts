@@ -9,6 +9,7 @@ import {
   listAccounts,
   pauseAccount,
   reactivateAccount,
+  applyAccountUsageReset,
   probeAccount,
   setAccountAlias,
   updateAccount,
@@ -115,6 +116,21 @@ export function useAccountMutations() {
     },
   });
 
+  const usageResetMutation = useMutation({
+    mutationFn: (accountId: string) => applyAccountUsageReset(accountId),
+    onSuccess: (_data, accountId) => {
+      toast.success("Saved reset applied");
+      void queryClient.invalidateQueries({ queryKey: ["accounts", "list"] });
+      void queryClient.invalidateQueries({ queryKey: ["accounts", "trends"] });
+      void queryClient.invalidateQueries({ queryKey: ["accounts", "trends", accountId] });
+      void queryClient.invalidateQueries({ queryKey: ["dashboard", "overview"] });
+      void queryClient.invalidateQueries({ queryKey: ["dashboard", "projections"] });
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Apply reset failed");
+    },
+  });
+
   const limitWarmupMutation = useMutation({
     mutationFn: ({ accountId, enabled }: { accountId: string; enabled: boolean }) =>
       updateAccountLimitWarmup(accountId, enabled),
@@ -184,6 +200,7 @@ export function useAccountMutations() {
     setAliasMutation,
     deleteMutation,
     probeMutation,
+    usageResetMutation,
     exportAuthMutation,
     limitWarmupMutation,
     routingPolicyMutation,

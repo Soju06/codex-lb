@@ -133,6 +133,7 @@ class UsageEntry:
     credits_has: bool | None
     credits_unlimited: bool | None
     credits_balance: float | None
+    rate_limit_reset_available_count: int | None = None
 
 
 class StubUsageRepository:
@@ -164,6 +165,7 @@ class StubUsageRepository:
                     credits_has=entry.credits_has,
                     credits_unlimited=entry.credits_unlimited,
                     credits_balance=entry.credits_balance,
+                    rate_limit_reset_available_count=entry.rate_limit_reset_available_count,
                 )
         return None
 
@@ -180,6 +182,7 @@ class StubUsageRepository:
         credits_has: bool | None = None,
         credits_unlimited: bool | None = None,
         credits_balance: float | None = None,
+        rate_limit_reset_available_count: int | None = None,
     ) -> UsageHistory | None:
         self.entries.append(
             UsageEntry(
@@ -194,6 +197,7 @@ class StubUsageRepository:
                 credits_has=credits_has,
                 credits_unlimited=credits_unlimited,
                 credits_balance=credits_balance,
+                rate_limit_reset_available_count=rate_limit_reset_available_count,
             )
         )
         if not self._return_rows:
@@ -211,6 +215,7 @@ class StubUsageRepository:
             credits_has=credits_has,
             credits_unlimited=credits_unlimited,
             credits_balance=credits_balance,
+            rate_limit_reset_available_count=rate_limit_reset_available_count,
         )
         self._next_id += 1
         return entry
@@ -1879,6 +1884,81 @@ async def test_usage_updater_persists_primary_and_secondary_usage(monkeypatch) -
     assert secondary.credits_has is None
     assert secondary.credits_unlimited is None
     assert secondary.credits_balance is None
+
+
+@pytest.mark.asyncio
+async def test_usage_updater_persists_rate_limit_reset_available_count_on_primary(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+
+    async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: Any) -> UsagePayload:
+        assert access_token
+        assert account_id == "workspace_123"
+        return UsagePayload.model_validate(
+            {
+                "rate_limit": {
+                    "primary_window": {
+                        "used_percent": 100.0,
+                        "reset_at": 1735689600,
+                        "limit_window_seconds": 300,
+                    },
+                    "secondary_window": {
+                        "used_percent": 55.0,
+                        "reset_at": 1735693200,
+                        "limit_window_seconds": 60,
+                    },
+                },
+                "rate_limit_reset_credits": {"available_count": 2},
+            }
+        )
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+
+    usage_repo = StubUsageRepository()
+    updater = UsageUpdater(usage_repo, accounts_repo=None)
+    acc = _make_account("acc_test", "workspace_123", email="reset@example.com")
+
+    await updater.refresh_accounts([acc], latest_usage={})
+
+    primary = next(entry for entry in usage_repo.entries if entry.window == "primary")
+    secondary = next(entry for entry in usage_repo.entries if entry.window == "secondary")
+    assert primary.rate_limit_reset_available_count == 2
+    assert secondary.rate_limit_reset_available_count is None
+
+
+@pytest.mark.asyncio
+async def test_usage_updater_stores_null_reset_count_when_field_absent(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+
+    async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: Any) -> UsagePayload:
+        return UsagePayload.model_validate(
+            {
+                "rate_limit": {
+                    "primary_window": {
+                        "used_percent": 12.5,
+                        "reset_at": 1735689600,
+                        "limit_window_seconds": 300,
+                    },
+                },
+            }
+        )
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+
+    usage_repo = StubUsageRepository()
+    updater = UsageUpdater(usage_repo, accounts_repo=None)
+    acc = _make_account("acc_test", "workspace_123", email="noreset@example.com")
+
+    await updater.refresh_accounts([acc], latest_usage={})
+
+    primary = usage_repo.entries[0]
+    assert primary.window == "primary"
+    assert primary.rate_limit_reset_available_count is None
 
 
 @pytest.mark.asyncio

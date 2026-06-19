@@ -205,6 +205,7 @@ def _account_to_summary(
         primary_usage,
         secondary_usage,
     )
+    rate_limit_reset_available_count = _extract_rate_limit_reset_available_count(primary_usage)
     effective_status = _effective_status_from_usage(
         account,
         status_seed=status_seed,
@@ -254,6 +255,7 @@ def _account_to_summary(
         credits_has=credits_has,
         credits_unlimited=credits_unlimited,
         credits_balance=credits_balance,
+        rate_limit_reset_available_count=rate_limit_reset_available_count,
         request_usage=request_usage,
         additional_quotas=additional_quotas or [],
         deactivation_reason=account.deactivation_reason,
@@ -431,6 +433,12 @@ def _normalize_used_percent(entry: UsageHistory | None) -> float | None:
     if not entry:
         return None
     return entry.used_percent
+
+
+def _extract_rate_limit_reset_available_count(primary_usage: UsageHistory | None) -> int | None:
+    if primary_usage is None:
+        return None
+    return primary_usage.rate_limit_reset_available_count
 
 
 def _extract_credit_status(

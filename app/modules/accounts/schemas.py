@@ -102,6 +102,7 @@ class AccountSummary(DashboardModel):
     credits_has: bool | None = None
     credits_unlimited: bool | None = None
     credits_balance: float | None = None
+    rate_limit_reset_available_count: int | None = None
     deactivation_reason: str | None = None
     auth: AccountAuthStatus | None = None
     limit_warmup_enabled: bool = False
@@ -217,6 +218,21 @@ class AccountProbeResponse(DashboardModel):
     status: str
     account_id: str
     probe_status_code: int
+    primary_used_percent_before: float | None = None
+    primary_used_percent_after: float | None = None
+    secondary_used_percent_before: float | None = None
+    secondary_used_percent_after: float | None = None
+    account_status_before: str
+    account_status_after: str
+
+
+class AccountUsageResetResponse(DashboardModel):
+    status: str
+    account_id: str
+    consume_code: str
+    windows_reset: int | None = None
+    rate_limit_reset_available_count_before: int | None = None
+    rate_limit_reset_available_count_after: int | None = None
     primary_used_percent_before: float | None = None
     primary_used_percent_after: float | None = None
     secondary_used_percent_before: float | None = None

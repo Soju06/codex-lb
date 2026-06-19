@@ -148,6 +148,7 @@ class UsageHistory(Base):
     credits_has: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     credits_unlimited: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     credits_balance: Mapped[float | None] = mapped_column(Float, nullable=True)
+    rate_limit_reset_available_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class AdditionalUsageHistory(Base):

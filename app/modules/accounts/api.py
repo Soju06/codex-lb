@@ -25,6 +25,7 @@ from app.modules.accounts.schemas import (
     AccountPauseResponse,
     AccountProbeRequest,
     AccountProbeResponse,
+    AccountUsageResetResponse,
     AccountReactivateResponse,
     AccountRoutingPolicyUpdateRequest,
     AccountRoutingPolicyUpdateResponse,
@@ -33,7 +34,15 @@ from app.modules.accounts.schemas import (
     AccountUpdateRequest,
     AccountUpdateResponse,
 )
-from app.modules.accounts.service import AccountNotProbableError, AccountStateTransitionError, InvalidAuthJsonError
+from app.core.clients.rate_limit_reset import RateLimitResetConsumeError
+from app.modules.accounts.service import (
+    AccountNotProbableError,
+    AccountNotResetApplicableError,
+    AccountStateTransitionError,
+    AccountUsageResetNoCreditError,
+    AccountUsageResetRejectedError,
+    InvalidAuthJsonError,
+)
 
 router = APIRouter(
     prefix="/api/accounts",
@@ -219,6 +228,52 @@ async def probe_account(
             "account_id": result.account_id,
             "probe_status_code": result.probe_status_code,
             "model": requested_model,
+        },
+    )
+    return result
+
+
+@router.post("/{account_id}/usage-reset/apply", response_model=AccountUsageResetResponse)
+async def apply_account_usage_reset(
+    request: Request,
+    account_id: str,
+    _write_access=Depends(require_dashboard_write_access),
+    context: AccountsContext = Depends(get_accounts_context),
+) -> AccountUsageResetResponse:
+    try:
+        result = await context.service.apply_usage_reset(account_id)
+    except AccountNotResetApplicableError as exc:
+        raise DashboardConflictError(str(exc), code="account_not_reset_applicable") from exc
+    except AccountUsageResetNoCreditError as exc:
+        raise DashboardConflictError(str(exc), code="account_usage_reset_no_credit") from exc
+    except AccountUsageResetRejectedError as exc:
+        code = (
+            "account_usage_reset_nothing_to_reset"
+            if exc.code == "nothing_to_reset"
+            else "account_usage_reset_no_credit"
+        )
+        raise DashboardConflictError(str(exc), code=code) from exc
+    except RateLimitResetConsumeError as exc:
+        raise DashboardConflictError(
+            f"Usage reset consume failed: {exc.message}",
+            code="account_usage_reset_upstream_failed",
+        ) from exc
+    except RefreshError as exc:
+        raise DashboardConflictError(
+            f"Usage reset could not refresh account credentials: {exc.message}",
+            code="account_usage_reset_refresh_failed",
+        ) from exc
+    if result is None:
+        raise DashboardNotFoundError("Account not found", code="account_not_found")
+    AuditService.log_async(
+        "account_usage_reset_applied",
+        actor_ip=request.client.host if request.client else None,
+        details={
+            "account_id": result.account_id,
+            "consume_code": result.consume_code,
+            "windows_reset": result.windows_reset,
+            "rate_limit_reset_available_count_before": result.rate_limit_reset_available_count_before,
+            "rate_limit_reset_available_count_after": result.rate_limit_reset_available_count_after,
         },
     )
     return result

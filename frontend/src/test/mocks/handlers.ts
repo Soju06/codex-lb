@@ -620,6 +620,34 @@ export const handlers = [
     });
   }),
 
+  http.post("/api/accounts/:accountId/usage-reset/apply", ({ params }) => {
+    const accountId = String(params.accountId);
+    const account = findAccount(accountId);
+    if (!account) {
+      return HttpResponse.json(
+        { error: { code: "account_not_found", message: "Account not found" } },
+        { status: 404 },
+      );
+    }
+    const beforeCount = account.rateLimitResetAvailableCount ?? 0;
+    const afterCount = beforeCount > 0 ? beforeCount - 1 : beforeCount;
+    account.rateLimitResetAvailableCount = afterCount;
+    return HttpResponse.json({
+      status: "applied",
+      accountId,
+      consumeCode: "reset",
+      windowsReset: 2,
+      rateLimitResetAvailableCountBefore: beforeCount,
+      rateLimitResetAvailableCountAfter: afterCount,
+      primaryUsedPercentBefore: account.usage?.primaryRemainingPercent ?? null,
+      primaryUsedPercentAfter: account.usage?.primaryRemainingPercent ?? null,
+      secondaryUsedPercentBefore: account.usage?.secondaryRemainingPercent ?? null,
+      secondaryUsedPercentAfter: account.usage?.secondaryRemainingPercent ?? null,
+      accountStatusBefore: account.status,
+      accountStatusAfter: account.status,
+    });
+  }),
+
 	http.post("/api/accounts/:accountId/export/auth", ({ params }) => {
 		const accountId = String(params.accountId);
 		const account = findAccount(accountId);

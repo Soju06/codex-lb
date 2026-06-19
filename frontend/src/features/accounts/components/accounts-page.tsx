@@ -40,6 +40,7 @@ export function AccountsPage() {
     resumeMutation,
     setAliasMutation,
     probeMutation,
+    usageResetMutation,
     limitWarmupMutation,
     updateMutation,
     deleteMutation,
@@ -53,6 +54,7 @@ export function AccountsPage() {
   const importDialog = useDialogState();
   const oauthDialog = useDialogState();
   const deleteDialog = useDialogState<string>();
+  const usageResetDialog = useDialogState<string>();
   const exportDialog = useDialogState<AccountAuthExportResponse>();
   const [deleteHistory, setDeleteHistory] = useState(false);
 
@@ -105,6 +107,7 @@ export function AccountsPage() {
     resumeMutation.isPending ||
     setAliasMutation.isPending ||
     probeMutation.isPending ||
+    usageResetMutation.isPending ||
     limitWarmupMutation.isPending ||
     deleteMutation.isPending ||
     routingPolicyMutation.isPending ||
@@ -118,6 +121,7 @@ export function AccountsPage() {
     getErrorMessageOrNull(resumeMutation.error) ||
     getErrorMessageOrNull(setAliasMutation.error) ||
     getErrorMessageOrNull(probeMutation.error) ||
+    getErrorMessageOrNull(usageResetMutation.error) ||
     getErrorMessageOrNull(limitWarmupMutation.error) ||
     getErrorMessageOrNull(deleteMutation.error) ||
     getErrorMessageOrNull(routingPolicyMutation.error) ||
@@ -167,6 +171,7 @@ export function AccountsPage() {
             onProbe={(accountId) =>
               void probeMutation.mutateAsync({ accountId })
             }
+            onApplyUsageReset={(accountId) => usageResetDialog.show(accountId)}
             onSetAlias={(accountId, alias) =>
               setAliasMutation.mutateAsync({ accountId, alias })
             }
@@ -233,6 +238,23 @@ export function AccountsPage() {
         open={exportDialog.open}
         exportData={exportDialog.data}
         onOpenChange={exportDialog.onOpenChange}
+      />
+
+      <ConfirmDialog
+        open={usageResetDialog.open}
+        title="Apply saved reset?"
+        description="This consumes one upstream reset credit and cannot be undone. The account's rate-limit windows will be reset immediately."
+        confirmLabel="Apply reset"
+        cancelLabel="Cancel"
+        onOpenChange={usageResetDialog.onOpenChange}
+        onConfirm={() => {
+          if (!usageResetDialog.data) {
+            return;
+          }
+          void usageResetMutation
+            .mutateAsync(usageResetDialog.data)
+            .finally(() => usageResetDialog.hide());
+        }}
       />
 
       <ConfirmDialog

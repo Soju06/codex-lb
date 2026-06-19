@@ -1,4 +1,4 @@
-import { Flame, Shield, ShieldCheck } from "lucide-react";
+import { Flame, RotateCcw, Shield, ShieldCheck } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
@@ -100,6 +100,9 @@ export function AccountListItem({
             policy={account.routingPolicy as AccountRoutingPolicy | undefined}
           />
         ) : null}
+        {(account.rateLimitResetAvailableCount ?? 0) > 0 ? (
+          <SavedResetBadge count={account.rateLimitResetAvailableCount ?? 0} />
+        ) : null}
         {account.securityWorkAuthorized === true ? (
           <ShieldCheck
             className="h-3.5 w-3.5 text-emerald-600"
@@ -141,6 +144,20 @@ export function AccountListItem({
         <span className="truncate">{warmupMeta}</span>
       </div>
     </button>
+  );
+}
+
+function SavedResetBadge({ count }: { count: number }) {
+  const label = count === 1 ? "1 saved reset" : `${count} saved resets`;
+  return (
+    <Badge
+      variant="outline"
+      className="shrink-0 gap-1 border-violet-300 bg-violet-50 px-1.5 text-[11px] text-violet-700 dark:border-violet-500/30 dark:bg-violet-500/10 dark:text-violet-300"
+      aria-label={label}
+    >
+      <RotateCcw className="h-3 w-3" aria-hidden="true" />
+      {label}
+    </Badge>
   );
 }
 

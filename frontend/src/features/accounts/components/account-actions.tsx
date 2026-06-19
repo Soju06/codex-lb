@@ -4,6 +4,7 @@ import {
   Pause,
   Play,
   RefreshCw,
+  RotateCcw,
   Route,
   ShieldCheck,
   Trash2,
@@ -31,6 +32,7 @@ export type AccountActionsProps = {
   onPause: (accountId: string) => void;
   onResume: (accountId: string) => void;
   onProbe: (accountId: string) => void;
+  onApplyUsageReset: (accountId: string) => void;
   onDelete: (accountId: string) => void;
   onReauth: () => void;
   onExportAuth: (accountId: string) => void;
@@ -49,6 +51,7 @@ export function AccountActions({
   onPause,
   onResume,
   onProbe,
+  onApplyUsageReset,
   onDelete,
   onReauth,
   onExportAuth,
@@ -60,6 +63,13 @@ export function AccountActions({
     account.status === "reauth_required" || account.status === "deactivated";
   const probeDisabled =
     busy || readOnly || account.status === "paused" || showOperatorRecoveryAction;
+  const savedResetCount = account.rateLimitResetAvailableCount ?? 0;
+  const applyResetDisabled =
+    busy ||
+    readOnly ||
+    account.status === "paused" ||
+    showOperatorRecoveryAction ||
+    savedResetCount <= 0;
 
   return (
     <div className="space-y-3 border-t pt-4">
@@ -163,6 +173,18 @@ export function AccountActions({
         >
           <Activity className="h-3.5 w-3.5" />
           Force probe
+        </Button>
+
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          className="h-8 gap-1.5 text-xs"
+          onClick={() => onApplyUsageReset(account.accountId)}
+          disabled={applyResetDisabled}
+        >
+          <RotateCcw className="h-3.5 w-3.5" />
+          Apply reset
         </Button>
 
         <Button

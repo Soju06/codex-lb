@@ -143,6 +143,14 @@ describe("AccountListItem", () => {
     expect(screen.getByTestId("mini-quota-track-weekly-fill")).toHaveStyle({ width: "73%" });
   });
 
+  it("shows a saved reset badge when banked credits are available", () => {
+    const account = createAccountSummary({ rateLimitResetAvailableCount: 2 });
+
+    render(<AccountListItem account={account} selected={false} onSelect={vi.fn()} />);
+
+    expect(screen.getByLabelText("2 saved resets")).toBeInTheDocument();
+  });
+
   it("marks burn-first accounts in the list", () => {
     const account = createAccountSummary({ routingPolicy: "burn_first" });
 

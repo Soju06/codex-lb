@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Features
+
+* **accounts:** expose banked reset availability and apply-reset operator action ([#1014](https://github.com/Soju06/codex-lb/issues/1014))
+
 ## [1.20.1](https://github.com/Soju06/codex-lb/compare/v1.20.0...v1.20.1) (2026-06-18)
 
 

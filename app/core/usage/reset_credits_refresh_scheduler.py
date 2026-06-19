@@ -93,9 +93,8 @@ async def refresh_reset_credits_for_accounts(
     stays owned by usage refresh. One account failing must not abort the loop.
     """
     for account in accounts:
-        if account.status in _RESET_CREDITS_SKIP_STATUSES:
-            continue
-        if not account.chatgpt_account_id:
+        if not _is_reset_credits_refresh_eligible(account):
+            await store.invalidate(account.id)
             continue
         await _refresh_account_reset_credits(
             account,
@@ -104,6 +103,10 @@ async def refresh_reset_credits_for_accounts(
             fetch_fn=fetch_fn,
             route_resolver=route_resolver,
         )
+
+
+def _is_reset_credits_refresh_eligible(account: Account) -> bool:
+    return account.status not in _RESET_CREDITS_SKIP_STATUSES and bool(account.chatgpt_account_id)
 
 
 async def _refresh_account_reset_credits(

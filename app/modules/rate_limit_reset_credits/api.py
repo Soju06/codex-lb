@@ -28,7 +28,7 @@ from app.core.exceptions import (
     DashboardServiceUnavailableError,
 )
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError, resolve_upstream_route
-from app.db.models import Account
+from app.db.models import Account, AccountStatus
 from app.dependencies import AccountsContext, get_accounts_context
 from app.modules.rate_limit_reset_credits.store import (
     RateLimitResetCreditsStore,
@@ -45,6 +45,7 @@ router = APIRouter(
 ConsumeFn = Callable[..., Awaitable[ConsumeResetCreditResponse]]
 _redeem_locks: dict[str, asyncio.Lock] = {}
 _redeem_locks_registry_lock = asyncio.Lock()
+_RESET_CREDITS_INELIGIBLE_STATUSES = frozenset({AccountStatus.PAUSED, AccountStatus.DEACTIVATED})
 
 
 class ResetCreditItemResponse(DashboardModel):
@@ -94,6 +95,13 @@ async def consume_rate_limit_reset_credit(
     account = await context.repository.get_by_id(account_id)
     if account is None:
         raise DashboardNotFoundError("Account not found", code="account_not_found")
+    store = get_rate_limit_reset_credits_store()
+    if not _account_can_redeem_reset_credit(account):
+        await store.invalidate(account.id)
+        raise DashboardConflictError(
+            "Account is not eligible to redeem reset credits",
+            code="reset_credit_account_ineligible",
+        )
     try:
         route = await resolve_upstream_route(
             context.session,
@@ -108,7 +116,7 @@ async def consume_rate_limit_reset_credit(
         ) from exc
     return await _redeem_soonest_reset_credit(
         account=account,
-        store=get_rate_limit_reset_credits_store(),
+        store=store,
         encryptor=TokenEncryptor(),
         consume_fn=consume_reset_credit,
         route=route,
@@ -147,6 +155,10 @@ async def _redeem_soonest_reset_credit(
             windows_reset=result.windows_reset,
             redeemed_at=redeemed_at,
         )
+
+
+def _account_can_redeem_reset_credit(account: Account) -> bool:
+    return account.status not in _RESET_CREDITS_INELIGIBLE_STATUSES and bool(account.chatgpt_account_id)
 
 
 async def get_reset_credit_redeem_lock(account_id: str) -> asyncio.Lock:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import cast
 
 import pytest
 
@@ -12,18 +13,29 @@ from app.modules.rate_limit_reset_credits.store import RateLimitResetCreditsStor
 
 pytestmark = pytest.mark.unit
 
+_DEFAULT_CHATGPT_ACCOUNT_ID = object()
 
-def _account(account_id: str) -> Account:
+
+def _account(
+    account_id: str,
+    *,
+    status: AccountStatus = AccountStatus.ACTIVE,
+    chatgpt_account_id: str | None | object = _DEFAULT_CHATGPT_ACCOUNT_ID,
+) -> Account:
+    if chatgpt_account_id is _DEFAULT_CHATGPT_ACCOUNT_ID:
+        resolved_chatgpt_account_id: str | None = f"workspace-{account_id}"
+    else:
+        resolved_chatgpt_account_id = cast("str | None", chatgpt_account_id)
     return Account(
         id=account_id,
-        chatgpt_account_id=f"workspace-{account_id}",
+        chatgpt_account_id=resolved_chatgpt_account_id,
         email=f"{account_id}@example.com",
         plan_type="plus",
         access_token_encrypted=b"",
         refresh_token_encrypted=b"",
         id_token_encrypted=b"",
         last_refresh=datetime(2025, 1, 1),
-        status=AccountStatus.ACTIVE,
+        status=status,
     )
 
 
@@ -59,6 +71,35 @@ def test_account_summary_returns_zero_and_null_when_no_snapshot() -> None:
     store = RateLimitResetCreditsStore()
 
     [summary] = _summaries([_account("acc_no_cache")], store)
+
+    assert summary.available_reset_credits == 0
+    assert summary.reset_credit_nearest_expires_at is None
+
+
+@pytest.mark.parametrize("status", [AccountStatus.PAUSED, AccountStatus.DEACTIVATED])
+def test_account_summary_suppresses_cached_reset_credits_for_ineligible_status(status: AccountStatus) -> None:
+    store = RateLimitResetCreditsStore()
+    store._snapshots["acc_ineligible"] = RateLimitResetCreditsSnapshot(  # type: ignore[attr-defined]
+        available_count=3,
+        nearest_expires_at=datetime(2026, 6, 20, 0, 0, 0),
+        credits=[],
+    )
+
+    [summary] = _summaries([_account("acc_ineligible", status=status)], store)
+
+    assert summary.available_reset_credits == 0
+    assert summary.reset_credit_nearest_expires_at is None
+
+
+def test_account_summary_suppresses_cached_reset_credits_without_chatgpt_account_id() -> None:
+    store = RateLimitResetCreditsStore()
+    store._snapshots["acc_no_workspace"] = RateLimitResetCreditsSnapshot(  # type: ignore[attr-defined]
+        available_count=3,
+        nearest_expires_at=datetime(2026, 6, 20, 0, 0, 0),
+        credits=[],
+    )
+
+    [summary] = _summaries([_account("acc_no_workspace", chatgpt_account_id=None)], store)
 
     assert summary.available_reset_credits == 0
     assert summary.reset_credit_nearest_expires_at is None

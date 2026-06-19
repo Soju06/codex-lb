@@ -130,6 +130,32 @@ jobs:
             --base-ref "origin/${BASE_REF}" \
             --head-ref "${HEAD_REF}"
 
+  stable-release-guard:
+    name: Stable release guard
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch PR base branch
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: git fetch origin "${BASE_REF}:refs/remotes/origin/${BASE_REF}" --force
+
+      - name: Require complete release-please stable promotions
+        env:
+          BASE_REF: ${{ github.base_ref || 'main' }}
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          python -m scripts.guard_stable_release \
+            --base-ref "origin/${BASE_REF}" \
+            --head-ref "${HEAD_REF}"
+
   frontend-lint:
     name: Frontend lint (eslint)
     runs-on: ubuntu-24.04

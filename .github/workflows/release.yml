@@ -385,3 +385,23 @@ jobs:
           draft: false
           prerelease: ${{ needs.release-metadata.outputs.is_prerelease == 'true' }}
           make_latest: ${{ needs.release-metadata.outputs.make_latest }}
+
+  withdraw-failed-release:
+    name: Withdraw failed public release
+    needs: [release-metadata, build, publish-to-pypi, docker-image, helm-chart, create-github-release]
+    runs-on: ubuntu-24.04
+    if: >-
+      ${{
+        always() &&
+        github.event_name == 'release' &&
+        (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled'))
+      }}
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Make incomplete release draft again
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --draft

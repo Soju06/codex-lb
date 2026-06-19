@@ -108,7 +108,7 @@ async def _redeem_soonest_reset_credit(
     encryptor: TokenEncryptor,
     consume_fn: ConsumeFn,
 ) -> ConsumeResetCreditResponseSchema:
-    lock = await _get_redeem_lock(account.id)
+    lock = await get_reset_credit_redeem_lock(account.id)
     async with lock:
         snapshot = store.get(account.id)
         credit = _select_soonest_available_credit(snapshot)
@@ -128,7 +128,7 @@ async def _redeem_soonest_reset_credit(
         )
 
 
-async def _get_redeem_lock(account_id: str) -> asyncio.Lock:
+async def get_reset_credit_redeem_lock(account_id: str) -> asyncio.Lock:
     lock = _redeem_locks.get(account_id)
     if lock is not None:
         return lock

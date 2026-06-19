@@ -80,6 +80,34 @@ The system SHALL expose a dashboard endpoint `POST /api/accounts/{account_id}/ra
 - **WHEN** the operator invokes `POST /api/accounts/{id}/rate-limit-reset-credits/consume`
 - **THEN** the endpoint returns a `409` (or equivalent client-error) without calling upstream
 
+### Requirement: API-key self-service reset-credit reads and exact redemption reuse the cached snapshots
+
+The system SHALL expose `GET /v1/reset-credit` and `POST /v1/reset-credit` as API-key-authenticated self-service routes backed by the same cached reset-credit snapshots used by the dashboard flow. `GET /v1/reset-credit` SHALL project the authenticated API key's eligible account pool into one array item per eligible account, ordered by account email ascending and then account id ascending. Each item SHALL represent exactly one account that currently has at least one available credit and SHALL include `account_id`, `email`, `redeem_id`, and `expiredAt`, where `redeem_id` and `expiredAt` come from that account's soonest-`expires_at` available credit. Accounts with no cached snapshot or no available credit SHALL be omitted from the `GET` response.
+
+`POST /v1/reset-credit` SHALL accept JSON body `{account_id, redeem_id}`. The endpoint SHALL reject requests whose `account_id` is outside the authenticated API key's account pool. For in-pool accounts, the endpoint SHALL re-read that account's freshest cached snapshot, verify that `redeem_id` still identifies an `available` credit on the account, forward that exact `credit_id` upstream with a generated `redeem_request_id`, and invalidate the cached snapshot for the account on a 200 response. A cached snapshot with `available_count <= 0` MUST be treated as having no redeemable credits even if the cached `credits` list contains an item marked `available`.
+
+#### Scenario: GET returns one soonest credit per eligible account
+- **GIVEN** two in-pool accounts each have multiple cached available credits
+- **WHEN** the client invokes `GET /v1/reset-credit`
+- **THEN** the response contains one array item per account
+- **AND** each entry's `redeem_id` is the account's soonest-expiring available credit id
+
+#### Scenario: GET omits accounts without available cached credits
+- **GIVEN** one in-pool account has `available_count: 0` and another has no cached snapshot
+- **WHEN** the client invokes `GET /v1/reset-credit`
+- **THEN** neither account appears in the response array
+
+#### Scenario: POST rejects a redeem id that is not currently available
+- **GIVEN** an in-pool account whose cached snapshot does not contain the supplied `redeem_id` as an `available` credit
+- **WHEN** the client invokes `POST /v1/reset-credit`
+- **THEN** the endpoint returns `409` without calling upstream
+
+#### Scenario: POST forwards the exact requested redeem id
+- **GIVEN** an in-pool account whose cached snapshot contains `redeem_id = "credit_exact"` as an available credit
+- **WHEN** the client invokes `POST /v1/reset-credit` with `{account_id, redeem_id: "credit_exact"}`
+- **THEN** the upstream consume request carries `credit_id = "credit_exact"`
+- **AND** a successful response invalidates the cached snapshot for that account
+
 ### Requirement: Reset credit polling failure does not mutate account status
 
 The reset-credits refresh scheduler SHALL NOT transition any account's persisted status (`active`, `rate_limited`, `quota_exceeded`, `paused`, `deactivated`) in response to upstream reset-credits responses. On upstream error (non-200, non-JSON, malformed 200 payload, network, or auth-like failure) the scheduler SHALL log the failure and either keep the prior cached snapshot or leave the cache unset; it SHALL NOT propagate the failure to account-status derivation.

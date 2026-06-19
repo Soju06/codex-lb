@@ -93,6 +93,32 @@ async def test_refresh_skips_paused_and_deactivated_accounts() -> None:
 
 
 @pytest.mark.asyncio
+async def test_refresh_invalidates_snapshots_for_paused_and_deactivated_accounts() -> None:
+    store = RateLimitResetCreditsStore()
+    await store.set("acc_paused", RateLimitResetCreditsSnapshot(available_count=1))
+    await store.set("acc_deactivated", RateLimitResetCreditsSnapshot(available_count=1))
+    fetched: list[str] = []
+
+    async def fetch_fn(access_token: str, account_id: str | None, **kwargs: Any) -> ResetCreditsResponse:
+        fetched.append(access_token)
+        return _response()
+
+    await refresh_reset_credits_for_accounts(
+        accounts=[
+            _make_account("acc_paused", status=AccountStatus.PAUSED),
+            _make_account("acc_deactivated", status=AccountStatus.DEACTIVATED),
+        ],
+        encryptor=StubEncryptor(),
+        store=store,
+        fetch_fn=fetch_fn,
+    )
+
+    assert fetched == []
+    assert store.get("acc_paused") is None
+    assert store.get("acc_deactivated") is None
+
+
+@pytest.mark.asyncio
 async def test_refresh_skips_account_without_chatgpt_account_id() -> None:
     store = RateLimitResetCreditsStore()
     fetched: list[str] = []
@@ -109,6 +135,24 @@ async def test_refresh_skips_account_without_chatgpt_account_id() -> None:
     )
 
     assert fetched == []
+    assert store.get("acc_no_workspace") is None
+
+
+@pytest.mark.asyncio
+async def test_refresh_invalidates_snapshot_for_account_without_chatgpt_account_id() -> None:
+    store = RateLimitResetCreditsStore()
+    await store.set("acc_no_workspace", RateLimitResetCreditsSnapshot(available_count=1))
+
+    async def fetch_fn(access_token: str, account_id: str | None, **kwargs: Any) -> ResetCreditsResponse:
+        raise AssertionError("ineligible account must not fetch reset credits")
+
+    await refresh_reset_credits_for_accounts(
+        accounts=[_make_account("acc_no_workspace", chatgpt_account_id=None)],
+        encryptor=StubEncryptor(),
+        store=store,
+        fetch_fn=fetch_fn,
+    )
+
     assert store.get("acc_no_workspace") is None
 
 

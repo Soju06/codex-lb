@@ -30,6 +30,7 @@ from app.modules.rate_limit_reset_credits.store import (
 from app.modules.usage.mappers import usage_history_to_window_row
 
 _ACCOUNT_ROUTING_POLICIES = frozenset({"burn_first", "normal", "preserve"})
+_RESET_CREDITS_INELIGIBLE_STATUSES = frozenset({AccountStatus.PAUSED, AccountStatus.DEACTIVATED})
 _DEFAULT_USAGE_REFRESH_INTERVAL_SECONDS = 60
 
 
@@ -60,7 +61,7 @@ def build_account_summaries(
             encryptor,
             include_auth=include_auth,
             is_email_duplicate=_duplicate_detection_key(account) in duplicate_keys,
-            reset_credits_snapshot=store.get(account.id),
+            reset_credits_snapshot=_reset_credits_snapshot_for_account(account, store),
         )
         for account in accounts
     ]
@@ -279,6 +280,15 @@ def _normalize_account_routing_policy(value: str | None) -> str:
     if value in _ACCOUNT_ROUTING_POLICIES:
         return value
     return "normal"
+
+
+def _reset_credits_snapshot_for_account(
+    account: Account,
+    store: RateLimitResetCreditsStore,
+) -> RateLimitResetCreditsSnapshot | None:
+    if account.status in _RESET_CREDITS_INELIGIBLE_STATUSES or not account.chatgpt_account_id:
+        return None
+    return store.get(account.id)
 
 
 def _limit_warmup_to_status(entry: AccountLimitWarmup | None) -> AccountLimitWarmupStatus | None:

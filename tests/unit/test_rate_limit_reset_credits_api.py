@@ -59,6 +59,18 @@ def _account(account_id: str = "acc_1") -> Account:
     )
 
 
+def _account_with_state(
+    account_id: str,
+    *,
+    status: AccountStatus = AccountStatus.ACTIVE,
+    chatgpt_account_id: str | None = "workspace-1",
+) -> Account:
+    account = _account(account_id)
+    account.status = status
+    account.chatgpt_account_id = chatgpt_account_id
+    return account
+
+
 def _credit(
     credit_id: str,
     *,
@@ -371,6 +383,62 @@ async def test_consume_handler_returns_404_when_account_missing() -> None:
             _write_access=None,
             context=cast(Any, fake_context),
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [AccountStatus.PAUSED, AccountStatus.DEACTIVATED])
+async def test_consume_handler_rejects_ineligible_account_status_and_invalidates_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    status: AccountStatus,
+) -> None:
+    store = RateLimitResetCreditsStore()
+    await store.set("acc_disabled", _snapshot([_credit("stale")], available_count=1))
+
+    class _Repo:
+        async def get_by_id(self, account_id: str) -> Account | None:
+            return _account_with_state(account_id, status=status)
+
+    async def _route_not_called(*args: Any, **kwargs: Any) -> object:
+        raise AssertionError("ineligible accounts must be rejected before route resolution")
+
+    monkeypatch.setattr(reset_credits_api, "get_rate_limit_reset_credits_store", lambda: store)
+    monkeypatch.setattr(reset_credits_api, "resolve_upstream_route", _route_not_called)
+    fake_context = SimpleNamespace(repository=_Repo())
+
+    with pytest.raises(DashboardConflictError) as excinfo:
+        await consume_rate_limit_reset_credit(
+            account_id="acc_disabled",
+            _write_access=None,
+            context=cast(Any, fake_context),
+        )
+
+    assert excinfo.value.code == "reset_credit_account_ineligible"
+    assert store.get("acc_disabled") is None
+
+
+@pytest.mark.asyncio
+async def test_consume_handler_rejects_account_without_chatgpt_account_id_and_invalidates_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = RateLimitResetCreditsStore()
+    await store.set("acc_no_workspace", _snapshot([_credit("stale")], available_count=1))
+
+    class _Repo:
+        async def get_by_id(self, account_id: str) -> Account | None:
+            return _account_with_state(account_id, chatgpt_account_id=None)
+
+    monkeypatch.setattr(reset_credits_api, "get_rate_limit_reset_credits_store", lambda: store)
+    fake_context = SimpleNamespace(repository=_Repo())
+
+    with pytest.raises(DashboardConflictError) as excinfo:
+        await consume_rate_limit_reset_credit(
+            account_id="acc_no_workspace",
+            _write_access=None,
+            context=cast(Any, fake_context),
+        )
+
+    assert excinfo.value.code == "reset_credit_account_ineligible"
+    assert store.get("acc_no_workspace") is None
 
 
 # --- POST consume: write-access gating refuses guests (full ASGI path) ---

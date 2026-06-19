@@ -32,6 +32,10 @@ client treats non-200, non-JSON, and schema-drifted 200 responses defensively.
 - **In-memory only.** No DB column, no migration. Each replica refreshes its own process-local
   snapshots, which repopulate within one tick of startup. Restart cost: up to 60s of
   `available_reset_credits: 0` on that replica.
+- **Eligibility clears stale snapshots.** Paused accounts, deactivated accounts, and accounts
+  without a usable `chatgpt-account-id` do not fetch reset credits. If they already have a
+  cached snapshot, the scheduler invalidates it; account summaries suppress it immediately;
+  and dashboard consume rejects the account before route resolution or upstream calls.
 - **Server picks the credit, not the client.** `POST /consume` takes only the account id;
   the server selects the soonest-expiring available credit from the freshest snapshot and
   generates the `redeem_request_id`. Avoids stale-UI and clock-skew races.
@@ -55,8 +59,9 @@ client treats non-200, non-JSON, and schema-drifted 200 responses defensively.
 ## Failure Modes
 
 - **Upstream returns 200 but the rate-limit window doesn't move.** Per upstream behavior
-  the credit is still consumed. The confirmation dialog warns the operator; on success we
-  invalidate the cache and let the next tick reconcile `available_count`.
+  the credit is still consumed. This is an upstream caveat rather than a dashboard dialog
+  requirement; on success we invalidate the cache and let the next tick reconcile
+  `available_count`.
 - **Snapshot is empty/stale.** UI hides all reset affordances for that account
   (`available_reset_credits: 0`). Not an error — wait one tick.
 - **Upstream 401/403/auth-expired.** Logged; prior snapshot retained. Does NOT deactivate
@@ -153,8 +158,8 @@ with `null` expiries last, so the response remains deterministic for the same el
 
 - The 60s cadence matches usage refresh, but each replica polls because each replica serves
   dashboard reads from its own process-local snapshot cache.
-- A credit is consumed as soon as upstream returns 200 — treat the confirmation dialog as
-  the point of no return.
+- A credit is consumed as soon as upstream returns 200; operators should treat the confirm
+  action as the point of no return.
 - `/v1/reset-credit` uses the same process-local snapshot cache as the dashboard flow, so a
   client may need to retry after the next refresh tick if an account has just restarted or
   recently redeemed a credit.

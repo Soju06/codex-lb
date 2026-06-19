@@ -14,7 +14,7 @@
 - [x] 2.5 Update the backend pydantic response schemas (`AccountSummary` / equivalent) to declare the two new fields
 - [x] 2.6 Extend the authenticated `/v1/*` proxy surface with `GET /v1/reset-credit` and `POST /v1/reset-credit` in `app/modules/proxy/api.py`, using `validate_usage_api_key` and the existing OpenAI-style error envelope
 - [x] 2.7 Reuse API-key assignment-scope semantics to resolve the eligible reset-credit account pool: scoped keys may access only `assigned_account_ids`; unscoped keys may access all selectable accounts
-- [x] 2.8 Implement `GET /v1/reset-credit` projection from cached snapshots into a deterministic array ordered by account email ascending and account id ascending, returning one soonest available credit per eligible account with `email` included in each object and omitting accounts with no available cached credits
+- [x] 2.8 Implement `GET /v1/reset-credit` projection from cached snapshots into a deterministic array ordered by account email ascending, account id ascending, and credit expiry ascending (`null` last), returning every available credit for each eligible account with `email` included in each object and omitting accounts with no available cached credits
 - [x] 2.9 Implement `POST /v1/reset-credit` exact-credit redemption: validate `{account_id, redeem_id}`, reject out-of-pool accounts, reject unavailable or mismatched redeem ids, forward the exact `credit_id` upstream, and invalidate the cached snapshot on success
 
 ## 3. Frontend schemas, API client, formatter
@@ -46,7 +46,7 @@
 - [x] 5.9 Frontend — confirm dialog → consume: confirmation calls `consumeRateLimitResetCredit`, shows the expiry in local `YYYY-MM-DD HH:MM:SS`, success path invalidates queries, failure path surfaces a toast and does not invalidate
 - [x] 5.10 Frontend — "Most reset credits" sort: comparator orders by count desc with soonest-expiry tiebreak, null-expiry accounts last
 - [x] 5.11 Frontend — Accounts nav badge: shows the summed total, caps at `99+`, and hides at zero
-- [x] 5.12 Backend — `/v1/reset-credit` GET: requires Bearer API key, honors scoped vs unscoped account pools, emits a deterministic array with `email` in each object, and omits accounts without available cached credits
+- [x] 5.12 Backend — `/v1/reset-credit` GET: requires Bearer API key, honors scoped vs unscoped account pools, emits a deterministic array with `email` in each object for every available credit, and omits accounts without available cached credits
 - [x] 5.13 Backend — `/v1/reset-credit` POST: rejects out-of-pool `account_id`, rejects unavailable or mismatched `redeem_id`, forwards the exact requested `credit_id`, invalidates the snapshot on success, and preserves `/v1/*` OpenAI-style error responses
 
 ## 6. Validation and OpenSpec hygiene

@@ -214,25 +214,31 @@ describe("RateLimitResetCreditsSnapshotSchema", () => {
 });
 
 describe("ConsumeRateLimitResetCreditResponseSchema", () => {
-  it("parses consume responses when nullable backend fields are omitted or null", () => {
+  it("requires a non-null success payload", () => {
     expect(
       ConsumeRateLimitResetCreditResponseSchema.parse({
+        code: "rate_limit_reset",
+        windowsReset: 1,
         redeemedAt: ISO,
       }),
     ).toMatchObject({
+      code: "rate_limit_reset",
+      windowsReset: 1,
       redeemedAt: ISO,
     });
 
-    expect(
+    expect(() =>
+      ConsumeRateLimitResetCreditResponseSchema.parse({
+        redeemedAt: ISO,
+      }),
+    ).toThrow();
+
+    expect(() =>
       ConsumeRateLimitResetCreditResponseSchema.parse({
         code: null,
         windowsReset: null,
         redeemedAt: null,
       }),
-    ).toMatchObject({
-      code: null,
-      windowsReset: null,
-      redeemedAt: null,
-    });
+    ).toThrow();
   });
 });

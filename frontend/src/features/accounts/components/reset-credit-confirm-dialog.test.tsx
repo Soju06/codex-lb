@@ -93,10 +93,8 @@ describe("ResetCreditConfirmDialog", () => {
     await vi.waitFor(() =>
       expect(toastSuccess).toHaveBeenCalledWith("Rate-limit window reset (1)"),
     );
-    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["accounts", "list"] });
-    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["accounts", "trends"] });
-    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["dashboard", "overview"] });
-    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["dashboard", "projections"] });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["accounts"] });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["dashboard"] });
     expect(onOpenChange).toHaveBeenCalledWith(false);
   });
 
@@ -134,8 +132,8 @@ describe("ResetCreditConfirmDialog", () => {
     await vi.waitFor(() =>
       expect(toastError).toHaveBeenCalledWith("No reset credit available"),
     );
-    expect(invalidateSpy).not.toHaveBeenCalledWith({ queryKey: ["accounts", "list"] });
-    expect(invalidateSpy).not.toHaveBeenCalledWith({ queryKey: ["dashboard", "overview"] });
+    expect(invalidateSpy).not.toHaveBeenCalledWith({ queryKey: ["accounts"] });
+    expect(invalidateSpy).not.toHaveBeenCalledWith({ queryKey: ["dashboard"] });
     // Failure leaves the dialog open for retry.
     expect(onOpenChange).not.toHaveBeenCalledWith(false);
   });

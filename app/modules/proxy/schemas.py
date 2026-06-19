@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.core.clients.files import OPENAI_FILE_UPLOAD_LIMIT_BYTES, OPENAI_FILE_USE_CASE
@@ -230,6 +232,30 @@ class V1UsageResponse(BaseModel):
     total_cost_usd: float
     limits: list[V1UsageLimitResponse]
     upstream_limits: list[V1UsageLimitResponse] = []
+
+
+class V1ResetCreditEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    account_id: str
+    email: str
+    redeem_id: str
+    expired_at: datetime | None = Field(serialization_alias="expiredAt")
+
+
+class V1ResetCreditRedeemRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    account_id: str
+    redeem_id: str
+
+
+class V1ResetCreditRedeemResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    code: str
+    windows_reset: int
+    redeemed_at: datetime | None = None
 
 
 class WarmupRequest(BaseModel):

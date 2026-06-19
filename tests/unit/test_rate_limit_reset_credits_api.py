@@ -199,8 +199,23 @@ async def test_redeem_selects_soonest_calls_upstream_and_invalidates_cache() -> 
 
     captured: dict[str, Any] = {}
 
-    async def consume_fn(access_token: str, account_id: str | None, credit_id: str) -> ConsumeResetCreditResponse:
-        captured.update({"access_token": access_token, "account_id": account_id, "credit_id": credit_id})
+    async def consume_fn(
+        access_token: str,
+        account_id: str | None,
+        credit_id: str,
+        *,
+        route: object | None = None,
+        allow_direct_egress: bool = False,
+    ) -> ConsumeResetCreditResponse:
+        captured.update(
+            {
+                "access_token": access_token,
+                "account_id": account_id,
+                "credit_id": credit_id,
+                "route": route,
+                "allow_direct_egress": allow_direct_egress,
+            }
+        )
         return ConsumeResetCreditResponse.model_validate(
             {
                 "code": "reset",
@@ -221,6 +236,8 @@ async def test_redeem_selects_soonest_calls_upstream_and_invalidates_cache() -> 
         "access_token": "decrypted-access-token",
         "account_id": "workspace-1",
         "credit_id": "soon",
+        "route": None,
+        "allow_direct_egress": True,
     }
     # Successful redemption invalidates the in-memory snapshot so the next
     # dashboard refresh repulls upstream state instead of serving a local edit.
@@ -242,7 +259,16 @@ async def test_redeem_serializes_requests_per_account() -> None:
     release = asyncio.Event()
     consume_calls: list[str] = []
 
-    async def consume_fn(access_token: str, account_id: str | None, credit_id: str) -> ConsumeResetCreditResponse:
+    async def consume_fn(
+        access_token: str,
+        account_id: str | None,
+        credit_id: str,
+        *,
+        route: object | None = None,
+        allow_direct_egress: bool = False,
+    ) -> ConsumeResetCreditResponse:
+        assert route is None
+        assert allow_direct_egress is True
         consume_calls.append(credit_id)
         started.set()
         await release.wait()
@@ -303,7 +329,16 @@ async def test_redeem_translates_upstream_consume_failures(
     store = RateLimitResetCreditsStore()
     await store.set("acc_1", _snapshot([_credit("only")], available_count=1))
 
-    async def consume_fn(access_token: str, account_id: str | None, credit_id: str) -> ConsumeResetCreditResponse:
+    async def consume_fn(
+        access_token: str,
+        account_id: str | None,
+        credit_id: str,
+        *,
+        route: object | None = None,
+        allow_direct_egress: bool = False,
+    ) -> ConsumeResetCreditResponse:
+        assert route is None
+        assert allow_direct_egress is True
         raise ConsumeResetCreditError(status_code, f"upstream failed {status_code}", code=f"upstream_{status_code}")
 
     with pytest.raises(expected_exception) as excinfo:

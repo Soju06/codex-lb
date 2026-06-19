@@ -27,6 +27,7 @@ from app.core.exceptions import (
     DashboardPermissionError,
     DashboardServiceUnavailableError,
 )
+from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError, resolve_upstream_route
 from app.db.models import Account
 from app.dependencies import AccountsContext, get_accounts_context
 from app.modules.rate_limit_reset_credits.store import (
@@ -93,11 +94,24 @@ async def consume_rate_limit_reset_credit(
     account = await context.repository.get_by_id(account_id)
     if account is None:
         raise DashboardNotFoundError("Account not found", code="account_not_found")
+    try:
+        route = await resolve_upstream_route(
+            context.session,
+            account_id=account.id,
+            operation="reset_credits_consume",
+            scope="account",
+        )
+    except UpstreamProxyRouteError as exc:
+        raise DashboardServiceUnavailableError(
+            "Unable to resolve upstream proxy route for reset-credit consume",
+            code=exc.reason,
+        ) from exc
     return await _redeem_soonest_reset_credit(
         account=account,
         store=get_rate_limit_reset_credits_store(),
         encryptor=TokenEncryptor(),
         consume_fn=consume_reset_credit,
+        route=route,
     )
 
 
@@ -107,6 +121,7 @@ async def _redeem_soonest_reset_credit(
     store: RateLimitResetCreditsStore,
     encryptor: TokenEncryptor,
     consume_fn: ConsumeFn,
+    route: ResolvedUpstreamRoute | None = None,
 ) -> ConsumeResetCreditResponseSchema:
     lock = await get_reset_credit_redeem_lock(account.id)
     async with lock:
@@ -116,7 +131,13 @@ async def _redeem_soonest_reset_credit(
             raise DashboardConflictError("No available reset credit", code="no_available_reset_credit")
         access_token = encryptor.decrypt(account.access_token_encrypted)
         try:
-            result = await consume_fn(access_token, account.chatgpt_account_id, credit.id)
+            result = await consume_fn(
+                access_token,
+                account.chatgpt_account_id,
+                credit.id,
+                route=route,
+                allow_direct_egress=route is None,
+            )
         except ConsumeResetCreditError as exc:
             raise _translate_consume_error(exc) from exc
         redeemed_at = result.credit.redeemed_at if result.credit else None

@@ -123,6 +123,12 @@ client treats non-200, non-JSON, and schema-drifted 200 responses defensively.
     "expiredAt": "2026-07-12T01:29:41.346025Z"
   },
   {
+    "account_id": "acc_alpha",
+    "email": "alpha@example.com",
+    "redeem_id": "RateLimitResetCredit_alpha_2",
+    "expiredAt": null
+  },
+  {
     "account_id": "acc_beta",
     "email": "beta@example.com",
     "redeem_id": "RateLimitResetCredit_beta",
@@ -131,8 +137,8 @@ client treats non-200, non-JSON, and schema-drifted 200 responses defensively.
 ]
 ```
 
-Accounts are ordered by email ascending and then account id ascending so the response remains
-deterministic for the same eligible pool.
+Entries are ordered by email ascending, then account id ascending, then credit expiry ascending
+with `null` expiries last, so the response remains deterministic for the same eligible pool.
 
 ## Example: `/v1/reset-credit` POST body
 

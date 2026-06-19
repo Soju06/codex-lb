@@ -124,7 +124,7 @@ async def test_v1_reset_credit_requires_valid_bearer_key(async_client):
 
 
 @pytest.mark.asyncio
-async def test_v1_reset_credit_scoped_pool_returns_assigned_account_with_soonest_available_credit(async_client):
+async def test_v1_reset_credit_scoped_pool_returns_all_available_credits_for_assigned_account(async_client):
     await _enable_api_key_auth(async_client)
     assigned_email = "real-assigned@example.com"
     other_email = "other@example.com"
@@ -167,6 +167,12 @@ async def test_v1_reset_credit_scoped_pool_returns_assigned_account_with_soonest
             "email": assigned_email,
             "redeem_id": "credit-soonest",
             "expiredAt": "2031-01-02T03:04:05Z",
+        },
+        {
+            "account_id": assigned_account_id,
+            "email": assigned_email,
+            "redeem_id": "credit-later",
+            "expiredAt": "2031-01-02T05:04:05Z",
         }
     ]
 
@@ -201,7 +207,7 @@ async def test_v1_reset_credit_null_expiry_available_credit_is_returned(async_cl
 
 
 @pytest.mark.asyncio
-async def test_v1_reset_credit_mixed_null_expiry_prefers_dated_credit(async_client):
+async def test_v1_reset_credit_mixed_null_expiry_orders_dated_credit_before_null_expiry(async_client):
     await _enable_api_key_auth(async_client)
     email = "mixed-null-expiry@example.com"
     account_id = await _import_account(async_client, "acc-reset-mixed-null-expiry", email)
@@ -229,6 +235,12 @@ async def test_v1_reset_credit_mixed_null_expiry_prefers_dated_credit(async_clie
             "email": email,
             "redeem_id": "credit-dated",
             "expiredAt": "2031-02-01T01:02:03Z",
+        },
+        {
+            "account_id": account_id,
+            "email": email,
+            "redeem_id": "credit-null-expiry",
+            "expiredAt": None,
         }
     ]
 

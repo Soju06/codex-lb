@@ -744,26 +744,29 @@ def _project_reset_credit_accounts(accounts: list[Account], api_key: ApiKeyData)
     return [(account.id, account.email) for account in eligible_accounts]
 
 
-def _select_soonest_available_reset_credit(account_id: str, email: str) -> V1ResetCreditEntry | None:
+def _list_available_reset_credits(account_id: str, email: str) -> list[V1ResetCreditEntry]:
     snapshot = get_rate_limit_reset_credits_store().get(account_id)
     if snapshot is None or snapshot.available_count <= 0:
-        return None
+        return []
 
     available_credits = [credit for credit in snapshot.credits if credit.status == "available"]
     if not available_credits:
-        return None
+        return []
 
     far_future = datetime.max.replace(tzinfo=timezone.utc)
-    soonest_credit = min(
+    ordered_credits = sorted(
         available_credits,
         key=lambda credit: (credit.expires_at or far_future, credit.id),
     )
-    return V1ResetCreditEntry(
-        account_id=account_id,
-        email=email,
-        redeem_id=soonest_credit.id,
-        expired_at=soonest_credit.expires_at,
-    )
+    return [
+        V1ResetCreditEntry(
+            account_id=account_id,
+            email=email,
+            redeem_id=credit.id,
+            expired_at=credit.expires_at,
+        )
+        for credit in ordered_credits
+    ]
 
 
 def _is_reset_credit_account_in_api_key_pool(account: Account | None, api_key: ApiKeyData) -> bool:
@@ -800,9 +803,7 @@ async def v1_reset_credit(
 
     response: list[V1ResetCreditEntry] = []
     for account_id, account_email in eligible_accounts:
-        credit = _select_soonest_available_reset_credit(account_id, account_email)
-        if credit is not None:
-            response.append(credit)
+        response.extend(_list_available_reset_credits(account_id, account_email))
     return response
 
 

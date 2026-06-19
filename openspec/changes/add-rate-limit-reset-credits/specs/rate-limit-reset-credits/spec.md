@@ -82,15 +82,15 @@ The system SHALL expose a dashboard endpoint `POST /api/accounts/{account_id}/ra
 
 ### Requirement: API-key self-service reset-credit reads and exact redemption reuse the cached snapshots
 
-The system SHALL expose `GET /v1/reset-credit` and `POST /v1/reset-credit` as API-key-authenticated self-service routes backed by the same cached reset-credit snapshots used by the dashboard flow. `GET /v1/reset-credit` SHALL project the authenticated API key's eligible account pool into one array item per eligible account, ordered by account email ascending and then account id ascending. Each item SHALL represent exactly one account that currently has at least one available credit and SHALL include `account_id`, `email`, `redeem_id`, and `expiredAt`, where `redeem_id` and `expiredAt` come from that account's soonest-`expires_at` available credit. Accounts with no cached snapshot or no available credit SHALL be omitted from the `GET` response.
+The system SHALL expose `GET /v1/reset-credit` and `POST /v1/reset-credit` as API-key-authenticated self-service routes backed by the same cached reset-credit snapshots used by the dashboard flow. `GET /v1/reset-credit` SHALL project the authenticated API key's eligible account pool into one array item per available credit, ordered by account email ascending, then account id ascending, then credit `expires_at` ascending with `null` expiries last, then credit id ascending. Each item SHALL include `account_id`, `email`, `redeem_id`, and `expiredAt`, where `redeem_id` and `expiredAt` come from that available credit. Accounts with no cached snapshot or no available credit SHALL be omitted from the `GET` response.
 
 `POST /v1/reset-credit` SHALL accept JSON body `{account_id, redeem_id}`. The endpoint SHALL reject requests whose `account_id` is outside the authenticated API key's account pool. For in-pool accounts, the endpoint SHALL re-read that account's freshest cached snapshot, verify that `redeem_id` still identifies an `available` credit on the account, forward that exact `credit_id` upstream with a generated `redeem_request_id`, and invalidate the cached snapshot for the account on a 200 response. A cached snapshot with `available_count <= 0` MUST be treated as having no redeemable credits even if the cached `credits` list contains an item marked `available`.
 
-#### Scenario: GET returns one soonest credit per eligible account
+#### Scenario: GET returns every available credit for eligible accounts
 - **GIVEN** two in-pool accounts each have multiple cached available credits
 - **WHEN** the client invokes `GET /v1/reset-credit`
-- **THEN** the response contains one array item per account
-- **AND** each entry's `redeem_id` is the account's soonest-expiring available credit id
+- **THEN** the response contains one array item per available credit
+- **AND** entries are grouped by account email and account id, with each account's credits ordered by soonest expiry first and `null` expiries last
 
 #### Scenario: GET omits accounts without available cached credits
 - **GIVEN** one in-pool account has `available_count: 0` and another has no cached snapshot

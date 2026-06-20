@@ -6,12 +6,12 @@
 
 ## 2. Backend Reports Behavior
 
-- [x] 2.1 Aggregate `request_logs.useragent_group = null` into a `byUseragent` bucket labeled `Unknown`.
-- [x] 2.2 Treat `useragent_group=Unknown` as a filter for null-backed report rows.
+- [x] 2.1 Aggregate `request_logs.useragent_group = null` into a `byUseragent` bucket labeled `Missing User-Agent`.
+- [x] 2.2 Preserve real `useragent_group=Unknown` traffic as its own bucket while filtering `Missing User-Agent` to null-backed report rows.
 
 ## 3. Frontend Reports Rendering
 
-- [x] 3.1 Render the `Unknown` `Distribution by UserAgent` bucket with a fixed gray legend dot and slice color.
+- [x] 3.1 Render the `Missing User-Agent` `Distribution by UserAgent` bucket with a fixed gray legend dot and slice color.
 
 ## 4. Verification
 

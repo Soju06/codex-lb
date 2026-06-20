@@ -2,13 +2,13 @@
 
 ## Why
 
-The reports user-agent distribution currently drops traffic whose normalized `request_logs.useragent_group` is `null`. That hides unknown-client usage from the `Distribution by UserAgent` card and leaves operators without a stable way to inspect or visually identify those rows.
+The reports user-agent distribution currently collides real normalized `request_logs.useragent_group = "Unknown"` traffic with rows whose normalized `request_logs.useragent_group` is `null`. That merges distinct populations in the `Distribution by UserAgent` card and breaks drill-down totals because the `useragent_group=Unknown` filter currently resolves only to null-backed rows.
 
 ## What Changes
 
-- Aggregate `request_logs.useragent_group = null` into an `Unknown` bucket in `GET /api/reports` `byUseragent` results.
-- Treat `useragent_group=Unknown` on `GET /api/reports` as a filter for those null-backed rows.
-- Render the `Unknown` user-agent distribution bucket with a fixed gray legend dot and slice color.
+- Aggregate `request_logs.useragent_group = null` into a distinct `Missing User-Agent` bucket in `GET /api/reports` `byUseragent` results.
+- Preserve real `request_logs.useragent_group = "Unknown"` traffic as its own `Unknown` bucket and filter target.
+- Render the `Missing User-Agent` user-agent distribution bucket with a fixed gray legend dot and slice color.
 
 ## Capabilities
 

@@ -10,9 +10,10 @@ export type UseragentDistributionDonutProps = {
 
 const COLORS = ["#3b82f6", "#10b981", "#f59e0b", "#ec4899", "#8b5cf6", "#06b6d4"];
 const UNKNOWN_COLOR = "#9ca3af";
+const MISSING_USERAGENT_LABEL = "Missing User-Agent";
 
 function getUseragentColor(useragent: string, index: number) {
-  return useragent === "Unknown" ? UNKNOWN_COLOR : COLORS[index % COLORS.length];
+  return useragent === MISSING_USERAGENT_LABEL ? UNKNOWN_COLOR : COLORS[index % COLORS.length];
 }
 
 export function UseragentDistributionDonut({ data }: UseragentDistributionDonutProps) {

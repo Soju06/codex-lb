@@ -57,7 +57,27 @@ vi.mock("recharts", async (importOriginal) => {
 });
 
 describe("UseragentDistributionDonut", () => {
-  it("renders Unknown with a fixed grey legend dot", () => {
+  it("renders Missing User-Agent with a fixed grey legend dot", () => {
+    render(
+      <UseragentDistributionDonut
+        data={[
+          { useragent: "Missing User-Agent", costUsd: 12.5, requests: 8, percentage: 62.5 },
+          { useragent: "SDK", costUsd: 7.5, requests: 4, percentage: 37.5 },
+        ]}
+      />,
+    );
+
+    const unknownLegendLabel = screen.getAllByText("Missing User-Agent").at(-1);
+    const unknownLegendRow = unknownLegendLabel?.closest("div.flex.items-center.gap-2");
+
+    expect(unknownLegendLabel).toBeDefined();
+    expect(unknownLegendRow).not.toBeNull();
+    expect((unknownLegendRow?.firstElementChild as HTMLElement) ?? null).toHaveStyle({
+      background: "#9ca3af",
+    });
+  });
+
+  it("keeps a real Unknown bucket on the normal palette", () => {
     render(
       <UseragentDistributionDonut
         data={[
@@ -73,7 +93,7 @@ describe("UseragentDistributionDonut", () => {
     expect(unknownLegendLabel).toBeDefined();
     expect(unknownLegendRow).not.toBeNull();
     expect((unknownLegendRow?.firstElementChild as HTMLElement) ?? null).toHaveStyle({
-      background: "#9ca3af",
+      background: "#3b82f6",
     });
   });
 

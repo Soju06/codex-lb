@@ -239,7 +239,7 @@ async def test_report_filters_apply_to_all_aggregates_including_earliest_activit
 
 
 @pytest.mark.asyncio
-async def test_aggregate_by_useragent_groups_null_as_unknown_and_excludes_blank_groups(
+async def test_aggregate_by_useragent_separates_real_unknown_from_missing_groups(
     async_session: AsyncSession,
 ) -> None:
     repo = ReportsRepository(async_session)
@@ -270,6 +270,18 @@ async def test_aggregate_by_useragent_groups_null_as_unknown_and_excludes_blank_
                 output_tokens=3,
                 cached_input_tokens=0,
                 cost_usd=0.3,
+            ),
+            RequestLog(
+                account_id="acc_reports_useragents",
+                request_id="report-useragent-real-unknown",
+                requested_at=datetime(2026, 6, 1, 13, 30, tzinfo=timezone.utc).replace(tzinfo=None),
+                model="gpt-5.0",
+                useragent_group="Unknown",
+                status="success",
+                input_tokens=9,
+                output_tokens=2,
+                cached_input_tokens=0,
+                cost_usd=0.4,
             ),
             RequestLog(
                 account_id="acc_reports_useragents",
@@ -306,6 +318,7 @@ async def test_aggregate_by_useragent_groups_null_as_unknown_and_excludes_blank_
 
     assert [(row.useragent_group, row.cost_usd, row.request_count) for row in rows] == [
         ("opencode", 0.5, 1),
+        ("Unknown", 0.4, 1),
         ("CodexCLI", 0.3, 1),
-        ("Unknown", 0.1, 1),
+        ("Missing User-Agent", 0.1, 1),
     ]

@@ -15,6 +15,7 @@ _INTERNAL_WARMUP_REQUEST_KINDS = ("warmup", "limit_warmup")
 _SQLITE_COMPOUND_SELECT_LIMIT = 500
 MAX_DAILY_REPORT_DAYS = 730
 UNKNOWN_USERAGENT_GROUP = "Unknown"
+MISSING_USERAGENT_GROUP = "Missing User-Agent"
 
 
 class DailyReportRangeTooLargeError(ValueError):
@@ -312,7 +313,7 @@ def _report_conditions(
 
 def _useragent_group_bucket_expr():
     return case(
-        (RequestLog.useragent_group.is_(None), literal(UNKNOWN_USERAGENT_GROUP)),
+        (RequestLog.useragent_group.is_(None), literal(MISSING_USERAGENT_GROUP)),
         else_=RequestLog.useragent_group,
     )
 
@@ -320,7 +321,7 @@ def _useragent_group_bucket_expr():
 def _useragent_group_filter_clause(useragent_group: str | None):
     if not useragent_group:
         return None
-    if useragent_group == UNKNOWN_USERAGENT_GROUP:
+    if useragent_group == MISSING_USERAGENT_GROUP:
         return RequestLog.useragent_group.is_(None)
     return RequestLog.useragent_group == useragent_group
 

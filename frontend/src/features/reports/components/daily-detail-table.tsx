@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Download } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowUpDown, Download } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { buildContinuousDailyRows } from "../daily-series";
 import type { DailyReportRow } from "../schemas";
@@ -29,6 +29,7 @@ export function DailyDetailTable({ startDate, endDate, data }: DailyDetailTableP
     direction: "desc",
   });
   const rows = sortRows(buildContinuousDailyRows(startDate, endDate, data), sort);
+  const csvRows = sortRows(rows, { key: "date", direction: "asc" });
 
   const toggleSort = (key: SortKey) => {
     setSort((current) =>
@@ -46,7 +47,7 @@ export function DailyDetailTable({ startDate, endDate, data }: DailyDetailTableP
           variant="outline"
           size="sm"
           className="h-7 gap-1 text-xs"
-          onClick={() => exportCSV(rows)}
+          onClick={() => exportCSV(csvRows)}
         >
           <Download className="h-3 w-3" />
           CSV
@@ -156,15 +157,25 @@ function SortableHeader({
   direction,
   onClick,
 }: SortableHeaderProps) {
+  const Icon = isActive ? (direction === "asc" ? ArrowUp : ArrowDown) : ArrowUpDown;
+  const iconTestId = isActive ? (direction === "asc" ? "sort-icon-asc" : "sort-icon-desc") : "sort-icon-none";
+  const iconVariant = isActive ? (direction === "asc" ? "up" : "down") : "up-down";
+
   return (
     <th className={`pb-2 ${align === "left" ? "pr-4" : align === "right" ? "pr-4 text-right" : ""} font-medium`}>
       <button
         type="button"
-        className={`w-full ${align === "left" ? "text-left" : "text-right"} font-medium text-inherit`}
+        className={`flex w-full items-center gap-1 ${align === "left" ? "justify-start text-left" : "justify-end text-right"} font-medium text-inherit`}
         aria-sort={isActive ? (direction === "asc" ? "ascending" : "descending") : "none"}
         onClick={onClick}
       >
-        {label}
+        <span>{label}</span>
+        <Icon
+          aria-hidden="true"
+          data-testid={iconTestId}
+          data-sort-icon={iconVariant}
+          className={`h-3 w-3 shrink-0 ${isActive ? "text-foreground" : "text-muted-foreground/60"}`}
+        />
       </button>
     </th>
   );

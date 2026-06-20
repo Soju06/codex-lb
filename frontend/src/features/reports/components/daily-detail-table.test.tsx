@@ -1,8 +1,12 @@
 import userEvent from "@testing-library/user-event";
 import { cleanup, render, screen, within } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { DailyDetailTable } from "./daily-detail-table";
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe("DailyDetailTable", () => {
   it("fills missing days with zero rows and keeps the body scrollable", () => {
@@ -172,6 +176,71 @@ describe("DailyDetailTable", () => {
     ]);
   });
 
+  it("exports csv rows in chronological order regardless of visible sort", async () => {
+    const user = userEvent.setup();
+    const blobText = vi.fn(async () => "");
+    const createObjectURL = vi.spyOn(URL, "createObjectURL").mockImplementation((blob) => {
+      blobText.mockImplementation(() => blob.text());
+      return "blob:daily-breakdown";
+    });
+    const revokeObjectURL = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+
+    render(
+      <DailyDetailTable
+        startDate="2026-06-05"
+        endDate="2026-06-07"
+        data={[
+          {
+            date: "2026-06-05",
+            requests: 8,
+            inputTokens: 100,
+            outputTokens: 20,
+            cachedInputTokens: 1,
+            costUsd: 1,
+            activeAccounts: 3,
+            errorCount: 0,
+          },
+          {
+            date: "2026-06-06",
+            requests: 2,
+            inputTokens: 200,
+            outputTokens: 30,
+            cachedInputTokens: 2,
+            costUsd: 2,
+            activeAccounts: 1,
+            errorCount: 0,
+          },
+          {
+            date: "2026-06-07",
+            requests: 5,
+            inputTokens: 300,
+            outputTokens: 40,
+            cachedInputTokens: 3,
+            costUsd: 3,
+            activeAccounts: 2,
+            errorCount: 0,
+          },
+        ]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /reqs/i }));
+    await user.click(screen.getByRole("button", { name: /csv/i }));
+
+    expect(createObjectURL).toHaveBeenCalledOnce();
+    expect(clickSpy).toHaveBeenCalledOnce();
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:daily-breakdown");
+    await expect(blobText()).resolves.toBe(
+      [
+        "Date,Requests,Input Tokens,Output Tokens,Cached Tokens,Cost USD,Active Accounts,Errors",
+        "2026-06-05,8,100,20,1,1.0000,3,0",
+        "2026-06-06,2,200,30,2,2.0000,1,0",
+        "2026-06-07,5,300,40,3,3.0000,2,0",
+      ].join("\n"),
+    );
+  });
+
   it.each([
     ["Day", "daily-breakdown-row-2026-06-05"],
     ["Reqs", "daily-breakdown-row-2026-06-06"],
@@ -228,6 +297,74 @@ describe("DailyDetailTable", () => {
       "data-testid",
       expectedFirstRow,
     );
+  });
+
+  it("shows visible sort icons for active and inactive sortable headers", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <DailyDetailTable
+        startDate="2026-06-05"
+        endDate="2026-06-07"
+        data={[
+          {
+            date: "2026-06-05",
+            requests: 1,
+            inputTokens: 100,
+            outputTokens: 20,
+            cachedInputTokens: 0,
+            costUsd: 1,
+            activeAccounts: 3,
+            errorCount: 0,
+          },
+          {
+            date: "2026-06-06",
+            requests: 2,
+            inputTokens: 200,
+            outputTokens: 30,
+            cachedInputTokens: 0,
+            costUsd: 2,
+            activeAccounts: 1,
+            errorCount: 0,
+          },
+          {
+            date: "2026-06-07",
+            requests: 3,
+            inputTokens: 300,
+            outputTokens: 40,
+            cachedInputTokens: 0,
+            costUsd: 3,
+            activeAccounts: 2,
+            errorCount: 0,
+          },
+        ]}
+      />,
+    );
+
+    const dayHeader = screen.getByRole("button", { name: /day/i });
+    const reqsHeader = screen.getByRole("button", { name: /reqs/i });
+    const dayIcon = dayHeader.querySelector('[data-testid="sort-icon-desc"]');
+    const reqsIcon = reqsHeader.querySelector('[data-testid="sort-icon-none"]');
+
+    expect(dayIcon).toBeTruthy();
+    expect(dayIcon).toHaveAttribute("data-sort-icon", "down");
+    expect(dayIcon).toHaveClass("text-foreground");
+    expect(reqsIcon).toBeTruthy();
+    expect(reqsIcon).toHaveAttribute("data-sort-icon", "up-down");
+    expect(reqsIcon).toHaveClass("text-muted-foreground/60");
+
+    await user.click(reqsHeader);
+
+    const activeReqsIcon = reqsHeader.querySelector('[data-testid="sort-icon-asc"]');
+    const inactiveDayIcon = dayHeader.querySelector('[data-testid="sort-icon-none"]');
+
+    expect(reqsHeader).toHaveAttribute("aria-sort", "ascending");
+    expect(activeReqsIcon).toBeTruthy();
+    expect(activeReqsIcon).toHaveAttribute("data-sort-icon", "up");
+    expect(activeReqsIcon).toHaveClass("text-foreground");
+    expect(inactiveDayIcon).toBeTruthy();
+    expect(inactiveDayIcon).toHaveAttribute("data-sort-icon", "up-down");
+    expect(inactiveDayIcon).toHaveClass("text-muted-foreground/60");
   });
 
   it("renders cached tokens inline inside the input tokens cell", () => {

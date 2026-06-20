@@ -10,9 +10,9 @@ describe("ReportsSummaryCards", () => {
       <ReportsSummaryCards
         summary={{
           totalCostUsd: 15,
-          totalInputTokens: 300,
-          totalOutputTokens: 150,
-          totalCachedTokens: 0,
+          totalInputTokens: 1_600_000_000,
+          totalOutputTokens: 13_000_000,
+          totalCachedTokens: 990_000_000,
           totalRequests: 1500,
           totalErrors: 0,
           activeAccounts: 3,
@@ -23,7 +23,7 @@ describe("ReportsSummaryCards", () => {
           canCompare: true,
           previous: {
             totalCostUsd: 10,
-            totalTokens: 900,
+            totalTokens: 3_206_000_000,
             totalRequests: 1000,
           },
         }}
@@ -48,7 +48,9 @@ describe("ReportsSummaryCards", () => {
       "dark:text-emerald-400",
     );
 
-    expect(within(tokensCard).getByText("Input 300 · Output 150")).toBeInTheDocument();
+    expect(
+      within(tokensCard).getByText("Input 1.6B · Cache 990M · Output 13.0M"),
+    ).toBeInTheDocument();
     expect(within(requestsCard).getByText("avg 500/day · 3 accounts")).toBeInTheDocument();
   });
 
@@ -140,5 +142,38 @@ describe("ReportsSummaryCards", () => {
     );
 
     expect(screen.queryByText(/^[▲▼] \d+%$/)).not.toBeInTheDocument();
+  });
+
+  it("preserves trailing zeroes for unrelated whole K and B values", () => {
+    render(
+      <ReportsSummaryCards
+        summary={{
+          totalCostUsd: 15,
+          totalInputTokens: 100_000_000_000,
+          totalOutputTokens: 0,
+          totalCachedTokens: 0,
+          totalRequests: 100_000,
+          totalErrors: 0,
+          activeAccounts: 3,
+          avgCostPerDay: 5,
+          avgRequestsPerDay: 500,
+        }}
+        comparison={{
+          canCompare: false,
+          previous: {
+            totalCostUsd: 0,
+            totalTokens: 0,
+            totalRequests: 0,
+          },
+        }}
+      />,
+    );
+
+    const tokensCard = screen.getByTestId("report-summary-card-Tokens");
+    const requestsCard = screen.getByTestId("report-summary-card-Requests");
+
+    expect(within(tokensCard).getByText("100.0B")).toBeInTheDocument();
+    expect(within(tokensCard).getByText("Input 100.0B · Cache 0 · Output 0")).toBeInTheDocument();
+    expect(within(requestsCard).getByText("100.0K")).toBeInTheDocument();
   });
 });

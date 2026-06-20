@@ -1,0 +1,3 @@
+- [x] Keep the Assigned accounts dropdown from dismissing the parent API key dialog during account selection.
+- [x] Add regression coverage for selecting assigned accounts and saving without first pressing Escape.
+- [ ] Validate the frontend tests and OpenSpec specs.

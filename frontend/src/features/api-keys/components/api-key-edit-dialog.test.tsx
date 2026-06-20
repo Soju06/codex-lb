@@ -140,6 +140,7 @@ describe("ApiKeyEditDialog", () => {
   it("submits selected assigned accounts", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const onOpenChange = vi.fn();
     server.use(
       http.get("/api/accounts", () =>
         HttpResponse.json({
@@ -160,7 +161,7 @@ describe("ApiKeyEditDialog", () => {
         open
         busy={false}
         apiKey={createApiKey()}
-        onOpenChange={vi.fn()}
+        onOpenChange={onOpenChange}
         onSubmit={onSubmit}
       />,
     );
@@ -168,7 +169,9 @@ describe("ApiKeyEditDialog", () => {
     await user.click(await screen.findByRole("button", { name: "All accounts" }));
     await user.click(screen.getByRole("menuitemcheckbox", { name: /primary@example\.com/i }));
     await user.click(screen.getByRole("menuitemcheckbox", { name: /secondary@example\.com/i }));
-    await user.keyboard("{Escape}");
+    await user.click(screen.getByPlaceholderText("e.g. gpt-5.3-codex"));
+    expect(onOpenChange).not.toHaveBeenCalled();
+
     await user.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() => {

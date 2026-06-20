@@ -178,7 +178,7 @@ export function AccountMultiSelect({
 
   return (
     <div className="space-y-1.5">
-      <DropdownMenu>
+      <DropdownMenu modal={false}>
         <DropdownMenuTrigger asChild>
           <Button
             type="button"

@@ -77,13 +77,9 @@ async def test_get_reports_serializes_useragent_breakdown_and_model_request_coun
                 )
             ]
         ),
-        aggregate_by_model=AsyncMock(
-            return_value=[SimpleNamespace(model="gpt-5.1", cost_usd=1.2, request_count=2)]
-        ),
+        aggregate_by_model=AsyncMock(return_value=[SimpleNamespace(model="gpt-5.1", cost_usd=1.2, request_count=2)]),
         aggregate_by_account=AsyncMock(
-            return_value=[
-                SimpleNamespace(account_id="acc_reports", alias="Reports", cost_usd=1.2, request_count=2)
-            ]
+            return_value=[SimpleNamespace(account_id="acc_reports", alias="Reports", cost_usd=1.2, request_count=2)]
         ),
         aggregate_by_useragent=AsyncMock(
             return_value=[SimpleNamespace(useragent_group="opencode", cost_usd=1.2, request_count=2)]

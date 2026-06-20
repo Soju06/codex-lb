@@ -10,6 +10,7 @@ export type ReportsFiltersState = {
   endDate: string;
   accountId: string[];
   model: string;
+  useragent: string;
 };
 
 export type ReportsFiltersProps = {
@@ -17,6 +18,7 @@ export type ReportsFiltersProps = {
   selectedPresetDays: number | null;
   accountOptions: MultiSelectOption[];
   modelOptions: MultiSelectOption[];
+  useragentOptions: MultiSelectOption[];
   onPresetSelect: (days: number) => void;
   onFiltersChange: (filters: ReportsFiltersState) => void;
 };
@@ -32,6 +34,7 @@ export function ReportsFilters({
   selectedPresetDays,
   accountOptions,
   modelOptions,
+  useragentOptions,
   onPresetSelect,
   onFiltersChange,
 }: ReportsFiltersProps) {
@@ -67,6 +70,14 @@ export function ReportsFilters({
         options={modelOptions}
         onChange={(models) =>
           onFiltersChange({ ...filters, model: models.at(-1) ?? "" })
+        }
+      />
+      <MultiSelectFilter
+        label="UserAgent"
+        values={filters.useragent ? [filters.useragent] : []}
+        options={useragentOptions}
+        onChange={(useragents) =>
+          onFiltersChange({ ...filters, useragent: useragents.at(-1) ?? "" })
         }
       />
 

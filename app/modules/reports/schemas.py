@@ -19,6 +19,7 @@ class DailyReportRow(DashboardModel):
 class ModelCostEntry(DashboardModel):
     model: str
     cost_usd: float
+    requests: int = 0
     percentage: float = 0.0
 
 
@@ -27,6 +28,13 @@ class AccountCostEntry(DashboardModel):
     alias: str | None = None
     cost_usd: float = 0.0
     requests: int = 0
+
+
+class UserAgentCostEntry(DashboardModel):
+    useragent: str
+    cost_usd: float = 0.0
+    requests: int = 0
+    percentage: float = 0.0
 
 
 class ReportSummary(DashboardModel):
@@ -58,3 +66,4 @@ class ReportsResponse(DashboardModel):
     daily: list[DailyReportRow] = Field(default_factory=list)
     by_model: list[ModelCostEntry] = Field(default_factory=list)
     by_account: list[AccountCostEntry] = Field(default_factory=list)
+    by_useragent: list[UserAgentCostEntry] = Field(default_factory=list)

@@ -1,21 +1,22 @@
 import { useState } from "react";
 import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip } from "@/components/lazy-recharts";
-import type { ModelCostEntry } from "../schemas";
+import type { UseragentCostEntry } from "../schemas";
 import { ChartTooltip } from "./chart-tooltip";
 import { DistributionMetricToggle, type DistributionMetric } from "./distribution-metric-toggle";
 
-export type ModelDistributionDonutProps = {
-  data: ModelCostEntry[];
+export type UseragentDistributionDonutProps = {
+  data: UseragentCostEntry[];
 };
 
 const COLORS = ["#3b82f6", "#10b981", "#f59e0b", "#ec4899", "#8b5cf6", "#06b6d4"];
 
-export function ModelDistributionDonut({ data }: ModelDistributionDonutProps) {
+export function UseragentDistributionDonut({ data }: UseragentDistributionDonutProps) {
   const [metric, setMetric] = useState<DistributionMetric>("cost");
   const totalRequests = data.reduce((sum, entry) => sum + entry.requests, 0);
   const isCostMetric = metric === "cost";
   const chartData = data.map((entry) => ({
     ...entry,
+    metricValue: isCostMetric ? entry.costUsd : entry.requests,
     metricPercentage: isCostMetric
       ? entry.percentage
       : totalRequests > 0
@@ -26,7 +27,7 @@ export function ModelDistributionDonut({ data }: ModelDistributionDonutProps) {
   return (
     <div className="rounded-xl border bg-card p-5">
       <div className="flex items-start justify-between gap-3">
-        <div className="text-sm font-semibold text-foreground">Distribution by Model</div>
+        <div className="text-sm font-semibold text-foreground">Distribution by UserAgent</div>
         <DistributionMetricToggle metric={metric} onChange={setMetric} />
       </div>
       <div className="mt-4 flex items-center gap-4">
@@ -36,7 +37,7 @@ export function ModelDistributionDonut({ data }: ModelDistributionDonutProps) {
               <Pie
                 data={chartData}
                 dataKey={isCostMetric ? "costUsd" : "requests"}
-                nameKey="model"
+                nameKey="useragent"
                 cx="50%"
                 cy="50%"
                 innerRadius={45}
@@ -44,7 +45,7 @@ export function ModelDistributionDonut({ data }: ModelDistributionDonutProps) {
                 strokeWidth={0}
               >
                 {chartData.map((entry, i) => (
-                  <Cell key={entry.model} fill={COLORS[i % COLORS.length]} />
+                  <Cell key={entry.useragent} fill={COLORS[i % COLORS.length]} />
                 ))}
               </Pie>
               <Tooltip
@@ -63,7 +64,7 @@ export function ModelDistributionDonut({ data }: ModelDistributionDonutProps) {
         <div className="flex-1 space-y-1.5 text-xs">
           {chartData.map((entry, i) => (
             <div
-              key={entry.model}
+              key={entry.useragent}
               className="flex items-center justify-between rounded-md px-2 py-1 hover:bg-muted/50"
             >
               <div className="flex items-center gap-2">
@@ -71,7 +72,7 @@ export function ModelDistributionDonut({ data }: ModelDistributionDonutProps) {
                   className="h-2.5 w-2.5 shrink-0 rounded-[3px]"
                   style={{ background: COLORS[i % COLORS.length] }}
                 />
-                <span className="text-foreground">{entry.model}</span>
+                <span className="text-foreground">{entry.useragent}</span>
               </div>
               <div className="flex items-center gap-3">
                 <span className="text-muted-foreground">{entry.metricPercentage.toFixed(1)}%</span>

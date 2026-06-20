@@ -57,6 +57,49 @@ vi.mock("recharts", async (importOriginal) => {
 });
 
 describe("UseragentDistributionDonut", () => {
+  it("renders Unknown with a fixed grey legend dot", () => {
+    render(
+      <UseragentDistributionDonut
+        data={[
+          { useragent: "Unknown", costUsd: 12.5, requests: 8, percentage: 62.5 },
+          { useragent: "SDK", costUsd: 7.5, requests: 4, percentage: 37.5 },
+        ]}
+      />,
+    );
+
+    const unknownLegendLabel = screen.getAllByText("Unknown").at(-1);
+    const unknownLegendRow = unknownLegendLabel?.closest("div.flex.items-center.gap-2");
+
+    expect(unknownLegendLabel).toBeDefined();
+    expect(unknownLegendRow).not.toBeNull();
+    expect((unknownLegendRow?.firstElementChild as HTMLElement) ?? null).toHaveStyle({
+      background: "#9ca3af",
+    });
+  });
+
+  it("pads legend value cells to the longest formatted request total", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <UseragentDistributionDonut
+        data={[
+          { useragent: "CLI", costUsd: 12.5, requests: 8, percentage: 10 },
+          { useragent: "SDK", costUsd: 120.75, requests: 1200, percentage: 90 },
+        ]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /^req$/i }));
+
+    const smallRequestLegendValue = screen.getAllByText(/^8$/).at(-1);
+    const largeRequestLegendValue = screen.getAllByText(/^1200$/).at(-1);
+
+    expect(smallRequestLegendValue).toBeDefined();
+    expect(largeRequestLegendValue).toBeDefined();
+    expect(smallRequestLegendValue).toHaveStyle({ minWidth: "4ch" });
+    expect(largeRequestLegendValue).toHaveStyle({ minWidth: "4ch" });
+  });
+
   it("defaults to cost mode", () => {
     render(
       <UseragentDistributionDonut

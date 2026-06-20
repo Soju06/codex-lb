@@ -16,12 +16,17 @@ export function ModelDistributionDonut({ data }: ModelDistributionDonutProps) {
   const isCostMetric = metric === "cost";
   const chartData = data.map((entry) => ({
     ...entry,
+    metricLabel: isCostMetric ? `$${entry.costUsd.toFixed(2)}` : String(entry.requests),
     metricPercentage: isCostMetric
       ? entry.percentage
       : totalRequests > 0
         ? (entry.requests / totalRequests) * 100
         : 0,
   }));
+  const maxMetricLabelLength = chartData.reduce(
+    (maxLength, entry) => Math.max(maxLength, entry.metricLabel.length),
+    0,
+  );
 
   return (
     <div className="rounded-xl border bg-card p-5">
@@ -74,9 +79,12 @@ export function ModelDistributionDonut({ data }: ModelDistributionDonutProps) {
                 <span className="text-foreground">{entry.model}</span>
               </div>
               <div className="flex items-center gap-3">
-                <span className="text-muted-foreground">{entry.metricPercentage.toFixed(1)}%</span>
-                <span className="font-medium text-foreground">
-                  {isCostMetric ? `$${entry.costUsd.toFixed(2)}` : entry.requests}
+                <span className="tabular-nums text-muted-foreground">{entry.metricPercentage.toFixed(1)}%</span>
+                <span
+                  className="inline-block text-right font-medium tabular-nums text-foreground"
+                  style={{ minWidth: `${maxMetricLabelLength}ch` }}
+                >
+                  {entry.metricLabel}
                 </span>
               </div>
             </div>

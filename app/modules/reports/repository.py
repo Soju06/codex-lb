@@ -14,6 +14,7 @@ _INTERNAL_LIMIT_WARMUP_SOURCE = "limit_warmup"
 _INTERNAL_WARMUP_REQUEST_KINDS = ("warmup", "limit_warmup")
 _SQLITE_COMPOUND_SELECT_LIMIT = 500
 MAX_DAILY_REPORT_DAYS = 730
+UNKNOWN_USERAGENT_GROUP = "Unknown"
 
 
 class DailyReportRangeTooLargeError(ValueError):
@@ -223,20 +224,20 @@ class ReportsRepository:
         model: str | None = None,
         useragent_group: str | None = None,
     ) -> list[UserAgentAggregateRow]:
+        useragent_group_bucket = _useragent_group_bucket_expr()
         conditions = [
             *_report_conditions(start_date, end_date, account_ids, model, useragent_group),
-            RequestLog.useragent_group.is_not(None),
-            func.trim(RequestLog.useragent_group) != "",
+            or_(RequestLog.useragent_group.is_(None), func.trim(RequestLog.useragent_group) != ""),
         ]
 
         stmt = (
             select(
-                RequestLog.useragent_group,
+                useragent_group_bucket.label("useragent_group"),
                 func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("cost_usd"),
                 func.count().label("request_count"),
             )
             .where(and_(*conditions))
-            .group_by(RequestLog.useragent_group)
+            .group_by(useragent_group_bucket)
             .order_by(func.coalesce(func.sum(RequestLog.cost_usd), 0.0).desc())
         )
         result = await self._session.execute(stmt)
@@ -278,8 +279,9 @@ class ReportsRepository:
             conditions.append(RequestLog.account_id.in_(account_ids))
         if model:
             conditions.append(RequestLog.model == model)
-        if useragent_group:
-            conditions.append(RequestLog.useragent_group == useragent_group)
+        useragent_group_clause = _useragent_group_filter_clause(useragent_group)
+        if useragent_group_clause is not None:
+            conditions.append(useragent_group_clause)
 
         result = await self._session.execute(select(func.min(RequestLog.requested_at)).where(and_(*conditions)))
         value = result.scalar_one_or_none()
@@ -302,9 +304,25 @@ def _report_conditions(
         conditions.append(RequestLog.account_id.in_(account_ids))
     if model:
         conditions.append(RequestLog.model == model)
-    if useragent_group:
-        conditions.append(RequestLog.useragent_group == useragent_group)
+    useragent_group_clause = _useragent_group_filter_clause(useragent_group)
+    if useragent_group_clause is not None:
+        conditions.append(useragent_group_clause)
     return conditions
+
+
+def _useragent_group_bucket_expr():
+    return case(
+        (RequestLog.useragent_group.is_(None), literal(UNKNOWN_USERAGENT_GROUP)),
+        else_=RequestLog.useragent_group,
+    )
+
+
+def _useragent_group_filter_clause(useragent_group: str | None):
+    if not useragent_group:
+        return None
+    if useragent_group == UNKNOWN_USERAGENT_GROUP:
+        return RequestLog.useragent_group.is_(None)
+    return RequestLog.useragent_group == useragent_group
 
 
 def _normal_traffic_clause():
@@ -323,6 +341,7 @@ def _daily_rows_stmt(
     model: str | None,
     useragent_group: str | None,
 ):
+    useragent_group_clause = _useragent_group_filter_clause(useragent_group)
     day_range_rows = [
         select(
             literal(report_date).label("report_date"),
@@ -356,7 +375,7 @@ def _daily_rows_stmt(
                     _normal_traffic_clause(),
                     *([RequestLog.account_id.in_(account_ids)] if account_ids else []),
                     *([RequestLog.model == model] if model else []),
-                    *([RequestLog.useragent_group == useragent_group] if useragent_group else []),
+                    *([useragent_group_clause] if useragent_group_clause is not None else []),
                 ),
             )
         )

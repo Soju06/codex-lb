@@ -9,6 +9,11 @@ export type UseragentDistributionDonutProps = {
 };
 
 const COLORS = ["#3b82f6", "#10b981", "#f59e0b", "#ec4899", "#8b5cf6", "#06b6d4"];
+const UNKNOWN_COLOR = "#9ca3af";
+
+function getUseragentColor(useragent: string, index: number) {
+  return useragent === "Unknown" ? UNKNOWN_COLOR : COLORS[index % COLORS.length];
+}
 
 export function UseragentDistributionDonut({ data }: UseragentDistributionDonutProps) {
   const [metric, setMetric] = useState<DistributionMetric>("cost");
@@ -16,6 +21,7 @@ export function UseragentDistributionDonut({ data }: UseragentDistributionDonutP
   const isCostMetric = metric === "cost";
   const chartData = data.map((entry) => ({
     ...entry,
+    metricLabel: isCostMetric ? `$${entry.costUsd.toFixed(2)}` : String(entry.requests),
     metricValue: isCostMetric ? entry.costUsd : entry.requests,
     metricPercentage: isCostMetric
       ? entry.percentage
@@ -23,6 +29,10 @@ export function UseragentDistributionDonut({ data }: UseragentDistributionDonutP
         ? (entry.requests / totalRequests) * 100
         : 0,
   }));
+  const maxMetricLabelLength = chartData.reduce(
+    (maxLength, entry) => Math.max(maxLength, entry.metricLabel.length),
+    0,
+  );
 
   return (
     <div className="rounded-xl border bg-card p-5">
@@ -45,7 +55,7 @@ export function UseragentDistributionDonut({ data }: UseragentDistributionDonutP
                 strokeWidth={0}
               >
                 {chartData.map((entry, i) => (
-                  <Cell key={entry.useragent} fill={COLORS[i % COLORS.length]} />
+                  <Cell key={entry.useragent} fill={getUseragentColor(entry.useragent, i)} />
                 ))}
               </Pie>
               <Tooltip
@@ -70,14 +80,17 @@ export function UseragentDistributionDonut({ data }: UseragentDistributionDonutP
               <div className="flex items-center gap-2">
                 <span
                   className="h-2.5 w-2.5 shrink-0 rounded-[3px]"
-                  style={{ background: COLORS[i % COLORS.length] }}
+                  style={{ background: getUseragentColor(entry.useragent, i) }}
                 />
                 <span className="text-foreground">{entry.useragent}</span>
               </div>
               <div className="flex items-center gap-3">
-                <span className="text-muted-foreground">{entry.metricPercentage.toFixed(1)}%</span>
-                <span className="font-medium text-foreground">
-                  {isCostMetric ? `$${entry.costUsd.toFixed(2)}` : entry.requests}
+                <span className="tabular-nums text-muted-foreground">{entry.metricPercentage.toFixed(1)}%</span>
+                <span
+                  className="inline-block text-right font-medium tabular-nums text-foreground"
+                  style={{ minWidth: `${maxMetricLabelLength}ch` }}
+                >
+                  {entry.metricLabel}
                 </span>
               </div>
             </div>

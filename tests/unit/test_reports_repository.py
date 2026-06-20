@@ -239,7 +239,9 @@ async def test_report_filters_apply_to_all_aggregates_including_earliest_activit
 
 
 @pytest.mark.asyncio
-async def test_aggregate_by_useragent_excludes_null_and_blank_groups(async_session: AsyncSession) -> None:
+async def test_aggregate_by_useragent_groups_null_as_unknown_and_excludes_blank_groups(
+    async_session: AsyncSession,
+) -> None:
     repo = ReportsRepository(async_session)
 
     async_session.add(_make_account("acc_reports_useragents", "reports-useragents@example.com"))
@@ -305,4 +307,5 @@ async def test_aggregate_by_useragent_excludes_null_and_blank_groups(async_sessi
     assert [(row.useragent_group, row.cost_usd, row.request_count) for row in rows] == [
         ("opencode", 0.5, 1),
         ("CodexCLI", 0.3, 1),
+        ("Unknown", 0.1, 1),
     ]

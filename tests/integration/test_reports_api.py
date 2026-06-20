@@ -1276,8 +1276,9 @@ async def test_reports_api_supports_useragent_group_filter_and_breakdown(async_c
 
     payload = response.json()
     assert payload["byUseragent"] == [
-        {"useragent": "opencode", "costUsd": 0.8, "requests": 1, "percentage": 53.3},
-        {"useragent": "CodexCLI", "costUsd": 0.7, "requests": 1, "percentage": 46.7},
+        {"useragent": "opencode", "costUsd": 0.8, "requests": 1, "percentage": 40.0},
+        {"useragent": "CodexCLI", "costUsd": 0.7, "requests": 1, "percentage": 35.0},
+        {"useragent": "Unknown", "costUsd": 0.5, "requests": 1, "percentage": 25.0},
     ]
 
     filtered_response = await async_client.get(
@@ -1293,11 +1294,29 @@ async def test_reports_api_supports_useragent_group_filter_and_breakdown(async_c
     filtered_payload = filtered_response.json()
     assert filtered_payload["summary"]["totalRequests"] == 1
     assert filtered_payload["summary"]["totalCostUsd"] == 0.8
-    assert filtered_payload["byModel"] == [
-        {"model": "gpt-5.1", "costUsd": 0.8, "requests": 1, "percentage": 100.0}
-    ]
+    assert filtered_payload["byModel"] == [{"model": "gpt-5.1", "costUsd": 0.8, "requests": 1, "percentage": 100.0}]
     assert filtered_payload["byUseragent"] == [
         {"useragent": "opencode", "costUsd": 0.8, "requests": 1, "percentage": 100.0}
+    ]
+
+    unknown_filtered_response = await async_client.get(
+        "/api/reports",
+        params={
+            "start_date": "2026-06-01",
+            "end_date": "2026-06-01",
+            "useragent_group": "Unknown",
+        },
+    )
+    assert unknown_filtered_response.status_code == 200
+
+    unknown_filtered_payload = unknown_filtered_response.json()
+    assert unknown_filtered_payload["summary"]["totalRequests"] == 1
+    assert unknown_filtered_payload["summary"]["totalCostUsd"] == 0.5
+    assert unknown_filtered_payload["byModel"] == [
+        {"model": "gpt-5.4", "costUsd": 0.5, "requests": 1, "percentage": 100.0}
+    ]
+    assert unknown_filtered_payload["byUseragent"] == [
+        {"useragent": "Unknown", "costUsd": 0.5, "requests": 1, "percentage": 100.0}
     ]
 
 

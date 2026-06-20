@@ -69,6 +69,25 @@ vi.mock("recharts", async (importOriginal) => {
 });
 
 describe("ModelDistributionDonut", () => {
+  it("pads legend value cells to the longest formatted cost", () => {
+    render(
+      <ModelDistributionDonut
+        data={[
+          { model: "gpt-5", costUsd: 42.02, requests: 2, percentage: 24.0 },
+          { model: "gpt-5-pro", costUsd: 128.55, requests: 10, percentage: 76.0 },
+        ]}
+      />,
+    );
+
+    const smallCostLegendValue = screen.getAllByText("$42.02").at(-1);
+    const largeCostLegendValue = screen.getAllByText("$128.55").at(-1);
+
+    expect(smallCostLegendValue).toBeDefined();
+    expect(largeCostLegendValue).toBeDefined();
+    expect(smallCostLegendValue).toHaveStyle({ minWidth: "7ch" });
+    expect(largeCostLegendValue).toHaveStyle({ minWidth: "7ch" });
+  });
+
   it("defaults to cost mode", () => {
     render(
       <ModelDistributionDonut

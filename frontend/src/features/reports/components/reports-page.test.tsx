@@ -453,7 +453,9 @@ describe("ReportsPage", () => {
       ),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: /accounts/i }),
+      screen
+        .getAllByRole("button", { name: /accounts/i })
+        .find((button) => button.getAttribute("aria-haspopup") === "menu"),
     ).toBeInTheDocument();
   });
 });

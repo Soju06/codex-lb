@@ -344,10 +344,12 @@ describe("DailyDetailTable", () => {
       />,
     );
 
-    const dayHeader = screen.getByRole("button", { name: /day/i });
-    const reqsHeader = screen.getByRole("button", { name: /reqs/i });
-    const dayIcon = dayHeader.querySelector('[data-testid="sort-icon-desc"]');
-    const reqsIcon = reqsHeader.querySelector('[data-testid="sort-icon-none"]');
+    const dayHeader = screen.getByRole("columnheader", { name: /day/i });
+    const reqsHeader = screen.getByRole("columnheader", { name: /reqs/i });
+    const dayButton = screen.getByRole("button", { name: /day/i });
+    const reqsButton = screen.getByRole("button", { name: /reqs/i });
+    const dayIcon = dayButton.querySelector('[data-testid="sort-icon-desc"]');
+    const reqsIcon = reqsButton.querySelector('[data-testid="sort-icon-none"]');
 
     expect(dayIcon).toBeTruthy();
     expect(dayIcon).toHaveAttribute("data-sort-icon", "down");
@@ -356,12 +358,20 @@ describe("DailyDetailTable", () => {
     expect(reqsIcon).toHaveAttribute("data-sort-icon", "up-down");
     expect(reqsIcon).toHaveClass("text-muted-foreground/60");
 
-    await user.click(reqsHeader);
+    expect(dayHeader).toHaveAttribute("aria-sort", "descending");
+    expect(reqsHeader).toHaveAttribute("aria-sort", "none");
+    expect(dayButton).not.toHaveAttribute("aria-sort");
+    expect(reqsButton).not.toHaveAttribute("aria-sort");
 
-    const activeReqsIcon = reqsHeader.querySelector('[data-testid="sort-icon-asc"]');
-    const inactiveDayIcon = dayHeader.querySelector('[data-testid="sort-icon-none"]');
+    await user.click(reqsButton);
 
+    const activeReqsIcon = reqsButton.querySelector('[data-testid="sort-icon-asc"]');
+    const inactiveDayIcon = dayButton.querySelector('[data-testid="sort-icon-none"]');
+
+    expect(dayHeader).toHaveAttribute("aria-sort", "none");
     expect(reqsHeader).toHaveAttribute("aria-sort", "ascending");
+    expect(dayButton).not.toHaveAttribute("aria-sort");
+    expect(reqsButton).not.toHaveAttribute("aria-sort");
     expect(activeReqsIcon).toBeTruthy();
     expect(activeReqsIcon).toHaveAttribute("data-sort-icon", "up");
     expect(activeReqsIcon).toHaveClass("text-foreground");

@@ -160,13 +160,16 @@ function SortableHeader({
   const Icon = isActive ? (direction === "asc" ? ArrowUp : ArrowDown) : ArrowUpDown;
   const iconTestId = isActive ? (direction === "asc" ? "sort-icon-asc" : "sort-icon-desc") : "sort-icon-none";
   const iconVariant = isActive ? (direction === "asc" ? "up" : "down") : "up-down";
+  const ariaSort = isActive ? (direction === "asc" ? "ascending" : "descending") : "none";
 
   return (
-    <th className={`pb-2 ${align === "left" ? "pr-4" : align === "right" ? "pr-4 text-right" : ""} font-medium`}>
+    <th
+      className={`pb-2 ${align === "left" ? "pr-4" : align === "right" ? "pr-4 text-right" : ""} font-medium`}
+      aria-sort={ariaSort}
+    >
       <button
         type="button"
         className={`flex w-full items-center gap-1 ${align === "left" ? "justify-start text-left" : "justify-end text-right"} font-medium text-inherit`}
-        aria-sort={isActive ? (direction === "asc" ? "ascending" : "descending") : "none"}
         onClick={onClick}
       >
         <span>{label}</span>

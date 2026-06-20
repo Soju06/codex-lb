@@ -180,6 +180,9 @@ describe("DailyDetailTable", () => {
     const user = userEvent.setup();
     const blobText = vi.fn(async () => "");
     const createObjectURL = vi.spyOn(URL, "createObjectURL").mockImplementation((blob) => {
+      if (!(blob instanceof Blob)) {
+        throw new TypeError("expected Blob export payload");
+      }
       blobText.mockImplementation(() => blob.text());
       return "blob:daily-breakdown";
     });

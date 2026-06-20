@@ -200,10 +200,18 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
           />
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
             <Suspense fallback={<div className="h-[270px] rounded-xl border bg-card" />}>
-              <CostPerDayChart data={reportsQuery.data.daily} />
+              <CostPerDayChart
+                startDate={filters.startDate}
+                endDate={filters.endDate}
+                data={reportsQuery.data.daily}
+              />
             </Suspense>
             <Suspense fallback={<div className="h-[270px] rounded-xl border bg-card" />}>
-              <TokensPerDayChart data={reportsQuery.data.daily} />
+              <TokensPerDayChart
+                startDate={filters.startDate}
+                endDate={filters.endDate}
+                data={reportsQuery.data.daily}
+              />
             </Suspense>
           </div>
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">

@@ -526,6 +526,14 @@ def test_assert_account_can_redeem_reset_credit_rejects_non_applicable_statuses(
     assert excinfo.value.code == "account_not_reset_credit_applicable"
 
 
+def test_assert_account_can_redeem_reset_credit_rejects_missing_chatgpt_account_id() -> None:
+    account = _account()
+    account.chatgpt_account_id = None
+    with pytest.raises(DashboardConflictError) as excinfo:
+        _assert_account_can_redeem_reset_credit(account)
+    assert excinfo.value.code == "account_not_reset_credit_applicable"
+
+
 # --- POST consume: handler-level 404 when account missing ---
 
 

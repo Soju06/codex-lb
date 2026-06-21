@@ -146,8 +146,14 @@ export function AccountsPage() {
       {!accountsQuery.data ? (
         <AccountsSkeleton />
       ) : (
-        <div className="grid gap-4 lg:grid-cols-[22rem_minmax(0,1fr)]">
-          <div className="rounded-xl border bg-card p-4">
+        <div
+          data-testid="accounts-layout"
+          className="grid min-w-0 grid-cols-1 gap-4 lg:grid-cols-[minmax(18rem,22rem)_minmax(0,1fr)]"
+        >
+          <div
+            data-testid="accounts-list-panel"
+            className="min-w-0 rounded-xl border bg-card p-3 sm:p-4"
+          >
             <AccountList
               accounts={accounts}
               selectedAccountId={resolvedSelectedAccountId}

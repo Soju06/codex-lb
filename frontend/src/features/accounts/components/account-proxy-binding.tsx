@@ -28,13 +28,13 @@ export function AccountProxyBinding({ account, admin, busy, readOnly = false, on
   }
 
   return (
-    <section className="rounded-lg border bg-muted/30 p-4">
-      <div className="flex items-start justify-between gap-4">
-        <div className="flex items-center gap-2.5">
+    <section className="min-w-0 rounded-lg border bg-muted/30 p-4">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
+        <div className="flex min-w-0 items-center gap-2.5">
           <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10">
             <Network className="h-4 w-4 text-primary" aria-hidden="true" />
           </div>
-          <div>
+          <div className="min-w-0">
             <h3 className="text-sm font-semibold">Account proxy binding</h3>
             <p className="text-xs text-muted-foreground">
               Route this account's ChatGPT upstream traffic through a specific proxy pool.
@@ -43,6 +43,7 @@ export function AccountProxyBinding({ account, admin, busy, readOnly = false, on
         </div>
         <Switch
           aria-label="Enable account proxy binding"
+          className="shrink-0"
           checked={active}
           disabled={busy || readOnly || !binding}
           onCheckedChange={(checked) => {

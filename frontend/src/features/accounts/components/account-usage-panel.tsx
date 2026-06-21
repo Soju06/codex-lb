@@ -153,9 +153,9 @@ export function AccountUsagePanel({ account, trends }: AccountUsagePanelProps) {
     primaryTrendPoints.length > 0 || secondaryTrendPoints.length > 0 || secondaryScheduledTrendPoints.length > 0;
 
   return (
-    <div className="space-y-4 rounded-lg border bg-muted/30 p-4">
+    <div className="min-w-0 space-y-4 rounded-lg border bg-muted/30 p-4">
       <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Usage</h3>
-      <div className={cn("grid gap-4", weeklyOnly || monthlyOnly ? "grid-cols-1" : "grid-cols-2")}>
+      <div className={cn("grid gap-4", weeklyOnly || monthlyOnly ? "grid-cols-1" : "grid-cols-1 sm:grid-cols-2")}>
         {monthlyOnly ? (
           <QuotaRow label="Monthly" percent={monthly} resetAt={account.resetAtMonthly} />
         ) : (
@@ -168,7 +168,7 @@ export function AccountUsagePanel({ account, trends }: AccountUsagePanelProps) {
       <div className="rounded-md border bg-background/60 px-3 py-2">
         <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Request logs total</p>
         {hasRequestUsage ? (
-          <p className="mt-1 text-xs tabular-nums text-muted-foreground">
+          <p className="mt-1 break-words text-xs tabular-nums text-muted-foreground">
             {formatCompactNumber(requestUsage?.totalTokens)} tok | {formatCompactNumber(requestUsage?.cachedInputTokens)} cached |{" "}
             {formatCompactNumber(requestUsage?.requestCount)} req | {formatCurrency(requestUsage?.totalCostUsd)}
           </p>
@@ -212,9 +212,9 @@ export function AccountUsagePanel({ account, trends }: AccountUsagePanelProps) {
       ) : null}
       {hasTrends && (
         <div className="pt-3">
-          <div className="mb-2 flex items-center justify-between">
+          <div className="mb-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
             <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">7-day trend</h4>
-            <div className="flex items-center gap-3 text-[10px] text-muted-foreground">
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-muted-foreground">
               <span className="flex items-center gap-1.5">
                 <span className="inline-block h-2 w-2 rounded-full bg-chart-1" />
                 5h

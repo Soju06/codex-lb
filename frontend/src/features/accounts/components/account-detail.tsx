@@ -95,7 +95,7 @@ export function AccountDetail({
   return (
     <div
       key={account.accountId}
-      className="animate-fade-in-up space-y-4 rounded-xl border bg-card p-5"
+      className="animate-fade-in-up min-w-0 space-y-4 rounded-xl border bg-card p-4 sm:p-5"
     >
       {/* Account header */}
       <div>
@@ -248,7 +248,7 @@ function AccountNameField({
   }
 
   return (
-    <div className="flex items-center gap-1.5">
+    <div className="flex min-w-0 items-center gap-1.5">
       <h2 className="min-w-0 truncate text-base font-semibold">
         {labelIsEmail ? (
           <>

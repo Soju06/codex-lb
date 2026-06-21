@@ -47,10 +47,24 @@ function DialogOverlay({
   )
 }
 
+const FLOATING_LAYER_SELECTOR = [
+  "[data-slot='select-content']",
+  "[data-slot='dropdown-menu-content']",
+  "[data-slot='dropdown-menu-sub-content']",
+  "[data-slot='popover-content']",
+].join(", ")
+
+function isFloatingLayerTarget(target: EventTarget | null): boolean {
+  return target instanceof Element && target.closest(FLOATING_LAYER_SELECTOR) !== null
+}
+
 function DialogContent({
   className,
   children,
   showCloseButton = true,
+  onFocusOutside,
+  onInteractOutside,
+  onPointerDownOutside,
   ...props
 }: React.ComponentProps<typeof DialogPrimitive.Content> & {
   showCloseButton?: boolean
@@ -64,6 +78,24 @@ function DialogContent({
           "bg-background data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 fixed top-[50%] left-[50%] z-50 grid w-full max-w-[calc(100%-2rem)] translate-x-[-50%] translate-y-[-50%] gap-4 overflow-hidden rounded-lg border p-6 shadow-lg duration-200 outline-none overscroll-contain sm:max-w-lg",
           className
         )}
+        onFocusOutside={(event) => {
+          onFocusOutside?.(event)
+          if (!event.defaultPrevented && isFloatingLayerTarget(event.target)) {
+            event.preventDefault()
+          }
+        }}
+        onInteractOutside={(event) => {
+          onInteractOutside?.(event)
+          if (!event.defaultPrevented && isFloatingLayerTarget(event.target)) {
+            event.preventDefault()
+          }
+        }}
+        onPointerDownOutside={(event) => {
+          onPointerDownOutside?.(event)
+          if (!event.defaultPrevented && isFloatingLayerTarget(event.target)) {
+            event.preventDefault()
+          }
+        }}
         {...props}
       >
         {children}

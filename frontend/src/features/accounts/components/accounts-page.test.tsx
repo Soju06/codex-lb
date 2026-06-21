@@ -128,4 +128,47 @@ describe("AccountsPage", () => {
       screen.getByRole("heading", { name: "Visible First" }),
     ).toBeInTheDocument();
   });
+
+  it("renders account panels with mobile-first responsive containment", () => {
+    mockedUseAccounts.mockReturnValue({
+      accountsQuery: {
+        data: [
+          account({
+            accountId: "acc-long",
+            email: "very.long.account.identity.for.mobile@example-enterprise-workspace.invalid",
+            displayName: "very.long.account.identity.for.mobile@example-enterprise-workspace.invalid",
+          }),
+        ],
+        error: null,
+        refetch: vi.fn(),
+      },
+      importMutation: idleMutation(),
+      pauseMutation: idleMutation(),
+      resumeMutation: idleMutation(),
+      probeMutation: idleMutation(),
+      deleteMutation: idleMutation(),
+      exportAuthMutation: idleMutation(),
+      setAliasMutation: idleMutation(),
+      limitWarmupMutation: idleMutation(),
+      routingPolicyMutation: idleMutation(),
+      updateMutation: idleMutation(),
+    } as unknown as ReturnType<typeof useAccounts>);
+
+    render(
+      <MemoryRouter>
+        <AccountsPage />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByTestId("accounts-layout")).toHaveClass(
+      "grid-cols-1",
+      "min-w-0",
+      "lg:grid-cols-[minmax(18rem,22rem)_minmax(0,1fr)]",
+    );
+    expect(screen.getByTestId("accounts-list-panel")).toHaveClass("min-w-0");
+    expect(screen.getByRole("heading", { name: /very\.long\.account/i })).toHaveClass(
+      "min-w-0",
+      "truncate",
+    );
+  });
 });

@@ -57,6 +57,20 @@ vi.mock("recharts", async (importOriginal) => {
 });
 
 describe("UseragentDistributionDonut", () => {
+  it("shows the total label and compact cost total in the donut center by default", () => {
+    render(
+      <UseragentDistributionDonut
+        data={[
+          { useragent: "CLI", costUsd: 430, requests: 8, percentage: 30 },
+          { useragent: "SDK", costUsd: 1000, requests: 4, percentage: 70 },
+        ]}
+      />,
+    );
+
+    expect(screen.getByTestId("useragent-distribution-center-label")).toHaveTextContent("Total");
+    expect(screen.getByTestId("useragent-distribution-center-value")).toHaveTextContent("$1.43K");
+  });
+
   it("renders Missing User-Agent with a fixed grey legend dot", () => {
     render(
       <UseragentDistributionDonut
@@ -112,7 +126,7 @@ describe("UseragentDistributionDonut", () => {
     await user.click(screen.getByRole("button", { name: /^req$/i }));
 
     const smallRequestLegendValue = screen.getAllByText(/^8$/).at(-1);
-    const largeRequestLegendValue = screen.getAllByText(/^1200$/).at(-1);
+    const largeRequestLegendValue = screen.getAllByText("1.2K").at(-1);
 
     expect(smallRequestLegendValue).toBeDefined();
     expect(largeRequestLegendValue).toBeDefined();
@@ -132,12 +146,13 @@ describe("UseragentDistributionDonut", () => {
 
     expect(screen.getByRole("button", { name: /^cost$/i })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByRole("button", { name: /^req$/i })).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByTestId("useragent-distribution-center-value")).toHaveTextContent("$20");
     const tooltipRow = screen.getByText("Cost").parentElement;
 
     expect(tooltipRow).not.toBeNull();
-    expect(within(tooltipRow as HTMLElement).getByText("$12.50")).toBeInTheDocument();
+    expect(within(tooltipRow as HTMLElement).getByText("$12.5")).toBeInTheDocument();
     expect(screen.getByText("62.5%")).toBeInTheDocument();
-    expect(screen.getByText("$7.50")).toBeInTheDocument();
+    expect(screen.getByText("$7.5")).toBeInTheDocument();
     expect(screen.getByTestId("useragent-distribution-pie")).toHaveAttribute("data-key", "costUsd");
   });
 
@@ -162,6 +177,26 @@ describe("UseragentDistributionDonut", () => {
     expect(screen.getByText("66.7%")).toBeInTheDocument();
     expect(screen.getByText("33.3%")).toBeInTheDocument();
     expect(screen.getByText(/^4$/)).toBeInTheDocument();
+    expect(screen.getByTestId("useragent-distribution-center-value")).toHaveTextContent("12");
     expect(screen.getByTestId("useragent-distribution-pie")).toHaveAttribute("data-key", "requests");
+  });
+
+  it("uses compact request totals in the center and legend when request mode is active", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <UseragentDistributionDonut
+        data={[
+          { useragent: "CLI", costUsd: 12.5, requests: 500_000_000, percentage: 40 },
+          { useragent: "SDK", costUsd: 7.5, requests: 1_000_000_000, percentage: 60 },
+        ]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /^req$/i }));
+
+    expect(screen.getByTestId("useragent-distribution-center-value")).toHaveTextContent("1.5B");
+    expect(screen.getByText("500M")).toBeInTheDocument();
+    expect(screen.getByText("1B")).toBeInTheDocument();
   });
 });

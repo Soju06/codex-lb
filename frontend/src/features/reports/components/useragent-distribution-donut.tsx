@@ -3,6 +3,7 @@ import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip } from "@/components/
 import type { UseragentCostEntry } from "../schemas";
 import { ChartTooltip } from "./chart-tooltip";
 import { DistributionMetricToggle, type DistributionMetric } from "./distribution-metric-toggle";
+import { formatDistributionMetricValue } from "./distribution-metric-format";
 
 export type UseragentDistributionDonutProps = {
   data: UseragentCostEntry[];
@@ -18,11 +19,19 @@ function getUseragentColor(useragent: string, index: number) {
 
 export function UseragentDistributionDonut({ data }: UseragentDistributionDonutProps) {
   const [metric, setMetric] = useState<DistributionMetric>("cost");
+  const totalCost = data.reduce((sum, entry) => sum + entry.costUsd, 0);
   const totalRequests = data.reduce((sum, entry) => sum + entry.requests, 0);
   const isCostMetric = metric === "cost";
+  const totalMetricLabel = formatDistributionMetricValue(
+    isCostMetric ? totalCost : totalRequests,
+    metric,
+  );
   const chartData = data.map((entry) => ({
     ...entry,
-    metricLabel: isCostMetric ? `$${entry.costUsd.toFixed(2)}` : String(entry.requests),
+    metricLabel: formatDistributionMetricValue(
+      isCostMetric ? entry.costUsd : entry.requests,
+      metric,
+    ),
     metricValue: isCostMetric ? entry.costUsd : entry.requests,
     metricPercentage: isCostMetric
       ? entry.percentage
@@ -43,6 +52,20 @@ export function UseragentDistributionDonut({ data }: UseragentDistributionDonutP
       </div>
       <div className="mt-4 flex items-center gap-4">
         <div className="relative h-[140px] w-[140px] shrink-0">
+          <div className="pointer-events-none absolute inset-0 z-10 flex flex-col items-center justify-center text-center">
+            <span
+              className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground"
+              data-testid="useragent-distribution-center-label"
+            >
+              Total
+            </span>
+            <span
+              className="max-w-[76px] text-sm font-semibold leading-tight tabular-nums text-foreground"
+              data-testid="useragent-distribution-center-value"
+            >
+              {totalMetricLabel}
+            </span>
+          </div>
           <ResponsiveContainer width="100%" height="100%">
             <PieChart>
               <Pie
@@ -63,9 +86,7 @@ export function UseragentDistributionDonut({ data }: UseragentDistributionDonutP
                 content={
                   <ChartTooltip
                     names={isCostMetric ? { costUsd: "Cost" } : { requests: "Requests" }}
-                    formatValue={(value, dataKey) =>
-                      dataKey === "requests" ? String(value) : `$${value.toFixed(2)}`
-                    }
+                    formatValue={(value) => formatDistributionMetricValue(value, metric)}
                   />
                 }
               />

@@ -595,14 +595,16 @@ The dashboard SHALL render `/reports` with the following exact page-owned user-f
 - `Cost by Day`
 - `Tokens by Day`
 - `Distribution by Model`
+- `Distribution by UserAgent`
 - `Daily Breakdown`
 - `Day`
 - `Input Tokens`
 - `Output Tokens`
 - `Cost`
 - `Accounts`
+- `Total`
 - `Failed to load report data:`
-- `Failed to load model options:`
+- `Failed to load model and user-agent options:`
 - `Failed to load account options:`
 - `Some report data could not be loaded. Try reloading.`
 - `Retry`
@@ -615,16 +617,29 @@ Backend-provided strings, account values, model values, and raw server error pay
 - **THEN** the page title is `Cost Report`
 - **AND** the subtitle is `Usage history by date range`
 - **AND** the summary cards include `Total Cost` and `Requests`
-- **AND** the chart and table section titles include `Cost by Day`, `Tokens by Day`, `Distribution by Model`, and `Daily Breakdown`
+- **AND** the chart and table section titles include `Cost by Day`, `Tokens by Day`, `Distribution by Model`, `Distribution by UserAgent`, and `Daily Breakdown`
 - **AND** the daily table headings include `Day`, `Input Tokens`, `Output Tokens`, `Cost`, and `Accounts`
 
 #### Scenario: Reports page state labels are English
 
 - **WHEN** `/reports` renders a loading, empty, or error state
 - **THEN** the loading label is `Loading...`
-- **AND** page-owned error wrappers use `Failed to load report data:`, `Failed to load model options:`, and `Failed to load account options:` when those failures render
+- **AND** page-owned error wrappers use `Failed to load report data:`, `Failed to load model and user-agent options:`, and `Failed to load account options:` when those failures render
 - **AND** the retry warning is `Some report data could not be loaded. Try reloading.`
 - **AND** the retry button label is `Retry`
+
+### Requirement: Reports distribution donuts show compact active-metric totals
+
+The `/reports` page SHALL render both `Distribution by Model` and `Distribution by UserAgent` cards with a donut-center total that uses the page-owned label `Total` above the current metric value.
+When a donut card is in `cost` mode, its center total and legend values SHALL display compact USD values with up to two fractional digits and `K`, `M`, or `B` suffixes when applicable.
+When a donut card is in `req` mode, its center total and legend values SHALL display compact request values with up to two fractional digits and `K`, `M`, or `B` suffixes when applicable.
+
+#### Scenario: Reports distribution donut totals switch with the selected metric
+
+- **WHEN** `/reports` renders model or user-agent distribution data
+- **THEN** each distribution donut shows `Total` in the center above the total value
+- **AND** `cost` mode uses compact USD totals such as `$1.43K`
+- **AND** `req` mode uses compact request totals such as `1.5B`
 
 ### Requirement: Reports page loads report data from the reports endpoint
 

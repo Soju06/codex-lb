@@ -58,6 +58,8 @@ describe("formatters", () => {
   it("formats number-like values", () => {
     expect(formatNumber(1200)).toBe("1,200");
     expect(formatCompactNumber(1200)).toMatch(/K$/);
+    expect(formatCompactNumber(1430)).toBe("1.43K");
+    expect(formatCompactNumber(1_500_000_000)).toBe("1.5B");
     expect(formatCurrency(12)).toMatch(/^\$/);
     expect(formatNumber("abc")).toBe("--");
   });

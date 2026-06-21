@@ -69,6 +69,20 @@ vi.mock("recharts", async (importOriginal) => {
 });
 
 describe("ModelDistributionDonut", () => {
+  it("shows the total label and compact cost total in the donut center by default", () => {
+    render(
+      <ModelDistributionDonut
+        data={[
+          { model: "gpt-5", costUsd: 430, requests: 2, percentage: 30 },
+          { model: "gpt-5-pro", costUsd: 1000, requests: 10, percentage: 70 },
+        ]}
+      />,
+    );
+
+    expect(screen.getByTestId("model-distribution-center-label")).toHaveTextContent("Total");
+    expect(screen.getByTestId("model-distribution-center-value")).toHaveTextContent("$1.43K");
+  });
+
   it("pads legend value cells to the longest formatted cost", () => {
     render(
       <ModelDistributionDonut
@@ -98,9 +112,9 @@ describe("ModelDistributionDonut", () => {
       />,
     );
 
-    expect(screen.queryByTestId("model-distribution-center-cost")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /^cost$/i })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByRole("button", { name: /^req$/i })).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByTestId("model-distribution-center-value")).toHaveTextContent("$60.05");
     const tooltipRow = screen.getByText("Cost").parentElement;
 
     expect(tooltipRow).not.toBeNull();
@@ -132,8 +146,28 @@ describe("ModelDistributionDonut", () => {
     expect(screen.getByText("20.0%")).toBeInTheDocument();
     expect(screen.getByText("80.0%")).toBeInTheDocument();
     expect(screen.getByText(/^8$/)).toBeInTheDocument();
+    expect(screen.getByTestId("model-distribution-center-value")).toHaveTextContent("10");
     expect(screen.getByTestId("model-distribution-pie")).toHaveAttribute("data-key", "requests");
     expect(screen.getByRole("button", { name: /^cost$/i })).toHaveAttribute("aria-pressed", "false");
     expect(screen.getByRole("button", { name: /^req$/i })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("uses compact request totals in the center and legend when request mode is active", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <ModelDistributionDonut
+        data={[
+          { model: "gpt-5", costUsd: 42.02, requests: 500_000_000, percentage: 40 },
+          { model: "o3", costUsd: 18.03, requests: 1_000_000_000, percentage: 60 },
+        ]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /^req$/i }));
+
+    expect(screen.getByTestId("model-distribution-center-value")).toHaveTextContent("1.5B");
+    expect(screen.getByText("500M")).toBeInTheDocument();
+    expect(screen.getByText("1B")).toBeInTheDocument();
   });
 });

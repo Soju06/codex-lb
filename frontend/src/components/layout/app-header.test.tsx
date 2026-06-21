@@ -44,6 +44,25 @@ describe("AppHeader", () => {
     expect(await screen.findAllByText("99+")).not.toHaveLength(0);
   });
 
+  it("sums reset-credit badge across accounts and treats missing counts as zero", async () => {
+    server.use(
+      http.get("/api/accounts", () =>
+        HttpResponse.json({
+          accounts: [
+            createAccountSummary({ availableResetCredits: 5 }),
+            createAccountSummary({ accountId: "acc-2" }),
+            createAccountSummary({ accountId: "acc-3", availableResetCredits: null }),
+            createAccountSummary({ accountId: "acc-4", availableResetCredits: 3 }),
+          ],
+        }),
+      ),
+    );
+
+    renderHeader();
+
+    expect(await screen.findAllByText("8")).not.toHaveLength(0);
+  });
+
   it("hides the Accounts reset-credit badge when no resets are available", async () => {
     server.use(
       http.get("/api/accounts", () =>

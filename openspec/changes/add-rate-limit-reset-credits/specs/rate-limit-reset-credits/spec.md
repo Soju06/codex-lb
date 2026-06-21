@@ -2,7 +2,7 @@
 
 ### Requirement: Reset credits are polled per account on a fixed cadence
 
-The system SHALL poll upstream `GET /wham/rate-limit-reset-credits` for each eligible account on a configurable cadence that defaults to 60 seconds, using that account's stored OAuth bearer token and `chatgpt-account-id`. The scheduler SHALL always start with the application lifespan. Because snapshots are kept in process-local memory, every running replica SHALL refresh its own snapshot cache instead of relying on leader election. The poll SHALL skip any account that is paused, deactivated, or lacks a usable `chatgpt-account-id`, and SHALL invalidate any cached reset-credit snapshot for skipped accounts.
+The system SHALL poll upstream `GET /wham/rate-limit-reset-credits` for each eligible account on a configurable cadence that defaults to 60 seconds, using that account's stored OAuth bearer token and `chatgpt-account-id`. The scheduler SHALL always start with the application lifespan. Because snapshots are kept in process-local memory, every running replica SHALL refresh its own snapshot cache instead of relying on leader election. The poll SHALL skip any account that is paused, deactivated, or lacks a usable `chatgpt-account-id`.
 
 #### Scenario: Default cadence polls every 60 seconds
 - **WHEN** the application starts with default settings
@@ -16,16 +16,11 @@ The system SHALL poll upstream `GET /wham/rate-limit-reset-credits` for each eli
 #### Scenario: Paused and deactivated accounts are skipped
 - **WHEN** an account is persisted as `paused` or `deactivated`
 - **THEN** the scheduler performs no upstream reset-credits fetch for that account
-- **AND** the cached snapshot for that account (if any) is invalidated
-
-#### Scenario: Account without ChatGPT account id is skipped
-- **WHEN** an account lacks a usable `chatgpt-account-id`
-- **THEN** the scheduler performs no upstream reset-credits fetch for that account
-- **AND** the cached snapshot for that account (if any) is invalidated
+- **AND** the cached snapshot for that account (if any) is left untouched by the skip
 
 ### Requirement: Reset credit snapshots are cached in memory keyed by account
 
-The system SHALL store the most recent successful reset-credits response per account in an in-memory store keyed by account id. The store SHALL be concurrency-safe and SHALL provide an `invalidate(account_id)` operation. Account-summary mappers SHALL join the cached snapshot onto each eligible account summary, exposing `available_reset_credits` (integer) and `reset_credit_nearest_expires_at` (ISO timestamp or null). Accounts with no cached snapshot, accounts that are paused or deactivated, and accounts without a usable `chatgpt-account-id` SHALL expose `available_reset_credits: 0` and `reset_credit_nearest_expires_at: null`.
+The system SHALL store the most recent successful reset-credits response per account in an in-memory store keyed by account id. The store SHALL be concurrency-safe and SHALL provide an `invalidate(account_id)` operation. Account-summary mappers SHALL join the cached snapshot onto each account summary, exposing `available_reset_credits` (integer) and `reset_credit_nearest_expires_at` (ISO timestamp or null). Accounts with no cached snapshot SHALL expose `available_reset_credits: 0` and `reset_credit_nearest_expires_at: null`.
 
 #### Scenario: Account summary reflects cached credits
 - **GIVEN** an account has a cached reset-credits snapshot with `available_count: 2` and a soonest expiry of `2026-07-10T00:00:00Z`
@@ -34,12 +29,6 @@ The system SHALL store the most recent successful reset-credits response per acc
 
 #### Scenario: Missing cache presents as zero credits
 - **GIVEN** an account has no cached reset-credits snapshot (e.g. immediately after restart)
-- **WHEN** the account-summary mapper builds the summary for that account
-- **THEN** the summary exposes `available_reset_credits: 0` and `reset_credit_nearest_expires_at: null`
-
-#### Scenario: Ineligible account summary suppresses stale credits
-- **GIVEN** an account is paused, deactivated, or lacks a usable `chatgpt-account-id`
-- **AND** a cached reset-credits snapshot still exists for that account
 - **WHEN** the account-summary mapper builds the summary for that account
 - **THEN** the summary exposes `available_reset_credits: 0` and `reset_credit_nearest_expires_at: null`
 
@@ -56,7 +45,7 @@ The system SHALL store the most recent successful reset-credits response per acc
 
 ### Requirement: Operators can redeem the soonest-expiring available credit
 
-The system SHALL expose a dashboard endpoint `POST /api/accounts/{account_id}/rate-limit-reset-credits/consume` that redeems exactly one credit for the named account. The endpoint SHALL refuse paused accounts, deactivated accounts, and accounts without a usable `chatgpt-account-id`, invalidating any cached snapshot for the account before returning a client error. For eligible accounts, the endpoint SHALL select, from the freshest cached snapshot, the credit whose `status` is `available` with the smallest `expires_at`, generate a `redeem_request_id` (UUID v4), and forward `{credit_id, redeem_request_id}` to upstream `POST /wham/rate-limit-reset-credits/consume` using the account's bearer token and `chatgpt-account-id`. A cached snapshot with `available_count <= 0` MUST be treated as having no redeemable credits, even if the cached `credits` list contains an item marked `available`. On a 200 response the endpoint SHALL invalidate the cached snapshot for that account and return `{code, windows_reset, redeemed_at}`. The endpoint SHALL require dashboard write access; read-only guests MUST be refused.
+The system SHALL expose a dashboard endpoint `POST /api/accounts/{account_id}/rate-limit-reset-credits/consume` that redeems exactly one credit for the named account. The endpoint SHALL select, from the freshest cached snapshot, the credit whose `status` is `available` with the smallest `expires_at`, generate a `redeem_request_id` (UUID v4), and forward `{credit_id, redeem_request_id}` to upstream `POST /wham/rate-limit-reset-credits/consume` using the account's bearer token and `chatgpt-account-id`. A cached snapshot with `available_count <= 0` MUST be treated as having no redeemable credits, even if the cached `credits` list contains an item marked `available`. On a 200 response the endpoint SHALL invalidate the cached snapshot for that account and return `{code, windows_reset, redeemed_at}`. The endpoint SHALL require dashboard write access; read-only guests MUST be refused.
 
 #### Scenario: Consume selects the soonest-expiring credit
 - **GIVEN** an account has cached credits with expiries `2026-07-10Z` and `2026-06-20Z`, both `status: available`
@@ -90,41 +79,6 @@ The system SHALL expose a dashboard endpoint `POST /api/accounts/{account_id}/ra
 - **GIVEN** an account whose cached snapshot reports `available_count: 0` (or has no snapshot)
 - **WHEN** the operator invokes `POST /api/accounts/{id}/rate-limit-reset-credits/consume`
 - **THEN** the endpoint returns a `409` (or equivalent client-error) without calling upstream
-
-#### Scenario: Consume refuses ineligible account before upstream call
-- **GIVEN** an account is paused, deactivated, or lacks a usable `chatgpt-account-id`
-- **AND** a cached reset-credits snapshot still exists for that account
-- **WHEN** the operator invokes `POST /api/accounts/{id}/rate-limit-reset-credits/consume`
-- **THEN** the endpoint invalidates the cached snapshot for that account
-- **AND** returns a client error without resolving a route or calling upstream
-
-### Requirement: API-key self-service reset-credit reads and exact redemption reuse the cached snapshots
-
-The system SHALL expose `GET /v1/reset-credit` and `POST /v1/reset-credit` as API-key-authenticated self-service routes backed by the same cached reset-credit snapshots used by the dashboard flow. `GET /v1/reset-credit` SHALL project the authenticated API key's eligible account pool into one array item per available credit, ordered by account email ascending, then account id ascending, then credit `expires_at` ascending with `null` expiries last, then credit id ascending. Each item SHALL include `account_id`, `email`, `redeem_id`, and `expiredAt`, where `redeem_id` and `expiredAt` come from that available credit. Accounts with no cached snapshot or no available credit SHALL be omitted from the `GET` response.
-
-`POST /v1/reset-credit` SHALL accept JSON body `{account_id, redeem_id}`. The endpoint SHALL reject requests whose `account_id` is outside the authenticated API key's account pool. For in-pool accounts, the endpoint SHALL re-read that account's freshest cached snapshot, verify that `redeem_id` still identifies an `available` credit on the account, forward that exact `credit_id` upstream with a generated `redeem_request_id`, and invalidate the cached snapshot for the account on a 200 response. A cached snapshot with `available_count <= 0` MUST be treated as having no redeemable credits even if the cached `credits` list contains an item marked `available`.
-
-#### Scenario: GET returns every available credit for eligible accounts
-- **GIVEN** two in-pool accounts each have multiple cached available credits
-- **WHEN** the client invokes `GET /v1/reset-credit`
-- **THEN** the response contains one array item per available credit
-- **AND** entries are grouped by account email and account id, with each account's credits ordered by soonest expiry first and `null` expiries last
-
-#### Scenario: GET omits accounts without available cached credits
-- **GIVEN** one in-pool account has `available_count: 0` and another has no cached snapshot
-- **WHEN** the client invokes `GET /v1/reset-credit`
-- **THEN** neither account appears in the response array
-
-#### Scenario: POST rejects a redeem id that is not currently available
-- **GIVEN** an in-pool account whose cached snapshot does not contain the supplied `redeem_id` as an `available` credit
-- **WHEN** the client invokes `POST /v1/reset-credit`
-- **THEN** the endpoint returns `409` without calling upstream
-
-#### Scenario: POST forwards the exact requested redeem id
-- **GIVEN** an in-pool account whose cached snapshot contains `redeem_id = "credit_exact"` as an available credit
-- **WHEN** the client invokes `POST /v1/reset-credit` with `{account_id, redeem_id: "credit_exact"}`
-- **THEN** the upstream consume request carries `credit_id = "credit_exact"`
-- **AND** a successful response invalidates the cached snapshot for that account
 
 ### Requirement: Reset credit polling failure does not mutate account status
 

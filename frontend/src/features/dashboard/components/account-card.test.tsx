@@ -1,5 +1,6 @@
 import { act, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import userEvent from "@testing-library/user-event";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { AccountCard } from "@/features/dashboard/components/account-card";
 import { usePrivacyStore } from "@/hooks/use-privacy";
@@ -126,5 +127,25 @@ describe("AccountCard", () => {
     render(<AccountCard account={account} />);
 
     expect(screen.queryByRole("button", { name: /Reset \(/ })).not.toBeInTheDocument();
+  });
+
+  it("disables reset action for paused accounts", async () => {
+    const user = userEvent.setup();
+    const onAction = vi.fn();
+    const account = createAccountSummary({
+      accountId: "acc-paused",
+      displayName: "Paused Account",
+      status: "paused",
+      availableResetCredits: 1,
+      resetCreditNearestExpiresAt: "2026-01-03T12:00:00.000Z",
+    });
+
+    render(<AccountCard account={account} onAction={onAction} />);
+
+    const resetButton = screen.getByRole("button", { name: "Reset (1)" });
+    expect(resetButton).toBeDisabled();
+
+    await user.click(resetButton);
+    expect(onAction).not.toHaveBeenCalledWith(account, "reset-credit");
   });
 });

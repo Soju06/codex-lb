@@ -52,7 +52,8 @@ export function DashboardPage() {
   const projectionsQuery = useDashboardProjections(Boolean(dashboardQuery.data));
   const { filters, logsQuery, optionsQuery, updateFilters } = useRequestLogs();
   const { resumeMutation, limitWarmupMutation } = useAccountMutations();
-  const resetCreditDialog = useDialogState<string>();
+  type ResetCreditDialogTarget = { accountId: string; availableResetCredits: number };
+  const resetCreditDialog = useDialogState<ResetCreditDialogTarget>();
 
   const isRefreshing = dashboardQuery.isFetching || projectionsQuery.isFetching || logsQuery.isFetching;
 
@@ -96,7 +97,10 @@ export function DashboardPage() {
           }
           break;
         case "reset-credit":
-          resetCreditDialog.show(account.accountId);
+          resetCreditDialog.show({
+            accountId: account.accountId,
+            availableResetCredits: account.availableResetCredits ?? 0,
+          });
           break;
       }
     },
@@ -299,7 +303,8 @@ export function DashboardPage() {
       {resetCreditDialog.data ? (
         <ResetCreditConfirmDialog
           open={resetCreditDialog.open}
-          accountId={resetCreditDialog.data}
+          accountId={resetCreditDialog.data.accountId}
+          summaryAvailableCount={resetCreditDialog.data.availableResetCredits}
           onOpenChange={resetCreditDialog.onOpenChange}
         />
       ) : null}

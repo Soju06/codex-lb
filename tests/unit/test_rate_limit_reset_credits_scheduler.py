@@ -3,10 +3,11 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
+from app.core.auth.refresh import RefreshError
 from app.core.clients.rate_limit_reset_credits import (
     RateLimitResetCreditsSnapshot,
     ResetCreditFetchError,
@@ -19,6 +20,7 @@ from app.core.usage.reset_credits_refresh_scheduler import (
     refresh_reset_credits_for_accounts,
 )
 from app.db.models import Account, AccountStatus
+from app.modules.accounts.auth_manager import AuthManager
 from app.modules.rate_limit_reset_credits.store import RateLimitResetCreditsStore
 
 pytestmark = pytest.mark.unit
@@ -64,7 +66,7 @@ def _response(available_count: int = 1) -> ResetCreditsResponse:
 
 
 @pytest.mark.asyncio
-async def test_refresh_skips_paused_and_deactivated_accounts() -> None:
+async def test_refresh_skips_paused_reauth_and_deactivated_accounts() -> None:
     store = RateLimitResetCreditsStore()
     fetched: list[str] = []
 
@@ -74,6 +76,7 @@ async def test_refresh_skips_paused_and_deactivated_accounts() -> None:
 
     accounts = [
         _make_account("acc_paused", status=AccountStatus.PAUSED),
+        _make_account("acc_reauth", status=AccountStatus.REAUTH_REQUIRED),
         _make_account("acc_deactivated", status=AccountStatus.DEACTIVATED),
         _make_account("acc_active"),
     ]
@@ -88,34 +91,9 @@ async def test_refresh_skips_paused_and_deactivated_accounts() -> None:
     # Only the active account was fetched and cached.
     assert fetched == ["token-for-acc_active"]
     assert store.get("acc_paused") is None
+    assert store.get("acc_reauth") is None
     assert store.get("acc_deactivated") is None
     assert store.get("acc_active") is not None
-
-
-@pytest.mark.asyncio
-async def test_refresh_invalidates_snapshots_for_paused_and_deactivated_accounts() -> None:
-    store = RateLimitResetCreditsStore()
-    await store.set("acc_paused", RateLimitResetCreditsSnapshot(available_count=1))
-    await store.set("acc_deactivated", RateLimitResetCreditsSnapshot(available_count=1))
-    fetched: list[str] = []
-
-    async def fetch_fn(access_token: str, account_id: str | None, **kwargs: Any) -> ResetCreditsResponse:
-        fetched.append(access_token)
-        return _response()
-
-    await refresh_reset_credits_for_accounts(
-        accounts=[
-            _make_account("acc_paused", status=AccountStatus.PAUSED),
-            _make_account("acc_deactivated", status=AccountStatus.DEACTIVATED),
-        ],
-        encryptor=StubEncryptor(),
-        store=store,
-        fetch_fn=fetch_fn,
-    )
-
-    assert fetched == []
-    assert store.get("acc_paused") is None
-    assert store.get("acc_deactivated") is None
 
 
 @pytest.mark.asyncio
@@ -139,21 +117,61 @@ async def test_refresh_skips_account_without_chatgpt_account_id() -> None:
 
 
 @pytest.mark.asyncio
-async def test_refresh_invalidates_snapshot_for_account_without_chatgpt_account_id() -> None:
+async def test_refresh_retries_after_401_with_auth_manager(monkeypatch: pytest.MonkeyPatch) -> None:
     store = RateLimitResetCreditsStore()
-    await store.set("acc_no_workspace", RateLimitResetCreditsSnapshot(available_count=1))
+    account = _make_account("acc_refresh")
+    calls = {"fetch": 0, "refresh": 0}
+
+    class _AuthManager:
+        async def ensure_fresh(self, current: Account, *, force: bool = False) -> Account:
+            calls["refresh"] += 1
+            assert force is True
+            return current
 
     async def fetch_fn(access_token: str, account_id: str | None, **kwargs: Any) -> ResetCreditsResponse:
-        raise AssertionError("ineligible account must not fetch reset credits")
+        calls["fetch"] += 1
+        if calls["fetch"] == 1:
+            raise ResetCreditFetchError(401, "expired")
+        return _response(available_count=2)
 
     await refresh_reset_credits_for_accounts(
-        accounts=[_make_account("acc_no_workspace", chatgpt_account_id=None)],
+        accounts=[account],
         encryptor=StubEncryptor(),
         store=store,
         fetch_fn=fetch_fn,
+        auth_manager=cast(AuthManager, _AuthManager()),
     )
 
-    assert store.get("acc_no_workspace") is None
+    assert calls == {"fetch": 2, "refresh": 1}
+    snapshot = store.get("acc_refresh")
+    assert snapshot is not None
+    assert snapshot.available_count == 2
+
+
+@pytest.mark.asyncio
+async def test_refresh_does_not_retry_401_when_token_refresh_fails() -> None:
+    store = RateLimitResetCreditsStore()
+    account = _make_account("acc_refresh_fail")
+    calls = {"fetch": 0}
+
+    class _AuthManager:
+        async def ensure_fresh(self, current: Account, *, force: bool = False) -> Account:
+            raise RefreshError("invalid_grant", "refresh failed", True)
+
+    async def fetch_fn(access_token: str, account_id: str | None, **kwargs: Any) -> ResetCreditsResponse:
+        calls["fetch"] += 1
+        raise ResetCreditFetchError(401, "expired")
+
+    await refresh_reset_credits_for_accounts(
+        accounts=[account],
+        encryptor=StubEncryptor(),
+        store=store,
+        fetch_fn=fetch_fn,
+        auth_manager=cast(AuthManager, _AuthManager()),
+    )
+
+    assert calls["fetch"] == 1
+    assert store.get("acc_refresh_fail") is None
 
 
 @pytest.mark.asyncio
@@ -331,7 +349,6 @@ async def test_refresh_once_caches_snapshots_on_each_replica(monkeypatch: pytest
     monkeypatch.setattr(scheduler_module, "AccountsRepository", lambda session: _FakeRepo())
     monkeypatch.setattr(scheduler_module, "TokenEncryptor", lambda: StubEncryptor())
     monkeypatch.setattr(scheduler_module, "get_rate_limit_reset_credits_store", lambda: store)
-    monkeypatch.setattr(scheduler_module, "_resolve_upstream_route_for_account", lambda account: _async_none())
 
     async def fetch_fn(access_token: str, account_id: str | None, **kwargs: Any) -> ResetCreditsResponse:
         captured.append(("fetch", access_token, account_id))
@@ -347,7 +364,3 @@ async def test_refresh_once_caches_snapshots_on_each_replica(monkeypatch: pytest
     assert snapshot is not None
     assert snapshot.available_count == 7
     assert account.status == AccountStatus.ACTIVE
-
-
-async def _async_none() -> None:
-    return None

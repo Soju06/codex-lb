@@ -61,15 +61,18 @@ describe("AccountList", () => {
 
     render(<AccountList accounts={[account]} onAction={onAction} />);
 
+    const resetButton = screen.getByRole("button", { name: "Redeem reset credit for Paused Account" });
+    expect(resetButton).toBeDisabled();
+
     await user.click(screen.getByRole("button", { name: "View details for Paused Account" }));
-    await user.click(screen.getByRole("button", { name: "Redeem reset credit for Paused Account" }));
+    await user.click(resetButton);
     await user.click(screen.getByRole("button", { name: "Enable limit warm-up for Paused Account" }));
     await user.click(screen.getByRole("button", { name: "Resume Paused Account" }));
 
     expect(onAction).toHaveBeenNthCalledWith(1, account, "details");
-    expect(onAction).toHaveBeenNthCalledWith(2, account, "reset-credit");
-    expect(onAction).toHaveBeenNthCalledWith(3, account, "warmup-toggle");
-    expect(onAction).toHaveBeenNthCalledWith(4, account, "resume");
+    expect(onAction).toHaveBeenNthCalledWith(2, account, "warmup-toggle");
+    expect(onAction).toHaveBeenNthCalledWith(3, account, "resume");
+    expect(onAction).not.toHaveBeenCalledWith(account, "reset-credit");
   });
 
   it("blurs list identity text when privacy mode is enabled", () => {

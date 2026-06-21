@@ -327,7 +327,9 @@ describe("ReportsPage", () => {
 
     renderWithProviders(<ReportsPage initialFilters={{ model: "gpt-5.1" }} />);
 
-    await user.click(screen.getByRole("button", { name: /gpt-5.1/i }));
+    await user.click(
+      screen.getByRole("button", { name: /gpt-5.1/i, expanded: false }),
+    );
 
     expect(
       await screen.findByRole("menuitemcheckbox", { name: /gpt-5.2/i }),
@@ -356,7 +358,9 @@ describe("ReportsPage", () => {
 
     renderWithProviders(<ReportsPage initialFilters={{ useragent: "CLI" }} />);
 
-    await user.click(screen.getByRole("button", { name: /^CLI$/i }));
+    await user.click(
+      screen.getByRole("button", { name: /^CLI$/i, expanded: false }),
+    );
 
     expect(
       await screen.findByRole("menuitemcheckbox", { name: /^SDK$/i }),
@@ -472,9 +476,11 @@ describe("ReportsPage", () => {
       ),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: /gpt-5.1/i }),
+      screen.getByRole("button", { name: /gpt-5.1/i, expanded: false }),
     ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /^CLI$/i })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /^CLI$/i, expanded: false }),
+    ).toBeInTheDocument();
     expect(
       screen.queryByText(/Failed to load model options:/i),
     ).not.toBeInTheDocument();

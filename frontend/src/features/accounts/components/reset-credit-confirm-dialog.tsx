@@ -55,7 +55,7 @@ function CreditExpiryLine({
   return (
     <p className="text-xs text-muted-foreground">
       {label}{" "}
-      {formatLocalDateTimeSeconds(expiresAt)}
+      {formatLocalDateTimeSeconds(expiresAt)}{" "}
       <span
         className={cn(
           "tabular-nums",

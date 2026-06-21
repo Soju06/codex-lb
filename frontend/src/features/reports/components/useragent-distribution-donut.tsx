@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip } from "@/components/lazy-recharts";
+import { useEffect, useRef, useState } from "react";
+import { Cell, Pie, PieChart, ResponsiveContainer, Sector, Tooltip, type PieSectorShapeProps } from "@/components/lazy-recharts";
 import type { UseragentCostEntry } from "../schemas";
 import { ChartTooltip } from "./chart-tooltip";
 import { DistributionMetricToggle, type DistributionMetric } from "./distribution-metric-toggle";
@@ -12,6 +12,17 @@ export type UseragentDistributionDonutProps = {
 const COLORS = ["#3b82f6", "#10b981", "#f59e0b", "#ec4899", "#8b5cf6", "#06b6d4"];
 const UNKNOWN_COLOR = "#9ca3af";
 const MISSING_USERAGENT_LABEL = "Missing User-Agent";
+const ACTIVE_RADIUS_OFFSET = 4;
+const LEGEND_VISIBLE_COUNT = 4;
+const LEGEND_ROW_HEIGHT_REM = 2;
+
+type ChartDatum = UseragentCostEntry & {
+  id: string;
+  fill: string;
+  metricLabel: string;
+  metricValue: number;
+  metricPercentage: number;
+};
 
 function getUseragentColor(useragent: string, index: number) {
   return useragent === MISSING_USERAGENT_LABEL ? UNKNOWN_COLOR : COLORS[index % COLORS.length];
@@ -19,6 +30,8 @@ function getUseragentColor(useragent: string, index: number) {
 
 export function UseragentDistributionDonut({ data }: UseragentDistributionDonutProps) {
   const [metric, setMetric] = useState<DistributionMetric>("cost");
+  const [activeLegendId, setActiveLegendId] = useState<string | null>(null);
+  const legendRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   const totalCost = data.reduce((sum, entry) => sum + entry.costUsd, 0);
   const totalRequests = data.reduce((sum, entry) => sum + entry.requests, 0);
   const isCostMetric = metric === "cost";
@@ -26,8 +39,10 @@ export function UseragentDistributionDonut({ data }: UseragentDistributionDonutP
     isCostMetric ? totalCost : totalRequests,
     metric,
   );
-  const chartData = data.map((entry) => ({
+  const chartData: ChartDatum[] = data.map((entry, index) => ({
     ...entry,
+    id: `${entry.useragent}-${index}`,
+    fill: getUseragentColor(entry.useragent, index),
     metricLabel: formatDistributionMetricValue(
       isCostMetric ? entry.costUsd : entry.requests,
       metric,
@@ -43,6 +58,32 @@ export function UseragentDistributionDonut({ data }: UseragentDistributionDonutP
     (maxLength, entry) => Math.max(maxLength, entry.metricLabel.length),
     0,
   );
+
+  useEffect(() => {
+    if (!activeLegendId) {
+      return;
+    }
+
+    legendRefs.current[activeLegendId]?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [activeLegendId]);
+
+  const renderSlice = (props: PieSectorShapeProps) => {
+    const datum = props.payload as ChartDatum | undefined;
+    const isHighlighted = props.isActive || datum?.id === activeLegendId;
+
+    return (
+      <Sector
+        {...props}
+        outerRadius={
+          typeof props.outerRadius === "number"
+            ? props.outerRadius + (isHighlighted ? ACTIVE_RADIUS_OFFSET : 0)
+            : 65 + (isHighlighted ? ACTIVE_RADIUS_OFFSET : 0)
+        }
+        stroke={isHighlighted ? "hsl(var(--background))" : "none"}
+        strokeWidth={isHighlighted ? 2 : 0}
+      />
+    );
+  };
 
   return (
     <div className="rounded-xl border bg-card p-5">
@@ -77,9 +118,12 @@ export function UseragentDistributionDonut({ data }: UseragentDistributionDonutP
                 innerRadius={45}
                 outerRadius={65}
                 strokeWidth={0}
+                shape={renderSlice}
+                onMouseEnter={(entry: ChartDatum) => setActiveLegendId(entry.id)}
+                onMouseLeave={() => setActiveLegendId(null)}
               >
-                {chartData.map((entry, i) => (
-                  <Cell key={entry.useragent} fill={getUseragentColor(entry.useragent, i)} />
+                {chartData.map((entry) => (
+                  <Cell key={entry.id} fill={entry.fill} />
                 ))}
               </Pie>
               <Tooltip
@@ -93,16 +137,31 @@ export function UseragentDistributionDonut({ data }: UseragentDistributionDonutP
             </PieChart>
           </ResponsiveContainer>
         </div>
-        <div className="flex-1 space-y-1.5 text-xs">
+        <div
+          className="flex-1 overflow-y-auto text-xs [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+          data-testid="useragent-distribution-legend-list"
+          style={{ maxHeight: `calc(${LEGEND_VISIBLE_COUNT} * ${LEGEND_ROW_HEIGHT_REM}rem)` }}
+        >
           {chartData.map((entry, i) => (
-            <div
-              key={entry.useragent}
-              className="flex items-center justify-between rounded-md px-2 py-1 hover:bg-muted/50"
+            <button
+              ref={(node) => {
+                legendRefs.current[entry.id] = node;
+              }}
+              type="button"
+              key={entry.id}
+              className="flex h-8 w-full items-center justify-between rounded-md border px-2 py-1 text-left transition-all hover:bg-muted/50"
+              style={{ borderColor: activeLegendId === entry.id ? entry.fill : "transparent" }}
+              onMouseEnter={() => setActiveLegendId(entry.id)}
+              onMouseLeave={() => setActiveLegendId(null)}
+              onFocus={() => setActiveLegendId(entry.id)}
+              onBlur={() => setActiveLegendId(null)}
+              data-active={activeLegendId === entry.id ? "true" : "false"}
+              data-testid={`useragent-distribution-legend-${i}`}
             >
               <div className="flex items-center gap-2">
                 <span
                   className="h-2.5 w-2.5 shrink-0 rounded-[3px]"
-                  style={{ background: getUseragentColor(entry.useragent, i) }}
+                  style={{ background: entry.fill }}
                 />
                 <span className="text-foreground">{entry.useragent}</span>
               </div>
@@ -115,7 +174,7 @@ export function UseragentDistributionDonut({ data }: UseragentDistributionDonutP
                   {entry.metricLabel}
                 </span>
               </div>
-            </div>
+            </button>
           ))}
         </div>
       </div>

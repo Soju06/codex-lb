@@ -1,6 +1,6 @@
 import { cloneElement, isValidElement, type ReactNode } from "react";
 import userEvent from "@testing-library/user-event";
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import { UseragentDistributionDonut } from "./useragent-distribution-donut";
@@ -23,13 +23,31 @@ vi.mock("recharts", async (importOriginal) => {
     Pie: ({
       data,
       dataKey,
+      onMouseEnter,
+      onMouseLeave,
+      shape,
     }: {
       data: Array<{ useragent: string }>;
       dataKey: string;
+      onMouseEnter?: (entry: { useragent: string }, index: number) => void;
+      onMouseLeave?: (entry: { useragent: string }, index: number) => void;
+      shape?: unknown;
     }) => (
-      <div data-testid="useragent-distribution-pie" data-key={dataKey}>
-        {data.map((entry) => (
-          <div key={entry.useragent}>{entry.useragent}</div>
+      <div
+        data-testid="useragent-distribution-pie"
+        data-key={dataKey}
+        data-shape={shape ? "true" : "false"}
+      >
+        {data.map((entry, index) => (
+          <button
+            key={entry.useragent}
+            type="button"
+            data-testid={`useragent-slice-${index}`}
+            onMouseEnter={() => onMouseEnter?.(entry, index)}
+            onMouseLeave={() => onMouseLeave?.(entry, index)}
+          >
+            {entry.useragent}
+          </button>
         ))}
       </div>
     ),
@@ -57,6 +75,60 @@ vi.mock("recharts", async (importOriginal) => {
 });
 
 describe("UseragentDistributionDonut", () => {
+  it("highlights the matching legend row when a legend item is hovered", () => {
+    render(
+      <UseragentDistributionDonut
+        data={[
+          { useragent: "CLI", costUsd: 12.5, requests: 8, percentage: 62.5 },
+          { useragent: "SDK", costUsd: 7.5, requests: 4, percentage: 37.5 },
+        ]}
+      />,
+    );
+
+    const legendRow = screen.getByTestId("useragent-distribution-legend-0");
+
+    expect(screen.getByTestId("useragent-distribution-pie")).toHaveAttribute("data-shape", "true");
+    expect(legendRow).toHaveAttribute("data-active", "false");
+
+    fireEvent.mouseEnter(legendRow);
+    expect(legendRow).toHaveAttribute("data-active", "true");
+
+    fireEvent.mouseLeave(legendRow);
+    expect(legendRow).toHaveAttribute("data-active", "false");
+  });
+
+  it("highlights the matching legend row when a pie slice is hovered", () => {
+    render(
+      <UseragentDistributionDonut
+        data={[
+          { useragent: "CLI", costUsd: 12.5, requests: 8, percentage: 62.5 },
+          { useragent: "SDK", costUsd: 7.5, requests: 4, percentage: 37.5 },
+        ]}
+      />,
+    );
+
+    fireEvent.mouseEnter(screen.getByTestId("useragent-slice-0"));
+    expect(screen.getByTestId("useragent-distribution-legend-0")).toHaveAttribute("data-active", "true");
+  });
+
+  it("limits the legend viewport to four visible rows before scrolling", () => {
+    render(
+      <UseragentDistributionDonut
+        data={Array.from({ length: 5 }, (_, index) => ({
+          useragent: `UA-${index + 1}`,
+          costUsd: index + 1,
+          requests: index + 1,
+          percentage: 20,
+        }))}
+      />,
+    );
+
+    expect(screen.getByTestId("useragent-distribution-legend-list")).toHaveStyle({
+      maxHeight: "calc(4 * 2rem)",
+    });
+    expect(screen.getByTestId("useragent-distribution-legend-4")).toBeInTheDocument();
+  });
+
   it("shows the total label and compact cost total in the donut center by default", () => {
     render(
       <UseragentDistributionDonut
@@ -198,5 +270,28 @@ describe("UseragentDistributionDonut", () => {
     expect(screen.getByTestId("useragent-distribution-center-value")).toHaveTextContent("1.5B");
     expect(screen.getByText("500M")).toBeInTheDocument();
     expect(screen.getByText("1B")).toBeInTheDocument();
+  });
+
+  it("scrolls the hovered pie item into view in the legend list", () => {
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: scrollIntoView,
+    });
+
+    render(
+      <UseragentDistributionDonut
+        data={Array.from({ length: 5 }, (_, index) => ({
+          useragent: `UA-${index + 1}`,
+          costUsd: 5 - index,
+          requests: index + 1,
+          percentage: 20,
+        }))}
+      />,
+    );
+
+    fireEvent.mouseEnter(screen.getByTestId("useragent-slice-4"));
+
+    expect(scrollIntoView).toHaveBeenCalledWith({ block: "nearest", inline: "nearest" });
   });
 });

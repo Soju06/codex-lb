@@ -187,6 +187,41 @@ describe("AccountActions", () => {
     expect(onResetCredit).toHaveBeenCalledWith(account.accountId);
   });
 
+  it.each(["paused", "deactivated", "reauth_required"] as const)(
+    "disables reset action for %s accounts",
+    async (status) => {
+      const user = userEvent.setup();
+      const onResetCredit = vi.fn();
+      const account = createAccountSummary({
+        status,
+        availableResetCredits: 2,
+        resetCreditNearestExpiresAt: "2026-01-03T12:00:00.000Z",
+      });
+
+      render(
+        <AccountActions
+          account={account}
+          busy={false}
+          onPause={vi.fn()}
+          onResume={vi.fn()}
+          onProbe={vi.fn()}
+          onDelete={vi.fn()}
+          onReauth={vi.fn()}
+          onExportAuth={vi.fn()}
+          onResetCredit={onResetCredit}
+          onSecurityWorkAuthorizedChange={vi.fn()}
+          onLimitWarmupChange={vi.fn()}
+          onRoutingPolicyChange={vi.fn()}
+        />,
+      );
+
+      const button = screen.getByRole("button", { name: "Reset (2)" });
+      expect(button).toBeDisabled();
+      await user.click(button);
+      expect(onResetCredit).not.toHaveBeenCalled();
+    },
+  );
+
   it("hides reset action when no reset credits are available", () => {
     const account = createAccountSummary({
       availableResetCredits: 0,

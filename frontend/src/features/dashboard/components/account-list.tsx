@@ -314,9 +314,20 @@ export function AccountList({ accounts, readOnly = false, onAction }: AccountLis
             : "No attempts";
           const availableResetCredits = account.availableResetCredits ?? 0;
           const hasResetCredits = availableResetCredits > 0;
+          const resetCreditDisabled =
+            readOnly || status === "paused" || status === "reauth" || status === "deactivated";
           const resetCountdown = account.resetCreditNearestExpiresAt
             ? formatSingleUnitRemaining(account.resetCreditNearestExpiresAt)
             : null;
+          const resetButtonTitle = resetCreditDisabled
+            ? status === "paused"
+              ? "Resume account to redeem reset credits"
+              : status === "reauth" || status === "deactivated"
+                ? "Re-authenticate account to redeem reset credits"
+                : "Reset credits unavailable"
+            : resetCountdown
+              ? `Reset (${availableResetCredits}) · ${resetCountdown.label}`
+              : `Reset (${availableResetCredits})`;
           return (
             <div
               key={account.accountId}
@@ -366,8 +377,8 @@ export function AccountList({ accounts, readOnly = false, onAction }: AccountLis
                      variant="ghost"
                      className="h-7 w-7 rounded-md p-0 text-muted-foreground hover:text-foreground"
                      aria-label={`Redeem reset credit for ${title}`}
-                     title={resetCountdown ? `Reset (${availableResetCredits}) · ${resetCountdown.label}` : `Reset (${availableResetCredits})`}
-                     disabled={readOnly}
+                     title={resetButtonTitle}
+                     disabled={resetCreditDisabled}
                      onClick={() => onAction?.(account, "reset-credit")}
                    >
                     <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />

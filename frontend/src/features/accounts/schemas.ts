@@ -114,9 +114,9 @@ export const RateLimitResetCreditsSnapshotSchema = z.object({
 });
 
 export const ConsumeRateLimitResetCreditResponseSchema = z.object({
-  code: z.string(),
-  windowsReset: z.number(),
-  redeemedAt: z.iso.datetime({ offset: true }).nullable().optional(),
+  code: z.string().nullable().optional(),
+  windowsReset: z.number().nullable().optional(),
+  redeemedAt: z.iso.datetime({ offset: true }).nullable(),
 });
 
 export const AccountTrendsResponseSchema = z.object({

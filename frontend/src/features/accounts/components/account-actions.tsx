@@ -69,6 +69,11 @@ export function AccountActions({
     : null;
   const availableResetCredits = account.availableResetCredits ?? 0;
   const hasResetCredits = availableResetCredits > 0;
+  const resetCreditDisabled =
+    busy ||
+    readOnly ||
+    account.status === "paused" ||
+    showOperatorRecoveryAction;
 
   return (
     <div className="space-y-3 border-t pt-4">
@@ -207,7 +212,7 @@ export function AccountActions({
             variant="outline"
             className="relative h-8 gap-1.5 pr-8 text-xs"
             onClick={() => onResetCredit(account.accountId)}
-            disabled={busy || readOnly}
+            disabled={resetCreditDisabled}
           >
             <RotateCcw className="h-3.5 w-3.5" />
             {`Reset (${availableResetCredits})`}

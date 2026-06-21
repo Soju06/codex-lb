@@ -182,12 +182,15 @@ export function useAccountMutations() {
   const resetCreditConsumeMutation = useMutation({
     mutationFn: (accountId: string) => consumeRateLimitResetCredit(accountId),
     onSuccess: (data) => {
-      const resetCount = data.windowsReset;
+      const resetCount = data.windowsReset ?? 0;
       toast.success(
         `Rate-limit window${resetCount === 1 ? "" : "s"} reset (${resetCount})`,
       );
-      void queryClient.invalidateQueries({ queryKey: ["accounts"] });
-      void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+      void queryClient.invalidateQueries({ queryKey: ["accounts", "list"] });
+      void queryClient.invalidateQueries({ queryKey: ["accounts", "trends"] });
+      void queryClient.invalidateQueries({ queryKey: ["accounts", "reset-credits"] });
+      void queryClient.invalidateQueries({ queryKey: ["dashboard", "overview"] });
+      void queryClient.invalidateQueries({ queryKey: ["dashboard", "projections"] });
     },
     onError: (error: Error) => {
       toast.error(error.message || "Reset credit redeem failed");

@@ -32,18 +32,9 @@ client treats non-200, non-JSON, and schema-drifted 200 responses defensively.
 - **In-memory only.** No DB column, no migration. Each replica refreshes its own process-local
   snapshots, which repopulate within one tick of startup. Restart cost: up to 60s of
   `available_reset_credits: 0` on that replica.
-- **Eligibility clears stale snapshots.** Paused accounts, deactivated accounts, and accounts
-  without a usable `chatgpt-account-id` do not fetch reset credits. If they already have a
-  cached snapshot, the scheduler invalidates it; account summaries suppress it immediately;
-  and dashboard consume rejects the account before route resolution or upstream calls.
 - **Server picks the credit, not the client.** `POST /consume` takes only the account id;
   the server selects the soonest-expiring available credit from the freshest snapshot and
   generates the `redeem_request_id`. Avoids stale-UI and clock-skew races.
-- **Dashboard and self-service consume differ intentionally.** The dashboard `POST /api/accounts/{id}/rate-limit-reset-credits/consume`
-  takes only the account id and the server selects the soonest-expiring available credit.
-  The API-key self-service `POST /v1/reset-credit` instead accepts `{account_id, redeem_id}`
-  and forwards that exact credit only after validating account-pool membership and current
-  credit availability.
 - **Never mutates account status.** Account status is owned by usage refresh
   (see `usage-refresh-policy`). Reset-credit polling failure logs and retains the prior
   snapshot; it does not deactivate, rate-limit, or quota-block any account.
@@ -51,17 +42,12 @@ client treats non-200, non-JSON, and schema-drifted 200 responses defensively.
   loop shape (`asyncio.Lock`-guarded, configurable cadence) but intentionally does not use
   leader election because the cache is process-local. The scheduler always starts with the
   app; only the interval is configurable. See `design.md` for the rationale.
-- **`/v1/reset-credit` follows the `/v1/usage` route family.** It is an API-key self-service
-  contract, not a dashboard/admin route. The authenticated key's account pool comes from
-  existing assignment-scope behavior: scoped keys are limited to `assigned_account_ids`,
-  while unscoped keys can see all selectable accounts.
 
 ## Failure Modes
 
 - **Upstream returns 200 but the rate-limit window doesn't move.** Per upstream behavior
-  the credit is still consumed. This is an upstream caveat rather than a dashboard dialog
-  requirement; on success we invalidate the cache and let the next tick reconcile
-  `available_count`.
+  the credit is still consumed. The confirmation dialog warns the operator; on success we
+  invalidate the cache and let the next tick reconcile `available_count`.
 - **Snapshot is empty/stale.** UI hides all reset affordances for that account
   (`available_reset_credits: 0`). Not an error — wait one tick.
 - **Upstream 401/403/auth-expired.** Logged; prior snapshot retained. Does NOT deactivate
@@ -71,10 +57,6 @@ client treats non-200, non-JSON, and schema-drifted 200 responses defensively.
   consume requests cannot forward the same cached `credit_id` upstream. After the first
   request finishes, the second request re-reads the account snapshot and either sees a
   refreshed state or fails with a dashboard conflict when no credit is still available.
-- **Stale `/v1/reset-credit` `redeem_id`.** A client may read a credit from `GET /v1/reset-credit`
-  and redeem it later after the snapshot changed. `POST /v1/reset-credit` re-reads the
-  current cached snapshot and rejects unavailable or mismatched `redeem_id` values with a
-  client error instead of redeeming a different credit.
 - **Upstream consume failures.** Client-facing upstream failures are preserved as dashboard
   errors (`401`, `403`, `409`), while other consume failures surface as dashboard `503`
   responses instead of falling into the generic internal-error handler.
@@ -117,52 +99,12 @@ client treats non-200, non-JSON, and schema-drifted 200 responses defensively.
 }
 ```
 
-## Example: `/v1/reset-credit` GET response
-
-```json
-[
-  {
-    "account_id": "acc_alpha",
-    "email": "alpha@example.com",
-    "redeem_id": "RateLimitResetCredit_alpha",
-    "expiredAt": "2026-07-12T01:29:41.346025Z"
-  },
-  {
-    "account_id": "acc_alpha",
-    "email": "alpha@example.com",
-    "redeem_id": "RateLimitResetCredit_alpha_2",
-    "expiredAt": null
-  },
-  {
-    "account_id": "acc_beta",
-    "email": "beta@example.com",
-    "redeem_id": "RateLimitResetCredit_beta",
-    "expiredAt": null
-  }
-]
-```
-
-Entries are ordered by email ascending, then account id ascending, then credit expiry ascending
-with `null` expiries last, so the response remains deterministic for the same eligible pool.
-
-## Example: `/v1/reset-credit` POST body
-
-```json
-{
-  "account_id": "acc_alpha",
-  "redeem_id": "RateLimitResetCredit_alpha"
-}
-```
-
 ## Operational Notes
 
 - The 60s cadence matches usage refresh, but each replica polls because each replica serves
   dashboard reads from its own process-local snapshot cache.
-- A credit is consumed as soon as upstream returns 200; operators should treat the confirm
-  action as the point of no return.
-- `/v1/reset-credit` uses the same process-local snapshot cache as the dashboard flow, so a
-  client may need to retry after the next refresh tick if an account has just restarted or
-  recently redeemed a credit.
+- A credit is consumed as soon as upstream returns 200 — treat the confirmation dialog as
+  the point of no return.
 
 ## Related Work
 

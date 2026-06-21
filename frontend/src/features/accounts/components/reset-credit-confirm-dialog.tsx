@@ -5,12 +5,15 @@ import {
 } from "@/features/accounts/hooks/use-accounts";
 import type { RateLimitResetCreditItem } from "@/features/accounts/schemas";
 import { cn } from "@/lib/utils";
+import { getErrorMessage } from "@/utils/errors";
 import { formatLocalDateTimeSeconds, formatSingleUnitRemaining } from "@/utils/formatters";
 
 export type ResetCreditConfirmDialogProps = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   accountId: string | null;
+  /** Count from account summary when the per-account cache GET has not populated yet. */
+  summaryAvailableCount?: number;
 };
 
 function pickSoonestAvailableCredit(
@@ -70,15 +73,27 @@ export function ResetCreditConfirmDialog({
   open,
   onOpenChange,
   accountId,
+  summaryAvailableCount = 0,
 }: ResetCreditConfirmDialogProps) {
   const { resetCreditConsumeMutation } = useAccountMutations();
   const snapshotQuery = useRateLimitResetCredits(accountId, open);
+  const snapshotLoading = snapshotQuery.isPending;
+  const snapshotError = snapshotQuery.isError;
+  const snapshotErrorMessage = getErrorMessage(
+    snapshotQuery.error,
+    "Failed to load reset credit details",
+  );
   const soonest = pickSoonestAvailableCredit(snapshotQuery.data?.credits);
   const otherCredits = (snapshotQuery.data?.credits ?? []).filter(
     (c) => c.status === "available" && c.id !== soonest?.id,
   );
-  const availableCount = snapshotQuery.data?.availableCount ?? 0;
+  const availableCount =
+    snapshotQuery.data != null
+      ? snapshotQuery.data.availableCount
+      : summaryAvailableCount;
   const pending = resetCreditConsumeMutation.isPending;
+  const confirmDisabled =
+    pending || !accountId || snapshotLoading || snapshotError || availableCount <= 0;
 
   const handleConfirm = () => {
     if (!accountId || pending) {
@@ -111,36 +126,48 @@ export function ResetCreditConfirmDialog({
       description="This redeems the soonest-expiring banked reset credit for this account."
       confirmLabel={pending ? "Redeeming..." : "Redeem credit"}
       cancelLabel="Cancel"
-      confirmDisabled={pending || !accountId || !soonest}
+      confirmDisabled={confirmDisabled}
       onOpenChange={handleOpenChange}
       onConfirm={handleConfirm}
     >
       <div className="text-sm">
-        <p className="font-medium">
-          {availableCount} free rate limit reset{availableCount !== 1 ? "s" : ""}
-        </p>
-        {soonest ? (
-          <div className="mt-2 space-y-1">
-            <CreditExpiryLine
-              expiresAt={soonest.expiresAt}
-              label="Reset expires on"
-              suffix="will be used"
-            />
-            {otherCredits.map((credit) => (
-              <CreditExpiryLine
-                key={credit.id}
-                expiresAt={credit.expiresAt}
-                label="Other expires on"
-                colorClass="text-muted-foreground"
-              />
-            ))}
-            {!soonest.expiresAt && otherCredits.length === 0 ? (
-              <p className="text-xs text-muted-foreground">No upcoming expiry data available.</p>
+        {snapshotLoading ? (
+          <p className="text-xs text-muted-foreground">Loading reset credit details...</p>
+        ) : snapshotError ? (
+          <p className="text-xs text-destructive">{snapshotErrorMessage}</p>
+        ) : (
+          <>
+            <p className="font-medium">
+              {availableCount} free rate limit reset{availableCount !== 1 ? "s" : ""}
+            </p>
+            {soonest ? (
+              <div className="mt-2 space-y-1">
+                <CreditExpiryLine
+                  expiresAt={soonest.expiresAt}
+                  label="Reset expires on"
+                  suffix="will be used"
+                />
+                {otherCredits.map((credit) => (
+                  <CreditExpiryLine
+                    key={credit.id}
+                    expiresAt={credit.expiresAt}
+                    label="Other expires on"
+                    colorClass="text-muted-foreground"
+                  />
+                ))}
+                {!soonest.expiresAt && otherCredits.length === 0 ? (
+                  <p className="text-xs text-muted-foreground">No upcoming expiry data available.</p>
+                ) : null}
+              </div>
+            ) : availableCount > 0 ? (
+              <p className="mt-1 text-xs text-muted-foreground">No upcoming expiry data available.</p>
+            ) : snapshotQuery.data === null ? (
+              <p className="mt-1 text-xs text-muted-foreground">
+                Reset credit details are not available yet.
+              </p>
             ) : null}
-          </div>
-        ) : availableCount > 0 ? (
-          <p className="mt-1 text-xs text-muted-foreground">No upcoming expiry data available.</p>
-        ) : null}
+          </>
+        )}
       </div>
     </ConfirmDialog>
   );

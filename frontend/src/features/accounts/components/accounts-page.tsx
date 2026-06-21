@@ -54,7 +54,8 @@ export function AccountsPage() {
   const importDialog = useDialogState();
   const oauthDialog = useDialogState();
   const deleteDialog = useDialogState<string>();
-  const resetCreditDialog = useDialogState<string>();
+  type ResetCreditDialogTarget = { accountId: string; availableResetCredits: number };
+  const resetCreditDialog = useDialogState<ResetCreditDialogTarget>();
   const exportDialog = useDialogState<AccountAuthExportResponse>();
   const [deleteHistory, setDeleteHistory] = useState(false);
 
@@ -180,7 +181,13 @@ export function AccountsPage() {
                 .then((result) => exportDialog.show(result))
                 .catch(() => null);
             }}
-            onResetCredit={(accountId) => resetCreditDialog.show(accountId)}
+            onResetCredit={(accountId) => {
+            const account = accountsQuery.data?.find((item) => item.accountId === accountId);
+            resetCreditDialog.show({
+              accountId,
+              availableResetCredits: account?.availableResetCredits ?? 0,
+            });
+          }}
             onLimitWarmupChange={(accountId, enabled) =>
               void limitWarmupMutation.mutateAsync({ accountId, enabled })
             }
@@ -241,7 +248,8 @@ export function AccountsPage() {
       {resetCreditDialog.data ? (
         <ResetCreditConfirmDialog
           open={resetCreditDialog.open}
-          accountId={resetCreditDialog.data}
+          accountId={resetCreditDialog.data.accountId}
+          summaryAvailableCount={resetCreditDialog.data.availableResetCredits}
           onOpenChange={resetCreditDialog.onOpenChange}
         />
       ) : null}

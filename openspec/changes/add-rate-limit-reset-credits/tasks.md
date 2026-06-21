@@ -12,10 +12,6 @@
 - [x] 2.3 Create `app/modules/rate_limit_reset_credits/api.py` with `GET /api/accounts/{account_id}/rate-limit-reset-credits` (returns cached snapshot or `null`) and `POST /api/accounts/{account_id}/rate-limit-reset-credits/consume` (selects soonest-`expires_at` available credit from the freshest snapshot, generates `redeem_request_id`, calls upstream, invalidates the cached snapshot, returns `{code, windows_reset, redeemed_at}`). Use `validate_dashboard_session` for GET and `require_dashboard_write_access` for POST. Return `409` when no credit is available. Register the router in `app/main.py`
 - [x] 2.4 Extend the AccountSummary mapper(s) in `app/modules/accounts/` and the dashboard mapper to join the cached snapshot onto each returned account: add `available_reset_credits: int` (0 when no snapshot) and `reset_credit_nearest_expires_at: datetime | None` (null when no snapshot)
 - [x] 2.5 Update the backend pydantic response schemas (`AccountSummary` / equivalent) to declare the two new fields
-- [x] 2.6 Extend the authenticated `/v1/*` proxy surface with `GET /v1/reset-credit` and `POST /v1/reset-credit` in `app/modules/proxy/api.py`, using `validate_usage_api_key` and the existing OpenAI-style error envelope
-- [x] 2.7 Reuse API-key assignment-scope semantics to resolve the eligible reset-credit account pool: scoped keys may access only `assigned_account_ids`; unscoped keys may access all selectable accounts
-- [x] 2.8 Implement `GET /v1/reset-credit` projection from cached snapshots into a deterministic array ordered by account email ascending, account id ascending, and credit expiry ascending (`null` last), returning every available credit for each eligible account with `email` included in each object and omitting accounts with no available cached credits
-- [x] 2.9 Implement `POST /v1/reset-credit` exact-credit redemption: validate `{account_id, redeem_id}`, reject out-of-pool accounts, reject unavailable or mismatched redeem ids, forward the exact `credit_id` upstream, and invalidate the cached snapshot on success
 
 ## 3. Frontend schemas, API client, formatter
 
@@ -29,7 +25,7 @@
 - [x] 4.2 Add the `Reset (N)` button to `frontend/src/features/accounts/components/account-actions.tsx` immediately after the Export button, matching its `size="sm" variant="outline" className="h-8 gap-1.5 text-xs"` style, with a `RotateCcw` icon, a single-unit countdown label (using 3.3) placed at the button's right-upper radius, and destructive/red label color when `expiringSoon`. Render only when `availableResetCredits > 0`. Wire `onClick` to open the confirmation dialog
 - [x] 4.3 Add a reset action to `frontend/src/features/dashboard/components/account-list.tsx` (table view) inside the existing Details action cell, matching the `h-7 w-7` icon-button style with the countdown and count exposed in the `title` tooltip. Render only when `availableResetCredits > 0`
 - [x] 4.4 Add a `Reset (N)` button to `frontend/src/features/dashboard/components/account-card.tsx` (grid view) next to the Details button, matching the `h-7 gap-1.5` text style with the single-unit countdown label. Render only when `availableResetCredits > 0`
-- [x] 4.5 Implement the confirmation dialog (reuse `frontend/src/components/confirm-dialog.tsx` + `frontend/src/hooks/use-dialog-state.ts`, same shape as the delete-account dialog): body explains that the dashboard redeems the soonest-expiring banked reset credit for the account. On confirm → call `consumeRateLimitResetCredit(accountId)` → success/failure toast → query invalidation
+- [x] 4.5 Implement the confirmation dialog (reuse `frontend/src/components/confirm-dialog.tsx` + `frontend/src/hooks/use-dialog-state.ts`, same shape as the delete-account dialog): body shows the soonest credit's title and `expires_at` formatted as local `YYYY-MM-DD HH:MM:SS`, plus the "credit is consumed even if the window doesn't move" warning. On confirm → call `consumeRateLimitResetCredit(accountId)` → success/failure toast → query invalidation
 - [x] 4.6 Add a "Most reset credits" option to the Accounts page sort selector in `frontend/src/features/accounts/sorting.ts` and make it the default Accounts page sort mode: comparator orders by `availableResetCredits` desc, tiebreak by `resetCreditNearestExpiresAt` asc (soonest first), accounts with null expiry last. Add the localized dropdown label
 - [x] 4.7 Add a summed reset-credit badge to `frontend/src/components/layout/app-header.tsx` for the Accounts nav tab, capped at `99+`
 
@@ -43,16 +39,14 @@
 - [x] 5.6 Frontend — `formatSingleUnitRemaining`: boundaries at 7d (color flip), 1d, 1h, 1m, and `now`; sub-minute and past timestamps both yield `"now"`
 - [x] 5.7 Frontend — `AccountListItem` badge: renders count, `"99+"` at 100+, absent at 0
 - [x] 5.8 Frontend — Reset button visibility: rendered when `availableResetCredits > 0`, absent at 0, in all three surfaces (account-actions, dashboard table, dashboard grid)
-- [x] 5.9 Frontend — confirm dialog → consume: confirmation calls `consumeRateLimitResetCredit`, success path invalidates queries, failure path surfaces a toast and does not invalidate
+- [x] 5.9 Frontend — confirm dialog → consume: confirmation calls `consumeRateLimitResetCredit`, shows the expiry in local `YYYY-MM-DD HH:MM:SS`, success path invalidates queries, failure path surfaces a toast and does not invalidate
 - [x] 5.10 Frontend — "Most reset credits" sort: comparator orders by count desc with soonest-expiry tiebreak, null-expiry accounts last
 - [x] 5.11 Frontend — Accounts nav badge: shows the summed total, caps at `99+`, and hides at zero
-- [x] 5.12 Backend — `/v1/reset-credit` GET: requires Bearer API key, honors scoped vs unscoped account pools, emits a deterministic array with `email` in each object for every available credit, and omits accounts without available cached credits
-- [x] 5.13 Backend — `/v1/reset-credit` POST: rejects out-of-pool `account_id`, rejects unavailable or mismatched `redeem_id`, forwards the exact requested `credit_id`, invalidates the snapshot on success, and preserves `/v1/*` OpenAI-style error responses
 
 ## 6. Validation and OpenSpec hygiene
 
 - [x] 6.1 Run `openspec validate add-rate-limit-reset-credits --strict` and resolve any findings
 - [x] 6.2 Run `openspec validate --specs --strict` to confirm no main-spec drift
-- [x] 6.3 Run backend checks: `uv run ruff check && uv run ruff format --check && uv run pytest` (or the repo's documented equivalent)
+- [ ] 6.3 Run backend checks: `uv run ruff check && uv run ruff format --check && uv run pytest` (or the repo's documented equivalent)
 - [x] 6.4 Run frontend checks: `pnpm -C frontend lint && pnpm -C frontend typecheck && pnpm -C frontend test` (or the repo's documented equivalent)
 - [ ] 6.5 Manually verify the three Reset button placements, the per-button count labels, the Accounts-nav total badge cap behavior, the countdown color flip at 7d, the local expiry timestamp, the confirm flow, and the new sort option against the spec scenarios

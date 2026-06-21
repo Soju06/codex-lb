@@ -113,9 +113,20 @@ export function AccountCard({ account, showAccountId = false, readOnly = false, 
     : "No attempts";
   const availableResetCredits = account.availableResetCredits ?? 0;
   const hasResetCredits = availableResetCredits > 0;
+  const resetCreditDisabled =
+    readOnly || status === "paused" || status === "reauth" || status === "deactivated";
   const resetCountdown = account.resetCreditNearestExpiresAt
     ? formatSingleUnitRemaining(account.resetCreditNearestExpiresAt)
     : null;
+  const resetButtonTitle = resetCreditDisabled
+    ? status === "paused"
+      ? "Resume account to redeem reset credits"
+      : status === "reauth" || status === "deactivated"
+        ? "Re-authenticate account to redeem reset credits"
+        : "Reset credits unavailable"
+    : resetCountdown
+      ? `Reset (${availableResetCredits}) · ${resetCountdown.label}`
+      : `Reset (${availableResetCredits})`;
 
   return (
     <div className="card-hover rounded-xl border bg-card p-4">
@@ -201,7 +212,8 @@ export function AccountCard({ account, showAccountId = false, readOnly = false, 
             size="sm"
             variant="ghost"
             className="relative h-7 gap-1.5 rounded-lg pr-8 text-xs text-muted-foreground hover:text-foreground"
-            disabled={readOnly}
+            title={resetButtonTitle}
+            disabled={resetCreditDisabled}
             onClick={() => onAction?.(account, "reset-credit")}
           >
             <RotateCcw className="h-3 w-3" />

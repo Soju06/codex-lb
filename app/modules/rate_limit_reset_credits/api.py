@@ -162,7 +162,7 @@ async def consume_rate_limit_reset_credit(
             code="account_reset_credit_refresh_failed",
         ) from exc
     except UpstreamProxyRouteError as exc:
-        raise DashboardConflictError(
+        raise DashboardServiceUnavailableError(
             f"Reset credit consume upstream proxy route unavailable: {exc.reason}",
             code="account_reset_credit_upstream_route_unavailable",
         ) from exc
@@ -197,20 +197,17 @@ async def _redeem_soonest_reset_credit(
     effective_consume_fn = consume_fn or consume_reset_credit
 
     lock = await get_reset_credit_redeem_lock(account.id)
-    try:
-        async with lock:
-            return await _redeem_soonest_reset_credit_locked(
-                account=account,
-                store=store,
-                encryptor=encryptor,
-                effective_fetch_fn=effective_fetch_fn,
-                effective_consume_fn=effective_consume_fn,
-                auth_manager=auth_manager,
-                refresh_usage=refresh_usage,
-                resolve_route=resolve_route,
-            )
-    finally:
-        await _prune_redeem_lock_if_idle(account.id, lock)
+    async with lock:
+        return await _redeem_soonest_reset_credit_locked(
+            account=account,
+            store=store,
+            encryptor=encryptor,
+            effective_fetch_fn=effective_fetch_fn,
+            effective_consume_fn=effective_consume_fn,
+            auth_manager=auth_manager,
+            refresh_usage=refresh_usage,
+            resolve_route=resolve_route,
+        )
 
 
 async def _redeem_soonest_reset_credit_locked(
@@ -290,18 +287,15 @@ async def _redeem_soonest_reset_credit_locked(
     )
 
 
-async def _prune_redeem_lock_if_idle(account_id: str, lock: asyncio.Lock) -> None:
-    if lock.locked():
-        return
-    async with _redeem_locks_registry_lock:
-        if _redeem_locks.get(account_id) is lock and not lock.locked():
-            _redeem_locks.pop(account_id, None)
-
-
 def _assert_account_can_redeem_reset_credit(account: Account) -> None:
-    if account.status in _NON_REDEEMABLE_STATUSES:
+    if account.status in _NON_REDEEMABLE_STATUSES or not account.chatgpt_account_id:
+        msg = (
+            f"Account is {account.status.value} and cannot redeem a reset credit"
+            if account.status in _NON_REDEEMABLE_STATUSES
+            else "Account has no ChatGPT account ID and cannot redeem a reset credit"
+        )
         raise DashboardConflictError(
-            f"Account is {account.status.value} and cannot redeem a reset credit",
+            msg,
             code="account_not_reset_credit_applicable",
         )
 

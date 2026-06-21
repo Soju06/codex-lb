@@ -32,7 +32,7 @@ The dashboard SHALL render `/reports` with a `Distribution by UserAgent` card pl
 
 ### Requirement: Reports distribution cards toggle between cost and requests
 
-The dashboard SHALL render both `/reports` distribution cards with an upper-right `cost` / `req` toggle that defaults to `cost` and changes the donut slices, tooltip values, percentages, and legend values to match the selected metric.
+The dashboard SHALL render both `/reports` distribution cards with an upper-right `cost` / `req` toggle that defaults to `cost` and changes the donut slices, percentages, and legend values to match the selected metric. The `Distribution by Model` and `Distribution by UserAgent` donuts SHALL NOT render hover tooltips.
 
 #### Scenario: Distribution cards default to cost mode
 - **WHEN** an authenticated operator opens `/reports`

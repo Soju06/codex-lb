@@ -1,15 +1,9 @@
-import { cloneElement, isValidElement, type ReactNode } from "react";
+import type { ReactNode } from "react";
 import userEvent from "@testing-library/user-event";
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import { ModelDistributionDonut } from "./model-distribution-donut";
-
-type MockTooltipContentProps = {
-  names?: {
-    requests?: unknown;
-  };
-};
 
 vi.mock("recharts", async (importOriginal) => {
   const actual = await importOriginal<typeof import("recharts")>();
@@ -52,25 +46,6 @@ vi.mock("recharts", async (importOriginal) => {
       </div>
     ),
     Cell: () => null,
-    Tooltip: ({ content }: { content: ReactNode }) => {
-      if (!isValidElement<MockTooltipContentProps>(content)) {
-        return null;
-      }
-
-      const dataKey = content.props.names?.requests ? "requests" : "costUsd";
-
-      return cloneElement(content, {
-        active: true,
-        payload: [
-          {
-            dataKey,
-            name: dataKey,
-            value: dataKey === "requests" ? 2 : 42.02,
-            color: "#3b82f6",
-          },
-        ],
-      } as Record<string, unknown>);
-    },
   };
 });
 
@@ -165,7 +140,7 @@ describe("ModelDistributionDonut", () => {
     expect(largeCostLegendValue).toHaveStyle({ minWidth: "7ch" });
   });
 
-  it("defaults to cost mode", () => {
+  it("defaults to cost mode without rendering a donut tooltip", () => {
     render(
       <ModelDistributionDonut
         data={[
@@ -178,16 +153,12 @@ describe("ModelDistributionDonut", () => {
     expect(screen.getByRole("button", { name: /^cost$/i })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByRole("button", { name: /^req$/i })).toHaveAttribute("aria-pressed", "false");
     expect(screen.getByTestId("model-distribution-center-value")).toHaveTextContent("$60.05");
-    const tooltipRow = screen.getByText("Cost").parentElement;
-
-    expect(tooltipRow).not.toBeNull();
-    expect(within(tooltipRow as HTMLElement).getByText("Cost")).toBeInTheDocument();
-    expect(within(tooltipRow as HTMLElement).getByText("$42.02")).toBeInTheDocument();
     expect(screen.getByText("$18.03")).toBeInTheDocument();
     expect(screen.getByTestId("model-distribution-pie")).toHaveAttribute("data-key", "costUsd");
+    expect(screen.queryByText(/^Cost$/)).not.toBeInTheDocument();
   });
 
-  it("switches to request mode for slices, tooltip, legend values, and percentages", async () => {
+  it("switches to request mode for slices, legend values, and percentages without rendering a donut tooltip", async () => {
     const user = userEvent.setup();
 
     render(
@@ -201,11 +172,6 @@ describe("ModelDistributionDonut", () => {
 
     await user.click(screen.getByRole("button", { name: /^req$/i }));
 
-    const tooltipRow = screen.getByText("Requests").parentElement;
-
-    expect(tooltipRow).not.toBeNull();
-    expect(within(tooltipRow as HTMLElement).getByText("Requests")).toBeInTheDocument();
-    expect(within(tooltipRow as HTMLElement).getByText("2")).toBeInTheDocument();
     expect(screen.getByText("20.0%")).toBeInTheDocument();
     expect(screen.getByText("80.0%")).toBeInTheDocument();
     expect(screen.getByText(/^8$/)).toBeInTheDocument();
@@ -213,6 +179,7 @@ describe("ModelDistributionDonut", () => {
     expect(screen.getByTestId("model-distribution-pie")).toHaveAttribute("data-key", "requests");
     expect(screen.getByRole("button", { name: /^cost$/i })).toHaveAttribute("aria-pressed", "false");
     expect(screen.getByRole("button", { name: /^req$/i })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.queryByText(/^Requests$/)).not.toBeInTheDocument();
   });
 
   it("uses compact request totals in the center and legend when request mode is active", async () => {

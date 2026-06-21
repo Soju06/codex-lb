@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { Cell, Pie, PieChart, ResponsiveContainer, Sector, Tooltip, type PieSectorShapeProps } from "@/components/lazy-recharts";
+import { Cell, Pie, PieChart, ResponsiveContainer, Sector, type PieSectorShapeProps } from "@/components/lazy-recharts";
 import type { ModelCostEntry } from "../schemas";
-import { ChartTooltip } from "./chart-tooltip";
 import { DistributionMetricToggle, type DistributionMetric } from "./distribution-metric-toggle";
 import { formatDistributionMetricValue } from "./distribution-metric-format";
 
@@ -118,14 +117,6 @@ export function ModelDistributionDonut({ data }: ModelDistributionDonutProps) {
                   <Cell key={entry.id} fill={entry.fill} />
                 ))}
               </Pie>
-              <Tooltip
-                content={
-                  <ChartTooltip
-                    names={isCostMetric ? { costUsd: "Cost" } : { requests: "Requests" }}
-                    formatValue={(value) => formatDistributionMetricValue(value, metric)}
-                  />
-                }
-              />
             </PieChart>
           </ResponsiveContainer>
         </div>

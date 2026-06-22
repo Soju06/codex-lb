@@ -2,7 +2,7 @@
 
 ### Requirement: Reset credits are polled per account on a fixed cadence
 
-The system SHALL poll upstream `GET /wham/rate-limit-reset-credits` for each eligible account on a configurable cadence that defaults to 60 seconds, using that account's stored OAuth bearer token and `chatgpt-account-id`. The scheduler SHALL always start with the application lifespan. Because snapshots are kept in process-local memory, every running replica SHALL refresh its own snapshot cache instead of relying on leader election. The poll SHALL skip any account that is paused, deactivated, or lacks a usable `chatgpt-account-id`.
+The system SHALL poll upstream `GET /wham/rate-limit-reset-credits` for each eligible account on a configurable cadence that defaults to 60 seconds, using that account's stored OAuth bearer token and `chatgpt-account-id`. The scheduler SHALL always start with the application lifespan. Because snapshots are kept in process-local memory, every running replica SHALL refresh its own snapshot cache instead of relying on leader election. The poll SHALL skip any account that is paused, requires reauthentication, deactivated, or lacks a usable `chatgpt-account-id`.
 
 #### Scenario: Default cadence polls every 60 seconds
 - **WHEN** the application starts with default settings
@@ -13,8 +13,8 @@ The system SHALL poll upstream `GET /wham/rate-limit-reset-credits` for each eli
 - **THEN** each replica refreshes its own in-memory reset-credit snapshots on the configured cadence
 - **AND** dashboard reads served by any replica can observe populated reset-credit data after that replica's refresh tick
 
-#### Scenario: Paused and deactivated accounts are skipped
-- **WHEN** an account is persisted as `paused` or `deactivated`
+#### Scenario: Ineligible accounts are skipped
+- **WHEN** an account is persisted as `paused`, `reauth_required`, or `deactivated`
 - **THEN** the scheduler performs no upstream reset-credits fetch for that account
 - **AND** the cached snapshot for that account (if any) is left untouched by the skip
 
@@ -42,6 +42,13 @@ The system SHALL store the most recent successful reset-credits response per acc
 - **AND** another caller invokes `invalidate(account_id)` before that refresh stores its fetched response
 - **WHEN** the refresh completes
 - **THEN** the stale fetched response MUST NOT be written back into the cache
+
+#### Scenario: Dashboard read invalidates stale snapshots for ineligible accounts
+- **GIVEN** an account has a cached reset-credits snapshot
+- **AND** the account is now persisted as `paused`, `reauth_required`, `deactivated`, or no longer has a usable `chatgpt-account-id`
+- **WHEN** the dashboard invokes `GET /api/accounts/{id}/rate-limit-reset-credits`
+- **THEN** the endpoint returns `null` without calling upstream
+- **AND** the cached snapshot for that account is invalidated
 
 ### Requirement: Operators can redeem the soonest-expiring available credit
 

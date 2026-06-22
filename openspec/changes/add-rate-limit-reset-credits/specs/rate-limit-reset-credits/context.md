@@ -46,10 +46,15 @@ client treats non-200, non-JSON, and schema-drifted 200 responses defensively.
 ## Failure Modes
 
 - **Upstream returns 200 but the rate-limit window doesn't move.** Per upstream behavior
-  the credit is still consumed. The confirmation dialog warns the operator; on success we
-  invalidate the cache and let the next tick reconcile `available_count`.
+  the credit is still consumed. The dashboard requires explicit confirmation before
+  redeeming; on success we invalidate the cache and let the next tick reconcile
+  `available_count`.
 - **Snapshot is empty/stale.** UI hides all reset affordances for that account
   (`available_reset_credits: 0`). Not an error — wait one tick.
+- **Account becomes ineligible after a successful snapshot.** Scheduler skips paused,
+  reauth-required, deactivated, or account-id-less accounts, so dashboard reads also check
+  current account eligibility before serving cached reset credits. If the account is
+  ineligible, the read returns no snapshot and invalidates the stale cache entry.
 - **Upstream 401/403/auth-expired.** Logged; prior snapshot retained. Does NOT deactivate
   the account. If the token is genuinely expired, usage refresh / OAuth refresh owns the
   deactivation path.

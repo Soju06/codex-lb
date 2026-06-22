@@ -108,15 +108,17 @@ async def get_rate_limit_reset_credits(
     context: AccountsContext = Depends(get_accounts_context),
 ) -> RateLimitResetCreditsSnapshotResponse | None:
     store = get_rate_limit_reset_credits_store()
+    account = await context.repository.get_by_id(account_id)
+    if account is None:
+        await store.invalidate(account_id)
+        return None
+    if account.status in _NON_REDEEMABLE_STATUSES or not account.chatgpt_account_id:
+        await store.invalidate(account_id)
+        return None
+
     snapshot = store.get(account_id)
     if snapshot is not None:
         return _snapshot_to_response(snapshot)
-
-    account = await context.repository.get_by_id(account_id)
-    if account is None:
-        return None
-    if account.status in _NON_REDEEMABLE_STATUSES or not account.chatgpt_account_id:
-        return None
 
     await _refresh_account_reset_credits(
         account,

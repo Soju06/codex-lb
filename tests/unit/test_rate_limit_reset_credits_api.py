@@ -31,6 +31,7 @@ from app.modules.rate_limit_reset_credits import api as reset_credits_api
 from app.modules.rate_limit_reset_credits.api import (
     ConsumeResetCreditResponseSchema,
     _assert_account_can_redeem_reset_credit,
+    _select_available_credit_by_id,
     _build_refresh_usage_callback,
     _redeem_soonest_reset_credit,
     _select_soonest_available_credit,
@@ -255,12 +256,26 @@ def test_select_soonest_available_credit_returns_none_when_none_available() -> N
     assert _select_soonest_available_credit(snapshot) is None
 
 
+def test_select_available_credit_by_id_returns_matching_available_credit() -> None:
+    response = _response([_credit("wanted"), _credit("other")], available_count=2)
+    selected = _select_available_credit_by_id(response, "wanted")
+    assert selected is not None
+    assert selected.id == "wanted"
+
+
+def test_select_available_credit_by_id_rejects_missing_or_unavailable_credit() -> None:
+    response = _response([_credit("wanted", status="redeemed")], available_count=1)
+    assert _select_available_credit_by_id(response, "wanted") is None
+    assert _select_available_credit_by_id(response, "missing") is None
+
+
 # --- POST consume: helper covers selection, uuid body, invalidation, shape ---
 
 
 @pytest.mark.asyncio
 async def test_redeem_returns_409_when_no_available_credit() -> None:
     store = RateLimitResetCreditsStore()
+    await store.set("acc_1", _snapshot([_credit("c1", status="redeemed")], available_count=1))
 
     with pytest.raises(DashboardConflictError) as excinfo:
         await _redeem_soonest_reset_credit(
@@ -280,13 +295,14 @@ async def test_redeem_returns_409_when_no_available_credit() -> None:
 @pytest.mark.asyncio
 async def test_redeem_returns_409_when_cached_count_is_zero() -> None:
     store = RateLimitResetCreditsStore()
+    await store.set("acc_1", _snapshot([_credit("cached_available")], available_count=0))
 
     with pytest.raises(DashboardConflictError) as excinfo:
         await _redeem_soonest_reset_credit(
             account=_account(),
             store=store,
             encryptor=StubEncryptor(),
-            fetch_fn=_static_fetch_fn(_response([_credit("cached_available")], available_count=0)),
+            fetch_fn=_raise_not_called,  # type: ignore[arg-type]
             consume_fn=_raise_not_called,  # type: ignore[arg-type]
         )
     assert excinfo.value.code == "no_available_reset_credit"
@@ -304,13 +320,10 @@ async def test_redeem_returns_409_when_snapshot_missing() -> None:
             account=_account(),
             store=store,
             encryptor=StubEncryptor(),
-            fetch_fn=_static_fetch_fn(_response([], available_count=0)),
+            fetch_fn=_raise_not_called,  # type: ignore[arg-type]
             consume_fn=_raise_not_called,  # type: ignore[arg-type]
         )
-    cached = store.get("acc_1")
-    assert cached is not None
-    assert cached.available_count == 0
-    assert cached.credits == []
+    assert store.get("acc_1") is None
 
 
 @pytest.mark.asyncio
@@ -332,6 +345,27 @@ async def test_redeem_replaces_stale_cached_snapshot_when_fresh_fetch_has_no_ava
     assert cached is not None
     assert cached.available_count == 0
     assert cached.credits == []
+
+
+@pytest.mark.asyncio
+async def test_redeem_returns_409_and_replaces_snapshot_when_cached_credit_disappears_upstream() -> None:
+    store = RateLimitResetCreditsStore()
+    await store.set("acc_1", _snapshot([_credit("stale")], available_count=1))
+
+    with pytest.raises(DashboardConflictError) as excinfo:
+        await _redeem_soonest_reset_credit(
+            account=_account(),
+            store=store,
+            encryptor=StubEncryptor(),
+            fetch_fn=_static_fetch_fn(_response([_credit("other")], available_count=1)),
+            consume_fn=_raise_not_called,  # type: ignore[arg-type]
+        )
+
+    assert excinfo.value.code == "no_available_reset_credit"
+    cached = store.get("acc_1")
+    assert cached is not None
+    assert cached.available_count == 1
+    assert [credit.id for credit in cached.credits] == ["other"]
 
 
 @pytest.mark.asyncio
@@ -406,6 +440,7 @@ async def test_redeem_selects_soonest_calls_upstream_and_invalidates_cache() -> 
 @pytest.mark.asyncio
 async def test_redeem_restores_snapshot_when_usage_refresh_fails() -> None:
     store = RateLimitResetCreditsStore()
+    await store.set("acc_1", _snapshot([_credit("only")], available_count=1))
     fetch_calls = 0
 
     async def fetch_fn(*args: Any, **kwargs: Any) -> ResetCreditsResponse:
@@ -452,6 +487,7 @@ async def test_redeem_restores_snapshot_when_force_refresh_returns_false(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = RateLimitResetCreditsStore()
+    await store.set("acc_1", _snapshot([_credit("only")], available_count=1))
     fetch_calls = 0
 
     async def fetch_fn(*args: Any, **kwargs: Any) -> ResetCreditsResponse:
@@ -512,6 +548,7 @@ async def test_redeem_restores_snapshot_when_force_refresh_returns_false(
 @pytest.mark.asyncio
 async def test_redeem_serializes_requests_per_account() -> None:
     store = RateLimitResetCreditsStore()
+    await store.set("acc_1", _snapshot([_credit("only")], available_count=1))
     fetch_calls = 0
 
     async def fetch_fn(*args: Any, **kwargs: Any) -> ResetCreditsResponse:
@@ -591,6 +628,7 @@ async def test_redeem_translates_upstream_fetch_failures(
     expected_exception: type[Exception],
 ) -> None:
     store = RateLimitResetCreditsStore()
+    await store.set("acc_1", _snapshot([_credit("only")], available_count=1))
 
     async def fetch_fn(*args: Any, **kwargs: Any) -> ResetCreditsResponse:
         raise ResetCreditFetchError(status_code, f"upstream fetch failed {status_code}", code=f"fetch_{status_code}")
@@ -606,7 +644,9 @@ async def test_redeem_translates_upstream_fetch_failures(
 
     assert str(excinfo.value) == f"upstream fetch failed {status_code}"
     assert getattr(excinfo.value, "code", None) == f"fetch_{status_code}"
-    assert store.get("acc_1") is None
+    cached = store.get("acc_1")
+    assert cached is not None
+    assert [credit.id for credit in cached.credits] == ["only"]
 
 
 @pytest.mark.asyncio
@@ -625,6 +665,7 @@ async def test_redeem_translates_upstream_consume_failures(
     expected_exception: type[Exception],
 ) -> None:
     store = RateLimitResetCreditsStore()
+    await store.set("acc_1", _snapshot([_credit("only")], available_count=1))
 
     async def consume_fn(
         access_token: str,
@@ -645,12 +686,15 @@ async def test_redeem_translates_upstream_consume_failures(
 
     assert str(excinfo.value) == f"upstream failed {status_code}"
     assert getattr(excinfo.value, "code", None) == f"upstream_{status_code}"
-    assert store.get("acc_1") is None
+    cached = store.get("acc_1")
+    assert cached is not None
+    assert [credit.id for credit in cached.credits] == ["only"]
 
 
 @pytest.mark.asyncio
 async def test_redeem_reports_zero_available_count_after_last_credit() -> None:
     store = RateLimitResetCreditsStore()
+    await store.set("acc_1", _snapshot([_credit("only")], available_count=1))
 
     async def consume_fn(
         access_token: str,

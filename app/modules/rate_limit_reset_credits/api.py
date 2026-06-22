@@ -225,6 +225,11 @@ async def _redeem_soonest_reset_credit_locked(
     if auth_manager is not None:
         redeem_account = await auth_manager.ensure_fresh(account, force=False)
 
+    cached_snapshot = store.get(account.id)
+    cached_credit = _select_soonest_available_credit(cached_snapshot)
+    if cached_credit is None:
+        raise DashboardConflictError("No available reset credit", code="no_available_reset_credit")
+
     access_token = encryptor.decrypt(redeem_account.access_token_encrypted)
     route: ResolvedUpstreamRoute | None = None
     if resolve_route is not None:
@@ -240,7 +245,7 @@ async def _redeem_soonest_reset_credit_locked(
     except ResetCreditFetchError as exc:
         raise _translate_fetch_error(exc) from exc
 
-    credit = _select_soonest_available_credit_from_response(credits_response)
+    credit = _select_available_credit_by_id(credits_response, cached_credit.id)
     if credit is None:
         await store.set(account.id, build_snapshot(credits_response))
         raise DashboardConflictError("No available reset credit", code="no_available_reset_credit")
@@ -395,6 +400,18 @@ def _select_soonest_available_credit_from_response(
     response: ResetCreditsResponse,
 ) -> ResetCreditItem | None:
     return _select_soonest_available_credit_from_items(response.credits, response.available_count)
+
+
+def _select_available_credit_by_id(
+    response: ResetCreditsResponse,
+    credit_id: str,
+) -> ResetCreditItem | None:
+    if response.available_count <= 0:
+        return None
+    for credit in response.credits:
+        if credit.id == credit_id and credit.status == "available":
+            return credit
+    return None
 
 
 def _select_soonest_available_credit_from_items(

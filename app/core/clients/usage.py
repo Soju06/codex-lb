@@ -13,6 +13,7 @@ from app.core.clients.codex import (
     create_codex_session,
     require_route_or_direct_egress_opt_in,
 )
+from app.core.clients.headers import build_chatgpt_auth_headers
 from app.core.clients.http import lease_retry_client
 from app.core.config.settings import get_settings
 from app.core.types import JsonObject
@@ -220,13 +221,7 @@ def _usage_url(base_url: str) -> str:
 
 
 def _usage_headers(access_token: str, account_id: str | None) -> dict[str, str]:
-    headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/json"}
-    request_id = get_request_id()
-    if request_id:
-        headers["x-request-id"] = request_id
-    if account_id and not account_id.startswith(("email_", "local_")):
-        headers["chatgpt-account-id"] = account_id
-    return headers
+    return build_chatgpt_auth_headers(access_token, account_id)
 
 
 async def _safe_json(resp: aiohttp.ClientResponse) -> JsonObject:

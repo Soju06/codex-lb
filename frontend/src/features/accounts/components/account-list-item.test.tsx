@@ -223,4 +223,28 @@ describe("AccountListItem", () => {
     expect(screen.queryByText(/Legacy Workspace/)).not.toBeInTheDocument();
     expect(screen.queryByText(/Personal \/ unknown workspace/)).not.toBeInTheDocument();
   });
+
+  it("shows a reset-credit badge capped at 99+", () => {
+    const account = createAccountSummary({ availableResetCredits: 120 });
+
+    render(<AccountListItem account={account} selected={false} onSelect={vi.fn()} />);
+
+    expect(screen.getByText("99+")).toBeInTheDocument();
+  });
+
+  it("shows the reset-credit badge count when below the cap", () => {
+    const account = createAccountSummary({ availableResetCredits: 3 });
+
+    render(<AccountListItem account={account} selected={false} onSelect={vi.fn()} />);
+
+    expect(screen.getByText("3")).toBeInTheDocument();
+  });
+
+  it("hides the reset-credit badge when no credits are available", () => {
+    const account = createAccountSummary({ availableResetCredits: 0 });
+
+    render(<AccountListItem account={account} selected={false} onSelect={vi.fn()} />);
+
+    expect(screen.queryByText("99+")).not.toBeInTheDocument();
+  });
 });

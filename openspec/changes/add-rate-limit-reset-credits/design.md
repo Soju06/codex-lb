@@ -41,6 +41,10 @@ The reference is a single-account CLI; codex-lb needs a multi-account, dashboard
 **Rationale:** This is a self-service API-key feature, not a dashboard feature. The existing structural match is `GET /v1/usage`, which already requires a valid Bearer key even when global proxy auth is disabled. Reusing that surface keeps the route family coherent and reuses established `assigned_account_ids` scope semantics: scoped keys see only assigned accounts; unscoped keys see all selectable accounts.
 **Alternatives considered:** (a) add `/api/reset-credit` — rejected because `/api/*` in this repo is primarily dashboard/admin surface. (b) add `/api/codex/reset-credit` — rejected because the existing API-key self-service contract already lives under `/v1/*`.
 
+### Decision: Successful consume triggers a best-effort usage refresh
+**Rationale:** Reset-credit redemption changes the upstream rate-limit windows. Forcing `/wham/usage` after a successful consume keeps quota bars, account status, and account selection close to the redeemed state instead of waiting for the normal scheduler tick.
+**Alternatives considered:** Let the regular 60s usage refresh reconcile state - rejected because operators expect immediate feedback after spending a banked credit.
+
 ### Decision: `GET /v1/reset-credit` returns one array item per account
 **Rationale:** Email is useful data for callers, but using it as the response key collides with this repo's duplicate-email account rows. Returning one array item per account avoids key collisions while still exposing the real email inside each object. The response sorts eligible accounts by email ascending, then account id ascending, for deterministic output. Each item exposes `account_id`, `email`, `redeem_id`, and `expiredAt`, which is enough for clients to choose and redeem a credit without exposing the full upstream payload.
 **Alternatives considered:** (a) key by email — rejected because duplicate-email rows can overwrite each other. (b) key by account id — rejected because the caller asked for one big array.
@@ -54,7 +58,7 @@ The reference is a single-account CLI; codex-lb needs a multi-account, dashboard
 **Alternatives considered:** Reuse `formatResetRelative` — rejected because it returns multi-unit ("6d 13h") output.
 
 ### Decision: Reset credit refresh never mutates account status
-**Rationale:** Account status (active / rate_limited / quota_exceeded / paused / deactivated) is owned by usage refresh. Reset-credit polling failure MUST NOT deactivate or block an account — doing so would create a second status owner and contradict `usage-refresh-policy`. On upstream errors the scheduler logs, keeps the prior snapshot if any, and moves on.
+**Rationale:** Account status (active / rate_limited / quota_exceeded / paused / reauth_required / deactivated) is owned by usage refresh. Reset-credit polling failure MUST NOT deactivate or block an account — doing so would create a second status owner and contradict `usage-refresh-policy`. On upstream errors the scheduler logs, keeps the prior snapshot if any, and moves on.
 **Alternatives considered:** Reuse usage-refresh cooldown/deactivation classification — rejected because it would require this scheduler to write account status, violating the single-owner invariant.
 
 ## Risks / Trade-offs
@@ -64,8 +68,8 @@ The reference is a single-account CLI; codex-lb needs a multi-account, dashboard
 - **[Credit consumed even on partial reset]** (upstream behavior: "if POST returns 200, the credit is gone") → Mitigation: on success we invalidate the cache and let the next tick reconcile. This caveat is documented in OpenSpec context but is not required in the dashboard confirmation dialog.
 - **[Race: credit expires between render and click]** → Mitigation: server re-selects from the freshest cached snapshot at consume time and surfaces upstream's error if the chosen credit is no longer redeemable.
 - **[Race: `/v1/reset-credit` client redeems a stale `redeem_id`]** → Mitigation: the POST handler re-reads the current cached snapshot, rejects credits that are no longer `available`, and only forwards the exact `redeem_id` when it still matches an available credit on an in-pool account.
-- **[Disabled or incomplete account keeps stale cached credits]** → Mitigation: paused, deactivated, and missing-`chatgpt-account-id` accounts invalidate any existing snapshot during scheduler refresh. Account summaries suppress such snapshots immediately, and dashboard consume refuses them before route resolution or upstream calls.
-- **[Many accounts = many upstream calls per tick]** → Mitigation: reuse the same skip rules (paused/deactivated/missing chatgpt-account-id) and keep the interval configurable. Each replica polls so its process-local cache is useful for dashboard reads; moving snapshots to shared storage can later reduce duplicate polling if upstream load becomes a problem.
+- **[Disabled or incomplete account keeps stale cached credits]** → Mitigation: paused, reauth_required, deactivated, and missing-`chatgpt-account-id` accounts invalidate any existing snapshot during scheduler refresh. Account summaries suppress such snapshots immediately, and dashboard consume refuses them before route resolution or upstream calls.
+- **[Many accounts = many upstream calls per tick]** → Mitigation: reuse the same skip rules (paused/reauth_required/deactivated/missing chatgpt-account-id) and keep the interval configurable. Each replica polls so its process-local cache is useful for dashboard reads; moving snapshots to shared storage can later reduce duplicate polling if upstream load becomes a problem.
 - **[Guest read-only dashboard users]** → Mitigation: `POST /consume` requires `require_dashboard_write_access`; guests can see the badge/button (count is read off `AccountSummary`) but cannot redeem.
 
 ## Migration Plan

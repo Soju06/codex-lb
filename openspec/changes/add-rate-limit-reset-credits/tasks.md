@@ -7,7 +7,7 @@
 
 ## 2. Backend scheduler, API, mapper, lifespan wiring
 
-- [x] 2.1 Create `app/core/usage/reset_credits_refresh_scheduler.py` mirroring `app/core/usage/refresh_scheduler.py`: `RateLimitResetCreditsRefreshScheduler` dataclass with `asyncio.Lock`-guarded `_refresh_once` that runs in every replica, lists accounts, skips paused/deactivated/missing-`chatgpt-account-id`, decrypts `access_token_encrypted`, calls `fetch_reset_credits`, and stores the snapshot. On upstream error: log + retain prior snapshot; do NOT mutate account status. Add `build_rate_limit_reset_credits_scheduler()` factory
+- [x] 2.1 Create `app/core/usage/reset_credits_refresh_scheduler.py` mirroring `app/core/usage/refresh_scheduler.py`: `RateLimitResetCreditsRefreshScheduler` dataclass with `asyncio.Lock`-guarded `_refresh_once` that runs in every replica, lists accounts, skips paused/reauth_required/deactivated/missing-`chatgpt-account-id`, decrypts `access_token_encrypted`, calls `fetch_reset_credits`, and stores the snapshot. On upstream error: log + retain prior snapshot; do NOT mutate account status. Add `build_rate_limit_reset_credits_scheduler()` factory
 - [x] 2.2 Wire the new scheduler into `app/main.py` lifespan alongside `usage_scheduler`: build (~line 148), start (~154), stop (~314)
 - [x] 2.3 Create `app/modules/rate_limit_reset_credits/api.py` with `GET /api/accounts/{account_id}/rate-limit-reset-credits` (returns cached snapshot or `null`) and `POST /api/accounts/{account_id}/rate-limit-reset-credits/consume` (selects soonest-`expires_at` available credit from the freshest snapshot, generates `redeem_request_id`, calls upstream, invalidates the cached snapshot, returns `{code, windows_reset, redeemed_at}`). Use `validate_dashboard_session` for GET and `require_dashboard_write_access` for POST. Return `409` when no credit is available. Register the router in `app/main.py`
 - [x] 2.4 Extend the AccountSummary mapper(s) in `app/modules/accounts/` and the dashboard mapper to join the cached snapshot onto each returned account: add `available_reset_credits: int` (0 when no snapshot) and `reset_credit_nearest_expires_at: datetime | None` (null when no snapshot)
@@ -16,6 +16,7 @@
 - [x] 2.7 Reuse API-key assignment-scope semantics to resolve the eligible reset-credit account pool: scoped keys may access only `assigned_account_ids`; unscoped keys may access all selectable accounts
 - [x] 2.8 Implement `GET /v1/reset-credit` projection from cached snapshots into a deterministic array ordered by account email ascending, account id ascending, and credit expiry ascending (`null` last), returning every available credit for each eligible account with `email` included in each object and omitting accounts with no available cached credits
 - [x] 2.9 Implement `POST /v1/reset-credit` exact-credit redemption: validate `{account_id, redeem_id}`, reject out-of-pool accounts, reject unavailable or mismatched redeem ids, forward the exact `credit_id` upstream, and invalidate the cached snapshot on success
+- [x] 2.10 Force a best-effort usage refresh after successful dashboard and `/v1/reset-credit` redemption so quota bars and account status reconcile immediately when possible
 
 ## 3. Frontend schemas, API client, formatter
 
@@ -37,7 +38,7 @@
 
 - [x] 5.1 Backend — `app/core/clients/rate_limit_reset_credits.py`: header construction (account-id skip rule), base-url normalization, consume body shape, JSON parse on 200, error handling on non-200/non-JSON
 - [x] 5.2 Backend — `app/modules/rate_limit_reset_credits/store.py`: `set`/`get`/`invalidate` (single + all), concurrency under `anyio.Lock`, missing-account returns `None`
-- [x] 5.3 Backend — `reset_credits_refresh_scheduler.py`: every replica refreshes its local cache, paused/deactivated account skip, one-account failure doesn't break the loop, upstream error retains prior snapshot, account status is never mutated
+- [x] 5.3 Backend — `reset_credits_refresh_scheduler.py`: every replica refreshes its local cache, paused/reauth_required/deactivated account skip, one-account failure doesn't break the loop, upstream error retains prior snapshot, account status is never mutated
 - [x] 5.4 Backend — `rate_limit_reset_credits/api.py`: GET returns cached snapshot / `null` on miss; POST selects soonest expiry, calls upstream with fresh `redeem_request_id`, invalidates cache, returns `{code, windows_reset, redeemed_at}`; write-access gating refuses guests; `409` when no available credit
 - [x] 5.5 Backend — AccountSummary mapper: exposes the two new fields from a cached snapshot, returns `0`/`null` when no snapshot, does not crash when store is empty
 - [x] 5.6 Frontend — `formatSingleUnitRemaining`: boundaries at 7d (color flip), 1d, 1h, 1m, and `now`; sub-minute and past timestamps both yield `"now"`
@@ -48,6 +49,8 @@
 - [x] 5.11 Frontend — Accounts nav badge: shows the summed total, caps at `99+`, and hides at zero
 - [x] 5.12 Backend — `/v1/reset-credit` GET: requires Bearer API key, honors scoped vs unscoped account pools, emits a deterministic array with `email` in each object for every available credit, and omits accounts without available cached credits
 - [x] 5.13 Backend — `/v1/reset-credit` POST: rejects out-of-pool `account_id`, rejects unavailable or mismatched `redeem_id`, forwards the exact requested `credit_id`, invalidates the snapshot on success, and preserves `/v1/*` OpenAI-style error responses
+
+- [x] 5.14 Backend: successful dashboard and `/v1/reset-credit` redemption triggers a best-effort usage refresh after reset-credit snapshot invalidation
 
 ## 6. Validation and OpenSpec hygiene
 

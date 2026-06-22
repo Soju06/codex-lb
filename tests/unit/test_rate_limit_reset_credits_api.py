@@ -386,7 +386,7 @@ async def test_consume_handler_returns_404_when_account_missing() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("status", [AccountStatus.PAUSED, AccountStatus.DEACTIVATED])
+@pytest.mark.parametrize("status", [AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED])
 async def test_consume_handler_rejects_ineligible_account_status_and_invalidates_snapshot(
     monkeypatch: pytest.MonkeyPatch,
     status: AccountStatus,
@@ -439,6 +439,66 @@ async def test_consume_handler_rejects_account_without_chatgpt_account_id_and_in
 
     assert excinfo.value.code == "reset_credit_account_ineligible"
     assert store.get("acc_no_workspace") is None
+
+
+@pytest.mark.asyncio
+async def test_consume_handler_force_refreshes_usage_after_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    store = RateLimitResetCreditsStore()
+    await store.set("acc_refresh", _snapshot([_credit("credit-refresh")], available_count=1))
+    refresh_calls: list[str] = []
+    invalidated: list[str] = []
+
+    class _Repo:
+        async def get_by_id(self, account_id: str) -> Account | None:
+            return _account_with_state(account_id)
+
+    class _UsageUpdater:
+        def __init__(self, usage_repo: object, accounts_repo: object, additional_usage_repo: object) -> None:
+            assert usage_repo is not None
+            assert accounts_repo is not None
+            assert additional_usage_repo is not None
+
+        async def force_refresh(self, account: Account) -> bool:
+            refresh_calls.append(account.id)
+            return True
+
+    class _SelectionCache:
+        def invalidate(self) -> None:
+            invalidated.append("selection")
+
+    async def _consume_fn(*args: Any, **kwargs: Any) -> ConsumeResetCreditResponse:
+        return ConsumeResetCreditResponse.model_validate(
+            {
+                "code": "reset",
+                "credit": {
+                    "id": "credit-refresh",
+                    "status": "redeemed",
+                    "redeemed_at": "2026-06-13T13:12:31Z",
+                },
+                "windows_reset": 1,
+            }
+        )
+
+    async def _resolve_route(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(reset_credits_api, "get_rate_limit_reset_credits_store", lambda: store)
+    monkeypatch.setattr(reset_credits_api, "consume_reset_credit", _consume_fn)
+    monkeypatch.setattr(reset_credits_api, "resolve_upstream_route", _resolve_route)
+    monkeypatch.setattr(reset_credits_api, "TokenEncryptor", lambda: StubEncryptor())
+    monkeypatch.setattr(reset_credits_api, "UsageUpdater", _UsageUpdater)
+    monkeypatch.setattr(reset_credits_api, "get_account_selection_cache", lambda: _SelectionCache())
+
+    response = await consume_rate_limit_reset_credit(
+        account_id="acc_refresh",
+        _write_access=None,
+        context=cast(Any, SimpleNamespace(repository=_Repo(), session=object())),
+    )
+
+    assert response.code == "reset"
+    assert store.get("acc_refresh") is None
+    assert refresh_calls == ["acc_refresh"]
+    assert invalidated == ["selection"]
 
 
 # --- POST consume: write-access gating refuses guests (full ASGI path) ---

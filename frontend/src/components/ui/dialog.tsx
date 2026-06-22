@@ -52,10 +52,34 @@ const FLOATING_LAYER_SELECTOR = [
   "[data-slot='dropdown-menu-content']",
   "[data-slot='dropdown-menu-sub-content']",
   "[data-slot='popover-content']",
+  "[data-radix-popper-content-wrapper]",
+].join(", ")
+
+// Floating layers (Select / DropdownMenu / Popover) that are currently OPEN.
+// While one is open, an "outside" pointer/focus event is the user dismissing
+// that layer — not the dialog — even when the pointer lands outside every layer
+// (e.g. clicking the backdrop to close an open multi-select dropdown). The
+// layer closes itself; the dialog must stay open.
+const OPEN_FLOATING_LAYER_SELECTOR = [
+  "[data-slot='select-content'][data-state='open']",
+  "[data-slot='dropdown-menu-content'][data-state='open']",
+  "[data-slot='dropdown-menu-sub-content'][data-state='open']",
+  "[data-slot='popover-content'][data-state='open']",
 ].join(", ")
 
 function isFloatingLayerTarget(target: EventTarget | null): boolean {
   return target instanceof Element && target.closest(FLOATING_LAYER_SELECTOR) !== null
+}
+
+function isFloatingLayerOpen(): boolean {
+  return (
+    typeof document !== "undefined" &&
+    document.querySelector(OPEN_FLOATING_LAYER_SELECTOR) !== null
+  )
+}
+
+function shouldIgnoreDialogDismiss(target: EventTarget | null): boolean {
+  return isFloatingLayerTarget(target) || isFloatingLayerOpen()
 }
 
 function DialogContent({
@@ -80,19 +104,19 @@ function DialogContent({
         )}
         onFocusOutside={(event) => {
           onFocusOutside?.(event)
-          if (!event.defaultPrevented && isFloatingLayerTarget(event.target)) {
+          if (!event.defaultPrevented && shouldIgnoreDialogDismiss(event.target)) {
             event.preventDefault()
           }
         }}
         onInteractOutside={(event) => {
           onInteractOutside?.(event)
-          if (!event.defaultPrevented && isFloatingLayerTarget(event.target)) {
+          if (!event.defaultPrevented && shouldIgnoreDialogDismiss(event.target)) {
             event.preventDefault()
           }
         }}
         onPointerDownOutside={(event) => {
           onPointerDownOutside?.(event)
-          if (!event.defaultPrevented && isFloatingLayerTarget(event.target)) {
+          if (!event.defaultPrevented && shouldIgnoreDialogDismiss(event.target)) {
             event.preventDefault()
           }
         }}

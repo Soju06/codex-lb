@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.core.auth import generate_unique_account_id
+from app.core.auth.refresh import RefreshError
 from app.core.clients.rate_limit_reset_credits import (
     ConsumeResetCreditResponse,
     RateLimitResetCreditsSnapshot,
@@ -628,6 +629,67 @@ async def test_v1_reset_credit_post_refreshes_account_before_consuming_credit(
     }
     assert events == ["refresh", "consume"]
     assert get_rate_limit_reset_credits_store().get(account_id) is None
+
+
+@pytest.mark.asyncio
+async def test_v1_reset_credit_post_returns_conflict_when_account_refresh_fails(
+    async_client,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    await _enable_api_key_auth(async_client)
+    account_id = await _import_account(
+        async_client,
+        "acc-reset-post-refresh-failure",
+        "refresh-failure@example.com",
+    )
+
+    _, key = await _create_api_key(async_client, name="reset-credit-post-refresh-failure")
+    await _seed_snapshot(
+        account_id,
+        available_count=1,
+        credits=[
+            ResetCreditItem(
+                id="credit-refresh-failure",
+                status="available",
+                expires_at=datetime(2031, 5, 2, tzinfo=timezone.utc),
+            )
+        ],
+    )
+
+    class SelectionCache:
+        def __init__(self) -> None:
+            self.invalidations = 0
+
+        def invalidate(self) -> None:
+            self.invalidations += 1
+
+    async def fake_ensure_fresh(requested_account_id: str):
+        assert requested_account_id == account_id
+        raise RefreshError("invalid_grant", "refresh token expired", True)
+
+    selection_cache = SelectionCache()
+    consume_mock = AsyncMock()
+
+    monkeypatch.setattr("app.modules.proxy.api._ensure_v1_reset_credit_account_fresh", fake_ensure_fresh)
+    monkeypatch.setattr("app.modules.proxy.api.consume_reset_credit", consume_mock)
+    monkeypatch.setattr("app.modules.proxy.api.get_account_selection_cache", lambda: selection_cache)
+
+    response = await async_client.post(
+        "/v1/reset-credit",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"account_id": account_id, "redeem_id": "credit-refresh-failure"},
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "error": {
+            "message": "Reset credit redeem could not refresh account credentials: refresh token expired",
+            "type": "invalid_request_error",
+            "code": "invalid_request_error",
+        }
+    }
+    assert selection_cache.invalidations == 1
+    consume_mock.assert_not_awaited()
 
 
 @pytest.mark.asyncio

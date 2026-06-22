@@ -41,7 +41,11 @@ from app.core.auth.dependencies import (
 from app.core.auth.refresh import RefreshError
 from app.core.clients.files import FileProxyError
 from app.core.clients.proxy import ProxyResponseError
-from app.core.clients.rate_limit_reset_credits import ConsumeResetCreditError, ResetCreditItem, consume_reset_credit
+from app.core.clients.rate_limit_reset_credits import (
+    ConsumeResetCreditError,
+    ResetCreditItem,
+    consume_reset_credit,
+)
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
@@ -95,8 +99,8 @@ from app.core.utils.sse import (
 from app.db.models import Account, AccountStatus
 from app.db.session import get_background_session
 from app.dependencies import ProxyContext, get_proxy_context, get_proxy_websocket_context
-from app.modules.accounts.repository import AccountsRepository
 from app.modules.accounts.auth_manager import AuthManager
+from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import (
     TRAFFIC_CLASS_OPPORTUNISTIC,
@@ -891,7 +895,14 @@ async def v1_redeem_reset_credit(
         except ConsumeResetCreditError as exc:
             raise _translate_v1_reset_credit_consume_error(exc) from exc
         await get_rate_limit_reset_credits_store().invalidate(account_id)
-        await _refresh_usage_after_v1_reset_credit_redeem(account_id)
+        try:
+            await _refresh_usage_after_v1_reset_credit_redeem(account_id)
+        except Exception:
+            logger.warning(
+                "V1 reset credit consume succeeded but usage refresh failed account_id=%s",
+                account_id,
+                exc_info=True,
+            )
         redeemed_at = result.credit.redeemed_at if result.credit else None
         return V1ResetCreditRedeemResponse(
             code=result.code,

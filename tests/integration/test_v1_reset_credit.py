@@ -834,3 +834,92 @@ async def test_v1_reset_credit_post_closes_session_before_lock_and_upstream_cons
         "lock_exit",
     ]
     assert get_rate_limit_reset_credits_store().get(account_id) is None
+
+
+@pytest.mark.asyncio
+async def test_v1_reset_credit_post_preserves_success_when_post_redeem_usage_refresh_fails(
+    async_client,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+):
+    await _enable_api_key_auth(async_client)
+    account_id = await _import_account(
+        async_client,
+        "acc-reset-post-refresh-raise",
+        "refresh-raise@example.com",
+    )
+
+    _, key = await _create_api_key(async_client, name="reset-credit-post-refresh-raise")
+    await _seed_snapshot(
+        account_id,
+        available_count=1,
+        credits=[
+            ResetCreditItem(
+                id="credit-refresh-raise",
+                status="available",
+                expires_at=datetime(2031, 6, 2, tzinfo=timezone.utc),
+            )
+        ],
+    )
+
+    account = SimpleNamespace(
+        id=account_id,
+        status=AccountStatus.ACTIVE,
+        access_token_encrypted=TokenEncryptor().encrypt("access-token"),
+        chatgpt_account_id="chatgpt-refresh-raise",
+    )
+
+    async def fake_consume(
+        access_token: str,
+        chatgpt_account_id: str,
+        credit_id: str,
+        *,
+        route: object | None = None,
+        allow_direct_egress: bool = False,
+    ):
+        assert access_token == "access-token"
+        assert chatgpt_account_id == "chatgpt-refresh-raise"
+        assert credit_id == "credit-refresh-raise"
+        assert route is None
+        assert allow_direct_egress is True
+        return ConsumeResetCreditResponse.model_validate(
+            {
+                "code": "reset",
+                "credit": {
+                    "id": credit_id,
+                    "status": "redeemed",
+                    "redeemed_at": "2031-06-02T00:30:00Z",
+                },
+                "windows_reset": 1,
+            }
+        )
+
+    async def fake_refresh_usage_after_redeem(refreshed_account_id: str) -> None:
+        assert refreshed_account_id == account_id
+        raise RuntimeError("usage refresh failed")
+
+    monkeypatch.setattr(
+        "app.modules.proxy.api._ensure_v1_reset_credit_account_fresh",
+        AsyncMock(return_value=account),
+    )
+    monkeypatch.setattr("app.modules.proxy.api.consume_reset_credit", fake_consume)
+    monkeypatch.setattr(
+        "app.modules.proxy.api._refresh_usage_after_v1_reset_credit_redeem",
+        fake_refresh_usage_after_redeem,
+    )
+
+    with caplog.at_level("WARNING", logger="app.modules.proxy.api"):
+        response = await async_client.post(
+            "/v1/reset-credit",
+            headers={"Authorization": f"Bearer {key}"},
+            json={"account_id": account_id, "redeem_id": "credit-refresh-raise"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "code": "reset",
+        "windows_reset": 1,
+        "redeemed_at": "2031-06-02T00:30:00Z",
+    }
+    assert "V1 reset credit consume succeeded but usage refresh failed" in caplog.text
+    assert get_rate_limit_reset_credits_store().get(account_id) is None

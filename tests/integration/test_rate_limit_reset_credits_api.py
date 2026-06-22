@@ -194,4 +194,3 @@ async def test_get_populates_reset_credits_on_cache_miss(async_client, monkeypat
     body = response.json()
     assert body["availableCount"] == 1
     assert body["credits"][0]["id"] == "credit-get"
-

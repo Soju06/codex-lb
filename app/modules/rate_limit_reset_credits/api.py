@@ -61,9 +61,7 @@ ConsumeFn = Callable[..., Awaitable[ConsumeResetCreditResponse]]
 RefreshUsageFn = Callable[[Account], Awaitable[None]]
 ResolveRouteFn = Callable[[Account], Awaitable[ResolvedUpstreamRoute | None]]
 
-_NON_REDEEMABLE_STATUSES = frozenset(
-    {AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED}
-)
+_NON_REDEEMABLE_STATUSES = frozenset({AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED})
 
 _redeem_locks: dict[str, asyncio.Lock] = {}
 _redeem_locks_registry_lock = asyncio.Lock()

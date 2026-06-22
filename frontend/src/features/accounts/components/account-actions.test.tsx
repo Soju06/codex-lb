@@ -20,7 +20,6 @@ describe("AccountActions", () => {
         onDelete={vi.fn()}
         onReauth={vi.fn()}
         onExportAuth={vi.fn()}
-        onResetCredit={vi.fn()}
         onSecurityWorkAuthorizedChange={vi.fn()}
         onLimitWarmupChange={vi.fn()}
         onRoutingPolicyChange={onRoutingPolicyChange}
@@ -47,7 +46,6 @@ describe("AccountActions", () => {
         onDelete={vi.fn()}
         onReauth={onReauth}
         onExportAuth={vi.fn()}
-        onResetCredit={vi.fn()}
         onSecurityWorkAuthorizedChange={vi.fn()}
         onLimitWarmupChange={vi.fn()}
         onRoutingPolicyChange={vi.fn()}
@@ -80,7 +78,6 @@ describe("AccountActions", () => {
         onDelete={vi.fn()}
         onReauth={vi.fn()}
         onExportAuth={vi.fn()}
-        onResetCredit={vi.fn()}
         onSecurityWorkAuthorizedChange={vi.fn()}
         onLimitWarmupChange={vi.fn()}
         onRoutingPolicyChange={vi.fn()}
@@ -110,7 +107,6 @@ describe("AccountActions", () => {
           onDelete={vi.fn()}
           onReauth={vi.fn()}
           onExportAuth={vi.fn()}
-          onResetCredit={vi.fn()}
           onSecurityWorkAuthorizedChange={vi.fn()}
           onLimitWarmupChange={vi.fn()}
           onRoutingPolicyChange={vi.fn()}
@@ -142,7 +138,6 @@ describe("AccountActions", () => {
         onDelete={vi.fn()}
         onReauth={vi.fn()}
         onExportAuth={vi.fn()}
-        onResetCredit={vi.fn()}
         onSecurityWorkAuthorizedChange={vi.fn()}
         onLimitWarmupChange={vi.fn()}
         onRoutingPolicyChange={vi.fn()}
@@ -155,61 +150,5 @@ describe("AccountActions", () => {
     await user.click(button);
 
     expect(onProbe).not.toHaveBeenCalled();
-  });
-
-  it("shows reset action when reset credits are available", async () => {
-    const user = userEvent.setup();
-    const onResetCredit = vi.fn();
-    const account = createAccountSummary({
-      availableResetCredits: 3,
-      resetCreditNearestExpiresAt: "2026-01-03T12:00:00.000Z",
-    });
-
-    render(
-      <AccountActions
-        account={account}
-        busy={false}
-        onPause={vi.fn()}
-        onResume={vi.fn()}
-        onProbe={vi.fn()}
-        onDelete={vi.fn()}
-        onReauth={vi.fn()}
-        onExportAuth={vi.fn()}
-        onResetCredit={onResetCredit}
-        onSecurityWorkAuthorizedChange={vi.fn()}
-        onLimitWarmupChange={vi.fn()}
-        onRoutingPolicyChange={vi.fn()}
-      />,
-    );
-
-    await user.click(screen.getByRole("button", { name: "Reset (3)" }));
-
-    expect(onResetCredit).toHaveBeenCalledWith(account.accountId);
-  });
-
-  it("hides reset action when no reset credits are available", () => {
-    const account = createAccountSummary({
-      availableResetCredits: 0,
-      resetCreditNearestExpiresAt: null,
-    });
-
-    render(
-      <AccountActions
-        account={account}
-        busy={false}
-        onPause={vi.fn()}
-        onResume={vi.fn()}
-        onProbe={vi.fn()}
-        onDelete={vi.fn()}
-        onReauth={vi.fn()}
-        onExportAuth={vi.fn()}
-        onResetCredit={vi.fn()}
-        onSecurityWorkAuthorizedChange={vi.fn()}
-        onLimitWarmupChange={vi.fn()}
-        onRoutingPolicyChange={vi.fn()}
-      />,
-    );
-
-    expect(screen.queryByRole("button", { name: /Reset \(/ })).not.toBeInTheDocument();
   });
 });

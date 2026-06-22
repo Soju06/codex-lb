@@ -39,10 +39,8 @@ from app.core.auth.dependencies import (
 )
 from app.core.clients.files import FileProxyError
 from app.core.clients.proxy import ProxyResponseError
-from app.core.clients.rate_limit_reset_credits import ConsumeResetCreditError, ResetCreditItem, consume_reset_credit
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
-from app.core.crypto import TokenEncryptor
 from app.core.errors import (
     PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
     OpenAIErrorEnvelope,
@@ -80,7 +78,6 @@ from app.core.openai.v1_requests import V1ResponsesCompactRequest, V1ResponsesRe
 from app.core.resilience.overload import is_local_overload_error_code, merge_retry_after_headers
 from app.core.runtime_logging import log_error_response
 from app.core.types import JsonValue
-from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError, resolve_upstream_route
 from app.core.utils.json_guards import is_json_mapping
 from app.core.utils.request_id import get_request_id
 from app.core.utils.sse import (
@@ -93,7 +90,6 @@ from app.core.utils.sse import (
 from app.db.models import Account, AccountStatus
 from app.db.session import get_background_session
 from app.dependencies import ProxyContext, get_proxy_context, get_proxy_websocket_context
-from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import (
     TRAFFIC_CLASS_OPPORTUNISTIC,
@@ -133,9 +129,6 @@ from app.modules.proxy.schemas import (
     ModelMetadata,
     RateLimitStatusPayload,
     ReasoningLevelSchema,
-    V1ResetCreditEntry,
-    V1ResetCreditRedeemRequest,
-    V1ResetCreditRedeemResponse,
     V1UsageLimitResponse,
     V1UsageResponse,
     WarmupFailedAccount,
@@ -149,8 +142,6 @@ from app.modules.proxy.types import (
     RateLimitStatusPayloadData,
     RateLimitWindowSnapshotData,
 )
-from app.modules.rate_limit_reset_credits.api import get_reset_credit_redeem_lock
-from app.modules.rate_limit_reset_credits.store import get_rate_limit_reset_credits_store
 from app.modules.usage.mappers import usage_history_to_window_row
 from app.modules.usage.repository import UsageRepository
 
@@ -717,147 +708,6 @@ async def v1_usage(
         total_cost_usd=usage.total_cost_usd,
         limits=[_to_v1_usage_limit_response(limit) for limit in usage.limits],
         upstream_limits=_ordered_aggregate_limits(aggregate_limits),
-    )
-
-
-def _is_reset_credit_selectable_account(account: Account) -> bool:
-    return account.status not in (
-        AccountStatus.REAUTH_REQUIRED,
-        AccountStatus.DEACTIVATED,
-        AccountStatus.PAUSED,
-    )
-
-
-def _eligible_reset_credit_accounts(accounts: list[Account], api_key: ApiKeyData) -> list[Account]:
-    if api_key.account_assignment_scope_enabled:
-        assigned_ids = {account_id for account_id in api_key.assigned_account_ids if account_id}
-        requested_accounts = [account for account in accounts if account.id in assigned_ids]
-    else:
-        requested_accounts = accounts
-    return [account for account in requested_accounts if _is_reset_credit_selectable_account(account)]
-
-
-def _project_reset_credit_accounts(accounts: list[Account], api_key: ApiKeyData) -> list[tuple[str, str]]:
-    eligible_accounts = sorted(
-        _eligible_reset_credit_accounts(accounts, api_key),
-        key=lambda account: (account.email, account.id),
-    )
-    return [(account.id, account.email) for account in eligible_accounts]
-
-
-def _list_available_reset_credits(account_id: str, email: str) -> list[V1ResetCreditEntry]:
-    snapshot = get_rate_limit_reset_credits_store().get(account_id)
-    if snapshot is None or snapshot.available_count <= 0:
-        return []
-
-    available_credits = [credit for credit in snapshot.credits if credit.status == "available"]
-    if not available_credits:
-        return []
-
-    far_future = datetime.max.replace(tzinfo=timezone.utc)
-    ordered_credits = sorted(
-        available_credits,
-        key=lambda credit: (credit.expires_at or far_future, credit.id),
-    )
-    return [
-        V1ResetCreditEntry(
-            account_id=account_id,
-            email=email,
-            redeem_id=credit.id,
-            expired_at=credit.expires_at,
-        )
-        for credit in ordered_credits
-    ]
-
-
-def _is_reset_credit_account_in_api_key_pool(account: Account | None, api_key: ApiKeyData) -> bool:
-    if account is None or not _is_reset_credit_selectable_account(account):
-        return False
-    if not api_key.account_assignment_scope_enabled:
-        return True
-    assigned_ids = {account_id for account_id in api_key.assigned_account_ids if account_id}
-    return account.id in assigned_ids
-
-
-def _select_available_reset_credit_by_id(account_id: str, redeem_id: str) -> ResetCreditItem | None:
-    snapshot = get_rate_limit_reset_credits_store().get(account_id)
-    if snapshot is None or snapshot.available_count <= 0:
-        return None
-    for credit in snapshot.credits:
-        if credit.id == redeem_id and credit.status == "available":
-            return credit
-    return None
-
-
-def _translate_v1_reset_credit_consume_error(exc: ConsumeResetCreditError) -> HTTPException:
-    status_code = exc.status_code if exc.status_code > 0 else 503
-    return HTTPException(status_code=status_code, detail=exc.message)
-
-
-@usage_router.get("/v1/reset-credit", response_model=list[V1ResetCreditEntry])
-async def v1_reset_credit(
-    api_key: ApiKeyData = Security(validate_usage_api_key),
-) -> list[V1ResetCreditEntry]:
-    async with get_background_session() as session:
-        accounts = await AccountsRepository(session).list_accounts(refresh_existing=True)
-        eligible_accounts = _project_reset_credit_accounts(accounts, api_key)
-
-    response: list[V1ResetCreditEntry] = []
-    for account_id, account_email in eligible_accounts:
-        response.extend(_list_available_reset_credits(account_id, account_email))
-    return response
-
-
-@usage_router.post("/v1/reset-credit", response_model=V1ResetCreditRedeemResponse)
-async def v1_redeem_reset_credit(
-    payload: V1ResetCreditRedeemRequest,
-    api_key: ApiKeyData = Security(validate_usage_api_key),
-) -> V1ResetCreditRedeemResponse:
-    async with get_background_session() as session:
-        account = await AccountsRepository(session).get_by_id(payload.account_id)
-        if not _is_reset_credit_account_in_api_key_pool(account, api_key):
-            raise HTTPException(status_code=403, detail="Account is outside the API key pool")
-        if account is None:
-            raise HTTPException(status_code=403, detail="Account is outside the API key pool")
-        try:
-            route = await _resolve_reset_credit_route(session, account.id)
-        except UpstreamProxyRouteError as exc:
-            raise HTTPException(status_code=503, detail="Unable to resolve upstream proxy route") from exc
-        account_id = account.id
-        access_token_encrypted = account.access_token_encrypted
-        chatgpt_account_id = account.chatgpt_account_id
-
-    lock = await get_reset_credit_redeem_lock(account_id)
-    async with lock:
-        credit = _select_available_reset_credit_by_id(account_id, payload.redeem_id)
-        if credit is None:
-            raise HTTPException(status_code=409, detail="Requested reset credit is unavailable")
-        access_token = TokenEncryptor().decrypt(access_token_encrypted)
-        try:
-            result = await consume_reset_credit(
-                access_token,
-                chatgpt_account_id,
-                credit.id,
-                route=route,
-                allow_direct_egress=route is None,
-            )
-        except ConsumeResetCreditError as exc:
-            raise _translate_v1_reset_credit_consume_error(exc) from exc
-        await get_rate_limit_reset_credits_store().invalidate(account_id)
-        redeemed_at = result.credit.redeemed_at if result.credit else None
-        return V1ResetCreditRedeemResponse(
-            code=result.code,
-            windows_reset=result.windows_reset,
-            redeemed_at=redeemed_at,
-        )
-
-
-async def _resolve_reset_credit_route(session: AsyncSession, account_id: str) -> ResolvedUpstreamRoute | None:
-    return await resolve_upstream_route(
-        session,
-        account_id=account_id,
-        operation="reset_credits_consume",
-        scope="account",
     )
 
 

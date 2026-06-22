@@ -1,4 +1,3 @@
-import { useQuery } from "@tanstack/react-query";
 import { Eye, EyeOff, LogIn, LogOut, Menu } from "lucide-react";
 import { useState } from "react";
 import { NavLink } from "react-router-dom";
@@ -6,7 +5,6 @@ import { NavLink } from "react-router-dom";
 import { CodexLogo } from "@/components/brand/codex-logo";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
-import { listAccounts } from "@/features/accounts/api";
 import { usePrivacyStore } from "@/hooks/use-privacy";
 import { cn } from "@/lib/utils";
 
@@ -37,23 +35,6 @@ export function AppHeader({
   const blurred = usePrivacyStore((s) => s.blurred);
   const togglePrivacy = usePrivacyStore((s) => s.toggle);
   const PrivacyIcon = blurred ? EyeOff : Eye;
-  const { data: accounts = [] } = useQuery({
-    queryKey: ["accounts", "list"],
-    queryFn: listAccounts,
-    select: (data) => data.accounts,
-    refetchInterval: 30_000,
-    refetchIntervalInBackground: false,
-    staleTime: 30_000,
-  });
-  const totalAvailableResetCredits = accounts.reduce(
-    (total, account) => total + Math.max(0, account.availableResetCredits ?? 0),
-    0,
-  );
-  const accountsResetBadge = totalAvailableResetCredits > 99
-    ? "99+"
-    : totalAvailableResetCredits > 0
-      ? String(totalAvailableResetCredits)
-      : null;
 
   return (
     <header
@@ -88,14 +69,7 @@ export function AppHeader({
                 )
               }
             >
-              <span className="relative inline-flex items-center">
-                {item.label}
-                {item.to === "/accounts" && accountsResetBadge ? (
-                  <span className="absolute -top-2 -right-4 z-10 grid h-4 min-w-[1rem] place-items-center rounded-full bg-primary px-1 text-[10px] font-medium text-primary-foreground">
-                    {accountsResetBadge}
-                  </span>
-                ) : null}
-              </span>
+              {item.label}
             </NavLink>
           ))}
         </nav>
@@ -159,18 +133,13 @@ export function AppHeader({
                     {({ isActive }) => (
                       <span
                         className={cn(
-                          "relative block w-full rounded-lg px-3 py-2 text-left text-sm font-medium transition-colors",
+                          "block w-full rounded-lg px-3 py-2 text-left text-sm font-medium transition-colors",
                           isActive
                             ? "bg-primary/10 text-primary"
                             : "text-muted-foreground hover:bg-muted hover:text-foreground",
                         )}
                       >
                         {item.label}
-                        {item.to === "/accounts" && accountsResetBadge ? (
-                          <span className="absolute right-2 top-1 z-10 grid h-5 min-w-[1.25rem] place-items-center rounded-full bg-primary px-1 text-[10px] font-medium text-primary-foreground">
-                            {accountsResetBadge}
-                          </span>
-                        ) : null}
                       </span>
                     )}
                   </NavLink>

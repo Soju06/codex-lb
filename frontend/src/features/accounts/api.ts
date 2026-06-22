@@ -15,7 +15,6 @@ import {
   AccountTrendsResponseSchema,
   AccountProbeRequestSchema,
   AccountProbeResponseSchema,
-  ConsumeRateLimitResetCreditResponseSchema,
   ManualOauthCallbackRequestSchema,
   ManualOauthCallbackResponseSchema,
   OauthCompleteRequestSchema,
@@ -23,7 +22,6 @@ import {
   OauthStartRequestSchema,
   OauthStartResponseSchema,
   OauthStatusResponseSchema,
-  RateLimitResetCreditsSnapshotSchema,
   RuntimeConnectAddressResponseSchema,
 } from "@/features/accounts/schemas";
 import type { AccountRoutingPolicy } from "@/features/accounts/schemas";
@@ -116,20 +114,6 @@ export function exportAccountAuth(accountId: string) {
   return post(
     `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/export/auth`,
     AccountAuthExportResponseSchema,
-  );
-}
-
-export function getRateLimitResetCredits(accountId: string) {
-  return get(
-    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/rate-limit-reset-credits`,
-    RateLimitResetCreditsSnapshotSchema.nullable(),
-  );
-}
-
-export function consumeRateLimitResetCredit(accountId: string) {
-  return post(
-    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/rate-limit-reset-credits/consume`,
-    ConsumeRateLimitResetCreditResponseSchema,
   );
 }
 

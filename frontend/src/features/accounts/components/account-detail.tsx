@@ -31,7 +31,6 @@ export type AccountDetailProps = {
   onDelete: (accountId: string) => void;
   onReauth: () => void;
   onExportAuth: (accountId: string) => void;
-  onResetCredit: (accountId: string) => void;
   onLimitWarmupChange: (accountId: string, enabled: boolean) => void;
   onRoutingPolicyChange: (
     accountId: string,
@@ -54,7 +53,6 @@ export function AccountDetail({
   onDelete,
   onReauth,
   onExportAuth,
-  onResetCredit,
   onLimitWarmupChange,
   onRoutingPolicyChange,
   onSecurityWorkAuthorizedChange,
@@ -150,7 +148,6 @@ export function AccountDetail({
         onDelete={onDelete}
         onReauth={onReauth}
         onExportAuth={onExportAuth}
-        onResetCredit={onResetCredit}
         onLimitWarmupChange={onLimitWarmupChange}
         onRoutingPolicyChange={onRoutingPolicyChange}
         onSecurityWorkAuthorizedChange={onSecurityWorkAuthorizedChange}

@@ -10,7 +10,6 @@ import { AccountDetail } from "@/features/accounts/components/account-detail";
 import { AccountList } from "@/features/accounts/components/account-list";
 import { AccountsSkeleton } from "@/features/accounts/components/accounts-skeleton";
 import { ImportDialog } from "@/features/accounts/components/import-dialog";
-import { ResetCreditConfirmDialog } from "@/features/accounts/components/reset-credit-confirm-dialog";
 import { AuthExportDialog } from "@/features/accounts/components/auth-export-dialog";
 import { useAccounts } from "@/features/accounts/hooks/use-accounts";
 import {
@@ -54,7 +53,6 @@ export function AccountsPage() {
   const importDialog = useDialogState();
   const oauthDialog = useDialogState();
   const deleteDialog = useDialogState<string>();
-  const resetCreditDialog = useDialogState<string>();
   const exportDialog = useDialogState<AccountAuthExportResponse>();
   const [deleteHistory, setDeleteHistory] = useState(false);
 
@@ -180,7 +178,6 @@ export function AccountsPage() {
                 .then((result) => exportDialog.show(result))
                 .catch(() => null);
             }}
-            onResetCredit={(accountId) => resetCreditDialog.show(accountId)}
             onLimitWarmupChange={(accountId, enabled) =>
               void limitWarmupMutation.mutateAsync({ accountId, enabled })
             }
@@ -237,14 +234,6 @@ export function AccountsPage() {
         exportData={exportDialog.data}
         onOpenChange={exportDialog.onOpenChange}
       />
-
-      {resetCreditDialog.data ? (
-        <ResetCreditConfirmDialog
-          open={resetCreditDialog.open}
-          accountId={resetCreditDialog.data}
-          onOpenChange={resetCreditDialog.onOpenChange}
-        />
-      ) : null}
 
       <ConfirmDialog
         open={deleteDialog.open}

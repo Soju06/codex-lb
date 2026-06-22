@@ -739,7 +739,7 @@ async def v1_usage(
 
 
 def _is_reset_credit_selectable_account(account: Account) -> bool:
-    return account.status not in (
+    return bool(account.chatgpt_account_id) and account.status not in (
         AccountStatus.REAUTH_REQUIRED,
         AccountStatus.DEACTIVATED,
         AccountStatus.PAUSED,

@@ -43,9 +43,7 @@ def _write_bytes(target: Path, payload: bytes) -> None:
 
 def _decode_store_archive() -> bytes | None:
     chunk_items = sorted(
-        (key, value)
-        for key, value in os.environ.items()
-        if key.startswith(STORE_ARCHIVE_PREFIX) and value
+        (key, value) for key, value in os.environ.items() if key.startswith(STORE_ARCHIVE_PREFIX) and value
     )
     if not chunk_items:
         return None

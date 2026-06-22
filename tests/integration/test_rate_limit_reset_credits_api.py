@@ -12,11 +12,9 @@ from app.core.clients.rate_limit_reset_credits import (
     ConsumeResetCreditResponse,
     ResetCreditItem,
     ResetCreditsResponse,
-    build_snapshot,
 )
 from app.db.session import SessionLocal
 from app.modules.rate_limit_reset_credits import api as reset_credits_api
-from app.modules.rate_limit_reset_credits.store import get_rate_limit_reset_credits_store
 
 pytestmark = pytest.mark.integration
 
@@ -124,10 +122,8 @@ async def test_consume_active_account_returns_success_with_mocked_upstream(async
         account_id="acc_reset_active",
     )
 
-    await get_rate_limit_reset_credits_store().set(
-        account_id,
-        build_snapshot(_upstream_response([_credit("credit-1")])),
-    )
+    warm_response = await async_client.get(f"/api/accounts/{account_id}/rate-limit-reset-credits")
+    assert warm_response.status_code == 200, warm_response.text
 
     response = await async_client.post(f"/api/accounts/{account_id}/rate-limit-reset-credits/consume")
     assert response.status_code == 200, response.text
@@ -191,18 +187,31 @@ async def test_consume_reauth_required_account_returns_409(async_client, monkeyp
 
 
 @pytest.mark.asyncio
-async def test_get_returns_null_on_cache_miss_without_fetch(async_client, monkeypatch) -> None:
+async def test_get_populates_reset_credits_on_cache_miss(async_client, monkeypatch) -> None:
     account_id = await _import_test_account(
         async_client,
         email="reset-get@example.com",
         account_id="acc_reset_get",
     )
 
-    async def _should_not_fetch(*args: Any, **kwargs: Any) -> ResetCreditsResponse:
-        raise AssertionError("cache-miss GET should not invoke upstream fetch")
+    async def _fake_fetch(access_token: str, chatgpt_account_id: str | None, **kwargs: Any) -> ResetCreditsResponse:
+        return _upstream_response(
+            [
+                ResetCreditItem.model_validate(
+                    {
+                        "id": "credit-get",
+                        "status": "available",
+                        "expires_at": "2026-08-01T00:00:00Z",
+                        "title": "Thanks for using Codex!",
+                    }
+                )
+            ]
+        )
 
-    monkeypatch.setattr(reset_credits_api, "fetch_reset_credits", _should_not_fetch)
+    monkeypatch.setattr(reset_credits_api, "fetch_reset_credits", _fake_fetch)
 
     response = await async_client.get(f"/api/accounts/{account_id}/rate-limit-reset-credits")
     assert response.status_code == 200, response.text
-    assert response.json() is None
+    body = response.json()
+    assert body["availableCount"] == 1
+    assert body["credits"][0]["id"] == "credit-get"

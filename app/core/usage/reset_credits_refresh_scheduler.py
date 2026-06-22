@@ -98,8 +98,10 @@ async def refresh_reset_credits_for_accounts(
     """
     for account in accounts:
         if account.status in _RESET_CREDITS_SKIP_STATUSES:
+            await store.invalidate(account.id)
             continue
         if not account.chatgpt_account_id:
+            await store.invalidate(account.id)
             continue
         await _refresh_account_reset_credits(
             account,

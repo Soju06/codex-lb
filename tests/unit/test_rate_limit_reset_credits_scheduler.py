@@ -66,6 +66,10 @@ def _response(available_count: int = 1) -> ResetCreditsResponse:
 @pytest.mark.asyncio
 async def test_refresh_skips_paused_reauth_and_deactivated_accounts() -> None:
     store = RateLimitResetCreditsStore()
+    stale = RateLimitResetCreditsSnapshot(available_count=5)
+    await store.set("acc_paused", stale)
+    await store.set("acc_reauth", stale)
+    await store.set("acc_deactivated", stale)
     fetched: list[str] = []
 
     async def fetch_fn(access_token: str, account_id: str | None, **kwargs: Any) -> ResetCreditsResponse:
@@ -97,6 +101,7 @@ async def test_refresh_skips_paused_reauth_and_deactivated_accounts() -> None:
 @pytest.mark.asyncio
 async def test_refresh_skips_account_without_chatgpt_account_id() -> None:
     store = RateLimitResetCreditsStore()
+    await store.set("acc_no_workspace", RateLimitResetCreditsSnapshot(available_count=4))
     fetched: list[str] = []
 
     async def fetch_fn(access_token: str, account_id: str | None, **kwargs: Any) -> ResetCreditsResponse:

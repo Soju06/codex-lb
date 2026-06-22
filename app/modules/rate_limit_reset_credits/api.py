@@ -244,6 +244,7 @@ async def _redeem_soonest_reset_credit_locked(
 
     credit = _select_soonest_available_credit_from_response(credits_response)
     if credit is None:
+        await store.set(account.id, build_snapshot(credits_response))
         raise DashboardConflictError("No available reset credit", code="no_available_reset_credit")
 
     try:

@@ -51,6 +51,10 @@ client treats non-200, non-JSON, and schema-drifted 200 responses defensively.
   `available_count`.
 - **Snapshot is empty/stale.** UI hides all reset affordances for that account
   (`available_reset_credits: 0`). Not an error — wait one tick.
+- **Fresh consume preflight disproves a cached credit.** If the live pre-consume fetch says
+  `available_count: 0` or returns no available items, codex-lb overwrites the cached snapshot
+  with that fresh upstream state before returning `409`, so the dashboard does not keep
+  advertising a stale `Reset (N)` action until the next scheduler tick.
 - **Account becomes ineligible after a successful snapshot.** Scheduler skips paused,
   reauth-required, deactivated, or account-id-less accounts, so dashboard reads also check
   current account eligibility before serving cached reset credits. If the account is

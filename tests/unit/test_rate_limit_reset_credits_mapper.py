@@ -76,7 +76,10 @@ def test_account_summary_returns_zero_and_null_when_no_snapshot() -> None:
     assert summary.reset_credit_nearest_expires_at is None
 
 
-@pytest.mark.parametrize("status", [AccountStatus.PAUSED, AccountStatus.DEACTIVATED])
+@pytest.mark.parametrize(
+    "status",
+    [AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED],
+)
 def test_account_summary_suppresses_cached_reset_credits_for_ineligible_status(status: AccountStatus) -> None:
     store = RateLimitResetCreditsStore()
     store._snapshots["acc_ineligible"] = RateLimitResetCreditsSnapshot(  # type: ignore[attr-defined]

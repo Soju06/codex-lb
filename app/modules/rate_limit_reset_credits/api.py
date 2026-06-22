@@ -125,7 +125,6 @@ async def get_rate_limit_reset_credits(
         encryptor=TokenEncryptor(),
         store=store,
         fetch_fn=fetch_reset_credits,
-        auth_manager=context.service._auth_manager,
         resolve_route=_resolve_reset_credit_route,
     )
     return _snapshot_to_response(store.get(account_id))

@@ -66,6 +66,11 @@ client treats non-200, non-JSON, and schema-drifted 200 responses defensively.
   consume requests cannot forward the same cached `credit_id` upstream. After the first
   request finishes, the second request re-reads the account snapshot and either sees a
   refreshed state or fails with a dashboard conflict when no credit is still available.
+- **Successful self-service redeem leaves stale usage state behind.** The `/v1/reset-credit`
+  success path force-refreshes usage for the redeemed account and invalidates the
+  load-balancer's account-selection cache when that refresh writes updated usage, so
+  `rate_limited` / `quota_exceeded` recovery can take effect for immediate follow-up
+  `/v1/*` traffic instead of waiting for the next periodic usage tick.
 - **Upstream consume failures.** Client-facing upstream failures are preserved as dashboard
   errors (`401`, `403`, `409`), while other consume failures surface as dashboard `503`
   responses instead of falling into the generic internal-error handler.

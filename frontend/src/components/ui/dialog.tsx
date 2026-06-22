@@ -78,8 +78,17 @@ function isFloatingLayerOpen(): boolean {
   )
 }
 
-function shouldIgnoreDialogDismiss(target: EventTarget | null): boolean {
-  return isFloatingLayerTarget(target) || isFloatingLayerOpen()
+function shouldIgnoreDialogDismiss(
+  target: EventTarget | null,
+  floatingLayerWasOpen: boolean,
+): boolean {
+  // `floatingLayerWasOpen` is captured at pointerdown (capture phase, before any
+  // Radix dismiss handler runs). A mouse click outside an open dropdown closes
+  // that dropdown first, flipping its data-state to "closed" before this dialog
+  // handler runs, so a live isFloatingLayerOpen() check would already miss it and
+  // the dialog would wrongly close. The captured flag avoids that race; the live
+  // check still covers focus-driven dismissals.
+  return isFloatingLayerTarget(target) || floatingLayerWasOpen || isFloatingLayerOpen()
 }
 
 function DialogContent({
@@ -93,6 +102,19 @@ function DialogContent({
 }: React.ComponentProps<typeof DialogPrimitive.Content> & {
   showCloseButton?: boolean
 }) {
+  // Capture whether a floating layer is open at the very start of each pointer
+  // interaction. Capture phase runs before Radix's own dismiss listeners, so the
+  // dropdown is still open here even though it closes before our outside handlers.
+  const floatingLayerOpenAtPointerDownRef = React.useRef(false)
+  React.useEffect(() => {
+    const onPointerDownCapture = () => {
+      floatingLayerOpenAtPointerDownRef.current = isFloatingLayerOpen()
+    }
+    document.addEventListener("pointerdown", onPointerDownCapture, true)
+    return () =>
+      document.removeEventListener("pointerdown", onPointerDownCapture, true)
+  }, [])
+
   return (
     <DialogPortal data-slot="dialog-portal">
       <DialogOverlay />
@@ -104,19 +126,28 @@ function DialogContent({
         )}
         onFocusOutside={(event) => {
           onFocusOutside?.(event)
-          if (!event.defaultPrevented && shouldIgnoreDialogDismiss(event.target)) {
+          if (
+            !event.defaultPrevented &&
+            shouldIgnoreDialogDismiss(event.target, floatingLayerOpenAtPointerDownRef.current)
+          ) {
             event.preventDefault()
           }
         }}
         onInteractOutside={(event) => {
           onInteractOutside?.(event)
-          if (!event.defaultPrevented && shouldIgnoreDialogDismiss(event.target)) {
+          if (
+            !event.defaultPrevented &&
+            shouldIgnoreDialogDismiss(event.target, floatingLayerOpenAtPointerDownRef.current)
+          ) {
             event.preventDefault()
           }
         }}
         onPointerDownOutside={(event) => {
           onPointerDownOutside?.(event)
-          if (!event.defaultPrevented && shouldIgnoreDialogDismiss(event.target)) {
+          if (
+            !event.defaultPrevented &&
+            shouldIgnoreDialogDismiss(event.target, floatingLayerOpenAtPointerDownRef.current)
+          ) {
             event.preventDefault()
           }
         }}

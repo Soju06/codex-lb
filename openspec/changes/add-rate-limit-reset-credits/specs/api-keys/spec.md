@@ -8,6 +8,8 @@ The target account pool SHALL be derived from the authenticated API key. If `acc
 
 `GET /v1/reset-credit` SHALL return only credits for the authenticated key's eligible account pool. `POST /v1/reset-credit` SHALL reject requests whose `account_id` is outside that pool.
 
+On a successful `POST /v1/reset-credit` redemption, the system SHALL invalidate the redeemed account's cached reset-credit snapshot, force a usage refresh for that account, and invalidate account-selection cache state when that usage refresh writes updated usage. A failed or empty post-redeem usage refresh SHALL NOT roll back the successful credit redemption response.
+
 #### Scenario: Missing API key is rejected
 
 - **WHEN** a client calls `GET /v1/reset-credit` or `POST /v1/reset-credit` without a Bearer token
@@ -39,3 +41,12 @@ The target account pool SHALL be derived from the authenticated API key. If `acc
 
 - **WHEN** `api_key_auth_enabled` is false and a client calls `GET /v1/reset-credit` or `POST /v1/reset-credit` with a valid Bearer key
 - **THEN** the system still authenticates that key and applies the same account-pool rules
+
+#### Scenario: Successful self-service redemption refreshes usage for immediate follow-up traffic
+
+- **GIVEN** an eligible account has a redeemable reset credit and persisted usage/account state that still reflects a blocked window
+- **WHEN** a client successfully calls `POST /v1/reset-credit` for that account
+- **THEN** the redeemed account's cached reset-credit snapshot is invalidated
+- **AND** codex-lb forces a usage refresh for that account before returning
+- **AND** any account-selection cache entry derived from the stale usage state is invalidated when the refresh writes updated usage
+- **AND** the response still returns the upstream `{code, windows_reset, redeemed_at}` success payload

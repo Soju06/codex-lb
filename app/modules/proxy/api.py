@@ -110,6 +110,7 @@ from app.modules.firewall.service import FirewallRepositoryPort, FirewallService
 from app.modules.proxy import affinity as proxy_affinity_module
 from app.modules.proxy import images_service as images_service_module
 from app.modules.proxy import service as proxy_service_module
+from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
 from app.modules.proxy.helpers import _rate_limit_details
 from app.modules.proxy.http_bridge_forwarding import parse_forwarded_request
@@ -152,7 +153,8 @@ from app.modules.proxy.types import (
 from app.modules.rate_limit_reset_credits.api import get_reset_credit_redeem_lock
 from app.modules.rate_limit_reset_credits.store import get_rate_limit_reset_credits_store
 from app.modules.usage.mappers import usage_history_to_window_row
-from app.modules.usage.repository import UsageRepository
+from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
+from app.modules.usage.updater import UsageUpdater
 
 logger = logging.getLogger(__name__)
 
@@ -844,6 +846,7 @@ async def v1_redeem_reset_credit(
         except ConsumeResetCreditError as exc:
             raise _translate_v1_reset_credit_consume_error(exc) from exc
         await get_rate_limit_reset_credits_store().invalidate(account_id)
+        await _refresh_usage_after_v1_reset_credit_redeem(account_id)
         redeemed_at = result.credit.redeemed_at if result.credit else None
         return V1ResetCreditRedeemResponse(
             code=result.code,
@@ -858,6 +861,30 @@ async def _resolve_reset_credit_route(session: AsyncSession, account_id: str) ->
         account_id=account_id,
         operation="reset_credits_consume",
         scope="account",
+    )
+
+
+async def _refresh_usage_after_v1_reset_credit_redeem(account_id: str) -> None:
+    async with get_background_session() as session:
+        account = await AccountsRepository(session).get_by_id(account_id)
+        if account is None:
+            logger.warning(
+                "V1 reset credit consume succeeded but account disappeared before usage refresh account_id=%s",
+                account_id,
+            )
+            return
+        usage_updater = UsageUpdater(
+            UsageRepository(session),
+            AccountsRepository(session),
+            AdditionalUsageRepository(session),
+        )
+        refreshed = await usage_updater.force_refresh(account)
+    if refreshed:
+        get_account_selection_cache().invalidate()
+        return
+    logger.warning(
+        "V1 reset credit consume succeeded but usage refresh returned no update account_id=%s",
+        account_id,
     )
 
 

@@ -478,6 +478,76 @@ async def test_v1_reset_credit_post_consumes_exact_credit_and_invalidates_snapsh
 
 
 @pytest.mark.asyncio
+async def test_v1_reset_credit_post_force_refreshes_usage_and_invalidates_selection_cache(
+    async_client,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    await _enable_api_key_auth(async_client)
+    account_id = await _import_account(async_client, "acc-reset-post-refresh", "refresh@example.com")
+
+    _, key = await _create_api_key(async_client, name="reset-credit-post-refresh")
+    await _seed_snapshot(
+        account_id,
+        available_count=1,
+        credits=[
+            ResetCreditItem(
+                id="credit-refresh",
+                status="available",
+                expires_at=datetime(2031, 5, 2, 1, 0, 0, tzinfo=timezone.utc),
+            )
+        ],
+    )
+
+    consume_mock = AsyncMock(
+        return_value=ConsumeResetCreditResponse.model_validate(
+            {
+                "code": "reset",
+                "credit": {"id": "credit-refresh", "status": "redeemed", "redeemed_at": "2031-05-02T01:30:00Z"},
+                "windows_reset": 1,
+            }
+        )
+    )
+    force_refresh_calls: list[tuple[str, str]] = []
+
+    class StubUsageUpdater:
+        def __init__(self, *args, **kwargs) -> None:
+            del args, kwargs
+
+        async def force_refresh(self, account) -> bool:
+            force_refresh_calls.append((account.id, account.status.value))
+            return True
+
+    class SelectionCache:
+        def __init__(self) -> None:
+            self.invalidations = 0
+
+        def invalidate(self) -> None:
+            self.invalidations += 1
+
+    selection_cache = SelectionCache()
+
+    monkeypatch.setattr("app.modules.proxy.api.consume_reset_credit", consume_mock)
+    monkeypatch.setattr("app.modules.proxy.api.UsageUpdater", StubUsageUpdater)
+    monkeypatch.setattr("app.modules.proxy.api.get_account_selection_cache", lambda: selection_cache)
+
+    response = await async_client.post(
+        "/v1/reset-credit",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"account_id": account_id, "redeem_id": "credit-refresh"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "code": "reset",
+        "windows_reset": 1,
+        "redeemed_at": "2031-05-02T01:30:00Z",
+    }
+    assert force_refresh_calls == [(account_id, "active")]
+    assert selection_cache.invalidations == 1
+    assert get_rate_limit_reset_credits_store().get(account_id) is None
+
+
+@pytest.mark.asyncio
 async def test_v1_reset_credit_post_closes_session_before_lock_and_upstream_consume(
     async_client,
     monkeypatch: pytest.MonkeyPatch,
@@ -576,11 +646,19 @@ async def test_v1_reset_credit_post_closes_session_before_lock_and_upstream_cons
         assert requested_account_id == account_id
         return None
 
+    async def fake_refresh_usage_after_redeem(refreshed_account_id: str) -> None:
+        events.append("refresh_usage")
+        assert refreshed_account_id == account_id
+
     monkeypatch.setattr("app.modules.proxy.api.get_background_session", lambda: SessionManager())
     monkeypatch.setattr("app.modules.proxy.api.AccountsRepository", StubAccountsRepository)
     monkeypatch.setattr("app.modules.proxy.api._resolve_reset_credit_route", fake_resolve_route)
     monkeypatch.setattr("app.modules.proxy.api.get_reset_credit_redeem_lock", fake_get_lock)
     monkeypatch.setattr("app.modules.proxy.api.consume_reset_credit", fake_consume)
+    monkeypatch.setattr(
+        "app.modules.proxy.api._refresh_usage_after_v1_reset_credit_redeem",
+        fake_refresh_usage_after_redeem,
+    )
 
     response = await async_client.post(
         "/v1/reset-credit",
@@ -603,6 +681,7 @@ async def test_v1_reset_credit_post_closes_session_before_lock_and_upstream_cons
         "lock_wait",
         "lock_enter",
         "consume",
+        "refresh_usage",
         "lock_exit",
     ]
     assert get_rate_limit_reset_credits_store().get(account_id) is None

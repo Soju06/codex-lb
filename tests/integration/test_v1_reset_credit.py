@@ -548,6 +548,89 @@ async def test_v1_reset_credit_post_force_refreshes_usage_and_invalidates_select
 
 
 @pytest.mark.asyncio
+async def test_v1_reset_credit_post_refreshes_account_before_consuming_credit(
+    async_client,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    await _enable_api_key_auth(async_client)
+    account_id = await _import_account(
+        async_client,
+        "acc-reset-post-refresh-token",
+        "refresh-token@example.com",
+    )
+
+    _, key = await _create_api_key(async_client, name="reset-credit-post-refresh-token")
+    await _seed_snapshot(
+        account_id,
+        available_count=1,
+        credits=[
+            ResetCreditItem(
+                id="credit-refresh-token",
+                status="available",
+                expires_at=datetime(2031, 5, 2, tzinfo=timezone.utc),
+            )
+        ],
+    )
+
+    refreshed_account = SimpleNamespace(
+        id=account_id,
+        status=AccountStatus.ACTIVE,
+        access_token_encrypted=TokenEncryptor().encrypt("fresh-access-token"),
+        chatgpt_account_id="chatgpt-refresh-token",
+    )
+    events: list[str] = []
+
+    async def fake_ensure_fresh(requested_account_id: str):
+        events.append("refresh")
+        assert requested_account_id == account_id
+        return refreshed_account
+
+    async def fake_consume(
+        access_token: str,
+        chatgpt_account_id: str,
+        credit_id: str,
+        *,
+        route: object | None = None,
+        allow_direct_egress: bool = False,
+    ):
+        events.append("consume")
+        assert access_token == "fresh-access-token"
+        assert chatgpt_account_id == "chatgpt-refresh-token"
+        assert credit_id == "credit-refresh-token"
+        assert route is None
+        assert allow_direct_egress is True
+        return ConsumeResetCreditResponse.model_validate(
+            {
+                "code": "reset",
+                "credit": {
+                    "id": credit_id,
+                    "status": "redeemed",
+                    "redeemed_at": "2031-05-02T00:30:00Z",
+                },
+                "windows_reset": 1,
+            }
+        )
+
+    monkeypatch.setattr("app.modules.proxy.api._ensure_v1_reset_credit_account_fresh", fake_ensure_fresh)
+    monkeypatch.setattr("app.modules.proxy.api.consume_reset_credit", fake_consume)
+
+    response = await async_client.post(
+        "/v1/reset-credit",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"account_id": account_id, "redeem_id": "credit-refresh-token"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "code": "reset",
+        "windows_reset": 1,
+        "redeemed_at": "2031-05-02T00:30:00Z",
+    }
+    assert events == ["refresh", "consume"]
+    assert get_rate_limit_reset_credits_store().get(account_id) is None
+
+
+@pytest.mark.asyncio
 async def test_v1_reset_credit_post_closes_session_before_lock_and_upstream_consume(
     async_client,
     monkeypatch: pytest.MonkeyPatch,
@@ -654,6 +737,10 @@ async def test_v1_reset_credit_post_closes_session_before_lock_and_upstream_cons
     monkeypatch.setattr("app.modules.proxy.api.AccountsRepository", StubAccountsRepository)
     monkeypatch.setattr("app.modules.proxy.api._resolve_reset_credit_route", fake_resolve_route)
     monkeypatch.setattr("app.modules.proxy.api.get_reset_credit_redeem_lock", fake_get_lock)
+    monkeypatch.setattr(
+        "app.modules.proxy.api._ensure_v1_reset_credit_account_fresh",
+        AsyncMock(return_value=account),
+    )
     monkeypatch.setattr("app.modules.proxy.api.consume_reset_credit", fake_consume)
     monkeypatch.setattr(
         "app.modules.proxy.api._refresh_usage_after_v1_reset_credit_redeem",

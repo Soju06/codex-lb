@@ -5,6 +5,7 @@ import json
 import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from json import JSONDecodeError
 from typing import Any, Final, Literal, cast
@@ -94,6 +95,7 @@ from app.db.models import Account, AccountStatus
 from app.db.session import get_background_session
 from app.dependencies import ProxyContext, get_proxy_context, get_proxy_websocket_context
 from app.modules.accounts.repository import AccountsRepository
+from app.modules.accounts.auth_manager import AuthManager
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import (
     TRAFFIC_CLASS_OPPORTUNISTIC,
@@ -178,6 +180,14 @@ _PUBLIC_RESPONSE_STREAM_TERMINAL_TYPES = frozenset(
     {"response.completed", "response.incomplete", "response.failed", "error"}
 )
 _PUBLIC_RESPONSES_PRE_CREATED_BUFFER_LIMIT = 64
+
+
+class _V1ResetCreditFreshCredentials:
+    __slots__ = ("access_token_encrypted", "chatgpt_account_id")
+
+    def __init__(self, *, access_token_encrypted: bytes, chatgpt_account_id: str | None) -> None:
+        self.access_token_encrypted = access_token_encrypted
+        self.chatgpt_account_id = chatgpt_account_id
 
 router = APIRouter(
     prefix="/backend-api/codex",
@@ -796,6 +806,29 @@ def _translate_v1_reset_credit_consume_error(exc: ConsumeResetCreditError) -> HT
     return HTTPException(status_code=status_code, detail=exc.message)
 
 
+@asynccontextmanager
+async def _v1_reset_credit_accounts_refresh_scope() -> AsyncIterator[AccountsRepository]:
+    async with get_background_session() as session:
+        yield AccountsRepository(session)
+
+
+async def _ensure_v1_reset_credit_account_fresh(account_id: str) -> _V1ResetCreditFreshCredentials:
+    async with get_background_session() as session:
+        repo = AccountsRepository(session)
+        account = await repo.get_by_id(account_id)
+        if account is None:
+            raise HTTPException(status_code=404, detail="Account not found")
+        auth_manager = AuthManager(
+            repo,
+            refresh_repo_factory=_v1_reset_credit_accounts_refresh_scope,
+        )
+        refreshed = await auth_manager.ensure_fresh(account, force=False)
+        return _V1ResetCreditFreshCredentials(
+            access_token_encrypted=refreshed.access_token_encrypted,
+            chatgpt_account_id=refreshed.chatgpt_account_id,
+        )
+
+
 @usage_router.get("/v1/reset-credit", response_model=list[V1ResetCreditEntry])
 async def v1_reset_credit(
     api_key: ApiKeyData = Security(validate_usage_api_key),
@@ -826,19 +859,18 @@ async def v1_redeem_reset_credit(
         except UpstreamProxyRouteError as exc:
             raise HTTPException(status_code=503, detail="Unable to resolve upstream proxy route") from exc
         account_id = account.id
-        access_token_encrypted = account.access_token_encrypted
-        chatgpt_account_id = account.chatgpt_account_id
 
     lock = await get_reset_credit_redeem_lock(account_id)
     async with lock:
         credit = _select_available_reset_credit_by_id(account_id, payload.redeem_id)
         if credit is None:
             raise HTTPException(status_code=409, detail="Requested reset credit is unavailable")
-        access_token = TokenEncryptor().decrypt(access_token_encrypted)
+        redeem_credentials = await _ensure_v1_reset_credit_account_fresh(account_id)
+        access_token = TokenEncryptor().decrypt(redeem_credentials.access_token_encrypted)
         try:
             result = await consume_reset_credit(
                 access_token,
-                chatgpt_account_id,
+                redeem_credentials.chatgpt_account_id,
                 credit.id,
                 route=route,
                 allow_direct_egress=route is None,

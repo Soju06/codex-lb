@@ -266,6 +266,10 @@ async def test_redeem_returns_409_when_no_available_credit() -> None:
             consume_fn=_raise_not_called,  # type: ignore[arg-type]
         )
     assert excinfo.value.code == "no_available_reset_credit"
+    cached = store.get("acc_1")
+    assert cached is not None
+    assert cached.available_count == 1
+    assert cached.credits[0].status == "redeemed"
 
 
 @pytest.mark.asyncio
@@ -281,6 +285,10 @@ async def test_redeem_returns_409_when_cached_count_is_zero() -> None:
             consume_fn=_raise_not_called,  # type: ignore[arg-type]
         )
     assert excinfo.value.code == "no_available_reset_credit"
+    cached = store.get("acc_1")
+    assert cached is not None
+    assert cached.available_count == 0
+    assert cached.credits[0].status == "available"
 
 
 @pytest.mark.asyncio
@@ -294,6 +302,31 @@ async def test_redeem_returns_409_when_snapshot_missing() -> None:
             fetch_fn=_static_fetch_fn(_response([], available_count=0)),
             consume_fn=_raise_not_called,  # type: ignore[arg-type]
         )
+    cached = store.get("acc_1")
+    assert cached is not None
+    assert cached.available_count == 0
+    assert cached.credits == []
+
+
+@pytest.mark.asyncio
+async def test_redeem_replaces_stale_cached_snapshot_when_fresh_fetch_has_no_available_credit() -> None:
+    store = RateLimitResetCreditsStore()
+    await store.set("acc_1", _snapshot([_credit("stale")], available_count=1))
+
+    with pytest.raises(DashboardConflictError) as excinfo:
+        await _redeem_soonest_reset_credit(
+            account=_account(),
+            store=store,
+            encryptor=StubEncryptor(),
+            fetch_fn=_static_fetch_fn(_response([], available_count=0)),
+            consume_fn=_raise_not_called,  # type: ignore[arg-type]
+        )
+
+    assert excinfo.value.code == "no_available_reset_credit"
+    cached = store.get("acc_1")
+    assert cached is not None
+    assert cached.available_count == 0
+    assert cached.credits == []
 
 
 @pytest.mark.asyncio

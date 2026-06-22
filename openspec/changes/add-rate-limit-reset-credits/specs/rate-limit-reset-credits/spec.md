@@ -52,7 +52,7 @@ The system SHALL store the most recent successful reset-credits response per acc
 
 ### Requirement: Operators can redeem the soonest-expiring available credit
 
-The system SHALL expose a dashboard endpoint `POST /api/accounts/{account_id}/rate-limit-reset-credits/consume` that redeems exactly one credit for the named account. The endpoint SHALL select, from the freshest cached snapshot, the credit whose `status` is `available` with the smallest `expires_at`, generate a `redeem_request_id` (UUID v4), and forward `{credit_id, redeem_request_id}` to upstream `POST /wham/rate-limit-reset-credits/consume` using the account's bearer token and `chatgpt-account-id`. A cached snapshot with `available_count <= 0` MUST be treated as having no redeemable credits, even if the cached `credits` list contains an item marked `available`. On a 200 response the endpoint SHALL invalidate the cached snapshot for that account and return `{code, windows_reset, redeemed_at}`. The endpoint SHALL require dashboard write access; read-only guests MUST be refused.
+The system SHALL expose a dashboard endpoint `POST /api/accounts/{account_id}/rate-limit-reset-credits/consume` that redeems exactly one credit for the named account. The endpoint SHALL select, from the freshest cached snapshot, the credit whose `status` is `available` with the smallest `expires_at`, generate a `redeem_request_id` (UUID v4), and forward `{credit_id, redeem_request_id}` to upstream `POST /wham/rate-limit-reset-credits/consume` using the account's bearer token and `chatgpt-account-id`. A cached snapshot with `available_count <= 0` MUST be treated as having no redeemable credits, even if the cached `credits` list contains an item marked `available`. When the fresh pre-consume fetch reports `available_count <= 0` or no available credit items, the endpoint SHALL replace any prior cached snapshot for that account with the fresh upstream snapshot before returning a conflict. On a 200 response the endpoint SHALL invalidate the cached snapshot for that account and return `{code, windows_reset, redeemed_at}`. The endpoint SHALL require dashboard write access; read-only guests MUST be refused.
 
 #### Scenario: Consume selects the soonest-expiring credit
 - **GIVEN** an account has cached credits with expiries `2026-07-10Z` and `2026-06-20Z`, both `status: available`
@@ -86,6 +86,13 @@ The system SHALL expose a dashboard endpoint `POST /api/accounts/{account_id}/ra
 - **GIVEN** an account whose cached snapshot reports `available_count: 0` (or has no snapshot)
 - **WHEN** the operator invokes `POST /api/accounts/{id}/rate-limit-reset-credits/consume`
 - **THEN** the endpoint returns a `409` (or equivalent client-error) without calling upstream
+
+#### Scenario: Fresh empty consume fetch replaces a stale cached snapshot
+- **GIVEN** an account has a cached reset-credits snapshot showing at least one available credit
+- **AND** the fresh pre-consume upstream fetch returns `available_count: 0` or no `status: available` items
+- **WHEN** the operator invokes `POST /api/accounts/{id}/rate-limit-reset-credits/consume`
+- **THEN** the endpoint returns a `409` (or equivalent client-error)
+- **AND** the cached snapshot for that account is replaced with the fresh upstream snapshot before the response is returned
 
 ### Requirement: Reset credit polling failure does not mutate account status
 

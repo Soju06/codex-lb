@@ -96,6 +96,7 @@ class ConsumeResetCreditResponseSchema(DashboardModel):
 @dataclass(frozen=True, slots=True)
 class _RedeemResetCreditOutcome:
     response: ConsumeResetCreditResponseSchema
+    available_count_before: int
     available_count_after: int
 
 
@@ -145,8 +146,6 @@ async def consume_rate_limit_reset_credit(
         raise DashboardNotFoundError("Account not found", code="account_not_found")
 
     store = get_rate_limit_reset_credits_store()
-    cached_snapshot = store.get(account_id)
-    available_count_before = cached_snapshot.available_count if cached_snapshot is not None else 0
 
     try:
         outcome = await _redeem_soonest_reset_credit(
@@ -158,6 +157,8 @@ async def consume_rate_limit_reset_credit(
             resolve_route=_resolve_reset_credit_route,
         )
     except RefreshError as exc:
+        if exc.is_permanent:
+            get_account_selection_cache().invalidate()
         raise DashboardConflictError(
             f"Reset credit consume could not refresh account credentials: {exc.message}",
             code="account_reset_credit_refresh_failed",
@@ -175,7 +176,7 @@ async def consume_rate_limit_reset_credit(
             "account_id": account_id,
             "consume_code": outcome.response.code,
             "windows_reset": outcome.response.windows_reset,
-            "available_reset_credits_before": available_count_before,
+            "available_reset_credits_before": outcome.available_count_before,
             "available_reset_credits_after": outcome.available_count_after,
         },
     )
@@ -284,6 +285,7 @@ async def _redeem_soonest_reset_credit_locked(
             windows_reset=result.windows_reset,
             redeemed_at=redeemed_at,
         ),
+        available_count_before=credits_response.available_count,
         available_count_after=available_count_after,
     )
 

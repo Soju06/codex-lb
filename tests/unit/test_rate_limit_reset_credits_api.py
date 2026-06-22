@@ -8,6 +8,7 @@ from typing import Any, cast
 import pytest
 
 from app.core.auth.dependencies import require_dashboard_write_access
+from app.core.auth.refresh import RefreshError
 from app.core.clients.rate_limit_reset_credits import (
     ConsumeResetCreditError,
     ConsumeResetCreditResponse,
@@ -354,6 +355,7 @@ async def test_redeem_selects_soonest_calls_upstream_and_invalidates_cache() -> 
     # Successful redemption invalidates the in-memory snapshot so the next
     # dashboard refresh repulls upstream state instead of serving a local edit.
     assert store.get("acc_1") is None
+    assert result.available_count_before == 2
     assert result.available_count_after == 1
     assert isinstance(result.response, ConsumeResetCreditResponseSchema)
     assert result.response.code == "reset"
@@ -677,6 +679,132 @@ async def test_consume_handler_returns_404_when_account_missing() -> None:
             _write_access=None,
             context=cast(Any, fake_context),
         )
+
+
+@pytest.mark.asyncio
+async def test_consume_handler_audits_live_available_count_before_when_cache_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = RateLimitResetCreditsStore()
+    monkeypatch.setattr(reset_credits_api, "get_rate_limit_reset_credits_store", lambda: store)
+
+    class _Repo:
+        async def get_by_id(self, account_id: str) -> Account | None:
+            return _account(account_id)
+
+    logged: dict[str, Any] = {}
+
+    def _log_async(event: str, **kwargs: Any) -> None:
+        logged["event"] = event
+        logged.update(kwargs)
+
+    async def _redeem(**kwargs: Any) -> Any:
+        return reset_credits_api._RedeemResetCreditOutcome(
+            response=ConsumeResetCreditResponseSchema(code="reset", windows_reset=1, redeemed_at=None),
+            available_count_before=3,
+            available_count_after=2,
+        )
+
+    monkeypatch.setattr(reset_credits_api, "_redeem_soonest_reset_credit", _redeem)
+    monkeypatch.setattr(reset_credits_api.AuditService, "log_async", _log_async)
+
+    fake_context = SimpleNamespace(
+        repository=_Repo(),
+        service=SimpleNamespace(_auth_manager=None, _usage_updater=None),
+    )
+    fake_request = SimpleNamespace(client=SimpleNamespace(host="127.0.0.1"))
+
+    response = await consume_rate_limit_reset_credit(
+        fake_request,
+        account_id="acc_1",
+        _write_access=None,
+        context=cast(Any, fake_context),
+    )
+
+    assert response.code == "reset"
+    assert logged["event"] == "account_rate_limit_reset_credit_consumed"
+    assert logged["details"]["available_reset_credits_before"] == 3
+    assert logged["details"]["available_reset_credits_after"] == 2
+
+
+@pytest.mark.asyncio
+async def test_consume_handler_invalidates_selection_cache_on_permanent_refresh_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Repo:
+        async def get_by_id(self, account_id: str) -> Account | None:
+            return _account(account_id)
+
+    class _SelectionCache:
+        def __init__(self) -> None:
+            self.invalidated = 0
+
+        def invalidate(self) -> None:
+            self.invalidated += 1
+
+    async def _redeem(**kwargs: Any) -> Any:
+        raise RefreshError("invalid_grant", "refresh token expired", True)
+
+    selection_cache = _SelectionCache()
+    monkeypatch.setattr(reset_credits_api, "_redeem_soonest_reset_credit", _redeem)
+    monkeypatch.setattr(reset_credits_api, "get_account_selection_cache", lambda: selection_cache)
+
+    fake_context = SimpleNamespace(
+        repository=_Repo(),
+        service=SimpleNamespace(_auth_manager=None, _usage_updater=None),
+    )
+    fake_request = SimpleNamespace(client=SimpleNamespace(host="127.0.0.1"))
+
+    with pytest.raises(DashboardConflictError) as excinfo:
+        await consume_rate_limit_reset_credit(
+            fake_request,
+            account_id="acc_1",
+            _write_access=None,
+            context=cast(Any, fake_context),
+        )
+
+    assert excinfo.value.code == "account_reset_credit_refresh_failed"
+    assert selection_cache.invalidated == 1
+
+
+@pytest.mark.asyncio
+async def test_consume_handler_keeps_selection_cache_on_transient_refresh_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Repo:
+        async def get_by_id(self, account_id: str) -> Account | None:
+            return _account(account_id)
+
+    class _SelectionCache:
+        def __init__(self) -> None:
+            self.invalidated = 0
+
+        def invalidate(self) -> None:
+            self.invalidated += 1
+
+    async def _redeem(**kwargs: Any) -> Any:
+        raise RefreshError("transport_error", "timeout", False)
+
+    selection_cache = _SelectionCache()
+    monkeypatch.setattr(reset_credits_api, "_redeem_soonest_reset_credit", _redeem)
+    monkeypatch.setattr(reset_credits_api, "get_account_selection_cache", lambda: selection_cache)
+
+    fake_context = SimpleNamespace(
+        repository=_Repo(),
+        service=SimpleNamespace(_auth_manager=None, _usage_updater=None),
+    )
+    fake_request = SimpleNamespace(client=SimpleNamespace(host="127.0.0.1"))
+
+    with pytest.raises(DashboardConflictError) as excinfo:
+        await consume_rate_limit_reset_credit(
+            fake_request,
+            account_id="acc_1",
+            _write_access=None,
+            context=cast(Any, fake_context),
+        )
+
+    assert excinfo.value.code == "account_reset_credit_refresh_failed"
+    assert selection_cache.invalidated == 0
 
 
 # --- POST consume: write-access gating refuses guests (full ASGI path) ---

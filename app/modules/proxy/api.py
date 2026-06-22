@@ -194,6 +194,7 @@ class _V1ResetCreditFreshCredentials:
         self.access_token_encrypted = access_token_encrypted
         self.chatgpt_account_id = chatgpt_account_id
 
+
 router = APIRouter(
     prefix="/backend-api/codex",
     tags=["proxy"],

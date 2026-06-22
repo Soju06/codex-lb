@@ -127,6 +127,7 @@ export function ResetCreditConfirmDialog({
       confirmLabel={pending ? "Redeeming..." : "Redeem credit"}
       cancelLabel="Cancel"
       confirmDisabled={confirmDisabled}
+      keepOpenOnConfirm
       onOpenChange={handleOpenChange}
       onConfirm={handleConfirm}
     >

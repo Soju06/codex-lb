@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from sqlalchemy import update
 
 from app.core.auth import generate_unique_account_id
 from app.core.auth.refresh import RefreshError
@@ -17,7 +18,8 @@ from app.core.clients.rate_limit_reset_credits import (
 )
 from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
-from app.db.models import AccountStatus
+from app.db.models import Account, AccountStatus
+from app.db.session import SessionLocal
 from app.modules.rate_limit_reset_credits.store import get_rate_limit_reset_credits_store
 
 pytestmark = pytest.mark.integration
@@ -326,6 +328,47 @@ async def test_v1_reset_credit_selectable_accounts_excludes_paused_accounts(asyn
 
 
 @pytest.mark.asyncio
+async def test_v1_reset_credit_excludes_accounts_without_chatgpt_account_id(async_client):
+    await _enable_api_key_auth(async_client)
+    active_account_id = await _import_account(async_client, "acc-reset-chatgpt-present", "present@example.com")
+    missing_id_account_id = await _import_account(async_client, "acc-reset-chatgpt-missing", "missing-id@example.com")
+
+    async with SessionLocal() as session:
+        await session.execute(
+            update(Account).where(Account.id == missing_id_account_id).values(chatgpt_account_id=None)
+        )
+        await session.commit()
+
+    _, key = await _create_api_key(async_client, name="reset-credit-chatgpt-filter")
+    expires_at = datetime(2031, 2, 4, 4, 5, 6, tzinfo=timezone.utc)
+    await _seed_snapshot(
+        active_account_id,
+        available_count=1,
+        credits=[ResetCreditItem(id="credit-active", status="available", expires_at=expires_at)],
+    )
+    await _seed_snapshot(
+        missing_id_account_id,
+        available_count=1,
+        credits=[ResetCreditItem(id="credit-missing-id", status="available", expires_at=expires_at)],
+    )
+
+    response = await async_client.get(
+        "/v1/reset-credit",
+        headers={"Authorization": f"Bearer {key}"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == [
+        {
+            "account_id": active_account_id,
+            "email": "present@example.com",
+            "redeem_id": "credit-active",
+            "expiredAt": "2031-02-04T04:05:06Z",
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_v1_reset_credit_duplicate_email_accounts_return_separate_entries(async_client):
     await _enable_api_key_auth(async_client)
     shared_email = "duplicate@example.com"
@@ -388,6 +431,33 @@ async def test_v1_reset_credit_post_outside_api_key_scope_returns_403(async_clie
         "/v1/reset-credit",
         headers={"Authorization": f"Bearer {key}"},
         json={"account_id": blocked_account_id, "redeem_id": "credit-blocked"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["error"]["type"] == "permission_error"
+    consume_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_v1_reset_credit_post_rejects_account_without_chatgpt_account_id(
+    async_client,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    await _enable_api_key_auth(async_client)
+    account_id = await _import_account(async_client, "acc-reset-post-missing-chatgpt", "post-missing@example.com")
+
+    async with SessionLocal() as session:
+        await session.execute(update(Account).where(Account.id == account_id).values(chatgpt_account_id=None))
+        await session.commit()
+
+    _, key = await _create_api_key(async_client, name="reset-credit-post-missing-chatgpt")
+    consume_mock = AsyncMock()
+    monkeypatch.setattr("app.modules.proxy.api.consume_reset_credit", consume_mock)
+
+    response = await async_client.post(
+        "/v1/reset-credit",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"account_id": account_id, "redeem_id": "credit-missing-chatgpt"},
     )
 
     assert response.status_code == 403

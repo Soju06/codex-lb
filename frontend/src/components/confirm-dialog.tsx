@@ -15,6 +15,7 @@ export type ConfirmDialogProps = {
   description?: string;
   confirmLabel?: string;
   confirmDisabled?: boolean;
+  keepOpenOnConfirm?: boolean;
   cancelLabel?: string;
   onConfirm: () => void;
   onOpenChange: (open: boolean) => void;
@@ -27,6 +28,7 @@ export function ConfirmDialog({
   description,
   confirmLabel = "Confirm",
   confirmDisabled = false,
+  keepOpenOnConfirm = false,
   cancelLabel = "Cancel",
   onConfirm,
   onOpenChange,
@@ -45,7 +47,9 @@ export function ConfirmDialog({
           <AlertDialogAction
             disabled={confirmDisabled}
             onClick={(event) => {
-              event.preventDefault();
+              if (keepOpenOnConfirm) {
+                event.preventDefault();
+              }
               onConfirm();
             }}
           >

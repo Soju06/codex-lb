@@ -38,6 +38,7 @@ from app.core.auth.dependencies import (
     validate_proxy_api_key_authorization,
     validate_usage_api_key,
 )
+from app.core.auth.refresh import RefreshError
 from app.core.clients.files import FileProxyError
 from app.core.clients.proxy import ProxyResponseError
 from app.core.clients.rate_limit_reset_credits import ConsumeResetCreditError, ResetCreditItem, consume_reset_credit
@@ -807,6 +808,15 @@ def _translate_v1_reset_credit_consume_error(exc: ConsumeResetCreditError) -> HT
     return HTTPException(status_code=status_code, detail=exc.message)
 
 
+def _translate_v1_reset_credit_refresh_error(exc: RefreshError) -> HTTPException:
+    if exc.is_permanent:
+        get_account_selection_cache().invalidate()
+    return HTTPException(
+        status_code=409,
+        detail=f"Reset credit redeem could not refresh account credentials: {exc.message}",
+    )
+
+
 @asynccontextmanager
 async def _v1_reset_credit_accounts_refresh_scope() -> AsyncIterator[AccountsRepository]:
     async with get_background_session() as session:
@@ -866,7 +876,10 @@ async def v1_redeem_reset_credit(
         credit = _select_available_reset_credit_by_id(account_id, payload.redeem_id)
         if credit is None:
             raise HTTPException(status_code=409, detail="Requested reset credit is unavailable")
-        redeem_credentials = await _ensure_v1_reset_credit_account_fresh(account_id)
+        try:
+            redeem_credentials = await _ensure_v1_reset_credit_account_fresh(account_id)
+        except RefreshError as exc:
+            raise _translate_v1_reset_credit_refresh_error(exc) from exc
         access_token = TokenEncryptor().decrypt(redeem_credentials.access_token_encrypted)
         try:
             result = await consume_reset_credit(

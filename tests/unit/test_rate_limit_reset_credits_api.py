@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+from fastapi import Request
 
 from app.core.auth.dependencies import require_dashboard_write_access
 from app.core.auth.refresh import RefreshError
@@ -77,6 +78,10 @@ def _credit(
 def _response(credits: list[ResetCreditItem], available_count: int | None = None) -> ResetCreditsResponse:
     count = available_count if available_count is not None else len(credits)
     return ResetCreditsResponse(credits=credits, available_count=count)
+
+
+def _fake_request(host: str = "127.0.0.1") -> Request:
+    return cast(Request, SimpleNamespace(client=SimpleNamespace(host=host)))
 
 
 def _static_fetch_fn(response: ResetCreditsResponse):
@@ -703,11 +708,9 @@ async def test_consume_handler_returns_404_when_account_missing() -> None:
 
     fake_context = SimpleNamespace(repository=_Repo())
 
-    fake_request = SimpleNamespace(client=SimpleNamespace(host="127.0.0.1"))
-
     with pytest.raises(DashboardNotFoundError):
         await consume_rate_limit_reset_credit(
-            fake_request,
+            _fake_request(),
             account_id="missing",
             _write_access=None,
             context=cast(Any, fake_context),
@@ -745,10 +748,8 @@ async def test_consume_handler_audits_live_available_count_before_when_cache_mis
         repository=_Repo(),
         service=SimpleNamespace(_auth_manager=None, _usage_updater=None),
     )
-    fake_request = SimpleNamespace(client=SimpleNamespace(host="127.0.0.1"))
-
     response = await consume_rate_limit_reset_credit(
-        fake_request,
+        _fake_request(),
         account_id="acc_1",
         _write_access=None,
         context=cast(Any, fake_context),
@@ -786,11 +787,9 @@ async def test_consume_handler_invalidates_selection_cache_on_permanent_refresh_
         repository=_Repo(),
         service=SimpleNamespace(_auth_manager=None, _usage_updater=None),
     )
-    fake_request = SimpleNamespace(client=SimpleNamespace(host="127.0.0.1"))
-
     with pytest.raises(DashboardConflictError) as excinfo:
         await consume_rate_limit_reset_credit(
-            fake_request,
+            _fake_request(),
             account_id="acc_1",
             _write_access=None,
             context=cast(Any, fake_context),
@@ -826,11 +825,9 @@ async def test_consume_handler_keeps_selection_cache_on_transient_refresh_error(
         repository=_Repo(),
         service=SimpleNamespace(_auth_manager=None, _usage_updater=None),
     )
-    fake_request = SimpleNamespace(client=SimpleNamespace(host="127.0.0.1"))
-
     with pytest.raises(DashboardConflictError) as excinfo:
         await consume_rate_limit_reset_credit(
-            fake_request,
+            _fake_request(),
             account_id="acc_1",
             _write_access=None,
             context=cast(Any, fake_context),

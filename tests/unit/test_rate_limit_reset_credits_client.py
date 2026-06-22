@@ -6,7 +6,6 @@ from uuid import UUID
 
 import pytest
 
-from app.core.config.settings import get_settings
 from app.core.clients.headers import build_chatgpt_auth_headers
 from app.core.clients.rate_limit_reset_credits import (
     ConsumeResetCreditError,
@@ -18,6 +17,7 @@ from app.core.clients.rate_limit_reset_credits import (
     fetch_reset_credits,
 )
 from app.core.clients.usage import _usage_headers
+from app.core.config.settings import get_settings
 
 pytestmark = pytest.mark.unit
 

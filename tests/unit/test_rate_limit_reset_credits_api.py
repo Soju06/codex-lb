@@ -145,12 +145,72 @@ async def test_get_returns_cached_snapshot_shape(monkeypatch: pytest.MonkeyPatch
         _snapshot([_credit("c1"), _credit("c2", expires_at="2026-06-20T00:00:00Z")], available_count=2),
     )
     monkeypatch.setattr(reset_credits_api, "get_rate_limit_reset_credits_store", lambda: store)
-    response = await get_rate_limit_reset_credits("acc_1", context=cast(Any, SimpleNamespace()))
+
+    class _Repo:
+        async def get_by_id(self, account_id: str) -> Account | None:
+            return _account(account_id)
+
+    fake_context = SimpleNamespace(repository=_Repo())
+    response = await get_rate_limit_reset_credits("acc_1", context=cast(Any, fake_context))
 
     assert response is not None
     assert response.available_count == 2
     assert response.nearest_expires_at is not None
     assert {credit.id for credit in response.credits} == {"c1", "c2"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "status",
+    [AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED],
+)
+async def test_get_invalidates_cached_snapshot_for_ineligible_status(
+    status: AccountStatus,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = RateLimitResetCreditsStore()
+    await store.set("acc_1", _snapshot([_credit("stale")], available_count=1))
+    monkeypatch.setattr(reset_credits_api, "get_rate_limit_reset_credits_store", lambda: store)
+
+    async def _should_not_refresh(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("ineligible account should not refresh reset credits")
+
+    monkeypatch.setattr(reset_credits_api, "_refresh_account_reset_credits", _should_not_refresh)
+
+    class _Repo:
+        async def get_by_id(self, account_id: str) -> Account | None:
+            account = _account(account_id)
+            account.status = status
+            return account
+
+    fake_context = SimpleNamespace(repository=_Repo())
+
+    response = await get_rate_limit_reset_credits("acc_1", context=cast(Any, fake_context))
+
+    assert response is None
+    assert store.get("acc_1") is None
+
+
+@pytest.mark.asyncio
+async def test_get_invalidates_cached_snapshot_without_chatgpt_account_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = RateLimitResetCreditsStore()
+    await store.set("acc_1", _snapshot([_credit("stale")], available_count=1))
+    monkeypatch.setattr(reset_credits_api, "get_rate_limit_reset_credits_store", lambda: store)
+
+    class _Repo:
+        async def get_by_id(self, account_id: str) -> Account | None:
+            account = _account(account_id)
+            account.chatgpt_account_id = None
+            return account
+
+    fake_context = SimpleNamespace(repository=_Repo())
+
+    response = await get_rate_limit_reset_credits("acc_1", context=cast(Any, fake_context))
+
+    assert response is None
+    assert store.get("acc_1") is None
 
 
 # --- soonest-available selection helper ---

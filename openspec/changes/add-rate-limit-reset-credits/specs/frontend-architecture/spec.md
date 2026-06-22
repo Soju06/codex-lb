@@ -2,7 +2,7 @@
 
 ### Requirement: Accounts page exposes a reset-credits redeem action
 
-The Accounts page per-account action bar SHALL render a `Reset (N)` button next to the existing Export button with matching button styling whenever the account reports `available_reset_credits > 0`, where `N` is the available reset-credit count for that account. The button SHALL be hidden when `available_reset_credits` is `0`. Activating the button SHALL open a confirmation dialog that names the soonest-expiring credit's title, shows its expiry in local time using `YYYY-MM-DD HH:MM:SS`, and explicitly warns that the credit is consumed regardless of whether the rate-limit window moves. Confirming SHALL submit a redeem request for that account and refresh account data on success.
+The Accounts page per-account action bar SHALL render a `Reset (N)` button next to the existing Export button with matching button styling whenever the account reports `available_reset_credits > 0`, where `N` is the available reset-credit count for that account. The button SHALL be hidden when `available_reset_credits` is `0`. Activating the button SHALL open a confirmation dialog that describes redeeming the soonest-expiring banked reset credit for that account and, when credit details are available, shows the soonest credit's expiry in local time using `YYYY-MM-DD HH:MM:SS`. Confirming SHALL submit a redeem request for that account and refresh account data on success.
 
 #### Scenario: Reset button mirrors Export styling and placement
 - **WHEN** the Accounts page renders the per-account action bar for an account with `available_reset_credits > 0`
@@ -15,11 +15,11 @@ The Accounts page per-account action bar SHALL render a `Reset (N)` button next 
 
 #### Scenario: Confirmation required before redeem
 - **WHEN** the operator clicks the "Reset" button
-- **THEN** a confirmation dialog opens describing the soonest-expiring credit and the no-refund warning
+- **THEN** a confirmation dialog opens describing the soonest-expiring banked reset-credit redeem action
 - **AND** no redeem request is sent until the operator confirms
 
 #### Scenario: Confirmation dialog shows local expiry timestamp
-- **WHEN** the operator opens the reset-credit confirmation dialog
+- **WHEN** the operator opens the reset-credit confirmation dialog and credit details include an expiry timestamp
 - **THEN** the dialog renders the credit expiry in local time using `YYYY-MM-DD HH:MM:SS`
 
 ### Requirement: AccountListItem displays a reset-credits count badge

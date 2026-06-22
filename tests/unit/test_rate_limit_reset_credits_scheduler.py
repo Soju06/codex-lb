@@ -3,11 +3,10 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Any, cast
+from typing import Any
 
 import pytest
 
-from app.core.auth.refresh import RefreshError
 from app.core.clients.rate_limit_reset_credits import (
     RateLimitResetCreditsSnapshot,
     ResetCreditFetchError,
@@ -20,7 +19,6 @@ from app.core.usage.reset_credits_refresh_scheduler import (
     refresh_reset_credits_for_accounts,
 )
 from app.db.models import Account, AccountStatus
-from app.modules.accounts.auth_manager import AuthManager
 from app.modules.rate_limit_reset_credits.store import RateLimitResetCreditsStore
 
 pytestmark = pytest.mark.unit
@@ -117,61 +115,33 @@ async def test_refresh_skips_account_without_chatgpt_account_id() -> None:
 
 
 @pytest.mark.asyncio
-async def test_refresh_retries_after_401_with_auth_manager(monkeypatch: pytest.MonkeyPatch) -> None:
-    store = RateLimitResetCreditsStore()
-    account = _make_account("acc_refresh")
-    calls = {"fetch": 0, "refresh": 0}
+async def test_refresh_401_retains_prior_snapshot_without_status_mutation() -> None:
+    """A 401 on reset-credits must not trigger a token refresh or status write.
 
-    class _AuthManager:
-        async def ensure_fresh(self, current: Account, *, force: bool = False) -> Account:
-            calls["refresh"] += 1
-            assert force is True
-            return current
+    Reset-credits polling owns no account-status derivation; usage refresh owns
+    token refresh and deactivation. A 401 logs and retains the prior cached
+    snapshot with a single fetch attempt and no AuthManager involvement.
+    """
+    store = RateLimitResetCreditsStore()
+    prior = RateLimitResetCreditsSnapshot(available_count=2)
+    await store.set("acc_401", prior)
+    account = _make_account("acc_401", status=AccountStatus.ACTIVE)
+    fetch_calls = {"count": 0}
 
     async def fetch_fn(access_token: str, account_id: str | None, **kwargs: Any) -> ResetCreditsResponse:
-        calls["fetch"] += 1
-        if calls["fetch"] == 1:
-            raise ResetCreditFetchError(401, "expired")
-        return _response(available_count=2)
+        fetch_calls["count"] += 1
+        raise ResetCreditFetchError(401, "unauthorized")
 
     await refresh_reset_credits_for_accounts(
         accounts=[account],
         encryptor=StubEncryptor(),
         store=store,
         fetch_fn=fetch_fn,
-        auth_manager=cast(AuthManager, _AuthManager()),
     )
 
-    assert calls == {"fetch": 2, "refresh": 1}
-    snapshot = store.get("acc_refresh")
-    assert snapshot is not None
-    assert snapshot.available_count == 2
-
-
-@pytest.mark.asyncio
-async def test_refresh_does_not_retry_401_when_token_refresh_fails() -> None:
-    store = RateLimitResetCreditsStore()
-    account = _make_account("acc_refresh_fail")
-    calls = {"fetch": 0}
-
-    class _AuthManager:
-        async def ensure_fresh(self, current: Account, *, force: bool = False) -> Account:
-            raise RefreshError("invalid_grant", "refresh failed", True)
-
-    async def fetch_fn(access_token: str, account_id: str | None, **kwargs: Any) -> ResetCreditsResponse:
-        calls["fetch"] += 1
-        raise ResetCreditFetchError(401, "expired")
-
-    await refresh_reset_credits_for_accounts(
-        accounts=[account],
-        encryptor=StubEncryptor(),
-        store=store,
-        fetch_fn=fetch_fn,
-        auth_manager=cast(AuthManager, _AuthManager()),
-    )
-
-    assert calls["fetch"] == 1
-    assert store.get("acc_refresh_fail") is None
+    assert fetch_calls["count"] == 1
+    assert store.get("acc_401") is prior
+    assert account.status == AccountStatus.ACTIVE
 
 
 @pytest.mark.asyncio

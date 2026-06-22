@@ -3,11 +3,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
-from app.core.auth.refresh import RefreshError
 from app.core.clients.rate_limit_reset_credits import (
     ResetCreditFetchError,
     ResetCreditsResponse,
@@ -19,7 +17,6 @@ from app.core.crypto import TokenEncryptor
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError
 from app.db.models import Account, AccountStatus
 from app.db.session import get_background_session
-from app.modules.accounts.auth_manager import AuthManager
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.rate_limit_reset_credits.store import (
     RateLimitResetCreditsStore,
@@ -73,17 +70,12 @@ class RateLimitResetCreditsRefreshScheduler:
                 async with get_background_session() as session:
                     accounts_repo = AccountsRepository(session)
                     accounts = await accounts_repo.list_accounts()
-                    auth_manager = AuthManager(
-                        accounts_repo,
-                        refresh_repo_factory=_reset_credits_accounts_repo_factory,
-                    )
                     await refresh_reset_credits_for_accounts(
                         accounts=accounts,
                         encryptor=TokenEncryptor(),
                         store=get_rate_limit_reset_credits_store(),
                         fetch_fn=fetch_reset_credits,
                         resolve_route=_resolve_reset_credits_refresh_route,
-                        auth_manager=auth_manager,
                     )
             except Exception:
                 logger.exception("Reset credits refresh loop failed")
@@ -96,7 +88,6 @@ async def refresh_reset_credits_for_accounts(
     store: RateLimitResetCreditsStore,
     fetch_fn: ResetCreditsFetchFn = fetch_reset_credits,
     resolve_route: ResolveRouteFn | None = None,
-    auth_manager: AuthManager | None = None,
 ) -> None:
     """Refresh the cached reset-credits snapshot for each eligible account.
 
@@ -116,7 +107,6 @@ async def refresh_reset_credits_for_accounts(
             store=store,
             fetch_fn=fetch_fn,
             resolve_route=resolve_route,
-            auth_manager=auth_manager,
         )
 
 
@@ -131,59 +121,40 @@ async def _refresh_account_reset_credits(
     store: RateLimitResetCreditsStore,
     fetch_fn: ResetCreditsFetchFn,
     resolve_route: ResolveRouteFn | None = None,
-    auth_manager: AuthManager | None = None,
 ) -> None:
     snapshot_generation = store.generation(account.id)
-    refresh_account = account
-    response: ResetCreditsResponse | None = None
-
-    for attempt in range(2):
-        route: ResolvedUpstreamRoute | None = None
-        if resolve_route is not None:
-            try:
-                route = await resolve_route(refresh_account)
-            except UpstreamProxyRouteError as exc:
-                logger.warning(
-                    "Reset credits refresh upstream proxy route unavailable account_id=%s reason=%s",
-                    refresh_account.id,
-                    exc.reason,
-                )
-                return
+    route: ResolvedUpstreamRoute | None = None
+    if resolve_route is not None:
         try:
-            access_token = encryptor.decrypt(refresh_account.access_token_encrypted)
-            response = await fetch_fn(
-                access_token,
-                refresh_account.chatgpt_account_id,
-                route=route,
-                allow_direct_egress=route is None,
-            )
-            break
-        except ResetCreditFetchError as exc:
-            if exc.status_code != 401 or auth_manager is None or attempt > 0:
-                logger.warning(
-                    "Reset credits refresh failed account_id=%s error=%s",
-                    refresh_account.id,
-                    exc,
-                )
-                return
-            try:
-                refresh_account = await auth_manager.ensure_fresh(refresh_account, force=True)
-            except RefreshError as refresh_exc:
-                logger.warning(
-                    "Reset credits refresh token refresh failed account_id=%s error=%s",
-                    refresh_account.id,
-                    refresh_exc,
-                )
-                return
-        except Exception as exc:  # scheduler must never crash the loop or mutate account status
+            route = await resolve_route(account)
+        except UpstreamProxyRouteError as exc:
             logger.warning(
-                "Reset credits refresh failed account_id=%s error=%s",
-                refresh_account.id,
-                exc,
+                "Reset credits refresh upstream proxy route unavailable account_id=%s reason=%s",
+                account.id,
+                exc.reason,
             )
             return
-
-    if response is None:
+    try:
+        access_token = encryptor.decrypt(account.access_token_encrypted)
+        response = await fetch_fn(
+            access_token,
+            account.chatgpt_account_id,
+            route=route,
+            allow_direct_egress=route is None,
+        )
+    except ResetCreditFetchError as exc:
+        logger.warning(
+            "Reset credits refresh failed account_id=%s error=%s",
+            account.id,
+            exc,
+        )
+        return
+    except Exception as exc:
+        logger.warning(
+            "Reset credits refresh failed account_id=%s error=%s",
+            account.id,
+            exc,
+        )
         return
 
     snapshot = build_snapshot(response)
@@ -193,12 +164,6 @@ async def _refresh_account_reset_credits(
             "Skipped stale reset credits snapshot account_id=%s",
             account.id,
         )
-
-
-@asynccontextmanager
-async def _reset_credits_accounts_repo_factory() -> AsyncIterator[AccountsRepository]:
-    async with get_background_session() as session:
-        yield AccountsRepository(session)
 
 
 def build_rate_limit_reset_credits_scheduler() -> RateLimitResetCreditsRefreshScheduler:

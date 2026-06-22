@@ -3,11 +3,14 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Request
 from pydantic import Field
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit.service import AuditService
 from app.core.auth.dependencies import (
@@ -150,6 +153,7 @@ async def consume_rate_limit_reset_credit(
             account=account,
             store=store,
             encryptor=TokenEncryptor(),
+            lock_session=getattr(context, "session", None),
             auth_manager=context.service._auth_manager,
             refresh_usage=_build_refresh_usage_callback(context),
             resolve_route=_resolve_reset_credit_route,
@@ -186,6 +190,7 @@ async def _redeem_soonest_reset_credit(
     account: Account,
     store: RateLimitResetCreditsStore,
     encryptor: TokenEncryptor,
+    lock_session: AsyncSession | None = None,
     fetch_fn: FetchFn | None = None,
     consume_fn: ConsumeFn | None = None,
     auth_manager: AuthManager | None = None,
@@ -196,8 +201,7 @@ async def _redeem_soonest_reset_credit(
     effective_fetch_fn = fetch_fn or fetch_reset_credits
     effective_consume_fn = consume_fn or consume_reset_credit
 
-    lock = await get_reset_credit_redeem_lock(account.id)
-    async with lock:
+    async with serialize_reset_credit_redeem(account.id, session=lock_session):
         return await _redeem_soonest_reset_credit_locked(
             account=account,
             store=store,
@@ -208,6 +212,31 @@ async def _redeem_soonest_reset_credit(
             refresh_usage=refresh_usage,
             resolve_route=resolve_route,
         )
+
+
+@asynccontextmanager
+async def serialize_reset_credit_redeem(
+    account_id: str,
+    *,
+    session: AsyncSession | None,
+):
+    if session is not None and session.get_bind().dialect.name == "postgresql":
+        await _acquire_postgresql_reset_credit_redeem_lock(session, account_id)
+        yield
+        return
+
+    # SQLite and direct unit-test callers keep the existing in-process lock.
+    lock = await get_reset_credit_redeem_lock(account_id)
+    async with lock:
+        yield
+
+
+async def _acquire_postgresql_reset_credit_redeem_lock(session: AsyncSession, account_id: str) -> None:
+    lock_key = f"reset-credit-redeem:{account_id}"
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
+        {"lock_key": lock_key},
+    )
 
 
 async def _redeem_soonest_reset_credit_locked(

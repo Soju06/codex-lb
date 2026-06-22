@@ -157,7 +157,7 @@ from app.modules.proxy.types import (
     RateLimitStatusPayloadData,
     RateLimitWindowSnapshotData,
 )
-from app.modules.rate_limit_reset_credits.api import get_reset_credit_redeem_lock
+from app.modules.rate_limit_reset_credits.api import serialize_reset_credit_redeem
 from app.modules.rate_limit_reset_credits.store import get_rate_limit_reset_credits_store
 from app.modules.usage.mappers import usage_history_to_window_row
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
@@ -876,41 +876,40 @@ async def v1_redeem_reset_credit(
             raise HTTPException(status_code=503, detail="Unable to resolve upstream proxy route") from exc
         account_id = account.id
 
-    lock = await get_reset_credit_redeem_lock(account_id)
-    async with lock:
-        credit = _select_available_reset_credit_by_id(account_id, payload.redeem_id)
-        if credit is None:
-            raise HTTPException(status_code=409, detail="Requested reset credit is unavailable")
-        try:
-            redeem_credentials = await _ensure_v1_reset_credit_account_fresh(account_id)
-        except RefreshError as exc:
-            raise _translate_v1_reset_credit_refresh_error(exc) from exc
-        access_token = TokenEncryptor().decrypt(redeem_credentials.access_token_encrypted)
-        try:
-            result = await consume_reset_credit(
-                access_token,
-                redeem_credentials.chatgpt_account_id,
-                credit.id,
-                route=route,
-                allow_direct_egress=route is None,
+        async with serialize_reset_credit_redeem(account_id, session=session):
+            credit = _select_available_reset_credit_by_id(account_id, payload.redeem_id)
+            if credit is None:
+                raise HTTPException(status_code=409, detail="Requested reset credit is unavailable")
+            try:
+                redeem_credentials = await _ensure_v1_reset_credit_account_fresh(account_id)
+            except RefreshError as exc:
+                raise _translate_v1_reset_credit_refresh_error(exc) from exc
+            access_token = TokenEncryptor().decrypt(redeem_credentials.access_token_encrypted)
+            try:
+                result = await consume_reset_credit(
+                    access_token,
+                    redeem_credentials.chatgpt_account_id,
+                    credit.id,
+                    route=route,
+                    allow_direct_egress=route is None,
+                )
+            except ConsumeResetCreditError as exc:
+                raise _translate_v1_reset_credit_consume_error(exc) from exc
+            await get_rate_limit_reset_credits_store().invalidate(account_id)
+            try:
+                await _refresh_usage_after_v1_reset_credit_redeem(account_id)
+            except Exception:
+                logger.warning(
+                    "V1 reset credit consume succeeded but usage refresh failed account_id=%s",
+                    account_id,
+                    exc_info=True,
+                )
+            redeemed_at = result.credit.redeemed_at if result.credit else None
+            return V1ResetCreditRedeemResponse(
+                code=result.code,
+                windows_reset=result.windows_reset,
+                redeemed_at=redeemed_at,
             )
-        except ConsumeResetCreditError as exc:
-            raise _translate_v1_reset_credit_consume_error(exc) from exc
-        await get_rate_limit_reset_credits_store().invalidate(account_id)
-        try:
-            await _refresh_usage_after_v1_reset_credit_redeem(account_id)
-        except Exception:
-            logger.warning(
-                "V1 reset credit consume succeeded but usage refresh failed account_id=%s",
-                account_id,
-                exc_info=True,
-            )
-        redeemed_at = result.credit.redeemed_at if result.credit else None
-        return V1ResetCreditRedeemResponse(
-            code=result.code,
-            windows_reset=result.windows_reset,
-            redeemed_at=redeemed_at,
-        )
 
 
 async def _resolve_reset_credit_route(session: AsyncSession, account_id: str) -> ResolvedUpstreamRoute | None:

@@ -38,6 +38,7 @@ from app.modules.rate_limit_reset_credits.api import (
     _select_soonest_available_credit_from_response,
     consume_rate_limit_reset_credit,
     get_rate_limit_reset_credits,
+    serialize_reset_credit_redeem,
 )
 from app.modules.rate_limit_reset_credits.store import RateLimitResetCreditsStore
 
@@ -610,6 +611,28 @@ async def test_redeem_serializes_requests_per_account() -> None:
         await second
     assert excinfo.value.code == "no_available_reset_credit"
     assert consume_calls == ["only"]
+
+
+@pytest.mark.asyncio
+async def test_serialize_reset_credit_redeem_uses_postgresql_advisory_lock() -> None:
+    calls: list[tuple[str, dict[str, str] | None]] = []
+
+    class _FakeSession:
+        def get_bind(self) -> Any:
+            return SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
+
+        async def execute(self, statement: Any, params: dict[str, str] | None = None) -> None:
+            calls.append((str(statement), params))
+
+    async with serialize_reset_credit_redeem("acc_1", session=cast(Any, _FakeSession())):
+        pass
+
+    assert calls == [
+        (
+            "SELECT pg_advisory_xact_lock(hashtext(:lock_key))",
+            {"lock_key": "reset-credit-redeem:acc_1"},
+        )
+    ]
 
 
 @pytest.mark.asyncio

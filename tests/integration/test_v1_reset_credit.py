@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -763,7 +764,7 @@ async def test_v1_reset_credit_post_returns_conflict_when_account_refresh_fails(
 
 
 @pytest.mark.asyncio
-async def test_v1_reset_credit_post_closes_session_before_lock_and_upstream_consume(
+async def test_v1_reset_credit_post_holds_session_open_through_lock_and_upstream_consume(
     async_client,
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -788,7 +789,7 @@ async def test_v1_reset_credit_post_closes_session_before_lock_and_upstream_cons
     )
 
     events: list[str] = []
-    session = object()
+    repo_session = object()
     account = SimpleNamespace(
         id=account_id,
         status=AccountStatus.ACTIVE,
@@ -799,35 +800,32 @@ async def test_v1_reset_credit_post_closes_session_before_lock_and_upstream_cons
     class SessionManager:
         async def __aenter__(self):
             events.append("session_enter")
-            return session
+            return repo_session
 
         async def __aexit__(self, exc_type, exc, tb):
             events.append("session_exit")
             return False
 
     class StubAccountsRepository:
-        def __init__(self, repo_session):
+        def __init__(self, repo_session_arg):
             events.append("repo_init")
-            assert repo_session is session
+            assert repo_session_arg is repo_session
 
         async def get_by_id(self, requested_account_id: str):
             events.append("repo_get")
             assert requested_account_id == account_id
             return account
 
-    class StubLock:
-        async def __aenter__(self):
-            events.append("lock_enter")
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb):
-            events.append("lock_exit")
-            return False
-
-    async def fake_get_lock(requested_account_id: str):
+    @asynccontextmanager
+    async def fake_serialize_reset_credit_redeem(requested_account_id: str, *, session: object | None):
         events.append("lock_wait")
         assert requested_account_id == account_id
-        return StubLock()
+        assert session is repo_session
+        events.append("lock_enter")
+        try:
+            yield
+        finally:
+            events.append("lock_exit")
 
     async def fake_consume(
         access_token: str,
@@ -857,7 +855,7 @@ async def test_v1_reset_credit_post_closes_session_before_lock_and_upstream_cons
 
     async def fake_resolve_route(route_session, requested_account_id: str):
         events.append("route_resolve")
-        assert route_session is session
+        assert route_session is repo_session
         assert requested_account_id == account_id
         return None
 
@@ -868,7 +866,7 @@ async def test_v1_reset_credit_post_closes_session_before_lock_and_upstream_cons
     monkeypatch.setattr("app.modules.proxy.api.get_background_session", lambda: SessionManager())
     monkeypatch.setattr("app.modules.proxy.api.AccountsRepository", StubAccountsRepository)
     monkeypatch.setattr("app.modules.proxy.api._resolve_reset_credit_route", fake_resolve_route)
-    monkeypatch.setattr("app.modules.proxy.api.get_reset_credit_redeem_lock", fake_get_lock)
+    monkeypatch.setattr("app.modules.proxy.api.serialize_reset_credit_redeem", fake_serialize_reset_credit_redeem)
     monkeypatch.setattr(
         "app.modules.proxy.api._ensure_v1_reset_credit_account_fresh",
         AsyncMock(return_value=account),
@@ -896,12 +894,12 @@ async def test_v1_reset_credit_post_closes_session_before_lock_and_upstream_cons
         "repo_init",
         "repo_get",
         "route_resolve",
-        "session_exit",
         "lock_wait",
         "lock_enter",
         "consume",
         "refresh_usage",
         "lock_exit",
+        "session_exit",
     ]
     assert get_rate_limit_reset_credits_store().get(account_id) is None
 

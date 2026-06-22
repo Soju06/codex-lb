@@ -6,6 +6,7 @@ from uuid import UUID
 
 import pytest
 
+from app.core.config.settings import get_settings
 from app.core.clients.headers import build_chatgpt_auth_headers
 from app.core.clients.rate_limit_reset_credits import (
     ConsumeResetCreditError,
@@ -352,6 +353,38 @@ async def test_consume_reset_credit_generates_fresh_redeem_request_id_each_call(
         assert state.json_body is not None
         ids.append(state.json_body["redeem_request_id"])
     assert ids[0] != ids[1]
+
+
+@pytest.mark.asyncio
+async def test_consume_reset_credit_does_not_retry_when_max_retries_omitted(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = get_settings()
+    original_retries = settings.usage_fetch_max_retries
+    monkeypatch.setattr(settings, "usage_fetch_max_retries", 2)
+
+    state = ClientState()
+    client = StubRetryClient(
+        [
+            StubResponse(503, {"error": {"code": "temporarily_unavailable", "message": "retry later"}}, ""),
+            StubResponse(200, {"code": "reset", "credit": {"id": "x"}, "windows_reset": 1}, ""),
+        ],
+        state,
+    )
+
+    with pytest.raises(ConsumeResetCreditError) as excinfo:
+        await consume_reset_credit(
+            "access-token",
+            None,
+            "RateLimitResetCredit_test",
+            base_url="http://upstream.test/backend-api",
+            timeout_seconds=2.0,
+            client=cast(Any, client),
+            allow_direct_egress=True,
+        )
+
+    assert excinfo.value.status_code == 503
+    assert excinfo.value.code == "temporarily_unavailable"
+    assert state.calls == 1
+    monkeypatch.setattr(settings, "usage_fetch_max_retries", original_retries)
 
 
 @pytest.mark.asyncio

@@ -122,6 +122,9 @@ async def test_consume_active_account_returns_success_with_mocked_upstream(async
         account_id="acc_reset_active",
     )
 
+    warm_response = await async_client.get(f"/api/accounts/{account_id}/rate-limit-reset-credits")
+    assert warm_response.status_code == 200, warm_response.text
+
     response = await async_client.post(f"/api/accounts/{account_id}/rate-limit-reset-credits/consume")
     assert response.status_code == 200, response.text
     body = response.json()
@@ -135,6 +138,24 @@ async def test_consume_active_account_returns_success_with_mocked_upstream(async
     assert captured["consume_account_id"] == "acc_reset_active"
     assert captured["consume_credit_id"] == "credit-1"
     assert captured["consume_had_token"] is True
+
+
+@pytest.mark.asyncio
+async def test_consume_without_cached_snapshot_returns_409_without_fetch(async_client, monkeypatch) -> None:
+    async def _should_not_fetch(*args: Any, **kwargs: Any) -> ResetCreditsResponse:
+        raise AssertionError("uncached consume should not invoke upstream fetch")
+
+    monkeypatch.setattr(reset_credits_api, "fetch_reset_credits", _should_not_fetch)
+
+    account_id = await _import_test_account(
+        async_client,
+        email="reset-no-cache@example.com",
+        account_id="acc_reset_no_cache",
+    )
+
+    response = await async_client.post(f"/api/accounts/{account_id}/rate-limit-reset-credits/consume")
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "no_available_reset_credit"
 
 
 @pytest.mark.asyncio

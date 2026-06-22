@@ -24,9 +24,7 @@ from app.modules.rate_limit_reset_credits.store import (
 
 logger = logging.getLogger(__name__)
 
-_RESET_CREDITS_SKIP_STATUSES = frozenset(
-    {AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED}
-)
+_RESET_CREDITS_SKIP_STATUSES = frozenset({AccountStatus.PAUSED, AccountStatus.DEACTIVATED})
 
 ResetCreditsFetchFn = Callable[..., Awaitable[ResetCreditsResponse]]
 UpstreamRouteResolver = Callable[[Account], Awaitable[ResolvedUpstreamRoute | None]]

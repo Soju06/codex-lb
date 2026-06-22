@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 from datetime import datetime, timezone
 from typing import Awaitable, Callable
 
@@ -31,16 +30,11 @@ from app.core.exceptions import (
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError, resolve_upstream_route
 from app.db.models import Account, AccountStatus
 from app.dependencies import AccountsContext, get_accounts_context
-from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.rate_limit_reset_credits.store import (
     RateLimitResetCreditsStore,
     get_rate_limit_reset_credits_store,
 )
 from app.modules.shared.schemas import DashboardModel
-from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
-from app.modules.usage.updater import UsageUpdater
-
-logger = logging.getLogger(__name__)
 
 router = APIRouter(
     prefix="/api/accounts",
@@ -51,9 +45,7 @@ router = APIRouter(
 ConsumeFn = Callable[..., Awaitable[ConsumeResetCreditResponse]]
 _redeem_locks: dict[str, asyncio.Lock] = {}
 _redeem_locks_registry_lock = asyncio.Lock()
-_RESET_CREDITS_INELIGIBLE_STATUSES = frozenset(
-    {AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED}
-)
+_RESET_CREDITS_INELIGIBLE_STATUSES = frozenset({AccountStatus.PAUSED, AccountStatus.DEACTIVATED})
 
 
 class ResetCreditItemResponse(DashboardModel):
@@ -122,15 +114,13 @@ async def consume_rate_limit_reset_credit(
             "Unable to resolve upstream proxy route for reset-credit consume",
             code=exc.reason,
         ) from exc
-    result = await _redeem_soonest_reset_credit(
+    return await _redeem_soonest_reset_credit(
         account=account,
         store=store,
         encryptor=TokenEncryptor(),
         consume_fn=consume_reset_credit,
         route=route,
     )
-    await _force_usage_refresh_after_reset_credit(account, context)
-    return result
 
 
 async def _redeem_soonest_reset_credit(
@@ -169,19 +159,6 @@ async def _redeem_soonest_reset_credit(
 
 def _account_can_redeem_reset_credit(account: Account) -> bool:
     return account.status not in _RESET_CREDITS_INELIGIBLE_STATUSES and bool(account.chatgpt_account_id)
-
-
-async def _force_usage_refresh_after_reset_credit(account: Account, context: AccountsContext) -> None:
-    try:
-        refreshed = await UsageUpdater(
-            UsageRepository(context.session),
-            context.repository,
-            AdditionalUsageRepository(context.session),
-        ).force_refresh(account)
-        if refreshed:
-            get_account_selection_cache().invalidate()
-    except Exception:
-        logger.exception("Post reset-credit usage refresh failed account_id=%s", account.id)
 
 
 async def get_reset_credit_redeem_lock(account_id: str) -> asyncio.Lock:

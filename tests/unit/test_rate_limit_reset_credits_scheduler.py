@@ -64,7 +64,7 @@ def _response(available_count: int = 1) -> ResetCreditsResponse:
 
 
 @pytest.mark.asyncio
-async def test_refresh_skips_ineligible_account_statuses() -> None:
+async def test_refresh_skips_paused_and_deactivated_accounts() -> None:
     store = RateLimitResetCreditsStore()
     fetched: list[str] = []
 
@@ -74,7 +74,6 @@ async def test_refresh_skips_ineligible_account_statuses() -> None:
 
     accounts = [
         _make_account("acc_paused", status=AccountStatus.PAUSED),
-        _make_account("acc_reauth", status=AccountStatus.REAUTH_REQUIRED),
         _make_account("acc_deactivated", status=AccountStatus.DEACTIVATED),
         _make_account("acc_active"),
     ]
@@ -89,16 +88,14 @@ async def test_refresh_skips_ineligible_account_statuses() -> None:
     # Only the active account was fetched and cached.
     assert fetched == ["token-for-acc_active"]
     assert store.get("acc_paused") is None
-    assert store.get("acc_reauth") is None
     assert store.get("acc_deactivated") is None
     assert store.get("acc_active") is not None
 
 
 @pytest.mark.asyncio
-async def test_refresh_invalidates_snapshots_for_ineligible_account_statuses() -> None:
+async def test_refresh_invalidates_snapshots_for_paused_and_deactivated_accounts() -> None:
     store = RateLimitResetCreditsStore()
     await store.set("acc_paused", RateLimitResetCreditsSnapshot(available_count=1))
-    await store.set("acc_reauth", RateLimitResetCreditsSnapshot(available_count=1))
     await store.set("acc_deactivated", RateLimitResetCreditsSnapshot(available_count=1))
     fetched: list[str] = []
 
@@ -109,7 +106,6 @@ async def test_refresh_invalidates_snapshots_for_ineligible_account_statuses() -
     await refresh_reset_credits_for_accounts(
         accounts=[
             _make_account("acc_paused", status=AccountStatus.PAUSED),
-            _make_account("acc_reauth", status=AccountStatus.REAUTH_REQUIRED),
             _make_account("acc_deactivated", status=AccountStatus.DEACTIVATED),
         ],
         encryptor=StubEncryptor(),
@@ -119,7 +115,6 @@ async def test_refresh_invalidates_snapshots_for_ineligible_account_statuses() -
 
     assert fetched == []
     assert store.get("acc_paused") is None
-    assert store.get("acc_reauth") is None
     assert store.get("acc_deactivated") is None
 
 

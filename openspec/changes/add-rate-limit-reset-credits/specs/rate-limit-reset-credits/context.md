@@ -32,7 +32,7 @@ client treats non-200, non-JSON, and schema-drifted 200 responses defensively.
 - **In-memory only.** No DB column, no migration. Each replica refreshes its own process-local
   snapshots, which repopulate within one tick of startup. Restart cost: up to 60s of
   `available_reset_credits: 0` on that replica.
-- **Eligibility clears stale snapshots.** Paused accounts, reauth-required accounts, deactivated accounts, and accounts
+- **Eligibility clears stale snapshots.** Paused accounts, deactivated accounts, and accounts
   without a usable `chatgpt-account-id` do not fetch reset credits. If they already have a
   cached snapshot, the scheduler invalidates it; account summaries suppress it immediately;
   and dashboard consume rejects the account before route resolution or upstream calls.
@@ -44,11 +44,6 @@ client treats non-200, non-JSON, and schema-drifted 200 responses defensively.
   The API-key self-service `POST /v1/reset-credit` instead accepts `{account_id, redeem_id}`
   and forwards that exact credit only after validating account-pool membership and current
   credit availability.
-- **Successful consume refreshes usage best-effort.** After a successful dashboard or
-  self-service redemption, codex-lb invalidates the reset-credit snapshot and forces a
-  `/wham/usage` refresh for that account so quota bars and account status can reconcile
-  immediately. If the usage refresh fails, the redemption response still succeeds and the
-  regular usage scheduler remains the fallback.
 - **Never mutates account status.** Account status is owned by usage refresh
   (see `usage-refresh-policy`). Reset-credit polling failure logs and retains the prior
   snapshot; it does not deactivate, rate-limit, or quota-block any account.
@@ -65,8 +60,8 @@ client treats non-200, non-JSON, and schema-drifted 200 responses defensively.
 
 - **Upstream returns 200 but the rate-limit window doesn't move.** Per upstream behavior
   the credit is still consumed. This is an upstream caveat rather than a dashboard dialog
-  requirement; on success we invalidate the cache, force a best-effort usage refresh, and
-  let the next reset-credit tick reconcile `available_count`.
+  requirement; on success we invalidate the cache and let the next tick reconcile
+  `available_count`.
 - **Snapshot is empty/stale.** UI hides all reset affordances for that account
   (`available_reset_credits: 0`). Not an error — wait one tick.
 - **Upstream 401/403/auth-expired.** Logged; prior snapshot retained. Does NOT deactivate

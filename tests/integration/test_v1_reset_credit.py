@@ -457,8 +457,6 @@ async def test_v1_reset_credit_post_consumes_exact_credit_and_invalidates_snapsh
         )
     )
     monkeypatch.setattr("app.modules.proxy.api.consume_reset_credit", consume_mock)
-    force_refresh_mock = AsyncMock()
-    monkeypatch.setattr("app.modules.proxy.api._force_v1_usage_refresh_after_reset_credit", force_refresh_mock)
 
     response = await async_client.post(
         "/v1/reset-credit",
@@ -477,7 +475,6 @@ async def test_v1_reset_credit_post_consumes_exact_credit_and_invalidates_snapsh
     assert consume_args is not None
     assert consume_args.args[2] == "credit-later"
     assert get_rate_limit_reset_credits_store().get(account_id) is None
-    force_refresh_mock.assert_awaited_once_with(account_id)
 
 
 @pytest.mark.asyncio
@@ -579,16 +576,11 @@ async def test_v1_reset_credit_post_closes_session_before_lock_and_upstream_cons
         assert requested_account_id == account_id
         return None
 
-    async def fake_force_usage_refresh(requested_account_id: str):
-        events.append("usage_refresh")
-        assert requested_account_id == account_id
-
     monkeypatch.setattr("app.modules.proxy.api.get_background_session", lambda: SessionManager())
     monkeypatch.setattr("app.modules.proxy.api.AccountsRepository", StubAccountsRepository)
     monkeypatch.setattr("app.modules.proxy.api._resolve_reset_credit_route", fake_resolve_route)
     monkeypatch.setattr("app.modules.proxy.api.get_reset_credit_redeem_lock", fake_get_lock)
     monkeypatch.setattr("app.modules.proxy.api.consume_reset_credit", fake_consume)
-    monkeypatch.setattr("app.modules.proxy.api._force_v1_usage_refresh_after_reset_credit", fake_force_usage_refresh)
 
     response = await async_client.post(
         "/v1/reset-credit",
@@ -612,6 +604,5 @@ async def test_v1_reset_credit_post_closes_session_before_lock_and_upstream_cons
         "lock_enter",
         "consume",
         "lock_exit",
-        "usage_refresh",
     ]
     assert get_rate_limit_reset_credits_store().get(account_id) is None

@@ -29,6 +29,7 @@ from app.modules.rate_limit_reset_credits import api as reset_credits_api
 from app.modules.rate_limit_reset_credits.api import (
     ConsumeResetCreditResponseSchema,
     _assert_account_can_redeem_reset_credit,
+    _build_refresh_usage_callback,
     _redeem_soonest_reset_credit,
     _select_soonest_available_credit,
     _select_soonest_available_credit_from_response,
@@ -404,6 +405,68 @@ async def test_redeem_restores_snapshot_when_usage_refresh_fails() -> None:
     assert fetch_calls == 2
     assert restored is not None
     assert restored.available_count == 0
+
+
+@pytest.mark.asyncio
+async def test_redeem_restores_snapshot_when_force_refresh_returns_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = RateLimitResetCreditsStore()
+    fetch_calls = 0
+
+    async def fetch_fn(*args: Any, **kwargs: Any) -> ResetCreditsResponse:
+        nonlocal fetch_calls
+        fetch_calls += 1
+        if fetch_calls == 1:
+            return _response([_credit("only")], available_count=1)
+        return _response([], available_count=0)
+
+    async def consume_fn(
+        access_token: str,
+        account_id: str | None,
+        credit_id: str,
+        **kwargs: Any,
+    ) -> ConsumeResetCreditResponse:
+        return ConsumeResetCreditResponse.model_validate(
+            {
+                "code": "reset",
+                "credit": {"id": credit_id, "status": "redeemed", "redeemed_at": "2026-06-13T13:12:31Z"},
+                "windows_reset": 1,
+            }
+        )
+
+    class _UsageUpdater:
+        async def force_refresh(self, account: Account) -> bool:
+            assert account.id == "acc_1"
+            return False
+
+    class _SelectionCache:
+        def __init__(self) -> None:
+            self.invalidated = 0
+
+        def invalidate(self) -> None:
+            self.invalidated += 1
+
+    selection_cache = _SelectionCache()
+    monkeypatch.setattr(reset_credits_api, "get_account_selection_cache", lambda: selection_cache)
+    refresh_usage = _build_refresh_usage_callback(
+        cast(Any, SimpleNamespace(service=SimpleNamespace(_usage_updater=_UsageUpdater())))
+    )
+
+    await _redeem_soonest_reset_credit(
+        account=_account(),
+        store=store,
+        encryptor=StubEncryptor(),
+        fetch_fn=fetch_fn,
+        consume_fn=consume_fn,
+        refresh_usage=refresh_usage,
+    )
+
+    restored = store.get("acc_1")
+    assert fetch_calls == 2
+    assert restored is not None
+    assert restored.available_count == 0
+    assert selection_cache.invalidated == 0
 
 
 @pytest.mark.asyncio

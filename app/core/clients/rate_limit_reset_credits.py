@@ -185,7 +185,9 @@ async def consume_reset_credit(
     usage_base = base_url or settings.upstream_base_url
     url = _consume_url(usage_base)
     timeout = aiohttp.ClientTimeout(total=timeout_seconds or settings.usage_fetch_timeout_seconds)
-    retries = max_retries if max_retries is not None else settings.usage_fetch_max_retries
+    # Consume is non-idempotent, so omitted max_retries must not inherit the
+    # fetch retry budget and risk replaying a successful upstream redemption.
+    retries = max_retries if max_retries is not None else 0
     headers = build_chatgpt_auth_headers(
         access_token,
         account_id,

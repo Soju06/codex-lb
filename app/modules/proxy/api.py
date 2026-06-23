@@ -2624,6 +2624,31 @@ async def _read_first_stream_item(stream: AsyncIterator[str]) -> str:
     return await anext(stream)
 
 
+def _retrieve_first_stream_task_exception(task: asyncio.Task[str]) -> None:
+    # Retrieve a finished probe task's exception so an abandoned task does not
+    # surface asyncio's "exception was never retrieved" warning. Consumers that
+    # await the task still re-raise it.
+    if not task.cancelled():
+        task.exception()
+
+
+def _create_first_stream_probe_task(stream: AsyncIterator[str]) -> asyncio.Task[str]:
+    """Create the first-stream-item probe task.
+
+    ``_probe_stream_startup_error`` / ``_probe_chat_stream_startup_error`` race
+    this task against a timeout. On timeout the task keeps running and is handed
+    to the streamed response for consumption. If the wrapping stream is dropped
+    before the task is awaited -- for example the request is torn down while the
+    upstream is still blocked on the response-create admission gate -- the task
+    would otherwise finish with an unretrieved ``ProxyResponseError`` and asyncio
+    would log it. The done-callback retrieves the result in that abandoned case
+    without hiding the error from consumers that do await the task.
+    """
+    task = asyncio.create_task(_read_first_stream_item(stream))
+    task.add_done_callback(_retrieve_first_stream_task_exception)
+    return task
+
+
 async def _probe_stream_startup_error(
     stream: AsyncIterator[str],
     *,
@@ -2632,14 +2657,17 @@ async def _probe_stream_startup_error(
 ) -> tuple[AsyncIterator[str], ProxyResponseError | OpenAIErrorEnvelopeModel | None]:
     if timeout_seconds is None:
         timeout_seconds = _STREAM_STARTUP_ERROR_PROBE_SECONDS
-    first_task = asyncio.create_task(_read_first_stream_item(stream))
-    try:
-        first = await asyncio.wait_for(
-            asyncio.shield(first_task),
-            timeout=timeout_seconds,
-        )
-    except TimeoutError:
+    first_task = _create_first_stream_probe_task(stream)
+    done, _pending = await asyncio.wait({first_task}, timeout=timeout_seconds)
+    if not done:
+        # Probe window elapsed before the first item arrived. Hand the still-
+        # running task off to be consumed by the streamed response. asyncio.wait
+        # (rather than wait_for + shield) never cancels the task on timeout,
+        # avoiding the Python 3.14 "exception in shielded future" log when the
+        # upstream later returns an error such as a 429 from the admission gate.
         return _prepend_first_task(first_task, stream), None
+    try:
+        first = first_task.result()
     except StopAsyncIteration:
         return _prepend_first(None, stream), None
     except ProxyResponseError as exc:
@@ -2944,14 +2972,12 @@ async def _probe_chat_stream_startup_error(
 ) -> tuple[AsyncIterator[str], ProxyResponseError | OpenAIErrorEnvelopeModel | None]:
     buffered: list[str] = []
     for _ in range(max_startup_events):
-        first_task = asyncio.create_task(_read_first_stream_item(stream))
-        try:
-            first = await asyncio.wait_for(
-                asyncio.shield(first_task),
-                timeout=timeout_seconds,
-            )
-        except TimeoutError:
+        first_task = _create_first_stream_probe_task(stream)
+        done, _pending = await asyncio.wait({first_task}, timeout=timeout_seconds)
+        if not done:
             return _prepend_items(buffered, _prepend_first_task(first_task, stream)), None
+        try:
+            first = first_task.result()
         except StopAsyncIteration:
             return _prepend_items(buffered, _prepend_first(None, stream)), None
         except ProxyResponseError as exc:
@@ -2982,9 +3008,16 @@ async def _prepend_items(items: list[str], stream: AsyncIterator[str]) -> AsyncI
 
 async def _prepend_first_task(first_task: asyncio.Task[str], stream: AsyncIterator[str]) -> AsyncIterator[str]:
     try:
-        yield await first_task
+        first = await first_task
     except StopAsyncIteration:
         return
+    finally:
+        # If the wrapping stream is closed before the first item is consumed
+        # (client disconnect, request teardown), cancel the still-running probe
+        # task so it does not hold the upstream connection open.
+        if not first_task.done():
+            first_task.cancel()
+    yield first
     async for line in stream:
         yield line
 

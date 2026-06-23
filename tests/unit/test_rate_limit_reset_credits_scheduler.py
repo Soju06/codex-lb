@@ -92,16 +92,17 @@ async def test_refresh_skips_paused_reauth_and_deactivated_accounts() -> None:
 
     # Only the active account was fetched and cached.
     assert fetched == ["token-for-acc_active"]
-    assert store.get("acc_paused") is None
-    assert store.get("acc_reauth") is None
-    assert store.get("acc_deactivated") is None
+    assert store.get("acc_paused") is stale
+    assert store.get("acc_reauth") is stale
+    assert store.get("acc_deactivated") is stale
     assert store.get("acc_active") is not None
 
 
 @pytest.mark.asyncio
 async def test_refresh_skips_account_without_chatgpt_account_id() -> None:
     store = RateLimitResetCreditsStore()
-    await store.set("acc_no_workspace", RateLimitResetCreditsSnapshot(available_count=4))
+    stale = RateLimitResetCreditsSnapshot(available_count=4)
+    await store.set("acc_no_workspace", stale)
     fetched: list[str] = []
 
     async def fetch_fn(access_token: str, account_id: str | None, **kwargs: Any) -> ResetCreditsResponse:
@@ -116,7 +117,7 @@ async def test_refresh_skips_account_without_chatgpt_account_id() -> None:
     )
 
     assert fetched == []
-    assert store.get("acc_no_workspace") is None
+    assert store.get("acc_no_workspace") is stale
 
 
 @pytest.mark.asyncio

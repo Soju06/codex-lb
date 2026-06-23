@@ -813,6 +813,10 @@ def _translate_v1_reset_credit_consume_error(exc: ConsumeResetCreditError) -> HT
     return HTTPException(status_code=status_code, detail=exc.message)
 
 
+def _should_invalidate_v1_reset_credit_snapshot_on_consume_error(exc: ConsumeResetCreditError) -> bool:
+    return exc.status_code == 409
+
+
 def _translate_v1_reset_credit_refresh_error(exc: RefreshError) -> HTTPException:
     if exc.is_permanent:
         get_account_selection_cache().invalidate()
@@ -894,6 +898,8 @@ async def v1_redeem_reset_credit(
                     allow_direct_egress=route is None,
                 )
             except ConsumeResetCreditError as exc:
+                if _should_invalidate_v1_reset_credit_snapshot_on_consume_error(exc):
+                    await get_rate_limit_reset_credits_store().invalidate(account_id)
                 raise _translate_v1_reset_credit_consume_error(exc) from exc
             await get_rate_limit_reset_credits_store().invalidate(account_id)
             try:

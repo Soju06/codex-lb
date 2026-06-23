@@ -349,24 +349,93 @@ async def test_redeem_replaces_stale_cached_snapshot_when_fresh_fetch_has_no_ava
 
 
 @pytest.mark.asyncio
-async def test_redeem_returns_409_and_replaces_snapshot_when_cached_credit_disappears_upstream() -> None:
+async def test_redeem_consumes_fresh_available_credit_when_cached_credit_disappears_upstream() -> None:
     store = RateLimitResetCreditsStore()
     await store.set("acc_1", _snapshot([_credit("stale")], available_count=1))
 
-    with pytest.raises(DashboardConflictError) as excinfo:
-        await _redeem_soonest_reset_credit(
-            account=_account(),
-            store=store,
-            encryptor=StubEncryptor(),
-            fetch_fn=_static_fetch_fn(_response([_credit("other")], available_count=1)),
-            consume_fn=_raise_not_called,  # type: ignore[arg-type]
+    captured: dict[str, Any] = {}
+
+    async def consume_fn(
+        access_token: str,
+        account_id: str | None,
+        credit_id: str,
+        **kwargs: Any,
+    ) -> ConsumeResetCreditResponse:
+        captured.update({"access_token": access_token, "account_id": account_id, "credit_id": credit_id})
+        return ConsumeResetCreditResponse.model_validate(
+            {
+                "code": "reset",
+                "credit": {"id": credit_id, "status": "redeemed", "redeemed_at": "2026-06-13T13:12:31Z"},
+                "windows_reset": 1,
+            }
         )
 
-    assert excinfo.value.code == "no_available_reset_credit"
-    cached = store.get("acc_1")
-    assert cached is not None
-    assert cached.available_count == 1
-    assert [credit.id for credit in cached.credits] == ["other"]
+    result = await _redeem_soonest_reset_credit(
+        account=_account(),
+        store=store,
+        encryptor=StubEncryptor(),
+        fetch_fn=_static_fetch_fn(_response([_credit("other")], available_count=1)),
+        consume_fn=consume_fn,
+    )
+
+    assert captured == {
+        "access_token": "decrypted-access-token",
+        "account_id": "workspace-1",
+        "credit_id": "other",
+    }
+    assert result.available_count_before == 1
+    assert result.available_count_after == 0
+    assert store.get("acc_1") is None
+
+
+@pytest.mark.asyncio
+async def test_redeem_reselects_soonest_available_credit_from_fresh_fetch() -> None:
+    store = RateLimitResetCreditsStore()
+    await store.set(
+        "acc_1",
+        _snapshot([_credit("cached", expires_at="2026-06-30T00:00:00Z")], available_count=1),
+    )
+
+    captured: dict[str, Any] = {}
+
+    async def consume_fn(
+        access_token: str,
+        account_id: str | None,
+        credit_id: str,
+        **kwargs: Any,
+    ) -> ConsumeResetCreditResponse:
+        captured.update({"access_token": access_token, "account_id": account_id, "credit_id": credit_id})
+        return ConsumeResetCreditResponse.model_validate(
+            {
+                "code": "reset",
+                "credit": {"id": credit_id, "status": "redeemed", "redeemed_at": "2026-06-13T13:12:31Z"},
+                "windows_reset": 1,
+            }
+        )
+
+    result = await _redeem_soonest_reset_credit(
+        account=_account(),
+        store=store,
+        encryptor=StubEncryptor(),
+        fetch_fn=_static_fetch_fn(
+            _response(
+                [
+                    _credit("later", expires_at="2026-07-10T00:00:00Z"),
+                    _credit("fresh-soonest", expires_at="2026-06-20T00:00:00Z"),
+                ]
+            )
+        ),
+        consume_fn=consume_fn,
+    )
+
+    assert captured == {
+        "access_token": "decrypted-access-token",
+        "account_id": "workspace-1",
+        "credit_id": "fresh-soonest",
+    }
+    assert result.available_count_before == 2
+    assert result.available_count_after == 1
+    assert store.get("acc_1") is None
 
 
 @pytest.mark.asyncio

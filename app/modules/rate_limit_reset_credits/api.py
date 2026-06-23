@@ -274,7 +274,7 @@ async def _redeem_soonest_reset_credit_locked(
     except ResetCreditFetchError as exc:
         raise _translate_fetch_error(exc) from exc
 
-    credit = _select_available_credit_by_id(credits_response, cached_credit.id)
+    credit = _select_soonest_available_credit_from_response(credits_response)
     if credit is None:
         await store.set(account.id, build_snapshot(credits_response))
         raise DashboardConflictError("No available reset credit", code="no_available_reset_credit")

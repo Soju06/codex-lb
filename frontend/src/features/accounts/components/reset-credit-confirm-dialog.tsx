@@ -87,10 +87,9 @@ export function ResetCreditConfirmDialog({
   const otherCredits = (snapshotQuery.data?.credits ?? []).filter(
     (c) => c.status === "available" && c.id !== soonest?.id,
   );
-  const availableCount =
-    snapshotQuery.data != null
-      ? snapshotQuery.data.availableCount
-      : summaryAvailableCount;
+  const availableCount = snapshotQuery.isSuccess
+    ? (snapshotQuery.data?.availableCount ?? 0)
+    : summaryAvailableCount;
   const pending = resetCreditConsumeMutation.isPending;
   const confirmDisabled =
     pending || !accountId || snapshotLoading || snapshotError || availableCount <= 0;

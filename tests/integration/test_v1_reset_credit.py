@@ -13,6 +13,7 @@ from sqlalchemy import update
 from app.core.auth import generate_unique_account_id
 from app.core.auth.refresh import RefreshError
 from app.core.clients.rate_limit_reset_credits import (
+    ConsumeResetCreditError,
     ConsumeResetCreditResponse,
     RateLimitResetCreditsSnapshot,
     ResetCreditItem,
@@ -496,6 +497,48 @@ async def test_v1_reset_credit_post_unavailable_redeem_id_returns_409(async_clie
     assert response.status_code == 409
     assert response.json()["error"]["code"] == "invalid_request_error"
     consume_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_v1_reset_credit_post_upstream_conflict_invalidates_stale_snapshot(
+    async_client,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    await _enable_api_key_auth(async_client)
+    account_id = await _import_account(async_client, "acc-reset-post-conflict", "conflict@example.com")
+
+    _, key = await _create_api_key(async_client, name="reset-credit-post-conflict")
+    await _seed_snapshot(
+        account_id,
+        available_count=1,
+        credits=[
+            ResetCreditItem(
+                id="credit-conflict",
+                status="available",
+                expires_at=datetime(2031, 4, 2, tzinfo=timezone.utc),
+            )
+        ],
+    )
+
+    async def fake_consume(*args, **kwargs):
+        del args, kwargs
+        raise ConsumeResetCreditError(409, "credit already redeemed upstream", code="credit_unavailable")
+
+    monkeypatch.setattr("app.modules.proxy.api.consume_reset_credit", fake_consume)
+
+    response = await async_client.post(
+        "/v1/reset-credit",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"account_id": account_id, "redeem_id": "credit-conflict"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"] == {
+        "message": "credit already redeemed upstream",
+        "type": "invalid_request_error",
+        "code": "invalid_request_error",
+    }
+    assert get_rate_limit_reset_credits_store().get(account_id) is None
 
 
 @pytest.mark.asyncio

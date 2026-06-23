@@ -103,6 +103,7 @@ export function SettingsPage() {
                 settings.warmupModel,
                 settings.limitWarmupModel,
                 settings.limitWarmupPrompt,
+                settings.limitWarmupExhaustedThresholdPercent,
                 settings.limitWarmupCooldownSeconds,
               ].join(":")}
               settings={settings}

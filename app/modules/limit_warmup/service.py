@@ -343,6 +343,7 @@ class LimitWarmupService:
                     before_secondary=before_secondary,
                     after_primary=after_primary,
                     after_secondary=after_secondary,
+                    exhausted_threshold_percent=settings.limit_warmup_exhausted_threshold_percent,
                     min_available_percent=settings.limit_warmup_min_available_percent,
                 )
                 if candidate is None:
@@ -624,6 +625,7 @@ def _build_candidate(
     before_secondary: dict[str, UsageHistory],
     after_primary: dict[str, UsageHistory],
     after_secondary: dict[str, UsageHistory],
+    exhausted_threshold_percent: float,
     min_available_percent: float,
 ) -> _WarmupCandidate | None:
     before = _effective_usage_entry(
@@ -642,7 +644,7 @@ def _build_candidate(
         return None
     if before.reset_at is None or after.reset_at is None:
         return None
-    if before.used_percent < 100.0:
+    if before.used_percent < exhausted_threshold_percent:
         return None
     if after.used_percent >= 100.0:
         return None

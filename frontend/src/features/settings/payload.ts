@@ -31,6 +31,7 @@ export function buildSettingsUpdateRequest(
     limitWarmupModel: settings.limitWarmupModel,
     limitWarmupPrompt: settings.limitWarmupPrompt,
     limitWarmupCooldownSeconds: settings.limitWarmupCooldownSeconds,
+    limitWarmupExhaustedThresholdPercent: settings.limitWarmupExhaustedThresholdPercent,
     limitWarmupMinAvailablePercent: settings.limitWarmupMinAvailablePercent,
     weeklyPaceWorkingDays: settings.weeklyPaceWorkingDays,
     guestAccessEnabled: settings.guestAccessEnabled,

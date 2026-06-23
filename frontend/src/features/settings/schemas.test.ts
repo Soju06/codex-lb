@@ -37,6 +37,7 @@ describe("DashboardSettingsSchema", () => {
       limitWarmupModel: "auto",
       limitWarmupPrompt: "Say OK.",
       limitWarmupCooldownSeconds: 3600,
+      limitWarmupExhaustedThresholdPercent: 99,
       limitWarmupMinAvailablePercent: 100,
     });
 
@@ -85,6 +86,7 @@ describe("DashboardSettingsSchema", () => {
     expect(parsed.limitWarmupModel).toBe("auto");
     expect(parsed.limitWarmupPrompt).toBe("Say OK.");
     expect(parsed.limitWarmupCooldownSeconds).toBe(3600);
+    expect(parsed.limitWarmupExhaustedThresholdPercent).toBe(99);
     expect(parsed.limitWarmupMinAvailablePercent).toBe(100);
     expect(parsed.weeklyPaceWorkingDays).toBe("0,1,2,3,4,5,6");
     expect(parsed.stickyReallocationPrimaryBudgetThresholdPct).toBe(95);
@@ -162,6 +164,7 @@ describe("SettingsUpdateRequestSchema", () => {
       limitWarmupModel: "gpt-5.1-codex-mini",
       limitWarmupPrompt: "Say OK.",
       limitWarmupCooldownSeconds: 7200,
+      limitWarmupExhaustedThresholdPercent: 98.5,
       limitWarmupMinAvailablePercent: 99,
     });
 
@@ -184,6 +187,7 @@ describe("SettingsUpdateRequestSchema", () => {
     expect(parsed.apiKeyAuthEnabled).toBe(false);
     expect(parsed.limitWarmupEnabled).toBe(true);
     expect(parsed.limitWarmupWindows).toBe("primary");
+    expect(parsed.limitWarmupExhaustedThresholdPercent).toBe(98.5);
   });
 
   it("accepts long session lifetimes above 30 days", () => {
@@ -269,6 +273,23 @@ describe("SettingsUpdateRequestSchema", () => {
         stickyThreadsEnabled: false,
         preferEarlierResetAccounts: true,
         limitWarmupPrompt: "p".repeat(513),
+      }).success,
+    ).toBe(false);
+  });
+
+  it("matches backend limit warm-up threshold bounds", () => {
+    expect(
+      SettingsUpdateRequestSchema.safeParse({
+        stickyThreadsEnabled: false,
+        preferEarlierResetAccounts: true,
+        limitWarmupExhaustedThresholdPercent: 0,
+      }).success,
+    ).toBe(false);
+    expect(
+      SettingsUpdateRequestSchema.safeParse({
+        stickyThreadsEnabled: false,
+        preferEarlierResetAccounts: true,
+        limitWarmupExhaustedThresholdPercent: 100.1,
       }).success,
     ).toBe(false);
   });

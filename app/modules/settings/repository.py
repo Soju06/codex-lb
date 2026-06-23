@@ -51,6 +51,7 @@ class SettingsRepository:
             limit_warmup_model="auto",
             limit_warmup_prompt="Say OK.",
             limit_warmup_cooldown_seconds=3600,
+            limit_warmup_exhausted_threshold_percent=99.0,
             limit_warmup_min_available_percent=100.0,
             weekly_pace_working_days="0,1,2,3,4,5,6",
         )
@@ -96,6 +97,7 @@ class SettingsRepository:
         limit_warmup_model: str | None = None,
         limit_warmup_prompt: str | None = None,
         limit_warmup_cooldown_seconds: int | None = None,
+        limit_warmup_exhausted_threshold_percent: float | None = None,
         limit_warmup_min_available_percent: float | None = None,
         weekly_pace_working_days: str | None = None,
         guest_access_enabled: bool | None = None,
@@ -158,6 +160,8 @@ class SettingsRepository:
             settings.limit_warmup_prompt = limit_warmup_prompt
         if limit_warmup_cooldown_seconds is not None:
             settings.limit_warmup_cooldown_seconds = limit_warmup_cooldown_seconds
+        if limit_warmup_exhausted_threshold_percent is not None:
+            settings.limit_warmup_exhausted_threshold_percent = limit_warmup_exhausted_threshold_percent
         if limit_warmup_min_available_percent is not None:
             settings.limit_warmup_min_available_percent = limit_warmup_min_available_percent
         if additional_quota_routing_policies_json is not None:

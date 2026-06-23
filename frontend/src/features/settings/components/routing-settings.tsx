@@ -75,6 +75,7 @@ type RoutingSettingsDraft = {
   limitWarmupModel: string;
   limitWarmupPrompt: string;
   limitWarmupCooldown: string;
+  limitWarmupExhaustedThreshold: string;
   additionalQuotaKey: string;
   additionalQuotaPolicy: AdditionalQuotaRoutingPolicy;
 };
@@ -90,6 +91,7 @@ function createRoutingSettingsDraft(settings: DashboardSettings): RoutingSetting
     limitWarmupModel: settings.limitWarmupModel,
     limitWarmupPrompt: settings.limitWarmupPrompt,
     limitWarmupCooldown: String(settings.limitWarmupCooldownSeconds),
+    limitWarmupExhaustedThreshold: String(settings.limitWarmupExhaustedThresholdPercent),
     additionalQuotaKey: "",
     additionalQuotaPolicy: "inherit",
   };
@@ -146,15 +148,23 @@ export function RoutingSettings({
   const warmupModelValid = draft.warmupModel.trim().length > 0 && draft.warmupModel.trim().length <= WARMUP_MODEL_MAX_LENGTH;
   const parsedLimitWarmupCooldown = Number(draft.limitWarmupCooldown);
   const limitWarmupCooldownValid = Number.isInteger(parsedLimitWarmupCooldown) && parsedLimitWarmupCooldown >= 60;
+  const parsedLimitWarmupExhaustedThreshold = Number(draft.limitWarmupExhaustedThreshold);
+  const limitWarmupExhaustedThresholdValid =
+    Number.isFinite(parsedLimitWarmupExhaustedThreshold) &&
+    parsedLimitWarmupExhaustedThreshold > 0 &&
+    parsedLimitWarmupExhaustedThreshold <= 100;
   const limitWarmupFieldsChanged =
     draft.limitWarmupModel.trim() !== settings.limitWarmupModel ||
     draft.limitWarmupPrompt.trim() !== settings.limitWarmupPrompt ||
+    (limitWarmupExhaustedThresholdValid &&
+      parsedLimitWarmupExhaustedThreshold !== settings.limitWarmupExhaustedThresholdPercent) ||
     (limitWarmupCooldownValid && parsedLimitWarmupCooldown !== settings.limitWarmupCooldownSeconds);
   const limitWarmupFieldsValid =
     draft.limitWarmupModel.trim().length > 0 &&
     draft.limitWarmupModel.trim().length <= LIMIT_WARMUP_MODEL_MAX_LENGTH &&
     draft.limitWarmupPrompt.trim().length > 0 &&
     draft.limitWarmupPrompt.trim().length <= LIMIT_WARMUP_PROMPT_MAX_LENGTH &&
+    limitWarmupExhaustedThresholdValid &&
     limitWarmupCooldownValid;
 
   const parsedRelativeAvailabilityPower = Number.parseFloat(draft.relativeAvailabilityPower);
@@ -715,7 +725,7 @@ export function RoutingSettings({
               />
             </div>
 
-            <div className="grid gap-2 sm:grid-cols-[10rem_minmax(0,1fr)_7rem]">
+            <div className="grid gap-2 sm:grid-cols-[10rem_minmax(0,1fr)_7rem_7rem]">
               <Select
                 value={settings.limitWarmupWindows}
                 onValueChange={(value) => save({ limitWarmupWindows: value as "primary" | "secondary" | "both" })}
@@ -736,6 +746,18 @@ export function RoutingSettings({
                 onChange={(event) => updateDraft({ limitWarmupModel: event.target.value })}
                 className="h-8 text-xs"
                 aria-label="Warm-up model"
+              />
+              <Input
+                type="number"
+                min={1}
+                max={100}
+                step={0.1}
+                inputMode="decimal"
+                value={draft.limitWarmupExhaustedThreshold}
+                disabled={busy}
+                onChange={(event) => updateDraft({ limitWarmupExhaustedThreshold: event.target.value })}
+                className="h-8 text-xs"
+                aria-label="Warm-up exhausted threshold"
               />
               <Input
                 type="number"
@@ -768,6 +790,7 @@ export function RoutingSettings({
                   void save({
                     limitWarmupModel: draft.limitWarmupModel.trim(),
                     limitWarmupPrompt: draft.limitWarmupPrompt.trim(),
+                    limitWarmupExhaustedThresholdPercent: parsedLimitWarmupExhaustedThreshold,
                     limitWarmupCooldownSeconds: parsedLimitWarmupCooldown,
                   })
                 }

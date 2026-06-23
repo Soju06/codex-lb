@@ -726,60 +726,71 @@ export function RoutingSettings({
             </div>
 
             <div className="grid gap-2 sm:grid-cols-[10rem_minmax(0,1fr)_7rem_7rem]">
-              <Select
-                value={settings.limitWarmupWindows}
-                onValueChange={(value) => save({ limitWarmupWindows: value as "primary" | "secondary" | "both" })}
-              >
-                <SelectTrigger className="h-8 text-xs" disabled={busy}>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent align="start">
-                  <SelectItem value="both">5h + weekly</SelectItem>
-                  <SelectItem value="primary">5h only</SelectItem>
-                  <SelectItem value="secondary">Weekly only</SelectItem>
-                </SelectContent>
-              </Select>
-              <Input
-                value={draft.limitWarmupModel}
-                disabled={busy}
-                maxLength={LIMIT_WARMUP_MODEL_MAX_LENGTH}
-                onChange={(event) => updateDraft({ limitWarmupModel: event.target.value })}
-                className="h-8 text-xs"
-                aria-label="Warm-up model"
-              />
-              <Input
-                type="number"
-                min={1}
-                max={100}
-                step={0.1}
-                inputMode="decimal"
-                value={draft.limitWarmupExhaustedThreshold}
-                disabled={busy}
-                onChange={(event) => updateDraft({ limitWarmupExhaustedThreshold: event.target.value })}
-                className="h-8 text-xs"
-                aria-label="Warm-up exhausted threshold"
-              />
-              <Input
-                type="number"
-                min={60}
-                step={60}
-                inputMode="numeric"
-                value={draft.limitWarmupCooldown}
-                disabled={busy}
-                onChange={(event) => updateDraft({ limitWarmupCooldown: event.target.value })}
-                className="h-8 text-xs"
-                aria-label="Warm-up cooldown"
-              />
+              <div className="space-y-1">
+                <span className="block text-[11px] font-medium text-muted-foreground">Windows</span>
+                <Select
+                  value={settings.limitWarmupWindows}
+                  onValueChange={(value) => save({ limitWarmupWindows: value as "primary" | "secondary" | "both" })}
+                >
+                  <SelectTrigger className="h-8 text-xs" disabled={busy} aria-label="Warm-up windows">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent align="start">
+                    <SelectItem value="both">5h + weekly</SelectItem>
+                    <SelectItem value="primary">5h only</SelectItem>
+                    <SelectItem value="secondary">Weekly only</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <label className="block space-y-1">
+                <span className="block text-[11px] font-medium text-muted-foreground">Model</span>
+                <Input
+                  value={draft.limitWarmupModel}
+                  disabled={busy}
+                  maxLength={LIMIT_WARMUP_MODEL_MAX_LENGTH}
+                  onChange={(event) => updateDraft({ limitWarmupModel: event.target.value })}
+                  className="h-8 text-xs"
+                />
+              </label>
+              <label className="block space-y-1">
+                <span className="block text-[11px] font-medium text-muted-foreground">Exhausted at %</span>
+                <Input
+                  type="number"
+                  min={1}
+                  max={100}
+                  step={0.1}
+                  inputMode="decimal"
+                  value={draft.limitWarmupExhaustedThreshold}
+                  disabled={busy}
+                  onChange={(event) => updateDraft({ limitWarmupExhaustedThreshold: event.target.value })}
+                  className="h-8 text-xs"
+                />
+              </label>
+              <label className="block space-y-1">
+                <span className="block text-[11px] font-medium text-muted-foreground">Cooldown (sec)</span>
+                <Input
+                  type="number"
+                  min={60}
+                  step={60}
+                  inputMode="numeric"
+                  value={draft.limitWarmupCooldown}
+                  disabled={busy}
+                  onChange={(event) => updateDraft({ limitWarmupCooldown: event.target.value })}
+                  className="h-8 text-xs"
+                />
+              </label>
             </div>
-            <div className="flex flex-col gap-2 sm:flex-row">
-              <Input
-                value={draft.limitWarmupPrompt}
-                disabled={busy}
-                maxLength={LIMIT_WARMUP_PROMPT_MAX_LENGTH}
-                onChange={(event) => updateDraft({ limitWarmupPrompt: event.target.value })}
-                className="h-8 text-xs"
-                aria-label="Warm-up prompt"
-              />
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+              <label className="block space-y-1 sm:flex-1">
+                <span className="block text-[11px] font-medium text-muted-foreground">Prompt</span>
+                <Input
+                  value={draft.limitWarmupPrompt}
+                  disabled={busy}
+                  maxLength={LIMIT_WARMUP_PROMPT_MAX_LENGTH}
+                  onChange={(event) => updateDraft({ limitWarmupPrompt: event.target.value })}
+                  className="h-8 text-xs"
+                />
+              </label>
               <Button
                 type="button"
                 size="sm"

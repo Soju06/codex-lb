@@ -252,19 +252,9 @@ describe("ResetCreditConfirmDialog", () => {
     await vi.waitFor(() => expect(consumeCalled).toHaveBeenCalledTimes(1));
   });
 
-  it("enables redeem when GET cache is empty but summary reports available credits", async () => {
-    const user = userEvent.setup();
-    const consumeCalled = vi.fn();
+  it("treats a loaded null snapshot as unavailable even when the summary count is stale", async () => {
     server.use(
       http.get(SNAPSHOT_URL, () => HttpResponse.json(null)),
-      http.post(CONSUME_URL, () => {
-        consumeCalled();
-        return HttpResponse.json({
-          code: "rate_limit_reset",
-          windowsReset: 1,
-          redeemedAt: "2026-01-01T12:00:00.000Z",
-        });
-      }),
     );
 
     renderWithClient(
@@ -276,11 +266,8 @@ describe("ResetCreditConfirmDialog", () => {
       />,
     );
 
-    expect(await screen.findByText("2 free rate limit resets")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Redeem credit" })).toBeEnabled();
-
-    await user.click(screen.getByRole("button", { name: "Redeem credit" }));
-
-    await vi.waitFor(() => expect(consumeCalled).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText("0 free rate limit resets")).toBeInTheDocument();
+    expect(screen.getByText("Reset credit details are not available yet.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Redeem credit" })).toBeDisabled();
   });
 });

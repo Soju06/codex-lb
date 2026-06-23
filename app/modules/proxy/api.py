@@ -873,20 +873,27 @@ async def v1_redeem_reset_credit(
             raise HTTPException(status_code=403, detail="Account is outside the API key pool")
         if account is None:
             raise HTTPException(status_code=403, detail="Account is outside the API key pool")
+        account_id = account.id
+    try:
+        redeem_credentials = await _ensure_v1_reset_credit_account_fresh(account_id)
+    except RefreshError as exc:
+        raise _translate_v1_reset_credit_refresh_error(exc) from exc
+
+    async with get_background_session() as session:
+        account = await AccountsRepository(session).get_by_id(account_id)
+        if not _is_reset_credit_account_in_api_key_pool(account, api_key):
+            raise HTTPException(status_code=403, detail="Account is outside the API key pool")
+        if account is None:
+            raise HTTPException(status_code=403, detail="Account is outside the API key pool")
         try:
-            route = await _resolve_reset_credit_route(session, account.id)
+            route = await _resolve_reset_credit_route(session, account_id)
         except UpstreamProxyRouteError as exc:
             raise HTTPException(status_code=503, detail="Unable to resolve upstream proxy route") from exc
-        account_id = account.id
 
         async with serialize_reset_credit_redeem(account_id, session=session):
             credit = _select_available_reset_credit_by_id(account_id, payload.redeem_id)
             if credit is None:
                 raise HTTPException(status_code=409, detail="Requested reset credit is unavailable")
-            try:
-                redeem_credentials = await _ensure_v1_reset_credit_account_fresh(account_id)
-            except RefreshError as exc:
-                raise _translate_v1_reset_credit_refresh_error(exc) from exc
             access_token = TokenEncryptor().decrypt(redeem_credentials.access_token_encrypted)
             try:
                 result = await consume_reset_credit(

@@ -832,7 +832,7 @@ async def test_v1_reset_credit_post_holds_session_open_through_lock_and_upstream
     )
 
     events: list[str] = []
-    repo_session = object()
+    repo_sessions = [object(), object()]
     account = SimpleNamespace(
         id=account_id,
         status=AccountStatus.ACTIVE,
@@ -842,6 +842,7 @@ async def test_v1_reset_credit_post_holds_session_open_through_lock_and_upstream
 
     class SessionManager:
         async def __aenter__(self):
+            repo_session = repo_sessions.pop(0)
             events.append("session_enter")
             return repo_session
 
@@ -852,7 +853,6 @@ async def test_v1_reset_credit_post_holds_session_open_through_lock_and_upstream
     class StubAccountsRepository:
         def __init__(self, repo_session_arg):
             events.append("repo_init")
-            assert repo_session_arg is repo_session
 
         async def get_by_id(self, requested_account_id: str):
             events.append("repo_get")
@@ -863,7 +863,7 @@ async def test_v1_reset_credit_post_holds_session_open_through_lock_and_upstream
     async def fake_serialize_reset_credit_redeem(requested_account_id: str, *, session: object | None):
         events.append("lock_wait")
         assert requested_account_id == account_id
-        assert session is repo_session
+        assert session is not None
         events.append("lock_enter")
         try:
             yield
@@ -898,7 +898,7 @@ async def test_v1_reset_credit_post_holds_session_open_through_lock_and_upstream
 
     async def fake_resolve_route(route_session, requested_account_id: str):
         events.append("route_resolve")
-        assert route_session is repo_session
+        assert route_session is not None
         assert requested_account_id == account_id
         return None
 
@@ -912,7 +912,7 @@ async def test_v1_reset_credit_post_holds_session_open_through_lock_and_upstream
     monkeypatch.setattr("app.modules.proxy.api.serialize_reset_credit_redeem", fake_serialize_reset_credit_redeem)
     monkeypatch.setattr(
         "app.modules.proxy.api._ensure_v1_reset_credit_account_fresh",
-        AsyncMock(return_value=account),
+        AsyncMock(side_effect=lambda requested_account_id: events.append("refresh") or account),
     )
     monkeypatch.setattr("app.modules.proxy.api.consume_reset_credit", fake_consume)
     monkeypatch.setattr(
@@ -933,6 +933,11 @@ async def test_v1_reset_credit_post_holds_session_open_through_lock_and_upstream
         "redeemed_at": "2031-06-01T00:30:00Z",
     }
     assert events == [
+        "session_enter",
+        "repo_init",
+        "repo_get",
+        "session_exit",
+        "refresh",
         "session_enter",
         "repo_init",
         "repo_get",

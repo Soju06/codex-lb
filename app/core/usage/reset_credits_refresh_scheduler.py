@@ -70,13 +70,13 @@ class RateLimitResetCreditsRefreshScheduler:
                 async with get_background_session() as session:
                     accounts_repo = AccountsRepository(session)
                     accounts = await accounts_repo.list_accounts()
-                    await refresh_reset_credits_for_accounts(
-                        accounts=accounts,
-                        encryptor=TokenEncryptor(),
-                        store=get_rate_limit_reset_credits_store(),
-                        fetch_fn=fetch_reset_credits,
-                        resolve_route=_resolve_reset_credits_refresh_route,
-                    )
+                await refresh_reset_credits_for_accounts(
+                    accounts=accounts,
+                    encryptor=TokenEncryptor(),
+                    store=get_rate_limit_reset_credits_store(),
+                    fetch_fn=fetch_reset_credits,
+                    resolve_route=_resolve_reset_credits_refresh_route,
+                )
             except Exception:
                 logger.exception("Reset credits refresh loop failed")
 

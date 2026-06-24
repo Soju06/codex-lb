@@ -106,6 +106,30 @@ def test_account_selection_recovery_sleep_ignores_permanent_selection_failures(m
     assert _account_selection_recovery_sleep_seconds(selection) is None
 
 
+def test_account_selection_recovery_sleep_ignores_locally_generated_retry_hint():
+    from app.core.balancer.logic import _format_retry_hint
+
+    selection = AccountSelection(
+        account=None,
+        error_message=_format_retry_hint(300.0),
+        error_code="no_accounts",
+    )
+
+    assert _account_selection_recovery_sleep_seconds(selection) is None
+
+
+def test_account_selection_recovery_sleep_ignores_locally_generated_retry_hint_short_wait():
+    from app.core.balancer.logic import _format_retry_hint
+
+    selection = AccountSelection(
+        account=None,
+        error_message=_format_retry_hint(30.0),
+        error_code="no_accounts",
+    )
+
+    assert _account_selection_recovery_sleep_seconds(selection) is None
+
+
 def test_account_capacity_wait_payload_reports_status_and_wait_time(monkeypatch):
     monkeypatch.setattr(proxy_support.time, "monotonic", lambda: 125.4)
     request_state = proxy_service._WebSocketRequestState(

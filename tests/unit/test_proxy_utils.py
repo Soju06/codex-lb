@@ -62,9 +62,14 @@ pytestmark = pytest.mark.unit
 
 
 def test_account_selection_recovery_sleep_uses_retry_hint_with_bounds():
+    # The locally-generated `Rate limit exceeded. Try again in <N>s` shape is
+    # filtered before the retry-hint regex (see
+    # `test_account_selection_recovery_sleep_ignores_locally_generated_retry_hint`);
+    # this test exercises the regex against an upstream-derived shape so the
+    # bounded recovery path stays covered for non-local producers.
     selection = AccountSelection(
         account=None,
-        error_message="Rate limit exceeded. Try again in 9999s",
+        error_message="Upstream throttled. Try again in 9999s",
         error_code="no_accounts",
     )
 
@@ -173,7 +178,7 @@ async def test_account_selection_recovery_sleep_clamps_to_remaining_budget(monke
     waited = await _sleep_for_account_selection_recovery(
         AccountSelection(
             account=None,
-            error_message="Rate limit exceeded. Try again in 120s",
+            error_message="Upstream throttled. Try again in 120s",
             error_code="no_accounts",
         ),
         request_id="req_budget_clamp",
@@ -197,7 +202,7 @@ async def test_account_selection_recovery_sleep_refuses_exhausted_budget(monkeyp
     waited = await _sleep_for_account_selection_recovery(
         AccountSelection(
             account=None,
-            error_message="Rate limit exceeded. Try again in 120s",
+            error_message="Upstream throttled. Try again in 120s",
             error_code="no_accounts",
         ),
         request_id="req_budget_exhausted",

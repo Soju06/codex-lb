@@ -20,9 +20,11 @@ native Codex client requests on any transport.
 
 A request is considered **native** when its inbound `User-Agent` begins with a
 known Codex client token (`codex_cli_rs`, `codex-tui`, `codex_exec`,
-`codex_vscode`, `Codex Desktop`, or a value starting with `Codex `) OR it
-carries an `originator` header whose value is in the native Codex originator
-set. Transport/continuity headers (`x-codex-turn-state` and other `x-codex-*`
+`codex_sdk_ts`, `codex_vscode`, `Codex Desktop`, or a value starting with
+`Codex `) OR it carries an `originator` header whose value is in the native
+Codex originator set (which MUST include every first-party originator the
+backend whitelists, e.g. `codex_cli_rs`, `codex_vscode`, `codex_sdk_ts`).
+Transport/continuity headers (`x-codex-turn-state` and other `x-codex-*`
 stream headers) MUST NOT be treated as a native signal, because a non-native
 client replays the upstream-issued `x-codex-turn-state` token for continuity;
 treating it as native would let that follow-up reach upstream with its
@@ -67,6 +69,13 @@ in-process cache that is refreshed by existing background refresh paths.
 - **WHEN** an http upstream request arrives with `User-Agent: codex_exec/0.142.1 (Mac OS 27.0.0; arm64) unknown (codex_exec; 0.142.1)`
 - **THEN** the outbound `User-Agent` equals the inbound `User-Agent`
 - **AND** the request fingerprint is not normalized
+
+#### Scenario: first-party Codex SDK request is left unchanged
+
+- **WHEN** an http upstream request carries an `originator: codex_sdk_ts` header
+  (a first-party originator the backend whitelists)
+- **THEN** the outbound request is treated as native
+- **AND** its `User-Agent` and `originator` header are not rewritten or stripped
 
 #### Scenario: non-native request replaying a continuity token is still normalized
 

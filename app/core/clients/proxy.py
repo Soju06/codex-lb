@@ -141,6 +141,7 @@ _NATIVE_CODEX_ORIGINATORS = frozenset(
         "codex_chatgpt_desktop",
         "codex_cli_rs",
         "codex_exec",
+        "codex_sdk_ts",
         "codex_vscode",
     }
 )
@@ -447,6 +448,7 @@ _NATIVE_CODEX_USER_AGENT_PREFIXES: tuple[str, ...] = (
     "codex_cli_rs",
     "codex-tui",
     "codex_exec",
+    "codex_sdk_ts",
     "codex_vscode",
     "codex desktop",
     "codex ",

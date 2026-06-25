@@ -109,6 +109,25 @@ def test_native_originator_header_marks_request_native():
     assert headers["originator"] == "codex_vscode"
 
 
+def test_first_party_codex_sdk_ts_originator_is_native():
+    # Regression for the Codex P2 finding: codex_sdk_ts is a first-party Codex
+    # originator the backend whitelists (named in proposal.md). It must be
+    # treated as native so its User-Agent and originator are not rewritten.
+    inbound = {"User-Agent": "OpenAI/Node 5.0.0", "originator": "codex_sdk_ts"}
+    headers = _build_upstream_headers(inbound, "tok", None)
+    assert headers["User-Agent"] == "OpenAI/Node 5.0.0"
+    assert headers["originator"] == "codex_sdk_ts"
+
+
+def test_codex_sdk_ts_user_agent_prefix_is_native():
+    # A codex_sdk_ts User-Agent prefix also identifies a first-party client.
+    native_ua = "codex_sdk_ts/5.0.0 (Mac OS 27.0.0; arm64)"
+    headers = _build_upstream_headers({"User-Agent": native_ua}, "tok", "acct-1")
+    assert headers["User-Agent"] == native_ua
+    assert headers["chatgpt-account-id"] == "acct-1"
+    assert "ChatGPT-Account-Id" not in headers
+
+
 def test_websocket_non_native_sdk_request_is_normalized():
     # Regression for the Codex P1 finding: with upstream_stream_transport="auto",
     # a non-native SDK follow-up that replays x-codex-turn-state is routed onto

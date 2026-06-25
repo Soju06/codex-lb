@@ -29,21 +29,25 @@ async def _delayed_429_stream() -> AsyncIterator[str]:
 
 
 async def _response_failed_stream(code: str) -> AsyncIterator[str]:
-    yield "data: " + json.dumps(
-        {
-            "type": "response.failed",
-            "response": {
-                "id": "resp_failed",
-                "status": "failed",
-                "error": {
-                    "code": code,
-                    "message": "Upstream rejected the request.",
-                    "type": "server_error",
+    yield (
+        "data: "
+        + json.dumps(
+            {
+                "type": "response.failed",
+                "response": {
+                    "id": "resp_failed",
+                    "status": "failed",
+                    "error": {
+                        "code": code,
+                        "message": "Upstream rejected the request.",
+                        "type": "server_error",
+                    },
                 },
             },
-        },
-        separators=(",", ":"),
-    ) + "\n\n"
+            separators=(",", ":"),
+        )
+        + "\n\n"
+    )
 
 
 @pytest.mark.asyncio
@@ -113,7 +117,7 @@ async def test_startup_probe_can_still_convert_event_errors_when_requested() -> 
         timeout_seconds=0.1,
     )
 
-    assert startup_error is not None
+    assert isinstance(startup_error, proxy_api.OpenAIErrorEnvelopeModel)
     assert startup_error.error is not None
     assert startup_error.error.code == "overloaded_error"
     with pytest.raises(StopAsyncIteration):

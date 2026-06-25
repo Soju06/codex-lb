@@ -968,3 +968,46 @@ async def test_connect_responses_websocket_maps_invalid_proxy(monkeypatch):
 
     assert exc_info.value.status_code == 502
     assert _proxy_error_code(exc_info.value) == "upstream_unavailable"
+
+
+def test_responses_websocket_builder_normalizes_non_native_sdk_fingerprint():
+    # Regression for the Codex P2 finding: the client-facing /v1/responses
+    # websocket egress builder must normalize a non-native SDK fingerprint, not
+    # just the internal auto-transport builder, or a direct websocket SDK caller
+    # bypasses the priority-downgrade mitigation.
+    from unittest.mock import patch
+
+    from app.core.clients import proxy as proxy_module
+    from app.core.clients.proxy_websocket import _build_upstream_websocket_headers
+
+    inbound = {
+        "User-Agent": "OpenAI/Python 2.24.0",
+        "x-openai-client-version": "2.24.0",
+        "x-stainless-os": "MacOS",
+        "originator": "sdk",
+        "openai-beta": "responses_websockets=2026-02-06",
+    }
+    with patch.object(proxy_module.get_codex_version_cache(), "cached_version_or_default", return_value="0.142.0"):
+        headers = _build_upstream_websocket_headers(inbound, "tok", "acct-1")
+
+    assert headers["User-Agent"] == "codex_cli_rs/0.142.0 (Mac OS 26.5.0; arm64) iTerm.app/3.6.10"
+    lowered = {key.lower() for key in headers}
+    assert "x-openai-client-version" not in lowered
+    assert not any(key.lower().startswith("x-stainless-") for key in headers)
+    assert "originator" not in lowered
+    assert headers["ChatGPT-Account-Id"] == "acct-1"
+    assert "chatgpt-account-id" not in headers
+    # The responses websocket beta header is still appended.
+    assert "responses_websockets=2026-02-06" in headers["openai-beta"]
+
+
+def test_responses_websocket_builder_leaves_native_codex_unchanged():
+    from app.core.clients.proxy_websocket import _build_upstream_websocket_headers
+
+    native_ua = "codex_cli_rs/0.142.0 (Mac OS 27.0.0; arm64) iTerm.app/3.6.10"
+    inbound = {"User-Agent": native_ua, "openai-beta": "responses_websockets=2026-02-06"}
+    headers = _build_upstream_websocket_headers(inbound, "tok", "acct-1")
+
+    assert headers["User-Agent"] == native_ua
+    assert headers["chatgpt-account-id"] == "acct-1"
+    assert "ChatGPT-Account-Id" not in headers

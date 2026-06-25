@@ -7,13 +7,16 @@
 The service MUST normalize the outbound client fingerprint to the first-party
 Codex CLI (`codex_cli_rs`) persona when forwarding a proxied request to the
 upstream Codex backend that did not originate from a native Codex client. This
-normalization MUST apply on every upstream transport path (both the http and
-websocket builders), because with `upstream_stream_transport="auto"` a
-non-native client carrying a `x-codex-turn-state` continuity header is routed
-onto the websocket path; normalizing only the http path would let that
-follow-up reach upstream with its downgraded fingerprint intact. The service
-MUST NOT modify the fingerprint of native Codex client requests on any
-transport.
+normalization MUST apply on every upstream egress path: the http builder, the
+internal auto-transport websocket builder, and the client-facing
+`/v1/responses` websocket egress builder
+(`app/core/clients/proxy_websocket.py`). With `upstream_stream_transport="auto"`
+a non-native client carrying a `x-codex-turn-state` continuity header is routed
+onto the internal websocket path, and a direct websocket SDK caller reaches
+upstream through the `/v1/responses` egress builder; normalizing only a subset
+of these paths would let the un-normalized path reach upstream with its
+downgraded fingerprint intact. The service MUST NOT modify the fingerprint of
+native Codex client requests on any transport.
 
 A request is considered **native** when its inbound `User-Agent` begins with a
 known Codex client token (`codex_cli_rs`, `codex-tui`, `codex_exec`,
@@ -91,6 +94,19 @@ in-process cache that is refreshed by existing background refresh paths.
   with `User-Agent: codex_cli_rs/0.142.0 (Mac OS 27.0.0; arm64) iTerm.app/3.6.10`
 - **THEN** the outbound websocket `User-Agent` equals the inbound `User-Agent`
 - **AND** the account id is carried under the lowercase header `chatgpt-account-id`
+
+#### Scenario: non-native client-facing responses websocket request is normalized
+
+- **WHEN** a non-native SDK connects directly to the `/v1/responses` websocket
+  endpoint with `User-Agent: OpenAI/Python 2.24.0`, `x-openai-client-version`,
+  and `x-stainless-*` headers
+- **THEN** the upstream responses websocket `User-Agent` is
+  `codex_cli_rs/<version> (Mac OS 26.5.0; arm64) iTerm.app/3.6.10`
+- **AND** the `x-openai-client-*`, `x-stainless-*`, and `originator` headers are
+  absent from the outbound request
+- **AND** the upstream account id is carried under the PascalCase header name
+  `ChatGPT-Account-Id`
+- **AND** the required responses websocket beta header is still present
 
 #### Scenario: account header uses Codex CLI casing on a normalized request
 

@@ -43,6 +43,7 @@ from app.core.clients.codex import (
     create_codex_session,
     require_route_or_direct_egress_opt_in,
 )
+from app.core.clients.codex_version import get_codex_version_cache
 from app.core.clients.http import acquire_http_client, lease_http_session
 from app.core.config.settings import Settings, get_settings
 from app.core.conversation_archive import archive_json, archive_text
@@ -442,6 +443,83 @@ def filter_inbound_headers(headers: Mapping[str, str]) -> dict[str, str]:
     return {key: value for key, value in headers.items() if not _should_drop_inbound_header(key)}
 
 
+_NATIVE_CODEX_USER_AGENT_PREFIXES: tuple[str, ...] = (
+    "codex_cli_rs",
+    "codex-tui",
+    "codex_exec",
+    "codex_vscode",
+    "codex desktop",
+    "codex ",
+)
+_SDK_FINGERPRINT_HEADER_KEYS: frozenset[str] = frozenset(
+    {
+        "x-openai-client-version",
+        "x-openai-client-os",
+        "x-openai-client-arch",
+        "x-openai-client-id",
+        "x-openai-client-user-agent",
+    }
+)
+_CODEX_CLI_ORIGINATOR = "codex_cli_rs"
+_CHATGPT_ACCOUNT_ID_HEADER = "ChatGPT-Account-Id"
+_DEFAULT_FINGERPRINT_OS = "Mac OS 26.5.0"
+_DEFAULT_FINGERPRINT_ARCH = "arm64"
+_DEFAULT_FINGERPRINT_TERMINAL = "iTerm.app/3.6.10"
+
+
+def build_codex_user_agent(version: str) -> str:
+    """Build a Codex CLI ``User-Agent`` matching ``get_codex_user_agent()`` from
+    ``openai/codex`` (``codex-rs/login/src/auth/default_client.rs``):
+    ``codex_cli_rs/<version> (<os>; <arch>) <terminal>``.
+
+    OS/arch/terminal come from operator-configurable settings; the version is
+    the live Codex client version resolved by the caller. Settings access is
+    defensive (``getattr`` with built-in defaults) so header construction can
+    never raise and fail an otherwise-valid upstream request.
+    """
+    settings = get_settings()
+    os_name = getattr(settings, "codex_fingerprint_os", _DEFAULT_FINGERPRINT_OS)
+    arch = getattr(settings, "codex_fingerprint_arch", _DEFAULT_FINGERPRINT_ARCH)
+    terminal = getattr(settings, "codex_fingerprint_terminal", _DEFAULT_FINGERPRINT_TERMINAL)
+    return f"{_CODEX_CLI_ORIGINATOR}/{version} ({os_name}; {arch}) {terminal}"
+
+
+def _is_native_codex_user_agent(user_agent: str | None) -> bool:
+    if not user_agent:
+        return False
+    lowered = user_agent.strip().lower()
+    return any(lowered.startswith(prefix) for prefix in _NATIVE_CODEX_USER_AGENT_PREFIXES)
+
+
+def _is_native_codex_request(headers: Mapping[str, str]) -> bool:
+    """A request is native when its User-Agent already identifies a Codex
+    client, or it already carries native Codex transport headers (originator in
+    the native set, or any ``x-codex-*`` stream header)."""
+    user_agent = None
+    for key, value in headers.items():
+        if key.lower() == "user-agent":
+            user_agent = value
+            break
+    if _is_native_codex_user_agent(user_agent):
+        return True
+    return _has_native_codex_transport_headers(headers)
+
+
+def _normalize_non_native_upstream_fingerprint(headers: dict[str, str]) -> None:
+    """Rewrite a non-native request's outbound fingerprint to the Codex CLI
+    persona in place: set ``User-Agent`` to a ``codex_cli_rs`` string, strip
+    SDK-only ``x-openai-client-*`` headers, and strip any inbound
+    ``originator`` header (the real Codex CLI omits it for the default
+    originator and lets the backend read it from the User-Agent prefix)."""
+    version = get_codex_version_cache().cached_version_or_default()
+    codex_user_agent = build_codex_user_agent(version)
+    for key in list(headers.keys()):
+        lowered = key.lower()
+        if lowered == "user-agent" or lowered in _SDK_FINGERPRINT_HEADER_KEYS or lowered == "originator":
+            del headers[key]
+    headers["User-Agent"] = codex_user_agent
+
+
 def _build_upstream_headers(
     inbound: Mapping[str, str],
     access_token: str,
@@ -449,16 +527,22 @@ def _build_upstream_headers(
     accept: str = "text/event-stream",
 ) -> dict[str, str]:
     headers = dict(inbound)
+    native = _is_native_codex_request(headers)
     lower_keys = {key.lower() for key in headers}
     if "x-request-id" not in lower_keys and "request-id" not in lower_keys:
         request_id = get_request_id()
         if request_id:
             headers["x-request-id"] = request_id
+    if not native:
+        _normalize_non_native_upstream_fingerprint(headers)
     headers["Authorization"] = f"Bearer {access_token}"
     headers["Accept"] = accept
     headers["Content-Type"] = "application/json"
     if account_id:
-        headers["chatgpt-account-id"] = account_id
+        if native:
+            headers["chatgpt-account-id"] = account_id
+        else:
+            headers[_CHATGPT_ACCOUNT_ID_HEADER] = account_id
     return headers
 
 

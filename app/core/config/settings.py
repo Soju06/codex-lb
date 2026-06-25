@@ -242,6 +242,9 @@ class Settings(BaseSettings):
     model_registry_enabled: bool = True
     model_registry_refresh_interval_seconds: int = Field(default=300, gt=0)
     model_registry_client_version: str = "0.101.0"
+    codex_fingerprint_os: str = "Mac OS 26.5.0"
+    codex_fingerprint_arch: str = "arm64"
+    codex_fingerprint_terminal: str = "iTerm.app/3.6.10"
     model_context_window_overrides: Annotated[dict[str, int], NoDecode] = Field(default_factory=dict)
     proxy_unauthenticated_client_cidrs: Annotated[list[str], NoDecode] = Field(default_factory=list)
     firewall_trust_proxy_headers: bool = False

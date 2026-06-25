@@ -7,6 +7,13 @@ import re
 # example, ``ms`` is preferred over ``m`` and ``minutes`` over ``m``.
 _UNIT_ALTERNATION = r"ms|milliseconds?|hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s"
 
+# A unit literal is only valid when it is not immediately followed by another
+# letter, otherwise the single-letter alternatives swallow the prefix of an
+# unsupported longer word (``m`` from ``month``, ``h`` from ``half``) and the
+# hint is silently mis-scaled. Digits still follow units in compound hints
+# (``6m0s``), so the boundary forbids letters only, not digits or whitespace.
+_UNIT_BOUNDARY = r"(?![A-Za-z])"
+
 # Seconds-per-unit for every literal ``_UNIT_ALTERNATION`` can capture.
 _UNIT_SECONDS: dict[str, float] = {
     "ms": 0.001,
@@ -32,8 +39,8 @@ _UNIT_SECONDS: dict[str, float] = {
 # Capture the contiguous run of ``<number><unit>`` components that immediately
 # follows "try again in" so compound hints such as ``6m0s`` or ``1h2m3s`` are
 # read in full instead of stopping at the first unit.
-_RETRY_PATTERN = re.compile(rf"(?i)try again in\s*((?:\d+(?:\.\d+)?\s*(?:{_UNIT_ALTERNATION})\s*)+)")
-_DURATION_TOKEN = re.compile(rf"(?i)(\d+(?:\.\d+)?)\s*({_UNIT_ALTERNATION})")
+_RETRY_PATTERN = re.compile(rf"(?i)try again in\s*((?:\d+(?:\.\d+)?\s*(?:{_UNIT_ALTERNATION}){_UNIT_BOUNDARY}\s*)+)")
+_DURATION_TOKEN = re.compile(rf"(?i)(\d+(?:\.\d+)?)\s*({_UNIT_ALTERNATION}){_UNIT_BOUNDARY}")
 
 _BACKOFF_INITIAL_DELAY_MS = 200
 _BACKOFF_FACTOR = 2.0

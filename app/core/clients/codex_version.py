@@ -63,6 +63,19 @@ class CodexVersionCache:
             self._cached_version = None
             self._cached_at = 0.0
 
+    def cached_version_or_default(self) -> str:
+        """Return the cached Codex client version without any network I/O.
+
+        Safe to call from synchronous hot paths (e.g. upstream header build).
+        Falls back to the configured client-version default when the cache has
+        not been warmed yet. Cache warming happens via the async
+        ``get_version()`` already invoked by the model-registry refresh cycle.
+        """
+        cached = self._cached_version
+        if cached is not None:
+            return cached
+        return get_settings().model_registry_client_version
+
     async def _fetch_latest_version(self) -> str | None:
         timeout = aiohttp.ClientTimeout(total=_FETCH_TIMEOUT_SECONDS)
         try:

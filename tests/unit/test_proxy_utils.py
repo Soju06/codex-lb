@@ -386,12 +386,27 @@ def test_request_log_useragent_fields_handle_missing_and_blank_headers(
 
 
 def test_build_upstream_headers_overrides_auth():
+    # No native Codex User-Agent on the inbound request -> the upstream
+    # fingerprint is normalized to the Codex CLI persona and the account header
+    # is emitted in PascalCase (ChatGPT-Account-Id).
     inbound = {"X-Request-Id": "req_1"}
     headers = _build_upstream_headers(inbound, "token", "acc_2")
     assert headers["Authorization"] == "Bearer token"
-    assert headers["chatgpt-account-id"] == "acc_2"
+    assert headers["ChatGPT-Account-Id"] == "acc_2"
+    assert "chatgpt-account-id" not in headers
+    assert headers["User-Agent"].startswith("codex_cli_rs/")
     assert headers["Accept"] == "text/event-stream"
     assert headers["Content-Type"] == "application/json"
+
+
+def test_build_upstream_headers_preserves_native_account_header_casing():
+    # A native Codex client request keeps the existing lowercase account header
+    # and its original User-Agent.
+    native_ua = "codex_exec/0.142.1 (Mac OS 27.0.0; arm64) unknown (codex_exec; 0.142.1)"
+    headers = _build_upstream_headers({"User-Agent": native_ua}, "token", "acc_2")
+    assert headers["chatgpt-account-id"] == "acc_2"
+    assert "ChatGPT-Account-Id" not in headers
+    assert headers["User-Agent"] == native_ua
 
 
 def test_build_upstream_headers_accept_override():
@@ -897,7 +912,7 @@ def test_build_upstream_websocket_headers_strip_accept_and_content_type_case_ins
         {
             "accept": "text/event-stream",
             "content-type": "application/json",
-            "User-Agent": "codex-test",
+            "User-Agent": "codex_cli_rs/0.1.0",
         },
         "token",
         "acc_2",
@@ -907,7 +922,7 @@ def test_build_upstream_websocket_headers_strip_accept_and_content_type_case_ins
     assert all(key.lower() != "content-type" for key in headers)
     assert headers["Authorization"] == "Bearer token"
     assert headers["chatgpt-account-id"] == "acc_2"
-    assert headers["User-Agent"] == "codex-test"
+    assert headers["User-Agent"] == "codex_cli_rs/0.1.0"
 
 
 def test_build_upstream_websocket_headers_strip_hop_by_hop_headers_and_connection_tokens():
@@ -919,7 +934,7 @@ def test_build_upstream_websocket_headers_strip_hop_by_hop_headers_and_connectio
             "Transfer-Encoding": "chunked",
             "Proxy-Connection": "keep-alive",
             "X-Handshake-Debug": "1",
-            "User-Agent": "codex-test",
+            "User-Agent": "codex_cli_rs/0.1.0",
         },
         "token",
         "acc_2",
@@ -933,7 +948,7 @@ def test_build_upstream_websocket_headers_strip_hop_by_hop_headers_and_connectio
     assert "X-Handshake-Debug" not in headers
     assert headers["Authorization"] == "Bearer token"
     assert headers["chatgpt-account-id"] == "acc_2"
-    assert headers["User-Agent"] == "codex-test"
+    assert headers["User-Agent"] == "codex_cli_rs/0.1.0"
 
 
 @pytest.mark.asyncio

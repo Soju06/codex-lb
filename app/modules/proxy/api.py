@@ -2287,7 +2287,7 @@ async def _stream_responses(
         )
     stream, startup_error = await _probe_stream_startup_error(
         stream,
-        convert_event_errors=bridge_active,
+        convert_event_errors=False,
         timeout_seconds=(
             _HTTP_BRIDGE_STARTUP_ERROR_PROBE_SECONDS if prefer_http_bridge else _STREAM_STARTUP_ERROR_PROBE_SECONDS
         ),

@@ -1,0 +1,5 @@
+- [x] 1. Specify that bridge upstream terminal error events remain SSE events.
+- [x] 2. Stop converting first upstream `response.failed` / `error` bridge events into startup HTTP errors.
+- [x] 3. Add focused regression coverage for startup probe behavior.
+- [x] 4. Run focused tests and lint.
+- [ ] 5. Validate OpenSpec with `openspec validate forward-bridge-upstream-error-events --strict` once the CLI is available.

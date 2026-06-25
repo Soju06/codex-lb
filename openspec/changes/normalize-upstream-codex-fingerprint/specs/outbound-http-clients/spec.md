@@ -35,7 +35,8 @@ For a non-native request, the service MUST:
   `arm64`, and `iTerm.app/3.6.10`.
 - Remove SDK-only fingerprint headers `x-openai-client-version`,
   `x-openai-client-os`, `x-openai-client-arch`, `x-openai-client-id`, and
-  `x-openai-client-user-agent`.
+  `x-openai-client-user-agent`, as well as every `x-stainless-*` header (the
+  OpenAI SDK fingerprint family the API layer uses to detect SDK callers).
 - Remove any inbound `originator` header and MUST NOT add an `originator`
   header, matching the Codex CLI behavior of omitting the header when the
   originator equals the default `codex_cli_rs`.
@@ -50,11 +51,12 @@ in-process cache that is refreshed by existing background refresh paths.
 #### Scenario: non-native SDK http request is rewritten to the Codex CLI fingerprint
 
 - **WHEN** an http upstream request arrives with `User-Agent: OpenAI/Python 2.24.0`
-  and `x-openai-client-version` / `x-openai-client-os` headers
+  and `x-openai-client-version` / `x-openai-client-os` / `x-stainless-os` headers
 - **THEN** the outbound `User-Agent` is `codex_cli_rs/<version> (Mac OS 26.5.0; arm64) iTerm.app/3.6.10`
 - **AND** the `x-openai-client-version`, `x-openai-client-os`,
   `x-openai-client-arch`, `x-openai-client-id`, and `x-openai-client-user-agent`
   headers are absent from the outbound request
+- **AND** every `x-stainless-*` header is absent from the outbound request
 - **AND** no `originator` header is present on the outbound request
 
 #### Scenario: native Codex http request is left unchanged
@@ -95,6 +97,14 @@ in-process cache that is refreshed by existing background refresh paths.
 - **WHEN** a non-native http request is normalized and an upstream account id is present
 - **THEN** the outbound request carries the account id under the PascalCase
   header name `ChatGPT-Account-Id`
+
+#### Scenario: per-account upstream diagnostics survive normalization
+
+- **WHEN** upstream request logging is enabled and a normalized non-native
+  request carries its account id under the PascalCase `ChatGPT-Account-Id` header
+- **THEN** the upstream request start/complete log entries record the account id
+  rather than `None`, so per-account diagnostics are preserved regardless of the
+  header casing produced by normalization
 
 #### Scenario: fingerprint version falls back to the configured default
 

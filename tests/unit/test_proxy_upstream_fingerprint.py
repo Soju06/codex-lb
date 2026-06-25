@@ -149,3 +149,55 @@ def test_websocket_native_codex_request_is_left_unchanged():
     assert headers["chatgpt-account-id"] == "acct-1"
     assert "ChatGPT-Account-Id" not in headers
     assert headers["x-codex-turn-state"] == "abc"
+
+
+def test_non_native_request_strips_x_stainless_sdk_headers():
+    # Regression for the Codex P2 finding: OpenAI SDKs attach an x-stainless-*
+    # header family the API layer treats as an OpenAI SDK signal. Installing the
+    # codex_cli_rs User-Agent is not enough; the x-stainless-* headers must be
+    # stripped by prefix or upstream can still distinguish SDK traffic and apply
+    # the downgrade this change avoids.
+    inbound = {
+        "User-Agent": "OpenAI/Python 2.24.0",
+        "x-stainless-os": "MacOS",
+        "x-stainless-arch": "arm64",
+        "x-stainless-runtime": "CPython",
+        "x-stainless-runtime-version": "3.13.0",
+        "x-stainless-package-version": "2.24.0",
+        "x-stainless-lang": "python",
+    }
+    with patch.object(proxy_module.get_codex_version_cache(), "cached_version_or_default", return_value="0.142.0"):
+        headers = _build_upstream_headers(inbound, "tok", None)
+    assert headers["User-Agent"].startswith("codex_cli_rs/")
+    assert not any(key.lower().startswith("x-stainless-") for key in headers)
+
+
+def test_websocket_non_native_request_strips_x_stainless_sdk_headers():
+    # The websocket builder must strip x-stainless-* too, for the auto-transport
+    # turn-state continuity path.
+    from app.core.clients.proxy import _build_upstream_websocket_headers
+
+    inbound = {
+        "User-Agent": "OpenAI/Python 2.24.0",
+        "x-stainless-os": "MacOS",
+        "x-stainless-runtime-version": "3.13.0",
+        "x-codex-turn-state": "abc",
+    }
+    with patch.object(proxy_module.get_codex_version_cache(), "cached_version_or_default", return_value="0.142.0"):
+        headers = _build_upstream_websocket_headers(inbound, "tok", None)
+    assert headers["User-Agent"].startswith("codex_cli_rs/")
+    assert not any(key.lower().startswith("x-stainless-") for key in headers)
+    assert headers["x-codex-turn-state"] == "abc"
+
+
+def test_upstream_log_account_id_lookup_is_case_insensitive():
+    # Regression for the Codex P3 finding: a normalized non-native request carries
+    # the account id under PascalCase ChatGPT-Account-Id. The upstream log helper
+    # must read it case-insensitively or per-account diagnostics are lost for
+    # exactly the SDK traffic this feature investigates.
+    from app.core.clients.proxy import _account_id_for_upstream_log
+
+    assert _account_id_for_upstream_log({"ChatGPT-Account-Id": "acct-9"}) == "acct-9"
+    assert _account_id_for_upstream_log({"chatgpt-account-id": "acct-9"}) == "acct-9"
+    assert _account_id_for_upstream_log({"CHATGPT-ACCOUNT-ID": "acct-9"}) == "acct-9"
+    assert _account_id_for_upstream_log({"User-Agent": "x"}) is None

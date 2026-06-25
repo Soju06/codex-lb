@@ -460,6 +460,13 @@ _SDK_FINGERPRINT_HEADER_KEYS: frozenset[str] = frozenset(
         "x-openai-client-user-agent",
     }
 )
+# OpenAI SDKs (the Stainless-generated clients) attach an ``x-stainless-*``
+# header family (os, arch, runtime, runtime-version, package-version, ...) with
+# a variable suffix. The API layer treats any ``x-stainless-*`` header as an
+# OpenAI SDK signal, so they must be stripped by prefix on a normalized request
+# or upstream can still distinguish SDK traffic from the Codex CLI and apply the
+# downgrade this change is meant to avoid.
+_SDK_FINGERPRINT_HEADER_PREFIXES: tuple[str, ...] = ("x-stainless-",)
 _CODEX_CLI_ORIGINATOR = "codex_cli_rs"
 _CHATGPT_ACCOUNT_ID_HEADER = "ChatGPT-Account-Id"
 _DEFAULT_FINGERPRINT_OS = "Mac OS 26.5.0"
@@ -518,14 +525,19 @@ def _is_native_codex_request(headers: Mapping[str, str]) -> bool:
 def _normalize_non_native_upstream_fingerprint(headers: dict[str, str]) -> None:
     """Rewrite a non-native request's outbound fingerprint to the Codex CLI
     persona in place: set ``User-Agent`` to a ``codex_cli_rs`` string, strip
-    SDK-only ``x-openai-client-*`` headers, and strip any inbound
-    ``originator`` header (the real Codex CLI omits it for the default
+    SDK-only ``x-openai-client-*`` and ``x-stainless-*`` headers, and strip any
+    inbound ``originator`` header (the real Codex CLI omits it for the default
     originator and lets the backend read it from the User-Agent prefix)."""
     version = get_codex_version_cache().cached_version_or_default()
     codex_user_agent = build_codex_user_agent(version)
     for key in list(headers.keys()):
         lowered = key.lower()
-        if lowered == "user-agent" or lowered in _SDK_FINGERPRINT_HEADER_KEYS or lowered == "originator":
+        if (
+            lowered == "user-agent"
+            or lowered in _SDK_FINGERPRINT_HEADER_KEYS
+            or lowered.startswith(_SDK_FINGERPRINT_HEADER_PREFIXES)
+            or lowered == "originator"
+        ):
             del headers[key]
     headers["User-Agent"] = codex_user_agent
 
@@ -734,6 +746,21 @@ def _error_payload_from_websocket_handshake_error(exc: aiohttp.WSServerHandshake
     return openai_error(code, message)
 
 
+def _account_id_for_upstream_log(headers: Mapping[str, str]) -> str | None:
+    """Read the upstream account id from request headers case-insensitively.
+
+    A normalized non-native request carries the id under PascalCase
+    ``ChatGPT-Account-Id`` while native requests use lowercase
+    ``chatgpt-account-id``; a case-sensitive lookup would log ``account_id=None``
+    for normalized SDK traffic and drop the per-account diagnostics this feature
+    exists to provide.
+    """
+    for key, value in headers.items():
+        if key.lower() == "chatgpt-account-id":
+            return value
+    return None
+
+
 def _maybe_log_upstream_request_start(
     *,
     kind: str,
@@ -749,7 +776,7 @@ def _maybe_log_upstream_request_start(
 
     request_id = get_request_id()
     target = _summarize_upstream_target(url)
-    account_id = headers.get("chatgpt-account-id")
+    account_id = _account_id_for_upstream_log(headers)
     header_keys = _interesting_upstream_header_keys(headers)
 
     if settings.log_upstream_request_summary:
@@ -811,7 +838,7 @@ def _maybe_log_upstream_request_complete(
         kind,
         method,
         _summarize_upstream_target(url),
-        headers.get("chatgpt-account-id"),
+        _account_id_for_upstream_log(headers),
         status_code,
         int((time.monotonic() - started_at) * 1000),
         error_code,

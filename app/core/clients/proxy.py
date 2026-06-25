@@ -492,17 +492,27 @@ def _is_native_codex_user_agent(user_agent: str | None) -> bool:
 
 
 def _is_native_codex_request(headers: Mapping[str, str]) -> bool:
-    """A request is native when its User-Agent already identifies a Codex
-    client, or it already carries native Codex transport headers (originator in
-    the native set, or any ``x-codex-*`` stream header)."""
+    """A request is native when its identity headers mark it as a first-party
+    Codex client: either a native Codex ``User-Agent`` prefix, or an
+    ``originator`` header whose value is in the native Codex originator set.
+
+    Transport/continuity headers (``x-codex-turn-state`` and friends) are
+    deliberately NOT treated as native signals: an HTTP SDK client replays the
+    ``x-codex-turn-state`` token the upstream returns for continuity, so keying
+    the exemption on those headers would let a non-native SDK follow-up skip
+    normalization and reach upstream with its downgraded fingerprint intact.
+    """
     user_agent = None
+    originator = None
     for key, value in headers.items():
-        if key.lower() == "user-agent":
+        lowered = key.lower()
+        if lowered == "user-agent":
             user_agent = value
-            break
+        elif lowered == "originator":
+            originator = value
     if _is_native_codex_user_agent(user_agent):
         return True
-    return _has_native_codex_transport_headers(headers)
+    return _is_native_codex_originator(originator)
 
 
 def _normalize_non_native_upstream_fingerprint(headers: dict[str, str]) -> None:

@@ -13,8 +13,12 @@ and MUST NOT modify websocket upstream requests.
 A request is considered **native** when its inbound `User-Agent` begins with a
 known Codex client token (`codex_cli_rs`, `codex-tui`, `codex_exec`,
 `codex_vscode`, `Codex Desktop`, or a value starting with `Codex `) OR it
-already carries native Codex transport headers (an `originator` header whose
-value is in the native Codex originator set, or any `x-codex-*` stream header).
+carries an `originator` header whose value is in the native Codex originator
+set. Transport/continuity headers (`x-codex-turn-state` and other `x-codex-*`
+stream headers) MUST NOT be treated as a native signal, because a non-native
+http client replays the upstream-issued `x-codex-turn-state` token for
+continuity; treating it as native would let that follow-up reach upstream with
+its downgraded fingerprint intact.
 
 For a non-native http request, the service MUST:
 
@@ -52,11 +56,12 @@ in-process cache that is refreshed by existing background refresh paths.
 - **THEN** the outbound `User-Agent` equals the inbound `User-Agent`
 - **AND** the request fingerprint is not normalized
 
-#### Scenario: request carrying native Codex transport headers is treated as native
+#### Scenario: non-native request replaying a continuity token is still normalized
 
-- **WHEN** an http upstream request arrives with a non-Codex `User-Agent`
-  but includes an `x-codex-turn-state` header
-- **THEN** the request is treated as native and its fingerprint is not normalized
+- **WHEN** an http upstream request arrives with `User-Agent: OpenAI/Python 2.24.0`
+  and an `x-codex-turn-state` continuity header
+- **THEN** the request is treated as non-native and its fingerprint is normalized
+- **AND** the `x-codex-turn-state` header is preserved on the outbound request
 
 #### Scenario: account header uses Codex CLI casing on a normalized request
 

@@ -80,11 +80,33 @@ def test_codex_desktop_native_user_agent_is_left_unchanged():
     assert headers["User-Agent"] == native_ua
 
 
-def test_request_with_native_codex_transport_header_is_treated_as_native():
-    # Non-Codex UA but carries an x-codex-* stream header -> native, untouched.
-    inbound = {"User-Agent": "OpenAI/Python 2.24.0", "x-codex-turn-state": "abc"}
+def test_sdk_request_replaying_turn_state_is_still_normalized():
+    # Regression for the Codex P2 finding: an HTTP SDK client replays the
+    # x-codex-turn-state continuity token the upstream returned. That transport
+    # header must NOT make the request count as native, or the downgraded SDK
+    # fingerprint would reach upstream unchanged. The continuity header itself
+    # is preserved (only the fingerprint is normalized).
+    inbound = {
+        "User-Agent": "OpenAI/Python 2.24.0",
+        "x-openai-client-version": "2.24.0",
+        "x-codex-turn-state": "abc",
+    }
+    with patch.object(proxy_module.get_codex_version_cache(), "cached_version_or_default", return_value="0.142.0"):
+        headers = _build_upstream_headers(inbound, "tok", None)
+    assert headers["User-Agent"].startswith("codex_cli_rs/")
+    lowered = _lower_keys(headers)
+    assert "x-openai-client-version" not in lowered
+    # Continuity header is preserved for sticky routing.
+    assert headers["x-codex-turn-state"] == "abc"
+
+
+def test_native_originator_header_marks_request_native():
+    # A native Codex originator header (not the default codex_cli_rs, which the
+    # CLI omits) identifies a first-party client and is left unchanged.
+    inbound = {"User-Agent": "OpenAI/Python 2.24.0", "originator": "codex_vscode"}
     headers = _build_upstream_headers(inbound, "tok", None)
     assert headers["User-Agent"] == "OpenAI/Python 2.24.0"
+    assert headers["originator"] == "codex_vscode"
 
 
 def test_websocket_header_builder_is_untouched_by_normalization():

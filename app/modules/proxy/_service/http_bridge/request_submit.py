@@ -964,9 +964,7 @@ class _HTTPBridgeRequestSubmitMixin:
     async def _retry_http_bridge_precreated_request(self: Any, session: "_HTTPBridgeSession") -> bool:
         async with session.pending_lock:
             active_requests = [
-                request_state
-                for request_state in session.pending_requests
-                if not request_state.draining_until_terminal
+                request_state for request_state in session.pending_requests if not request_state.draining_until_terminal
             ]
             retryable_requests = [
                 request_state

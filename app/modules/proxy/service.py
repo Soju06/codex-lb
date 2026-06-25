@@ -547,6 +547,7 @@ from app.modules.proxy._service.support import (
     _wait_for_websocket_continuity_gap,  # noqa: F401
     _websocket_full_replay_should_wait_for_continuity,  # noqa: F401
     _websocket_request_can_replay_before_visible_output,  # noqa: F401
+    _websocket_request_previsible_replay_skip_reason,  # noqa: F401
     _WebSocketConnectFailureEmitted,  # noqa: F401
     _WebSocketContinuityAnchor,  # noqa: F401
     _WebSocketContinuityState,

@@ -21227,9 +21227,10 @@ async def test_retry_http_bridge_precreated_request_replays_created_without_visi
 
 
 @pytest.mark.asyncio
-async def test_retry_http_bridge_precreated_request_refuses_created_after_visible_output(monkeypatch):
+async def test_retry_http_bridge_precreated_request_refuses_created_after_visible_output(monkeypatch, caplog):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
+    caplog.set_level(logging.INFO, logger="app.modules.proxy.service")
     send_text = AsyncMock()
     request_state = proxy_service._WebSocketRequestState(
         request_id="req_bridge_created_visible_refuse",
@@ -21270,6 +21271,32 @@ async def test_retry_http_bridge_precreated_request_refuses_created_after_visibl
     send_text.assert_not_awaited()
     assert request_state.replay_count == 0
     assert session.pending_requests == deque([request_state])
+    assert "http_bridge_event event=retry_precreated_skipped" in caplog.text
+    assert "detail=downstream_visible" in caplog.text
+
+
+def test_websocket_previsible_replay_skip_reason_classifies_unsafe_states():
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_skip_reason",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        request_text='{"type":"response.create"}',
+        awaiting_response_created=True,
+        previous_response_id="resp_anchor",
+    )
+
+    assert (
+        proxy_service._websocket_request_previsible_replay_skip_reason(request_state)
+        == "unsafe_previous_response_anchor"
+    )
+
+    request_state.previous_response_id = None
+    request_state.downstream_visible = True
+
+    assert proxy_service._websocket_request_previsible_replay_skip_reason(request_state) == "downstream_visible"
 
 
 @pytest.mark.asyncio

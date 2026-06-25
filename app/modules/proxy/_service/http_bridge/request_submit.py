@@ -111,6 +111,7 @@ from app.modules.proxy._service.support import (
     _HTTPBridgeSession,
     _request_log_useragent_fields,
     _websocket_request_can_replay_before_visible_output,
+    _websocket_request_previsible_replay_skip_reason,
     _WebSocketRequestState,
 )
 from app.modules.proxy._service.support import (
@@ -962,13 +963,34 @@ class _HTTPBridgeRequestSubmitMixin:
 
     async def _retry_http_bridge_precreated_request(self: Any, session: "_HTTPBridgeSession") -> bool:
         async with session.pending_lock:
-            retryable_requests = [
+            active_requests = [
                 request_state
                 for request_state in session.pending_requests
                 if not request_state.draining_until_terminal
-                and _websocket_request_can_replay_before_visible_output(request_state)
+            ]
+            retryable_requests = [
+                request_state
+                for request_state in active_requests
+                if _websocket_request_can_replay_before_visible_output(request_state)
             ]
             if len(retryable_requests) != 1:
+                skip_reason = "multiple_retryable_requests" if len(retryable_requests) > 1 else "no_retryable_request"
+                if len(active_requests) == 1:
+                    skip_reason = _websocket_request_previsible_replay_skip_reason(active_requests[0]) or skip_reason
+                elif not active_requests:
+                    skip_reason = "no_active_request"
+                else:
+                    skip_reason = "multiple_active_requests"
+                _log_http_bridge_event(
+                    "retry_precreated_skipped",
+                    session.key,
+                    account_id=session.account.id,
+                    model=session.request_model,
+                    detail=skip_reason,
+                    pending_count=len(active_requests),
+                    cache_key_family=session.key.affinity_kind,
+                    model_class=_extract_model_class(session.request_model) if session.request_model else None,
+                )
                 return False
             request_state = retryable_requests[0]
             if request_state.previous_response_id is not None and not (
@@ -981,6 +1003,16 @@ class _HTTPBridgeRequestSubmitMixin:
                 # is unsafe without upstream idempotency guarantees. Proxy-
                 # injected retry-safe anchors are equivalent to the client's own
                 # full resend once the anchor is stripped.
+                _log_http_bridge_event(
+                    "retry_precreated_skipped",
+                    session.key,
+                    account_id=session.account.id,
+                    model=session.request_model,
+                    detail="unsafe_previous_response_anchor",
+                    pending_count=1,
+                    cache_key_family=session.key.affinity_kind,
+                    model_class=_extract_model_class(session.request_model) if session.request_model else None,
+                )
                 return False
             close_classification = _classify_upstream_close(
                 session.last_upstream_close_code,
@@ -993,9 +1025,29 @@ class _HTTPBridgeRequestSubmitMixin:
                     "Upstream rejected the request before response.created "
                     f"(close_code={session.last_upstream_close_code})"
                 )
+                _log_http_bridge_event(
+                    "retry_precreated_skipped",
+                    session.key,
+                    account_id=session.account.id,
+                    model=session.request_model,
+                    detail="upstream_rejected_input",
+                    pending_count=1,
+                    cache_key_family=session.key.affinity_kind,
+                    model_class=_extract_model_class(session.request_model) if session.request_model else None,
+                )
                 return False
             request_text = _prepare_websocket_request_state_for_visible_output_replay(request_state)
             if request_text is None:
+                _log_http_bridge_event(
+                    "retry_precreated_skipped",
+                    session.key,
+                    account_id=session.account.id,
+                    model=session.request_model,
+                    detail="prepare_replay_failed",
+                    pending_count=1,
+                    cache_key_family=session.key.affinity_kind,
+                    model_class=_extract_model_class(session.request_model) if session.request_model else None,
+                )
                 return False
         _log_http_bridge_event(
             "retry_precreated",

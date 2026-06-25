@@ -452,18 +452,22 @@ def _record_response_event(request_state: _WebSocketRequestState | None, event_t
 
 
 def _websocket_request_can_replay_before_visible_output(request_state: _WebSocketRequestState) -> bool:
+    return _websocket_request_previsible_replay_skip_reason(request_state) is None
+
+
+def _websocket_request_previsible_replay_skip_reason(request_state: _WebSocketRequestState) -> str | None:
     if not request_state.request_text:
-        return False
+        return "missing_request_text"
     if request_state.replay_count >= 1:
-        return False
+        return "replay_already_attempted"
     if request_state.downstream_visible:
-        return False
+        return "downstream_visible"
     has_retry_safe_fresh_payload = (
         request_state.fresh_upstream_request_is_retry_safe and request_state.fresh_upstream_request_text is not None
     )
     precreated_pending = request_state.response_id is None and request_state.awaiting_response_created
     if precreated_pending and request_state.previous_response_id is not None and not has_retry_safe_fresh_payload:
-        return False
+        return "unsafe_previous_response_anchor"
     created_only_pending = (
         request_state.response_id is not None
         and not request_state.awaiting_response_created
@@ -471,8 +475,16 @@ def _websocket_request_can_replay_before_visible_output(request_state: _WebSocke
         and (request_state.previous_response_id is None or has_retry_safe_fresh_payload)
     )
     if precreated_pending and request_state.response_event_count > 0:
-        return False
-    return precreated_pending or created_only_pending
+        return "precreated_with_response_events"
+    if precreated_pending or created_only_pending:
+        return None
+    if request_state.response_id is not None and request_state.awaiting_response_created:
+        return "awaiting_created_with_response_id"
+    if request_state.response_id is not None and request_state.response_event_count > 1:
+        return "response_events_after_created"
+    if request_state.previous_response_id is not None and not has_retry_safe_fresh_payload:
+        return "unsafe_previous_response_anchor"
+    return "not_previsible_pending"
 
 
 def _record_websocket_route_metadata(

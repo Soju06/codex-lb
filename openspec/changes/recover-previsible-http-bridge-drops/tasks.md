@@ -1,0 +1,5 @@
+- [x] 1. Update responses-api-compat requirements for pre-visible bridge-drop recovery.
+- [x] 2. Implement bounded retry diagnostics for HTTP bridge websocket drops.
+- [x] 3. Add focused regression tests for replay eligibility and skip reasons.
+- [x] 4. Run focused tests and lint.
+- [ ] 5. Validate OpenSpec with `openspec validate recover-previsible-http-bridge-drops --strict` once the CLI is available.

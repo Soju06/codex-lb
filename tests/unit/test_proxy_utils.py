@@ -912,7 +912,7 @@ def test_build_upstream_websocket_headers_strip_accept_and_content_type_case_ins
         {
             "accept": "text/event-stream",
             "content-type": "application/json",
-            "User-Agent": "codex-test",
+            "User-Agent": "codex_cli_rs/0.1.0",
         },
         "token",
         "acc_2",
@@ -922,7 +922,7 @@ def test_build_upstream_websocket_headers_strip_accept_and_content_type_case_ins
     assert all(key.lower() != "content-type" for key in headers)
     assert headers["Authorization"] == "Bearer token"
     assert headers["chatgpt-account-id"] == "acc_2"
-    assert headers["User-Agent"] == "codex-test"
+    assert headers["User-Agent"] == "codex_cli_rs/0.1.0"
 
 
 def test_build_upstream_websocket_headers_strip_hop_by_hop_headers_and_connection_tokens():
@@ -934,7 +934,7 @@ def test_build_upstream_websocket_headers_strip_hop_by_hop_headers_and_connectio
             "Transfer-Encoding": "chunked",
             "Proxy-Connection": "keep-alive",
             "X-Handshake-Debug": "1",
-            "User-Agent": "codex-test",
+            "User-Agent": "codex_cli_rs/0.1.0",
         },
         "token",
         "acc_2",
@@ -948,7 +948,7 @@ def test_build_upstream_websocket_headers_strip_hop_by_hop_headers_and_connectio
     assert "X-Handshake-Debug" not in headers
     assert headers["Authorization"] == "Bearer token"
     assert headers["chatgpt-account-id"] == "acc_2"
-    assert headers["User-Agent"] == "codex-test"
+    assert headers["User-Agent"] == "codex_cli_rs/0.1.0"
 
 
 @pytest.mark.asyncio

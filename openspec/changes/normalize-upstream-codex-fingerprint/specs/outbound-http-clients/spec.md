@@ -2,13 +2,18 @@
 
 ## ADDED Requirements
 
-### Requirement: Non-native upstream http requests use the Codex CLI client fingerprint
+### Requirement: Non-native upstream requests use the Codex CLI client fingerprint
 
 The service MUST normalize the outbound client fingerprint to the first-party
-Codex CLI (`codex_cli_rs`) persona when forwarding a proxied http request to
-the upstream Codex backend that did not originate from a native Codex client.
-The service MUST NOT modify the fingerprint of native Codex client requests,
-and MUST NOT modify websocket upstream requests.
+Codex CLI (`codex_cli_rs`) persona when forwarding a proxied request to the
+upstream Codex backend that did not originate from a native Codex client. This
+normalization MUST apply on every upstream transport path (both the http and
+websocket builders), because with `upstream_stream_transport="auto"` a
+non-native client carrying a `x-codex-turn-state` continuity header is routed
+onto the websocket path; normalizing only the http path would let that
+follow-up reach upstream with its downgraded fingerprint intact. The service
+MUST NOT modify the fingerprint of native Codex client requests on any
+transport.
 
 A request is considered **native** when its inbound `User-Agent` begins with a
 known Codex client token (`codex_cli_rs`, `codex-tui`, `codex_exec`,
@@ -16,11 +21,11 @@ known Codex client token (`codex_cli_rs`, `codex-tui`, `codex_exec`,
 carries an `originator` header whose value is in the native Codex originator
 set. Transport/continuity headers (`x-codex-turn-state` and other `x-codex-*`
 stream headers) MUST NOT be treated as a native signal, because a non-native
-http client replays the upstream-issued `x-codex-turn-state` token for
-continuity; treating it as native would let that follow-up reach upstream with
-its downgraded fingerprint intact.
+client replays the upstream-issued `x-codex-turn-state` token for continuity;
+treating it as native would let that follow-up reach upstream with its
+downgraded fingerprint intact.
 
-For a non-native http request, the service MUST:
+For a non-native request, the service MUST:
 
 - Set the outbound `User-Agent` to
   `codex_cli_rs/<version> (<os>; <arch>) <terminal>`, where `<version>` is the
@@ -35,6 +40,8 @@ For a non-native http request, the service MUST:
   header, matching the Codex CLI behavior of omitting the header when the
   originator equals the default `codex_cli_rs`.
 - Emit the upstream account header as PascalCase `ChatGPT-Account-Id`.
+- Preserve continuity headers (`x-codex-turn-state` and other `x-codex-*`
+  stream headers) on the outbound request so sticky routing is unaffected.
 
 Resolving the fingerprint version for an outbound request MUST NOT perform a
 blocking network call on the request path; the version is read from an
@@ -62,6 +69,26 @@ in-process cache that is refreshed by existing background refresh paths.
   and an `x-codex-turn-state` continuity header
 - **THEN** the request is treated as non-native and its fingerprint is normalized
 - **AND** the `x-codex-turn-state` header is preserved on the outbound request
+
+#### Scenario: non-native websocket request carrying a continuity token is normalized
+
+- **WHEN** the upstream stream transport resolves to websocket for a non-native
+  request with `User-Agent: OpenAI/Python 2.24.0`, an `x-openai-client-version`
+  header, and an `x-codex-turn-state` continuity header
+- **THEN** the outbound websocket `User-Agent` is
+  `codex_cli_rs/<version> (Mac OS 26.5.0; arm64) iTerm.app/3.6.10`
+- **AND** the `x-openai-client-*` and `originator` headers are absent from the
+  outbound request
+- **AND** the upstream account id is carried under the PascalCase header name
+  `ChatGPT-Account-Id`
+- **AND** the `x-codex-turn-state` header is preserved on the outbound request
+
+#### Scenario: native Codex websocket request is left unchanged
+
+- **WHEN** the upstream stream transport resolves to websocket for a request
+  with `User-Agent: codex_cli_rs/0.142.0 (Mac OS 27.0.0; arm64) iTerm.app/3.6.10`
+- **THEN** the outbound websocket `User-Agent` equals the inbound `User-Agent`
+- **AND** the account id is carried under the lowercase header `chatgpt-account-id`
 
 #### Scenario: account header uses Codex CLI casing on a normalized request
 

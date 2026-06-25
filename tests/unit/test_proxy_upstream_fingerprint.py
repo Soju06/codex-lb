@@ -109,11 +109,43 @@ def test_native_originator_header_marks_request_native():
     assert headers["originator"] == "codex_vscode"
 
 
-def test_websocket_header_builder_is_untouched_by_normalization():
-    # The websocket path uses a different builder and must not rewrite the UA.
+def test_websocket_non_native_sdk_request_is_normalized():
+    # Regression for the Codex P1 finding: with upstream_stream_transport="auto",
+    # a non-native SDK follow-up that replays x-codex-turn-state is routed onto
+    # the websocket path. The websocket builder must apply the same codex_cli_rs
+    # persona rewrite as the HTTP builder, otherwise the SDK fingerprint reaches
+    # upstream unchanged and the priority-downgrade mitigation is bypassed.
     from app.core.clients.proxy import _build_upstream_websocket_headers
 
-    inbound = {"User-Agent": "OpenAI/Python 2.24.0", "x-openai-client-version": "2.24.0"}
+    inbound = {
+        "User-Agent": "OpenAI/Python 2.24.0",
+        "x-openai-client-version": "2.24.0",
+        "x-codex-turn-state": "abc",
+        "originator": "sdk",
+    }
+    with patch.object(proxy_module.get_codex_version_cache(), "cached_version_or_default", return_value="0.142.0"):
+        headers = _build_upstream_websocket_headers(inbound, "tok", "acct-1")
+
+    assert headers["User-Agent"] == "codex_cli_rs/0.142.0 (Mac OS 26.5.0; arm64) iTerm.app/3.6.10"
+    lowered = _lower_keys(headers)
+    assert "x-openai-client-version" not in lowered
+    assert "originator" not in lowered
+    # Non-native uses the PascalCase account header, mirroring the HTTP builder.
+    assert headers["ChatGPT-Account-Id"] == "acct-1"
+    assert "chatgpt-account-id" not in headers
+    # Continuity header is preserved for sticky routing.
+    assert headers["x-codex-turn-state"] == "abc"
+
+
+def test_websocket_native_codex_request_is_left_unchanged():
+    # A first-party Codex websocket client must keep its native fingerprint and
+    # the existing lowercase account header.
+    from app.core.clients.proxy import _build_upstream_websocket_headers
+
+    native_ua = "codex_cli_rs/0.142.0 (Mac OS 27.0.0; arm64) iTerm.app/3.6.10"
+    inbound = {"User-Agent": native_ua, "x-codex-turn-state": "abc"}
     headers = _build_upstream_websocket_headers(inbound, "tok", "acct-1")
-    assert headers["User-Agent"] == "OpenAI/Python 2.24.0"
-    assert headers["x-openai-client-version"] == "2.24.0"
+    assert headers["User-Agent"] == native_ua
+    assert headers["chatgpt-account-id"] == "acct-1"
+    assert "ChatGPT-Account-Id" not in headers
+    assert headers["x-codex-turn-state"] == "abc"

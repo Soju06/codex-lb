@@ -594,14 +594,26 @@ def _build_upstream_websocket_headers(
         )
     blocked_header_names = _HOP_BY_HOP_HEADER_NAMES | connected_header_tokens
     headers = {key: value for key, value in inbound.items() if key.lower() not in blocked_header_names}
+    native = _is_native_codex_request(headers)
     lower_keys = {key.lower() for key in headers}
     if "x-request-id" not in lower_keys and "request-id" not in lower_keys:
         request_id = get_request_id()
         if request_id:
             headers["x-request-id"] = request_id
+    # Normalize a non-native client's fingerprint regardless of transport. The
+    # ``auto`` transport routes a turn-state continuity follow-up onto the
+    # websocket path even for an HTTP SDK client, so this builder must apply the
+    # same codex_cli_rs persona rewrite as ``_build_upstream_headers``; otherwise
+    # the SDK fingerprint reaches upstream unchanged and the priority-downgrade
+    # mitigation is bypassed for exactly the continuity-token scenario.
+    if not native:
+        _normalize_non_native_upstream_fingerprint(headers)
     headers["Authorization"] = f"Bearer {access_token}"
     if account_id:
-        headers["chatgpt-account-id"] = account_id
+        if native:
+            headers["chatgpt-account-id"] = account_id
+        else:
+            headers[_CHATGPT_ACCOUNT_ID_HEADER] = account_id
     return headers
 
 

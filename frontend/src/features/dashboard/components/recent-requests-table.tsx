@@ -66,6 +66,8 @@ const REQUEST_KIND_LABELS: Record<string, string> = {
   normal: "Normal",
   warmup: "Warmup",
   limit_warmup: "Warmup",
+  prewarm: "Prewarm",
+  compaction: "Compaction",
 };
 
 export type RecentRequestsTableProps = {
@@ -231,9 +233,9 @@ export function RecentRequestsTable({
                       <span className="font-mono text-xs">
                         {formatModelLabel(request.model, request.reasoningEffort, visibleServiceTier)}
                       </span>
-                      {request.requestKind === "warmup" || request.requestKind === "limit_warmup" ? (
+                      {request.requestKind !== "normal" ? (
                         <div className="mt-1 text-xs text-muted-foreground">
-                          {REQUEST_KIND_LABELS.warmup}
+                          {REQUEST_KIND_LABELS[request.requestKind] ?? request.requestKind}
                         </div>
                       ) : null}
                       {showRequestedTier ? (

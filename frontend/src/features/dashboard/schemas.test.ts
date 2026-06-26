@@ -309,6 +309,62 @@ describe("RequestLogsResponseSchema", () => {
     expect(parsed.requests[0]?.requestKind).toBe("limit_warmup");
   });
 
+  it("accepts backend request kind values beyond the dashboard label set", () => {
+    const parsed = RequestLogsResponseSchema.parse({
+      requests: [
+        {
+          requestedAt: ISO,
+          accountId: "acc-1",
+          planType: "plus",
+          apiKeyName: null,
+          apiKeyId: null,
+          requestId: "req-prewarm",
+          requestKind: "prewarm",
+          model: "gpt-5.5",
+          transport: "websocket",
+          status: "ok",
+          errorCode: null,
+          errorMessage: null,
+          tokens: 1,
+          inputTokens: 1,
+          outputTokens: 0,
+          cachedInputTokens: 0,
+          reasoningEffort: null,
+          costUsd: 0,
+          latencyMs: 42,
+        },
+        {
+          requestedAt: ISO,
+          accountId: "acc-1",
+          planType: "plus",
+          apiKeyName: null,
+          apiKeyId: null,
+          requestId: "req-compaction",
+          requestKind: "compaction",
+          model: "gpt-5.5",
+          transport: "http",
+          status: "ok",
+          errorCode: null,
+          errorMessage: null,
+          tokens: 1,
+          inputTokens: 1,
+          outputTokens: 0,
+          cachedInputTokens: 0,
+          reasoningEffort: null,
+          costUsd: 0,
+          latencyMs: 42,
+        },
+      ],
+      total: 2,
+      hasMore: false,
+    });
+
+    expect(parsed.requests.map((request) => request.requestKind)).toEqual([
+      "prewarm",
+      "compaction",
+    ]);
+  });
+
   it("defaults omitted cost fields to null for backward compatibility", () => {
     const parsed = RequestLogsResponseSchema.parse({
       requests: [

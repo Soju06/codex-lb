@@ -1062,7 +1062,7 @@ async def test_v1_responses_previous_response_followup_without_http_bridge_recov
                 "input": "continue",
                 "previous_response_id": "resp_prior_turn",
             },
-            "websocket",
+            "auto",
         ),
     ],
     ids=["single-shot-http", "sticky-websocket"],

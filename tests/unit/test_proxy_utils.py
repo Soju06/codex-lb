@@ -2486,6 +2486,125 @@ async def _capture_stream_retry_transport(
 
 
 @pytest.mark.asyncio
+async def test_http_downstream_sticky_smart_policy_preserves_auto_transport_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport = await _capture_stream_retry_transport(
+        monkeypatch,
+        payload=_make_transport_policy_payload(prompt_cache_key="prompt-cache-thread"),
+    )
+
+    assert transport == "auto"
+
+
+@pytest.mark.asyncio
+async def test_http_downstream_sticky_smart_auto_mode_keeps_websocket_handshake_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dashboard_settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    dashboard_settings.http_downstream_transport_policy = "smart"
+    dashboard_settings.upstream_stream_transport = "auto"
+    base_settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    base_settings.upstream_stream_transport = "auto"
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_stream_policy_auto_fallback")
+    payload = _make_transport_policy_payload(prompt_cache_key="prompt-cache-thread")
+    captured: dict[str, str | None] = {}
+    attempts = {"websocket": 0}
+    request_info = cast(RequestInfo, SimpleNamespace(real_url="wss://chatgpt.com/backend-api/codex/responses"))
+
+    class CoreSettings:
+        upstream_base_url = "https://chatgpt.com/backend-api"
+        upstream_stream_transport = "auto"
+        upstream_connect_timeout_seconds = 8.0
+        stream_idle_timeout_seconds = 45.0
+        max_sse_event_bytes = 1024
+        image_inline_fetch_enabled = False
+        log_upstream_request_payload = False
+        proxy_request_budget_seconds = 75.0
+        log_upstream_request_summary = False
+
+    async def fake_open_upstream_websocket(**kwargs: object) -> None:
+        del kwargs
+        attempts["websocket"] += 1
+        raise proxy_module.aiohttp.WSServerHandshakeError(request_info, (), status=426, message="Upgrade Required")
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(dashboard_settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: base_settings)
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: CoreSettings())
+    monkeypatch.setattr(
+        proxy_module,
+        "get_model_registry",
+        lambda: SimpleNamespace(
+            get_snapshot=lambda: SimpleNamespace(models={"gpt-5.4": SimpleNamespace(prefer_websockets=True)})
+        ),
+    )
+    monkeypatch.setattr(proxy_module, "_open_upstream_websocket", fake_open_upstream_websocket)
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
+    monkeypatch.setattr(
+        streaming_retry_module,
+        "_resolve_stream_transport",
+        lambda **kwargs: "websocket" if kwargs["transport"] == "auto" else kwargs["transport"],
+    )
+
+    async def fake_stream(
+        payload,
+        headers,
+        access_token,
+        account_id,
+        base_url=None,
+        raise_for_status=False,
+        upstream_stream_transport_override=None,
+    ):
+        del base_url, raise_for_status
+        captured["override"] = upstream_stream_transport_override
+        session = _SseSession(
+            _SsePostResponse([b'data: {"type":"response.completed","response":{"id":"resp_http"}}\n\n'])
+        )
+        async for event in proxy_module.stream_responses(
+            payload,
+            headers,
+            access_token,
+            account_id,
+            session=cast(proxy_module.aiohttp.ClientSession, session),
+            upstream_stream_transport_override=upstream_stream_transport_override,
+        ):
+            yield event
+
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+
+    events = [
+        event
+        async for event in service._stream_with_retry(
+            payload,
+            {},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            request_transport="http",
+            upstream_stream_transport_override=None,
+        )
+    ]
+
+    assert captured["override"] == "auto"
+    assert attempts["websocket"] == 1
+    assert len(events) == 1
+    assert parse_sse_data_json(events[0]) == {"type": "response.completed", "response": {"id": "resp_http"}}
+
+
+@pytest.mark.asyncio
 async def test_http_downstream_per_key_override_wins_over_global_policy(monkeypatch: pytest.MonkeyPatch) -> None:
     transport = await _capture_stream_retry_transport(
         monkeypatch,
@@ -2493,7 +2612,7 @@ async def test_http_downstream_per_key_override_wins_over_global_policy(monkeypa
         api_key=_make_api_key_data("key_stream_override", transport_policy_override="always_websocket"),
     )
 
-    assert transport == "websocket"
+    assert transport == "auto"
 
 
 @pytest.mark.asyncio
@@ -2504,7 +2623,7 @@ async def test_http_downstream_null_per_key_override_follows_global_policy(monke
         api_key=_make_api_key_data("key_stream_no_override", transport_policy_override=None),
     )
 
-    assert transport == "websocket"
+    assert transport == "auto"
 
 
 @pytest.mark.asyncio

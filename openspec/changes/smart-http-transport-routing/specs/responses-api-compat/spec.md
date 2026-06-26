@@ -20,7 +20,8 @@ Policy values and behavior:
 - `always_http` (and its alias `pinned`): the request MUST be sent over
   upstream HTTP `POST`, preserving the legacy unconditional pin.
 - `always_websocket`: the request MUST keep upstream WebSocket whenever
-  the base transport resolved to `"websocket"`.
+  the base transport resolved to `"websocket"` without replacing a base
+  `"auto"` transport mode with a hard `"websocket"` override.
 - `smart` (default): the request MUST keep upstream WebSocket **iff** at
   least one sticky-continuation signal is present on the request, and
   MUST otherwise fall back to upstream HTTP. The sticky-continuation
@@ -30,6 +31,13 @@ Policy values and behavior:
   - a Codex session header (`session_id`, `x-codex-session-id`, or
     `x-codex-conversation-id`), **OR**
   - an `x-codex-turn-state` continuity header.
+
+When a policy decision keeps upstream WebSocket, the proxy MUST preserve
+the configured/base downstream transport mode passed to the upstream
+client. In particular, a base `"auto"` mode MUST remain `"auto"` so the
+existing WebSocket-handshake rejection fallback to upstream HTTP remains
+available. The policy MAY force a concrete transport override only when
+the decision is to downgrade to upstream HTTP.
 
 The per-API-key `transport_policy_override`, when non-null, MUST be used
 as the effective policy for requests authenticated by that key and MUST
@@ -49,12 +57,15 @@ through to the global `http_downstream_transport_policy`.
 #### Scenario: sticky downstream-HTTP request keeps WebSocket under smart policy
 
 - **GIVEN** `http_downstream_transport_policy` is `"smart"` and the base
-  upstream transport resolves to `"websocket"`
+  upstream transport mode is `"auto"` and resolves to `"websocket"`
 - **AND** a downstream HTTP request carries any one of
   `previous_response_id`, `prompt_cache_key`, a Codex session header, or
   an `x-codex-turn-state` header
 - **WHEN** the proxy resolves the upstream transport
-- **THEN** the request MUST keep upstream WebSocket
+- **THEN** the request MUST keep upstream WebSocket without converting
+  the downstream transport mode from `"auto"` to `"websocket"`
+- **AND** an upstream WebSocket handshake rejection status eligible for
+  auto fallback MUST transparently retry over upstream HTTP
 
 #### Scenario: always_http policy preserves the legacy pin
 
@@ -67,10 +78,12 @@ through to the global `http_downstream_transport_policy`.
 #### Scenario: always_websocket policy never downgrades sticky-less HTTP
 
 - **GIVEN** `http_downstream_transport_policy` is `"always_websocket"`
-  and the base upstream transport resolves to `"websocket"`
+  and the base upstream transport mode is `"auto"` and resolves to
+  `"websocket"`
 - **WHEN** a downstream HTTP request with no sticky signals resolves the
   upstream transport
-- **THEN** the request MUST keep upstream WebSocket
+- **THEN** the request MUST keep upstream WebSocket without converting
+  the downstream transport mode from `"auto"` to `"websocket"`
 
 #### Scenario: per-key override wins over the global policy
 

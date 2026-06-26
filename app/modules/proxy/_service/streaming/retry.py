@@ -146,7 +146,7 @@ class _StreamingRetryMixin:
             image_bypass = _facade()._responses_request_uses_image_generation(
                 payload
             ) or _facade()._responses_request_contains_input_image(payload)
-            upstream_stream_transport = _resolve_stream_transport(
+            resolved_base_transport = _resolve_stream_transport(
                 settings=base_settings,
                 transport=configured_transport,
                 transport_override=None,
@@ -155,6 +155,7 @@ class _StreamingRetryMixin:
                 has_image_generation_tool=image_bypass,
                 payload_size_estimate_bytes=_payload_size_estimate_bytes(payload),
             )
+            upstream_stream_transport = resolved_base_transport
             if not explicit_transport and image_bypass:
                 upstream_stream_transport = "http"
             if (
@@ -164,7 +165,8 @@ class _StreamingRetryMixin:
             ):
                 policy, override_applied = _effective_http_downstream_transport_policy(api_key, settings, base_settings)
                 sticky = _http_downstream_request_is_sticky(payload, headers)
-                upstream_stream_transport = _resolve_http_downstream_transport(policy, payload=payload, headers=headers)
+                policy_transport = _resolve_http_downstream_transport(policy, payload=payload, headers=headers)
+                upstream_stream_transport = "http" if policy_transport == "http" else configured_transport
                 logger.info(
                     "http_downstream_transport_decision policy=%s override_applied=%s sticky=%s "
                     "upstream_stream_transport=%s request_id=%s",

@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -321,10 +321,14 @@ async def test_refresh_once_caches_snapshots_on_each_replica(monkeypatch: pytest
         captured.append("session_opened")
         yield _FakeSession()
 
+    async def resolve_route(*args: Any, **kwargs: Any) -> None:
+        return None
+
     monkeypatch.setattr(scheduler_module, "get_background_session", _fake_background_session)
     monkeypatch.setattr(scheduler_module, "AccountsRepository", lambda session: _FakeRepo())
     monkeypatch.setattr(scheduler_module, "TokenEncryptor", lambda: StubEncryptor())
     monkeypatch.setattr(scheduler_module, "get_rate_limit_reset_credits_store", lambda: store)
+    monkeypatch.setattr(scheduler_module, "resolve_upstream_route", resolve_route)
 
     async def fetch_fn(access_token: str, account_id: str | None, **kwargs: Any) -> ResetCreditsResponse:
         captured.append(("fetch", access_token, account_id))
@@ -370,10 +374,14 @@ async def test_refresh_once_releases_list_session_before_account_refresh(monkeyp
         finally:
             events.append("session_exit")
 
+    async def resolve_route(*args: Any, **kwargs: Any) -> None:
+        return None
+
     monkeypatch.setattr(scheduler_module, "get_background_session", _fake_background_session)
     monkeypatch.setattr(scheduler_module, "AccountsRepository", lambda session: _FakeRepo())
     monkeypatch.setattr(scheduler_module, "TokenEncryptor", lambda: StubEncryptor())
     monkeypatch.setattr(scheduler_module, "get_rate_limit_reset_credits_store", lambda: store)
+    monkeypatch.setattr(scheduler_module, "resolve_upstream_route", resolve_route)
 
     async def fetch_fn(access_token: str, account_id: str | None, **kwargs: Any) -> ResetCreditsResponse:
         events.append("fetch")
@@ -384,4 +392,85 @@ async def test_refresh_once_releases_list_session_before_account_refresh(monkeyp
     scheduler = RateLimitResetCreditsRefreshScheduler(interval_seconds=60)
     await scheduler._refresh_once()
 
-    assert events == ["session_enter", "list_accounts", "session_exit", "fetch"]
+    assert events == ["session_enter", "list_accounts", "session_exit", "session_enter", "session_exit", "fetch"]
+
+
+@pytest.mark.asyncio
+async def test_refresh_once_snapshots_accounts_before_releasing_list_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    store = RateLimitResetCreditsStore()
+    session_open = False
+    events: list[str] = []
+
+    class _DetachedAfterCloseAccount:
+        @property
+        def id(self) -> str:
+            return "acc_detached"
+
+        @property
+        def status(self) -> AccountStatus:
+            if not session_open:
+                raise RuntimeError("detached status access")
+            return AccountStatus.ACTIVE
+
+        @property
+        def chatgpt_account_id(self) -> str:
+            if not session_open:
+                raise RuntimeError("detached chatgpt account access")
+            return "workspace-detached"
+
+        @property
+        def access_token_encrypted(self) -> bytes:
+            if not session_open:
+                raise RuntimeError("detached token access")
+            return b"detached"
+
+    class _FakeRepo:
+        async def list_accounts(self) -> list[Account]:
+            events.append("list_accounts")
+            return [cast(Account, _DetachedAfterCloseAccount())]
+
+    class _FakeSession:
+        pass
+
+    @asynccontextmanager
+    async def _fake_background_session():
+        nonlocal session_open
+        events.append("session_enter")
+        session_open = True
+        try:
+            yield _FakeSession()
+        finally:
+            session_open = False
+            events.append("session_exit")
+
+    async def resolve_route(*args: Any, **kwargs: Any) -> None:
+        events.append("resolve_route")
+        return None
+
+    monkeypatch.setattr(scheduler_module, "get_background_session", _fake_background_session)
+    monkeypatch.setattr(scheduler_module, "resolve_upstream_route", resolve_route)
+    monkeypatch.setattr(scheduler_module, "AccountsRepository", lambda session: _FakeRepo())
+    monkeypatch.setattr(scheduler_module, "TokenEncryptor", lambda: StubEncryptor())
+    monkeypatch.setattr(scheduler_module, "get_rate_limit_reset_credits_store", lambda: store)
+
+    async def fetch_fn(access_token: str, account_id: str | None, **kwargs: Any) -> ResetCreditsResponse:
+        events.append(f"fetch:{access_token}:{account_id}")
+        return _response(available_count=2)
+
+    monkeypatch.setattr(scheduler_module, "fetch_reset_credits", fetch_fn)
+
+    scheduler = RateLimitResetCreditsRefreshScheduler(interval_seconds=60)
+    await scheduler._refresh_once()
+
+    assert events == [
+        "session_enter",
+        "list_accounts",
+        "session_exit",
+        "session_enter",
+        "resolve_route",
+        "session_exit",
+        "fetch:token-for-detached:workspace-detached",
+    ]
+    snapshot = store.get("acc_detached")
+    assert snapshot is not None
+    assert snapshot.available_count == 2

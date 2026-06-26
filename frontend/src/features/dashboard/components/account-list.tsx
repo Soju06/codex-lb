@@ -314,6 +314,7 @@ export function AccountList({ accounts, readOnly = false, onAction }: AccountLis
             : "No attempts";
           const availableResetCredits = account.availableResetCredits ?? 0;
           const hasResetCredits = availableResetCredits > 0;
+          const resetBadgeLabel = availableResetCredits > 99 ? "99+" : String(availableResetCredits);
           const resetCreditDisabled =
             readOnly || status === "paused" || status === "reauth" || status === "deactivated";
           const resetCountdown = account.resetCreditNearestExpiresAt
@@ -332,7 +333,7 @@ export function AccountList({ accounts, readOnly = false, onAction }: AccountLis
             <div
               key={account.accountId}
               data-testid="account-list-row"
-              className="grid min-h-[4.5rem] items-center gap-3 px-3 py-2 text-sm"
+              className="relative grid min-h-[4.5rem] items-center gap-3 px-3 py-2 text-sm"
               style={{ animationDelay: `${index * 50}ms`, gridTemplateColumns: ACCOUNT_LIST_COLUMNS }}
             >
               <div className="min-w-0">
@@ -358,7 +359,12 @@ export function AccountList({ accounts, readOnly = false, onAction }: AccountLis
                 </p>
                 <p className="truncate text-[11px] text-muted-foreground">{warmupDetail}</p>
               </div>
-              <div className="flex justify-end gap-1">
+              <div className="relative flex justify-end gap-1">
+                {hasResetCredits ? (
+                  <span className="absolute -top-1.5 -right-1.5 grid h-4 min-w-[1rem] place-items-center rounded-full bg-primary px-1 text-[9px] font-medium text-primary-foreground">
+                    {resetBadgeLabel}
+                  </span>
+                ) : null}
                 <Button
                   type="button"
                   size="sm"

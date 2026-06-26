@@ -1133,6 +1133,8 @@ async def test_stream_via_http_bridge_turn_state_request_ignores_prompt_cache_ow
     ]
 
     assert chunks == []
+    assert request_state.affinity_policy.key == "http_turn_promoted"
+    assert request_state.affinity_policy.kind == proxy_service.StickySessionKind.CODEX_SESSION
     key = cast(proxy_service._HTTPBridgeSessionKey, captured_key["value"])
     assert key.affinity_kind == "prompt_cache"
     assert key.affinity_key == "cache-derived"

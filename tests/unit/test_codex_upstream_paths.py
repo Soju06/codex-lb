@@ -303,7 +303,7 @@ async def test_compact_responses_uses_upstream_chatgpt_account_id_header(route: 
         chatgpt_account_id="upstream_chatgpt_account_id",
     )
 
-    assert client.calls[0]["headers"]["chatgpt-account-id"] == "upstream_chatgpt_account_id"
+    assert client.calls[0]["headers"]["ChatGPT-Account-Id"] == "upstream_chatgpt_account_id"
 
 
 @pytest.mark.asyncio
@@ -324,7 +324,7 @@ async def test_compact_responses_preserves_legacy_account_id_header(
         chatgpt_account_id=None,
     )
 
-    assert client.calls[0]["headers"]["chatgpt-account-id"] == "legacy_upstream_account_id"
+    assert client.calls[0]["headers"]["ChatGPT-Account-Id"] == "legacy_upstream_account_id"
 
 
 @pytest.mark.asyncio

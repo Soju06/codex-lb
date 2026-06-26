@@ -1,7 +1,7 @@
 """Add HTTP downstream transport policy settings.
 
 Revision ID: 20260626_000000_add_http_downstream_transport_policy
-Revises: 20260611_000000_merge_dashboard_guest_and_weekly_useragent_heads
+Revises: 20260613_010000_merge_installation_id_and_dashboard_weekly_heads
 Create Date: 2026-06-26 00:00:00.000000
 """
 
@@ -11,7 +11,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "20260626_000000_add_http_downstream_transport_policy"
-down_revision = "20260611_000000_merge_dashboard_guest_and_weekly_useragent_heads"
+down_revision = "20260613_010000_merge_installation_id_and_dashboard_weekly_heads"
 branch_labels = None
 depends_on = None
 

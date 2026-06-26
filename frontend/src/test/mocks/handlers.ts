@@ -812,6 +812,24 @@ export const handlers = [
     return HttpResponse.json(endpoint);
   }),
 
+  http.post("/api/settings/upstream-proxy/endpoints/:endpointId/test", ({ params }) => {
+    const endpointId = String(params.endpointId);
+    const endpoint = state.upstreamProxyAdmin.endpoints.find((item) => item.id === endpointId);
+    if (!endpoint) {
+      return HttpResponse.json(
+        { error: { code: "proxy_endpoint_not_found", message: "Proxy endpoint not found" } },
+        { status: 404 },
+      );
+    }
+    return HttpResponse.json({
+      endpointId,
+      ok: true,
+      statusCode: 200,
+      elapsedMs: 24,
+      error: null,
+    });
+  }),
+
   http.post("/api/settings/upstream-proxy/pools", async ({ request }) => {
     const payload = await parseJsonBody(
       request,

@@ -20,6 +20,7 @@ from app.core.upstream_proxy import UpstreamProxyRouteError, resolve_upstream_ro
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus
 from app.db.session import get_background_session
+from app.modules.proxy.account_cache import get_account_selection_cache, mark_account_routing_unavailable
 
 
 class AccountsRepositoryPort(Protocol):
@@ -216,6 +217,8 @@ class AuthManager:
                 await self._repo.update_status(account.id, status, reason)
                 account.status = status
                 account.deactivation_reason = reason
+                mark_account_routing_unavailable(account.id)
+                get_account_selection_cache().invalidate()
             raise
 
         account.access_token_encrypted = self._encryptor.encrypt(result.access_token)

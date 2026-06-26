@@ -277,7 +277,7 @@ class _ApiKeyUsageMixin:
         with anyio.CancelScope(shield=True):
             try:
                 async with proxy._repo_factory() as repos:
-                    api_keys_service = ApiKeysService(repos.api_keys)
+                    api_keys_service = _service_api_keys_service()(repos.api_keys)
                     if response is not None and input_tokens is not None and output_tokens is not None:
                         await api_keys_service.finalize_usage_reservation(
                             reservation_id,
@@ -310,13 +310,12 @@ class _ApiKeyUsageMixin:
 
         reservation_id = api_key_reservation.reservation_id
         model_name = api_key_reservation.model or settlement.model or ""
-
-        settled: bool = False
         proxy = cast(_ApiKeyUsageServiceProtocol, self)
-        with anyio.CancelScope(shield=True):
+
+        async def _settle_once() -> bool:
             try:
                 async with proxy._repo_factory() as repos:
-                    api_keys_service = ApiKeysService(repos.api_keys)
+                    api_keys_service = _service_api_keys_service()(repos.api_keys)
                     if (
                         settlement.status == "success"
                         and settlement.input_tokens is not None
@@ -332,7 +331,7 @@ class _ApiKeyUsageMixin:
                         )
                     else:
                         await api_keys_service.release_usage_reservation(reservation_id)
-                settled = True
+                return True
             except Exception:
                 logger.warning(
                     "Failed to settle stream API key reservation key_id=%s request_id=%s",
@@ -340,9 +339,79 @@ class _ApiKeyUsageMixin:
                     request_id,
                     exc_info=True,
                 )
-                settled = False
+                return False
 
-        return settled
+        task = asyncio.create_task(_settle_once(), name=f"proxy-stream-api-key-settle-{request_id}")
+        try:
+            with anyio.CancelScope(shield=True):
+                return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if task.done():
+                return task.result()
+            if not task.done():
+                settlement.usage_settlement_transferred = True
+                self._track_stream_usage_settlement_task(
+                    task,
+                    api_key=api_key,
+                    api_key_reservation=api_key_reservation,
+                    request_id=request_id,
+                )
+            raise
+
+        return False
+
+    def _track_stream_usage_settlement_task(
+        self,
+        task: asyncio.Task[bool],
+        *,
+        api_key: ApiKeyData,
+        api_key_reservation: ApiKeyUsageReservationData,
+        request_id: str,
+    ) -> None:
+        proxy = cast(_ApiKeyUsageServiceProtocol, self)
+        proxy._background_cleanup_tasks.add(cast(asyncio.Task[None], task))
+
+        def _settlement_done(done_task: asyncio.Task[bool]) -> None:
+            proxy._background_cleanup_tasks.discard(cast(asyncio.Task[None], done_task))
+            try:
+                settled = done_task.result()
+            except asyncio.CancelledError:
+                logger.warning(
+                    "Stream API key settlement task cancelled key_id=%s request_id=%s",
+                    api_key.id,
+                    request_id,
+                )
+                release_coro = self._release_unsettled_stream_api_key_usage(
+                    api_key=api_key,
+                    api_key_reservation=api_key_reservation,
+                    request_id=request_id,
+                )
+                self._schedule_cancel_safe_cleanup(
+                    release_coro,
+                    action="release_stream_api_key_reservation_after_cancelled_settlement",
+                    request_id=request_id,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Stream API key settlement task failed key_id=%s request_id=%s",
+                    api_key.id,
+                    request_id,
+                    exc_info=(type(exc), exc, exc.__traceback__),
+                )
+            else:
+                if not settled:
+                    release_coro = self._release_unsettled_stream_api_key_usage(
+                        api_key=api_key,
+                        api_key_reservation=api_key_reservation,
+                        request_id=request_id,
+                    )
+                    self._schedule_cancel_safe_cleanup(
+                        release_coro,
+                        action="release_stream_api_key_reservation_after_failed_settlement",
+                        request_id=request_id,
+                    )
+
+        task.add_done_callback(_settlement_done)
 
     def _schedule_cancel_safe_cleanup(
         self,
@@ -382,7 +451,7 @@ class _ApiKeyUsageMixin:
         with anyio.CancelScope(shield=True):
             try:
                 async with proxy._repo_factory() as repos:
-                    api_keys_service = ApiKeysService(repos.api_keys)
+                    api_keys_service = _service_api_keys_service()(repos.api_keys)
                     await api_keys_service.release_usage_reservation(
                         api_key_reservation.reservation_id,
                     )

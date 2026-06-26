@@ -34,6 +34,7 @@ export function SettingsPage() {
     createEndpointMutation,
     createPoolMutation,
     addPoolMemberMutation,
+    testEndpointMutation,
   } = useUpstreamProxyAdmin();
   const authMode = useAuthStore((state) => state.authMode);
   const passwordManagementEnabled = useAuthStore((state) => state.passwordManagementEnabled);
@@ -45,7 +46,8 @@ export function SettingsPage() {
     updateSettingsMutation.isPending ||
     createEndpointMutation.isPending ||
     createPoolMutation.isPending ||
-    addPoolMemberMutation.isPending;
+    addPoolMemberMutation.isPending ||
+    testEndpointMutation.isPending;
   const controlsDisabled = busy || !canWrite;
   const error =
     getErrorMessageOrNull(settingsQuery.error) ||
@@ -53,7 +55,8 @@ export function SettingsPage() {
     getErrorMessageOrNull(updateSettingsMutation.error) ||
     getErrorMessageOrNull(createEndpointMutation.error) ||
     getErrorMessageOrNull(createPoolMutation.error) ||
-    getErrorMessageOrNull(addPoolMemberMutation.error);
+    getErrorMessageOrNull(addPoolMemberMutation.error) ||
+    getErrorMessageOrNull(testEndpointMutation.error);
 
   const handleSave = async (payload: SettingsUpdateRequest) => {
     await updateSettingsMutation.mutateAsync(payload);
@@ -117,6 +120,7 @@ export function SettingsPage() {
                 busy={controlsDisabled}
                 onSaveSettings={handleSave}
                 onCreateEndpoint={(payload) => createEndpointMutation.mutateAsync(payload)}
+                onTestEndpoint={(endpointId) => testEndpointMutation.mutateAsync(endpointId)}
                 onCreatePool={(payload) => createPoolMutation.mutateAsync(payload)}
                 onAddPoolMember={(poolId, payload) =>
                   addPoolMemberMutation.mutateAsync({ poolId, payload })

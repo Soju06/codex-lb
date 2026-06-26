@@ -11,6 +11,7 @@ function renderSettings(overrides: Partial<Parameters<typeof UpstreamProxySettin
     busy: false,
     onSaveSettings: vi.fn().mockResolvedValue(undefined),
     onCreateEndpoint: vi.fn().mockResolvedValue(undefined),
+    onTestEndpoint: vi.fn().mockResolvedValue({ endpointId: "ep_primary", ok: true }),
     onCreatePool: vi.fn().mockResolvedValue(undefined),
     onAddPoolMember: vi.fn().mockResolvedValue(undefined),
     ...overrides,
@@ -67,8 +68,11 @@ describe("UpstreamProxySettings", () => {
 
     await user.type(within(dialog).getByLabelText("Name"), "Backup proxy");
     await user.type(within(dialog).getByLabelText("Host"), "backup.proxy.test");
-    await user.clear(within(dialog).getByLabelText("Port"));
-    await user.type(within(dialog).getByLabelText("Port"), "8081");
+    const portInput = within(dialog).getByLabelText("Port");
+    expect(portInput).toHaveAttribute("inputmode", "numeric");
+    expect(portInput).not.toHaveAttribute("pattern");
+    await user.clear(portInput);
+    await user.type(portInput, "8081");
     await user.click(within(dialog).getByRole("button", { name: "Create endpoint" }));
 
     await waitFor(() => {
@@ -117,5 +121,24 @@ describe("UpstreamProxySettings", () => {
     expect(within(memberDialog).getByText(/Endpoint is already in Primary pool/)).toBeInTheDocument();
     expect(within(memberDialog).getByRole("button", { name: "Add member" })).toBeDisabled();
     expect(onAddPoolMember).not.toHaveBeenCalled();
+  });
+
+  it("tests a configured proxy endpoint", async () => {
+    const user = userEvent.setup();
+    const onTestEndpoint = vi.fn().mockResolvedValue({
+      endpointId: "ep_primary",
+      ok: true,
+      statusCode: 200,
+      elapsedMs: 42,
+      error: null,
+    });
+
+    renderSettings({ onTestEndpoint });
+
+    await user.click(screen.getByRole("button", { name: "Test" }));
+
+    expect(onTestEndpoint).toHaveBeenCalledWith("ep_primary");
+    expect(await screen.findByText(/Connection ok/)).toBeInTheDocument();
+    expect(screen.getByText(/HTTP 200/)).toBeInTheDocument();
   });
 });

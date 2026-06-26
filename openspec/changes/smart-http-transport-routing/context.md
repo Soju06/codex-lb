@@ -20,4 +20,3 @@ The routing split is therefore:
 - native downstream WebSocket clients: leave the path unchanged;
 - explicit operator overrides, oversized payload bypass, and image bypasses:
   keep their higher precedence.
-

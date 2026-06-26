@@ -308,8 +308,9 @@ def _connection_header_tokens(headers: Mapping[str, str]) -> set[str]:
 
 
 def filter_inbound_websocket_headers(headers: Mapping[str, str]) -> dict[str, str]:
+    connection_header_tokens = _connection_header_tokens(headers)
     filtered = filter_inbound_headers(headers)
-    blocked_header_names = _WEBSOCKET_HOP_BY_HOP_HEADERS | _connection_header_tokens(filtered)
+    blocked_header_names = _WEBSOCKET_HOP_BY_HOP_HEADERS | connection_header_tokens
     return {key: value for key, value in filtered.items() if key.lower() not in blocked_header_names}
 
 

@@ -132,6 +132,206 @@ def test_http_bridge_request_budget_falls_back_to_proxy_budget() -> None:
     assert http_bridge_streaming_module._http_bridge_request_budget_seconds(settings) == 42.5
 
 
+@pytest.mark.asyncio
+async def test_stream_http_bridge_or_retry_falls_back_to_raw_http_before_visible_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.5",
+            "instructions": "You are Codex.",
+            "input": "hello",
+            "prompt_cache_key": "fallback-key",
+        }
+    )
+    bridge_key = proxy_service._HTTPBridgeSessionKey("prompt_cache", "fallback-key", None)
+    raw_http_calls: list[dict[str, object]] = []
+
+    async def fake_stream_via_http_bridge(*_args: object, **_kwargs: object):
+        exc = ProxyResponseError(
+            502,
+            proxy_service.openai_error(
+                "upstream_unavailable",
+                "Request to upstream timed out",
+            ),
+        )
+        setattr(exc, http_bridge_streaming_module._HTTP_BRIDGE_RAW_HTTP_FALLBACK_KEY_ATTR, bridge_key)
+        raise exc
+        yield ""  # pragma: no cover - keeps this an async generator
+
+    async def fake_stream_with_retry(*_args: object, **kwargs: object):
+        raw_http_calls.append(dict(kwargs))
+        yield 'data: {"type":"response.completed"}\n\n'
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: cast(
+            Any,
+            SimpleNamespace(
+                get=AsyncMock(
+                    return_value=SimpleNamespace(
+                        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,
+                        http_responses_session_bridge_gateway_safe_mode=False,
+                    )
+                )
+            ),
+        ),
+    )
+    monkeypatch.setattr(service, "_stream_via_http_bridge", fake_stream_via_http_bridge)
+    monkeypatch.setattr(service, "_stream_with_retry", fake_stream_with_retry)
+
+    chunks = [
+        chunk
+        async for chunk in service._stream_http_bridge_or_retry(
+            payload,
+            {},
+            codex_session_affinity=False,
+            propagate_http_errors=True,
+            openai_cache_affinity=True,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+        )
+    ]
+
+    assert chunks == ['data: {"type":"response.completed"}\n\n']
+    assert bridge_key in service._http_bridge_raw_http_fallback_keys
+    assert raw_http_calls[0]["request_transport"] == "http"
+    assert raw_http_calls[0]["upstream_stream_transport_override"] == "http"
+
+
+@pytest.mark.asyncio
+async def test_stream_http_bridge_or_retry_does_not_fallback_after_visible_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {"model": "gpt-5.5", "instructions": "You are Codex.", "input": "hello"}
+    )
+    bridge_key = proxy_service._HTTPBridgeSessionKey("prompt_cache", "fallback-key", None)
+    raw_http_calls: list[dict[str, object]] = []
+
+    async def fake_stream_via_http_bridge(*_args: object, **_kwargs: object):
+        yield 'data: {"type":"response.created"}\n\n'
+        exc = ProxyResponseError(
+            502,
+            proxy_service.openai_error(
+                "upstream_unavailable",
+                "Request to upstream timed out",
+            ),
+        )
+        setattr(exc, http_bridge_streaming_module._HTTP_BRIDGE_RAW_HTTP_FALLBACK_KEY_ATTR, bridge_key)
+        raise exc
+
+    async def fake_stream_with_retry(*_args: object, **kwargs: object):
+        raw_http_calls.append(dict(kwargs))
+        yield 'data: {"type":"response.completed"}\n\n'
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: cast(
+            Any,
+            SimpleNamespace(
+                get=AsyncMock(
+                    return_value=SimpleNamespace(
+                        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,
+                        http_responses_session_bridge_gateway_safe_mode=False,
+                    )
+                )
+            ),
+        ),
+    )
+    monkeypatch.setattr(service, "_stream_via_http_bridge", fake_stream_via_http_bridge)
+    monkeypatch.setattr(service, "_stream_with_retry", fake_stream_with_retry)
+
+    with pytest.raises(ProxyResponseError):
+        async for _ in service._stream_http_bridge_or_retry(
+            payload,
+            {},
+            codex_session_affinity=False,
+            propagate_http_errors=True,
+            openai_cache_affinity=True,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+        ):
+            pass
+
+    assert raw_http_calls == []
+    assert bridge_key not in service._http_bridge_raw_http_fallback_keys
+
+
+@pytest.mark.asyncio
+async def test_stream_via_http_bridge_uses_sticky_raw_http_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.5",
+            "instructions": "You are Codex.",
+            "input": "hello",
+            "prompt_cache_key": "fallback-key",
+        }
+    )
+    bridge_key = proxy_service._HTTPBridgeSessionKey("prompt_cache", "fallback-key", None)
+    service._http_bridge_raw_http_fallback_keys.add(bridge_key)
+    raw_http_calls: list[dict[str, object]] = []
+
+    async def fake_stream_with_retry(*_args: object, **kwargs: object):
+        raw_http_calls.append(dict(kwargs))
+        yield 'data: {"type":"response.completed"}\n\n'
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: cast(
+            Any,
+            SimpleNamespace(
+                get=AsyncMock(
+                    return_value=SimpleNamespace(
+                        sticky_threads_enabled=False,
+                        openai_cache_affinity_max_age_seconds=1800,
+                        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,
+                        http_responses_session_bridge_gateway_safe_mode=False,
+                    )
+                )
+            ),
+        ),
+    )
+    service._durable_bridge.lookup_request_targets = AsyncMock(  # type: ignore[method-assign]
+        side_effect=AssertionError("sticky fallback must bypass durable bridge lookup")
+    )
+    monkeypatch.setattr(service, "_stream_with_retry", fake_stream_with_retry)
+
+    chunks = [
+        chunk
+        async for chunk in service._stream_via_http_bridge(
+            payload,
+            {},
+            codex_session_affinity=False,
+            propagate_http_errors=True,
+            openai_cache_affinity=True,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            idle_ttl_seconds=120.0,
+            codex_idle_ttl_seconds=900.0,
+            max_sessions=8,
+            queue_limit=4,
+        )
+    ]
+
+    assert chunks == ['data: {"type":"response.completed"}\n\n']
+    assert raw_http_calls[0]["upstream_stream_transport_override"] == "http"
+
+
 def test_websocket_top_level_error_payload_uses_error_type_not_event_type() -> None:
     payload: dict[str, proxy_service.JsonValue] = {
         "type": "error",

@@ -200,6 +200,31 @@ _SECURITY_WORK_NO_AUTHORIZED_ACCOUNTS_MESSAGE = (
 )
 _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS = 5.0
 _HTTP_BRIDGE_BACKGROUND_CLEANUP_WARN_THRESHOLD = 100
+_HTTP_BRIDGE_RAW_HTTP_FALLBACK_KEY_ATTR = "_codex_lb_http_bridge_raw_http_fallback_key"
+_HTTP_BRIDGE_RAW_HTTP_FALLBACK_CODES = frozenset(
+    {
+        "stream_incomplete",
+        "upstream_request_timeout",
+    }
+)
+_HTTP_BRIDGE_RAW_HTTP_FALLBACK_UPSTREAM_UNAVAILABLE_MARKERS = (
+    "broken pipe",
+    "cannot connect",
+    "connection aborted",
+    "connection closed",
+    "connection reset",
+    "keepalive ping timeout",
+    "no close frame",
+    "server disconnected",
+    "timed out",
+    "timeout",
+    "upstream closed",
+)
+_HTTP_BRIDGE_RAW_HTTP_FALLBACK_UPSTREAM_UNAVAILABLE_NON_TRANSIENT_MARKERS = (
+    "certificate verify failed",
+    "clientconnectorcertificateerror",
+    "sslcertverificationerror",
+)
 
 
 def _proxy_error_code_message(exc: ProxyResponseError) -> tuple[str | None, str | None]:
@@ -209,6 +234,24 @@ def _proxy_error_code_message(exc: ProxyResponseError) -> tuple[str | None, str 
     code = error.get("code")
     message = error.get("message")
     return (str(code) if code is not None else None, str(message) if message is not None else None)
+
+
+def _http_bridge_should_fallback_to_raw_http(exc: ProxyResponseError) -> bool:
+    code, message = _proxy_error_code_message(exc)
+    normalized_code = _normalize_error_code(code, None)
+    if normalized_code in _HTTP_BRIDGE_RAW_HTTP_FALLBACK_CODES:
+        return True
+    if normalized_code != "upstream_unavailable" or not message:
+        return False
+    normalized_message = message.lower()
+    if any(
+        marker in normalized_message
+        for marker in _HTTP_BRIDGE_RAW_HTTP_FALLBACK_UPSTREAM_UNAVAILABLE_NON_TRANSIENT_MARKERS
+    ):
+        return False
+    return any(
+        marker in normalized_message for marker in _HTTP_BRIDGE_RAW_HTTP_FALLBACK_UPSTREAM_UNAVAILABLE_MARKERS
+    )
 
 
 def _http_bridge_account_capacity_wait_seconds(exc: ProxyResponseError) -> float | None:
@@ -366,29 +409,67 @@ class _HTTPBridgeStreamingMixin:
                 yield line
             return
 
-        async for line in self._stream_via_http_bridge(
-            payload,
-            headers,
-            codex_session_affinity=codex_session_affinity,
-            propagate_http_errors=propagate_http_errors,
-            openai_cache_affinity=openai_cache_affinity,
-            api_key=api_key,
-            api_key_reservation=api_key_reservation,
-            suppress_text_done_events=suppress_text_done_events,
-            idle_ttl_seconds=runtime_config.idle_ttl_seconds,
-            codex_idle_ttl_seconds=runtime_config.codex_idle_ttl_seconds,
-            max_sessions=runtime_config.max_sessions,
-            queue_limit=runtime_config.queue_limit,
-            prompt_cache_idle_ttl_seconds=runtime_config.prompt_cache_idle_ttl_seconds,
-            downstream_turn_state=downstream_turn_state,
-            forwarded_request=forwarded_request,
-            proxy_api_authorization=proxy_api_authorization,
-            forwarded_affinity_kind=forwarded_affinity_kind,
-            forwarded_affinity_key=forwarded_affinity_key,
-            rewritten_file_account_id=rewritten_file_account_id,
-            enforce_openai_sdk_contract=enforce_openai_sdk_contract,
-        ):
-            yield line
+        yielded_any = False
+        try:
+            async for line in self._stream_via_http_bridge(
+                payload,
+                headers,
+                codex_session_affinity=codex_session_affinity,
+                propagate_http_errors=propagate_http_errors,
+                openai_cache_affinity=openai_cache_affinity,
+                api_key=api_key,
+                api_key_reservation=api_key_reservation,
+                suppress_text_done_events=suppress_text_done_events,
+                idle_ttl_seconds=runtime_config.idle_ttl_seconds,
+                codex_idle_ttl_seconds=runtime_config.codex_idle_ttl_seconds,
+                max_sessions=runtime_config.max_sessions,
+                queue_limit=runtime_config.queue_limit,
+                prompt_cache_idle_ttl_seconds=runtime_config.prompt_cache_idle_ttl_seconds,
+                downstream_turn_state=downstream_turn_state,
+                forwarded_request=forwarded_request,
+                proxy_api_authorization=proxy_api_authorization,
+                forwarded_affinity_kind=forwarded_affinity_kind,
+                forwarded_affinity_key=forwarded_affinity_key,
+                rewritten_file_account_id=rewritten_file_account_id,
+                enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+            ):
+                yielded_any = True
+                yield line
+        except ProxyResponseError as exc:
+            bridge_session_key = getattr(exc, _HTTP_BRIDGE_RAW_HTTP_FALLBACK_KEY_ATTR, None)
+            if yielded_any or not isinstance(bridge_session_key, _HTTPBridgeSessionKey):
+                raise
+            if not _http_bridge_should_fallback_to_raw_http(exc):
+                raise
+            fallback_keys = getattr(self, "_http_bridge_raw_http_fallback_keys", None)
+            if fallback_keys is not None:
+                fallback_keys.add(bridge_session_key)
+            code, message = _proxy_error_code_message(exc)
+            _log_http_bridge_event(
+                "fallback_raw_http",
+                bridge_session_key,
+                account_id=None,
+                model=payload.model,
+                detail=f"code={code or 'unknown'}, message={message or 'unknown'}",
+                cache_key_family=bridge_session_key.affinity_kind,
+                model_class=_extract_model_class(payload.model) if payload.model else None,
+            )
+            stream_with_retry = cast(Callable[..., AsyncIterator[str]], self._stream_with_retry)
+            async for line in stream_with_retry(
+                payload,
+                headers,
+                codex_session_affinity=codex_session_affinity,
+                propagate_http_errors=propagate_http_errors,
+                openai_cache_affinity=openai_cache_affinity,
+                api_key=api_key,
+                api_key_reservation=api_key_reservation,
+                suppress_text_done_events=suppress_text_done_events,
+                request_transport=_REQUEST_TRANSPORT_HTTP,
+                rewritten_file_account_id=rewritten_file_account_id,
+                upstream_stream_transport_override="http",
+                enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+            ):
+                yield line
 
     async def _stream_via_http_bridge(
         self: Any,
@@ -414,7 +495,6 @@ class _HTTPBridgeStreamingMixin:
         rewritten_file_account_id: str | None = None,
         enforce_openai_sdk_contract: bool = True,
     ) -> AsyncIterator[str]:
-        del suppress_text_done_events
         request_id = ensure_request_id()
         dashboard_settings = await _service_get_settings_cache().get()
         runtime_config = _http_bridge_runtime_config(dashboard_settings, _service_get_settings())
@@ -456,6 +536,33 @@ class _HTTPBridgeStreamingMixin:
             forwarded_affinity_kind=forwarded_affinity_kind,
             forwarded_affinity_key=forwarded_affinity_key,
         )
+        fallback_keys = getattr(self, "_http_bridge_raw_http_fallback_keys", None)
+        if fallback_keys is not None and bridge_session_key in fallback_keys:
+            _log_http_bridge_event(
+                "fallback_raw_http_sticky",
+                bridge_session_key,
+                account_id=None,
+                model=payload.model,
+                cache_key_family=bridge_session_key.affinity_kind,
+                model_class=_extract_model_class(payload.model) if payload.model else None,
+            )
+            stream_with_retry = cast(Callable[..., AsyncIterator[str]], self._stream_with_retry)
+            async for line in stream_with_retry(
+                payload,
+                headers,
+                codex_session_affinity=codex_session_affinity,
+                propagate_http_errors=propagate_http_errors,
+                openai_cache_affinity=openai_cache_affinity,
+                api_key=api_key,
+                api_key_reservation=api_key_reservation,
+                suppress_text_done_events=suppress_text_done_events,
+                request_transport=_REQUEST_TRANSPORT_HTTP,
+                rewritten_file_account_id=rewritten_file_account_id,
+                upstream_stream_transport_override="http",
+                enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+            ):
+                yield line
+            return
         try:
             durable_lookup = await self._durable_bridge.lookup_request_targets(
                 session_key_kind=bridge_session_key.affinity_kind,
@@ -700,8 +807,10 @@ class _HTTPBridgeStreamingMixin:
                         ):
                             yield line
                         if _service_time().monotonic() >= request_deadline:
+                            setattr(exc, _HTTP_BRIDGE_RAW_HTTP_FALLBACK_KEY_ATTR, bridge_session_key)
                             raise
                         continue
+                    setattr(exc, _HTTP_BRIDGE_RAW_HTTP_FALLBACK_KEY_ATTR, bridge_session_key)
                     raise
                 _log_http_bridge_event(
                     "owner_unavailable_fresh_resend",
@@ -1220,6 +1329,7 @@ class _HTTPBridgeStreamingMixin:
                         model_class=_extract_model_class(effective_payload.model) if effective_payload.model else None,
                         owner_check_applied=True,
                     )
+                setattr(exc, _HTTP_BRIDGE_RAW_HTTP_FALLBACK_KEY_ATTR, bridge_session_key)
                 raise
 
             if should_attempt_context_overflow_fresh_turn_recovery:

@@ -155,6 +155,46 @@ describe("DashboardOverviewSchema", () => {
 
     expect(parsed.summary.comparison).toBeUndefined();
   });
+
+  it("accepts explicit null comparison from the backend", () => {
+    const parsed = DashboardOverviewSchema.parse({
+      lastSyncAt: ISO,
+      timeframe: {
+        key: "7d",
+        windowMinutes: 10080,
+        bucketSeconds: 21600,
+        bucketCount: 28,
+      },
+      accounts: [],
+      summary: {
+        primaryWindow: {
+          remainingPercent: 70,
+          capacityCredits: 100,
+          remainingCredits: 70,
+          resetAt: ISO,
+          windowMinutes: 300,
+        },
+        secondaryWindow: null,
+        cost: {
+          currency: "USD",
+          totalUsd: 0,
+        },
+        metrics: null,
+        comparison: null,
+      },
+      windows: {
+        primary: {
+          windowKey: "primary",
+          windowMinutes: 300,
+          accounts: [],
+        },
+        secondary: null,
+      },
+      trends: EMPTY_TRENDS,
+    });
+
+    expect(parsed.summary.comparison).toBeNull();
+  });
 });
 
 describe("RequestLogsResponseSchema", () => {

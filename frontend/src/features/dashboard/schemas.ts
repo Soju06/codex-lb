@@ -126,7 +126,7 @@ export const DashboardOverviewSchema = z.object({
     secondaryWindow: UsageSummaryWindowSchema.nullable(),
     cost: UsageCostSchema,
     metrics: DashboardMetricsSchema.nullable(),
-    comparison: DashboardMetricsComparisonSchema.optional(),
+    comparison: DashboardMetricsComparisonSchema.nullable().optional(),
   }),
   windows: z.object({
     primary: UsageWindowSchema,

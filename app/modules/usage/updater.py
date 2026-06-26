@@ -1024,6 +1024,7 @@ _DEACTIVATING_USAGE_ERROR_CODES = {
     "account_deleted",
     "token_expired",
     "token_invalidated",
+    "app_session_terminated",
 }
 _DEACTIVATING_USAGE_MESSAGE_HINTS = (
     "your openai account has been deactivated",

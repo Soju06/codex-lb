@@ -12,6 +12,7 @@ from app.core.metrics.prometheus import (
     PROMETHEUS_AVAILABLE,
     continuity_fail_closed_total,
     continuity_owner_resolution_total,
+    upstream_transport_decisions_total,
 )
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
 from app.core.types import JsonValue
@@ -34,6 +35,25 @@ def _service_global(name: str, fallback: Any) -> Any:
 
 def _service_get_settings() -> Any:
     return cast(Callable[[], Any], _service_global("get_settings", get_settings))()
+
+
+def _record_upstream_transport_decision(
+    *,
+    downstream_transport: str,
+    upstream_transport: str | None,
+    policy: str,
+    sticky: bool,
+    status: str,
+) -> None:
+    if upstream_transport_decisions_total is None:
+        return
+    upstream_transport_decisions_total.labels(
+        downstream_transport=downstream_transport,
+        upstream_transport=upstream_transport or "unknown",
+        policy=policy,
+        sticky="true" if sticky else "false",
+        status="success" if status == "success" else "error",
+    ).inc()
 
 
 def _maybe_log_proxy_request_shape(

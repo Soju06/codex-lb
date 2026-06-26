@@ -552,6 +552,7 @@ class _HTTPBridgeStreamingMixin:
             request_id=request_id,
         )
         request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
+        request_state.affinity_policy = affinity
         if downstream_turn_state is not None:
             request_state.session_id = _normalize_session_id(downstream_turn_state)
         if previous_response_trimmed_input_count is not None:
@@ -718,6 +719,7 @@ class _HTTPBridgeStreamingMixin:
                     api_key_reservation=api_key_reservation,
                     request_id=request_id,
                 )
+                request_state.affinity_policy = affinity
                 if downstream_turn_state is not None:
                     request_state.session_id = _normalize_session_id(downstream_turn_state)
                 request_state.transport = _REQUEST_TRANSPORT_HTTP
@@ -889,6 +891,7 @@ class _HTTPBridgeStreamingMixin:
                         request_id=request_id,
                     )
                     retry_request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
+                    retry_request_state.affinity_policy = affinity
                     if downstream_turn_state is not None:
                         retry_request_state.session_id = _normalize_session_id(downstream_turn_state)
                     retry_request_state.transport = _REQUEST_TRANSPORT_HTTP
@@ -983,6 +986,7 @@ class _HTTPBridgeStreamingMixin:
                 request_id=request_id,
             )
             request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
+            request_state.affinity_policy = affinity
             request_state.transport = _REQUEST_TRANSPORT_HTTP
             request_state.request_stage = _http_bridge_request_stage(
                 headers=headers,
@@ -1034,6 +1038,7 @@ class _HTTPBridgeStreamingMixin:
                     request_id=request_id,
                 )
                 request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
+                request_state.affinity_policy = affinity
                 if downstream_turn_state is not None:
                     request_state.session_id = _normalize_session_id(downstream_turn_state)
                 request_state.transport = _REQUEST_TRANSPORT_HTTP

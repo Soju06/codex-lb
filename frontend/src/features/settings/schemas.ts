@@ -16,6 +16,12 @@ const UpstreamStreamTransportSchema = z.enum([
   "http",
   "websocket",
 ]);
+const HttpDownstreamTransportPolicySchema = z.enum([
+  "smart",
+  "always_http",
+  "always_websocket",
+  "pinned",
+]);
 const LimitWarmupWindowsSchema = z.enum([
   "primary",
   "secondary",
@@ -43,6 +49,8 @@ export const DashboardSettingsSchema = z
     stickyThreadsEnabled: z.boolean(),
     upstreamStreamTransport:
       UpstreamStreamTransportSchema.optional().default("default"),
+    httpDownstreamTransportPolicy:
+      HttpDownstreamTransportPolicySchema.optional().default("smart"),
     upstreamProxyRoutingEnabled: z.boolean().optional().default(false),
     upstreamProxyDefaultPoolId: z.string().nullable().optional().default(null),
     preferEarlierResetAccounts: z.boolean(),
@@ -122,6 +130,7 @@ export const DashboardSettingsSchema = z
 export const SettingsUpdateRequestSchema = z.object({
   stickyThreadsEnabled: z.boolean().optional(),
   upstreamStreamTransport: UpstreamStreamTransportSchema.optional(),
+  httpDownstreamTransportPolicy: HttpDownstreamTransportPolicySchema.optional(),
   upstreamProxyRoutingEnabled: z.boolean().optional(),
   upstreamProxyDefaultPoolId: z.string().nullable().optional(),
   preferEarlierResetAccounts: z.boolean().optional(),

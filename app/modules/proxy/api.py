@@ -1713,23 +1713,30 @@ async def _build_codex_models_response(api_key: ApiKeyData | None) -> Response:
 
     if not models:
         await _release_reservation(reservation)
-        return JSONResponse(content=CodexModelsResponse(models=[]).model_dump(mode="json"))
+        return JSONResponse(content=CodexModelsResponse(models=[], data=[]).model_dump(mode="json"))
 
     entries: list[CodexModelEntry] = []
+    data: list[ModelListItem] = []
     for slug, model in models.items():
+        if not model.supported_in_api:
+            continue
         if visibility_allowed_models is None:
             if not is_public_model(model, allowed_models):
                 continue
-            entries.append(_to_codex_model_entry(model))
+            entry = _to_codex_model_entry(model)
+            entries.append(entry)
+            if entry.visibility == "list":
+                data.append(_to_model_list_item(slug, model, created=_model_list_created_at(model)))
             continue
-        entries.append(
-            _to_codex_model_entry(
-                model,
-                visibility="list" if slug in visibility_allowed_models else "hide",
-            )
+        entry = _to_codex_model_entry(
+            model,
+            visibility="list" if slug in visibility_allowed_models else "hide",
         )
+        entries.append(entry)
+        if entry.visibility == "list":
+            data.append(_to_model_list_item(slug, model, created=_model_list_created_at(model)))
     await _release_reservation(reservation)
-    return JSONResponse(content=CodexModelsResponse(models=entries).model_dump(mode="json"))
+    return JSONResponse(content=CodexModelsResponse(models=entries, data=data).model_dump(mode="json"))
 
 
 async def _build_models_response(api_key: ApiKeyData | None) -> Response:
@@ -1747,36 +1754,27 @@ async def _build_models_response(api_key: ApiKeyData | None) -> Response:
 
     if not models:
         await _release_reservation(reservation)
-        return JSONResponse(content=ModelListResponse(data=[]).model_dump(mode="json"))
+        return JSONResponse(content=_dump_v1_models_response(ModelListResponse(data=[])))
 
     items: list[ModelListItem] = []
     for slug, model in models.items():
         if not is_public_model(model, allowed_models):
             continue
-        items.append(
-            ModelListItem.model_validate(
-                {
-                    "id": slug,
-                    "created": created,
-                    "owned_by": "codex-lb",
-                    "metadata": _to_model_metadata(model),
-                    "api_types": ["chat_completions"],
-                    "capabilities": _v1_model_capabilities(model),
-                    "context_length": _v1_input_context_window(model),
-                    "contextLength": _v1_input_context_window(model),
-                    "max_output_tokens": _v1_max_output_tokens(model),
-                    "maxOutputTokens": _v1_max_output_tokens(model),
-                    "supports_reasoning": _v1_supports_reasoning(model),
-                    "supportsReasoning": _v1_supports_reasoning(model),
-                    "supports_images": _v1_supports_vision(model),
-                    "supportsImages": _v1_supports_vision(model),
-                    "supports_vision": _v1_supports_vision(model),
-                    "supportsVision": _v1_supports_vision(model),
-                }
-            )
-        )
+        items.append(_to_model_list_item(slug, model, created=created))
     await _release_reservation(reservation)
-    return JSONResponse(content=ModelListResponse(data=items).model_dump(mode="json"))
+    return JSONResponse(content=_dump_v1_models_response(ModelListResponse(data=items)))
+
+
+def _dump_v1_models_response(response: ModelListResponse) -> dict[str, JsonValue]:
+    payload = response.model_dump(mode="json")
+    for item in payload["data"]:
+        metadata = item.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        for key in ("additional_speed_tiers", "service_tiers", "default_service_tier"):
+            if metadata.get(key) is None:
+                metadata.pop(key, None)
+    return payload
 
 
 def _allowed_models_for_api_key(api_key: ApiKeyData | None) -> set[str] | None:
@@ -1793,6 +1791,39 @@ def _canonical_model_set(models: Iterable[str]) -> set[str]:
 
 def _canonical_model_slug(model: str) -> str:
     return resolve_model_alias(model) or model
+
+
+def _to_model_list_item(slug: str, model: UpstreamModel, *, created: int) -> ModelListItem:
+    return ModelListItem.model_validate(
+        {
+            "id": slug,
+            "created": created,
+            "owned_by": "codex-lb",
+            "metadata": _to_model_metadata(model),
+            "api_types": ["chat_completions"],
+            "capabilities": _v1_model_capabilities(model),
+            "context_length": _v1_input_context_window(model),
+            "contextLength": _v1_input_context_window(model),
+            "max_output_tokens": _v1_max_output_tokens(model),
+            "maxOutputTokens": _v1_max_output_tokens(model),
+            "supports_reasoning": _v1_supports_reasoning(model),
+            "supportsReasoning": _v1_supports_reasoning(model),
+            "supports_images": _v1_supports_vision(model),
+            "supportsImages": _v1_supports_vision(model),
+            "supports_vision": _v1_supports_vision(model),
+            "supportsVision": _v1_supports_vision(model),
+        }
+    )
+
+
+def _model_list_created_at(model: UpstreamModel) -> int:
+    for key in ("created", "created_at", "createdAt"):
+        raw_value = model.raw.get(key)
+        if isinstance(raw_value, int):
+            return raw_value
+        if isinstance(raw_value, float):
+            return int(raw_value)
+    return 0
 
 
 def _codex_model_visibility_allowed_models(api_key: ApiKeyData | None) -> set[str] | None:
@@ -1927,7 +1958,29 @@ def _to_model_metadata(model: UpstreamModel) -> ModelMetadata:
         supported_in_api=model.supported_in_api,
         minimal_client_version=model.minimal_client_version,
         priority=model.priority,
+        additional_speed_tiers=_raw_string_list(model.raw, "additional_speed_tiers"),
+        service_tiers=_raw_object_list(model.raw, "service_tiers"),
+        default_service_tier=_raw_optional_string(model.raw, "default_service_tier"),
     )
+
+
+def _raw_string_list(raw: Mapping[str, JsonValue], key: str) -> list[str] | None:
+    value = raw.get(key)
+    if not isinstance(value, list):
+        return None
+    return [item for item in value if isinstance(item, str)]
+
+
+def _raw_object_list(raw: Mapping[str, JsonValue], key: str) -> list[dict[str, JsonValue]] | None:
+    value = raw.get(key)
+    if not isinstance(value, list):
+        return None
+    return [dict(cast(Mapping[str, JsonValue], item)) for item in value if isinstance(item, Mapping)]
+
+
+def _raw_optional_string(raw: Mapping[str, JsonValue], key: str) -> str | None:
+    value = raw.get(key)
+    return value if isinstance(value, str) else None
 
 
 @v1_router.post(
@@ -2642,21 +2695,29 @@ async def _read_first_stream_item(stream: AsyncIterator[str]) -> str:
     return await anext(stream)
 
 
-def _consume_first_stream_task_exception(first_task: asyncio.Task[str]) -> None:
-    if first_task.cancelled():
-        return
-    try:
-        first_task.exception()
-    except asyncio.CancelledError:
-        return
+def _retrieve_first_stream_task_exception(task: asyncio.Task[str]) -> None:
+    # Retrieve a finished probe task's exception so an abandoned task does not
+    # surface asyncio's "exception was never retrieved" warning. Consumers that
+    # await the task still re-raise it.
+    if not task.cancelled():
+        task.exception()
 
 
-async def _await_first_stream_item_probe(first_task: asyncio.Task[str], timeout_seconds: float) -> str:
-    done, _pending = await asyncio.wait({first_task}, timeout=timeout_seconds)
-    if not done:
-        first_task.add_done_callback(_consume_first_stream_task_exception)
-        raise TimeoutError
-    return await first_task
+def _create_first_stream_probe_task(stream: AsyncIterator[str]) -> asyncio.Task[str]:
+    """Create the first-stream-item probe task.
+
+    ``_probe_stream_startup_error`` / ``_probe_chat_stream_startup_error`` race
+    this task against a timeout. On timeout the task keeps running and is handed
+    to the streamed response for consumption. If the wrapping stream is dropped
+    before the task is awaited -- for example the request is torn down while the
+    upstream is still blocked on the response-create admission gate -- the task
+    would otherwise finish with an unretrieved ``ProxyResponseError`` and asyncio
+    would log it. The done-callback retrieves the result in that abandoned case
+    without hiding the error from consumers that do await the task.
+    """
+    task = asyncio.create_task(_read_first_stream_item(stream))
+    task.add_done_callback(_retrieve_first_stream_task_exception)
+    return task
 
 
 async def _probe_stream_startup_error(
@@ -2667,11 +2728,17 @@ async def _probe_stream_startup_error(
 ) -> tuple[AsyncIterator[str], ProxyResponseError | OpenAIErrorEnvelopeModel | None]:
     if timeout_seconds is None:
         timeout_seconds = _STREAM_STARTUP_ERROR_PROBE_SECONDS
-    first_task = asyncio.create_task(_read_first_stream_item(stream))
-    try:
-        first = await _await_first_stream_item_probe(first_task, timeout_seconds)
-    except TimeoutError:
+    first_task = _create_first_stream_probe_task(stream)
+    done, _pending = await asyncio.wait({first_task}, timeout=timeout_seconds)
+    if not done:
+        # Probe window elapsed before the first item arrived. Hand the still-
+        # running task off to be consumed by the streamed response. asyncio.wait
+        # (rather than wait_for + shield) never cancels the task on timeout,
+        # avoiding the Python 3.14 "exception in shielded future" log when the
+        # upstream later returns an error such as a 429 from the admission gate.
         return _prepend_first_task(first_task, stream), None
+    try:
+        first = first_task.result()
     except StopAsyncIteration:
         return _prepend_first(None, stream), None
     except ProxyResponseError as exc:
@@ -2976,11 +3043,12 @@ async def _probe_chat_stream_startup_error(
 ) -> tuple[AsyncIterator[str], ProxyResponseError | OpenAIErrorEnvelopeModel | None]:
     buffered: list[str] = []
     for _ in range(max_startup_events):
-        first_task = asyncio.create_task(_read_first_stream_item(stream))
-        try:
-            first = await _await_first_stream_item_probe(first_task, timeout_seconds)
-        except TimeoutError:
+        first_task = _create_first_stream_probe_task(stream)
+        done, _pending = await asyncio.wait({first_task}, timeout=timeout_seconds)
+        if not done:
             return _prepend_items(buffered, _prepend_first_task(first_task, stream)), None
+        try:
+            first = first_task.result()
         except StopAsyncIteration:
             return _prepend_items(buffered, _prepend_first(None, stream)), None
         except ProxyResponseError as exc:
@@ -3011,9 +3079,16 @@ async def _prepend_items(items: list[str], stream: AsyncIterator[str]) -> AsyncI
 
 async def _prepend_first_task(first_task: asyncio.Task[str], stream: AsyncIterator[str]) -> AsyncIterator[str]:
     try:
-        yield await first_task
+        first = await first_task
     except StopAsyncIteration:
         return
+    finally:
+        # If the wrapping stream is closed before the first item is consumed
+        # (client disconnect, request teardown), cancel the still-running probe
+        # task so it does not hold the upstream connection open.
+        if not first_task.done():
+            first_task.cancel()
+    yield first
     async for line in stream:
         yield line
 

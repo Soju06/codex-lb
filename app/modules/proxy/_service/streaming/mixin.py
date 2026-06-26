@@ -548,9 +548,9 @@ class _StreamingMixin(_StreamingRetryMixin):
                         "route_trace": route_trace,
                         "codex_installation_id": account.codex_installation_id,
                         "enforce_openai_sdk_contract": enforce_openai_sdk_contract,
+                        "upstream_stream_transport_override": upstream_stream_transport,
                     },
                     raise_for_status=True,
-                    upstream_stream_transport_override=upstream_stream_transport,
                 )
             else:
                 stream = _facade()._call_stream_with_supported_optional_kwargs(
@@ -1070,6 +1070,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                 reasoning_tokens=reasoning_tokens,
                 reasoning_effort=reasoning_effort,
                 transport=request_transport,
+                upstream_transport=upstream_stream_transport,
                 service_tier=service_tier,
                 requested_service_tier=requested_service_tier,
                 actual_service_tier=actual_service_tier,

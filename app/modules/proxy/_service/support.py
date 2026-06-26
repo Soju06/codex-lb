@@ -29,6 +29,7 @@ from app.modules.proxy.work_admission import AdmissionLease
 
 logger = logging.getLogger(__name__)
 
+_REQUEST_TRANSPORT_HTTP = "http"
 _REQUEST_TRANSPORT_WEBSOCKET = "websocket"
 _WEBSOCKET_FULL_REPLAY_WAIT_MIN_ITEMS = 20
 _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS = 0.05
@@ -302,7 +303,9 @@ class _WebSocketRequestState:
     awaiting_response_created: bool = False
     event_queue: asyncio.Queue[str | None] | None = None
     transport: str = _REQUEST_TRANSPORT_WEBSOCKET
+    upstream_transport: str | None = _REQUEST_TRANSPORT_WEBSOCKET
     enforce_openai_sdk_contract: bool = True
+    request_kind: str = "normal"
     api_key: ApiKeyData | None = None
     request_usage_budget: ApiKeyRequestUsageBudget | None = None
     request_text: str | None = None
@@ -337,7 +340,6 @@ class _WebSocketRequestState:
     error_http_status_override: int | None = None
     response_event_count: int = 0
     previous_response_not_found_rewritten: bool = False
-    request_kind: str = "normal"
     response_create_gate_acquired: bool = False
     response_create_gate: asyncio.Semaphore | None = None
     response_create_admission: AdmissionLease | None = None

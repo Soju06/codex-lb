@@ -157,10 +157,6 @@ class CodexModelEntry(BaseModel):
     visibility: str = "list"
 
 
-class CodexModelsResponse(BaseModel):
-    models: list[CodexModelEntry]
-
-
 class ModelMetadata(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -180,6 +176,9 @@ class ModelMetadata(BaseModel):
     supported_in_api: bool = True
     minimal_client_version: str | None = None
     priority: int = 0
+    additional_speed_tiers: list[str] | None = None
+    service_tiers: list[dict[str, JsonValue]] | None = None
+    default_service_tier: str | None = None
 
 
 class ModelListItem(BaseModel):
@@ -201,6 +200,12 @@ class ModelListResponse(BaseModel):
 
     object: str = "list"
     data: list[ModelListItem]
+
+
+class CodexModelsResponse(BaseModel):
+    models: list[CodexModelEntry]
+    object: str = "list"
+    data: list[ModelListItem] = []
 
 
 class V1UsageLimitResponse(BaseModel):

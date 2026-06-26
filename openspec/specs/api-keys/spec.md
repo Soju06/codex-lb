@@ -447,6 +447,13 @@ This predicate SHALL be applied consistently across `/api/models`, `/v1/models`,
 - **WHEN** a model is in the `allowed_models` set but has `supported_in_api=false`
 - **THEN** that model is not exposed in any model list endpoint
 
+#### Scenario: gpt-5.3-codex aliases share availability gate consistently
+
+- **WHEN** `gpt-5.3-codex` has `supported_in_api=false`
+- **AND** `gpt-5.3-codex-spark` has `supported_in_api=true`
+- **THEN** `/api/models`, `/v1/models`, and `/backend-api/codex/models`
+      expose `gpt-5.3-codex-spark` but do not expose `gpt-5.3-codex`
+
 #### Scenario: Consistent model set across endpoints
 
 - **GIVEN** any model registry state

@@ -59,6 +59,10 @@ def _model(slug: str) -> UpstreamModel:
     )
 
 
+def _model_with_support(slug: str, *, supported_in_api: bool) -> UpstreamModel:
+    return replace(_model(slug), supported_in_api=supported_in_api)
+
+
 @pytest.mark.asyncio
 async def test_initial_snapshot_is_none():
     registry = ModelRegistry(ttl_seconds=60.0)
@@ -155,7 +159,7 @@ def test_bootstrap_models_include_representative_upstream_metadata():
     assert spark.context_window == 128_000
     assert spark.input_modalities == ("text",)
     assert spark.default_reasoning_level == "high"
-    assert spark.supported_in_api is False
+    assert spark.supported_in_api is True
     assert spark.minimal_client_version == "0.100.0"
 
     auto_review = models["codex-auto-review"]
@@ -255,6 +259,17 @@ def test_ttl_must_be_positive():
         ModelRegistry(ttl_seconds=0)
     with pytest.raises(ValueError, match="positive"):
         ModelRegistry(ttl_seconds=-1.0)
+
+
+def test_is_public_model_requires_supported_in_api_true():
+    from app.core.openai.model_registry import is_public_model
+
+    public = _model_with_support("model-public", supported_in_api=True)
+    hidden = _model_with_support("model-hidden", supported_in_api=False)
+
+    assert is_public_model(public, None)
+    assert not is_public_model(hidden, None)
+    assert not is_public_model(hidden, {"model-hidden", "model-public"})
 
 
 @pytest.mark.asyncio

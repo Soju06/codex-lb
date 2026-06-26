@@ -161,6 +161,46 @@ async def test_list_recent_without_search_avoids_related_joins(db_setup):
 
 
 @pytest.mark.asyncio
+async def test_list_recent_uses_separate_count_instead_of_window_count(db_setup):
+    statements: list[str] = []
+
+    def _capture(_conn, _cursor, statement, _parameters, _context, _executemany):
+        statements.append(statement)
+
+    event.listen(engine.sync_engine, "before_cursor_execute", _capture)
+    try:
+        now = utcnow()
+        async with SessionLocal() as session:
+            accounts_repo = AccountsRepository(session)
+            repo = RequestLogsRepository(session)
+            await accounts_repo.upsert(_make_account("acc_window_count"))
+            for i in range(5):
+                await repo.add_log(
+                    account_id="acc_window_count",
+                    request_id=f"req_window_count_{i}",
+                    model="gpt-5.1",
+                    input_tokens=10,
+                    output_tokens=20,
+                    latency_ms=100,
+                    status="success",
+                    error_code=None,
+                    requested_at=now - timedelta(minutes=i),
+                )
+
+            statements.clear()
+            logs, total = await repo.list_recent(limit=3, offset=0)
+
+        assert len(logs) == 3
+        assert total == 5
+        request_log_selects = [statement for statement in statements if "FROM request_logs" in statement]
+        assert len(request_log_selects) >= 2
+        assert any("count(" in statement.lower() for statement in request_log_selects)
+        assert all("OVER" not in statement.upper() for statement in request_log_selects)
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", _capture)
+
+
+@pytest.mark.asyncio
 async def test_list_recent_with_search_keeps_related_joins(db_setup):
     statements: list[str] = []
 

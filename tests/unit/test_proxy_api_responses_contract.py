@@ -8,6 +8,7 @@ import pytest
 import app.modules.proxy.api as proxy_api_module
 from app.core.openai.models import CompactResponsePayload
 from app.core.types import JsonValue
+from app.core.utils.request_id import reset_request_id, set_request_id
 
 pytestmark = pytest.mark.unit
 
@@ -15,6 +16,17 @@ pytestmark = pytest.mark.unit
 async def _iter_blocks(*blocks: str) -> AsyncIterator[str]:
     for block in blocks:
         yield block
+
+
+async def _raises_proxy_response_error() -> AsyncIterator[str]:
+    raise proxy_api_module.ProxyResponseError(
+        502,
+        proxy_api_module.openai_error(
+            "stream_incomplete",
+            "Upstream websocket closed before response.completed",
+        ),
+    )
+    yield ""  # pragma: no cover - keeps this an async generator
 
 
 def test_compact_response_output_item_accepts_modeled_output_field() -> None:
@@ -153,6 +165,38 @@ async def test_normalize_public_responses_stream_preserves_initial_error_details
     assert error["code"] == "rate_limit_exceeded"
     assert error["message"] == "slow down"
     assert error["param"] == "model"
+
+
+@pytest.mark.asyncio
+async def test_normalized_streamed_proxy_error_uses_request_id_for_synthetic_created() -> None:
+    token = set_request_id("req_stream_incomplete_123")
+    try:
+        blocks = [
+            block
+            async for block in proxy_api_module._normalize_public_responses_stream(
+                proxy_api_module._stream_response_error_events(
+                    _raises_proxy_response_error(),
+                    owns_reservation=False,
+                    reservation=None,
+                )
+            )
+        ]
+    finally:
+        reset_request_id(token)
+
+    payloads = [proxy_api_module._parse_sse_payload(block) for block in blocks]
+    payloads = [payload for payload in payloads if payload is not None]
+    assert [payload["type"] for payload in payloads] == ["response.created", "response.failed"]
+    for payload in payloads:
+        response = payload["response"]
+        assert isinstance(response, dict)
+        assert response["id"] == "req_stream_incomplete_123"
+    failed_response = payloads[1]["response"]
+    assert isinstance(failed_response, dict)
+    error = failed_response["error"]
+    assert isinstance(error, dict)
+    assert error["code"] == "stream_incomplete"
+    assert error["message"] == "Upstream websocket closed before response.completed"
 
 
 @pytest.mark.asyncio

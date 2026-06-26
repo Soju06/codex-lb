@@ -3138,6 +3138,7 @@ async def _stream_response_error_events(
                 error.code if error and error.code else "upstream_error",
                 error.message if error and error.message else "Upstream error",
                 error.type if error and error.type else "server_error",
+                response_id=get_request_id(),
                 error_param=error.param if error else None,
             )
         )

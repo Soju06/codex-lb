@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 import sys
 from collections.abc import Callable
@@ -9,6 +10,8 @@ from typing import Any, AsyncIterator, Literal, Mapping, cast
 from app.core.auth.refresh import (
     RefreshError,
 )
+from app.core.balancer import PERMANENT_FAILURE_CODES
+from app.core.balancer.types import ClassifiedFailure, UpstreamError
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
 from app.core.clients.files import finalize_file as core_finalize_file  # noqa: F401
 from app.core.clients.http import lease_http_session as lease_http_session  # noqa: F401
@@ -48,10 +51,13 @@ from app.core.errors import (
 from app.core.openai.models import OpenAIEvent
 from app.core.openai.parsing import parse_sse_event
 from app.core.types import JsonValue
+from app.core.upstream_proxy import ResolvedUpstreamRoute
+from app.core.utils.request_id import get_request_id
 from app.core.utils.sse import CODEX_KEEPALIVE_FRAME as CODEX_KEEPALIVE_FRAME  # noqa: F401
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
 from app.core.utils.time import utcnow as utcnow
 from app.db.models import (
+    Account,
     AccountStatus,  # noqa: F401
 )
 from app.modules.proxy._service.api_key_usage import (
@@ -270,6 +276,8 @@ from app.modules.proxy._service.support import (
     _WEBSOCKET_FULL_REPLAY_WAIT_MIN_ITEMS,  # noqa: F401
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
     _event_type_from_payload,
+    _RequestLogFailureMetadata,
+    _StreamSettlement,
     _WebSocketRequestState,
 )
 from app.modules.proxy._service.support import (
@@ -375,6 +383,7 @@ from app.modules.proxy.durable_bridge_coordinator import (
 )
 from app.modules.proxy.helpers import (
     _normalize_error_code,
+    classify_upstream_failure,
 )
 from app.modules.proxy.http_bridge_forwarding import (
     HTTPBridgeForwardContext as HTTPBridgeForwardContext,
@@ -382,6 +391,7 @@ from app.modules.proxy.http_bridge_forwarding import (
 from app.modules.proxy.http_bridge_forwarding import (
     OwnerForwardRelayFailure as OwnerForwardRelayFailure,
 )
+from app.modules.proxy.load_balancer import AccountSelection
 
 
 def _facade() -> Any:
@@ -506,6 +516,84 @@ def _rewrite_previous_response_stream_error(
     return None
 
 
+def _raw_stream_error_fields(
+    event_type: str | None,
+    event_payload: dict[str, JsonValue] | None,
+) -> tuple[str | None, str | None, str | None, str]:
+    raw_error_type = _websocket_event_error_type(event_type, event_payload)
+    raw_error_message = _websocket_event_error_message(event_type, event_payload)
+    raw_error_param = _websocket_event_error_param(event_type, event_payload)
+    return (
+        raw_error_type,
+        raw_error_message,
+        raw_error_param,
+        _normalize_error_code(_websocket_event_error_code(event_type, event_payload), raw_error_type),
+    )
+
+
+def _raw_stream_error_code_or_upstream(
+    event_type: str | None,
+    event_payload: dict[str, JsonValue] | None,
+    error_code: str,
+) -> str:
+    if (
+        event_type == "error"
+        and error_code == "error"
+        and _websocket_event_error_code(event_type, event_payload) is None
+    ):
+        return "upstream_error"
+    return error_code
+
+
+def _mark_stream_settlement_interrupted(
+    settlement: _StreamSettlement,
+    *,
+    status: str,
+    error_code: str,
+    error_message: str,
+    failure_phase: Literal["upstream", "downstream"],
+    failure_detail: str,
+    account_health_error: bool,
+) -> tuple[str, str, str, _RequestLogFailureMetadata]:
+    settlement.record_success = False
+    settlement.account_health_error = account_health_error
+    settlement.error = {"message": error_message}
+    return (
+        status,
+        error_code,
+        error_message,
+        _RequestLogFailureMetadata(failure_phase=failure_phase, failure_detail=failure_detail),
+    )
+
+
+def _mark_upstream_stream_incomplete(
+    settlement: _StreamSettlement,
+) -> tuple[str, str, str, _RequestLogFailureMetadata]:
+    return _mark_stream_settlement_interrupted(
+        settlement,
+        status="error",
+        error_code="stream_incomplete",
+        error_message="Upstream stream ended before response.completed",
+        failure_phase="upstream",
+        failure_detail="upstream_eof_before_terminal_event",
+        account_health_error=True,
+    )
+
+
+def _mark_downstream_stream_cancelled(
+    settlement: _StreamSettlement,
+) -> tuple[str, str, str, _RequestLogFailureMetadata]:
+    return _mark_stream_settlement_interrupted(
+        settlement,
+        status="cancelled",
+        error_code="client_disconnected",
+        error_message="Downstream client disconnected before response.completed",
+        failure_phase="downstream",
+        failure_detail="client_disconnected_before_terminal_event",
+        account_health_error=False,
+    )
+
+
 def _build_rewritten_stream_response_failed_event(
     *,
     response_id: str,
@@ -611,6 +699,78 @@ def _stream_request_budget_seconds(settings: object, *, request_transport: str) 
         if budget is not None:
             return float(budget)
     return float(getattr(settings, "proxy_request_budget_seconds"))
+
+
+async def _resolve_upstream_route_for_account(
+    proxy: Any,
+    account: Account,
+    *,
+    operation: str,
+) -> ResolvedUpstreamRoute | None:
+    async with _facade().SessionLocal() as session:
+        return await _facade().resolve_upstream_route(
+            session,
+            account_id=account.id,
+            operation=operation,
+            scope="account",
+            encryptor=proxy._encryptor,
+        )
+
+
+async def _select_account_with_budget_for_stream(proxy: Any, deadline: float, **kwargs: Any) -> AccountSelection:
+    selector = proxy._select_account_with_budget_compatible
+    optional_kwargs = (
+        "require_security_work_authorized",
+        "lease_kind",
+        "estimated_lease_tokens",
+        "fallback_on_preferred_account_unavailable",
+    )
+    if any(name in kwargs for name in optional_kwargs):
+        try:
+            signature = inspect.signature(selector)
+        except (TypeError, ValueError):
+            signature = None
+        accepts_var_keyword = signature is not None and any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in signature.parameters.values()
+        )
+        if signature is not None and not accepts_var_keyword:
+            kwargs = dict(kwargs)
+            for name in optional_kwargs:
+                if name not in signature.parameters:
+                    kwargs.pop(name, None)
+    return await selector(deadline, **kwargs)
+
+
+async def _handle_stream_error(
+    proxy: Any,
+    account: Account,
+    error: UpstreamError,
+    code: str,
+    http_status: int | None = None,
+) -> ClassifiedFailure:
+    classified = classify_upstream_failure(
+        error_code=code,
+        error=error,
+        http_status=http_status,
+        phase="first_event",
+    )
+    if _facade()._is_account_neutral_error_code(code):
+        return classified
+    if classified["failure_class"] == "rate_limit":
+        await proxy._load_balancer.mark_rate_limit(account, error)
+    elif classified["failure_class"] == "quota":
+        await proxy._load_balancer.mark_quota_exceeded(account, error)
+    elif code in PERMANENT_FAILURE_CODES:
+        await proxy._load_balancer.mark_permanent_failure(account, code)
+    else:
+        await proxy._load_balancer.record_error(account)
+        _facade().logger.info(
+            "Recorded transient account error account_id=%s request_id=%s code=%s",
+            account.id,
+            get_request_id(),
+            code,
+        )
+    return classified
 
 
 def _push_stream_attempt_timeout_overrides(

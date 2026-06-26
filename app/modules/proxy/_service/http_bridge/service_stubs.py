@@ -17,6 +17,7 @@ from app.core.clients.proxy import (
 )
 from app.core.clients.proxy import stream_responses as core_stream_responses
 from app.core.clients.proxy import thread_goal_request as core_thread_goal_request
+from app.core.clients.proxy_websocket import filter_inbound_websocket_headers
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.openai.requests import ResponsesRequest
@@ -294,12 +295,20 @@ def _headers_with_turn_state(*args: Any, **kwargs: Any) -> Any:
     return _service_global("_headers_with_turn_state")(*args, **kwargs)
 
 
+def _websocket_safe_headers_with_turn_state(headers: Mapping[str, str], turn_state: str | None) -> dict[str, str]:
+    return cast(dict[str, str], _headers_with_turn_state(filter_inbound_websocket_headers(dict(headers)), turn_state))
+
+
 def _headers_with_authorization(*args: Any, **kwargs: Any) -> Any:
     return _service_global("_headers_with_authorization")(*args, **kwargs)
 
 
 def _response_create_client_metadata(*args: Any, **kwargs: Any) -> Any:
     return _service_global("_response_create_client_metadata")(*args, **kwargs)
+
+
+def _response_create_text_with_account_installation_id(*args: Any, **kwargs: Any) -> Any:
+    return _service_global("_response_create_text_with_account_installation_id")(*args, **kwargs)
 
 
 def _count_external_image_urls(*args: Any, **kwargs: Any) -> Any:

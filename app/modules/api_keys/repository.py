@@ -267,6 +267,7 @@ class ApiKeysRepository:
         enforced_reasoning_effort: str | None | _Unset = _UNSET,
         enforced_service_tier: str | None | _Unset = _UNSET,
         traffic_class: str | _Unset = _UNSET,
+        transport_policy_override: str | None | _Unset = _UNSET,
         account_assignment_scope_enabled: bool | _Unset = _UNSET,
         expires_at: datetime | None | _Unset = _UNSET,
         is_active: bool | _Unset = _UNSET,
@@ -298,6 +299,9 @@ class ApiKeysRepository:
         if traffic_class is not _UNSET:
             assert isinstance(traffic_class, str)
             row.traffic_class = traffic_class
+        if transport_policy_override is not _UNSET:
+            assert transport_policy_override is None or isinstance(transport_policy_override, str)
+            row.transport_policy_override = transport_policy_override
         if account_assignment_scope_enabled is not _UNSET:
             assert isinstance(account_assignment_scope_enabled, bool)
             row.account_assignment_scope_enabled = account_assignment_scope_enabled

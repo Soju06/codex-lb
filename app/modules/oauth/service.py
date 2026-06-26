@@ -48,7 +48,7 @@ from app.modules.oauth.schemas import (
     OauthStartResponse,
     OauthStatusResponse,
 )
-from app.modules.proxy.account_cache import get_account_selection_cache
+from app.modules.proxy.account_cache import clear_account_routing_unavailable, get_account_selection_cache
 
 _async_sleep = asyncio.sleep
 logger = logging.getLogger(__name__)
@@ -596,18 +596,21 @@ class OauthService:
         )
         if self._repo_factory:
             async with self._repo_factory() as repo:
-                await repo.upsert_account_slot(
+                saved = await repo.upsert_account_slot(
                     account,
                     preserve_unknown_workspace_duplicates=False,
                     preserve_identity_slots=True,
                 )
+                saved_id = saved.id
         else:
-            await self._accounts_repo.upsert_account_slot(
+            saved = await self._accounts_repo.upsert_account_slot(
                 account,
                 preserve_unknown_workspace_duplicates=False,
                 preserve_identity_slots=True,
             )
+            saved_id = saved.id
 
+        clear_account_routing_unavailable(saved_id)
         await self._invalidate_account_routing_caches()
 
     async def _invalidate_account_routing_caches(self) -> None:

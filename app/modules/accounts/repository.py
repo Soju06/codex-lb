@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -789,6 +790,8 @@ def _apply_account_updates(target: Account, source: Account) -> None:
         target.workspace_id = source.workspace_id
         target.workspace_label = source.workspace_label
         target.seat_type = source.seat_type
+    if not target.codex_installation_id:
+        target.codex_installation_id = source.codex_installation_id or str(uuid.uuid4())
     target.plan_type = source.plan_type
     target.access_token_encrypted = source.access_token_encrypted
     target.refresh_token_encrypted = source.refresh_token_encrypted

@@ -430,6 +430,9 @@ from app.modules.proxy._service.response_create import (
     _response_create_text as _response_create_text,
 )
 from app.modules.proxy._service.response_create import (
+    _response_create_text_with_account_installation_id as _response_create_text_with_account_installation_id,
+)
+from app.modules.proxy._service.response_create import (
     _response_create_text_with_size_guard as _response_create_text_with_size_guard,
 )
 from app.modules.proxy._service.response_create import (
@@ -522,6 +525,12 @@ from app.modules.proxy._service.streaming.helpers import (
 from app.modules.proxy._service.streaming.helpers import (
     _upstream_turn_state_from_socket as _upstream_turn_state_from_socket,
 )
+from app.modules.proxy._service.streaming.retry import (
+    _http_downstream_request_is_sticky as _http_downstream_request_is_sticky,
+)
+from app.modules.proxy._service.streaming.retry import (
+    _resolve_http_downstream_transport as _resolve_http_downstream_transport,
+)
 from app.modules.proxy._service.support import (
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
     _REQUEST_TRANSPORT_WEBSOCKET,  # noqa: F401
@@ -555,7 +564,13 @@ from app.modules.proxy._service.support import (
     _WebSocketUpstreamControl,  # noqa: F401
 )
 from app.modules.proxy._service.support import (
+    _call_with_supported_optional_kwargs as _support_call_with_supported_optional_kwargs,
+)
+from app.modules.proxy._service.support import (
     _HTTPBridgeOwnerForward as _HTTPBridgeOwnerForward,
+)
+from app.modules.proxy._service.support import (
+    _supported_optional_kwargs as _support_supported_optional_kwargs,
 )
 from app.modules.proxy._service.support import (
     _websocket_route_log_kwargs as _websocket_route_log_kwargs,
@@ -1389,7 +1404,10 @@ class ProxyService(
                     acquire_refresh_admission=self._get_work_admission().acquire_token_refresh,
                     refresh_repo_factory=self._accounts_refresh_scope,
                 )
-                return await auth_manager.ensure_fresh(account, force=force)
+                refresh = auth_manager.ensure_fresh(account, force=force)
+                if timeout_seconds is None:
+                    return await refresh
+                return await asyncio.wait_for(refresh, timeout=max(0.001, timeout_seconds))
         finally:
             pop_token_refresh_timeout_override(token)
 
@@ -2165,7 +2183,12 @@ async def _call_with_supported_optional_kwargs(
     optional_kwargs: Mapping[str, Any],
     **required_kwargs: Any,
 ) -> Any:
-    return await func(*args, **_supported_optional_kwargs(func, optional_kwargs, required_kwargs))
+    return await _support_call_with_supported_optional_kwargs(
+        func,
+        *args,
+        optional_kwargs=optional_kwargs,
+        **required_kwargs,
+    )
 
 
 def _supported_optional_kwargs(
@@ -2173,21 +2196,7 @@ def _supported_optional_kwargs(
     optional_kwargs: Mapping[str, Any],
     required_kwargs: Mapping[str, Any],
 ) -> dict[str, Any]:
-    kwargs = dict(required_kwargs)
-    kwargs.update(optional_kwargs)
-    if optional_kwargs:
-        try:
-            signature = inspect.signature(func)
-        except (TypeError, ValueError):
-            signature = None
-        accepts_var_keyword = signature is not None and any(
-            parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in signature.parameters.values()
-        )
-        if signature is not None and not accepts_var_keyword:
-            for name in optional_kwargs:
-                if name not in signature.parameters:
-                    kwargs.pop(name, None)
-    return kwargs
+    return _support_supported_optional_kwargs(func, optional_kwargs, required_kwargs)
 
 
 def _relative_availability_power(settings: DashboardSettings) -> float:

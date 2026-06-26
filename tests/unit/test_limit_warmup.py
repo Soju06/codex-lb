@@ -169,6 +169,7 @@ class FakeRequestLogsRepo:
         requested_service_tier: str | None = None,
         actual_service_tier: str | None = None,
         transport: str | None = None,
+        upstream_transport: str | None = None,
         api_key_id: str | None = None,
         session_id: str | None = None,
         plan_type: str | None = None,

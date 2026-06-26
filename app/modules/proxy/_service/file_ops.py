@@ -239,14 +239,10 @@ class _FileOpsMixin:
         upload (the upstream contract is account-scoped via
         ``chatgpt-account-id``).
 
-        The pin is only consulted when the request has *no* stronger
-        client-supplied affinity signal: a ``prompt_cache_key`` that
-        the client itself sent, a session / turn-state header
-        (codex_session affinity), or a ``previous_response_id`` all
-        imply an existing conversation continuation and must keep
-        their routing intact. Returning ``None`` from here means
-        "fall back to the standard sticky / codex / cache affinity
-        path".
+        The pin is only skipped for stronger client-supplied
+        continuation signals: an explicit ``prompt_cache_key``, a Codex
+        session header, a client-supplied turn-state header, or a
+        ``previous_response_id``.
 
         Note: ``_sticky_key_for_responses_request`` can *derive* and
         write a ``prompt_cache_key`` onto the payload when openai cache

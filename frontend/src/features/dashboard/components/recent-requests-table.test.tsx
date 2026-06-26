@@ -114,6 +114,7 @@ describe("RecentRequestsTable", () => {
              errorMessage: longError,
             ...NULL_FAILURE_METADATA,
             ...NULL_USERAGENT_METADATA,
+            upstreamTransport: "auto",
              tokens: 1200,
              inputTokens: 1000,
              outputTokens: 200,
@@ -138,6 +139,7 @@ describe("RecentRequestsTable", () => {
     expect(screen.getByText("gpt-5.1 (high, default)")).toBeInTheDocument();
     expect(screen.getByText("Requested priority")).toBeInTheDocument();
     expect(screen.getByText("WS")).toBeInTheDocument();
+    expect(screen.getByText("Up Auto")).toBeInTheDocument();
     expect(screen.getByText("Rate limit")).toBeInTheDocument();
     expect(screen.getByText("rate_limit_exceeded")).toBeInTheDocument();
 

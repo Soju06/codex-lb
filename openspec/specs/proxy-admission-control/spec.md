@@ -74,6 +74,14 @@ Local Responses overload failures MUST expose stable low-cardinality reason fiel
 - **THEN** logs and metrics use the stable reason `bridge_queue_full`
 - **AND** they do not use the ambiguous alias `queue_full`
 
+#### Scenario: Queued bridge requests wait for the response-create gate within timeout
+
+- **WHEN** a visible HTTP bridge request has already claimed a bridge queue slot
+- **AND** the per-session `response_create_gate` is held by legitimate in-flight work
+- **THEN** the request waits for the gate until the configured `proxy_admission_wait_timeout_seconds` elapses
+- **AND** if the timeout elapses first, the request is rejected with `response_create_gate_timeout`
+- **AND** `bridge_queue_full` remains the bounded local-overload reason when the bridge queue itself is saturated
+
 #### Scenario: Account cap rejection is local overload
 
 - **WHEN** every eligible account is unavailable because of account-local caps
@@ -113,4 +121,3 @@ If a request owns in-flight bridge session creation and is cancelled or fails af
 - **AND** it is cancelled while closing a stale local bridge session before creating the replacement session
 - **THEN** the in-flight marker is removed or settled
 - **AND** later requests do not remain blocked on that cancelled owner's future
-

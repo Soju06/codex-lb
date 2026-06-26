@@ -133,9 +133,10 @@ def _reset_global_state() -> None:
     except Exception:
         pass
     try:
-        from app.modules.proxy.account_cache import get_account_selection_cache
+        from app.modules.proxy.account_cache import clear_all_account_routing_unavailable, get_account_selection_cache
 
         get_account_selection_cache().invalidate()
+        clear_all_account_routing_unavailable()
     except Exception:
         pass
     try:

@@ -7,6 +7,7 @@
 
 - [x] 2.1 Add a streaming integration test that verifies a valid terminal `compaction_trigger` yields exactly one `response.output_item.done` compaction item and a terminal `response.completed` event with the same item in `output`.
 - [x] 2.2 Add a 400 regression test for malformed trigger placement, including duplicated and non-terminal trigger items.
+- [x] 2.3 Add a direct Codex compact regression test that normalizes remote-compaction-v2 historical message output into one compact output item.
 
 ## 3. Validate the change
 

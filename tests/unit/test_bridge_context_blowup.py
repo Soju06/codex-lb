@@ -18,6 +18,7 @@ These tests are LOCAL ONLY — not pushed upstream.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from collections import deque
 from contextlib import nullcontext
@@ -35,6 +36,16 @@ from app.db.models import AccountStatus
 from app.modules.proxy import service as proxy_service
 
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio(loop_scope="session")]
+
+
+def _without_installation_metadata(text: str) -> dict[str, Any]:
+    payload = json.loads(text)
+    client_metadata = payload.get("client_metadata")
+    if isinstance(client_metadata, dict):
+        client_metadata.pop("x-codex-installation-id", None)
+        if not client_metadata:
+            payload.pop("client_metadata", None)
+    return payload
 
 
 def _make_session(*, closed: bool = False) -> proxy_service._HTTPBridgeSession:
@@ -298,10 +309,20 @@ class TestRetryHelperPreservesPreviousResponseId:
         )
 
         assert result is True
-        send_text.assert_awaited_once_with('{"type":"response.create","input":"hello"}')
+        send_text.assert_awaited_once()
+        send_text_await = send_text.await_args
+        assert send_text_await is not None
+        assert _without_installation_metadata(send_text_await.args[0]) == {
+            "type": "response.create",
+            "input": "hello",
+        }
         assert request_state.previous_response_id is None
         assert request_state.proxy_injected_previous_response_id is False
-        assert request_state.request_text == '{"type":"response.create","input":"hello"}'
+        assert request_state.request_text is not None
+        assert _without_installation_metadata(request_state.request_text) == {
+            "type": "response.create",
+            "input": "hello",
+        }
 
 
 class TestContextGrowthScenarios:

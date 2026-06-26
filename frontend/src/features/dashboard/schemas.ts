@@ -163,6 +163,7 @@ export const RequestLogSchema = z.object({
   model: z.string(),
   source: z.string().nullable().optional().default(null),
   transport: z.string().nullable().optional().default(null),
+  upstreamTransport: z.string().nullable().optional(),
   useragent: z.string().nullable().optional().default(null),
   useragentGroup: z.string().nullable().optional().default(null),
   serviceTier: z.string().nullable().optional().default(null),

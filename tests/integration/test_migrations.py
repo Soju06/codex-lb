@@ -636,12 +636,12 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
                 text(
                     """
                     INSERT INTO accounts (
-                        id, chatgpt_account_id, email, plan_type,
+                        id, chatgpt_account_id, codex_installation_id, email, plan_type,
                         access_token_encrypted, refresh_token_encrypted, id_token_encrypted,
                         last_refresh, created_at, status, deactivation_reason, reset_at
                     )
                     VALUES (
-                        'acc_legacy_2', 'chatgpt_legacy_2', 'legacy@example.com', 'team',
+                        'acc_legacy_2', 'chatgpt_legacy_2', 'legacy-installation-2', 'legacy@example.com', 'team',
                         x'11', x'12', x'13',
                         '2026-01-01 00:00:00', '2026-01-01 00:00:00', 'active', NULL, NULL
                     )

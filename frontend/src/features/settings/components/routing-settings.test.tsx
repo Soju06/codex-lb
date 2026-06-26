@@ -318,7 +318,13 @@ describe("RoutingSettings", () => {
       />,
     );
 
-    await user.click(screen.getAllByRole("combobox")[1]);
+    const routingStrategySelect = screen
+      .getAllByRole("combobox")
+      .find((element) => element.textContent?.includes("Capacity weighted"));
+    if (!routingStrategySelect) {
+      throw new Error("Routing strategy select not found");
+    }
+    await user.click(routingStrategySelect);
     await user.click(await screen.findByRole("option", { name: "Single account" }));
 
     expect(onSave).toHaveBeenCalledWith({
@@ -401,6 +407,20 @@ describe("RoutingSettings", () => {
     expect(onSave).toHaveBeenCalledWith({
       ...BASE_UPDATE_PAYLOAD,
       preferEarlierResetWindow: "primary",
+    });
+  });
+
+  it("renders and saves the HTTP client routing policy", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={onSave} />);
+
+    await user.click(screen.getByRole("combobox", { name: "HTTP client routing" }));
+    await user.click(await screen.findByRole("option", { name: "Prefer persistent sessions" }));
+
+    expect(onSave).toHaveBeenCalledWith({
+      ...BASE_UPDATE_PAYLOAD,
+      httpDownstreamTransportPolicy: "always_websocket",
     });
   });
 

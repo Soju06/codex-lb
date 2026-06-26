@@ -27,6 +27,7 @@ class RequestLogEntry(DashboardModel):
     useragent: str | None = None
     useragent_group: str | None = None
     transport: str | None = None
+    upstream_transport: str | None = None
     service_tier: str | None = None
     requested_service_tier: str | None = None
     actual_service_tier: str | None = None

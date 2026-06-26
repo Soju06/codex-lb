@@ -237,7 +237,8 @@ async def test_starting_new_device_flow_cancels_previous_pending_poll(async_clie
         ]
         assert [flow.flow_id for flow in pending_device_flows] == [second_flow_id]
         assert oauth_module._OAUTH_STORE.get_flow_locked(first_flow_id) is None
-    assert first_task.cancelled()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(first_task, timeout=1)
 
     await oauth_module._OAUTH_STORE.reset()
 

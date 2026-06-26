@@ -807,6 +807,16 @@
         "code",
         "test"
       ]
+    },
+    {
+      "login": "RyeBelen",
+      "name": "Kapitantutan",
+      "avatar_url": "https://avatars.githubusercontent.com/u/121075326?v=4",
+      "profile": "https://github.com/RyeBelen",
+      "contributions": [
+        "code",
+        "test"
+      ]
     }
   ],
   "contributorsPerLine": 7,

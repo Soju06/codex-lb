@@ -2330,7 +2330,234 @@ def _make_proxy_settings(*, log_proxy_service_tier_trace: bool) -> SimpleNamespa
         max_sse_event_bytes=16 * 1024 * 1024,
         http_responses_session_bridge_instance_id="test-instance",
         http_responses_session_bridge_instance_ring=[],
+        http_downstream_transport_policy="smart",
     )
+
+
+def _make_transport_policy_payload(**overrides: object) -> ResponsesRequest:
+    payload: dict[str, object] = {
+        "model": "gpt-5.4",
+        "instructions": "hi",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
+        "stream": True,
+    }
+    payload.update(overrides)
+    return ResponsesRequest.model_validate(payload)
+
+
+def _make_api_key_data(
+    key_id: str,
+    *,
+    transport_policy_override: str | None = None,
+) -> ApiKeyData:
+    return ApiKeyData(
+        id=key_id,
+        name=key_id,
+        key_prefix=f"sk-{key_id[:8]}",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+        transport_policy_override=transport_policy_override,
+    )
+
+
+@pytest.mark.parametrize(
+    ("payload", "headers"),
+    [
+        (_make_transport_policy_payload(previous_response_id="resp_previous"), {}),
+        (_make_transport_policy_payload(prompt_cache_key="prompt-cache-thread"), {}),
+        (_make_transport_policy_payload(), {"session_id": "session-thread"}),
+        (_make_transport_policy_payload(), {"x-codex-turn-state": "turn-thread"}),
+    ],
+    ids=["previous-response-id", "prompt-cache-key", "session-header", "turn-state-header"],
+)
+def test_http_downstream_smart_policy_keeps_websocket_for_each_sticky_signal(
+    payload: ResponsesRequest,
+    headers: dict[str, str],
+) -> None:
+    assert (
+        streaming_retry_module._resolve_http_downstream_transport("smart", payload=payload, headers=headers)
+        == "websocket"
+    )
+
+
+def test_http_downstream_smart_policy_uses_http_for_single_shot_request() -> None:
+    payload = _make_transport_policy_payload()
+
+    assert streaming_retry_module._resolve_http_downstream_transport("smart", payload=payload, headers={}) == "http"
+
+
+@pytest.mark.parametrize("policy", ["always_http", "pinned"])
+def test_http_downstream_http_policies_use_http_even_with_sticky_signal(policy: str) -> None:
+    payload = _make_transport_policy_payload(previous_response_id="resp_previous")
+
+    assert streaming_retry_module._resolve_http_downstream_transport(policy, payload=payload, headers={}) == "http"
+
+
+def test_http_downstream_always_websocket_policy_keeps_websocket_without_sticky_signal() -> None:
+    payload = _make_transport_policy_payload()
+
+    assert (
+        streaming_retry_module._resolve_http_downstream_transport("always_websocket", payload=payload, headers={})
+        == "websocket"
+    )
+
+
+async def _capture_stream_retry_transport(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    dashboard_policy: str = "smart",
+    base_policy: str = "smart",
+    api_key: ApiKeyData | None = None,
+    request_transport: str = "http",
+    upstream_config: str = "auto",
+    resolved_base_transport: str = "websocket",
+    payload: ResponsesRequest | None = None,
+    headers: dict[str, str] | None = None,
+) -> str:
+    dashboard_settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    dashboard_settings.http_downstream_transport_policy = dashboard_policy
+    dashboard_settings.upstream_stream_transport = upstream_config
+    base_settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    base_settings.http_downstream_transport_policy = base_policy
+    base_settings.upstream_stream_transport = "auto"
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_stream_policy")
+    captured: dict[str, str | None] = {}
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(dashboard_settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: base_settings)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
+    monkeypatch.setattr(
+        streaming_retry_module,
+        "_resolve_stream_transport",
+        lambda **kwargs: (
+            kwargs["transport"] if kwargs.get("transport") in ("http", "websocket") else resolved_base_transport
+        ),
+    )
+
+    async def fake_stream(
+        payload,
+        headers,
+        access_token,
+        account_id,
+        base_url=None,
+        raise_for_status=False,
+        upstream_stream_transport_override=None,
+    ):
+        del payload, headers, access_token, account_id, base_url, raise_for_status
+        captured["override"] = upstream_stream_transport_override
+        yield 'data: {"type":"response.completed","response":{"id":"resp_transport_policy"}}\n\n'
+
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+
+    chunks = [
+        chunk
+        async for chunk in service._stream_with_retry(
+            payload or _make_transport_policy_payload(),
+            headers or {},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=api_key,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            request_transport=request_transport,
+            upstream_stream_transport_override=None,
+        )
+    ]
+
+    assert chunks
+    transport = captured["override"]
+    assert transport is not None
+    return transport
+
+
+@pytest.mark.asyncio
+async def test_http_downstream_per_key_override_wins_over_global_policy(monkeypatch: pytest.MonkeyPatch) -> None:
+    transport = await _capture_stream_retry_transport(
+        monkeypatch,
+        dashboard_policy="always_http",
+        api_key=_make_api_key_data("key_stream_override", transport_policy_override="always_websocket"),
+    )
+
+    assert transport == "websocket"
+
+
+@pytest.mark.asyncio
+async def test_http_downstream_null_per_key_override_follows_global_policy(monkeypatch: pytest.MonkeyPatch) -> None:
+    transport = await _capture_stream_retry_transport(
+        monkeypatch,
+        dashboard_policy="always_websocket",
+        api_key=_make_api_key_data("key_stream_no_override", transport_policy_override=None),
+    )
+
+    assert transport == "websocket"
+
+
+@pytest.mark.asyncio
+async def test_http_downstream_explicit_websocket_override_beats_policy(monkeypatch: pytest.MonkeyPatch) -> None:
+    transport = await _capture_stream_retry_transport(
+        monkeypatch,
+        dashboard_policy="always_http",
+        upstream_config="websocket",
+        resolved_base_transport="http",
+    )
+
+    assert transport == "websocket"
+
+
+@pytest.mark.asyncio
+async def test_http_downstream_oversized_payload_bypass_still_forces_http_under_always_websocket(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport = await _capture_stream_retry_transport(
+        monkeypatch,
+        dashboard_policy="always_websocket",
+        resolved_base_transport="http",
+    )
+
+    assert transport == "http"
+
+
+@pytest.mark.asyncio
+async def test_http_downstream_input_image_bypass_still_forces_http_under_always_websocket(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport = await _capture_stream_retry_transport(
+        monkeypatch,
+        dashboard_policy="always_websocket",
+        payload=_make_transport_policy_payload(
+            input=[{"type": "input_image", "image_url": "data:image/png;base64,iVBORw0KGgo="}],
+        ),
+    )
+
+    assert transport == "http"
+
+
+@pytest.mark.asyncio
+async def test_native_websocket_clients_are_not_downgraded_by_http_downstream_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport = await _capture_stream_retry_transport(
+        monkeypatch,
+        dashboard_policy="always_http",
+        request_transport="websocket",
+    )
+
+    assert transport == "websocket"
 
 
 @pytest.mark.asyncio
@@ -5992,7 +6219,7 @@ async def test_stream_responses_logs_actual_service_tier_and_requested_tier_trac
 
 
 @pytest.mark.asyncio
-async def test_service_stream_responses_forces_http_upstream_for_http_stream_clients(monkeypatch):
+async def test_service_stream_responses_honors_explicit_websocket_upstream_for_http_stream_clients(monkeypatch):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     setattr(settings, "upstream_stream_transport", "websocket")
     request_logs = _RequestLogsRecorder()
@@ -6036,7 +6263,7 @@ async def test_service_stream_responses_forces_http_upstream_for_http_stream_cli
     chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-stream"})]
 
     assert chunks
-    assert captured["override"] == "http"
+    assert captured["override"] == "websocket"
 
 
 @pytest.mark.asyncio

@@ -522,6 +522,12 @@ from app.modules.proxy._service.streaming.helpers import (
 from app.modules.proxy._service.streaming.helpers import (
     _upstream_turn_state_from_socket as _upstream_turn_state_from_socket,
 )
+from app.modules.proxy._service.streaming.retry import (
+    _http_downstream_request_is_sticky as _http_downstream_request_is_sticky,
+)
+from app.modules.proxy._service.streaming.retry import (
+    _resolve_http_downstream_transport as _resolve_http_downstream_transport,
+)
 from app.modules.proxy._service.support import (
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
     _REQUEST_TRANSPORT_WEBSOCKET,  # noqa: F401

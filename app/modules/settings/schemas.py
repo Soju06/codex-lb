@@ -5,6 +5,7 @@ from pydantic import Field, field_validator
 from app.modules.shared.schemas import DashboardModel
 
 _DEFAULT_WEEKLY_PACE_WORKING_DAYS = "0,1,2,3,4,5,6"
+_HTTP_DOWNSTREAM_TRANSPORT_POLICY_PATTERN = r"^(smart|always_http|always_websocket|pinned)$"
 
 
 def _normalize_weekly_pace_working_days(value: str | None) -> str | None:
@@ -32,6 +33,7 @@ class AdditionalQuotaPolicy(DashboardModel):
 class DashboardSettingsResponse(DashboardModel):
     sticky_threads_enabled: bool
     upstream_stream_transport: str = Field(pattern=r"^(default|auto|http|websocket)$")
+    http_downstream_transport_policy: str = Field(pattern=_HTTP_DOWNSTREAM_TRANSPORT_POLICY_PATTERN)
     upstream_proxy_routing_enabled: bool
     upstream_proxy_default_pool_id: str | None = None
     prefer_earlier_reset_accounts: bool
@@ -72,6 +74,10 @@ class DashboardSettingsUpdateRequest(DashboardModel):
     upstream_stream_transport: str | None = Field(
         default=None,
         pattern=r"^(default|auto|http|websocket)$",
+    )
+    http_downstream_transport_policy: str | None = Field(
+        default=None,
+        pattern=_HTTP_DOWNSTREAM_TRANSPORT_POLICY_PATTERN,
     )
     upstream_proxy_routing_enabled: bool | None = None
     upstream_proxy_default_pool_id: str | None = None

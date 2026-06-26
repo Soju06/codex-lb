@@ -412,6 +412,12 @@ class DashboardSettings(Base):
         server_default=text("'default'"),
         nullable=False,
     )
+    http_downstream_transport_policy: Mapped[str] = mapped_column(
+        String,
+        default="smart",
+        server_default=text("'smart'"),
+        nullable=False,
+    )
     prefer_earlier_reset_accounts: Mapped[bool] = mapped_column(
         Boolean, default=True, server_default=true(), nullable=False
     )
@@ -619,6 +625,7 @@ class ApiKey(Base):
         server_default=text("'foreground'"),
         nullable=False,
     )
+    transport_policy_override: Mapped[str | None] = mapped_column(String, nullable=True)
     account_assignment_scope_enabled: Mapped[bool] = mapped_column(
         Boolean,
         default=False,

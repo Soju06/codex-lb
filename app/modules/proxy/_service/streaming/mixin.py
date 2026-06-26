@@ -572,9 +572,9 @@ class _StreamingMixin(_StreamingRetryMixin):
                         "route": route,
                         "allow_direct_egress": route is None,
                         "route_trace": route_trace,
+                        "upstream_stream_transport_override": upstream_stream_transport,
                     },
                     raise_for_status=True,
-                    upstream_stream_transport_override=upstream_stream_transport,
                 )
             else:
                 stream = _facade()._call_stream_with_supported_optional_kwargs(

@@ -73,6 +73,33 @@ describe("ApiKeyCreateDialog", () => {
     expect(onSubmit.mock.calls[0][0].trafficClass).toBe("opportunistic");
   });
 
+  it("renders and submits a transport policy override", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+
+    renderWithProviders(
+      <ApiKeyCreateDialog
+        open
+        busy={false}
+        onOpenChange={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    expect(screen.getByRole("combobox", { name: "HTTP client routing" })).toHaveTextContent("Follow global default");
+
+    await user.type(screen.getByLabelText("Name"), "Persistent sessions key");
+    await user.click(screen.getByRole("combobox", { name: "HTTP client routing" }));
+    await user.click(await screen.findByRole("option", { name: "Prefer persistent sessions" }));
+    await user.click(screen.getByRole("button", { name: "Create" }));
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+    });
+
+    expect(onSubmit.mock.calls[0][0].transportPolicyOverride).toBe("always_websocket");
+  });
+
   it("resets the codex /model checkbox when the dialog is dismissed", async () => {
     const user = userEvent.setup();
     const onOpenChange = vi.fn();

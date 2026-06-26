@@ -107,6 +107,7 @@ def _dashboard_settings_response(settings) -> DashboardSettingsResponse:
     return DashboardSettingsResponse(
         sticky_threads_enabled=settings.sticky_threads_enabled,
         upstream_stream_transport=settings.upstream_stream_transport,
+        http_downstream_transport_policy=settings.http_downstream_transport_policy,
         upstream_proxy_routing_enabled=settings.upstream_proxy_routing_enabled,
         upstream_proxy_default_pool_id=settings.upstream_proxy_default_pool_id,
         prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
@@ -458,6 +459,9 @@ async def update_settings(
                     else current.sticky_threads_enabled
                 ),
                 upstream_stream_transport=payload.upstream_stream_transport or current.upstream_stream_transport,
+                http_downstream_transport_policy=(
+                    payload.http_downstream_transport_policy or current.http_downstream_transport_policy
+                ),
                 upstream_proxy_routing_enabled=(
                     payload.upstream_proxy_routing_enabled
                     if payload.upstream_proxy_routing_enabled is not None
@@ -573,6 +577,7 @@ async def update_settings(
         for field_name in (
             "sticky_threads_enabled",
             "upstream_stream_transport",
+            "http_downstream_transport_policy",
             "upstream_proxy_routing_enabled",
             "upstream_proxy_default_pool_id",
             "prefer_earlier_reset_accounts",

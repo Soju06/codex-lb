@@ -149,6 +149,66 @@ async def test_api_keys_crud_and_regenerate(async_client):
 
 
 @pytest.mark.asyncio
+async def test_api_key_create_with_transport_policy_override_round_trips(async_client):
+    create = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "transport-policy-key",
+            "transportPolicyOverride": "always_websocket",
+        },
+    )
+
+    assert create.status_code == 200
+    payload = create.json()
+    assert payload["transportPolicyOverride"] == "always_websocket"
+
+    listed = await async_client.get("/api/api-keys/")
+    assert listed.status_code == 200
+    assert listed.json()[0]["transportPolicyOverride"] == "always_websocket"
+
+
+@pytest.mark.asyncio
+async def test_api_key_update_sets_and_clears_transport_policy_override(async_client):
+    create = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "transport-policy-update-key",
+        },
+    )
+    assert create.status_code == 200
+    key_id = create.json()["id"]
+    assert create.json()["transportPolicyOverride"] is None
+
+    update = await async_client.patch(
+        f"/api/api-keys/{key_id}",
+        json={"transportPolicyOverride": "smart"},
+    )
+    assert update.status_code == 200
+    assert update.json()["transportPolicyOverride"] == "smart"
+
+    cleared = await async_client.patch(
+        f"/api/api-keys/{key_id}",
+        json={"transportPolicyOverride": None},
+    )
+    assert cleared.status_code == 200
+    assert cleared.json()["transportPolicyOverride"] is None
+
+
+@pytest.mark.asyncio
+async def test_api_key_transport_policy_override_invalid_value_returns_400(async_client):
+    create = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "transport-policy-invalid-key",
+            "transportPolicyOverride": "sometimes",
+        },
+    )
+
+    assert create.status_code == 400
+    assert create.json()["error"]["code"] == "invalid_api_key_payload"
+
+
+@pytest.mark.asyncio
 async def test_api_key_update_persists_assigned_account_ids(async_client):
     first_account_id = await _import_account(async_client, "acc-assigned-a", "assigned-a@example.com")
     second_account_id = await _import_account(async_client, "acc-assigned-b", "assigned-b@example.com")

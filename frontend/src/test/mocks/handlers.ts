@@ -53,6 +53,7 @@ const OauthStartPayloadSchema = z.looseObject({
 const ApiKeyCreatePayloadSchema = z.looseObject({
   name: z.string().optional(),
   trafficClass: z.enum(TRAFFIC_CLASSES).optional(),
+  transportPolicyOverride: z.enum(["smart", "always_http", "always_websocket"]).nullable().optional(),
   assignedAccountIds: z.array(z.string()).optional(),
 });
 
@@ -64,6 +65,7 @@ const ApiKeyUpdatePayloadSchema = z.looseObject({
   name: z.string().optional(),
   allowedModels: z.array(z.string()).nullable().optional(),
   trafficClass: z.enum(TRAFFIC_CLASSES).optional(),
+  transportPolicyOverride: z.enum(["smart", "always_http", "always_websocket"]).nullable().optional(),
   isActive: z.boolean().optional(),
   assignedAccountIds: z.array(z.string()).optional(),
   resetUsage: z.boolean().optional(),
@@ -91,6 +93,9 @@ const SettingsPayloadSchema = z.looseObject({
   stickyThreadsEnabled: z.boolean().optional(),
   upstreamStreamTransport: z
     .enum(["default", "auto", "http", "websocket"])
+    .optional(),
+  httpDownstreamTransportPolicy: z
+    .enum(["smart", "always_http", "always_websocket", "pinned"])
     .optional(),
   upstreamProxyRoutingEnabled: z.boolean().optional(),
   upstreamProxyDefaultPoolId: z.string().nullable().optional(),

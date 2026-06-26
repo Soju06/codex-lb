@@ -35,6 +35,8 @@ export type ServiceTierType = (typeof SERVICE_TIERS)[number];
 
 export const TRAFFIC_CLASSES = ["foreground", "opportunistic"] as const;
 export type TrafficClass = (typeof TRAFFIC_CLASSES)[number];
+export const TRANSPORT_POLICY_OVERRIDES = ["smart", "always_http", "always_websocket"] as const;
+export type TransportPolicyOverride = (typeof TRANSPORT_POLICY_OVERRIDES)[number];
 
 export const ApiKeySchema = z.object({
   id: z.string(),
@@ -46,6 +48,7 @@ export const ApiKeySchema = z.object({
   trafficClass: z
     .enum(TRAFFIC_CLASSES)
     .default("foreground"),
+  transportPolicyOverride: z.enum(TRANSPORT_POLICY_OVERRIDES).nullable().default(null),
   enforcedReasoningEffort: z
     .enum(["none", "minimal", "low", "medium", "high", "xhigh"])
     .nullable()
@@ -72,6 +75,7 @@ export const ApiKeyCreateRequestSchema = z.object({
   allowedModels: z.array(z.string()).optional(),
   applyToCodexModel: z.boolean().optional(),
   trafficClass: z.enum(TRAFFIC_CLASSES).optional(),
+  transportPolicyOverride: z.enum(TRANSPORT_POLICY_OVERRIDES).nullable().optional(),
   enforcedModel: z.string().min(1).nullable().optional(),
   enforcedReasoningEffort: z
     .enum(["none", "minimal", "low", "medium", "high", "xhigh"])
@@ -96,6 +100,7 @@ export const ApiKeyUpdateRequestSchema = z.object({
   allowedModels: z.array(z.string()).nullable().optional(),
   applyToCodexModel: z.boolean().optional(),
   trafficClass: z.enum(TRAFFIC_CLASSES).optional(),
+  transportPolicyOverride: z.enum(TRANSPORT_POLICY_OVERRIDES).nullable().optional(),
   enforcedModel: z.string().min(1).nullable().optional(),
   enforcedReasoningEffort: z
     .enum(["none", "minimal", "low", "medium", "high", "xhigh"])

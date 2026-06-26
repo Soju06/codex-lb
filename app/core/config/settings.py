@@ -155,6 +155,7 @@ class Settings(BaseSettings):
     database_alembic_auto_remap_enabled: bool = True
     upstream_base_url: str = "https://chatgpt.com/backend-api"
     upstream_stream_transport: Literal["http", "websocket", "auto"] = "auto"
+    http_downstream_transport_policy: Literal["smart", "always_http", "always_websocket", "pinned"] = "smart"
     upstream_connect_timeout_seconds: float = 8.0
     upstream_compact_timeout_seconds: float | None = None
     upstream_websocket_trust_env: bool = Field(default_factory=_default_upstream_websocket_trust_env)

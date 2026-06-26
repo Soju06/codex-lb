@@ -2,14 +2,16 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 
 import {
+  consumeRateLimitResetCredit,
   deleteAccount,
   exportAccountAuth,
   getAccountTrends,
+  getRateLimitResetCredits,
   importAccount,
   listAccounts,
   pauseAccount,
-  reactivateAccount,
   probeAccount,
+  reactivateAccount,
   setAccountAlias,
   updateAccount,
   updateAccountLimitWarmup,
@@ -177,6 +179,24 @@ export function useAccountMutations() {
     },
   });
 
+  const resetCreditConsumeMutation = useMutation({
+    mutationFn: (accountId: string) => consumeRateLimitResetCredit(accountId),
+    onSuccess: (data) => {
+      const resetCount = data.windowsReset ?? 0;
+      toast.success(
+        `Rate-limit window${resetCount === 1 ? "" : "s"} reset (${resetCount})`,
+      );
+      void queryClient.invalidateQueries({ queryKey: ["accounts", "list"] });
+      void queryClient.invalidateQueries({ queryKey: ["accounts", "trends"] });
+      void queryClient.invalidateQueries({ queryKey: ["accounts", "reset-credits"] });
+      void queryClient.invalidateQueries({ queryKey: ["dashboard", "overview"] });
+      void queryClient.invalidateQueries({ queryKey: ["dashboard", "projections"] });
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Reset credit redeem failed");
+    },
+  });
+
   return {
     importMutation,
     pauseMutation,
@@ -188,7 +208,20 @@ export function useAccountMutations() {
     limitWarmupMutation,
     routingPolicyMutation,
     updateMutation,
+    resetCreditConsumeMutation,
   };
+}
+
+export function useRateLimitResetCredits(
+  accountId: string | null,
+  enabled: boolean,
+) {
+  return useQuery({
+    queryKey: ["accounts", "reset-credits", accountId],
+    queryFn: () => getRateLimitResetCredits(accountId as string),
+    enabled: enabled && !!accountId,
+    staleTime: 0,
+  });
 }
 
 export function useAccountTrends(accountId: string | null) {

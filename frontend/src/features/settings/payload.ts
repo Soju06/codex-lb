@@ -10,6 +10,7 @@ export function buildSettingsUpdateRequest(
   const payload: SettingsUpdateRequest = {
     stickyThreadsEnabled: settings.stickyThreadsEnabled,
     upstreamStreamTransport: settings.upstreamStreamTransport,
+    httpDownstreamTransportPolicy: settings.httpDownstreamTransportPolicy,
     preferEarlierResetAccounts: settings.preferEarlierResetAccounts,
     preferEarlierResetWindow: settings.preferEarlierResetWindow,
     routingStrategy: settings.routingStrategy,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from collections.abc import AsyncIterator, Mapping
 
 from app.core.errors import ResponseFailedEvent
@@ -9,6 +10,12 @@ from app.core.types import JsonValue
 from app.core.utils.json_guards import is_json_dict
 
 type JsonPayload = Mapping[str, JsonValue] | ResponseFailedEvent
+
+# The SSE spec delimits lines only by CR, LF, or CRLF. str.splitlines() also
+# breaks on other Unicode boundaries (VT, FF, FS/GS/RS, NEL, U+2028, U+2029),
+# and U+2028/U+2029 are valid *unescaped* inside JSON strings, so splitting on
+# them would corrupt a data: payload that legitimately contains one.
+_SSE_LINE_BOUNDARY = re.compile(r"\r\n|\r|\n")
 
 SSE_KEEPALIVE_FRAME = ": keepalive\n\n"
 CODEX_KEEPALIVE_FRAME = 'event: codex.keepalive\ndata: {"type":"codex.keepalive"}\n\n'
@@ -105,7 +112,7 @@ def extract_sse_data(event_block: str) -> str | None:
 
 def _extract_sse_data_lines(event_block: str) -> list[str] | None:
     data_lines: list[str] = []
-    for raw_line in event_block.splitlines():
+    for raw_line in _SSE_LINE_BOUNDARY.split(event_block):
         if not raw_line:
             continue
         if raw_line.startswith(":"):

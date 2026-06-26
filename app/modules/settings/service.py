@@ -14,6 +14,7 @@ from app.modules.usage.additional_quota_keys import (
 class DashboardSettingsData:
     sticky_threads_enabled: bool
     upstream_stream_transport: str
+    http_downstream_transport_policy: str
     upstream_proxy_routing_enabled: bool
     upstream_proxy_default_pool_id: str | None
     prefer_earlier_reset_accounts: bool
@@ -50,6 +51,7 @@ class DashboardSettingsData:
 class DashboardSettingsUpdateData:
     sticky_threads_enabled: bool
     upstream_stream_transport: str
+    http_downstream_transport_policy: str
     upstream_proxy_routing_enabled: bool
     upstream_proxy_default_pool_id: str | None
     prefer_earlier_reset_accounts: bool
@@ -89,6 +91,7 @@ class SettingsService:
         return DashboardSettingsData(
             sticky_threads_enabled=row.sticky_threads_enabled,
             upstream_stream_transport=row.upstream_stream_transport,
+            http_downstream_transport_policy=row.http_downstream_transport_policy,
             upstream_proxy_routing_enabled=row.upstream_proxy_routing_enabled,
             upstream_proxy_default_pool_id=row.upstream_proxy_default_pool_id,
             prefer_earlier_reset_accounts=row.prefer_earlier_reset_accounts,
@@ -132,6 +135,7 @@ class SettingsService:
         row = await self._repository.update(
             sticky_threads_enabled=payload.sticky_threads_enabled,
             upstream_stream_transport=payload.upstream_stream_transport,
+            http_downstream_transport_policy=payload.http_downstream_transport_policy,
             upstream_proxy_routing_enabled=payload.upstream_proxy_routing_enabled,
             upstream_proxy_default_pool_id=payload.upstream_proxy_default_pool_id,
             prefer_earlier_reset_accounts=payload.prefer_earlier_reset_accounts,
@@ -168,6 +172,7 @@ class SettingsService:
         return DashboardSettingsData(
             sticky_threads_enabled=row.sticky_threads_enabled,
             upstream_stream_transport=row.upstream_stream_transport,
+            http_downstream_transport_policy=row.http_downstream_transport_policy,
             upstream_proxy_routing_enabled=row.upstream_proxy_routing_enabled,
             upstream_proxy_default_pool_id=row.upstream_proxy_default_pool_id,
             prefer_earlier_reset_accounts=row.prefer_earlier_reset_accounts,

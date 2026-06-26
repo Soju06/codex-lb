@@ -1,5 +1,5 @@
 import { render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 
 import { AuthGate } from "@/features/auth/components/auth-gate";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
@@ -24,9 +24,14 @@ function setAuthState(
 
 describe("AuthGate", () => {
   beforeEach(() => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     setAuthState({
       refreshSession: vi.fn().mockResolvedValue(undefined),
     });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it("shows login form when unauthenticated", async () => {

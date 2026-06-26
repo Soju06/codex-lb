@@ -34,6 +34,12 @@ const WEEKDAYS = [
   { value: 5, label: "Sat" },
   { value: 6, label: "Sun" },
 ] as const;
+const HTTP_DOWNSTREAM_TRANSPORT_POLICY_LABELS = {
+  smart: "Session-aware",
+  always_http: "Prefer request/response",
+  always_websocket: "Prefer persistent sessions",
+  pinned: "Legacy pinned",
+} as const;
 
 function parseWorkingDays(value: string): Set<number> {
   const days = new Set(
@@ -297,6 +303,35 @@ export function RoutingSettings({
                 <SelectItem value="auto">Auto</SelectItem>
                 <SelectItem value="http">Responses</SelectItem>
                 <SelectItem value="websocket">WebSockets</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div className="flex items-center justify-between gap-4 p-3">
+            <div>
+              <p className="text-sm font-medium">HTTP client routing</p>
+              <p className="text-xs text-muted-foreground">
+                Choose how browser and SSE callers use persistent upstream sessions.
+              </p>
+            </div>
+            <Select
+              value={settings.httpDownstreamTransportPolicy}
+              onValueChange={(value) =>
+                save({
+                  httpDownstreamTransportPolicy:
+                    value as DashboardSettings["httpDownstreamTransportPolicy"],
+                })
+              }
+            >
+              <SelectTrigger className="h-8 w-52 text-xs" disabled={busy} aria-label="HTTP client routing">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent align="end">
+                {Object.entries(HTTP_DOWNSTREAM_TRANSPORT_POLICY_LABELS).map(([value, label]) => (
+                  <SelectItem key={value} value={value}>
+                    {label}
+                  </SelectItem>
+                ))}
               </SelectContent>
             </Select>
           </div>

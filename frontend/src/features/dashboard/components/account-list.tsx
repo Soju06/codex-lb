@@ -10,7 +10,13 @@ import { usePrivacyStore } from "@/hooks/use-privacy";
 import { cn } from "@/lib/utils";
 import { formatCompactAccountId } from "@/utils/account-identifiers";
 import { normalizeStatus, quotaBarColor, quotaBarTrack } from "@/utils/account-status";
-import { formatDateTimeInline, formatPercentNullable, formatQuotaResetLabel, formatSlug } from "@/utils/formatters";
+import {
+  formatDateTimeInline,
+  formatPercentNullable,
+  formatQuotaResetLabel,
+  formatSingleUnitRemaining,
+  formatSlug,
+} from "@/utils/formatters";
 
 const ACCOUNT_LIST_VISIBLE_ROWS = 8;
 const ACCOUNT_LIST_ROW_HEIGHT_REM = 4.5;
@@ -306,11 +312,28 @@ export function AccountList({ accounts, readOnly = false, onAction }: AccountLis
           const warmupDetail = account.limitWarmup
             ? `${formatSlug(account.limitWarmup.status)} | ${account.limitWarmup.window === "primary" ? "5h" : "weekly"} | ${formatDateTimeInline(account.limitWarmup.completedAt ?? account.limitWarmup.attemptedAt)}`
             : "No attempts";
+          const availableResetCredits = account.availableResetCredits ?? 0;
+          const hasResetCredits = availableResetCredits > 0;
+          const resetBadgeLabel = availableResetCredits > 99 ? "99+" : String(availableResetCredits);
+          const resetCreditDisabled =
+            readOnly || status === "paused" || status === "reauth" || status === "deactivated";
+          const resetCountdown = account.resetCreditNearestExpiresAt
+            ? formatSingleUnitRemaining(account.resetCreditNearestExpiresAt)
+            : null;
+          const resetButtonTitle = resetCreditDisabled
+            ? status === "paused"
+              ? "Resume account to redeem reset credits"
+              : status === "reauth" || status === "deactivated"
+                ? "Re-authenticate account to redeem reset credits"
+                : "Reset credits unavailable"
+            : resetCountdown
+              ? `Reset (${availableResetCredits}) · ${resetCountdown.label}`
+              : `Reset (${availableResetCredits})`;
           return (
             <div
               key={account.accountId}
               data-testid="account-list-row"
-              className="grid min-h-[4.5rem] items-center gap-3 px-3 py-2 text-sm"
+              className="relative grid min-h-[4.5rem] items-center gap-3 px-3 py-2 text-sm"
               style={{ animationDelay: `${index * 50}ms`, gridTemplateColumns: ACCOUNT_LIST_COLUMNS }}
             >
               <div className="min-w-0">
@@ -336,7 +359,12 @@ export function AccountList({ accounts, readOnly = false, onAction }: AccountLis
                 </p>
                 <p className="truncate text-[11px] text-muted-foreground">{warmupDetail}</p>
               </div>
-              <div className="flex justify-end gap-1">
+              <div className="relative flex justify-end gap-1">
+                {hasResetCredits ? (
+                  <span className="absolute -top-1.5 -right-1.5 grid h-4 min-w-[1rem] place-items-center rounded-full bg-primary px-1 text-[9px] font-medium text-primary-foreground">
+                    {resetBadgeLabel}
+                  </span>
+                ) : null}
                 <Button
                   type="button"
                   size="sm"
@@ -348,6 +376,20 @@ export function AccountList({ accounts, readOnly = false, onAction }: AccountLis
                 >
                   <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
                 </Button>
+                {hasResetCredits ? (
+                  <Button
+                    type="button"
+                    size="sm"
+                     variant="ghost"
+                     className="h-7 w-7 rounded-md p-0 text-muted-foreground hover:text-foreground"
+                     aria-label={`Redeem reset credit for ${title}`}
+                     title={resetButtonTitle}
+                     disabled={resetCreditDisabled}
+                     onClick={() => onAction?.(account, "reset-credit")}
+                   >
+                    <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
+                  </Button>
+                ) : null}
                 <Button
                   type="button"
                   size="sm"

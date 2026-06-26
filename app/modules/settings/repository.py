@@ -22,6 +22,7 @@ class SettingsRepository:
             id=_SETTINGS_ID,
             sticky_threads_enabled=True,
             upstream_stream_transport="default",
+            http_downstream_transport_policy=get_settings().http_downstream_transport_policy,
             upstream_proxy_routing_enabled=False,
             upstream_proxy_default_pool_id=None,
             prefer_earlier_reset_accounts=True,
@@ -71,6 +72,7 @@ class SettingsRepository:
         *,
         sticky_threads_enabled: bool | None = None,
         upstream_stream_transport: str | None = None,
+        http_downstream_transport_policy: str | None = None,
         upstream_proxy_routing_enabled: bool | None = None,
         upstream_proxy_default_pool_id: str | None = None,
         prefer_earlier_reset_accounts: bool | None = None,
@@ -105,6 +107,8 @@ class SettingsRepository:
             settings.sticky_threads_enabled = sticky_threads_enabled
         if upstream_stream_transport is not None:
             settings.upstream_stream_transport = upstream_stream_transport
+        if http_downstream_transport_policy is not None:
+            settings.http_downstream_transport_policy = http_downstream_transport_policy
         if upstream_proxy_routing_enabled is not None:
             settings.upstream_proxy_routing_enabled = upstream_proxy_routing_enabled
         settings.upstream_proxy_default_pool_id = upstream_proxy_default_pool_id or None

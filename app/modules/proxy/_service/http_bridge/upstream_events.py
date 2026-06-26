@@ -679,7 +679,18 @@ class _HTTPBridgeUpstreamEventsMixin:
                     event_type,
                 ) = _build_stream_incomplete_terminal_event_for_request(status_request_state)
 
-        if event_type == "response.completed" and terminal_request_state is not None:
+        completed_usage = (
+            event.response.usage if event_type == "response.completed" and event and event.response else None
+        )
+        completed_empty_prewarm = (
+            event_type == "response.completed"
+            and terminal_request_state is not None
+            and terminal_request_state.request_kind == "prewarm"
+            and completed_usage is not None
+            and completed_usage.output_tokens == 0
+        )
+
+        if event_type == "response.completed" and terminal_request_state is not None and not completed_empty_prewarm:
             # Record the completed response id regardless of input shape so
             # subsequent turns (including ones that never populated
             # input_item_count, e.g. string inputs) can still reuse this
@@ -692,7 +703,13 @@ class _HTTPBridgeUpstreamEventsMixin:
                 session.last_completed_input_count = terminal_request_state.input_item_count
                 session.last_completed_input_prefix_fingerprint = terminal_request_state.input_full_fingerprint
 
-        if event_type == "error":
+        normalize_error_event = (
+            terminal_request_state is None or terminal_request_state.enforce_openai_sdk_contract
+        ) and (matched_request_state is None or matched_request_state.enforce_openai_sdk_contract)
+        settlement_payload = payload
+        settlement_event = event
+        settlement_event_type = event_type
+        if event_type == "error" and normalize_error_event:
             http_status = _http_error_status_from_payload(payload)
             if status_request_state is not None:
                 status_request_state.error_http_status_override = http_status
@@ -706,11 +723,33 @@ class _HTTPBridgeUpstreamEventsMixin:
                 payload=payload,
                 request_state=terminal_request_state or matched_request_state,
             )
+            settlement_payload = payload
+            settlement_event = event
+            settlement_event_type = event_type
+        elif event_type == "error":
+            http_status = _http_error_status_from_payload(payload)
+            if status_request_state is not None:
+                status_request_state.error_http_status_override = http_status
+            (
+                _settlement_event_block,
+                settlement_payload,
+                settlement_event,
+                settlement_event_type,
+            ) = _normalize_http_bridge_error_event(
+                event=event,
+                payload=payload,
+                request_state=terminal_request_state or matched_request_state,
+            )
 
         if event_type == "response.created" and release_create_gate and created_request_state is not None:
             await _release_websocket_response_create_gate(created_request_state, session.response_create_gate)
 
-        if response_id is not None and matched_request_state is not None and event_type == "response.completed":
+        if (
+            response_id is not None
+            and matched_request_state is not None
+            and event_type == "response.completed"
+            and not completed_empty_prewarm
+        ):
             await self._register_http_bridge_previous_response_id(
                 session,
                 response_id,
@@ -726,11 +765,11 @@ class _HTTPBridgeUpstreamEventsMixin:
                 ),
             )
 
-        if terminal_request_state is not None and event_type in {"response.failed", "error"}:
-            if event_type == "error":
-                error = event.error if event else None
+        if terminal_request_state is not None and settlement_event_type in {"response.failed", "error"}:
+            if settlement_event_type == "error":
+                error = settlement_event.error if settlement_event else None
             else:
-                error = event.response.error if event and event.response else None
+                error = settlement_event.response.error if settlement_event and settlement_event.response else None
             terminal_error_code = _normalize_error_code(
                 error.code if error else None,
                 error.type if error else None,
@@ -794,13 +833,13 @@ class _HTTPBridgeUpstreamEventsMixin:
         if terminal_request_state.event_queue is not None:
             await terminal_request_state.event_queue.put(None)
 
-        if event_type in {"response.failed", "response.incomplete", "error"}:
+        if settlement_event_type in {"response.failed", "response.incomplete", "error"}:
             error_code = None
-            if event_type == "error":
-                error = event.error if event else None
+            if settlement_event_type == "error":
+                error = settlement_event.error if settlement_event else None
                 error_code = _normalize_error_code(error.code if error else None, error.type if error else None)
-            elif event and event.response:
-                error = event.response.error
+            elif settlement_event and settlement_event.response:
+                error = settlement_event.response.error
                 error_code = _normalize_error_code(error.code if error else None, error.type if error else None)
             _log_http_bridge_event(
                 "terminal_error",
@@ -817,9 +856,9 @@ class _HTTPBridgeUpstreamEventsMixin:
             terminal_request_state,
             account=session.account,
             account_id_value=session.account.id,
-            event=event,
-            event_type=event_type,
-            payload=payload,
+            event=settlement_event,
+            event_type=settlement_event_type,
+            payload=settlement_payload,
             api_key=terminal_request_state.api_key,
             upstream_control=session.upstream_control,
             response_create_gate=session.response_create_gate,

@@ -740,33 +740,39 @@ async def test_refresh_account_deactivates_when_repo_only_reencrypted_same_refre
     assert repo.status_payload["status"] == AccountStatus.REAUTH_REQUIRED
 
 
-@pytest.mark.asyncio
-async def test_refresh_account_requires_reauth_when_upstream_returns_token_expired(monkeypatch):
-    """Regression for #383: a ``token_expired`` code from the OAuth refresh
-    endpoint must classify as a permanent failure and block the account,
-    not loop retries forever while the account stays ``ACTIVE``.
-    """
-
-    async def _fake_refresh(_: str, **_kwargs: object) -> TokenRefreshResult:
-        # Real upstream-observed shape: HTTP 4xx body whose error code is
-        # ``token_expired`` and message is the user-facing "Provided
-        # authentication token is expired" wording. classify_refresh_error
-        # must surface this as ``is_permanent=True``.
-        from app.core.auth.refresh import classify_refresh_error
-
-        assert classify_refresh_error("token_expired") is True
-        raise RefreshError(
+@pytest.mark.parametrize(
+    ("error_code", "message"),
+    [
+        (
             "token_expired",
             "Provided authentication token is expired. Please try signing in again.",
-            classify_refresh_error("token_expired"),
-        )
+        ),
+        (
+            "app_session_terminated",
+            "Your session has been terminated. Please sign in again.",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_refresh_account_requires_reauth_when_upstream_session_is_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+    error_code: str,
+    message: str,
+) -> None:
+    """Permanent OAuth session failures must block the account until re-authentication."""
+
+    async def _fake_refresh(_: str, **_kwargs: object) -> TokenRefreshResult:
+        from app.core.auth.refresh import classify_refresh_error
+
+        assert classify_refresh_error(error_code) is True
+        raise RefreshError(error_code, message, classify_refresh_error(error_code))
 
     monkeypatch.setattr(auth_manager_module, "refresh_access_token", _fake_refresh)
 
     encryptor = TokenEncryptor()
     stale_refresh = utcnow().replace(year=utcnow().year - 1)
     expired_account = Account(
-        id="acc_token_expired",
+        id=f"acc_{error_code}",
         email="user@example.com",
         plan_type="plus",
         access_token_encrypted=encryptor.encrypt("access-old"),
@@ -786,7 +792,7 @@ async def test_refresh_account_requires_reauth_when_upstream_returns_token_expir
     with pytest.raises(RefreshError) as exc_info:
         await manager.refresh_account(expired_account)
 
-    assert exc_info.value.code == "token_expired"
+    assert exc_info.value.code == error_code
     assert exc_info.value.is_permanent is True
     assert repo.status_payload is not None
     assert repo.status_payload["status"] == AccountStatus.REAUTH_REQUIRED

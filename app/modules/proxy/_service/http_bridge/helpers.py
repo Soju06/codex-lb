@@ -59,6 +59,7 @@ from app.core.utils.request_id import get_request_id
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
 from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import (
+    AccountStatus,
     DashboardSettings,
     HttpBridgeSessionState,
     StickySessionKind,
@@ -151,6 +152,7 @@ from app.modules.proxy._service.warmup import (
 from app.modules.proxy._service.warmup import (
     _WarmupUsageSnapshot as _WarmupUsageSnapshot,
 )
+from app.modules.proxy.account_cache import is_account_routing_unavailable
 from app.modules.proxy.affinity import (
     _AffinityPolicy,
     _extract_model_class,
@@ -474,6 +476,10 @@ def _http_bridge_session_allows_api_key(session: "_HTTPBridgeSession", api_key: 
     if api_key is None or not api_key.account_assignment_scope_enabled:
         return True
     return session.account.id in api_key.assigned_account_ids
+
+
+def _http_bridge_session_account_active(session: "_HTTPBridgeSession") -> bool:
+    return session.account.status == AccountStatus.ACTIVE and not is_account_routing_unavailable(session.account.id)
 
 
 def _http_bridge_session_reusable_for_request(
@@ -1134,6 +1140,7 @@ for _helper_name in (
     "_http_bridge_turn_state_alias_key",
     "_http_bridge_previous_response_alias_key",
     "_http_bridge_session_allows_api_key",
+    "_http_bridge_session_account_active",
     "_http_bridge_session_reusable_for_request",
     "_http_bridge_session_matches_preferred_account",
     "_make_http_bridge_session_key",

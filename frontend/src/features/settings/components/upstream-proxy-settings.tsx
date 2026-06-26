@@ -1,18 +1,20 @@
-import { Boxes, Network, Plus, Server } from "lucide-react";
+import { useState } from "react";
+import { Boxes, CheckCircle2, Loader2, Network, Plus, Server, XCircle } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
-import { useDialogState } from "@/hooks/use-dialog-state";
 import { ProxyEndpointCreateDialog } from "@/features/settings/components/proxy-endpoint-create-dialog";
 import { ProxyPoolCreateDialog } from "@/features/settings/components/proxy-pool-create-dialog";
 import { ProxyPoolMemberDialog } from "@/features/settings/components/proxy-pool-member-dialog";
 import type { SettingsUpdateRequest, UpstreamProxyAdmin } from "@/features/settings/schemas";
 import type {
   UpstreamProxyEndpointCreateRequest,
+  UpstreamProxyEndpointTestResponse,
   UpstreamProxyPoolCreateRequest,
   UpstreamProxyPoolMemberRequest,
 } from "@/features/settings/schemas";
+import { useDialogState } from "@/hooks/use-dialog-state";
 
 const NO_POOL_VALUE = "__none__";
 
@@ -21,6 +23,7 @@ export type UpstreamProxySettingsProps = {
   busy: boolean;
   onSaveSettings: (payload: SettingsUpdateRequest) => Promise<void>;
   onCreateEndpoint: (payload: UpstreamProxyEndpointCreateRequest) => Promise<unknown>;
+  onTestEndpoint: (endpointId: string) => Promise<UpstreamProxyEndpointTestResponse>;
   onCreatePool: (payload: UpstreamProxyPoolCreateRequest) => Promise<unknown>;
   onAddPoolMember: (poolId: string, payload: UpstreamProxyPoolMemberRequest) => Promise<unknown>;
 };
@@ -30,15 +33,31 @@ export function UpstreamProxySettings({
   busy,
   onSaveSettings,
   onCreateEndpoint,
+  onTestEndpoint,
   onCreatePool,
   onAddPoolMember,
 }: UpstreamProxySettingsProps) {
   const endpointDialog = useDialogState();
   const poolDialog = useDialogState();
   const memberDialog = useDialogState();
+  const [testingEndpointId, setTestingEndpointId] = useState<string | null>(null);
+  const [endpointTestResults, setEndpointTestResults] = useState<Record<string, UpstreamProxyEndpointTestResponse>>({});
 
   const hasEndpoints = admin.endpoints.length > 0;
   const hasPools = admin.pools.length > 0;
+
+  const testEndpoint = async (endpointId: string) => {
+    if (testingEndpointId !== null) {
+      return;
+    }
+    setTestingEndpointId(endpointId);
+    try {
+      const result = await onTestEndpoint(endpointId);
+      setEndpointTestResults((current) => ({ ...current, [endpointId]: result }));
+    } finally {
+      setTestingEndpointId(null);
+    }
+  };
 
   return (
     <section className="rounded-xl border bg-card p-5">
@@ -139,16 +158,57 @@ export function UpstreamProxySettings({
             </div>
             <div className="mt-2 space-y-1.5">
               {hasEndpoints ? (
-                admin.endpoints.map((endpoint) => (
-                  <div key={endpoint.id} className="rounded-md bg-muted/50 px-2.5 py-1.5 text-xs">
-                    <span className="font-medium text-foreground">{endpoint.name}</span>
-                    <span className="text-muted-foreground">
-                      {" "}
-                      · {endpoint.scheme}://{endpoint.username ? `${endpoint.username}@` : ""}
-                      {endpoint.host}:{endpoint.port}
-                    </span>
-                  </div>
-                ))
+                admin.endpoints.map((endpoint) => {
+                  const result = endpointTestResults[endpoint.id];
+                  return (
+                    <div key={endpoint.id} className="space-y-1 rounded-md bg-muted/50 px-2.5 py-1.5 text-xs">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="min-w-0">
+                          <span className="font-medium text-foreground">{endpoint.name}</span>
+                          <span className="text-muted-foreground">
+                            {" "}
+                            · {endpoint.scheme}://{endpoint.username ? `${endpoint.username}@` : ""}
+                            {endpoint.host}:{endpoint.port}
+                          </span>
+                        </span>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          className="h-7 shrink-0 px-2 text-xs"
+                          disabled={busy || testingEndpointId !== null}
+                          onClick={() => void testEndpoint(endpoint.id)}
+                        >
+                          {testingEndpointId === endpoint.id ? (
+                            <Loader2 className="mr-1 h-3 w-3 animate-spin" aria-hidden="true" />
+                          ) : null}
+                          Test
+                        </Button>
+                      </div>
+                      {result ? (
+                        <div
+                          className={
+                            result.ok
+                              ? "flex items-center gap-1 text-emerald-600"
+                              : "flex items-center gap-1 text-destructive"
+                          }
+                        >
+                          {result.ok ? (
+                            <CheckCircle2 className="h-3 w-3" aria-hidden="true" />
+                          ) : (
+                            <XCircle className="h-3 w-3" aria-hidden="true" />
+                          )}
+                          <span>
+                            {result.ok ? "Connection ok" : "Connection failed"}
+                            {result.statusCode ? ` · HTTP ${result.statusCode}` : ""}
+                            {result.elapsedMs !== null && result.elapsedMs !== undefined ? ` · ${result.elapsedMs}ms` : ""}
+                            {!result.ok && result.error ? ` · ${result.error}` : ""}
+                          </span>
+                        </div>
+                      ) : null}
+                    </div>
+                  );
+                })
               ) : (
                 <p className="text-xs text-muted-foreground">No proxy endpoints configured.</p>
               )}

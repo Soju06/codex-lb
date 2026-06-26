@@ -21,6 +21,7 @@ from app.core.clients.proxy import (  # noqa: F401  # noqa: F401
     _inline_content_images,
     _inline_input_image_urls,
     _ws_transport_payload_budget_bytes,
+    apply_codex_installation_metadata,
     filter_inbound_headers,
     pop_compact_timeout_overrides,
     pop_stream_timeout_overrides,
@@ -76,6 +77,7 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
     _prewarm_response_timeout_seconds,
     _release_websocket_response_create_gate,
     _response_create_client_metadata,
+    _response_create_text_with_account_installation_id,
     _security_work_advisory_event,
     _service_as_image_fetch_session,
     _service_get_settings,
@@ -180,6 +182,47 @@ _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS = 5.0
 _HTTP_BRIDGE_BACKGROUND_CLEANUP_WARN_THRESHOLD = 100
 
 
+def _text_with_account_installation_id(text_data: str, codex_installation_id: str | None) -> str:
+    payload = json.loads(text_data)
+    if not isinstance(payload, dict):
+        return text_data
+    apply_codex_installation_metadata(cast(dict[str, JsonValue], payload), codex_installation_id)
+    return json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+
+
+def _enforce_http_bridge_response_create_text_size(
+    request_state: _WebSocketRequestState,
+    text_data: str,
+) -> None:
+    original_request_text = request_state.request_text
+    request_state.request_text = text_data
+    try:
+        _enforce_response_create_size_limit(request_state)
+    finally:
+        request_state.request_text = original_request_text
+
+
+def _request_kind_from_headers(headers: Mapping[str, str] | None) -> str:
+    if not headers:
+        return "normal"
+    raw_turn_metadata = headers.get("x-codex-turn-metadata") or headers.get("X-Codex-Turn-Metadata")
+    if not isinstance(raw_turn_metadata, str):
+        return "normal"
+    try:
+        turn_metadata = json.loads(raw_turn_metadata)
+    except json.JSONDecodeError:
+        return "normal"
+    if not isinstance(turn_metadata, dict):
+        return "normal"
+    raw_request_kind = turn_metadata.get("request_kind")
+    if not isinstance(raw_request_kind, str):
+        return "normal"
+    request_kind = raw_request_kind.strip()
+    if request_kind in {"normal", "prewarm"}:
+        return request_kind
+    return "normal"
+
+
 class _HTTPBridgeRequestSubmitMixin:
     def _prepare_http_bridge_request(
         self: Any,
@@ -189,6 +232,7 @@ class _HTTPBridgeRequestSubmitMixin:
         api_key: ApiKeyData | None,
         api_key_reservation: ApiKeyUsageReservationData | None,
         request_id: str | None = None,
+        enforce_openai_sdk_contract: bool = True,
     ) -> tuple[_WebSocketRequestState, str]:
         request_state, text_data = self._prepare_response_bridge_request_state(
             payload,
@@ -198,8 +242,10 @@ class _HTTPBridgeRequestSubmitMixin:
             attach_event_queue=True,
             transport=_REQUEST_TRANSPORT_HTTP,
             client_metadata=_response_create_client_metadata(payload.to_payload(), headers=headers),
+            headers=headers,
             session_id=_owner_lookup_session_id_from_headers(headers),
             request_log_id=request_id or get_request_id() or ensure_request_id(None),
+            enforce_openai_sdk_contract=enforce_openai_sdk_contract,
         )
         request_state.useragent, request_state.useragent_group = _request_log_useragent_fields(headers)
         return request_state, text_data
@@ -214,9 +260,11 @@ class _HTTPBridgeRequestSubmitMixin:
         attach_event_queue: bool,
         transport: str,
         client_metadata: Mapping[str, JsonValue] | None,
+        headers: Mapping[str, str] | None = None,
         session_id: str | None = None,
         request_id: str | None = None,
         request_log_id: str | None = None,
+        enforce_openai_sdk_contract: bool = True,
     ) -> tuple[_WebSocketRequestState, str]:
         deduped_replayed_input_count: int | None = None
         deduped_replayed_input_fingerprint: str | None = None
@@ -260,12 +308,14 @@ class _HTTPBridgeRequestSubmitMixin:
             awaiting_response_created=True,
             event_queue=asyncio.Queue() if attach_event_queue else None,
             transport=transport,
+            enforce_openai_sdk_contract=enforce_openai_sdk_contract,
             api_key=api_key,
             request_usage_budget=estimate_api_key_request_usage(payload),
             previous_response_id=payload.previous_response_id,
             session_id=_normalize_session_id(session_id),
             input_item_count=input_item_count,
             input_full_fingerprint=input_full_fingerprint,
+            request_kind=_request_kind_from_headers(headers),
         )
         if deduped_replayed_input_count is not None:
             request_state.input_item_count = deduped_replayed_input_count
@@ -308,6 +358,27 @@ class _HTTPBridgeRequestSubmitMixin:
         request_state.request_text = text_data
         _enforce_response_create_size_limit(request_state)
         return request_state, text_data
+
+    def _http_bridge_text_with_account_installation_id(
+        self: Any,
+        session: "_HTTPBridgeSession",
+        request_state: _WebSocketRequestState,
+        text_data: str,
+    ) -> str:
+        codex_installation_id = getattr(session.account, "codex_installation_id", None)
+        updated_text = _text_with_account_installation_id(text_data, codex_installation_id)
+        if request_state.fresh_upstream_request_text is not None:
+            updated_fresh_text = _text_with_account_installation_id(
+                request_state.fresh_upstream_request_text,
+                codex_installation_id,
+            )
+            _enforce_http_bridge_response_create_text_size(request_state, updated_fresh_text)
+            request_state.fresh_upstream_request_text = updated_fresh_text
+        if updated_text == text_data:
+            return text_data
+        request_state.request_text = updated_text
+        _enforce_response_create_size_limit(request_state)
+        return updated_text
 
     async def _inline_http_bridge_image_urls(
         self: Any,
@@ -381,6 +452,7 @@ class _HTTPBridgeRequestSubmitMixin:
         text_data: str,
         queue_limit: int,
     ) -> None:
+        text_data = self._http_bridge_text_with_account_installation_id(session, request_state, text_data)
         if request_state.response_id is not None or request_state.response_event_count > 0:
             _log_http_bridge_event(
                 "submit_after_response_event",
@@ -473,6 +545,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 502,
                 openai_error("upstream_unavailable", "HTTP responses session bridge is retiring"),
             )
+        text_data = self._http_bridge_text_with_account_installation_id(session, request_state, text_data)
         await self._maybe_prewarm_http_bridge_session(
             session,
             request_state=request_state,
@@ -502,6 +575,7 @@ class _HTTPBridgeRequestSubmitMixin:
             session.queued_request_count += 1
         try:
             text_data = await self._inline_http_bridge_image_urls(text_data, request_state)
+            text_data = self._http_bridge_text_with_account_installation_id(session, request_state, text_data)
             self._start_request_state_api_key_reservation_heartbeat(
                 request_state,
                 api_key=request_state.api_key,
@@ -805,7 +879,23 @@ class _HTTPBridgeRequestSubmitMixin:
             if counted_in_queue:
                 session.queued_request_count = max(0, session.queued_request_count - 1)
         self._cancel_request_state_api_key_reservation_heartbeat(request_state)
-        if gate_acquired:
+        if request_state.response_create_gate is not None:
+            if gate_acquired or request_state.response_create_gate_acquired:
+                await _release_websocket_response_create_gate(request_state, session.response_create_gate)
+            else:
+                account_response_create_lease = request_state.account_response_create_lease
+                account_response_create_release = request_state.account_response_create_release
+                request_state.account_response_create_lease = None
+                request_state.account_response_create_release = None
+                if account_response_create_lease is not None and account_response_create_release is not None:
+                    await account_response_create_release(account_response_create_lease)
+                if request_state.response_create_admission is not None:
+                    request_state.response_create_admission.release()
+                    request_state.response_create_admission = None
+                request_state.awaiting_response_created = False
+                request_state.response_create_gate = None
+                request_state.response_create_gate_acquired = False
+        elif gate_acquired:
             await _release_websocket_response_create_gate(request_state, session.response_create_gate)
 
     async def _detach_http_bridge_request(
@@ -910,6 +1000,7 @@ class _HTTPBridgeRequestSubmitMixin:
         send_request: bool = True,
     ) -> bool:
         retry_text_data = text_data
+        using_fresh_replay = False
         if request_state.previous_response_id is not None and send_request:
             # After an ambiguous websocket send failure we cannot prove whether
             # upstream already accepted the continuation. Re-sending the same
@@ -927,6 +1018,7 @@ class _HTTPBridgeRequestSubmitMixin:
             ):
                 return False
             retry_text_data = request_state.fresh_upstream_request_text
+            using_fresh_replay = True
         if request_state.replay_count >= 1:
             return False
         if request_state.response_event_count > 0:
@@ -948,10 +1040,20 @@ class _HTTPBridgeRequestSubmitMixin:
                 restart_reader=True,
             )
             if send_request:
-                if retry_text_data != text_data:
+                retry_text_data = self._http_bridge_text_with_account_installation_id(
+                    session,
+                    request_state,
+                    retry_text_data,
+                )
+                if using_fresh_replay:
                     request_state.previous_response_id = None
                     request_state.proxy_injected_previous_response_id = False
                     request_state.request_text = retry_text_data
+                retry_text_data = _response_create_text_with_account_installation_id(
+                    retry_text_data,
+                    account=session.account,
+                )
+                request_state.request_text = retry_text_data
                 await session.upstream.send_text(retry_text_data)
             _clear_websocket_request_error_overrides(request_state)
             session.last_used_at = _service_time().monotonic()
@@ -1008,6 +1110,7 @@ class _HTTPBridgeRequestSubmitMixin:
         )
         try:
             await self._reconnect_http_bridge_session(session, request_state=request_state)
+            request_text = self._http_bridge_text_with_account_installation_id(session, request_state, request_text)
             await session.upstream.send_text(request_text)
             session.last_used_at = _service_time().monotonic()
             return True
@@ -1074,6 +1177,7 @@ class _HTTPBridgeRequestSubmitMixin:
         )
         try:
             await self._reconnect_http_bridge_session(session, request_state=request_state)
+            request_text = self._http_bridge_text_with_account_installation_id(session, request_state, request_text)
             await session.upstream.send_text(request_text)
             session.last_used_at = _service_time().monotonic()
             return "retried"
@@ -1141,6 +1245,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 request_state=request_state,
                 require_security_work_authorized=True,
             )
+            retry_text = self._http_bridge_text_with_account_installation_id(session, request_state, retry_text)
             await session.upstream.send_text(retry_text)
             session.last_used_at = _service_time().monotonic()
             return True

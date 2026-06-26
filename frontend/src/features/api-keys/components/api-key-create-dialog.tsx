@@ -26,7 +26,20 @@ import { AccountMultiSelect } from "@/features/api-keys/components/account-multi
 import { ExpiryPicker } from "@/features/api-keys/components/expiry-picker";
 import { LimitRulesEditor } from "@/features/api-keys/components/limit-rules-editor";
 import { ModelMultiSelect } from "@/features/api-keys/components/model-multi-select";
-import type { ApiKeyCreateRequest, LimitRuleCreate, ServiceTierType, TrafficClass } from "@/features/api-keys/schemas";
+import type {
+  ApiKeyCreateRequest,
+  LimitRuleCreate,
+  ServiceTierType,
+  TrafficClass,
+  TransportPolicyOverride,
+} from "@/features/api-keys/schemas";
+
+const TRANSPORT_POLICY_FOLLOW_GLOBAL = "follow_global";
+const TRANSPORT_POLICY_LABELS = {
+  smart: "Session-aware",
+  always_http: "Prefer request/response",
+  always_websocket: "Prefer persistent sessions",
+} as const;
 
 const formSchema = z.object({
   name: z.string().min(1, "Name is required"),
@@ -56,6 +69,7 @@ type ApiKeyCreateDraft = {
   enforcedReasoningEffort: string;
   enforcedServiceTier: string;
   trafficClass: TrafficClass;
+  transportPolicyOverride: TransportPolicyOverride | null;
   applyToCodexModel: boolean;
 };
 
@@ -68,6 +82,7 @@ const initialApiKeyCreateDraft: ApiKeyCreateDraft = {
   enforcedReasoningEffort: "none",
   enforcedServiceTier: "none",
   trafficClass: "foreground",
+  transportPolicyOverride: null,
   applyToCodexModel: false,
 };
 
@@ -100,6 +115,7 @@ function ApiKeyCreateForm({ busy, onClose, onSubmit }: ApiKeyCreateFormProps) {
           : draft.enforcedReasoningEffort as "minimal" | "low" | "medium" | "high" | "xhigh",
       enforcedServiceTier: draft.enforcedServiceTier === "none" ? null : draft.enforcedServiceTier as ServiceTierType,
       trafficClass: draft.trafficClass,
+      transportPolicyOverride: draft.transportPolicyOverride,
       expiresAt: draft.expiresAt?.toISOString(),
       limits: validLimits.length > 0 ? validLimits : undefined,
     };
@@ -208,6 +224,31 @@ function ApiKeyCreateForm({ busy, onClose, onSubmit }: ApiKeyCreateFormProps) {
                 <SelectContent>
                   <SelectItem value="foreground">Foreground</SelectItem>
                   <SelectItem value="opportunistic">Opportunistic</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-1">
+              <FormLabel htmlFor="create-api-key-transport-policy">HTTP client routing</FormLabel>
+              <Select
+                value={draft.transportPolicyOverride ?? TRANSPORT_POLICY_FOLLOW_GLOBAL}
+                onValueChange={(value) =>
+                  updateDraft({
+                    transportPolicyOverride:
+                      value === TRANSPORT_POLICY_FOLLOW_GLOBAL ? null : value as TransportPolicyOverride,
+                  })
+                }
+              >
+                <SelectTrigger id="create-api-key-transport-policy">
+                  <SelectValue placeholder="Follow global default" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={TRANSPORT_POLICY_FOLLOW_GLOBAL}>Follow global default</SelectItem>
+                  {Object.entries(TRANSPORT_POLICY_LABELS).map(([value, label]) => (
+                    <SelectItem key={value} value={value}>
+                      {label}
+                    </SelectItem>
+                  ))}
                 </SelectContent>
               </Select>
             </div>

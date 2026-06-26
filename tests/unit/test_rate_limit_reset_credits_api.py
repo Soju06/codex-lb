@@ -385,7 +385,10 @@ async def test_redeem_consumes_fresh_available_credit_when_cached_credit_disappe
     }
     assert result.available_count_before == 1
     assert result.available_count_after == 0
-    assert store.get("acc_1") is None
+    cached = store.get("acc_1")
+    assert cached is not None
+    assert cached.available_count == 0
+    assert [(credit.id, credit.status) for credit in cached.credits] == [("other", "redeemed")]
 
 
 @pytest.mark.asyncio
@@ -435,11 +438,17 @@ async def test_redeem_reselects_soonest_available_credit_from_fresh_fetch() -> N
     }
     assert result.available_count_before == 2
     assert result.available_count_after == 1
-    assert store.get("acc_1") is None
+    cached = store.get("acc_1")
+    assert cached is not None
+    assert cached.available_count == 1
+    assert [(credit.id, credit.status) for credit in cached.credits] == [
+        ("later", "available"),
+        ("fresh-soonest", "redeemed"),
+    ]
 
 
 @pytest.mark.asyncio
-async def test_redeem_selects_soonest_calls_upstream_and_invalidates_cache() -> None:
+async def test_redeem_selects_soonest_calls_upstream_and_preserves_remaining_cache() -> None:
     store = RateLimitResetCreditsStore()
     await store.set(
         "acc_1",
@@ -494,9 +503,13 @@ async def test_redeem_selects_soonest_calls_upstream_and_invalidates_cache() -> 
         "account_id": "workspace-1",
         "credit_id": "soon",
     }
-    # Successful redemption invalidates the in-memory snapshot so the next
-    # dashboard refresh repulls upstream state instead of serving a local edit.
-    assert store.get("acc_1") is None
+    cached = store.get("acc_1")
+    assert cached is not None
+    assert cached.available_count == 1
+    assert [(credit.id, credit.status) for credit in cached.credits] == [
+        ("late", "available"),
+        ("soon", "redeemed"),
+    ]
     assert result.available_count_before == 2
     assert result.available_count_after == 1
     assert isinstance(result.response, ConsumeResetCreditResponseSchema)

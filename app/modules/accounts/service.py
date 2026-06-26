@@ -48,6 +48,7 @@ from app.modules.accounts.schemas import (
 )
 from app.modules.limit_warmup.repository import LimitWarmupRepository
 from app.modules.proxy.account_cache import get_account_selection_cache
+from app.modules.rate_limit_reset_credits.store import invalidate_unselectable_reset_credit_snapshots
 from app.modules.usage.additional_quota_keys import (
     get_additional_display_label_for_quota_key,
     get_additional_quota_routing_policy,
@@ -102,6 +103,7 @@ class AccountsService:
         accounts = await self._repo.list_accounts()
         if not accounts:
             return []
+        await invalidate_unselectable_reset_credit_snapshots(accounts)
         account_ids = [account.id for account in accounts]
         account_id_set = set(account_ids)
         primary_usage = await self._usage_repo.latest_by_account(window="primary") if self._usage_repo else {}

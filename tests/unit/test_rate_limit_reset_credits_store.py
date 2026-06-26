@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 from datetime import datetime
+from types import SimpleNamespace
 
 import pytest
 
 from app.core.clients.rate_limit_reset_credits import RateLimitResetCreditsSnapshot, ResetCreditItem
+from app.db.models import AccountStatus
 from app.modules.rate_limit_reset_credits.store import (
     RateLimitResetCreditsStore,
     get_rate_limit_reset_credits_store,
+    invalidate_unselectable_reset_credit_snapshots,
 )
 
 pytestmark = pytest.mark.unit
@@ -99,6 +102,39 @@ async def test_invalidate_single_account_clears_only_that_key() -> None:
     snapshot_b = store.get("acc_b")
     assert snapshot_b is not None
     assert snapshot_b.available_count == 2
+
+
+@pytest.mark.asyncio
+async def test_invalidate_unselectable_snapshots_clears_ineligible_accounts_only() -> None:
+    store = RateLimitResetCreditsStore()
+    await store.set("acc_active", _snapshot(1))
+    await store.set("acc_paused", _snapshot(2))
+    await store.set("acc_missing_workspace", _snapshot(3))
+
+    await invalidate_unselectable_reset_credit_snapshots(
+        [
+            SimpleNamespace(
+                id="acc_active",
+                chatgpt_account_id="workspace-active",
+                status=AccountStatus.ACTIVE,
+            ),
+            SimpleNamespace(
+                id="acc_paused",
+                chatgpt_account_id="workspace-paused",
+                status=AccountStatus.PAUSED,
+            ),
+            SimpleNamespace(
+                id="acc_missing_workspace",
+                chatgpt_account_id=None,
+                status=AccountStatus.ACTIVE,
+            ),
+        ],
+        store=store,
+    )
+
+    assert store.get("acc_active") is not None
+    assert store.get("acc_paused") is None
+    assert store.get("acc_missing_workspace") is None
 
 
 @pytest.mark.asyncio

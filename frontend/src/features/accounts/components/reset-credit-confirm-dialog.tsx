@@ -91,8 +91,9 @@ export function ResetCreditConfirmDialog({
     ? (snapshotQuery.data?.availableCount ?? 0)
     : summaryAvailableCount;
   const pending = resetCreditConsumeMutation.isPending;
+  const detailFetchUnavailable = (snapshotLoading || snapshotError) && summaryAvailableCount <= 0;
   const confirmDisabled =
-    pending || !accountId || snapshotLoading || snapshotError || availableCount <= 0;
+    pending || !accountId || detailFetchUnavailable || availableCount <= 0;
 
   const handleConfirm = () => {
     if (!accountId || pending) {

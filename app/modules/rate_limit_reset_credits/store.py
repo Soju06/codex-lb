@@ -1,10 +1,24 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime
+from typing import Protocol
 
 import anyio
 
 from app.core.clients.rate_limit_reset_credits import RateLimitResetCreditsSnapshot, ResetCreditItem
+from app.db.models import AccountStatus
+
+
+class ResetCreditAccountLike(Protocol):
+    id: str
+    chatgpt_account_id: str | None
+    status: AccountStatus
+
+
+RESET_CREDITS_INELIGIBLE_STATUSES = frozenset(
+    {AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED}
+)
 
 
 class RateLimitResetCreditsStore:
@@ -91,6 +105,21 @@ _rate_limit_reset_credits_store = RateLimitResetCreditsStore()
 
 def get_rate_limit_reset_credits_store() -> RateLimitResetCreditsStore:
     return _rate_limit_reset_credits_store
+
+
+def is_reset_credit_selectable_account(account: ResetCreditAccountLike) -> bool:
+    return bool(account.chatgpt_account_id) and account.status not in RESET_CREDITS_INELIGIBLE_STATUSES
+
+
+async def invalidate_unselectable_reset_credit_snapshots(
+    accounts: Sequence[ResetCreditAccountLike],
+    *,
+    store: RateLimitResetCreditsStore | None = None,
+) -> None:
+    target_store = store or get_rate_limit_reset_credits_store()
+    for account in accounts:
+        if not is_reset_credit_selectable_account(account):
+            await target_store.invalidate(account.id)
 
 
 def _mark_credit_redeemed(

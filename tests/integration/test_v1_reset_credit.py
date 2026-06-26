@@ -368,6 +368,45 @@ async def test_v1_reset_credit_excludes_accounts_without_chatgpt_account_id(asyn
             "expiredAt": "2031-02-04T04:05:06Z",
         }
     ]
+    assert get_rate_limit_reset_credits_store().get(missing_id_account_id) is None
+
+
+@pytest.mark.asyncio
+async def test_v1_reset_credit_invalidates_snapshot_for_paused_account_before_resume(async_client):
+    await _enable_api_key_auth(async_client)
+    account_id = await _import_account(async_client, "acc-reset-paused-stale", "paused-stale@example.com")
+
+    async with SessionLocal() as session:
+        await session.execute(update(Account).where(Account.id == account_id).values(status=AccountStatus.PAUSED))
+        await session.commit()
+
+    _, key = await _create_api_key(async_client, name="reset-credit-paused-stale")
+    await _seed_snapshot(
+        account_id,
+        available_count=1,
+        credits=[ResetCreditItem(id="credit-stale-paused", status="available", expires_at=None)],
+    )
+
+    paused_response = await async_client.get(
+        "/v1/reset-credit",
+        headers={"Authorization": f"Bearer {key}"},
+    )
+
+    assert paused_response.status_code == 200
+    assert paused_response.json() == []
+    assert get_rate_limit_reset_credits_store().get(account_id) is None
+
+    async with SessionLocal() as session:
+        await session.execute(update(Account).where(Account.id == account_id).values(status=AccountStatus.ACTIVE))
+        await session.commit()
+
+    resumed_response = await async_client.get(
+        "/v1/reset-credit",
+        headers={"Authorization": f"Bearer {key}"},
+    )
+
+    assert resumed_response.status_code == 200
+    assert resumed_response.json() == []
 
 
 @pytest.mark.asyncio
@@ -542,7 +581,7 @@ async def test_v1_reset_credit_post_upstream_conflict_invalidates_stale_snapshot
 
 
 @pytest.mark.asyncio
-async def test_v1_reset_credit_post_consumes_exact_credit_and_invalidates_snapshot(
+async def test_v1_reset_credit_post_consumes_exact_credit_and_preserves_remaining_snapshot(
     async_client,
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -589,7 +628,27 @@ async def test_v1_reset_credit_post_consumes_exact_credit_and_invalidates_snapsh
     consume_args = consume_mock.await_args
     assert consume_args is not None
     assert consume_args.args[2] == "credit-later"
-    assert get_rate_limit_reset_credits_store().get(account_id) is None
+    snapshot = get_rate_limit_reset_credits_store().get(account_id)
+    assert snapshot is not None
+    assert snapshot.available_count == 1
+    assert [(credit.id, credit.status) for credit in snapshot.credits] == [
+        ("credit-soonest", "available"),
+        ("credit-later", "redeemed"),
+    ]
+
+    remaining = await async_client.get(
+        "/v1/reset-credit",
+        headers={"Authorization": f"Bearer {key}"},
+    )
+    assert remaining.status_code == 200
+    assert remaining.json() == [
+        {
+            "account_id": account_id,
+            "email": email,
+            "redeem_id": "credit-soonest",
+            "expiredAt": "2031-05-01T01:00:00Z",
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -659,7 +718,9 @@ async def test_v1_reset_credit_post_force_refreshes_usage_and_invalidates_select
     }
     assert force_refresh_calls == [(account_id, "active")]
     assert selection_cache.invalidations == 1
-    assert get_rate_limit_reset_credits_store().get(account_id) is None
+    snapshot = get_rate_limit_reset_credits_store().get(account_id)
+    assert snapshot is not None
+    assert snapshot.available_count == 0
 
 
 @pytest.mark.asyncio
@@ -742,7 +803,9 @@ async def test_v1_reset_credit_post_refreshes_account_before_consuming_credit(
         "redeemed_at": "2031-05-02T00:30:00Z",
     }
     assert events == ["refresh", "consume"]
-    assert get_rate_limit_reset_credits_store().get(account_id) is None
+    snapshot = get_rate_limit_reset_credits_store().get(account_id)
+    assert snapshot is not None
+    assert snapshot.available_count == 0
 
 
 @pytest.mark.asyncio
@@ -949,7 +1012,9 @@ async def test_v1_reset_credit_post_holds_session_open_through_lock_and_upstream
         "lock_exit",
         "session_exit",
     ]
-    assert get_rate_limit_reset_credits_store().get(account_id) is None
+    snapshot = get_rate_limit_reset_credits_store().get(account_id)
+    assert snapshot is not None
+    assert snapshot.available_count == 0
 
 
 @pytest.mark.asyncio
@@ -1038,4 +1103,6 @@ async def test_v1_reset_credit_post_preserves_success_when_post_redeem_usage_ref
         "redeemed_at": "2031-06-02T00:30:00Z",
     }
     assert "V1 reset credit consume succeeded but usage refresh failed" in caplog.text
-    assert get_rate_limit_reset_credits_store().get(account_id) is None
+    snapshot = get_rate_limit_reset_credits_store().get(account_id)
+    assert snapshot is not None
+    assert snapshot.available_count == 0

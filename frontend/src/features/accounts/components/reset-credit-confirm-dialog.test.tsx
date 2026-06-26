@@ -160,6 +160,41 @@ describe("ResetCreditConfirmDialog", () => {
     expect(screen.getByRole("button", { name: "Redeem credit" })).toBeDisabled();
   });
 
+  it("allows redeem from the summary count while details are still loading", async () => {
+    const user = userEvent.setup();
+    const consumeCalled = vi.fn();
+    server.use(
+      http.get(SNAPSHOT_URL, async () => {
+        await new Promise(() => {});
+        return snapshotResponse();
+      }),
+      http.post(CONSUME_URL, () => {
+        consumeCalled();
+        return HttpResponse.json({
+          code: "rate_limit_reset",
+          windowsReset: 1,
+          redeemedAt: "2026-01-01T12:00:00.000Z",
+        });
+      }),
+    );
+
+    renderWithClient(
+      <ResetCreditConfirmDialog
+        open
+        onOpenChange={vi.fn()}
+        accountId="acc_primary"
+        summaryAvailableCount={2}
+      />,
+    );
+
+    const button = screen.getByRole("button", { name: "Redeem credit" });
+    expect(button).not.toBeDisabled();
+
+    await user.click(button);
+
+    await vi.waitFor(() => expect(consumeCalled).toHaveBeenCalledTimes(1));
+  });
+
   it("shows an error message and keeps confirm disabled when the snapshot fetch fails", async () => {
     server.use(
       http.get(SNAPSHOT_URL, () =>
@@ -185,6 +220,49 @@ describe("ResetCreditConfirmDialog", () => {
 
     expect(await screen.findByText("Reset credits unavailable")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Redeem credit" })).toBeDisabled();
+  });
+
+  it("allows redeem from the summary count when the snapshot fetch fails", async () => {
+    const user = userEvent.setup();
+    const consumeCalled = vi.fn();
+    server.use(
+      http.get(SNAPSHOT_URL, () =>
+        HttpResponse.json(
+          {
+            error: {
+              code: "service_unavailable",
+              message: "Reset credits unavailable",
+            },
+          },
+          { status: 503 },
+        ),
+      ),
+      http.post(CONSUME_URL, () => {
+        consumeCalled();
+        return HttpResponse.json({
+          code: "rate_limit_reset",
+          windowsReset: 1,
+          redeemedAt: "2026-01-01T12:00:00.000Z",
+        });
+      }),
+    );
+
+    renderWithClient(
+      <ResetCreditConfirmDialog
+        open
+        onOpenChange={vi.fn()}
+        accountId="acc_primary"
+        summaryAvailableCount={2}
+      />,
+    );
+
+    expect(await screen.findByText("Reset credits unavailable")).toBeInTheDocument();
+    const button = screen.getByRole("button", { name: "Redeem credit" });
+    expect(button).not.toBeDisabled();
+
+    await user.click(button);
+
+    await vi.waitFor(() => expect(consumeCalled).toHaveBeenCalledTimes(1));
   });
 
   it("handles a null snapshot response without allowing redeem", async () => {

@@ -10,11 +10,13 @@ import pytest
 from app.core.auth import generate_unique_account_id
 from app.core.clients.rate_limit_reset_credits import (
     ConsumeResetCreditResponse,
+    RateLimitResetCreditsSnapshot,
     ResetCreditItem,
     ResetCreditsResponse,
 )
 from app.db.session import SessionLocal
 from app.modules.rate_limit_reset_credits import api as reset_credits_api
+from app.modules.rate_limit_reset_credits.store import get_rate_limit_reset_credits_store
 
 pytestmark = pytest.mark.integration
 
@@ -54,6 +56,10 @@ def _upstream_response(credits: list[ResetCreditItem], available_count: int | No
     return ResetCreditsResponse(credits=credits, available_count=count)
 
 
+def _account_payload(accounts: list[dict[str, Any]], account_id: str) -> dict[str, Any]:
+    return next(account for account in accounts if account["accountId"] == account_id)
+
+
 @pytest.mark.asyncio
 async def test_consume_paused_account_returns_409(async_client, monkeypatch) -> None:
     async def _should_not_fetch(*args: Any, **kwargs: Any) -> ResetCreditsResponse:
@@ -73,6 +79,40 @@ async def test_consume_paused_account_returns_409(async_client, monkeypatch) -> 
     assert response.status_code == 409
     body = response.json()
     assert body["error"]["code"] == "account_not_reset_credit_applicable"
+
+
+@pytest.mark.asyncio
+async def test_account_list_invalidates_cached_reset_credits_for_paused_account(async_client) -> None:
+    account_id = await _import_test_account(
+        async_client,
+        email="reset-list-paused@example.com",
+        account_id="acc_reset_list_paused",
+    )
+    store = get_rate_limit_reset_credits_store()
+    await store.set(
+        account_id,
+        RateLimitResetCreditsSnapshot(
+            available_count=1,
+            credits=[_credit("credit-stale")],
+        ),
+    )
+
+    pause_resp = await async_client.post(f"/api/accounts/{account_id}/pause")
+    assert pause_resp.status_code == 200
+
+    response = await async_client.get("/api/accounts")
+    assert response.status_code == 200
+
+    account = _account_payload(response.json()["accounts"], account_id)
+    assert account["availableResetCredits"] == 0
+    assert store.get(account_id) is None
+
+    reactivate_resp = await async_client.post(f"/api/accounts/{account_id}/reactivate")
+    assert reactivate_resp.status_code == 200
+    resumed = await async_client.get("/api/accounts")
+    assert resumed.status_code == 200
+    resumed_account = _account_payload(resumed.json()["accounts"], account_id)
+    assert resumed_account["availableResetCredits"] == 0
 
 
 @pytest.mark.asyncio

@@ -158,7 +158,12 @@ from app.modules.proxy.types import (
     RateLimitWindowSnapshotData,
 )
 from app.modules.rate_limit_reset_credits.api import serialize_reset_credit_redeem
-from app.modules.rate_limit_reset_credits.store import get_rate_limit_reset_credits_store
+from app.modules.rate_limit_reset_credits.store import (
+    RateLimitResetCreditsStore,
+    get_rate_limit_reset_credits_store,
+    invalidate_unselectable_reset_credit_snapshots,
+    is_reset_credit_selectable_account,
+)
 from app.modules.usage.mappers import usage_history_to_window_row
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 from app.modules.usage.updater import UsageUpdater
@@ -739,11 +744,7 @@ async def v1_usage(
 
 
 def _is_reset_credit_selectable_account(account: Account) -> bool:
-    return bool(account.chatgpt_account_id) and account.status not in (
-        AccountStatus.REAUTH_REQUIRED,
-        AccountStatus.DEACTIVATED,
-        AccountStatus.PAUSED,
-    )
+    return is_reset_credit_selectable_account(account)
 
 
 def _eligible_reset_credit_accounts(accounts: list[Account], api_key: ApiKeyData) -> list[Account]:
@@ -763,8 +764,14 @@ def _project_reset_credit_accounts(accounts: list[Account], api_key: ApiKeyData)
     return [(account.id, account.email) for account in eligible_accounts]
 
 
-def _list_available_reset_credits(account_id: str, email: str) -> list[V1ResetCreditEntry]:
-    snapshot = get_rate_limit_reset_credits_store().get(account_id)
+def _list_available_reset_credits(
+    account_id: str,
+    email: str,
+    *,
+    store: RateLimitResetCreditsStore | None = None,
+) -> list[V1ResetCreditEntry]:
+    target_store = store or get_rate_limit_reset_credits_store()
+    snapshot = target_store.get(account_id)
     if snapshot is None or snapshot.available_count <= 0:
         return []
 
@@ -854,11 +861,13 @@ async def v1_reset_credit(
 ) -> list[V1ResetCreditEntry]:
     async with get_background_session() as session:
         accounts = await AccountsRepository(session).list_accounts(refresh_existing=True)
+        store = get_rate_limit_reset_credits_store()
+        await invalidate_unselectable_reset_credit_snapshots(accounts, store=store)
         eligible_accounts = _project_reset_credit_accounts(accounts, api_key)
 
     response: list[V1ResetCreditEntry] = []
     for account_id, account_email in eligible_accounts:
-        response.extend(_list_available_reset_credits(account_id, account_email))
+        response.extend(_list_available_reset_credits(account_id, account_email, store=store))
     return response
 
 
@@ -907,7 +916,11 @@ async def v1_redeem_reset_credit(
                 if _should_invalidate_v1_reset_credit_snapshot_on_consume_error(exc):
                     await get_rate_limit_reset_credits_store().invalidate(account_id)
                 raise _translate_v1_reset_credit_consume_error(exc) from exc
-            await get_rate_limit_reset_credits_store().invalidate(account_id)
+            await get_rate_limit_reset_credits_store().mark_credit_redeemed(
+                account_id,
+                credit.id,
+                redeemed_at=result.credit.redeemed_at if result.credit else None,
+            )
             try:
                 await _refresh_usage_after_v1_reset_credit_redeem(account_id)
             except Exception:

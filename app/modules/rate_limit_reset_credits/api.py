@@ -292,7 +292,8 @@ async def _redeem_soonest_reset_credit_locked(
 
     redeemed_at = result.credit.redeemed_at if result.credit else None
     available_count_after = max(0, credits_response.available_count - 1)
-    await store.invalidate(account.id)
+    await store.set(account.id, build_snapshot(credits_response))
+    await store.mark_credit_redeemed(account.id, credit.id, redeemed_at=redeemed_at)
 
     if refresh_usage is not None:
         try:

@@ -20,6 +20,7 @@ from app.core.clients.rate_limit_reset_credits import (
 )
 from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
+from app.core.upstream_proxy import UpstreamProxyRouteError
 from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal
 from app.modules.rate_limit_reset_credits.store import get_rate_limit_reset_credits_store
@@ -486,7 +487,9 @@ async def test_v1_reset_credit_post_unavailable_redeem_id_returns_409(async_clie
     )
 
     consume_mock = AsyncMock()
+    resolve_route_mock = AsyncMock(side_effect=AssertionError("route resolution should not run"))
     monkeypatch.setattr("app.modules.proxy.api.consume_reset_credit", consume_mock)
+    monkeypatch.setattr("app.modules.proxy.api._resolve_reset_credit_route", resolve_route_mock)
 
     response = await async_client.post(
         "/v1/reset-credit",
@@ -496,6 +499,52 @@ async def test_v1_reset_credit_post_unavailable_redeem_id_returns_409(async_clie
 
     assert response.status_code == 409
     assert response.json()["error"]["code"] == "invalid_request_error"
+    consume_mock.assert_not_awaited()
+    resolve_route_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_v1_reset_credit_post_returns_503_when_route_resolution_fails_for_available_credit(
+    async_client,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    await _enable_api_key_auth(async_client)
+    account_id = await _import_account(async_client, "acc-reset-post-route-fail", "route-fail@example.com")
+
+    _, key = await _create_api_key(async_client, name="reset-credit-post-route-fail")
+    await _seed_snapshot(
+        account_id,
+        available_count=1,
+        credits=[
+            ResetCreditItem(
+                id="credit-route-fail",
+                status="available",
+                expires_at=datetime(2031, 4, 3, tzinfo=timezone.utc),
+            )
+        ],
+    )
+
+    consume_mock = AsyncMock()
+
+    async def fake_resolve_route(*args, **kwargs):
+        del args, kwargs
+        raise UpstreamProxyRouteError("pool_unavailable", account_id=account_id)
+
+    monkeypatch.setattr("app.modules.proxy.api.consume_reset_credit", consume_mock)
+    monkeypatch.setattr("app.modules.proxy.api._resolve_reset_credit_route", fake_resolve_route)
+
+    response = await async_client.post(
+        "/v1/reset-credit",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"account_id": account_id, "redeem_id": "credit-route-fail"},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["error"] == {
+        "message": "Unable to resolve upstream proxy route",
+        "type": "server_error",
+        "code": "server_error",
+    }
     consume_mock.assert_not_awaited()
 
 
@@ -936,9 +985,9 @@ async def test_v1_reset_credit_post_holds_session_open_through_lock_and_upstream
         "session_enter",
         "repo_init",
         "repo_get",
-        "route_resolve",
         "lock_wait",
         "lock_enter",
+        "route_resolve",
         "consume",
         "refresh_usage",
         "lock_exit",

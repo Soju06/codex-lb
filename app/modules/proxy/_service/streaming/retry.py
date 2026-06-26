@@ -15,7 +15,6 @@ from app.core.balancer import failover_decision
 from app.core.balancer.types import UpstreamError
 from app.core.clients.proxy import ProxyResponseError, _resolve_stream_transport, pop_stream_timeout_overrides
 from app.core.errors import openai_error, response_failed_event
-from app.core.metrics.prometheus import upstream_transport_decisions_total
 from app.core.openai.requests import ResponsesRequest
 from app.core.upstream_proxy import UpstreamProxyRouteError
 from app.core.utils.request_id import ensure_request_id
@@ -26,6 +25,7 @@ from app.modules.api_keys.service import ApiKeyData, ApiKeyUsageReservationData
 from app.modules.proxy._service.observability import (
     _maybe_log_proxy_request_shape,
     _record_continuity_fail_closed,
+    _record_upstream_transport_decision,
 )
 from app.modules.proxy._service.streaming.protocol import _StreamingServiceProtocol
 from app.modules.proxy._service.support import (
@@ -112,25 +112,6 @@ def _resolved_configured_stream_transport(dashboard_settings: Any, base_settings
 
 def _payload_size_estimate_bytes(payload: ResponsesRequest) -> int:
     return len(json.dumps(payload.to_payload(), ensure_ascii=True, separators=(",", ":")).encode("utf-8"))
-
-
-def _record_upstream_transport_decision(
-    *,
-    downstream_transport: str,
-    upstream_transport: str | None,
-    policy: str,
-    sticky: bool,
-    status: str,
-) -> None:
-    if upstream_transport_decisions_total is None:
-        return
-    upstream_transport_decisions_total.labels(
-        downstream_transport=downstream_transport,
-        upstream_transport=upstream_transport or "unknown",
-        policy=policy,
-        sticky="true" if sticky else "false",
-        status="success" if status == "success" else "error",
-    ).inc()
 
 
 class _StreamingRetryMixin:

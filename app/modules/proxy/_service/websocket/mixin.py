@@ -279,6 +279,9 @@ from app.modules.proxy._service.observability import (
     _record_continuity_owner_resolution as _record_continuity_owner_resolution,
 )
 from app.modules.proxy._service.observability import (
+    _record_upstream_transport_decision as _record_upstream_transport_decision,
+)
+from app.modules.proxy._service.observability import (
     _summarize_input as _summarize_input,
 )
 from app.modules.proxy._service.observability import (
@@ -289,6 +292,7 @@ from app.modules.proxy._service.observability import (
 )
 from app.modules.proxy._service.support import (
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
+    _REQUEST_TRANSPORT_HTTP,
     _REQUEST_TRANSPORT_WEBSOCKET,
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
     _account_capacity_wait_payload,
@@ -3294,6 +3298,7 @@ class _WebSocketMixin:
                 reasoning_tokens=reasoning_tokens,
                 reasoning_effort=request_state.reasoning_effort,
                 transport=request_state.transport,
+                upstream_transport=request_state.upstream_transport,
                 service_tier=response_service_tier,
                 requested_service_tier=request_state.requested_service_tier,
                 actual_service_tier=request_state.actual_service_tier,
@@ -3308,6 +3313,18 @@ class _WebSocketMixin:
                 upstream_proxy_fail_closed_reason=request_state.upstream_proxy_fail_closed_reason,
                 useragent=request_state.useragent,
                 useragent_group=request_state.useragent_group,
+            )
+            _record_upstream_transport_decision(
+                downstream_transport=request_state.transport,
+                upstream_transport=request_state.upstream_transport,
+                policy=(
+                    "bridge"
+                    if request_state.transport == _REQUEST_TRANSPORT_HTTP
+                    and request_state.upstream_transport == _REQUEST_TRANSPORT_WEBSOCKET
+                    else "direct"
+                ),
+                sticky=request_state.affinity_policy.key is not None or request_state.previous_response_id is not None,
+                status=status,
             )
 
     async def _write_websocket_connect_failure(
@@ -3334,6 +3351,7 @@ class _WebSocketMixin:
             error_message=error_message,
             reasoning_effort=request_state.reasoning_effort,
             transport=request_state.transport,
+            upstream_transport=request_state.upstream_transport,
             service_tier=request_state.service_tier,
             requested_service_tier=request_state.requested_service_tier,
             actual_service_tier=request_state.actual_service_tier,
@@ -3348,6 +3366,18 @@ class _WebSocketMixin:
             upstream_proxy_fail_closed_reason=request_state.upstream_proxy_fail_closed_reason,
             useragent=request_state.useragent,
             useragent_group=request_state.useragent_group,
+        )
+        _record_upstream_transport_decision(
+            downstream_transport=request_state.transport,
+            upstream_transport=request_state.upstream_transport,
+            policy=(
+                "bridge"
+                if request_state.transport == _REQUEST_TRANSPORT_HTTP
+                and request_state.upstream_transport == _REQUEST_TRANSPORT_WEBSOCKET
+                else "direct"
+            ),
+            sticky=request_state.affinity_policy.key is not None or request_state.previous_response_id is not None,
+            status="error",
         )
 
     async def _emit_websocket_connect_failure(

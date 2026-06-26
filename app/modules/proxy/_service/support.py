@@ -28,6 +28,7 @@ from app.modules.proxy.work_admission import AdmissionLease
 
 logger = logging.getLogger(__name__)
 
+_REQUEST_TRANSPORT_HTTP = "http"
 _REQUEST_TRANSPORT_WEBSOCKET = "websocket"
 _WEBSOCKET_FULL_REPLAY_WAIT_MIN_ITEMS = 20
 _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS = 0.05
@@ -268,6 +269,7 @@ class _WebSocketRequestState:
     awaiting_response_created: bool = False
     event_queue: asyncio.Queue[str | None] | None = None
     transport: str = _REQUEST_TRANSPORT_WEBSOCKET
+    upstream_transport: str | None = _REQUEST_TRANSPORT_WEBSOCKET
     api_key: ApiKeyData | None = None
     request_usage_budget: ApiKeyRequestUsageBudget | None = None
     request_text: str | None = None

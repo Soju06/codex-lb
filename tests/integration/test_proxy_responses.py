@@ -1245,6 +1245,15 @@ async def test_v1_responses_upstream_transport_metric_counts_terminal_errors(
     )
 
     assert response.status_code == 500
+    async with SessionLocal() as session:
+        result = await session.execute(
+            select(RequestLog)
+            .where(RequestLog.model == "gpt-5.1", RequestLog.status == "error")
+            .order_by(RequestLog.requested_at.desc())
+        )
+        log = result.scalars().first()
+    assert log is not None
+    assert log.upstream_transport == "http"
     assert metric_calls == [
         {
             "downstream_transport": "http",

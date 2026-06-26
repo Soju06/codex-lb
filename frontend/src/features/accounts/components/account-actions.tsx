@@ -72,8 +72,14 @@ export function AccountActions({
   const resetCreditDisabled =
     busy ||
     readOnly ||
+    !hasResetCredits ||
     account.status === "paused" ||
     showOperatorRecoveryAction;
+  const resetButtonTitle = !hasResetCredits
+    ? "No banked reset credits available"
+    : resetCountdown
+      ? `Reset (${availableResetCredits}) · ${resetCountdown.label}`
+      : `Reset (${availableResetCredits})`;
 
   return (
     <div className="space-y-3 border-t pt-4">
@@ -205,32 +211,31 @@ export function AccountActions({
           Export
         </Button>
 
-        {hasResetCredits ? (
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            className="relative h-8 gap-1.5 pr-8 text-xs"
-            onClick={() => onResetCredit(account.accountId)}
-            disabled={resetCreditDisabled}
-          >
-            <RotateCcw className="h-3.5 w-3.5" />
-            {`Reset (${availableResetCredits})`}
-            {resetCountdown ? (
-              <span
-                aria-hidden="true"
-                className={[
-                  "pointer-events-none absolute -top-1 right-1 text-[10px] tabular-nums",
-                  resetCountdown.expiringSoon
-                    ? "text-destructive"
-                    : "text-muted-foreground",
-                ].join(" ")}
-              >
-                {resetCountdown.label}
-              </span>
-            ) : null}
-          </Button>
-        ) : null}
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          className="relative h-8 gap-1.5 pr-8 text-xs"
+          title={resetButtonTitle}
+          onClick={() => onResetCredit(account.accountId)}
+          disabled={resetCreditDisabled}
+        >
+          <RotateCcw className="h-3.5 w-3.5" />
+          {`Reset (${availableResetCredits})`}
+          {resetCountdown && hasResetCredits ? (
+            <span
+              aria-hidden="true"
+              className={[
+                "pointer-events-none absolute -top-1 right-1 text-[10px] tabular-nums",
+                resetCountdown.expiringSoon
+                  ? "text-destructive"
+                  : "text-muted-foreground",
+              ].join(" ")}
+            >
+              {resetCountdown.label}
+            </span>
+          ) : null}
+        </Button>
 
         <Button
           type="button"

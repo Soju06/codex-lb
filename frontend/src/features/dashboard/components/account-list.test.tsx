@@ -223,22 +223,29 @@ describe("AccountList", () => {
     expect(rowNames()).toEqual(["Low Account", "Empty Account", "Unknown Account"]);
   });
 
-  it("hides the reset action when no reset credits are available", () => {
+  it("keeps the reset action visible and disabled when no reset credits are available", async () => {
+    const user = userEvent.setup();
+    const onAction = vi.fn();
+    const account = createAccountSummary({
+      accountId: "acc-no-reset",
+      displayName: "No Reset Account",
+      availableResetCredits: 0,
+      resetCreditNearestExpiresAt: null,
+    });
+
     render(
       <AccountList
-        accounts={[
-          createAccountSummary({
-            accountId: "acc-no-reset",
-            displayName: "No Reset Account",
-            availableResetCredits: 0,
-            resetCreditNearestExpiresAt: null,
-          }),
-        ]}
+        accounts={[account]}
+        onAction={onAction}
       />,
     );
 
-    expect(
-      screen.queryByRole("button", { name: "Redeem reset credit for No Reset Account" }),
-    ).not.toBeInTheDocument();
+    const button = screen.getByRole("button", { name: "Redeem reset credit for No Reset Account" });
+    expect(button).toBeDisabled();
+    expect(button).toHaveAttribute("title", "No banked reset credits available");
+
+    await user.click(button);
+
+    expect(onAction).not.toHaveBeenCalledWith(account, "reset-credit");
   });
 });

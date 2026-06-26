@@ -114,11 +114,13 @@ export function AccountCard({ account, showAccountId = false, readOnly = false, 
   const availableResetCredits = account.availableResetCredits ?? 0;
   const hasResetCredits = availableResetCredits > 0;
   const resetCreditDisabled =
-    readOnly || status === "paused" || status === "reauth" || status === "deactivated";
+    readOnly || !hasResetCredits || status === "paused" || status === "reauth" || status === "deactivated";
   const resetCountdown = account.resetCreditNearestExpiresAt
     ? formatSingleUnitRemaining(account.resetCreditNearestExpiresAt)
     : null;
-  const resetButtonTitle = resetCreditDisabled
+  const resetButtonTitle = !hasResetCredits
+    ? "No banked reset credits available"
+    : resetCreditDisabled
     ? status === "paused"
       ? "Resume account to redeem reset credits"
       : status === "reauth" || status === "deactivated"
@@ -206,31 +208,29 @@ export function AccountCard({ account, showAccountId = false, readOnly = false, 
           <ExternalLink className="h-3 w-3" />
           Details
         </Button>
-        {hasResetCredits ? (
-          <Button
-            type="button"
-            size="sm"
-            variant="ghost"
-            className="relative h-7 gap-1.5 rounded-lg pr-8 text-xs text-muted-foreground hover:text-foreground"
-            title={resetButtonTitle}
-            disabled={resetCreditDisabled}
-            onClick={() => onAction?.(account, "reset-credit")}
-          >
-            <RotateCcw className="h-3 w-3" />
-            {`Reset (${availableResetCredits})`}
-            {resetCountdown ? (
-              <span
-                aria-hidden="true"
-                className={cn(
-                  "pointer-events-none absolute -top-1 right-1 text-[10px] tabular-nums",
-                  resetCountdown.expiringSoon ? "text-destructive" : "text-muted-foreground",
-                )}
-              >
-                {resetCountdown.label}
-              </span>
-            ) : null}
-          </Button>
-        ) : null}
+        <Button
+          type="button"
+          size="sm"
+          variant="ghost"
+          className="relative h-7 gap-1.5 rounded-lg pr-8 text-xs text-muted-foreground hover:text-foreground"
+          title={resetButtonTitle}
+          disabled={resetCreditDisabled}
+          onClick={() => onAction?.(account, "reset-credit")}
+        >
+          <RotateCcw className="h-3 w-3" />
+          {`Reset (${availableResetCredits})`}
+          {resetCountdown && hasResetCredits ? (
+            <span
+              aria-hidden="true"
+              className={cn(
+                "pointer-events-none absolute -top-1 right-1 text-[10px] tabular-nums",
+                resetCountdown.expiringSoon ? "text-destructive" : "text-muted-foreground",
+              )}
+            >
+              {resetCountdown.label}
+            </span>
+          ) : null}
+        </Button>
         {status === "paused" && (
           <Button
             type="button"

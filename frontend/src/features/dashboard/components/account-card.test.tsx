@@ -121,12 +121,20 @@ describe("AccountCard", () => {
     expect(screen.getByRole("button", { name: "Reset (2)" })).toBeInTheDocument();
   });
 
-  it("hides reset action when no reset credits are available", () => {
+  it("keeps reset action visible and disabled when no reset credits are available", async () => {
+    const user = userEvent.setup();
+    const onAction = vi.fn();
     const account = createAccountSummary({ availableResetCredits: 0 });
 
-    render(<AccountCard account={account} />);
+    render(<AccountCard account={account} onAction={onAction} />);
 
-    expect(screen.queryByRole("button", { name: /Reset \(/ })).not.toBeInTheDocument();
+    const button = screen.getByRole("button", { name: "Reset (0)" });
+    expect(button).toBeDisabled();
+    expect(button).toHaveAttribute("title", "No banked reset credits available");
+
+    await user.click(button);
+
+    expect(onAction).not.toHaveBeenCalledWith(account, "reset-credit");
   });
 
   it("disables reset action for paused accounts", async () => {

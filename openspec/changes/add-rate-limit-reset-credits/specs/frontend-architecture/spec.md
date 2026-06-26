@@ -2,16 +2,17 @@
 
 ### Requirement: Accounts page exposes a reset-credits redeem action
 
-The Accounts page per-account action bar SHALL render a `Reset (N)` button next to the existing Export button with matching button styling whenever the account reports `available_reset_credits > 0`, where `N` is the available reset-credit count for that account. The button SHALL be hidden when `available_reset_credits` is `0`. Activating the button SHALL open a confirmation dialog that describes redeeming the soonest-expiring banked reset credit for that account and, when credit details are available, shows the soonest credit's expiry in local time using `YYYY-MM-DD HH:MM:SS`. Confirming SHALL submit a redeem request for that account and refresh account data on success.
+The Accounts page per-account action bar SHALL render a `Reset (N)` button next to the existing Export button with matching button styling, where `N` is the available reset-credit count for that account. The button SHALL remain visible and disabled when `available_reset_credits` is `0`. Activating an enabled button SHALL open a confirmation dialog that describes redeeming the soonest-expiring banked reset credit for that account and, when credit details are available, shows the soonest credit's expiry in local time using `YYYY-MM-DD HH:MM:SS`. Confirming SHALL submit a redeem request for that account and refresh account data on success.
 
 #### Scenario: Reset button mirrors Export styling and placement
 - **WHEN** the Accounts page renders the per-account action bar for an account with `available_reset_credits > 0`
 - **THEN** a `Reset (N)` button appears immediately next to the Export button
 - **AND** the button uses the same size, variant, and class as the Export button
 
-#### Scenario: Reset button hidden when no credits available
+#### Scenario: Reset button disabled when no credits available
 - **WHEN** an account reports `available_reset_credits: 0`
-- **THEN** the per-account action bar renders no "Reset" button
+- **THEN** the per-account action bar renders a disabled `Reset (0)` button
+- **AND** activating it does not open the confirmation dialog
 
 #### Scenario: Confirmation required before redeem
 - **WHEN** the operator clicks the "Reset" button
@@ -54,7 +55,7 @@ The Accounts page sort selector SHALL offer a "Most reset credits" option and SH
 
 ### Requirement: Dashboard accounts section exposes a reset-credits redeem action
 
-The Dashboard Accounts section SHALL render a reset action next to the existing Details action in both the table and grid views for any account with `available_reset_credits > 0`. The grid view label SHALL read `Reset (N)`. The table view MAY remain icon-only, but its tooltip/title SHALL include the available reset-credit count. The action SHALL be absent when `available_reset_credits` is `0`. Activating the action SHALL open the same confirmation flow as the Accounts page reset action.
+The Dashboard Accounts section SHALL render a reset action next to the existing Details action in both the table and grid views. The grid view label SHALL read `Reset (N)`. The table view MAY remain icon-only, but its tooltip/title SHALL include the available reset-credit count or explain that no banked reset credits are available. The action SHALL remain visible and disabled when `available_reset_credits` is `0`. Activating an enabled action SHALL open the same confirmation flow as the Accounts page reset action.
 
 #### Scenario: Table view shows reset next to details
 - **WHEN** the Dashboard Accounts section renders in table view for an account with `available_reset_credits > 0`
@@ -64,9 +65,10 @@ The Dashboard Accounts section SHALL render a reset action next to the existing 
 - **WHEN** the Dashboard Accounts section renders in grid view for an account with `available_reset_credits > 0`
 - **THEN** a `Reset (N)` button appears next to the Details button on the account card
 
-#### Scenario: Reset action absent when no credits
+#### Scenario: Reset action disabled when no credits
 - **WHEN** an account reports `available_reset_credits: 0`
-- **THEN** the Dashboard Accounts section renders no "Reset" action for that account in either view
+- **THEN** the Dashboard Accounts section renders a disabled reset action for that account in both views
+- **AND** activating it does not open the confirmation dialog
 
 ### Requirement: Dashboard header shows the total available reset-credit count
 

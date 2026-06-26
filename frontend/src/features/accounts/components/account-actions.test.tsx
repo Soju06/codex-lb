@@ -222,7 +222,9 @@ describe("AccountActions", () => {
     },
   );
 
-  it("hides reset action when no reset credits are available", () => {
+  it("keeps reset action visible and disabled when no reset credits are available", async () => {
+    const user = userEvent.setup();
+    const onResetCredit = vi.fn();
     const account = createAccountSummary({
       availableResetCredits: 0,
       resetCreditNearestExpiresAt: null,
@@ -238,13 +240,19 @@ describe("AccountActions", () => {
         onDelete={vi.fn()}
         onReauth={vi.fn()}
         onExportAuth={vi.fn()}
-        onResetCredit={vi.fn()}
+        onResetCredit={onResetCredit}
         onSecurityWorkAuthorizedChange={vi.fn()}
         onLimitWarmupChange={vi.fn()}
         onRoutingPolicyChange={vi.fn()}
       />,
     );
 
-    expect(screen.queryByRole("button", { name: /Reset \(/ })).not.toBeInTheDocument();
+    const button = screen.getByRole("button", { name: "Reset (0)" });
+    expect(button).toBeDisabled();
+    expect(button).toHaveAttribute("title", "No banked reset credits available");
+
+    await user.click(button);
+
+    expect(onResetCredit).not.toHaveBeenCalled();
   });
 });

@@ -249,9 +249,7 @@ def _http_bridge_should_fallback_to_raw_http(exc: ProxyResponseError) -> bool:
         for marker in _HTTP_BRIDGE_RAW_HTTP_FALLBACK_UPSTREAM_UNAVAILABLE_NON_TRANSIENT_MARKERS
     ):
         return False
-    return any(
-        marker in normalized_message for marker in _HTTP_BRIDGE_RAW_HTTP_FALLBACK_UPSTREAM_UNAVAILABLE_MARKERS
-    )
+    return any(marker in normalized_message for marker in _HTTP_BRIDGE_RAW_HTTP_FALLBACK_UPSTREAM_UNAVAILABLE_MARKERS)
 
 
 def _http_bridge_account_capacity_wait_seconds(exc: ProxyResponseError) -> float | None:
@@ -438,6 +436,8 @@ class _HTTPBridgeStreamingMixin:
         except ProxyResponseError as exc:
             bridge_session_key = getattr(exc, _HTTP_BRIDGE_RAW_HTTP_FALLBACK_KEY_ATTR, None)
             if yielded_any or not isinstance(bridge_session_key, _HTTPBridgeSessionKey):
+                raise
+            if payload.previous_response_id is not None:
                 raise
             if not _http_bridge_should_fallback_to_raw_http(exc):
                 raise

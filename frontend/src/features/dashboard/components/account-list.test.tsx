@@ -241,4 +241,38 @@ describe("AccountList", () => {
       screen.queryByRole("button", { name: "Redeem reset credit for No Reset Account" }),
     ).not.toBeInTheDocument();
   });
+
+  it("shows the banked reset count as a bubble on the reset button", () => {
+    render(
+      <AccountList
+        accounts={[
+          createAccountSummary({
+            accountId: "acc-reset",
+            displayName: "Reset Account",
+            availableResetCredits: 3,
+          }),
+        ]}
+      />,
+    );
+
+    const resetButton = screen.getByRole("button", { name: "Redeem reset credit for Reset Account" });
+    expect(within(resetButton).getByText("3")).toBeInTheDocument();
+  });
+
+  it("caps the reset count bubble at 99+", () => {
+    render(
+      <AccountList
+        accounts={[
+          createAccountSummary({
+            accountId: "acc-many-reset",
+            displayName: "Many Reset Account",
+            availableResetCredits: 120,
+          }),
+        ]}
+      />,
+    );
+
+    const resetButton = screen.getByRole("button", { name: "Redeem reset credit for Many Reset Account" });
+    expect(within(resetButton).getByText("99+")).toBeInTheDocument();
+  });
 });

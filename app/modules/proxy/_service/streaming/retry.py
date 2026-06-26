@@ -15,6 +15,7 @@ from app.core.balancer import failover_decision
 from app.core.balancer.types import UpstreamError
 from app.core.clients.proxy import ProxyResponseError, _resolve_stream_transport, pop_stream_timeout_overrides
 from app.core.errors import openai_error, response_failed_event
+from app.core.metrics.prometheus import upstream_transport_decisions_total
 from app.core.openai.requests import ResponsesRequest
 from app.core.upstream_proxy import UpstreamProxyRouteError
 from app.core.utils.request_id import ensure_request_id
@@ -113,6 +114,25 @@ def _payload_size_estimate_bytes(payload: ResponsesRequest) -> int:
     return len(json.dumps(payload.to_payload(), ensure_ascii=True, separators=(",", ":")).encode("utf-8"))
 
 
+def _record_upstream_transport_decision(
+    *,
+    downstream_transport: str,
+    upstream_transport: str | None,
+    policy: str,
+    sticky: bool,
+    status: str,
+) -> None:
+    if upstream_transport_decisions_total is None:
+        return
+    upstream_transport_decisions_total.labels(
+        downstream_transport=downstream_transport,
+        upstream_transport=upstream_transport or "unknown",
+        policy=policy,
+        sticky="true" if sticky else "false",
+        status="success" if status == "success" else "error",
+    ).inc()
+
+
 class _StreamingRetryMixin:
     async def _stream_with_retry(
         self,
@@ -140,6 +160,8 @@ class _StreamingRetryMixin:
             request_transport=request_transport,
         )
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
+        upstream_transport_policy_label = "explicit" if upstream_stream_transport_override is not None else "configured"
+        upstream_transport_sticky = _http_downstream_request_is_sticky(payload, headers)
         upstream_stream_transport = upstream_stream_transport_override
         if upstream_stream_transport is None:
             configured_transport, explicit_transport = _resolved_configured_stream_transport(settings, base_settings)
@@ -164,7 +186,8 @@ class _StreamingRetryMixin:
                 and upstream_stream_transport == "websocket"
             ):
                 policy, override_applied = _effective_http_downstream_transport_policy(api_key, settings, base_settings)
-                sticky = _http_downstream_request_is_sticky(payload, headers)
+                sticky = upstream_transport_sticky
+                upstream_transport_policy_label = policy
                 policy_transport = _resolve_http_downstream_transport(policy, payload=payload, headers=headers)
                 upstream_stream_transport = "http" if policy_transport == "http" else configured_transport
                 logger.info(
@@ -968,6 +991,13 @@ class _StreamingRetryMixin:
                             settlement,
                             request_id,
                         )
+                        _record_upstream_transport_decision(
+                            downstream_transport=request_transport,
+                            upstream_transport=upstream_stream_transport,
+                            policy=upstream_transport_policy_label,
+                            sticky=upstream_transport_sticky,
+                            status=settlement.status,
+                        )
                         return
                     continue  # outer loop: account failover after transient exhaustion
                 except _RetryableStreamError as exc:
@@ -1266,6 +1296,13 @@ class _StreamingRetryMixin:
                             api_key_reservation,
                             settlement,
                             request_id,
+                        )
+                        _record_upstream_transport_decision(
+                            downstream_transport=request_transport,
+                            upstream_transport=upstream_stream_transport,
+                            policy=upstream_transport_policy_label,
+                            sticky=upstream_transport_sticky,
+                            status=settlement.status,
                         )
                         return
                     error = _parse_openai_error(exc.payload)

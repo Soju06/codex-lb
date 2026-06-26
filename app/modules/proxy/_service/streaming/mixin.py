@@ -1011,6 +1011,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                 reasoning_tokens=reasoning_tokens,
                 reasoning_effort=reasoning_effort,
                 transport=request_transport,
+                upstream_transport=upstream_stream_transport,
                 service_tier=service_tier,
                 requested_service_tier=requested_service_tier,
                 actual_service_tier=actual_service_tier,

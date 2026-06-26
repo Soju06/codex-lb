@@ -213,6 +213,7 @@ class RequestLog(Base):
     upstream_error_code: Mapped[str | None] = mapped_column(String, nullable=True)
     bridge_stage: Mapped[str | None] = mapped_column(String, nullable=True)
     upstream_proxy_route_mode: Mapped[str | None] = mapped_column(String, nullable=True)
+    upstream_transport: Mapped[str | None] = mapped_column(String, nullable=True)
     upstream_proxy_pool_id: Mapped[str | None] = mapped_column(String, nullable=True)
     upstream_proxy_endpoint_id: Mapped[str | None] = mapped_column(String, nullable=True)
     upstream_proxy_fallback_used: Mapped[bool | None] = mapped_column(Boolean, nullable=True)

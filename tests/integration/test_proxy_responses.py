@@ -1120,6 +1120,12 @@ async def test_v1_responses_default_smart_policy_routes_http_downstream_by_stick
             return dashboard_settings
 
     captured: dict[str, object] = {}
+    metric_calls: list[dict[str, object]] = []
+
+    def _record_metric(**labels: object) -> None:
+        metric_calls.append(dict(labels))
+
+    monkeypatch.setattr(streaming_retry_module, "_record_upstream_transport_decision", _record_metric)
 
     async def fake_stream(
         payload,
@@ -1147,6 +1153,21 @@ async def test_v1_responses_default_smart_policy_routes_http_downstream_by_stick
     assert response.status_code == 200
     assert response.json()["id"] == "resp_http_smart"
     assert captured["transport"] == expected_transport
+
+    async with SessionLocal() as session:
+        result = await session.execute(select(RequestLog).where(RequestLog.request_id == "resp_http_smart"))
+        log = result.scalar_one()
+    assert log.transport == "http"
+    assert log.upstream_transport == expected_transport
+    assert metric_calls == [
+        {
+            "downstream_transport": "http",
+            "upstream_transport": expected_transport,
+            "policy": "smart",
+            "sticky": expected_transport == "auto",
+            "status": "success",
+        }
+    ]
 
 
 @pytest.mark.asyncio

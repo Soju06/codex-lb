@@ -1171,6 +1171,92 @@ async def test_v1_responses_default_smart_policy_routes_http_downstream_by_stick
 
 
 @pytest.mark.asyncio
+async def test_v1_responses_upstream_transport_metric_counts_terminal_errors(
+    async_client,
+    monkeypatch,
+):
+    email = "stream-http-smart-error@example.com"
+    raw_account_id = "acc_stream_http_smart_error"
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    app_settings = Settings(
+        http_responses_session_bridge_enabled=False,
+        proxy_request_budget_seconds=75.0,
+        compact_request_budget_seconds=75.0,
+        transcription_request_budget_seconds=120.0,
+        upstream_compact_timeout_seconds=None,
+        upstream_stream_transport="auto",
+        http_downstream_transport_policy="smart",
+        log_proxy_request_payload=False,
+        log_proxy_request_shape=False,
+        log_proxy_request_shape_raw_cache_key=False,
+        log_proxy_service_tier_trace=False,
+        stream_idle_timeout_seconds=300.0,
+        proxy_token_refresh_limit=32,
+        proxy_upstream_websocket_connect_limit=64,
+        proxy_response_create_limit=64,
+        proxy_compact_response_create_limit=16,
+    )
+    dashboard_settings = DashboardSettings(
+        id=1,
+        sticky_threads_enabled=False,
+        upstream_stream_transport="default",
+        http_downstream_transport_policy="smart",
+        prefer_earlier_reset_accounts=False,
+        routing_strategy="usage_weighted",
+        openai_cache_affinity_max_age_seconds=300,
+        import_without_overwrite=False,
+        totp_required_on_login=False,
+        api_key_auth_enabled=False,
+        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,
+        http_responses_session_bridge_gateway_safe_mode=False,
+        sticky_reallocation_budget_threshold_pct=95.0,
+    )
+
+    class _SettingsCache:
+        async def get(self) -> DashboardSettings:
+            return dashboard_settings
+
+    metric_calls: list[dict[str, object]] = []
+
+    def _record_metric(**labels: object) -> None:
+        metric_calls.append(dict(labels))
+
+    async def fake_stream(*_args, **_kwargs):
+        if False:
+            yield ""
+        raise proxy_client_module.ProxyResponseError(
+            500,
+            {"error": {"code": "server_error", "message": "upstream exploded"}},
+        )
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: app_settings)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _SettingsCache())
+    monkeypatch.setattr(streaming_retry_module, "_resolve_stream_transport", lambda **_: "websocket")
+    monkeypatch.setattr(streaming_retry_module, "_record_upstream_transport_decision", _record_metric)
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    response = await async_client.post(
+        "/v1/responses",
+        json={"model": "gpt-5.1", "instructions": "Return exactly OK.", "input": "boom"},
+    )
+
+    assert response.status_code == 500
+    assert metric_calls == [
+        {
+            "downstream_transport": "http",
+            "upstream_transport": "http",
+            "policy": "smart",
+            "sticky": False,
+            "status": "error",
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_v1_responses_without_http_bridge_honors_explicit_websocket_upstream(
     async_client,
     monkeypatch,

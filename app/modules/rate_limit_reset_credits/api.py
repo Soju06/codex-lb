@@ -39,7 +39,6 @@ from app.core.exceptions import (
     DashboardServiceUnavailableError,
 )
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError
-from app.core.usage.reset_credits_refresh_scheduler import _refresh_account_reset_credits
 from app.db.models import Account, AccountStatus
 from app.dependencies import AccountsContext, get_accounts_context
 from app.modules.accounts.auth_manager import AuthManager
@@ -122,14 +121,7 @@ async def get_rate_limit_reset_credits(
     if snapshot is not None:
         return _snapshot_to_response(snapshot)
 
-    await _refresh_account_reset_credits(
-        account,
-        encryptor=TokenEncryptor(),
-        store=store,
-        fetch_fn=fetch_reset_credits,
-        resolve_route=_resolve_reset_credit_route,
-    )
-    return _snapshot_to_response(store.get(account_id))
+    return None
 
 
 @router.post(

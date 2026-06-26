@@ -122,14 +122,9 @@ async def test_get_returns_null_when_no_snapshot_cached(monkeypatch: pytest.Monk
 
 
 @pytest.mark.asyncio
-async def test_get_populates_cache_on_miss_for_active_account(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_get_returns_null_on_cache_miss_for_active_account(monkeypatch: pytest.MonkeyPatch) -> None:
     store = RateLimitResetCreditsStore()
     monkeypatch.setattr(reset_credits_api, "get_rate_limit_reset_credits_store", lambda: store)
-
-    async def _refresh(account, **kwargs: Any) -> None:
-        await store.set("acc_1", _snapshot([_credit("live")], available_count=1))
-
-    monkeypatch.setattr(reset_credits_api, "_refresh_account_reset_credits", _refresh)
 
     class _Repo:
         async def get_by_id(self, account_id: str) -> Account | None:
@@ -141,9 +136,8 @@ async def test_get_populates_cache_on_miss_for_active_account(monkeypatch: pytes
     )
     response = await get_rate_limit_reset_credits("acc_1", context=cast(Any, fake_context))
 
-    assert response is not None
-    assert response.available_count == 1
-    assert response.credits[0].id == "live"
+    assert response is None
+    assert store.get("acc_1") is None
 
 
 @pytest.mark.asyncio
@@ -180,11 +174,6 @@ async def test_get_invalidates_cached_snapshot_for_ineligible_status(
     store = RateLimitResetCreditsStore()
     await store.set("acc_1", _snapshot([_credit("stale")], available_count=1))
     monkeypatch.setattr(reset_credits_api, "get_rate_limit_reset_credits_store", lambda: store)
-
-    async def _should_not_refresh(*args: Any, **kwargs: Any) -> None:
-        raise AssertionError("ineligible account should not refresh reset credits")
-
-    monkeypatch.setattr(reset_credits_api, "_refresh_account_reset_credits", _should_not_refresh)
 
     class _Repo:
         async def get_by_id(self, account_id: str) -> Account | None:

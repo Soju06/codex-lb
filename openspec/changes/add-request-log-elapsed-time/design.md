@@ -10,7 +10,7 @@ The dashboard request-log detail dialog already renders request metadata from `G
 - Persist a nullable `elapsed_ms` value on `request_logs` without changing existing `latency_ms` semantics.
 - Record `elapsed_ms` consistently for unary, SSE/streaming, WebSocket, and warmup-related request-log rows.
 - Expose `elapsedMs` through the dashboard request-log API.
-- Render `Elapsed Time` in Request Details as `elapsed (latency)` with shared formatting and visually de-emphasized latency text.
+- Render separate `Upstream elapsed` and `Total elapsed` fields in Request Details using the shared duration formatter.
 
 **Non-Goals:**
 - Reinterpreting or renaming `latency_ms`.
@@ -24,7 +24,7 @@ The dashboard request-log detail dialog already renders request metadata from `G
 `latency_ms` already has operator value as a proxy-wide duration. Reusing it for upstream-only elapsed timing would silently change semantics and lose the broader signal. A separate nullable `elapsed_ms` column preserves backward compatibility and keeps legacy rows valid.
 
 Alternative considered:
-- Overwrite `latency_ms` with the upstream-only timing. Rejected because it breaks current meaning and prevents the requested `elapsed (latency)` comparison.
+- Overwrite `latency_ms` with the upstream-only timing. Rejected because it breaks current meaning and prevents the requested side-by-side comparison between upstream and total durations.
 
 ### Capture elapsed start and completion at existing request-log write surfaces
 
@@ -41,7 +41,7 @@ Alternative considered:
 
 ### Expose and format both timings in the Request Details dialog only
 
-The user request targets the detail dialog, and the existing UI already reserves a compact metadata grid there. The frontend should add `elapsedMs` to the request-log schema and use a shared formatter for `elapsedMs` and `latencyMs`, producing `x.x ms` up to and including `1000.0 ms`, then `x.x s` above that threshold. The secondary `(${latency})` text should be rendered with smaller dimmer styling so elapsed stays primary.
+The user request targets the detail dialog, and the existing UI already reserves a compact metadata grid there. The frontend should add `elapsedMs` to the request-log schema and use a shared formatter for `elapsedMs` and `latencyMs`, producing `x.x ms` up to and including `1000.0 ms`, then `x.x s` above that threshold. The dialog should present `Upstream elapsed` for `elapsedMs` and `Total elapsed` for `latencyMs` as separate fields so operators can compare the two timings without parsing combined text.
 
 Alternative considered:
 - Add `elapsed_ms` to the main recent-requests table. Rejected as scope expansion beyond the requested enhancement.
@@ -51,14 +51,14 @@ Alternative considered:
 - [Upstream start markers drift from real submission point] → Place the marker adjacent to the actual upstream client invocation in each path and cover it with regression tests per transport.
 - [Not every error path currently has a natural upstream-start marker] → Leave `elapsed_ms` nullable for pre-upstream failures rather than writing misleading zero or proxy-wide values.
 - [Legacy rows do not have `elapsed_ms`] → Keep the field nullable end to end and render a placeholder when absent.
-- [Formatting inconsistency between elapsed and latency] → Use one shared frontend formatter for both values and cover threshold behavior in component or utility tests.
+- [Formatting inconsistency between elapsed and total timings] → Use one shared frontend formatter for both values and cover threshold behavior in component or utility tests.
 
 ## Migration Plan
 
 1. Add a new Alembic revision that introduces nullable `request_logs.elapsed_ms`.
 2. Update ORM and request-log persistence layers to accept and store the new field.
 3. Thread the new value through request-log API schemas and mappers.
-4. Update the dashboard Request Details dialog to render `Elapsed Time` as `elapsed (latency)`.
+4. Update the dashboard Request Details dialog to render separate `Upstream elapsed` and `Total elapsed` fields.
 5. Validate the OpenSpec change and run backend/frontend regression tests.
 
 Rollback: retain code compatibility with `null` values and drop the column in the Alembic downgrade if the change must be reverted before dependent features rely on it.

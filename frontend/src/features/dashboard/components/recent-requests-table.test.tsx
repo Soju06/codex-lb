@@ -82,7 +82,7 @@ describe("RecentRequestsTable", () => {
     expect(formatDurationMs("oops")).toBe("--");
   });
 
-  it("renders elapsed time in request details with dimmed latency text", () => {
+  it("renders upstream and total elapsed values in request details", () => {
     render(
       <RecentRequestsTable
         {...PAGINATION_PROPS}
@@ -98,19 +98,20 @@ describe("RecentRequestsTable", () => {
     );
 
     const dialog = openRequestDetails();
-    const elapsedTimeField = within(dialog).getByText("Elapsed Time").closest("div.space-y-1");
-    const latencyText = within(dialog).getByText("(1.9 s)");
+    const upstreamElapsedField = within(dialog).getByText("Upstream elapsed").closest("div.space-y-1");
+    const totalElapsedField = within(dialog).getByText("Total elapsed").closest("div.space-y-1");
 
-    expect(elapsedTimeField).not.toBeNull();
-    expect(within(dialog).getByText("Elapsed Time")).toBeInTheDocument();
+    expect(upstreamElapsedField).not.toBeNull();
+    expect(totalElapsedField).not.toBeNull();
+    expect(within(dialog).getByText("Upstream elapsed")).toBeInTheDocument();
+    expect(within(dialog).getByText("Total elapsed")).toBeInTheDocument();
     expect(within(dialog).getByText("1.2 s")).toBeInTheDocument();
-    expect(latencyText).toBeInTheDocument();
-    expect(latencyText).toHaveClass("text-xs", "text-muted-foreground");
-    expect(elapsedTimeField).toHaveTextContent("1.2 s");
-    expect(elapsedTimeField).toHaveTextContent("(1.9 s)");
+    expect(within(dialog).getByText("1.9 s")).toBeInTheDocument();
+    expect(upstreamElapsedField).toHaveTextContent("1.2 s");
+    expect(totalElapsedField).toHaveTextContent("1.9 s");
   });
 
-  it("renders an em dash for elapsed time when elapsed ms is missing", () => {
+  it("renders an em dash for upstream elapsed when elapsed ms is missing", () => {
     render(
       <RecentRequestsTable
         {...PAGINATION_PROPS}
@@ -126,15 +127,18 @@ describe("RecentRequestsTable", () => {
     );
 
     const dialog = openRequestDetails();
-    const elapsedTimeField = within(dialog).getByText("Elapsed Time").closest("div.space-y-1");
+    const upstreamElapsedField = within(dialog).getByText("Upstream elapsed").closest("div.space-y-1");
+    const totalElapsedField = within(dialog).getByText("Total elapsed").closest("div.space-y-1");
 
-    expect(elapsedTimeField).not.toBeNull();
-    expect(elapsedTimeField).toHaveTextContent("Elapsed Time");
-    expect(elapsedTimeField).toHaveTextContent("—");
-    expect(elapsedTimeField).not.toHaveTextContent("(1.9 s)");
+    expect(upstreamElapsedField).not.toBeNull();
+    expect(totalElapsedField).not.toBeNull();
+    expect(upstreamElapsedField).toHaveTextContent("Upstream elapsed");
+    expect(upstreamElapsedField).toHaveTextContent("—");
+    expect(totalElapsedField).toHaveTextContent("Total elapsed");
+    expect(totalElapsedField).toHaveTextContent("1.9 s");
   });
 
-  it("renders exact elapsed time threshold values in request details", () => {
+  it("renders exact threshold values for both elapsed fields in request details", () => {
     render(
       <RecentRequestsTable
         {...PAGINATION_PROPS}
@@ -150,11 +154,13 @@ describe("RecentRequestsTable", () => {
     );
 
     const dialog = openRequestDetails();
-    const elapsedTimeField = within(dialog).getByText("Elapsed Time").closest("div.space-y-1");
+    const upstreamElapsedField = within(dialog).getByText("Upstream elapsed").closest("div.space-y-1");
+    const totalElapsedField = within(dialog).getByText("Total elapsed").closest("div.space-y-1");
 
-    expect(elapsedTimeField).not.toBeNull();
-    expect(elapsedTimeField).toHaveTextContent("1000.0 ms");
-    expect(elapsedTimeField).toHaveTextContent("(999.9 ms)");
+    expect(upstreamElapsedField).not.toBeNull();
+    expect(totalElapsedField).not.toBeNull();
+    expect(upstreamElapsedField).toHaveTextContent("1000.0 ms");
+    expect(totalElapsedField).toHaveTextContent("999.9 ms");
   });
 
   it("renders rows with status badges and supports request details and copy actions", async () => {

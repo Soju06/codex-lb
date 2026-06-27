@@ -362,21 +362,12 @@ export function RecentRequestsTable({
                 <RequestDetailField label="Request kind" value={selectedRequest ? (REQUEST_KIND_LABELS[selectedRequest.requestKind] ?? selectedRequest.requestKind) : "—"} />
                 <RequestDetailField label="Plan" value={selectedRequest?.planType ? formatSlug(selectedRequest.planType) : "—"} />
                 <RequestDetailField
-                  label="Elapsed Time"
-                  value={
-                    selectedRequest?.elapsedMs == null ? (
-                      "—"
-                    ) : (
-                      <>
-                        <span>{formatDurationMs(selectedRequest.elapsedMs)}</span>{" "}
-                        {selectedRequest.latencyMs != null ? (
-                          <span className="text-xs text-muted-foreground">
-                            ({formatDurationMs(selectedRequest.latencyMs)})
-                          </span>
-                        ) : null}
-                      </>
-                    )
-                  }
+                  label="Upstream elapsed"
+                  value={selectedRequest?.elapsedMs == null ? "—" : formatDurationMs(selectedRequest.elapsedMs)}
+                />
+                <RequestDetailField
+                  label="Total elapsed"
+                  value={selectedRequest?.latencyMs == null ? "—" : formatDurationMs(selectedRequest.latencyMs)}
                 />
               </div>
               <div className="grid gap-3 sm:grid-cols-3">

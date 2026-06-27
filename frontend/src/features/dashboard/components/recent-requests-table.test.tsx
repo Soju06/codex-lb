@@ -152,6 +152,7 @@ describe("RecentRequestsTable", () => {
     expect(within(dialog).getByTestId("request-archive-panel")).toHaveTextContent("Archive for archive-req-1");
     expect(within(dialog).getByText("rate_limit_exceeded")).toBeInTheDocument();
     expect(dialog.textContent).toContain("Rate limit reached while processing this request");
+    expect(within(dialog).getByText("1.0 s")).toBeInTheDocument();
 
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Copy Request ID" }));
@@ -760,6 +761,7 @@ describe("RecentRequestsTable", () => {
     expect(clientIpField).not.toBeNull();
     expect(clientIpField).toHaveTextContent("Client IP");
     expect(clientIpField).toHaveTextContent("—");
+    expect(within(dialog).getByText("1 ms")).toBeInTheDocument();
   });
 
   it("hides the cost section for total-only cost breakdown rows", () => {

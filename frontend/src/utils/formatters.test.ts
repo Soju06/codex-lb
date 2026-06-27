@@ -9,6 +9,7 @@ import {
   formatCachedTokensMeta,
   formatLocalDateTimeSeconds,
   formatCompactNumber,
+  formatElapsed,
   formatCountdown,
   formatCurrency,
   formatIdTokenLabel,
@@ -126,6 +127,16 @@ describe("formatters", () => {
 
     expect(formatLocalDateTimeSeconds(iso)).toBe(expected);
     expect(formatLocalDateTimeSeconds("bad-date")).toBe("--");
+  });
+  
+it("formats elapsed latency values", () => {
+    expect(formatElapsed(500)).toBe("500 ms");
+    expect(formatElapsed(999)).toBe("999 ms");
+    expect(formatElapsed(1000)).toBe("1.0 s");
+    expect(formatElapsed(1500)).toBe("1.5 s");
+    expect(formatElapsed(3400)).toBe("3.4 s");
+    expect(formatElapsed(null)).toBe("—");
+    expect(formatElapsed(undefined)).toBe("—");
   });
 
   it("formats relative and countdown values", () => {

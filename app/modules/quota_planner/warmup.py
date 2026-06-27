@@ -198,12 +198,15 @@ class QuotaWarmupService:
 
         request_id = f"quota-warmup-{uuid4().hex}"
         started = time.monotonic()
+        upstream_started_at: float | None = None
         try:
+            upstream_started_at = time.monotonic()
             usage = await self._send_warmup_probe(
                 account=account,
                 model=resolved_model,
                 request_id=request_id,
             )
+            elapsed_ms = _elapsed_ms(upstream_started_at)
             if reservation_id is not None:
                 await self._api_keys.finalize_usage_reservation(
                     reservation_id,
@@ -212,6 +215,7 @@ class QuotaWarmupService:
                     output_tokens=usage.output_tokens,
                     cached_input_tokens=usage.cached_input_tokens,
                 )
+            runtime_ms = int((time.monotonic() - started) * 1000)
             await self._request_logs.add_log(
                 account_id=account_id,
                 api_key_id=api_key_id,
@@ -221,7 +225,8 @@ class QuotaWarmupService:
                 output_tokens=usage.output_tokens,
                 cached_input_tokens=usage.cached_input_tokens,
                 reasoning_tokens=usage.reasoning_tokens,
-                latency_ms=int((time.monotonic() - started) * 1000),
+                latency_ms=runtime_ms,
+                elapsed_ms=elapsed_ms,
                 status="success",
                 error_code=None,
                 transport="quota_planner",
@@ -259,6 +264,7 @@ class QuotaWarmupService:
             raise
         except Exception as exc:
             if reservation_id is not None:
+                elapsed_ms = _elapsed_ms(upstream_started_at) if upstream_started_at is not None else None
                 await self._api_keys.fail_usage_reservation(
                     reservation_id,
                     model=resolved_model,
@@ -266,6 +272,9 @@ class QuotaWarmupService:
                     output_tokens=0,
                     cached_input_tokens=0,
                 )
+            else:
+                elapsed_ms = _elapsed_ms(upstream_started_at) if upstream_started_at is not None else None
+            runtime_ms = int((time.monotonic() - started) * 1000)
             await self._request_logs.add_log(
                 account_id=account_id,
                 api_key_id=api_key_id,
@@ -273,7 +282,8 @@ class QuotaWarmupService:
                 model=resolved_model,
                 input_tokens=0,
                 output_tokens=0,
-                latency_ms=int((time.monotonic() - started) * 1000),
+                latency_ms=runtime_ms,
+                elapsed_ms=elapsed_ms,
                 status="error",
                 error_code="warmup_failed",
                 error_message=str(exc),
@@ -465,3 +475,7 @@ def _usage_history_is_fresh(before: object | None, after: object | None) -> bool
     if before_id is not None and after_id is not None:
         return after_id != before_id
     return getattr(after, "recorded_at", None) != getattr(before, "recorded_at", None)
+
+
+def _elapsed_ms(started_at: float) -> int:
+    return max(0, int((time.monotonic() - started_at) * 1000))

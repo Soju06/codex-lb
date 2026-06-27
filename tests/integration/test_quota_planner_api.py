@@ -478,6 +478,160 @@ async def test_quota_planner_warm_now_executes_when_explicitly_gated(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_quota_planner_warm_now_records_upstream_elapsed_before_finalize(monkeypatch, db_setup):
+    del db_setup
+    encryptor = TokenEncryptor()
+    async with SessionLocal() as session:
+        account = Account(
+            id="acc-warm-elapsed-success",
+            email="warm-elapsed-success@example.test",
+            plan_type="plus",
+            access_token_encrypted=encryptor.encrypt("access"),
+            refresh_token_encrypted=encryptor.encrypt("refresh"),
+            id_token_encrypted=encryptor.encrypt("id"),
+            last_refresh=utcnow(),
+            status=AccountStatus.ACTIVE,
+        )
+        session.add(account)
+        repo = QuotaPlannerRepository(session)
+        await repo.upsert_settings(
+            PlannerSettings(
+                mode="auto",
+                allow_synthetic_traffic=True,
+                dry_run=False,
+                max_warmup_credits_per_day=1.0,
+                warmup_model_preference="gpt-5.4-mini",
+            )
+        )
+        await repo.add_window_observation(
+            account_id=account.id,
+            model="gpt-5.4-mini",
+            source="warmup_probe",
+            confidence="observed",
+        )
+        service = QuotaWarmupService(session)
+        captured_logs: list[dict[str, object]] = []
+        phase = {"value": "before_probe"}
+
+        class FakeApiKeys:
+            async def enforce_limits_for_request(self, *args, **kwargs):
+                del args, kwargs
+                return SimpleNamespace(reservation_id="reservation-success")
+
+            async def finalize_usage_reservation(self, reservation_id, **kwargs):
+                del reservation_id, kwargs
+                phase["value"] = "after_finalize"
+
+        class FakeRequestLogs:
+            async def add_log(self, *args, **kwargs):
+                del args
+                captured_logs.append(kwargs)
+
+        async def fake_send(self, *, account, model, request_id):
+            del self, account, model, request_id
+            phase["value"] = "after_probe"
+            return WarmupUsage(input_tokens=3, output_tokens=1, cached_input_tokens=0, reasoning_tokens=None)
+
+        async def noop_record_effect(self, account, model, *, source, confidence):
+            del self, account, model, source, confidence
+
+        monkeypatch.setattr(service, "_api_keys", FakeApiKeys())
+        monkeypatch.setattr(service, "_request_logs", FakeRequestLogs())
+        monkeypatch.setattr(QuotaWarmupService, "_send_warmup_probe", fake_send)
+        monkeypatch.setattr(QuotaWarmupService, "_record_warmup_effect", noop_record_effect)
+        monkeypatch.setattr(
+            "app.modules.quota_planner.warmup._elapsed_ms",
+            lambda started_at: 30 if phase["value"] == "after_probe" else 999,
+        )
+
+        await service.warm_now(
+            account_id=account.id,
+            model="gpt-5.4-mini",
+            api_key_id="api-key-success",
+            force_probe=True,
+        )
+
+    assert captured_logs[0]["elapsed_ms"] == 30
+
+
+@pytest.mark.asyncio
+async def test_quota_planner_warm_now_records_upstream_elapsed_before_fail_reservation(monkeypatch, db_setup):
+    del db_setup
+    encryptor = TokenEncryptor()
+    async with SessionLocal() as session:
+        account = Account(
+            id="acc-warm-elapsed-failure",
+            email="warm-elapsed-failure@example.test",
+            plan_type="plus",
+            access_token_encrypted=encryptor.encrypt("access"),
+            refresh_token_encrypted=encryptor.encrypt("refresh"),
+            id_token_encrypted=encryptor.encrypt("id"),
+            last_refresh=utcnow(),
+            status=AccountStatus.ACTIVE,
+        )
+        session.add(account)
+        repo = QuotaPlannerRepository(session)
+        await repo.upsert_settings(
+            PlannerSettings(
+                mode="auto",
+                allow_synthetic_traffic=True,
+                dry_run=False,
+                max_warmup_credits_per_day=1.0,
+                warmup_model_preference="gpt-5.4-mini",
+            )
+        )
+        await repo.add_window_observation(
+            account_id=account.id,
+            model="gpt-5.4-mini",
+            source="warmup_probe",
+            confidence="observed",
+        )
+        service = QuotaWarmupService(session)
+        captured_logs: list[dict[str, object]] = []
+        phase = {"value": "before_probe"}
+
+        class FakeApiKeys:
+            async def enforce_limits_for_request(self, *args, **kwargs):
+                del args, kwargs
+                return SimpleNamespace(reservation_id="reservation-failure")
+
+            async def fail_usage_reservation(self, reservation_id, **kwargs):
+                del reservation_id, kwargs
+                phase["value"] = "after_fail_reservation"
+
+        class FakeRequestLogs:
+            async def add_log(self, *args, **kwargs):
+                del args
+                captured_logs.append(kwargs)
+
+        async def fail_send(self, *, account, model, request_id):
+            del self, account, model, request_id
+            phase["value"] = "probe_failed"
+            raise RuntimeError("boom")
+
+        async def noop_record_effect(self, account, model, *, source, confidence):
+            del self, account, model, source, confidence
+
+        monkeypatch.setattr(service, "_api_keys", FakeApiKeys())
+        monkeypatch.setattr(service, "_request_logs", FakeRequestLogs())
+        monkeypatch.setattr(QuotaWarmupService, "_send_warmup_probe", fail_send)
+        monkeypatch.setattr(QuotaWarmupService, "_record_warmup_effect", noop_record_effect)
+        monkeypatch.setattr(
+            "app.modules.quota_planner.warmup._elapsed_ms",
+            lambda started_at: 30 if phase["value"] == "probe_failed" else 999,
+        )
+
+        await service.warm_now(
+            account_id=account.id,
+            model="gpt-5.4-mini",
+            api_key_id="api-key-failure",
+            force_probe=True,
+        )
+
+    assert captured_logs[0]["elapsed_ms"] == 30
+
+
+@pytest.mark.asyncio
 async def test_quota_planner_warm_now_ignores_failed_effect_after_prior_observed(monkeypatch, async_client, db_setup):
     del db_setup
     encryptor = TokenEncryptor()

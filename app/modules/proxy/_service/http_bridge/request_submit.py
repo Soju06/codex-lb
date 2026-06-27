@@ -627,6 +627,8 @@ class _HTTPBridgeRequestSubmitMixin:
                 async with session.pending_lock:
                     session.pending_requests.append(request_state)
                 request_enqueued = True
+                if request_state.upstream_started_at is None:
+                    request_state.upstream_started_at = _service_time().monotonic()
                 await session.upstream.send_text(text_data)
                 session.last_used_at = _service_time().monotonic()
         except ProxyResponseError:
@@ -787,6 +789,8 @@ class _HTTPBridgeRequestSubmitMixin:
                     async with session.pending_lock:
                         session.pending_requests.append(warmup_state)
                     request_enqueued = True
+                    if warmup_state.upstream_started_at is None:
+                        warmup_state.upstream_started_at = _service_time().monotonic()
                     await session.upstream.send_text(warmup_text)
                 while True:
                     try:
@@ -1054,6 +1058,8 @@ class _HTTPBridgeRequestSubmitMixin:
                     account=session.account,
                 )
                 request_state.request_text = retry_text_data
+                if request_state.upstream_started_at is None:
+                    request_state.upstream_started_at = _service_time().monotonic()
                 await session.upstream.send_text(retry_text_data)
             _clear_websocket_request_error_overrides(request_state)
             session.last_used_at = _service_time().monotonic()
@@ -1111,6 +1117,8 @@ class _HTTPBridgeRequestSubmitMixin:
         try:
             await self._reconnect_http_bridge_session(session, request_state=request_state)
             request_text = self._http_bridge_text_with_account_installation_id(session, request_state, request_text)
+            if request_state.upstream_started_at is None:
+                request_state.upstream_started_at = _service_time().monotonic()
             await session.upstream.send_text(request_text)
             session.last_used_at = _service_time().monotonic()
             return True
@@ -1178,6 +1186,8 @@ class _HTTPBridgeRequestSubmitMixin:
         try:
             await self._reconnect_http_bridge_session(session, request_state=request_state)
             request_text = self._http_bridge_text_with_account_installation_id(session, request_state, request_text)
+            if request_state.upstream_started_at is None:
+                request_state.upstream_started_at = _service_time().monotonic()
             await session.upstream.send_text(request_text)
             session.last_used_at = _service_time().monotonic()
             return "retried"
@@ -1246,6 +1256,8 @@ class _HTTPBridgeRequestSubmitMixin:
                 require_security_work_authorized=True,
             )
             retry_text = self._http_bridge_text_with_account_installation_id(session, request_state, retry_text)
+            if request_state.upstream_started_at is None:
+                request_state.upstream_started_at = _service_time().monotonic()
             await session.upstream.send_text(retry_text)
             session.last_used_at = _service_time().monotonic()
             return True

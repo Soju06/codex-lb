@@ -335,6 +335,7 @@ export function createRequestLogEntry(
 			outputUsd: 0.0066,
 			totalUsd: 0.0132,
 		},
+		elapsedMs: 880,
 		latencyMs: 920,
 		...overrides,
 	});

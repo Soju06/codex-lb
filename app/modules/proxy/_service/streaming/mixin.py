@@ -267,6 +267,7 @@ from app.modules.proxy._service.observability import (
 from app.modules.proxy._service.observability import (
     _truncate_identifier as _truncate_identifier,
 )
+from app.modules.proxy._service.request_log import _elapsed_ms
 from app.modules.proxy._service.streaming.helpers import (
     _handle_stream_error as _handle_stream_error_helper,
 )
@@ -507,6 +508,7 @@ class _StreamingMixin(_StreamingRetryMixin):
         saw_text_delta = False
         terminal_event_seen = False
         latency_first_token_ms: int | None = None
+        upstream_started_at: float | None = None
         if tool_call_dedupe is None:
             tool_call_dedupe = _WebSocketUpstreamControl()
         suppressed_duplicate_tool_call = False
@@ -535,6 +537,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                 surface="stream",
             )
             response_create_lease = await proxy._get_work_admission().acquire_response_create()
+            upstream_started_at = time.monotonic()
             if upstream_stream_transport is not None:
                 stream = _facade()._call_stream_with_supported_optional_kwargs(
                     _facade().core_stream_responses,
@@ -1061,6 +1064,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                 request_id=response_id,
                 model=model,
                 latency_ms=int((time.monotonic() - start) * 1000),
+                elapsed_ms=_elapsed_ms(upstream_started_at),
                 status=status,
                 error_code=error_code,
                 error_message=error_message,

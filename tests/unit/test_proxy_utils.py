@@ -7607,6 +7607,7 @@ async def test_compact_responses_logs_service_tier_trace_and_generates_request_i
     assert request_logs.calls[0]["service_tier"] == "default"
     assert request_logs.calls[0]["requested_service_tier"] == "priority"
     assert request_logs.calls[0]["actual_service_tier"] == "default"
+    assert request_logs.calls[0]["elapsed_ms"] is not None
     assert request_id
     assert f"request_id={request_id}" in caplog.text
     assert "kind=compact" in caplog.text
@@ -19272,6 +19273,9 @@ async def test_compact_responses_refresh_connection_reset_fails_over(monkeypatch
     record_success.assert_awaited_once_with(account_b)
     assert request_logs.calls[0]["status"] == "success"
     assert request_logs.calls[0]["account_id"] == account_b.id
+    assert request_logs.calls[0]["elapsed_ms"] is not None
+    assert request_logs.calls[0]["elapsed_ms"] is not None
+    assert request_logs.calls[0]["elapsed_ms"] is not None
 
 
 @pytest.mark.asyncio
@@ -19382,6 +19386,7 @@ async def test_compact_responses_forced_refresh_connection_reset_preserves_file_
     handle_stream_error.assert_not_awaited()
     assert request_logs.calls[0]["status"] == "error"
     assert request_logs.calls[0]["account_id"] == account.id
+    assert request_logs.calls[0]["elapsed_ms"] is not None
     assert request_logs.calls[0]["error_code"] == "upstream_unavailable"
 
 
@@ -22273,6 +22278,68 @@ async def test_thread_goal_upstream_connection_reset_without_failover_records_on
 
 
 @pytest.mark.asyncio
+async def test_thread_goal_upstream_failover_preserves_first_elapsed_start(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account_a = _make_account("acc_thread_goal_elapsed_a")
+    account_b = _make_account("acc_thread_goal_elapsed_b")
+    seen_excluded_account_ids: list[set[str]] = []
+    attempt_starts: list[float] = []
+    elapsed_starts: list[float | None] = []
+    monotonic_last = 0.0
+
+    _install_two_account_selection(monkeypatch, service, account_a, account_b, seen_excluded_account_ids)
+    monkeypatch.setattr(service._load_balancer, "record_error", AsyncMock())
+    monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=[account_a, account_b]))
+    monkeypatch.setattr(proxy_service, "_remaining_budget_seconds", lambda _deadline: 30.0)
+    monkeypatch.setattr(
+        proxy_service,
+        "_elapsed_ms",
+        lambda started: elapsed_starts.append(started) or int(started * 1000),
+    )
+
+    def monotonic() -> float:
+        nonlocal monotonic_last
+        monotonic_last += 10.0
+        return monotonic_last
+
+    monkeypatch.setattr(proxy_service.time, "monotonic", monotonic)
+
+    async def fake_thread_goal_request(
+        operation: str,
+        payload: Mapping[str, JsonValue],
+        headers: Mapping[str, str],
+        access_token: str,
+        account_id: str | None,
+        *,
+        method: str,
+        timeout_seconds: float,
+        **kwargs: object,
+    ) -> dict[str, JsonValue]:
+        del operation, payload, headers, access_token, method, timeout_seconds, kwargs
+        attempt_starts.append(monotonic_last)
+        if account_id == account_a.chatgpt_account_id:
+            raise proxy_module.ProxyResponseError(
+                502,
+                openai_error("upstream_unavailable", "[Errno 104] Connection reset by peer"),
+                failure_phase="connect",
+            )
+        return {"goal": {"id": "goal-ok-after-elapsed-failover"}}
+
+    monkeypatch.setattr(proxy_service, "core_thread_goal_request", fake_thread_goal_request)
+
+    response = await service.thread_goal_request("get", {}, {"session_id": "sid-thread-goal"})
+
+    assert response == {"goal": {"id": "goal-ok-after-elapsed-failover"}}
+    assert seen_excluded_account_ids == [set(), {account_a.id}]
+    assert len(attempt_starts) == 2
+    assert attempt_starts[0] != attempt_starts[1]
+    assert elapsed_starts == [attempt_starts[0]]
+    assert request_logs.calls[0]["elapsed_ms"] == int(attempt_starts[0] * 1000)
+
+
+@pytest.mark.asyncio
 async def test_codex_control_refresh_connection_reset_fails_over(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
@@ -22323,6 +22390,7 @@ async def test_codex_control_refresh_connection_reset_fails_over(monkeypatch):
     record_success.assert_awaited_once_with(account_b)
     assert request_logs.calls[0]["status"] == "success"
     assert request_logs.calls[0]["account_id"] == account_b.id
+    assert request_logs.calls[0]["elapsed_ms"] is not None
 
 
 @pytest.mark.asyncio
@@ -22434,6 +22502,7 @@ async def test_transcribe_refresh_connection_reset_fails_over(monkeypatch):
     record_success.assert_awaited_once_with(account_b)
     assert request_logs.calls[0]["status"] == "success"
     assert request_logs.calls[0]["account_id"] == account_b.id
+    assert request_logs.calls[0]["elapsed_ms"] is not None
 
 
 @pytest.mark.asyncio
@@ -22477,6 +22546,7 @@ async def test_files_create_refresh_connection_reset_fails_over(monkeypatch):
     record_success.assert_awaited_once_with(account_b)
     assert request_logs.calls[0]["status"] == "success"
     assert request_logs.calls[0]["account_id"] == account_b.id
+    assert request_logs.calls[0]["elapsed_ms"] is not None
 
 
 @pytest.mark.asyncio
@@ -22565,6 +22635,7 @@ async def test_files_finalize_pinned_refresh_connection_reset_fails_closed(monke
     record_success.assert_not_awaited()
     assert request_logs.calls[0]["status"] == "error"
     assert request_logs.calls[0]["account_id"] == account.id
+    assert request_logs.calls[0]["elapsed_ms"] is None
 
 
 @pytest.mark.asyncio

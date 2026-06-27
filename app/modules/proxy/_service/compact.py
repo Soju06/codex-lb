@@ -35,6 +35,7 @@ from app.modules.api_keys.service import (
     ApiKeyRequestUsageBudget,
     ApiKeyUsageReservationData,
 )
+from app.modules.proxy._service.request_log import _elapsed_ms
 from app.modules.proxy._service.support import _request_log_useragent_fields, _RequestLogFailureMetadata
 from app.modules.proxy.affinity import (
     _AffinityPolicy,
@@ -446,6 +447,7 @@ class _CompactMixin:
         route_endpoint_id: str | None = None
         route_fallback_used: bool | None = None
         route_fail_closed_reason: str | None = None
+        upstream_started_at: float | None = None
         proxy._raise_for_unsupported_input_image_references(payload)
         rewritten_file_account_id = await proxy._resolve_file_account_for_responses(payload, headers)
         settings = await _service_get_settings_cache().get()
@@ -526,7 +528,7 @@ class _CompactMixin:
                 target: Account,
                 account_response_create_lease: AccountLease | None = None,
             ) -> CompactResponsePayload:
-                nonlocal route_fallback_used, route_mode, route_pool_id, route_endpoint_id
+                nonlocal route_fallback_used, route_mode, route_pool_id, route_endpoint_id, upstream_started_at
                 access_token = proxy._encryptor.decrypt(target.access_token_encrypted)
                 account_id = _header_account_id(target.chatgpt_account_id)
                 remaining_budget = _remaining_budget_seconds(deadline)
@@ -576,7 +578,8 @@ class _CompactMixin:
                         route_pool_id = route.pool_id
                         route_endpoint_id = route.endpoint_id
                     route_trace = UpstreamProxyRouteTrace()
-                    upstream_started_at = time.monotonic()
+                    if upstream_started_at is None:
+                        upstream_started_at = _service_time().monotonic()
                     try:
                         logger.info(
                             "Compact upstream call start request_id=%s account_id=%s timeout_seconds=%.2f "
@@ -1121,6 +1124,7 @@ class _CompactMixin:
                 request_id=request_id,
                 model=payload.model,
                 latency_ms=int((_service_time().monotonic() - start) * 1000),
+                elapsed_ms=_elapsed_ms(upstream_started_at),
                 status=log_status,
                 error_code=log_error_code,
                 error_message=log_error_message,

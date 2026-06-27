@@ -2,6 +2,8 @@ import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { RecentRequestsTable } from "@/features/dashboard/components/recent-requests-table";
+import { createRequestLogEntry } from "@/test/mocks/factories";
+import { formatDurationMs } from "@/utils/formatters";
 
 const ISO = "2026-01-01T12:00:00+00:00";
 const NULL_FAILURE_METADATA = {
@@ -67,6 +69,94 @@ describe("RecentRequestsTable", () => {
     }
   });
 
+  it("prepares elapsed and latency values with the shared duration formatter", () => {
+    const elapsedRequest = createRequestLogEntry({ requestId: "req-elapsed", elapsedMs: 850, latencyMs: 1200 });
+    const latencyOnlyRequest = createRequestLogEntry({ requestId: "req-latency", elapsedMs: null, latencyMs: 999.94 });
+    const thresholdRequest = createRequestLogEntry({ requestId: "req-threshold", elapsedMs: 1000, latencyMs: 999.94 });
+
+    expect(formatDurationMs(elapsedRequest.elapsedMs)).toBe("850.0 ms");
+    expect(formatDurationMs(elapsedRequest.latencyMs)).toBe("1.2 s");
+    expect(formatDurationMs(latencyOnlyRequest.latencyMs)).toBe("999.9 ms");
+    expect(formatDurationMs(thresholdRequest.elapsedMs)).toBe("1000.0 ms");
+    expect(formatDurationMs(latencyOnlyRequest.elapsedMs)).toBe("--");
+    expect(formatDurationMs("oops")).toBe("--");
+  });
+
+  it("renders elapsed time in request details with dimmed latency text", () => {
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={[
+          createRequestLogEntry({
+            requestId: "req-elapsed-details",
+            elapsedMs: 1243,
+            latencyMs: 1876,
+          }),
+        ]}
+      />,
+    );
+
+    const dialog = openRequestDetails();
+    const elapsedTimeField = within(dialog).getByText("Elapsed Time").closest("div.space-y-1");
+    const latencyText = within(dialog).getByText("(1.9 s)");
+
+    expect(elapsedTimeField).not.toBeNull();
+    expect(within(dialog).getByText("Elapsed Time")).toBeInTheDocument();
+    expect(within(dialog).getByText("1.2 s")).toBeInTheDocument();
+    expect(latencyText).toBeInTheDocument();
+    expect(latencyText).toHaveClass("text-xs", "text-muted-foreground");
+    expect(elapsedTimeField).toHaveTextContent("1.2 s");
+    expect(elapsedTimeField).toHaveTextContent("(1.9 s)");
+  });
+
+  it("renders an em dash for elapsed time when elapsed ms is missing", () => {
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={[
+          createRequestLogEntry({
+            requestId: "req-null-elapsed-details",
+            elapsedMs: null,
+            latencyMs: 1876,
+          }),
+        ]}
+      />,
+    );
+
+    const dialog = openRequestDetails();
+    const elapsedTimeField = within(dialog).getByText("Elapsed Time").closest("div.space-y-1");
+
+    expect(elapsedTimeField).not.toBeNull();
+    expect(elapsedTimeField).toHaveTextContent("Elapsed Time");
+    expect(elapsedTimeField).toHaveTextContent("—");
+    expect(elapsedTimeField).not.toHaveTextContent("(1.9 s)");
+  });
+
+  it("renders exact elapsed time threshold values in request details", () => {
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={[
+          createRequestLogEntry({
+            requestId: "req-threshold-details",
+            elapsedMs: 1000,
+            latencyMs: 999.94,
+          }),
+        ]}
+      />,
+    );
+
+    const dialog = openRequestDetails();
+    const elapsedTimeField = within(dialog).getByText("Elapsed Time").closest("div.space-y-1");
+
+    expect(elapsedTimeField).not.toBeNull();
+    expect(elapsedTimeField).toHaveTextContent("1000.0 ms");
+    expect(elapsedTimeField).toHaveTextContent("(999.9 ms)");
+  });
+
   it("renders rows with status badges and supports request details and copy actions", async () => {
     const longError = "Rate limit reached while processing this request ".repeat(3);
     const writeText = vi.fn().mockResolvedValue(undefined);
@@ -126,11 +216,12 @@ describe("RecentRequestsTable", () => {
                cachedInputUsd: 0.001,
                outputUsd: 0.005,
                totalUsd: 0.01,
-             },
-             latencyMs: 1000,
-           },
-         ]}
-       />,
+              },
+              elapsedMs: null,
+              latencyMs: 1000,
+            },
+          ]}
+        />,
     );
 
     expect(screen.getByText("Primary Account")).toBeInTheDocument();

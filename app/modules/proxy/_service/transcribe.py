@@ -27,6 +27,7 @@ from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteErr
 from app.core.utils.request_id import ensure_request_id, get_request_id
 from app.db.models import Account
 from app.modules.api_keys.service import ApiKeyData
+from app.modules.proxy._service.request_log import _elapsed_ms
 from app.modules.proxy._service.support import _request_log_useragent_fields, _RequestLogFailureMetadata
 from app.modules.proxy.helpers import _header_account_id, _normalize_error_code, _parse_openai_error
 from app.modules.proxy.load_balancer import AccountSelection
@@ -182,6 +183,7 @@ class _TranscribeMixin:
         route_endpoint_id: str | None = None
         route_fallback_used: bool | None = None
         route_fail_closed_reason: str | None = None
+        upstream_started_at: float | None = None
         transcribe_model = "gpt-4o-transcribe"
 
         settings = await _service_get_settings_cache().get()
@@ -209,7 +211,7 @@ class _TranscribeMixin:
             account_id_value = account.id
 
             async def _call_transcribe(target: Account) -> dict[str, JsonValue]:
-                nonlocal route_mode, route_pool_id, route_endpoint_id, route_fallback_used
+                nonlocal route_mode, route_pool_id, route_endpoint_id, route_fallback_used, upstream_started_at
                 access_token = proxy._encryptor.decrypt(target.access_token_encrypted)
                 account_id = _header_account_id(target.chatgpt_account_id)
                 remaining_budget = _remaining_budget_seconds(deadline)
@@ -232,6 +234,8 @@ class _TranscribeMixin:
                     total_timeout_seconds=remaining_budget,
                 )
                 try:
+                    if upstream_started_at is None:
+                        upstream_started_at = _service_time().monotonic()
                     return await _call_with_supported_optional_kwargs(
                         _service_core_transcribe_audio(),
                         audio_bytes,
@@ -412,6 +416,7 @@ class _TranscribeMixin:
                 request_id=request_id,
                 model=transcribe_model,
                 latency_ms=int((_service_time().monotonic() - start) * 1000),
+                elapsed_ms=_elapsed_ms(upstream_started_at),
                 status=log_status,
                 error_code=log_error_code,
                 error_message=log_error_message,

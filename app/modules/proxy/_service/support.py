@@ -295,6 +295,7 @@ class _WebSocketRequestState:
     reasoning_effort: str | None
     api_key_reservation: ApiKeyUsageReservationData | None
     started_at: float
+    upstream_started_at: float | None = None
     latency_first_token_ms: int | None = None
     request_log_id: str | None = None
     requested_service_tier: str | None = None

@@ -116,6 +116,14 @@ export function formatCurrency(value: unknown): string {
   return numeric === null ? "--" : currencyFormatter.format(numeric);
 }
 
+export function formatDurationMs(value: unknown): string {
+  const numeric = toNumber(value);
+  if (numeric === null) {
+    return "--";
+  }
+  return numeric > 1000 ? `${(numeric / 1000).toFixed(1)} s` : `${numeric.toFixed(1)} ms`;
+}
+
 export function formatPercent(value: unknown): string {
   const numeric = toNumber(value);
   if (numeric === null) {

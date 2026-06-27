@@ -291,6 +291,7 @@ from app.modules.proxy._service.observability import (
 from app.modules.proxy._service.observability import (
     _truncate_identifier as _truncate_identifier,
 )
+from app.modules.proxy._service.request_log import _elapsed_ms
 from app.modules.proxy._service.support import (
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
     _REQUEST_TRANSPORT_HTTP,
@@ -1042,8 +1043,12 @@ class _WebSocketMixin:
                                 account=account,
                             )
                             request_state.request_text = text_data
+                            if request_state.upstream_started_at is None:
+                                request_state.upstream_started_at = time.monotonic()
                         await upstream.send_text(text_data)
                     elif bytes_data is not None:
+                        if request_state is not None and request_state.upstream_started_at is None:
+                            request_state.upstream_started_at = time.monotonic()
                         await upstream.send_bytes(bytes_data)
                 except ProxyResponseError as exc:
                     error = _parse_openai_error(exc.payload)
@@ -3367,6 +3372,7 @@ class _WebSocketMixin:
                 request_id=request_log_response_id,
                 model=request_state.model or "",
                 latency_ms=latency_ms,
+                elapsed_ms=_elapsed_ms(request_state.upstream_started_at),
                 status=status,
                 error_code=error_code,
                 error_message=error_message,
@@ -3425,6 +3431,7 @@ class _WebSocketMixin:
             request_id=request_state.request_log_id or request_state.request_id,
             model=request_state.model or "",
             latency_ms=int((time.monotonic() - request_state.started_at) * 1000),
+            elapsed_ms=_elapsed_ms(request_state.upstream_started_at),
             status="error",
             error_code=error_code,
             error_message=error_message,
@@ -3639,6 +3646,7 @@ class _WebSocketMixin:
                 request_id=request_state.response_id or request_state.request_log_id or request_state.request_id,
                 model=request_state.model or "",
                 latency_ms=latency_ms,
+                elapsed_ms=_elapsed_ms(request_state.upstream_started_at),
                 status=status,
                 error_code=request_error_code,
                 error_message=request_error_message,

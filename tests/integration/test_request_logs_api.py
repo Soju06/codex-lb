@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 import pytest
+from sqlalchemy import text
 
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
@@ -124,6 +125,82 @@ async def test_request_logs_api_returns_recent(async_client, db_setup):
     }
     assert older["transport"] == "http"
     assert older["requestKind"] == "normal"
+
+
+@pytest.mark.asyncio
+async def test_request_logs_api_returns_elapsed_ms(async_client, db_setup):
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        logs_repo = RequestLogsRepository(session)
+        await accounts_repo.upsert(_make_account("acc_logs_elapsed", "elapsed@example.com"))
+
+        now = utcnow()
+        await logs_repo.add_log(
+            account_id="acc_logs_elapsed",
+            request_id="req_logs_elapsed_present",
+            model="gpt-5.1",
+            input_tokens=100,
+            output_tokens=200,
+            latency_ms=1200,
+            elapsed_ms=850,
+            status="success",
+            error_code=None,
+            requested_at=now,
+            transport="http",
+        )
+        await session.execute(
+            text(
+                """
+                INSERT INTO request_logs (
+                    account_id,
+                    request_id,
+                    requested_at,
+                    model,
+                    input_tokens,
+                    output_tokens,
+                    latency_ms,
+                    status,
+                    transport
+                ) VALUES (
+                    :account_id,
+                    :request_id,
+                    :requested_at,
+                    :model,
+                    :input_tokens,
+                    :output_tokens,
+                    :latency_ms,
+                    :status,
+                    :transport
+                )
+                """
+            ),
+            {
+                "account_id": "acc_logs_elapsed",
+                "request_id": "req_logs_elapsed_legacy",
+                "requested_at": now - timedelta(minutes=1),
+                "model": "legacy-model",
+                "input_tokens": 50,
+                "output_tokens": 0,
+                "latency_ms": 300,
+                "status": "success",
+                "transport": "http",
+            },
+        )
+        await session.commit()
+
+    response = await async_client.get("/api/request-logs?limit=2")
+    assert response.status_code == 200
+    payload = response.json()["requests"]
+    assert len(payload) == 2
+
+    latest = payload[0]
+    assert latest["requestId"] == "req_logs_elapsed_present"
+    assert latest["elapsedMs"] == 850
+    assert latest["latencyMs"] == 1200
+
+    older = payload[1]
+    assert older["requestId"] == "req_logs_elapsed_legacy"
+    assert older["elapsedMs"] is None
 
 
 @pytest.mark.asyncio

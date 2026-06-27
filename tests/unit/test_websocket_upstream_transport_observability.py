@@ -93,6 +93,7 @@ async def test_websocket_finalizer_records_bridge_upstream_transport_and_metric(
         reasoning_effort=None,
         api_key_reservation=None,
         started_at=time.monotonic(),
+        upstream_started_at=time.monotonic(),
         transport=_REQUEST_TRANSPORT_HTTP,
         upstream_transport=_REQUEST_TRANSPORT_WEBSOCKET,
     )
@@ -116,6 +117,7 @@ async def test_websocket_finalizer_records_bridge_upstream_transport_and_metric(
             "request_id": "resp_bridge_success",
             "model": "gpt-5.1",
             "latency_ms": service.request_log_calls[0]["latency_ms"],
+            "elapsed_ms": service.request_log_calls[0]["elapsed_ms"],
             "status": "success",
             "error_code": None,
             "error_message": None,
@@ -141,6 +143,7 @@ async def test_websocket_finalizer_records_bridge_upstream_transport_and_metric(
             "request_kind": "normal",
         }
     ]
+    assert cast(int, service.request_log_calls[0]["elapsed_ms"]) >= 0
     assert metric_calls == [
         {
             "downstream_transport": "http",
@@ -170,6 +173,7 @@ async def test_websocket_connect_failure_records_bridge_upstream_transport_and_m
         reasoning_effort=None,
         api_key_reservation=None,
         started_at=time.monotonic(),
+        upstream_started_at=time.monotonic(),
         transport=_REQUEST_TRANSPORT_HTTP,
         upstream_transport=_REQUEST_TRANSPORT_WEBSOCKET,
     )
@@ -189,6 +193,7 @@ async def test_websocket_connect_failure_records_bridge_upstream_transport_and_m
             "request_id": "resp_bridge_failure",
             "model": "gpt-5.1",
             "latency_ms": service.request_log_calls[0]["latency_ms"],
+            "elapsed_ms": service.request_log_calls[0]["elapsed_ms"],
             "status": "error",
             "error_code": "upstream_unavailable",
             "error_message": "bridge upstream failed",
@@ -210,6 +215,7 @@ async def test_websocket_connect_failure_records_bridge_upstream_transport_and_m
             "request_kind": "normal",
         }
     ]
+    assert cast(int, service.request_log_calls[0]["elapsed_ms"]) >= 0
 
 
 @pytest.mark.asyncio
@@ -231,6 +237,7 @@ async def test_fail_pending_websocket_requests_records_bridge_upstream_transport
         reasoning_effort=None,
         api_key_reservation=None,
         started_at=time.monotonic(),
+        upstream_started_at=time.monotonic(),
         transport=_REQUEST_TRANSPORT_HTTP,
         upstream_transport=_REQUEST_TRANSPORT_WEBSOCKET,
     )
@@ -252,6 +259,7 @@ async def test_fail_pending_websocket_requests_records_bridge_upstream_transport
             "request_id": "resp_bridge_pending_failure",
             "model": "gpt-5.1",
             "latency_ms": service.request_log_calls[0]["latency_ms"],
+            "elapsed_ms": service.request_log_calls[0]["elapsed_ms"],
             "status": "error",
             "error_code": "stream_incomplete",
             "error_message": "Upstream websocket closed before response.completed",
@@ -273,6 +281,7 @@ async def test_fail_pending_websocket_requests_records_bridge_upstream_transport
             "request_kind": "normal",
         }
     ]
+    assert cast(int, service.request_log_calls[0]["elapsed_ms"]) >= 0
     assert metric_calls == [
         {
             "downstream_transport": "http",

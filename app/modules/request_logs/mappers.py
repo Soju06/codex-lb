@@ -67,5 +67,6 @@ def to_request_log_entry(log: RequestLog, *, api_key_name: str | None = None) ->
         cost_usd=cost_breakdown.total_usd,
         cost_breakdown=RequestLogCostBreakdown(**cost_breakdown.__dict__),
         latency_ms=log.latency_ms,
+        elapsed_ms=log.elapsed_ms,
         latency_first_token_ms=log.latency_first_token_ms,
     )

@@ -31,6 +31,7 @@ from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteErr
 from app.core.utils.request_id import ensure_request_id, get_request_id
 from app.db.models import Account
 from app.modules.api_keys.service import ApiKeyData
+from app.modules.proxy._service.request_log import _elapsed_ms
 from app.modules.proxy._service.support import _request_log_useragent_fields, _RequestLogFailureMetadata
 from app.modules.proxy.affinity import _AffinityPolicy, _sticky_key_for_codex_control_request
 from app.modules.proxy.helpers import _header_account_id, _normalize_error_code, _parse_openai_error
@@ -180,6 +181,7 @@ class _CodexControlMixin:
         route_endpoint_id: str | None = None
         route_fallback_used: bool | None = None
         route_fail_closed_reason: str | None = None
+        upstream_started_at: float | None = None
         request_kind = f"codex_control_{path.strip('/').replace('/', '_')}"
 
         try:
@@ -217,7 +219,7 @@ class _CodexControlMixin:
             account_id_value = account.id
 
             async def _call_control(target: Account) -> CodexControlResponse:
-                nonlocal route_fallback_used, route_mode, route_pool_id, route_endpoint_id
+                nonlocal route_fallback_used, route_mode, route_pool_id, route_endpoint_id, upstream_started_at
                 access_token = proxy._encryptor.decrypt(target.access_token_encrypted)
                 upstream_account_id = _header_account_id(target.chatgpt_account_id)
                 remaining_budget = _remaining_budget_seconds(deadline)
@@ -237,6 +239,8 @@ class _CodexControlMixin:
                     route_endpoint_id = route.endpoint_id
                 route_trace = UpstreamProxyRouteTrace()
                 try:
+                    if upstream_started_at is None:
+                        upstream_started_at = _service_time().monotonic()
                     return await _service_core_codex_control_request()(
                         path,
                         method=method,
@@ -425,6 +429,7 @@ class _CodexControlMixin:
                 request_id=request_id,
                 model=None,
                 latency_ms=int((_service_time().monotonic() - start) * 1000),
+                elapsed_ms=_elapsed_ms(upstream_started_at),
                 status=log_status,
                 error_code=log_error_code,
                 error_message=log_error_message,

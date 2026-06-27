@@ -494,11 +494,16 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
             assert "transport" in request_log_columns
             assert "plan_type" in request_log_columns
             assert "source" in request_log_columns
+            assert "elapsed_ms" in request_log_columns
             assert "limit_warmup_enabled" in account_columns
             legacy_plan_type = (
                 await session.execute(text("SELECT plan_type FROM request_logs WHERE id=1"))
             ).scalar_one()
+            legacy_elapsed_ms = (
+                await session.execute(text("SELECT elapsed_ms FROM request_logs WHERE id=1"))
+            ).scalar_one()
             assert legacy_plan_type is None
+            assert legacy_elapsed_ms is None
             assert "limit_warmup_enabled" in dashboard_columns
             assert "limit_warmup_windows" in dashboard_columns
             assert "limit_warmup_model" in dashboard_columns

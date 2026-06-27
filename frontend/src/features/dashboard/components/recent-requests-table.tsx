@@ -1,4 +1,5 @@
 import { Inbox } from "lucide-react";
+import type { ReactNode } from "react";
 import { useMemo, useState } from "react";
 
 import { isEmailLabel } from "@/components/blur-email";
@@ -31,6 +32,7 @@ import {
   formatDateTimeInline,
   formatCompactNumber,
   formatCurrency,
+  formatDurationMs,
   formatModelLabel,
   formatSlug,
   formatTimeLong,
@@ -359,6 +361,23 @@ export function RecentRequestsTable({
                 <RequestDetailField label="Model" value={selectedRequest ? formatModelLabel(selectedRequest.model, selectedRequest.reasoningEffort, selectedRequest.actualServiceTier ?? selectedRequest.serviceTier) : "—"} mono />
                 <RequestDetailField label="Request kind" value={selectedRequest ? (REQUEST_KIND_LABELS[selectedRequest.requestKind] ?? selectedRequest.requestKind) : "—"} />
                 <RequestDetailField label="Plan" value={selectedRequest?.planType ? formatSlug(selectedRequest.planType) : "—"} />
+                <RequestDetailField
+                  label="Elapsed Time"
+                  value={
+                    selectedRequest?.elapsedMs == null ? (
+                      "—"
+                    ) : (
+                      <>
+                        <span>{formatDurationMs(selectedRequest.elapsedMs)}</span>{" "}
+                        {selectedRequest.latencyMs != null ? (
+                          <span className="text-xs text-muted-foreground">
+                            ({formatDurationMs(selectedRequest.latencyMs)})
+                          </span>
+                        ) : null}
+                      </>
+                    )
+                  }
+                />
               </div>
               <div className="grid gap-3 sm:grid-cols-3">
                 <RequestDetailField label="Transport" value={selectedRequest?.transport ? (TRANSPORT_LABELS[selectedRequest.transport] ?? selectedRequest.transport) : "—"} />
@@ -410,7 +429,7 @@ export function RecentRequestsTable({
 
 type RequestDetailFieldProps = {
   label: string;
-  value: string;
+  value: ReactNode;
   mono?: boolean;
   copyValue?: string;
   copyLabel?: string;

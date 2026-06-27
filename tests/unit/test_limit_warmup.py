@@ -159,6 +159,7 @@ class FakeRequestLogsRepo:
         latency_ms: int | None,
         status: str,
         error_code: str | None,
+        elapsed_ms: int | None = None,
         latency_first_token_ms: int | None = None,
         error_message: str | None = None,
         requested_at: datetime | None = None,
@@ -197,6 +198,7 @@ class FakeRequestLogsRepo:
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
                 "latency_ms": latency_ms,
+                "elapsed_ms": elapsed_ms,
                 "status": status,
                 "error_code": error_code,
                 "latency_first_token_ms": latency_first_token_ms,
@@ -242,6 +244,7 @@ async def test_fake_request_logs_repo_accepts_useragent_fields() -> None:
         input_tokens=1,
         output_tokens=2,
         latency_ms=3,
+        elapsed_ms=2,
         status="success",
         error_code=None,
         useragent="codex-lb-limit-warmup",
@@ -256,6 +259,7 @@ async def test_fake_request_logs_repo_accepts_useragent_fields() -> None:
             "input_tokens": 1,
             "output_tokens": 2,
             "latency_ms": 3,
+            "elapsed_ms": 2,
             "status": "success",
             "error_code": None,
             "latency_first_token_ms": None,
@@ -291,17 +295,27 @@ async def test_fake_request_logs_repo_accepts_useragent_fields() -> None:
 
 
 class FakeSender:
-    def __init__(self, *, success: bool = True, error_code: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        success: bool = True,
+        error_code: str | None = None,
+        latency_ms: int = 12,
+        elapsed_ms: int | None = 12,
+    ) -> None:
         self.calls: list[tuple[str, str]] = []
         self.success = success
         self.error_code = error_code
+        self.latency_ms = latency_ms
+        self.elapsed_ms = elapsed_ms
 
     async def send(self, account: Account, *, model: str, prompt: str) -> LimitWarmupSendResult:
         self.calls.append((account.id, model))
         return LimitWarmupSendResult(
             request_id=f"warmup-{len(self.calls)}",
             success=self.success,
-            latency_ms=12,
+            latency_ms=self.latency_ms,
+            elapsed_ms=self.elapsed_ms,
             error_code=self.error_code,
             error_message="failed" if self.error_code else None,
         )
@@ -524,16 +538,54 @@ async def test_streaming_limit_warmup_sender_fails_closed_when_route_unavailable
     result = await sender.send(account, model="gpt-5.2", prompt="Say OK.")
 
     assert result.success is False
+    assert result.elapsed_ms is None
     assert result.error_code == "upstream_proxy_unavailable"
     assert "default_pool_unconfigured" in (result.error_message or "")
     assert result.upstream_proxy_fail_closed_reason == "default_pool_unconfigured"
 
 
 @pytest.mark.asyncio
+async def test_streaming_limit_warmup_sender_tracks_upstream_elapsed_separately(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account = _account()
+    sender = StreamingLimitWarmupSender(cast(Any, _WarmupAccountsRepo()))
+    monotonic_values = iter([100.0, 100.075, 100.11, 100.11])
+    last_monotonic = 100.11
+
+    async def ensure_fresh(target: Account) -> Account:
+        return target
+
+    async def resolve_route(*args: object, **kwargs: object) -> None:
+        return None
+
+    async def stream(*args: object, **kwargs: object):
+        yield 'data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n'
+
+    monkeypatch.setattr(sender, "_ensure_fresh", ensure_fresh)
+    monkeypatch.setattr(sender._encryptor, "decrypt", lambda value: "access")
+    monkeypatch.setattr(limit_warmup_service, "resolve_upstream_route", resolve_route)
+    monkeypatch.setattr(limit_warmup_service, "stream_responses", stream)
+
+    def fake_monotonic() -> float:
+        nonlocal last_monotonic
+        last_monotonic = next(monotonic_values, last_monotonic)
+        return last_monotonic
+
+    monkeypatch.setattr(limit_warmup_service.time, "monotonic", fake_monotonic)
+
+    result = await sender.send(account, model="gpt-5.2", prompt="Say OK.")
+
+    assert result.success is True
+    assert result.latency_ms == 109
+    assert result.elapsed_ms == 34
+
+
+@pytest.mark.asyncio
 async def test_reset_confirmed_candidate_sends_one_warmup() -> None:
     repo = FakeWarmupRepo()
     logs = FakeRequestLogsRepo()
-    sender = FakeSender()
+    sender = FakeSender(latency_ms=12, elapsed_ms=7)
     service = LimitWarmupService(repo, logs, sender=sender)
     account = _account()
 
@@ -559,6 +611,8 @@ async def test_reset_confirmed_candidate_sends_one_warmup() -> None:
     assert repo.rows[0].status == "succeeded"
     assert logs.logs[0]["source"] == "limit_warmup"
     assert logs.logs[0]["request_kind"] == "warmup"
+    assert logs.logs[0]["latency_ms"] == 12
+    assert logs.logs[0]["elapsed_ms"] == 7
 
 
 @pytest.mark.asyncio
@@ -573,6 +627,7 @@ async def test_warmup_request_log_persists_route_metadata() -> None:
                 request_id="warmup-route",
                 success=True,
                 latency_ms=12,
+                elapsed_ms=9,
                 upstream_proxy_route_mode="account_bound",
                 upstream_proxy_pool_id="pool_1",
                 upstream_proxy_endpoint_id="ep_1",
@@ -595,6 +650,30 @@ async def test_warmup_request_log_persists_route_metadata() -> None:
     assert logs.logs[0]["upstream_proxy_pool_id"] == "pool_1"
     assert logs.logs[0]["upstream_proxy_endpoint_id"] == "ep_1"
     assert logs.logs[0]["upstream_proxy_fallback_used"] is True
+    assert logs.logs[0]["elapsed_ms"] == 9
+
+
+@pytest.mark.asyncio
+async def test_warmup_request_log_keeps_pre_upstream_elapsed_unset() -> None:
+    repo = FakeWarmupRepo()
+    logs = FakeRequestLogsRepo()
+    sender = FakeSender(success=False, error_code="auth_refresh_invalid", latency_ms=12, elapsed_ms=None)
+    service = LimitWarmupService(repo, logs, sender=sender)
+    account = _account()
+
+    await service.run_after_usage_refresh(
+        accounts=[account],
+        settings=_settings(),
+        before_primary={account.id: _usage(account.id, used_percent=100, reset_at=1000)},
+        before_secondary={},
+        after_primary={account.id: _usage(account.id, used_percent=0, reset_at=2000)},
+        after_secondary={},
+    )
+
+    assert repo.rows[0].status == "failed"
+    assert logs.logs[0]["status"] == "error"
+    assert logs.logs[0]["latency_ms"] == 12
+    assert logs.logs[0]["elapsed_ms"] is None
 
 
 @pytest.mark.asyncio

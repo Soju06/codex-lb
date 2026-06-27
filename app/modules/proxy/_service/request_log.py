@@ -27,6 +27,12 @@ def _normalize_session_id(session_id: str | None) -> str | None:
     return stripped or None
 
 
+def _elapsed_ms(upstream_started_at: float | None) -> int | None:
+    if upstream_started_at is None:
+        return None
+    return max(0, int((time.monotonic() - upstream_started_at) * 1000))
+
+
 class _RequestLogMixin:
     async def rewrite_request_log_model(self, request_id: str, model: str) -> None:
         """Override the ``model`` field on any ``request_logs`` row that
@@ -81,6 +87,7 @@ class _RequestLogMixin:
         request_id: str,
         model: str | None,
         latency_ms: int,
+        elapsed_ms: int | None = None,
         status: str,
         latency_first_token_ms: int | None = None,
         error_code: str | None = None,
@@ -118,6 +125,7 @@ class _RequestLogMixin:
                 request_id=request_id,
                 model=model,
                 latency_ms=latency_ms,
+                elapsed_ms=elapsed_ms,
                 status=status,
                 latency_first_token_ms=latency_first_token_ms,
                 error_code=error_code,
@@ -194,6 +202,7 @@ class _RequestLogMixin:
         request_id: str,
         model: str | None,
         latency_ms: int,
+        elapsed_ms: int | None = None,
         status: str,
         latency_first_token_ms: int | None = None,
         error_code: str | None = None,
@@ -245,6 +254,7 @@ class _RequestLogMixin:
                     actual_service_tier=actual_service_tier,
                     request_kind=request_kind,
                     latency_ms=latency_ms,
+                    elapsed_ms=elapsed_ms,
                     latency_first_token_ms=latency_first_token_ms,
                     status=status,
                     error_code=error_code,

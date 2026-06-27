@@ -212,6 +212,7 @@ describe("RequestLogsResponseSchema", () => {
             outputUsd: 0.0006,
             totalUsd: 0.001,
           },
+          elapsedMs: null,
           latencyMs: 42,
         },
       ],
@@ -235,6 +236,76 @@ describe("RequestLogsResponseSchema", () => {
     expect(parsed.requests[0]?.inputTokens).toBe(8);
     expect(parsed.requests[0]?.outputTokens).toBe(2);
     expect(parsed.requests[0]?.costBreakdown?.totalUsd).toBe(0.001);
+  });
+
+  it("parses request rows including elapsedMs", () => {
+    const parsed = RequestLogsResponseSchema.parse({
+      requests: [
+        {
+          requestedAt: ISO,
+          accountId: "acc-1",
+          planType: "plus",
+          apiKeyName: "Key A",
+          apiKeyId: "key-1",
+          requestId: "req-elapsed",
+          model: "gpt-5.1",
+          transport: "websocket",
+          useragent: "Mozilla/5.0",
+          useragentGroup: "Mozilla",
+          status: "ok",
+          errorCode: null,
+          errorMessage: null,
+          tokens: 10,
+          inputTokens: 8,
+          outputTokens: 2,
+          cachedInputTokens: 0,
+          reasoningEffort: null,
+          costUsd: 0.001,
+          costBreakdown: null,
+          elapsedMs: 850,
+          latencyMs: 1200,
+        },
+      ],
+      total: 1,
+      hasMore: false,
+    });
+
+    expect(parsed.requests[0]?.elapsedMs).toBe(850);
+    expect(parsed.requests[0]?.latencyMs).toBe(1200);
+  });
+
+  it("defaults missing elapsedMs to null for legacy rows", () => {
+    const parsed = RequestLogsResponseSchema.parse({
+      requests: [
+        {
+          requestedAt: ISO,
+          accountId: "acc-1",
+          planType: "plus",
+          apiKeyName: "Key A",
+          apiKeyId: "key-1",
+          requestId: "req-legacy-elapsed",
+          model: "gpt-5.1",
+          transport: "websocket",
+          useragent: "Mozilla/5.0",
+          useragentGroup: "Mozilla",
+          status: "ok",
+          errorCode: null,
+          errorMessage: null,
+          tokens: 10,
+          inputTokens: 8,
+          outputTokens: 2,
+          cachedInputTokens: 0,
+          reasoningEffort: null,
+          costUsd: 0.001,
+          costBreakdown: null,
+          latencyMs: 1200,
+        },
+      ],
+      total: 1,
+      hasMore: false,
+    });
+
+    expect(parsed.requests[0]?.elapsedMs).toBeNull();
   });
 
   it("accepts legacy limit warmup request kind rows", () => {

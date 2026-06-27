@@ -48,6 +48,7 @@ class RequestLogEntry(DashboardModel):
     cost_usd: float | None = None
     cost_breakdown: RequestLogCostBreakdown = Field(default_factory=RequestLogCostBreakdown)
     latency_ms: int | None = None
+    elapsed_ms: int | None = None
     latency_first_token_ms: int | None = None
 
 

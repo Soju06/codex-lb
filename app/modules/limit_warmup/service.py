@@ -41,6 +41,7 @@ class LimitWarmupSendResult:
     request_id: str
     success: bool
     latency_ms: int
+    elapsed_ms: int | None = None
     usage: ResponseUsage | None = None
     error_code: str | None = None
     error_message: str | None = None
@@ -100,6 +101,7 @@ class LimitWarmupRequestLogRepository(Protocol):
         latency_ms: int | None,
         status: str,
         error_code: str | None,
+        elapsed_ms: int | None = None,
         latency_first_token_ms: int | None = None,
         error_message: str | None = None,
         requested_at: datetime | None = None,
@@ -200,6 +202,7 @@ class StreamingLimitWarmupSender:
             "user-agent": "codex-lb-limit-warmup",
         }
         usage: ResponseUsage | None = None
+        upstream_started = time.monotonic()
         route_trace = UpstreamProxyRouteTrace()
         with override_stream_timeouts(
             connect_timeout_seconds=5.0,
@@ -226,6 +229,7 @@ class StreamingLimitWarmupSender:
                         request_id=request_id,
                         success=True,
                         latency_ms=_elapsed_ms(started),
+                        elapsed_ms=_elapsed_ms(upstream_started),
                         usage=usage,
                         upstream_proxy_route_mode=route_trace.mode,
                         upstream_proxy_pool_id=route_trace.pool_id,
@@ -238,6 +242,7 @@ class StreamingLimitWarmupSender:
                         request_id=request_id,
                         success=False,
                         latency_ms=_elapsed_ms(started),
+                        elapsed_ms=_elapsed_ms(upstream_started),
                         usage=usage,
                         error_code=error.code or event.type,
                         error_message=error.message or event.type,
@@ -251,6 +256,7 @@ class StreamingLimitWarmupSender:
             request_id=request_id,
             success=False,
             latency_ms=_elapsed_ms(started),
+            elapsed_ms=_elapsed_ms(upstream_started),
             usage=usage,
             error_code="stream_incomplete",
             error_message="Warm-up stream ended without a terminal event",
@@ -578,6 +584,7 @@ class LimitWarmupService:
             cached_input_tokens=cached_input_tokens,
             reasoning_tokens=reasoning_tokens,
             latency_ms=result.latency_ms,
+            elapsed_ms=result.elapsed_ms,
             status="success" if result.success else "error",
             error_code=result.error_code,
             error_message=_truncate(result.error_message),

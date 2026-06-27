@@ -349,7 +349,6 @@ from app.modules.proxy._service.rate_limit import (
     _RateLimitMixin,
 )
 from app.modules.proxy._service.request_log import (
-    _elapsed_ms,
     _RequestLogMixin,
 )
 from app.modules.proxy._service.response_create import (
@@ -540,6 +539,7 @@ from app.modules.proxy._service.support import (
     _ApiKeyReservationTouchState,  # noqa: F401
     _clear_websocket_request_error_overrides,  # noqa: F401
     _DownstreamWebSocketActivity,  # noqa: F401
+    _elapsed_ms,
     _event_type_from_payload,  # noqa: F401
     _FilePinEntry,
     _HTTPBridgeSession,

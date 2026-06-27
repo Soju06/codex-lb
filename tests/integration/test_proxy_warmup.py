@@ -187,6 +187,8 @@ async def test_warmup_normal_mode_uses_configured_model_and_logs_warmup_kind(asy
     assert len(rows) == 1
     assert rows[0].request_kind == "warmup"
     assert rows[0].model == "gpt-5.4-nano"
+    assert rows[0].elapsed_ms is not None
+    assert rows[0].elapsed_ms >= 0
     assert limit.current_value == 0
 
 

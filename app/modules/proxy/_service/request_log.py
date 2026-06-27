@@ -27,12 +27,6 @@ def _normalize_session_id(session_id: str | None) -> str | None:
     return stripped or None
 
 
-def _elapsed_ms(upstream_started_at: float | None) -> int | None:
-    if upstream_started_at is None:
-        return None
-    return max(0, int((time.monotonic() - upstream_started_at) * 1000))
-
-
 class _RequestLogMixin:
     async def rewrite_request_log_model(self, request_id: str, model: str) -> None:
         """Override the ``model`` field on any ``request_logs`` row that

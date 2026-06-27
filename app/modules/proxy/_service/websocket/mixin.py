@@ -291,7 +291,6 @@ from app.modules.proxy._service.observability import (
 from app.modules.proxy._service.observability import (
     _truncate_identifier as _truncate_identifier,
 )
-from app.modules.proxy._service.request_log import _elapsed_ms
 from app.modules.proxy._service.support import (
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
     _REQUEST_TRANSPORT_HTTP,
@@ -300,6 +299,7 @@ from app.modules.proxy._service.support import (
     _account_capacity_wait_payload,
     _clear_websocket_request_error_overrides,
     _DownstreamWebSocketActivity,
+    _elapsed_ms,
     _event_type_from_payload,
     _PreparedWebSocketRequest,
     _record_response_event,

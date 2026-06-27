@@ -313,6 +313,7 @@ class _WarmupMixin:
         upstream_proxy_endpoint_id: str | None = None
         upstream_proxy_fallback_used: bool | None = None
         upstream_proxy_fail_closed_reason: str | None = None
+        upstream_started_at: float | None = None
         proxy = cast(_WarmupServiceProtocol, self)
 
         try:
@@ -333,6 +334,7 @@ class _WarmupMixin:
                 store=False,
             )
             normalize_upstream_model_alias(payload)
+            upstream_started_at = time.monotonic()
             response = await _call_with_supported_optional_kwargs(
                 _service_core_compact_responses(),
                 payload,
@@ -404,6 +406,11 @@ class _WarmupMixin:
                     request_id=request_id,
                     model=warmup_model,
                     latency_ms=int((time.monotonic() - started_at) * 1000),
+                    elapsed_ms=(
+                        max(0, int((time.monotonic() - upstream_started_at) * 1000))
+                        if upstream_started_at is not None
+                        else None
+                    ),
                     status=status,
                     error_code=error_code,
                     error_message=error_message,

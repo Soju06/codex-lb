@@ -197,6 +197,12 @@ def _request_log_useragent_fields(headers: Mapping[str, str]) -> tuple[str | Non
     return useragent, useragent_group
 
 
+def _elapsed_ms(upstream_started_at: float | None) -> int | None:
+    if upstream_started_at is None:
+        return None
+    return max(0, int((time.monotonic() - upstream_started_at) * 1000))
+
+
 class _RetryableStreamError(Exception):
     def __init__(self, code: str, error: UpstreamError, *, exclude_account: bool = False) -> None:
         super().__init__(code)

@@ -38,9 +38,7 @@ from app.core.errors import (
 from app.core.errors import (
     PREVIOUS_RESPONSE_STALE_MESSAGE as PREVIOUS_RESPONSE_STALE_MESSAGE,
 )
-from app.core.errors import (
-    response_failed_event,
-)
+from app.core.errors import response_failed_event
 from app.core.openai.parsing import parse_sse_event
 from app.core.openai.requests import (
     ResponsesRequest,
@@ -267,7 +265,6 @@ from app.modules.proxy._service.observability import (
 from app.modules.proxy._service.observability import (
     _truncate_identifier as _truncate_identifier,
 )
-from app.modules.proxy._service.request_log import _elapsed_ms
 from app.modules.proxy._service.streaming.helpers import (
     _handle_stream_error as _handle_stream_error_helper,
 )
@@ -293,6 +290,7 @@ from app.modules.proxy._service.support import (
     _WEBSOCKET_FULL_REPLAY_WAIT_MIN_ITEMS,  # noqa: F401
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
     _ApiKeyReservationTouchState,
+    _elapsed_ms,
     _event_type_from_payload,
     _RequestLogFailureMetadata,
     _RetryableStreamError,

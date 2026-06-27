@@ -27,8 +27,7 @@ from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteErr
 from app.core.utils.request_id import ensure_request_id, get_request_id
 from app.db.models import Account
 from app.modules.api_keys.service import ApiKeyData
-from app.modules.proxy._service.request_log import _elapsed_ms
-from app.modules.proxy._service.support import _request_log_useragent_fields, _RequestLogFailureMetadata
+from app.modules.proxy._service.support import _elapsed_ms, _request_log_useragent_fields, _RequestLogFailureMetadata
 from app.modules.proxy.helpers import _header_account_id, _normalize_error_code, _parse_openai_error
 from app.modules.proxy.load_balancer import AccountSelection
 

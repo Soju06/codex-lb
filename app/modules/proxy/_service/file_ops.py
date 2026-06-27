@@ -29,8 +29,8 @@ from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteErr
 from app.core.utils.request_id import ensure_request_id, get_request_id
 from app.db.models import Account
 from app.modules.api_keys.service import ApiKeyData
-from app.modules.proxy._service.request_log import _elapsed_ms
 from app.modules.proxy._service.support import (
+    _elapsed_ms,
     _FilePinEntry,
     _request_log_useragent_fields,
     _RequestLogFailureMetadata,

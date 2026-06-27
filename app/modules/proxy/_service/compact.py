@@ -35,8 +35,7 @@ from app.modules.api_keys.service import (
     ApiKeyRequestUsageBudget,
     ApiKeyUsageReservationData,
 )
-from app.modules.proxy._service.request_log import _elapsed_ms
-from app.modules.proxy._service.support import _request_log_useragent_fields, _RequestLogFailureMetadata
+from app.modules.proxy._service.support import _elapsed_ms, _request_log_useragent_fields, _RequestLogFailureMetadata
 from app.modules.proxy.affinity import (
     _AffinityPolicy,
     _owner_lookup_session_id_from_headers,

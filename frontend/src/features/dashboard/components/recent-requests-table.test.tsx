@@ -298,6 +298,7 @@ describe("RecentRequestsTable", () => {
             reasoningEffort: null,
             costUsd: 0,
             costBreakdown: null,
+            elapsedMs: null,
             latencyMs: 1,
           },
           {
@@ -326,6 +327,7 @@ describe("RecentRequestsTable", () => {
             reasoningEffort: null,
             costUsd: 0,
             costBreakdown: null,
+            elapsedMs: null,
             latencyMs: 1,
           },
         ]}
@@ -368,8 +370,9 @@ describe("RecentRequestsTable", () => {
              reasoningEffort: null,
              costUsd: 0,
              costBreakdown: null,
+             elapsedMs: null,
              latencyMs: 1,
-           },
+            },
          ]}
        />,
     );
@@ -411,8 +414,9 @@ describe("RecentRequestsTable", () => {
              reasoningEffort: null,
              costUsd: 0,
              costBreakdown: null,
+             elapsedMs: null,
              latencyMs: 1,
-           },
+            },
          ]}
        />,
     );
@@ -460,6 +464,7 @@ describe("RecentRequestsTable", () => {
               outputUsd: 0.004,
               totalUsd: 0.01,
             },
+            elapsedMs: null,
             latencyMs: 100,
           },
         ]}
@@ -509,6 +514,7 @@ describe("RecentRequestsTable", () => {
             reasoningEffort: null,
             costUsd: 0,
             costBreakdown: null,
+            elapsedMs: null,
             latencyMs: 1,
           },
         ]}
@@ -562,6 +568,7 @@ describe("RecentRequestsTable", () => {
             reasoningEffort: null,
             costUsd: 0,
             costBreakdown: null,
+            elapsedMs: null,
             latencyMs: 1,
           },
         ]}
@@ -614,6 +621,7 @@ describe("RecentRequestsTable", () => {
               outputUsd: null,
               totalUsd: 0.01,
             },
+            elapsedMs: null,
             latencyMs: 1,
           },
         ]}
@@ -662,6 +670,7 @@ describe("RecentRequestsTable", () => {
               outputUsd: null,
               totalUsd: 0.01,
             },
+            elapsedMs: null,
             latencyMs: 1,
           },
         ]}
@@ -715,6 +724,7 @@ describe("RecentRequestsTable", () => {
               outputUsd: null,
               totalUsd: null,
             },
+            elapsedMs: null,
             latencyMs: 1,
           },
         ]}
@@ -764,6 +774,7 @@ describe("RecentRequestsTable", () => {
             reasoningEffort: null,
             costUsd: 0,
             costBreakdown: null,
+            elapsedMs: null,
             latencyMs: 1,
           },
         ]}
@@ -816,6 +827,7 @@ describe("RecentRequestsTable", () => {
             reasoningEffort: null,
             costUsd: 0,
             costBreakdown: null,
+            elapsedMs: null,
             latencyMs: 1,
           },
         ]}
@@ -868,6 +880,7 @@ describe("RecentRequestsTable", () => {
               outputUsd: null,
               totalUsd: 4.321234,
             },
+            elapsedMs: null,
             latencyMs: 1,
           },
         ]}

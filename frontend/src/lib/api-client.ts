@@ -180,14 +180,14 @@ async function request<T>(
 
   const parsed = schema.safeParse(payload);
   if (!parsed.success) {
-    if (import.meta.env.DEV) {
-      console.error(`Zod schema mismatch for ${method} ${url}`, parsed.error.format(), payload);
-    }
+    const formattedError = parsed.error.format();
+    console.error(`Zod schema mismatch for ${method} ${url}`, formattedError, payload);
+    const issues = parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ");
     throw new ApiError({
       status: response.status,
       code: "invalid_response_schema",
-      message: "Response schema mismatch",
-      details: parsed.error.format(),
+      message: `Response schema mismatch (${method} ${url}): ${issues}`,
+      details: formattedError,
       payload,
     });
   }

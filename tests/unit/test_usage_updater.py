@@ -684,6 +684,32 @@ async def test_force_refresh_respects_usage_refresh_disabled(monkeypatch: pytest
 
 
 @pytest.mark.asyncio
+async def test_force_refresh_can_ignore_usage_refresh_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "false")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+    updater = UsageUpdater(StubUsageRepository())
+    account = _make_account("acc_force_probe_disabled_override", "workspace_force_probe_disabled_override")
+    refresh_account = AsyncMock(
+        return_value=usage_updater_module.AccountRefreshResult(usage_written=True),
+    )
+    sync_account = AsyncMock()
+    monkeypatch.setattr(updater, "_refresh_account", refresh_account)
+    monkeypatch.setattr(updater, "_sync_account_from_repo", sync_account)
+
+    refreshed = await updater.force_refresh(account, ignore_refresh_disabled=True)
+
+    assert refreshed is True
+    refresh_account.assert_awaited_once_with(
+        account,
+        usage_account_id=account.chatgpt_account_id,
+    )
+    sync_account.assert_awaited_once_with(account)
+    get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
 async def test_usage_updater_includes_chatgpt_account_id_even_when_shared(monkeypatch) -> None:
     monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
     from app.core.config.settings import get_settings

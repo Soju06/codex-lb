@@ -12,7 +12,10 @@ import { AccountsSkeleton } from "@/features/accounts/components/accounts-skelet
 import { ImportDialog } from "@/features/accounts/components/import-dialog";
 import { ResetCreditConfirmDialog } from "@/features/accounts/components/reset-credit-confirm-dialog";
 import { AuthExportDialog } from "@/features/accounts/components/auth-export-dialog";
-import { useAccounts } from "@/features/accounts/hooks/use-accounts";
+import {
+  useAccounts,
+  useAccountUsageResetCredits,
+} from "@/features/accounts/hooks/use-accounts";
 import {
   DEFAULT_ACCOUNT_SORT_MODE,
   sortAccountsForDisplay,
@@ -41,6 +44,7 @@ export function AccountsPage() {
     resumeMutation,
     setAliasMutation,
     probeMutation,
+    usageResetMutation,
     limitWarmupMutation,
     updateMutation,
     deleteMutation,
@@ -56,6 +60,7 @@ export function AccountsPage() {
   const deleteDialog = useDialogState<string>();
   type ResetCreditDialogTarget = { accountId: string; availableResetCredits: number };
   const resetCreditDialog = useDialogState<ResetCreditDialogTarget>();
+  const usageResetDialog = useDialogState<string>();
   const exportDialog = useDialogState<AccountAuthExportResponse>();
   const [deleteHistory, setDeleteHistory] = useState(false);
 
@@ -101,6 +106,7 @@ export function AccountsPage() {
         : null,
     [accounts, resolvedSelectedAccountId],
   );
+  const resetCreditsQuery = useAccountUsageResetCredits(selectedAccount?.accountId ?? null);
 
   const mutationBusy =
     importMutation.isPending ||
@@ -108,6 +114,7 @@ export function AccountsPage() {
     resumeMutation.isPending ||
     setAliasMutation.isPending ||
     probeMutation.isPending ||
+    usageResetMutation.isPending ||
     limitWarmupMutation.isPending ||
     deleteMutation.isPending ||
     routingPolicyMutation.isPending ||
@@ -121,6 +128,7 @@ export function AccountsPage() {
     getErrorMessageOrNull(resumeMutation.error) ||
     getErrorMessageOrNull(setAliasMutation.error) ||
     getErrorMessageOrNull(probeMutation.error) ||
+    getErrorMessageOrNull(usageResetMutation.error) ||
     getErrorMessageOrNull(limitWarmupMutation.error) ||
     getErrorMessageOrNull(deleteMutation.error) ||
     getErrorMessageOrNull(routingPolicyMutation.error) ||
@@ -173,9 +181,8 @@ export function AccountsPage() {
             readOnly={!canWrite}
             onPause={(accountId) => void pauseMutation.mutateAsync(accountId)}
             onResume={(accountId) => void resumeMutation.mutateAsync(accountId)}
-            onProbe={(accountId) =>
-              void probeMutation.mutateAsync({ accountId })
-            }
+            onProbe={(accountId) => void probeMutation.mutateAsync({ accountId })}
+            onResetUsage={(accountId) => usageResetDialog.show(accountId)}
             onSetAlias={(accountId, alias) =>
               setAliasMutation.mutateAsync({ accountId, alias })
             }
@@ -188,12 +195,12 @@ export function AccountsPage() {
                 .catch(() => null);
             }}
             onResetCredit={(accountId) => {
-            const account = accountsQuery.data?.find((item) => item.accountId === accountId);
-            resetCreditDialog.show({
-              accountId,
-              availableResetCredits: account?.availableResetCredits ?? 0,
-            });
-          }}
+              const account = accountsQuery.data?.find((item) => item.accountId === accountId);
+              resetCreditDialog.show({
+                accountId,
+                availableResetCredits: account?.availableResetCredits ?? 0,
+              });
+            }}
             onLimitWarmupChange={(accountId, enabled) =>
               void limitWarmupMutation.mutateAsync({ accountId, enabled })
             }
@@ -213,6 +220,9 @@ export function AccountsPage() {
             onProxyBindingSave={(accountId, payload) =>
               accountBindingMutation.mutateAsync({ accountId, payload })
             }
+            resetCredits={resetCreditsQuery.data?.rateLimitResetCredits ?? null}
+            resetCreditsLoading={resetCreditsQuery.isFetching}
+            resetCreditsUnavailable={!!resetCreditsQuery.error}
           />
         </div>
       )}
@@ -296,6 +306,25 @@ export function AccountsPage() {
           </label>
         </div>
       </ConfirmDialog>
+
+      <ConfirmDialog
+        open={usageResetDialog.open}
+        title="Reset usage"
+        description="This consumes one upstream usage reset credit for the selected account, then fetches fresh usage."
+        confirmLabel="Reset"
+        cancelLabel="Cancel"
+        onOpenChange={usageResetDialog.onOpenChange}
+        onConfirm={() => {
+          if (!usageResetDialog.data) {
+            return;
+          }
+          void usageResetMutation
+            .mutateAsync({ accountId: usageResetDialog.data })
+            .finally(() => {
+              usageResetDialog.hide();
+            });
+        }}
+      />
 
       <LoadingOverlay
         visible={!!accountsQuery.data && mutationBusy}

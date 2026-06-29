@@ -32,6 +32,11 @@ class CreditStatusDetailsData:
 
 
 @dataclass(frozen=True)
+class RateLimitResetCreditsData:
+    available_count: int
+
+
+@dataclass(frozen=True)
 class AdditionalRateLimitData:
     limit_name: str
     metered_feature: str
@@ -45,4 +50,5 @@ class RateLimitStatusPayloadData:
     plan_type: str
     rate_limit: RateLimitStatusDetailsData | None = None
     credits: CreditStatusDetailsData | None = None
+    rate_limit_reset_credits: RateLimitResetCreditsData | None = None
     additional_rate_limits: list[AdditionalRateLimitData] = field(default_factory=list)

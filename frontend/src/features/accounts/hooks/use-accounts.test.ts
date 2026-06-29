@@ -3,7 +3,10 @@ import { renderHook, waitFor } from "@testing-library/react";
 import { createElement, type PropsWithChildren } from "react";
 import { describe, expect, it, vi } from "vitest";
 
-import { useAccounts } from "@/features/accounts/hooks/use-accounts";
+import {
+  useAccounts,
+  useAccountUsageResetCredits,
+} from "@/features/accounts/hooks/use-accounts";
 
 function createTestQueryClient(): QueryClient {
   return new QueryClient({
@@ -39,6 +42,9 @@ describe("useAccounts", () => {
     await result.current.probeMutation.mutateAsync({
       accountId: firstAccountId as string,
     });
+    await result.current.usageResetMutation.mutateAsync({
+      accountId: firstAccountId as string,
+    });
     const routingPolicyResult = await result.current.routingPolicyMutation.mutateAsync({
       accountId: firstAccountId as string,
       routingPolicy: "preserve",
@@ -53,8 +59,12 @@ describe("useAccounts", () => {
     await waitFor(() => {
       expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["accounts", "list"] });
       expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["accounts", "trends"] });
+      expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["accounts", "usage-reset-credits"] });
       expect(invalidateSpy).toHaveBeenCalledWith({
         queryKey: ["accounts", "trends", firstAccountId],
+      });
+      expect(invalidateSpy).toHaveBeenCalledWith({
+        queryKey: ["accounts", "usage-reset-credits", firstAccountId],
       });
       expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["dashboard", "overview"] });
       expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["dashboard", "projections"] });
@@ -77,7 +87,26 @@ describe("useAccounts", () => {
 
     expect(invalidateSpy).not.toHaveBeenCalledWith({ queryKey: ["accounts", "list"] });
     expect(invalidateSpy).not.toHaveBeenCalledWith({ queryKey: ["accounts", "trends"] });
+    expect(invalidateSpy).not.toHaveBeenCalledWith({ queryKey: ["accounts", "usage-reset-credits"] });
     expect(invalidateSpy).not.toHaveBeenCalledWith({ queryKey: ["dashboard", "overview"] });
     expect(invalidateSpy).not.toHaveBeenCalledWith({ queryKey: ["dashboard", "projections"] });
+  });
+
+  it("does not permanently poll usage reset credits", async () => {
+    const queryClient = createTestQueryClient();
+    const accountId = "acc_primary";
+
+    const { result } = renderHook(() => useAccountUsageResetCredits(accountId), {
+      wrapper: createWrapper(queryClient),
+    });
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    const query = queryClient.getQueryCache().find({
+      queryKey: ["accounts", "usage-reset-credits", accountId],
+    });
+    const refetchInterval = (query?.options as { refetchInterval?: unknown } | undefined)
+      ?.refetchInterval;
+    expect(refetchInterval).toBeUndefined();
   });
 });

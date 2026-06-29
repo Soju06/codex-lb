@@ -4,6 +4,7 @@ from datetime import timedelta
 
 import pytest
 
+from app.core.clients.usage import ConsumeRateLimitResetCreditResponse
 from app.core.crypto import TokenEncryptor
 from app.core.usage.models import UsagePayload
 from app.core.utils.time import utcnow
@@ -620,3 +621,138 @@ async def test_codex_usage_api_key_ignores_aggregate_workspace_limits(async_clie
     assert payload["rate_limit"]["primary_window"]["used_percent"] == 5
     assert payload["rate_limit"]["secondary_window"]["used_percent"] == 10
     assert payload["credits"]["balance"] == "450"
+
+
+@pytest.mark.asyncio
+async def test_codex_usage_exposes_reset_credit_availability(async_client, db_setup, monkeypatch):
+    raw_chatgpt_account_id = "workspace_reset_available"
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        await accounts_repo.upsert(
+            _make_account(
+                "acc_reset_available",
+                "reset-available@example.com",
+                chatgpt_account_id=raw_chatgpt_account_id,
+            )
+        )
+
+    async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: object) -> UsagePayload:
+        assert access_token == "chatgpt-token"
+        assert account_id == raw_chatgpt_account_id
+        return UsagePayload.model_validate(
+            {
+                "plan_type": "plus",
+                "rate_limit_reset_credits": {"available_count": 3},
+            }
+        )
+
+    monkeypatch.setattr("app.core.auth.dependencies.fetch_usage", stub_fetch_usage)
+
+    response = await async_client.get(
+        "/api/codex/usage",
+        headers={
+            "Authorization": "Bearer chatgpt-token",
+            "chatgpt-account-id": raw_chatgpt_account_id,
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["rate_limit_reset_credits"] == {"available_count": 3}
+
+
+@pytest.mark.asyncio
+async def test_codex_usage_reset_consume_forwards_and_refreshes(async_client, db_setup, monkeypatch):
+    raw_chatgpt_account_id = "workspace_reset_consume"
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        await accounts_repo.upsert(
+            _make_account("acc_reset_consume", "reset-consume@example.com", chatgpt_account_id=raw_chatgpt_account_id)
+        )
+
+    async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: object) -> UsagePayload:
+        assert access_token == "chatgpt-token"
+        assert account_id == raw_chatgpt_account_id
+        return UsagePayload.model_validate({"plan_type": "plus"})
+
+    consume_calls: list[dict[str, object]] = []
+
+    async def stub_consume_rate_limit_reset_credit(**kwargs: object) -> ConsumeRateLimitResetCreditResponse:
+        consume_calls.append(kwargs)
+        return ConsumeRateLimitResetCreditResponse.model_validate({"code": "reset", "windows_reset": 2})
+
+    refreshed_account_ids: list[str] = []
+
+    class StubUsageUpdater:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        async def force_refresh(self, account: Account, *, ignore_refresh_disabled: bool = False) -> bool:
+            refreshed_account_ids.append(f"{account.id}:{ignore_refresh_disabled}")
+            return True
+
+    monkeypatch.setattr("app.core.auth.dependencies.fetch_usage", stub_fetch_usage)
+    monkeypatch.setattr("app.modules.proxy.api.consume_rate_limit_reset_credit", stub_consume_rate_limit_reset_credit)
+    monkeypatch.setattr("app.modules.proxy.api.UsageUpdater", StubUsageUpdater)
+
+    response = await async_client.post(
+        "/api/codex/rate-limit-reset-credits/consume",
+        headers={
+            "Authorization": "Bearer chatgpt-token",
+            "chatgpt-account-id": raw_chatgpt_account_id,
+        },
+        json={"redeem_request_id": "redeem-123"},
+    )
+    assert response.status_code == 200
+    assert response.json() == {"code": "reset", "windows_reset": 2}
+    assert consume_calls == [
+        {
+            "access_token": "chatgpt-token",
+            "account_id": raw_chatgpt_account_id,
+            "redeem_request_id": "redeem-123",
+            "route": None,
+            "allow_direct_egress": True,
+        }
+    ]
+    assert refreshed_account_ids == ["acc_reset_consume:True"]
+
+
+@pytest.mark.asyncio
+async def test_codex_usage_reset_consume_rejects_api_key_callers(async_client, db_setup):
+    _, plain_key = await _create_api_key(name="reset-api-key")
+
+    response = await async_client.post(
+        "/api/codex/rate-limit-reset-credits/consume",
+        headers={"Authorization": f"Bearer {plain_key}"},
+        json={"redeem_request_id": "redeem-123"},
+    )
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "invalid_api_key"
+
+
+@pytest.mark.asyncio
+async def test_codex_usage_reset_consume_rejects_empty_redeem_request_id(async_client, db_setup, monkeypatch):
+    raw_chatgpt_account_id = "workspace_reset_empty"
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        await accounts_repo.upsert(
+            _make_account("acc_reset_empty", "reset-empty@example.com", chatgpt_account_id=raw_chatgpt_account_id)
+        )
+
+    async def stub_fetch_usage(**_: object) -> UsagePayload:
+        return UsagePayload.model_validate({"plan_type": "plus"})
+
+    async def should_not_consume(**_: object) -> ConsumeRateLimitResetCreditResponse:
+        raise AssertionError("empty redeem_request_id should not be forwarded upstream")
+
+    monkeypatch.setattr("app.core.auth.dependencies.fetch_usage", stub_fetch_usage)
+    monkeypatch.setattr("app.modules.proxy.api.consume_rate_limit_reset_credit", should_not_consume)
+
+    response = await async_client.post(
+        "/api/codex/rate-limit-reset-credits/consume",
+        headers={
+            "Authorization": "Bearer chatgpt-token",
+            "chatgpt-account-id": raw_chatgpt_account_id,
+        },
+        json={"redeem_request_id": "  "},
+    )
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_request_error"

@@ -32,6 +32,15 @@ class AccountRequestUsage(DashboardModel):
     total_cost_usd: float = 0.0
 
 
+class AccountUsageResetCredits(DashboardModel):
+    available_count: int = Field(ge=0)
+
+
+class AccountUsageResetCreditsResponse(DashboardModel):
+    account_id: str
+    rate_limit_reset_credits: AccountUsageResetCredits
+
+
 class AccountTokenStatus(DashboardModel):
     expires_at: datetime | None = None
     state: str | None = None
@@ -221,6 +230,20 @@ class AccountProbeResponse(DashboardModel):
     status: str
     account_id: str
     probe_status_code: int
+    primary_used_percent_before: float | None = None
+    primary_used_percent_after: float | None = None
+    secondary_used_percent_before: float | None = None
+    secondary_used_percent_after: float | None = None
+    account_status_before: str
+    account_status_after: str
+
+
+class AccountUsageResetConsumeResponse(DashboardModel):
+    status: str
+    account_id: str
+    code: str
+    windows_reset: int = 0
+    usage_written: bool
     primary_used_percent_before: float | None = None
     primary_used_percent_after: float | None = None
     secondary_used_percent_before: float | None = None

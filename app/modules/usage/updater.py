@@ -314,10 +314,10 @@ class UsageUpdater:
                 continue
         return refreshed
 
-    async def force_refresh(self, account: Account) -> bool:
+    async def force_refresh(self, account: Account, *, ignore_refresh_disabled: bool = False) -> bool:
         """Refresh one account regardless of cached/fresh usage rows."""
         settings = get_settings()
-        if not settings.usage_refresh_enabled:
+        if not settings.usage_refresh_enabled and not ignore_refresh_disabled:
             return False
         if account.status in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
             return False

@@ -25,6 +25,7 @@ describe("AccountDetail", () => {
         onPause={vi.fn()}
         onResume={vi.fn()}
         onProbe={vi.fn()}
+        onResetUsage={vi.fn()}
         onSetAlias={vi.fn().mockResolvedValue(undefined)}
         onDelete={vi.fn()}
         onReauth={vi.fn()}
@@ -55,6 +56,7 @@ describe("AccountDetail", () => {
         onPause={vi.fn()}
         onResume={vi.fn()}
         onProbe={vi.fn()}
+        onResetUsage={vi.fn()}
         onSetAlias={onSetAlias}
         onDelete={vi.fn()}
         onReauth={vi.fn()}
@@ -67,10 +69,12 @@ describe("AccountDetail", () => {
         upstreamProxyAdmin={createUpstreamProxyAdmin({
           bindings: [{ accountId: "acc_primary", poolId: "pool_primary", isActive: true }],
         })}
+        resetCredits={{ availableCount: 1 }}
       />,
     );
 
     expect(screen.getByRole("button", { name: "Edit alias" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Reset usage" })).toBeDisabled();
     expect(screen.getByRole("switch", { name: "Enable account proxy binding" })).toBeDisabled();
     expect(screen.getByRole("combobox", { name: "Account proxy pool" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Save binding" })).toBeDisabled();

@@ -268,10 +268,11 @@ async def validate_codex_usage_identity(request: Request) -> ApiKeyData | None:
         account = await accounts_repo.get_active_by_chatgpt_account_id(account_id)
         if account is None:
             raise ProxyAuthError("Unknown or inactive chatgpt-account-id")
+        local_account_id = account.id
         try:
             route = await resolve_upstream_route(
                 session,
-                account_id=account.id,
+                account_id=local_account_id,
                 operation="usage_identity",
                 scope="account",
                 encryptor=TokenEncryptor(),
@@ -280,7 +281,7 @@ async def validate_codex_usage_identity(request: Request) -> ApiKeyData | None:
             raise ProxyUpstreamError("Unable to resolve upstream proxy route for ChatGPT credentials") from exc
 
     try:
-        await fetch_usage(
+        usage_payload = await fetch_usage(
             access_token=token,
             account_id=account_id,
             route=route,
@@ -294,6 +295,11 @@ async def validate_codex_usage_identity(request: Request) -> ApiKeyData | None:
         if exc.status_code in (401, 403):
             raise ProxyAuthError("Invalid ChatGPT token or chatgpt-account-id") from exc
         raise ProxyUpstreamError("Unable to validate ChatGPT credentials at this time") from exc
+    request.state.codex_usage_identity_access_token = token
+    request.state.codex_usage_identity_chatgpt_account_id = account_id
+    request.state.codex_usage_identity_account_id = local_account_id
+    request.state.codex_usage_identity_route = route
+    request.state.codex_usage_identity_payload = usage_payload
     return None
 
 

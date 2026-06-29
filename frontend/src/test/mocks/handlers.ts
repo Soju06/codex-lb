@@ -605,6 +605,45 @@ export const handlers = [
     return HttpResponse.json(createAccountTrends(accountId));
   }),
 
+  http.get("/api/accounts/:accountId/usage-reset-credits", ({ params }) => {
+    const accountId = String(params.accountId);
+    const account = findAccount(accountId);
+    if (!account) {
+      return HttpResponse.json(
+        { error: { code: "account_not_found", message: "Account not found" } },
+        { status: 404 },
+      );
+    }
+    return HttpResponse.json({
+      accountId,
+      rateLimitResetCredits: { availableCount: 3 },
+    });
+  }),
+
+  http.post("/api/accounts/:accountId/usage-reset-credits/consume", ({ params }) => {
+    const accountId = String(params.accountId);
+    const account = findAccount(accountId);
+    if (!account) {
+      return HttpResponse.json(
+        { error: { code: "account_not_found", message: "Account not found" } },
+        { status: 404 },
+      );
+    }
+    return HttpResponse.json({
+      status: "reset",
+      accountId,
+      code: "reset",
+      windowsReset: 2,
+      usageWritten: true,
+      primaryUsedPercentBefore: 99,
+      primaryUsedPercentAfter: 1,
+      secondaryUsedPercentBefore: 80,
+      secondaryUsedPercentAfter: 0,
+      accountStatusBefore: account.status,
+      accountStatusAfter: account.status,
+    });
+  }),
+
   http.post("/api/accounts/:accountId/probe", ({ params }) => {
     const accountId = String(params.accountId);
     const account = findAccount(accountId);

@@ -12,6 +12,8 @@ import {
   AccountsResponseSchema,
   AccountRoutingPolicyUpdateRequestSchema,
   AccountRoutingPolicyUpdateResponseSchema,
+  AccountUsageResetConsumeResponseSchema,
+  AccountUsageResetCreditsResponseSchema,
   AccountTrendsResponseSchema,
   AccountProbeRequestSchema,
   AccountProbeResponseSchema,
@@ -100,6 +102,20 @@ export function getAccountTrends(accountId: string) {
   return get(
     `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/trends`,
     AccountTrendsResponseSchema,
+  );
+}
+
+export function getAccountUsageResetCredits(accountId: string) {
+  return get(
+    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/usage-reset-credits`,
+    AccountUsageResetCreditsResponseSchema,
+  );
+}
+
+export function consumeAccountUsageResetCredit(accountId: string) {
+  return post(
+    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/usage-reset-credits/consume`,
+    AccountUsageResetConsumeResponseSchema,
   );
 }
 

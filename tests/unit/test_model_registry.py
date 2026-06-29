@@ -189,6 +189,59 @@ async def test_update_merges_models_across_plans():
 
 
 @pytest.mark.asyncio
+async def test_update_unions_service_tiers_across_plans():
+    # Issue #1100: an account/plan without Fast entitlement returns empty
+    # service-tier metadata for a shared slug. Last-writer-wins would let that
+    # empty list erase Fast from the shared catalog; the merge must union it so
+    # Fast stays visible while any account supports it.
+    fast = replace(
+        _model("gpt-5.5"),
+        raw={
+            "service_tiers": [{"slug": "fast"}, {"slug": "default"}],
+            "additional_speed_tiers": ["fast"],
+            "default_service_tier": "fast",
+        },
+    )
+    no_fast = replace(
+        _model("gpt-5.5"),
+        raw={"service_tiers": [], "additional_speed_tiers": []},
+    )
+
+    registry = ModelRegistry(ttl_seconds=60.0)
+    # "pro" (Fast) first, "plus" (no Fast) last so last-writer-wins would drop Fast.
+    await registry.update({"pro": [fast], "plus": [no_fast]})
+
+    snapshot = registry.get_snapshot()
+    assert snapshot is not None
+    merged = snapshot.models["gpt-5.5"]
+    service_tiers = merged.raw["service_tiers"]
+    speed_tiers = merged.raw["additional_speed_tiers"]
+    assert isinstance(service_tiers, list)
+    assert isinstance(speed_tiers, list)
+    tier_slugs = {entry["slug"] for entry in service_tiers if isinstance(entry, dict)}
+    assert "fast" in tier_slugs
+    assert "fast" in speed_tiers
+    assert merged.raw["default_service_tier"] == "fast"
+
+
+@pytest.mark.asyncio
+async def test_update_does_not_duplicate_shared_service_tiers():
+    # Two accounts that both support Fast must not produce duplicate tier entries.
+    fast = replace(
+        _model("gpt-5.5"),
+        raw={"service_tiers": [{"slug": "fast"}], "additional_speed_tiers": ["fast"]},
+    )
+    registry = ModelRegistry(ttl_seconds=60.0)
+    await registry.update({"pro": [fast], "plus": [replace(fast, raw=dict(fast.raw))]})
+
+    snapshot = registry.get_snapshot()
+    assert snapshot is not None
+    merged = snapshot.models["gpt-5.5"]
+    assert merged.raw["service_tiers"] == [{"slug": "fast"}]
+    assert merged.raw["additional_speed_tiers"] == ["fast"]
+
+
+@pytest.mark.asyncio
 async def test_partial_update_preserves_stale_plans():
     registry = ModelRegistry(ttl_seconds=60.0)
 

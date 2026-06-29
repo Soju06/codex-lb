@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import json
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from fnmatch import fnmatchcase
 
 import anyio
@@ -198,6 +199,75 @@ _BOOTSTRAP_STATIC_MODELS: tuple[UpstreamModel, ...] = (
 )
 
 
+# Speed/service-tier metadata must aggregate (union) when the same slug is
+# fetched from multiple accounts/plans, rather than be overwritten
+# last-writer-wins. Otherwise a single account without Fast entitlement returns
+# an empty tier list and erases Fast from the shared catalog for every account
+# (issue #1100).
+_SERVICE_TIER_OBJECT_KEY_FIELDS = ("slug", "name", "id", "tier")
+
+
+def _union_string_tiers(primary: JsonValue, secondary: JsonValue) -> list[JsonValue] | None:
+    merged: list[JsonValue] = []
+    for source in (primary, secondary):
+        if isinstance(source, list):
+            for item in source:
+                if isinstance(item, str) and item not in merged:
+                    merged.append(item)
+    return merged or None
+
+
+def _service_tier_identity(entry: JsonValue) -> str:
+    if isinstance(entry, dict):
+        for key in _SERVICE_TIER_OBJECT_KEY_FIELDS:
+            value = entry.get(key)
+            if isinstance(value, str) and value:
+                return f"{key}:{value}"
+    return json.dumps(entry, sort_keys=True, default=str)
+
+
+def _union_object_tiers(primary: JsonValue, secondary: JsonValue) -> list[JsonValue] | None:
+    merged: list[JsonValue] = []
+    seen: set[str] = set()
+    for source in (primary, secondary):
+        if isinstance(source, list):
+            for item in source:
+                identity = _service_tier_identity(item)
+                if identity not in seen:
+                    seen.add(identity)
+                    merged.append(item)
+    return merged or None
+
+
+def _merge_service_tier_metadata(existing: UpstreamModel, incoming: UpstreamModel) -> UpstreamModel:
+    """Combine two same-slug models so the speed/service-tier metadata is the
+    union of both. ``incoming`` stays the base (last-writer-wins for every other
+    field); only the tier fields aggregate, so an account without Fast cannot
+    strip Fast contributed by another account (issue #1100)."""
+    merged_raw = dict(incoming.raw)
+
+    speed_tiers = _union_string_tiers(
+        incoming.raw.get("additional_speed_tiers"),
+        existing.raw.get("additional_speed_tiers"),
+    )
+    if speed_tiers is not None:
+        merged_raw["additional_speed_tiers"] = speed_tiers
+
+    service_tiers = _union_object_tiers(
+        incoming.raw.get("service_tiers"),
+        existing.raw.get("service_tiers"),
+    )
+    if service_tiers is not None:
+        merged_raw["service_tiers"] = service_tiers
+
+    if not merged_raw.get("default_service_tier") and existing.raw.get("default_service_tier"):
+        merged_raw["default_service_tier"] = existing.raw["default_service_tier"]
+
+    if merged_raw == incoming.raw:
+        return incoming
+    return replace(incoming, raw=merged_raw)
+
+
 class ModelRegistry:
     def __init__(self, *, ttl_seconds: float = 300.0) -> None:
         if ttl_seconds <= 0:
@@ -271,10 +341,15 @@ class ModelRegistry:
                                 models[slug] = previous.models[slug]
                             model_plans.setdefault(slug, set()).add(plan_type)
 
-                # Merge newly fetched results
+                # Merge newly fetched results, aggregating service-tier metadata
+                # across plans so a non-Fast account does not erase Fast from the
+                # shared catalog (issue #1100).
                 for plan_type, plan_models_list in per_plan_results.items():
                     for model in plan_models_list:
-                        models[model.slug] = model
+                        existing = models.get(model.slug)
+                        models[model.slug] = (
+                            _merge_service_tier_metadata(existing, model) if existing is not None else model
+                        )
                         model_plans.setdefault(model.slug, set()).add(plan_type)
 
                 frozen_model_plans: dict[str, frozenset[str]] = {

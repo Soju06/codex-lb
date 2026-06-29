@@ -260,7 +260,9 @@ async def test_stream_http_bridge_or_retry_raw_fallback_uses_prepared_payload_an
 
     async def fake_stream_with_retry(request_payload, *_args: object, **kwargs: object):
         raw_http_payloads.append(request_payload)
-        raw_http_reservations.append(kwargs["api_key_reservation"])
+        raw_http_reservations.append(
+            cast(proxy_service.ApiKeyUsageReservationData | None, kwargs["api_key_reservation"])
+        )
         yield 'data: {"type":"response.completed"}\n\n'
 
     monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())

@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
+from typing import cast
 
 import pytest
 
@@ -88,7 +89,7 @@ async def test_inject_sse_keepalives_keepalive_frame_is_sse_comment():
 @pytest.mark.asyncio
 async def test_inject_sse_keepalives_closes_source_on_outer_close():
     closed = asyncio.Event()
-    stream = inject_sse_keepalives(_closable_agen(closed), 5.0)
+    stream = cast(AsyncGenerator[str, None], inject_sse_keepalives(_closable_agen(closed), 5.0))
 
     assert await anext(stream) == "a\n\n"
     await stream.aclose()

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from typing import Any, cast
 
 import pytest
@@ -105,9 +105,12 @@ async def test_synthetic_compaction_stream_preserves_mapping_usage() -> None:
 @pytest.mark.asyncio
 async def test_prepend_first_closes_source_when_closed_after_cached_first() -> None:
     source = _ClosableBlockStream()
-    stream = proxy_api_module._prepend_first(
-        'data: {"type":"response.output_text.delta","delta":"hi"}\n\n',
-        source,
+    stream = cast(
+        AsyncGenerator[str, None],
+        proxy_api_module._prepend_first(
+            'data: {"type":"response.output_text.delta","delta":"hi"}\n\n',
+            source,
+        ),
     )
 
     assert await anext(stream) == 'data: {"type":"response.output_text.delta","delta":"hi"}\n\n'
@@ -121,7 +124,7 @@ async def test_normalize_public_responses_stream_closes_source_on_outer_close() 
     source = _ClosableBlockStream(
         'data: {"type":"response.created","response":{"id":"resp_close","status":"in_progress"}}\n\n'
     )
-    stream = proxy_api_module._normalize_public_responses_stream(source)
+    stream = cast(AsyncGenerator[str, None], proxy_api_module._normalize_public_responses_stream(source))
 
     payload = proxy_api_module._parse_sse_payload(await anext(stream))
     assert payload is not None

@@ -53,6 +53,7 @@ def _account_selection_recovery_sleep_seconds_from_message(message: str | None) 
         or "no accounts with a plan" in lowered
         or "no accounts with available additional quota" in lowered
         or "no fresh additional quota data" in lowered
+        or lowered.startswith("rate limit exceeded. try again in")
     ):
         return None
 

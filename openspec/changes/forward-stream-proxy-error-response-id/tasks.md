@@ -1,6 +1,6 @@
 - [x] Add regression coverage for a late `ProxyResponseError` converted to public Responses SSE.
 - [x] Include the active request id in converted streaming `response.failed` events.
-- [x] Add Codex CLI-style sticky raw HTTP fallback for pre-visible HTTP bridge websocket failures.
+- [x] Add Codex CLI-style raw HTTP fallback for pre-visible HTTP bridge websocket failures, preserving prepared continuity payloads and fresh API-key reservation settlement.
 - [x] Add regression coverage that post-visible bridge failures do not replay.
 - [x] Run targeted unit tests.
 - [ ] Run OpenSpec validation (`openspec` CLI unavailable locally).

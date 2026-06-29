@@ -24,14 +24,15 @@ When serving streaming `POST /v1/responses`, the first OpenAI-contract event the
 
 ### Requirement: HTTP bridge websocket failures fall back to raw HTTP when replay-safe
 
-When serving streaming Responses traffic through the HTTP responses session bridge, if a bridge websocket/session failure occurs before any downstream event has been yielded, the service MUST mark the affected bridge session key for raw HTTP fallback and replay the request through the non-bridge HTTP streaming transport. The fallback MUST force upstream HTTP transport for that replay and for later requests using the same bridge session key. If any downstream event has already been yielded for the request, the service MUST NOT replay the request through raw HTTP and MUST surface a terminal error instead.
+When serving streaming Responses traffic through the HTTP responses session bridge, if a bridge websocket/session failure occurs before any downstream event has been yielded, the service MUST replay the prepared bridge request through the non-bridge HTTP streaming transport. If bridge preparation injected or trimmed `previous_response_id` continuity, the raw HTTP replay MUST preserve that prepared payload. If the bridge attempt already held an API-key reservation, the raw HTTP replay MUST use a fresh reservation so successful fallback usage can be settled exactly once. Soft-affinity bridge keys MAY use a bounded raw-HTTP fallback marker for later requests with the same key. Hard continuity keys such as session headers or turn-state headers MUST re-enter bridge continuity resolution on later requests rather than permanently bypassing the bridge. If any downstream event has already been yielded for the request, the service MUST NOT replay the request through raw HTTP and MUST surface a terminal error instead.
 
 #### Scenario: Pre-visible bridge timeout falls back to raw HTTP
 
 - **WHEN** a bridge-routed streaming `/v1/responses` request fails with retryable transport error `upstream_unavailable`, `upstream_request_timeout`, or `stream_incomplete` before downstream-visible output
-- **THEN** the service records raw HTTP fallback for the bridge session key
-- **AND** the request is replayed through raw HTTP with upstream stream transport forced to HTTP
-- **AND** later requests for the same bridge session key bypass the bridge and use raw HTTP
+- **THEN** the request is replayed through raw HTTP with upstream stream transport forced to HTTP
+- **AND** bridge-injected continuity payload changes are preserved on that replay
+- **AND** the replay uses a live API-key reservation when API-key usage enforcement applies
+- **AND** only soft-affinity bridge keys may temporarily bypass the bridge on later same-key requests
 
 #### Scenario: Post-visible bridge failure is not replayed
 

@@ -9169,7 +9169,7 @@ async def test_v1_responses_http_bridge_downstream_disconnect_unwedges_same_sess
     app_instance,
     monkeypatch,
 ):
-    _install_bridge_settings(monkeypatch, enabled=True, admission_wait_timeout_seconds=0.05)
+    _install_bridge_settings_with_limits(monkeypatch, enabled=True, admission_wait_timeout_seconds=0.05)
     account_id = await _import_account(
         async_client,
         "acc_http_bridge_downstream_disconnect",

@@ -1,4 +1,4 @@
 - [x] 1. Add OpenSpec coverage for downstream-disconnect bridge cleanup.
 - [x] 2. Propagate downstream disconnects through existing bridge stream cleanup.
 - [x] 3. Add regression coverage for post-visible disconnect unwedging same-session admission.
-- [ ] 4. Run targeted tests and update PR notes.
+- [x] 4. Run targeted tests and update PR notes.

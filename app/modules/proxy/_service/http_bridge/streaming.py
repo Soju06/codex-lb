@@ -201,6 +201,8 @@ _SECURITY_WORK_NO_AUTHORIZED_ACCOUNTS_MESSAGE = (
 _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS = 5.0
 _HTTP_BRIDGE_BACKGROUND_CLEANUP_WARN_THRESHOLD = 100
 _HTTP_BRIDGE_RAW_HTTP_FALLBACK_KEY_ATTR = "_codex_lb_http_bridge_raw_http_fallback_key"
+_HTTP_BRIDGE_RAW_HTTP_FALLBACK_PAYLOAD_ATTR = "_codex_lb_http_bridge_raw_http_fallback_payload"
+_HTTP_BRIDGE_RAW_HTTP_FALLBACK_TTL_SECONDS = 300.0
 _HTTP_BRIDGE_RAW_HTTP_FALLBACK_CODES = frozenset(
     {
         "stream_incomplete",
@@ -250,6 +252,48 @@ def _http_bridge_should_fallback_to_raw_http(exc: ProxyResponseError) -> bool:
     ):
         return False
     return any(marker in normalized_message for marker in _HTTP_BRIDGE_RAW_HTTP_FALLBACK_UPSTREAM_UNAVAILABLE_MARKERS)
+
+
+def _set_http_bridge_raw_http_fallback(
+    exc: ProxyResponseError,
+    key: _HTTPBridgeSessionKey,
+    *,
+    payload: ResponsesRequest,
+) -> None:
+    setattr(exc, _HTTP_BRIDGE_RAW_HTTP_FALLBACK_KEY_ATTR, key)
+    setattr(exc, _HTTP_BRIDGE_RAW_HTTP_FALLBACK_PAYLOAD_ATTR, payload)
+
+
+def _http_bridge_raw_http_fallback_payload(
+    exc: ProxyResponseError,
+    default_payload: ResponsesRequest,
+) -> ResponsesRequest:
+    payload = getattr(exc, _HTTP_BRIDGE_RAW_HTTP_FALLBACK_PAYLOAD_ATTR, None)
+    return payload if isinstance(payload, ResponsesRequest) else default_payload
+
+
+def _http_bridge_mark_raw_http_fallback(
+    fallback_keys: dict[_HTTPBridgeSessionKey, float],
+    key: _HTTPBridgeSessionKey,
+) -> None:
+    now = _service_time().monotonic()
+    expired_keys = [fallback_key for fallback_key, expires_at in fallback_keys.items() if expires_at <= now]
+    for fallback_key in expired_keys:
+        fallback_keys.pop(fallback_key, None)
+    fallback_keys[key] = now + _HTTP_BRIDGE_RAW_HTTP_FALLBACK_TTL_SECONDS
+
+
+def _http_bridge_raw_http_fallback_active(
+    fallback_keys: dict[_HTTPBridgeSessionKey, float],
+    key: _HTTPBridgeSessionKey,
+) -> bool:
+    expires_at = fallback_keys.get(key)
+    if expires_at is None:
+        return False
+    if expires_at <= _service_time().monotonic():
+        fallback_keys.pop(key, None)
+        return False
+    return True
 
 
 def _http_bridge_account_capacity_wait_seconds(exc: ProxyResponseError) -> float | None:
@@ -441,9 +485,10 @@ class _HTTPBridgeStreamingMixin:
                 raise
             if not _http_bridge_should_fallback_to_raw_http(exc):
                 raise
+            fallback_payload = _http_bridge_raw_http_fallback_payload(exc, payload)
             fallback_keys = getattr(self, "_http_bridge_raw_http_fallback_keys", None)
-            if fallback_keys is not None:
-                fallback_keys.add(bridge_session_key)
+            if isinstance(fallback_keys, dict) and bridge_session_key.strength == "soft":
+                _http_bridge_mark_raw_http_fallback(fallback_keys, bridge_session_key)
             code, message = _proxy_error_code_message(exc)
             _log_http_bridge_event(
                 "fallback_raw_http",
@@ -454,15 +499,26 @@ class _HTTPBridgeStreamingMixin:
                 cache_key_family=bridge_session_key.affinity_kind,
                 model_class=_extract_model_class(payload.model) if payload.model else None,
             )
+            fallback_reservation = api_key_reservation
+            if api_key is not None and api_key_reservation is not None:
+                await self._release_websocket_reservation(api_key_reservation)
+                fallback_reservation = await self._reserve_websocket_api_key_usage(
+                    api_key,
+                    request_model=fallback_payload.model,
+                    request_service_tier=_normalize_service_tier_value(
+                        dict(fallback_payload.to_payload()).get("service_tier"),
+                    ),
+                    request_usage_budget=estimate_api_key_request_usage(fallback_payload),
+                )
             stream_with_retry = cast(Callable[..., AsyncIterator[str]], self._stream_with_retry)
             async for line in stream_with_retry(
-                payload,
+                fallback_payload,
                 headers,
                 codex_session_affinity=codex_session_affinity,
                 propagate_http_errors=propagate_http_errors,
                 openai_cache_affinity=openai_cache_affinity,
                 api_key=api_key,
-                api_key_reservation=api_key_reservation,
+                api_key_reservation=fallback_reservation,
                 suppress_text_done_events=suppress_text_done_events,
                 request_transport=_REQUEST_TRANSPORT_HTTP,
                 rewritten_file_account_id=rewritten_file_account_id,
@@ -537,7 +593,11 @@ class _HTTPBridgeStreamingMixin:
             forwarded_affinity_key=forwarded_affinity_key,
         )
         fallback_keys = getattr(self, "_http_bridge_raw_http_fallback_keys", None)
-        if fallback_keys is not None and bridge_session_key in fallback_keys:
+        if (
+            isinstance(fallback_keys, dict)
+            and bridge_session_key.strength == "soft"
+            and _http_bridge_raw_http_fallback_active(fallback_keys, bridge_session_key)
+        ):
             _log_http_bridge_event(
                 "fallback_raw_http_sticky",
                 bridge_session_key,
@@ -807,10 +867,10 @@ class _HTTPBridgeStreamingMixin:
                         ):
                             yield line
                         if _service_time().monotonic() >= request_deadline:
-                            setattr(exc, _HTTP_BRIDGE_RAW_HTTP_FALLBACK_KEY_ATTR, bridge_session_key)
+                            _set_http_bridge_raw_http_fallback(exc, bridge_session_key, payload=effective_payload)
                             raise
                         continue
-                    setattr(exc, _HTTP_BRIDGE_RAW_HTTP_FALLBACK_KEY_ATTR, bridge_session_key)
+                    _set_http_bridge_raw_http_fallback(exc, bridge_session_key, payload=effective_payload)
                     raise
                 _log_http_bridge_event(
                     "owner_unavailable_fresh_resend",
@@ -1138,9 +1198,10 @@ class _HTTPBridgeStreamingMixin:
                 original_count = len(incoming_input_list)
                 trimmed_input = incoming_input_list[stored_count:]
                 trimmed_payload = effective_payload.model_copy(update={"input": trimmed_input})
+                effective_payload = trimmed_payload
                 previous_preferred_account_id = request_state.preferred_account_id
                 request_state, text_data = self._prepare_http_bridge_request(
-                    trimmed_payload,
+                    effective_payload,
                     headers,
                     api_key=api_key,
                     api_key_reservation=api_key_reservation,
@@ -1153,7 +1214,7 @@ class _HTTPBridgeStreamingMixin:
                 request_state.transport = _REQUEST_TRANSPORT_HTTP
                 request_state.request_stage = _http_bridge_request_stage(
                     headers=headers,
-                    payload=trimmed_payload,
+                    payload=effective_payload,
                     durable_lookup=durable_lookup,
                 )
                 request_state.preferred_account_id = previous_preferred_account_id
@@ -1329,7 +1390,7 @@ class _HTTPBridgeStreamingMixin:
                         model_class=_extract_model_class(effective_payload.model) if effective_payload.model else None,
                         owner_check_applied=True,
                     )
-                setattr(exc, _HTTP_BRIDGE_RAW_HTTP_FALLBACK_KEY_ATTR, bridge_session_key)
+                _set_http_bridge_raw_http_fallback(exc, bridge_session_key, payload=effective_payload)
                 raise
 
             if should_attempt_context_overflow_fresh_turn_recovery:

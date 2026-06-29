@@ -3,7 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from typing import cast
 
 from app.core.errors import ResponseFailedEvent
 from app.core.types import JsonValue
@@ -36,15 +37,18 @@ async def inject_sse_keepalives(
 
     A non-positive ``interval_seconds`` disables injection entirely.
     """
+    iterator = source.__aiter__()
     if interval_seconds <= 0:
-        async for chunk in source:
-            yield chunk
+        try:
+            async for chunk in iterator:
+                yield chunk
+        finally:
+            await _close_async_iterator(iterator)
         return
 
     async def _next_chunk(it: AsyncIterator[str]) -> str:
         return await it.__anext__()
 
-    iterator = source.__aiter__()
     pending: asyncio.Task[str] | None = None
     try:
         while True:
@@ -64,12 +68,25 @@ async def inject_sse_keepalives(
             pending = None
             yield chunk
     finally:
-        if pending is not None and not pending.done():
-            pending.cancel()
-            try:
-                await pending
-            except BaseException:
-                pass
+        if pending is not None:
+            if not pending.done():
+                pending.cancel()
+                try:
+                    await pending
+                except BaseException:
+                    pass
+            else:
+                try:
+                    pending.result()
+                except BaseException:
+                    pass
+        await _close_async_iterator(iterator)
+
+
+async def _close_async_iterator(source: AsyncIterator[str]) -> None:
+    aclose = getattr(source, "aclose", None)
+    if callable(aclose):
+        await cast(Callable[[], Awaitable[None]], aclose)()
 
 
 def format_sse_event(payload: JsonPayload) -> str:

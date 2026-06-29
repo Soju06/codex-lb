@@ -224,6 +224,7 @@ _STREAM_STARTUP_ERROR_PROBE_SECONDS = 0.05
 # Keep bridge startup probing above tiny event-loop scheduling jitter:
 # PostgreSQL-backed failures may need a DB round trip before the first item.
 _HTTP_BRIDGE_STARTUP_ERROR_PROBE_SECONDS = 2.0
+_HTTP_BRIDGE_DOWNSTREAM_DISCONNECT_POLL_SECONDS = 0.25
 _CHAT_COMPLETIONS_STARTUP_ERROR_PROBE_SECONDS = 2.0
 _CURSOR_CHAT_COMPLETIONS_STARTUP_ERROR_PROBE_SECONDS = 15.0
 _CURSOR_CONTEXT_LIMIT_SYNTHETIC_USAGE_TOKENS: Final[int] = 1_000_000
@@ -2319,12 +2320,15 @@ async def _stream_responses(
             request_id=get_request_id(),
             route_family="responses",
         )
+    body_stream = inject_sse_keepalives(
+        stream,
+        get_settings().sse_keepalive_interval_seconds,
+        keepalive_frame=keepalive_frame,
+    )
+    if bridge_active:
+        body_stream = _stream_until_downstream_disconnect(request, body_stream)
     return StreamingResponse(
-        inject_sse_keepalives(
-            stream,
-            get_settings().sse_keepalive_interval_seconds,
-            keepalive_frame=keepalive_frame,
-        ),
+        body_stream,
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache, no-transform",
@@ -2685,10 +2689,79 @@ async def codex_usage(
 
 
 async def _prepend_first(first: str | None, stream: AsyncIterator[str]) -> AsyncIterator[str]:
-    if first is not None:
-        yield first
-    async for line in stream:
-        yield line
+    try:
+        if first is not None:
+            yield first
+        async for line in stream:
+            yield line
+    finally:
+        await _close_async_stream(stream)
+
+
+async def _close_async_stream(stream: AsyncIterator[str]) -> None:
+    aclose = getattr(stream, "aclose", None)
+    if callable(aclose):
+        await cast(Callable[[], Awaitable[None]], aclose)()
+
+
+async def _cancel_and_await_task(task: asyncio.Task[Any]) -> None:
+    task.cancel()
+    try:
+        await task
+    except BaseException:
+        pass
+
+
+async def _wait_for_downstream_disconnect(
+    request: Request,
+    poll_seconds: float = _HTTP_BRIDGE_DOWNSTREAM_DISCONNECT_POLL_SECONDS,
+) -> None:
+    while True:
+        if await request.is_disconnected():
+            return
+        await asyncio.sleep(poll_seconds)
+
+
+async def _stream_until_downstream_disconnect(
+    request: Request,
+    stream: AsyncIterator[str],
+    *,
+    poll_seconds: float = _HTTP_BRIDGE_DOWNSTREAM_DISCONNECT_POLL_SECONDS,
+) -> AsyncIterator[str]:
+    iterator = stream.__aiter__()
+    next_task: asyncio.Task[str] | None = None
+    disconnect_task = asyncio.create_task(_wait_for_downstream_disconnect(request, poll_seconds))
+    try:
+        while True:
+            if next_task is None:
+                next_task = asyncio.create_task(_read_first_stream_item(iterator))
+            done, _pending = await asyncio.wait(
+                {next_task, disconnect_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if disconnect_task in done:
+                if next_task is not None and not next_task.done():
+                    await _cancel_and_await_task(next_task)
+                    next_task = None
+                elif next_task is not None:
+                    try:
+                        next_task.result()
+                    except BaseException:
+                        pass
+                    next_task = None
+                return
+            try:
+                chunk = next_task.result()
+            except StopAsyncIteration:
+                return
+            next_task = None
+            yield chunk
+    finally:
+        if next_task is not None and not next_task.done():
+            await _cancel_and_await_task(next_task)
+        if not disconnect_task.done():
+            await _cancel_and_await_task(disconnect_task)
+        await _close_async_stream(iterator)
 
 
 async def _read_first_stream_item(stream: AsyncIterator[str]) -> str:
@@ -3071,26 +3144,32 @@ async def _probe_chat_stream_startup_error(
 
 
 async def _prepend_items(items: list[str], stream: AsyncIterator[str]) -> AsyncIterator[str]:
-    for item in items:
-        yield item
-    async for line in stream:
-        yield line
+    try:
+        for item in items:
+            yield item
+        async for line in stream:
+            yield line
+    finally:
+        await _close_async_stream(stream)
 
 
 async def _prepend_first_task(first_task: asyncio.Task[str], stream: AsyncIterator[str]) -> AsyncIterator[str]:
     try:
-        first = await first_task
-    except StopAsyncIteration:
-        return
+        try:
+            first = await first_task
+        except StopAsyncIteration:
+            return
+        finally:
+            # If the wrapping stream is closed before the first item is consumed
+            # (client disconnect, request teardown), cancel the still-running probe
+            # task so it does not hold the upstream connection open.
+            if not first_task.done():
+                await _cancel_and_await_task(first_task)
+        yield first
+        async for line in stream:
+            yield line
     finally:
-        # If the wrapping stream is closed before the first item is consumed
-        # (client disconnect, request teardown), cancel the still-running probe
-        # task so it does not hold the upstream connection open.
-        if not first_task.done():
-            first_task.cancel()
-    yield first
-    async for line in stream:
-        yield line
+        await _close_async_stream(stream)
 
 
 async def _prepend_initial_sse_heartbeat(
@@ -3100,19 +3179,26 @@ async def _prepend_initial_sse_heartbeat(
     request_id: str | None = None,
     route_family: str = "responses",
 ) -> AsyncIterator[str]:
-    logger.info(
-        "responses_stream_heartbeat request_id=%s route_family=%s stage=initial elapsed_seconds=0.000",
-        request_id,
-        route_family,
-    )
-    yield keepalive_frame
-    async for line in stream:
-        yield line
+    try:
+        logger.info(
+            "responses_stream_heartbeat request_id=%s route_family=%s stage=initial elapsed_seconds=0.000",
+            request_id,
+            route_family,
+        )
+        yield keepalive_frame
+        async for line in stream:
+            yield line
+    finally:
+        await _close_async_stream(stream)
 
 
 async def _stream_proxy_errors_as_response_failed(stream: AsyncIterator[str]) -> AsyncIterator[str]:
-    async for line in _stream_response_error_events(stream, owns_reservation=False, reservation=None):
-        yield line
+    wrapped_stream = _stream_response_error_events(stream, owns_reservation=False, reservation=None)
+    try:
+        async for line in wrapped_stream:
+            yield line
+    finally:
+        await _close_async_stream(wrapped_stream)
 
 
 async def _stream_response_error_events(
@@ -3142,6 +3228,8 @@ async def _stream_response_error_events(
                 error_param=error.param if error else None,
             )
         )
+    finally:
+        await _close_async_stream(stream)
 
 
 def _stream_startup_error_response(
@@ -3621,116 +3709,128 @@ async def _normalize_public_responses_stream(
         finally:
             pre_created_buffer.clear()
 
-    async for event_block in stream:
-        if event_block.strip() == "data: [DONE]":
-            done_seen = True
-            if terminal_seen:
+    try:
+        async for event_block in stream:
+            if event_block.strip() == "data: [DONE]":
+                done_seen = True
+                if terminal_seen:
+                    yield event_block
+                continue
+            if _looks_like_sse_comment_block(event_block):
                 yield event_block
-            continue
-        if _looks_like_sse_comment_block(event_block):
-            yield event_block
-            continue
-        payload = _parse_sse_payload(event_block)
-        if payload is None:
-            if _looks_like_sse_data_block(event_block):
-                contract_violation_kind = contract_violation_kind or "invalid_json"
-            continue
-        raw_event_type = payload.get("type")
-        if (
-            enforce_openai_sdk_contract
-            and isinstance(raw_event_type, str)
-            and raw_event_type
-            in (
-                "response.completed",
-                "response.incomplete",
+                continue
+            payload = _parse_sse_payload(event_block)
+            if payload is None:
+                if _looks_like_sse_data_block(event_block):
+                    contract_violation_kind = contract_violation_kind or "invalid_json"
+                continue
+            raw_event_type = payload.get("type")
+            if (
+                enforce_openai_sdk_contract
+                and isinstance(raw_event_type, str)
+                and raw_event_type
+                in (
+                    "response.completed",
+                    "response.incomplete",
+                )
+            ):
+                response_obj = payload.get("response")
+                if is_json_mapping(response_obj):
+                    existing_output = response_obj.get("output")
+                    needs_backfill = not (isinstance(existing_output, list) and existing_output)
+                    if needs_backfill and output_items:
+                        merged_response = _merge_collected_output_items(response_obj, output_items)
+                        payload = dict(payload)
+                        payload["response"] = merged_response
+            normalized_payload, violation_kind = _normalize_public_stream_payload(
+                payload,
+                enforce_openai_sdk_contract=enforce_openai_sdk_contract,
             )
-        ):
-            response_obj = payload.get("response")
-            if is_json_mapping(response_obj):
-                existing_output = response_obj.get("output")
-                needs_backfill = not (isinstance(existing_output, list) and existing_output)
-                if needs_backfill and output_items:
-                    merged_response = _merge_collected_output_items(response_obj, output_items)
-                    payload = dict(payload)
-                    payload["response"] = merged_response
-        normalized_payload, violation_kind = _normalize_public_stream_payload(
-            payload,
-            enforce_openai_sdk_contract=enforce_openai_sdk_contract,
-        )
-        if violation_kind is not None:
-            contract_violation_kind = contract_violation_kind or violation_kind
-        if normalized_payload is None:
-            continue
-        event_type = normalized_payload.get("type")
-        if not enforce_openai_sdk_contract and (
-            event_type == "error" or is_json_mapping(normalized_payload.get("error"))
-        ):
-            terminal_seen = True
-            yield event_block
-            continue
-
-        if enforce_openai_sdk_contract and not created_emitted and isinstance(event_type, str):
-            if event_type == "response.created":
-                created_emitted = True
-                yield format_sse_event(normalized_payload)
-                response_id = _response_id_from_event_payload(normalized_payload)
-                for formatted_payload in buffered_pre_created_payloads_to_replay(response_id):
-                    yield formatted_payload
+            if violation_kind is not None:
+                contract_violation_kind = contract_violation_kind or violation_kind
+            if normalized_payload is None:
+                continue
+            event_type = normalized_payload.get("type")
+            if not enforce_openai_sdk_contract and (
+                event_type == "error" or is_json_mapping(normalized_payload.get("error"))
+            ):
+                terminal_seen = True
+                yield event_block
                 continue
 
-            synthetic_created = _synthetic_response_created_envelope(normalized_payload)
-            if synthetic_created is not None:
-                yield format_sse_event(synthetic_created)
-                created_emitted = True
-                response_id = _response_id_from_event_payload(synthetic_created)
-                for formatted_payload in buffered_pre_created_payloads_to_replay(response_id):
-                    yield formatted_payload
-            elif _should_buffer_public_pre_created_event(event_type):
-                if len(pre_created_buffer) >= _PUBLIC_RESPONSES_PRE_CREATED_BUFFER_LIMIT:
-                    error_kind = contract_violation_kind or "upstream_stream_truncated"
-                    for formatted_payload in _public_response_failed_event_blocks(error_kind, include_created=True):
+            if enforce_openai_sdk_contract and not created_emitted and isinstance(event_type, str):
+                if event_type == "response.created":
+                    created_emitted = True
+                    yield format_sse_event(normalized_payload)
+                    response_id = _response_id_from_event_payload(normalized_payload)
+                    for formatted_payload in buffered_pre_created_payloads_to_replay(response_id):
                         yield formatted_payload
-                    return
-                pre_created_buffer.append(normalized_payload)
-                continue
-            elif event_type in _PUBLIC_RESPONSE_STREAM_TERMINAL_TYPES:
-                if event_type == "error":
-                    for formatted_payload in _public_response_failed_event_blocks_from_error(
-                        normalized_payload,
+                    continue
+
+                synthetic_created = _synthetic_response_created_envelope(normalized_payload)
+                if synthetic_created is not None:
+                    yield format_sse_event(synthetic_created)
+                    created_emitted = True
+                    response_id = _response_id_from_event_payload(synthetic_created)
+                    for formatted_payload in buffered_pre_created_payloads_to_replay(response_id):
+                        yield formatted_payload
+                elif _should_buffer_public_pre_created_event(event_type):
+                    if len(pre_created_buffer) >= _PUBLIC_RESPONSES_PRE_CREATED_BUFFER_LIMIT:
+                        error_kind = contract_violation_kind or "upstream_stream_truncated"
+                        for formatted_payload in _public_response_failed_event_blocks(
+                            error_kind,
+                            include_created=True,
+                        ):
+                            yield formatted_payload
+                        return
+                    pre_created_buffer.append(normalized_payload)
+                    continue
+                elif event_type in _PUBLIC_RESPONSE_STREAM_TERMINAL_TYPES:
+                    if event_type == "error":
+                        for formatted_payload in _public_response_failed_event_blocks_from_error(
+                            normalized_payload,
+                            include_created=True,
+                        ):
+                            yield formatted_payload
+                        return
+                    error_kind = contract_violation_kind or "upstream_stream_truncated"
+                    for formatted_payload in _public_response_failed_event_blocks(
+                        error_kind,
                         include_created=True,
                     ):
                         yield formatted_payload
                     return
-                error_kind = contract_violation_kind or "upstream_stream_truncated"
-                for formatted_payload in _public_response_failed_event_blocks(error_kind, include_created=True):
+
+            if enforce_openai_sdk_contract and event_type == "error":
+                for formatted_payload in _public_response_failed_event_blocks_from_error(
+                    normalized_payload,
+                    include_created=not created_emitted,
+                ):
                     yield formatted_payload
                 return
 
-        if enforce_openai_sdk_contract and event_type == "error":
-            for formatted_payload in _public_response_failed_event_blocks_from_error(
-                normalized_payload,
-                include_created=not created_emitted,
-            ):
+            _collect_output_item_event(normalized_payload, output_items)
+            if event_type == "response.output_text.delta":
+                seen_text_delta_keys.add(_text_delta_stream_key(normalized_payload))
+            for formatted_payload in formatted_payloads_with_synthetic_deltas(normalized_payload):
                 yield formatted_payload
+            if isinstance(event_type, str) and event_type in _PUBLIC_RESPONSE_STREAM_TERMINAL_TYPES:
+                terminal_seen = True
+        if terminal_seen:
+            if not done_seen and not enforce_openai_sdk_contract:
+                yield "data: [DONE]\n\n"
             return
-
-        _collect_output_item_event(normalized_payload, output_items)
-        if event_type == "response.output_text.delta":
-            seen_text_delta_keys.add(_text_delta_stream_key(normalized_payload))
-        for formatted_payload in formatted_payloads_with_synthetic_deltas(normalized_payload):
+        error_kind = contract_violation_kind or (
+            "upstream_stream_truncated" if enforce_openai_sdk_contract else "stream_incomplete"
+        )
+        include_created = enforce_openai_sdk_contract and not created_emitted
+        for formatted_payload in _public_response_failed_event_blocks(
+            error_kind,
+            include_created=include_created,
+        ):
             yield formatted_payload
-        if isinstance(event_type, str) and event_type in _PUBLIC_RESPONSE_STREAM_TERMINAL_TYPES:
-            terminal_seen = True
-    if terminal_seen:
-        if not done_seen and not enforce_openai_sdk_contract:
-            yield "data: [DONE]\n\n"
-        return
-    error_kind = contract_violation_kind or (
-        "upstream_stream_truncated" if enforce_openai_sdk_contract else "stream_incomplete"
-    )
-    include_created = enforce_openai_sdk_contract and not created_emitted
-    for formatted_payload in _public_response_failed_event_blocks(error_kind, include_created=include_created):
-        yield formatted_payload
+    finally:
+        await _close_async_stream(stream)
 
 
 def _should_buffer_public_pre_created_event(event_type: str) -> bool:

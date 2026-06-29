@@ -36,6 +36,14 @@ async def _slow_agen(items: list[str], delay: float) -> AsyncIterator[str]:
         yield item
 
 
+async def _closable_agen(closed: asyncio.Event) -> AsyncIterator[str]:
+    try:
+        yield "a\n\n"
+        await asyncio.Event().wait()
+    finally:
+        closed.set()
+
+
 @pytest.mark.asyncio
 async def test_inject_sse_keepalives_passes_through_when_disabled():
     out = [chunk async for chunk in inject_sse_keepalives(_agen(["a\n\n", "b\n\n"]), 0)]
@@ -75,6 +83,17 @@ async def test_inject_sse_keepalives_can_emit_codex_event_frame():
 async def test_inject_sse_keepalives_keepalive_frame_is_sse_comment():
     assert SSE_KEEPALIVE_FRAME.startswith(":")
     assert SSE_KEEPALIVE_FRAME.endswith("\n\n")
+
+
+@pytest.mark.asyncio
+async def test_inject_sse_keepalives_closes_source_on_outer_close():
+    closed = asyncio.Event()
+    stream = inject_sse_keepalives(_closable_agen(closed), 5.0)
+
+    assert await anext(stream) == "a\n\n"
+    await stream.aclose()
+
+    assert closed.is_set()
 
 
 def test_extract_sse_data_preserves_unicode_line_separators():

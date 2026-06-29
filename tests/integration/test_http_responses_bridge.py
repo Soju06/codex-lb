@@ -18,6 +18,7 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 
+import app.modules.proxy.api as proxy_api_module
 import app.modules.proxy.service as proxy_module
 from app.core.config.settings import Settings
 from app.core.utils.request_id import reset_request_id, set_request_id
@@ -371,6 +372,23 @@ class _CreatedOnlyUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
                     {
                         "type": "response.created",
                         "response": {"id": response_id, "object": "response", "status": "in_progress"},
+                    },
+                    separators=(",", ":"),
+                ),
+            )
+        )
+
+
+class _AnonymousDeltaOnlyUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
+    async def send_text(self, text: str) -> None:
+        self.sent_text.append(text)
+        await self._messages.put(
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "response.output_text.delta",
+                        "delta": "orphaned-visible-output",
                     },
                     separators=(",", ":"),
                 ),
@@ -9143,6 +9161,156 @@ async def test_v1_responses_http_bridge_stream_cancel_retires_session(
     assert session.closed is True
     assert session.upstream_control.retire_after_drain is True
     assert fake_upstream.closed is True
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_http_bridge_downstream_disconnect_unwedges_same_session(
+    async_client,
+    app_instance,
+    monkeypatch,
+):
+    _install_bridge_settings(monkeypatch, enabled=True, admission_wait_timeout_seconds=0.05)
+    account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_downstream_disconnect",
+        "http-bridge-downstream-disconnect@example.com",
+    )
+    service = get_proxy_service_for_app(app_instance)
+    account = await _get_account(account_id)
+    first_upstream = _AnonymousDeltaOnlyUpstreamWebSocket()
+    second_upstream = _FakeBridgeUpstreamWebSocket()
+    upstreams = deque([first_upstream, second_upstream])
+
+    class DisconnectingRequest:
+        def __init__(self) -> None:
+            self.disconnected = asyncio.Event()
+
+        async def is_disconnected(self) -> bool:
+            return self.disconnected.is_set()
+
+    async def fake_select_account_with_budget(self, deadline, **kwargs):
+        del deadline, kwargs
+        lease = await self._load_balancer.acquire_account_lease(account.id, kind="stream")
+        return AccountSelection(account=account, error_message=None, error_code=None, lease=lease)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        return upstreams.popleft()
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    payload = proxy_module.ResponsesRequest(
+        model="gpt-5.1",
+        instructions="Return exactly OK.",
+        input="disconnect-after-visible-output",
+        prompt_cache_key="downstream-disconnect-key",
+    )
+    bridge_stream = service.stream_http_responses(
+        payload,
+        {},
+        codex_session_affinity=False,
+        propagate_http_errors=True,
+        openai_cache_affinity=True,
+        api_key=None,
+        api_key_reservation=None,
+        suppress_text_done_events=False,
+        enforce_openai_sdk_contract=False,
+    )
+    stream, startup_error = await proxy_api_module._probe_stream_startup_error(
+        bridge_stream,
+        convert_event_errors=False,
+        timeout_seconds=2.0,
+    )
+    assert startup_error is None
+    stream = proxy_api_module._normalize_public_responses_stream(
+        proxy_api_module._stream_response_error_events(
+            stream,
+            owns_reservation=False,
+            reservation=None,
+        ),
+        enforce_openai_sdk_contract=False,
+    )
+    stream = proxy_api_module._prepend_initial_sse_heartbeat(
+        stream,
+        proxy_api_module.CODEX_KEEPALIVE_FRAME,
+        request_id="req_downstream_disconnect",
+    )
+    stream = proxy_api_module.inject_sse_keepalives(
+        stream,
+        60.0,
+        keepalive_frame=proxy_api_module.CODEX_KEEPALIVE_FRAME,
+    )
+    request = DisconnectingRequest()
+    stream = proxy_api_module._stream_until_downstream_disconnect(
+        cast(Any, request),
+        stream,
+        poll_seconds=0.001,
+    )
+    stream = cast(AsyncGenerator[str, None], stream)
+
+    assert await stream.__anext__() == proxy_api_module.CODEX_KEEPALIVE_FRAME
+    visible_event = await stream.__anext__()
+    assert "response.output_text.delta" in visible_event
+    request.disconnected.set()
+    with pytest.raises(StopAsyncIteration):
+        await stream.__anext__()
+
+    session_key = proxy_module._HTTPBridgeSessionKey(
+        affinity_kind="prompt_cache",
+        affinity_key="downstream-disconnect-key",
+        api_key_id=None,
+    )
+    async with service._http_bridge_lock:
+        abandoned_session = service._http_bridge_sessions[session_key]
+    async with abandoned_session.pending_lock:
+        assert not abandoned_session.pending_requests
+        assert abandoned_session.queued_request_count == 0
+    assert abandoned_session.closed is True
+    assert abandoned_session.upstream_control.retire_after_drain is True
+    assert first_upstream.closed is True
+    response_create_count, stream_count, _leased_tokens = await service._load_balancer.account_pressure_snapshot(
+        account.id
+    )
+    assert response_create_count == 0
+    assert stream_count == 0
+
+    second_payload = proxy_module.ResponsesRequest(
+        model="gpt-5.1",
+        instructions="Return exactly OK.",
+        input="second-turn-after-disconnect",
+        prompt_cache_key="downstream-disconnect-key",
+    )
+    second_events = [
+        block
+        async for block in service.stream_http_responses(
+            second_payload,
+            {},
+            codex_session_affinity=False,
+            propagate_http_errors=True,
+            openai_cache_affinity=True,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            enforce_openai_sdk_contract=False,
+        )
+    ]
+
+    assert any("response.completed" in event for event in second_events)
+    assert len(first_upstream.sent_text) == 1
+    assert len(second_upstream.sent_text) == 1
 
 
 @pytest.mark.asyncio

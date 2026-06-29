@@ -392,7 +392,7 @@ async def test_proxy_codex_session_id_pins_responses_and_compact_without_sticky_
     monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
     monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
 
-    headers = {"session_id": "codex-thread-123"}
+    headers = {"session-id": "codex-session-123", "thread-id": "codex-thread-123"}
     stream_payload = {
         "model": "gpt-5.1",
         "instructions": "hi",

@@ -527,7 +527,7 @@ When multiple `file_id`s are referenced and several are pinned, the most-recentl
 - **THEN** the proxy MUST follow the prompt-cache affinity for routing and MUST NOT use the file_id pin
 
 ### Requirement: Codex backend session_id preserves account affinity
-When a backend Codex Responses or compact request includes a non-empty accepted session header, the service MUST use that value as the routing affinity key for upstream account selection. If the request lacks a client-supplied `prompt_cache_key`, the service MUST derive and attach a stable `prompt_cache_key` before upstream forwarding so account affinity and upstream prompt-cache routing can coexist. Accepted session headers are `session_id`, `x-codex-session-id`, and `x-codex-conversation-id`, in that priority order.
+When a backend Codex Responses or compact request includes a non-empty accepted session header, the service MUST use that value as the routing affinity key for upstream account selection. If the request lacks a client-supplied `prompt_cache_key`, the service MUST derive and attach a stable `prompt_cache_key` before upstream forwarding so account affinity and upstream prompt-cache routing can coexist. Accepted session headers are `session_id`, `session-id`, `x-codex-session-id`, `x-codex-conversation-id`, and `thread-id`, in that priority order.
 
 #### Scenario: Backend Codex request derives prompt_cache_key before codex-session routing
 - **WHEN** `/backend-api/codex/responses` is called with `session_id` and without `prompt_cache_key`
@@ -562,6 +562,13 @@ When serving HTTP `/v1/responses` or HTTP `/backend-api/codex/responses`, the se
 - **WHEN** a forwarded hard-continuity bridge request reaches another non-owner replica
 - **THEN** the service MUST fail the request with a generic 5xx bridge-forward error
 - **AND** it MUST NOT attempt another owner handoff
+
+#### Scenario: local restart orphan is recovered by the replacement instance
+- **WHEN** a single local bridge instance is replaced while durable hard-continuity ownership still references the old instance id
+- **AND** the old owner has no distinct active forwarding endpoint from the current replacement instance
+- **THEN** the replacement instance MUST treat the row as restart-orphaned and may claim durable ownership locally
+- **AND** same-account takeover MUST preserve the latest persisted response anchor until a replacement response id is recorded
+- **AND** normal client retries MUST NOT be stranded waiting for the old instance lease to expire
 
 ### Requirement: Responses account selection accounts for in-flight pressure
 

@@ -214,7 +214,6 @@ class DurableBridgeRepository:
                 HttpBridgeSessionState.DRAINING,
                 HttpBridgeSessionState.CLOSED,
             }
-            previous_state = existing.state
             account_changed = existing.account_id != account_id
             owner_changed = existing.owner_instance_id != instance_id
             if owner_changed:
@@ -243,9 +242,9 @@ class DurableBridgeRepository:
                     existing.latest_input_item_count = None
                     existing.latest_input_full_fingerprint = None
                 elif owner_changed:
-                    if latest_turn_state is not None or previous_state == HttpBridgeSessionState.CLOSED:
+                    if latest_turn_state is not None:
                         existing.latest_turn_state = latest_turn_state
-                    if latest_response_id is not None or previous_state == HttpBridgeSessionState.CLOSED:
+                    if latest_response_id is not None:
                         existing.latest_response_id = latest_response_id
                         existing.latest_input_item_count = None
                         existing.latest_input_full_fingerprint = None

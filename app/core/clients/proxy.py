@@ -9,6 +9,7 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import socket
 import time
 from contextlib import asynccontextmanager
@@ -43,6 +44,7 @@ from app.core.clients.codex import (
     create_codex_session,
     require_route_or_direct_egress_opt_in,
 )
+from app.core.clients.codex_version import get_codex_version_cache
 from app.core.clients.http import acquire_http_client, lease_http_session
 from app.core.config.settings import Settings, get_settings
 from app.core.conversation_archive import archive_json, archive_text
@@ -71,7 +73,9 @@ from app.core.types import JsonObject, JsonValue
 from app.core.upstream_proxy import ResolvedUpstreamRoute
 from app.core.utils.json_guards import is_json_mapping
 from app.core.utils.request_id import get_request_id
-from app.core.utils.sse import format_sse_event
+from app.core.utils.sse import format_sse_event, parse_sse_data_json
+
+CODEX_INSTALLATION_ID_HEADER = "x-codex-installation-id"
 
 IGNORE_INBOUND_HEADERS = {
     "authorization",
@@ -80,6 +84,7 @@ IGNORE_INBOUND_HEADERS = {
     "host",
     "forwarded",
     "x-real-ip",
+    CODEX_INSTALLATION_ID_HEADER,
     "true-client-ip",
 }
 
@@ -95,6 +100,7 @@ _SSE_EVENT_TYPE_ALIASES = {
     "response.audio.delta": "response.output_audio.delta",
     "response.audio_transcript.delta": "response.output_audio_transcript.delta",
 }
+_SSE_LINE_BOUNDARY_RE = re.compile(r"\r\n|\r|\n")
 _RESPONSE_STREAM_TERMINAL_EVENT_TYPES = frozenset(
     {
         "response.completed",
@@ -102,6 +108,13 @@ _RESPONSE_STREAM_TERMINAL_EVENT_TYPES = frozenset(
         "response.incomplete",
     }
 )
+
+
+def _is_response_stream_terminal_event_type(event_type: str, *, enforce_openai_sdk_contract: bool) -> bool:
+    if event_type in _RESPONSE_STREAM_TERMINAL_EVENT_TYPES:
+        return True
+    return event_type == "error" and not enforce_openai_sdk_contract
+
 
 _SSE_READ_CHUNK_SIZE = 1 * 1024
 _IMAGE_INLINE_MAX_BYTES = 8 * 1024 * 1024
@@ -121,7 +134,9 @@ _UPSTREAM_TRACE_HEADER_ALLOWLIST = frozenset(
         "chatgpt-account-id",
         "content-type",
         "request-id",
+        "session-id",
         "session_id",
+        "thread-id",
         "user-agent",
         "x-codex-conversation-id",
         "x-codex-session-id",
@@ -140,6 +155,7 @@ _NATIVE_CODEX_ORIGINATORS = frozenset(
         "codex_chatgpt_desktop",
         "codex_cli_rs",
         "codex_exec",
+        "codex_sdk_ts",
         "codex_vscode",
     }
 )
@@ -442,6 +458,121 @@ def filter_inbound_headers(headers: Mapping[str, str]) -> dict[str, str]:
     return {key: value for key, value in headers.items() if not _should_drop_inbound_header(key)}
 
 
+def apply_codex_installation_metadata(payload: dict[str, JsonValue], codex_installation_id: str | None) -> None:
+    raw_metadata = payload.get("client_metadata")
+    client_metadata: dict[str, JsonValue] = {}
+    if is_json_mapping(raw_metadata):
+        for key, value in raw_metadata.items():
+            if isinstance(key, str) and key.lower() != CODEX_INSTALLATION_ID_HEADER:
+                client_metadata[key] = value
+    if codex_installation_id:
+        client_metadata[CODEX_INSTALLATION_ID_HEADER] = codex_installation_id
+    if client_metadata:
+        payload["client_metadata"] = client_metadata
+    else:
+        payload.pop("client_metadata", None)
+
+
+_NATIVE_CODEX_USER_AGENT_PREFIXES: tuple[str, ...] = (
+    "codex_cli_rs",
+    "codex-tui",
+    "codex_exec",
+    "codex_sdk_ts",
+    "codex_vscode",
+    "codex desktop",
+    "codex ",
+)
+_SDK_FINGERPRINT_HEADER_KEYS: frozenset[str] = frozenset(
+    {
+        "x-openai-client-version",
+        "x-openai-client-os",
+        "x-openai-client-arch",
+        "x-openai-client-id",
+        "x-openai-client-user-agent",
+    }
+)
+# OpenAI SDKs (the Stainless-generated clients) attach an ``x-stainless-*``
+# header family (os, arch, runtime, runtime-version, package-version, ...) with
+# a variable suffix. The API layer treats any ``x-stainless-*`` header as an
+# OpenAI SDK signal, so they must be stripped by prefix on a normalized request
+# or upstream can still distinguish SDK traffic from the Codex CLI and apply the
+# downgrade this change is meant to avoid.
+_SDK_FINGERPRINT_HEADER_PREFIXES: tuple[str, ...] = ("x-stainless-",)
+_CODEX_CLI_ORIGINATOR = "codex_cli_rs"
+_CHATGPT_ACCOUNT_ID_HEADER = "ChatGPT-Account-Id"
+_DEFAULT_FINGERPRINT_OS = "Mac OS 26.5.0"
+_DEFAULT_FINGERPRINT_ARCH = "arm64"
+_DEFAULT_FINGERPRINT_TERMINAL = "iTerm.app/3.6.10"
+
+
+def build_codex_user_agent(version: str) -> str:
+    """Build a Codex CLI ``User-Agent`` matching ``get_codex_user_agent()`` from
+    ``openai/codex`` (``codex-rs/login/src/auth/default_client.rs``):
+    ``codex_cli_rs/<version> (<os>; <arch>) <terminal>``.
+
+    OS/arch/terminal come from operator-configurable settings; the version is
+    the live Codex client version resolved by the caller. Settings access is
+    defensive (``getattr`` with built-in defaults) so header construction can
+    never raise and fail an otherwise-valid upstream request.
+    """
+    settings = get_settings()
+    os_name = getattr(settings, "codex_fingerprint_os", _DEFAULT_FINGERPRINT_OS)
+    arch = getattr(settings, "codex_fingerprint_arch", _DEFAULT_FINGERPRINT_ARCH)
+    terminal = getattr(settings, "codex_fingerprint_terminal", _DEFAULT_FINGERPRINT_TERMINAL)
+    return f"{_CODEX_CLI_ORIGINATOR}/{version} ({os_name}; {arch}) {terminal}"
+
+
+def _is_native_codex_user_agent(user_agent: str | None) -> bool:
+    if not user_agent:
+        return False
+    lowered = user_agent.strip().lower()
+    return any(lowered.startswith(prefix) for prefix in _NATIVE_CODEX_USER_AGENT_PREFIXES)
+
+
+def _is_native_codex_request(headers: Mapping[str, str]) -> bool:
+    """A request is native when its identity headers mark it as a first-party
+    Codex client: either a native Codex ``User-Agent`` prefix, or an
+    ``originator`` header whose value is in the native Codex originator set.
+
+    Transport/continuity headers (``x-codex-turn-state`` and friends) are
+    deliberately NOT treated as native signals: an HTTP SDK client replays the
+    ``x-codex-turn-state`` token the upstream returns for continuity, so keying
+    the exemption on those headers would let a non-native SDK follow-up skip
+    normalization and reach upstream with its downgraded fingerprint intact.
+    """
+    user_agent = None
+    originator = None
+    for key, value in headers.items():
+        lowered = key.lower()
+        if lowered == "user-agent":
+            user_agent = value
+        elif lowered == "originator":
+            originator = value
+    if _is_native_codex_user_agent(user_agent):
+        return True
+    return _is_native_codex_originator(originator)
+
+
+def _normalize_non_native_upstream_fingerprint(headers: dict[str, str]) -> None:
+    """Rewrite a non-native request's outbound fingerprint to the Codex CLI
+    persona in place: set ``User-Agent`` to a ``codex_cli_rs`` string, strip
+    SDK-only ``x-openai-client-*`` and ``x-stainless-*`` headers, and strip any
+    inbound ``originator`` header (the real Codex CLI omits it for the default
+    originator and lets the backend read it from the User-Agent prefix)."""
+    version = get_codex_version_cache().cached_version_or_default()
+    codex_user_agent = build_codex_user_agent(version)
+    for key in list(headers.keys()):
+        lowered = key.lower()
+        if (
+            lowered == "user-agent"
+            or lowered in _SDK_FINGERPRINT_HEADER_KEYS
+            or lowered.startswith(_SDK_FINGERPRINT_HEADER_PREFIXES)
+            or lowered == "originator"
+        ):
+            del headers[key]
+    headers["User-Agent"] = codex_user_agent
+
+
 def _build_upstream_headers(
     inbound: Mapping[str, str],
     access_token: str,
@@ -449,16 +580,22 @@ def _build_upstream_headers(
     accept: str = "text/event-stream",
 ) -> dict[str, str]:
     headers = dict(inbound)
+    native = _is_native_codex_request(headers)
     lower_keys = {key.lower() for key in headers}
     if "x-request-id" not in lower_keys and "request-id" not in lower_keys:
         request_id = get_request_id()
         if request_id:
             headers["x-request-id"] = request_id
+    if not native:
+        _normalize_non_native_upstream_fingerprint(headers)
     headers["Authorization"] = f"Bearer {access_token}"
     headers["Accept"] = accept
     headers["Content-Type"] = "application/json"
     if account_id:
-        headers["chatgpt-account-id"] = account_id
+        if native:
+            headers["chatgpt-account-id"] = account_id
+        else:
+            headers[_CHATGPT_ACCOUNT_ID_HEADER] = account_id
     return headers
 
 
@@ -500,14 +637,26 @@ def _build_upstream_websocket_headers(
         )
     blocked_header_names = _HOP_BY_HOP_HEADER_NAMES | connected_header_tokens
     headers = {key: value for key, value in inbound.items() if key.lower() not in blocked_header_names}
+    native = _is_native_codex_request(headers)
     lower_keys = {key.lower() for key in headers}
     if "x-request-id" not in lower_keys and "request-id" not in lower_keys:
         request_id = get_request_id()
         if request_id:
             headers["x-request-id"] = request_id
+    # Normalize a non-native client's fingerprint regardless of transport. The
+    # ``auto`` transport routes a turn-state continuity follow-up onto the
+    # websocket path even for an HTTP SDK client, so this builder must apply the
+    # same codex_cli_rs persona rewrite as ``_build_upstream_headers``; otherwise
+    # the SDK fingerprint reaches upstream unchanged and the priority-downgrade
+    # mitigation is bypassed for exactly the continuity-token scenario.
+    if not native:
+        _normalize_non_native_upstream_fingerprint(headers)
     headers["Authorization"] = f"Bearer {access_token}"
     if account_id:
-        headers["chatgpt-account-id"] = account_id
+        if native:
+            headers["chatgpt-account-id"] = account_id
+        else:
+            headers[_CHATGPT_ACCOUNT_ID_HEADER] = account_id
     return headers
 
 
@@ -628,6 +777,21 @@ def _error_payload_from_websocket_handshake_error(exc: aiohttp.WSServerHandshake
     return openai_error(code, message)
 
 
+def _account_id_for_upstream_log(headers: Mapping[str, str]) -> str | None:
+    """Read the upstream account id from request headers case-insensitively.
+
+    A normalized non-native request carries the id under PascalCase
+    ``ChatGPT-Account-Id`` while native requests use lowercase
+    ``chatgpt-account-id``; a case-sensitive lookup would log ``account_id=None``
+    for normalized SDK traffic and drop the per-account diagnostics this feature
+    exists to provide.
+    """
+    for key, value in headers.items():
+        if key.lower() == "chatgpt-account-id":
+            return value
+    return None
+
+
 def _maybe_log_upstream_request_start(
     *,
     kind: str,
@@ -643,7 +807,7 @@ def _maybe_log_upstream_request_start(
 
     request_id = get_request_id()
     target = _summarize_upstream_target(url)
-    account_id = headers.get("chatgpt-account-id")
+    account_id = _account_id_for_upstream_log(headers)
     header_keys = _interesting_upstream_header_keys(headers)
 
     if settings.log_upstream_request_summary:
@@ -705,7 +869,7 @@ def _maybe_log_upstream_request_complete(
         kind,
         method,
         _summarize_upstream_target(url),
-        headers.get("chatgpt-account-id"),
+        _account_id_for_upstream_log(headers),
         status_code,
         int((time.monotonic() - started_at) * 1000),
         error_code,
@@ -779,7 +943,7 @@ def _remaining_total_timeout(timeout_seconds: float | None, started_at: float, n
 
 
 def _find_sse_separator(buffer: bytes | bytearray) -> tuple[int, int] | None:
-    separators = (b"\r\n\r\n", b"\n\n")
+    separators = (b"\r\n\r\n", b"\n\n", b"\r\r")
     positions = [(buffer.find(separator), len(separator)) for separator in separators]
     valid_positions = [position for position in positions if position[0] >= 0]
     if not valid_positions:
@@ -1019,12 +1183,16 @@ def _normalize_sse_event_block(event_block: str) -> str:
         line_separator = "\n"
         terminator = "\n\n"
         body = event_block[: -len(terminator)]
+    elif event_block.endswith("\r\r"):
+        line_separator = "\r"
+        terminator = "\r\r"
+        body = event_block[: -len(terminator)]
     else:
         line_separator = "\r\n" if "\r\n" in event_block else "\n"
         terminator = ""
         body = event_block
 
-    lines = body.splitlines()
+    lines = _SSE_LINE_BOUNDARY_RE.split(body)
     if not lines:
         return event_block
 
@@ -1082,6 +1250,30 @@ def _normalize_stream_event_payload(payload: dict[str, JsonValue]) -> dict[str, 
             ),
         )
     return payload
+
+
+def _normalize_stream_payload_for_http_block(
+    event_block: str,
+    *,
+    enforce_openai_sdk_contract: bool = True,
+) -> tuple[str, str | None]:
+    if not enforce_openai_sdk_contract:
+        payload = parse_sse_data_json(event_block)
+        if payload is None:
+            return event_block, None
+        event_type = payload.get("type")
+        return event_block, event_type if isinstance(event_type, str) else None
+
+    payload = parse_sse_data_json(event_block)
+    if payload is None:
+        return event_block, None
+    normalized = _normalize_stream_event_payload(payload)
+    if normalized is payload:
+        event_type = normalized.get("type")
+        return event_block, event_type if isinstance(event_type, str) else None
+    normalized_type = normalized.get("type")
+    event_type = normalized_type if isinstance(normalized_type, str) else None
+    return format_sse_event(normalized), event_type
 
 
 def _to_websocket_upstream_url(url: str) -> str:
@@ -1337,6 +1529,7 @@ async def _stream_websocket_events(
     idle_timeout_seconds: float,
     total_timeout_seconds: float | None,
     max_event_bytes: int,
+    enforce_openai_sdk_contract: bool = True,
 ) -> AsyncIterator[str]:
     deadline = None if total_timeout_seconds is None else time.monotonic() + total_timeout_seconds
 
@@ -1379,10 +1572,13 @@ async def _stream_websocket_events(
             continue
         if not isinstance(payload, dict):
             continue
-        normalized = _normalize_stream_event_payload(payload)
+        normalized = payload if not enforce_openai_sdk_contract else _normalize_stream_event_payload(payload)
         event_type = normalized.get("type")
         yield format_sse_event(normalized)
-        if isinstance(event_type, str) and event_type in _RESPONSE_STREAM_TERMINAL_EVENT_TYPES:
+        if isinstance(event_type, str) and _is_response_stream_terminal_event_type(
+            event_type,
+            enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+        ):
             break
 
 
@@ -1392,6 +1588,7 @@ async def _stream_codex_websocket_events(
     idle_timeout_seconds: float,
     total_timeout_seconds: float | None,
     max_event_bytes: int,
+    enforce_openai_sdk_contract: bool = True,
 ) -> AsyncIterator[str]:
     deadline = None if total_timeout_seconds is None else time.monotonic() + total_timeout_seconds
 
@@ -1434,10 +1631,13 @@ async def _stream_codex_websocket_events(
             continue
         if not isinstance(payload, dict):
             continue
-        normalized = _normalize_stream_event_payload(payload)
+        normalized = payload if not enforce_openai_sdk_contract else _normalize_stream_event_payload(payload)
         event_type = normalized.get("type")
         yield format_sse_event(normalized)
-        if isinstance(event_type, str) and event_type in _RESPONSE_STREAM_TERMINAL_EVENT_TYPES:
+        if isinstance(event_type, str) and _is_response_stream_terminal_event_type(
+            event_type,
+            enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+        ):
             break
 
 
@@ -1468,6 +1668,7 @@ async def _stream_responses_via_websocket(
     codex_client: CodexClient | None = None,
     route_trace: UpstreamProxyRouteTrace | None = None,
     allow_direct_egress: bool = True,
+    enforce_openai_sdk_contract: bool = True,
 ) -> AsyncIterator[str]:
     websocket_url = _to_websocket_upstream_url(url)
     request_started_at = time.monotonic()
@@ -1604,6 +1805,7 @@ async def _stream_responses_via_websocket(
                 idle_timeout_seconds=effective_idle_timeout,
                 total_timeout_seconds=remaining_total_timeout,
                 max_event_bytes=max_event_bytes,
+                enforce_openai_sdk_contract=enforce_openai_sdk_contract,
             )
             if route is not None
             else _stream_websocket_events(
@@ -1611,6 +1813,7 @@ async def _stream_responses_via_websocket(
                 idle_timeout_seconds=effective_idle_timeout,
                 total_timeout_seconds=remaining_total_timeout,
                 max_event_bytes=max_event_bytes,
+                enforce_openai_sdk_contract=enforce_openai_sdk_contract,
             )
         )
         async for event in event_iter:
@@ -1626,7 +1829,10 @@ async def _stream_responses_via_websocket(
                 extra={"event_format": "sse"},
             )
             parsed_event = parse_sse_event(event)
-            if parsed_event and parsed_event.type in _RESPONSE_STREAM_TERMINAL_EVENT_TYPES:
+            if parsed_event and _is_response_stream_terminal_event_type(
+                parsed_event.type,
+                enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+            ):
                 seen_terminal = True
                 await _record_lifecycle_success()
             yield event
@@ -2129,6 +2335,8 @@ async def stream_responses(
     codex_client: CodexClient | None = None,
     route_trace: UpstreamProxyRouteTrace | None = None,
     allow_direct_egress: bool = True,
+    codex_installation_id: str | None = None,
+    enforce_openai_sdk_contract: bool = True,
 ) -> AsyncIterator[str]:
     effective_allow_direct_egress = allow_direct_egress or (route is None and session is not None)
     async with lease_http_session(session) as client_session:
@@ -2145,6 +2353,8 @@ async def stream_responses(
             codex_client=codex_client,
             route_trace=route_trace,
             allow_direct_egress=effective_allow_direct_egress,
+            codex_installation_id=codex_installation_id,
+            enforce_openai_sdk_contract=enforce_openai_sdk_contract,
         ):
             yield event_block
 
@@ -2162,6 +2372,8 @@ async def _stream_responses_with_session(
     codex_client: CodexClient | None = None,
     route_trace: UpstreamProxyRouteTrace | None = None,
     allow_direct_egress: bool = True,
+    codex_installation_id: str | None = None,
+    enforce_openai_sdk_contract: bool = True,
 ) -> AsyncIterator[str]:
     settings = get_settings()
     upstream_base = (base_url or settings.upstream_base_url).rstrip("/")
@@ -2175,10 +2387,15 @@ async def _stream_responses_with_session(
         route_trace.record_direct()
     pre_request_started_at = time.monotonic()
     # Keep a default total timeout so direct callers cannot hang forever before
-    # response headers or the first SSE event. ProxyService stream attempts clamp
-    # this further by installing per-attempt overrides from the remaining budget.
+    # response headers or the first SSE event. Responses streams can run much
+    # longer than control calls; ProxyService stream attempts clamp this further
+    # by installing per-attempt overrides from the remaining budget.
     request_total_timeout = _effective_stream_timeout(
-        settings.proxy_request_budget_seconds,
+        getattr(
+            settings,
+            "http_responses_stream_request_budget_seconds",
+            settings.proxy_request_budget_seconds,
+        ),
         "total",
     )
     effective_connect_timeout = _effective_stream_timeout(settings.upstream_connect_timeout_seconds, "connect")
@@ -2189,8 +2406,13 @@ async def _stream_responses_with_session(
     last_stream_activity_at: float | None = None
     error_code: str | None = None
     error_message: str | None = None
+    failure_phase: str | None = None
+    failure_detail: str | None = None
+    failure_exception_type: str | None = None
+    retryable_same_contract: bool | None = None
     client_session = session
-    payload_dict = payload.to_payload()
+    payload_dict = dict(payload.to_payload())
+    apply_codex_installation_metadata(payload_dict, codex_installation_id)
     if settings.image_inline_fetch_enabled:
         payload_dict = await _inline_input_image_urls(
             payload_dict,
@@ -2300,8 +2522,20 @@ async def _stream_responses_with_session(
                 ):
                     last_stream_activity_at = time.monotonic()
                     event_block = _normalize_sse_event_block(event_block)
+                    event_block, normalized_event_type = _normalize_stream_payload_for_http_block(
+                        event_block,
+                        enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+                    )
                     event = parse_sse_event(event_block)
-                    if event and event.type in _RESPONSE_STREAM_TERMINAL_EVENT_TYPES:
+                    if event:
+                        if event.type in _RESPONSE_STREAM_TERMINAL_EVENT_TYPES or (
+                            event.type == "error" and not enforce_openai_sdk_contract
+                        ):
+                            seen_terminal = True
+                    elif isinstance(normalized_event_type, str) and (
+                        normalized_event_type in _RESPONSE_STREAM_TERMINAL_EVENT_TYPES
+                        or (normalized_event_type == "error" and not enforce_openai_sdk_contract)
+                    ):
                         seen_terminal = True
                     archive_text(
                         direction="server_to_codex",
@@ -2376,11 +2610,21 @@ async def _stream_responses_with_session(
             ):
                 last_stream_activity_at = time.monotonic()
                 event_block = _normalize_sse_event_block(event_block)
+                event_block, normalized_event_type = _normalize_stream_payload_for_http_block(
+                    event_block,
+                    enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+                )
                 event = parse_sse_event(event_block)
                 if event:
-                    event_type = event.type
-                    if event_type in _RESPONSE_STREAM_TERMINAL_EVENT_TYPES:
+                    if event.type in _RESPONSE_STREAM_TERMINAL_EVENT_TYPES or (
+                        event.type == "error" and not enforce_openai_sdk_contract
+                    ):
                         seen_terminal = True
+                elif isinstance(normalized_event_type, str) and (
+                    normalized_event_type in _RESPONSE_STREAM_TERMINAL_EVENT_TYPES
+                    or (normalized_event_type == "error" and not enforce_openai_sdk_contract)
+                ):
+                    seen_terminal = True
                 archive_text(
                     direction="server_to_codex",
                     kind="responses",
@@ -2493,13 +2737,17 @@ async def _stream_responses_with_session(
                     route=route,
                     codex_client=codex_client,
                     route_trace=route_trace,
+                    enforce_openai_sdk_contract=enforce_openai_sdk_contract,
                 ):
                     if status_code is None:
                         status_code = 101
                     event = parse_sse_event(event_block)
                     if event:
                         event_type = event.type
-                        if event_type in _RESPONSE_STREAM_TERMINAL_EVENT_TYPES:
+                        if _is_response_stream_terminal_event_type(
+                            event_type,
+                            enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+                        ):
                             seen_terminal = True
                     yield event_block
             except aiohttp.WSServerHandshakeError as exc:
@@ -2542,6 +2790,10 @@ async def _stream_responses_with_session(
     except StreamIdleTimeoutError:
         error_code = "stream_idle_timeout"
         error_message = "Upstream stream idle timeout"
+        failure_phase = "upstream"
+        failure_detail = "stream_idle_timeout"
+        failure_exception_type = "StreamIdleTimeoutError"
+        retryable_same_contract = False
         yield format_sse_event(
             response_failed_event(
                 "stream_idle_timeout",
@@ -2581,6 +2833,10 @@ async def _stream_responses_with_session(
             exc=exc,
         )
         response_error_message = cast(str, error_message)
+        failure_phase = "upstream"
+        failure_detail = "transport_error"
+        failure_exception_type = type(exc).__name__
+        retryable_same_contract = True
         yield format_sse_event(
             response_failed_event("upstream_unavailable", response_error_message, response_id=get_request_id()),
         )
@@ -2594,6 +2850,10 @@ async def _stream_responses_with_session(
             exc=exc,
         )
         response_error_message = cast(str, error_message)
+        failure_phase = "upstream"
+        failure_detail = "transport_error"
+        failure_exception_type = type(exc).__name__
+        retryable_same_contract = True
         yield format_sse_event(
             response_failed_event("upstream_unavailable", response_error_message, response_id=get_request_id()),
         )
@@ -2614,6 +2874,10 @@ async def _stream_responses_with_session(
                 else str(exc) or "Request to upstream timed out"
             )
             response_error_message = cast(str, error_message)
+            failure_phase = "upstream"
+            failure_detail = "transport_error"
+            failure_exception_type = type(exc).__name__
+            retryable_same_contract = True
             yield format_sse_event(
                 response_failed_event("upstream_unavailable", response_error_message, response_id=get_request_id()),
             )
@@ -2627,6 +2891,10 @@ async def _stream_responses_with_session(
         ):
             error_code = "stream_idle_timeout"
             error_message = "Upstream stream idle timeout"
+            failure_phase = "upstream"
+            failure_detail = "stream_idle_timeout"
+            failure_exception_type = type(exc).__name__
+            retryable_same_contract = False
             yield format_sse_event(
                 response_failed_event(
                     "stream_idle_timeout",
@@ -2649,6 +2917,10 @@ async def _stream_responses_with_session(
                 else str(exc) or "Request to upstream timed out"
             )
             response_error_message = cast(str, error_message)
+            failure_phase = "upstream"
+            failure_detail = "transport_error"
+            failure_exception_type = type(exc).__name__
+            retryable_same_contract = True
             yield format_sse_event(
                 response_failed_event(
                     "upstream_unavailable",
@@ -2659,12 +2931,41 @@ async def _stream_responses_with_session(
             return
         error_code = "upstream_request_timeout"
         error_message = "Proxy request budget exhausted"
+        failure_phase = "upstream"
+        failure_detail = "request_timeout"
+        failure_exception_type = type(exc).__name__
+        retryable_same_contract = False
         yield format_sse_event(
             response_failed_event(
                 "upstream_request_timeout",
                 "Proxy request budget exhausted",
                 response_id=get_request_id(),
             ),
+        )
+        return
+    except GeneratorExit:
+        error_code = "client_disconnected"
+        error_message = "Downstream client disconnected before response.completed"
+        failure_phase = "downstream"
+        failure_detail = "client_disconnected_before_terminal_event"
+        failure_exception_type = "GeneratorExit"
+        retryable_same_contract = False
+        raise
+    except OSError as exc:
+        error_code = "upstream_unavailable"
+        error_message = _codex_route_transport_error_message(
+            route=route,
+            route_trace=route_trace,
+            operation="stream",
+            exc=exc,
+        )
+        response_error_message = cast(str, error_message)
+        failure_phase = "upstream"
+        failure_detail = "transport_error"
+        failure_exception_type = type(exc).__name__
+        retryable_same_contract = True
+        yield format_sse_event(
+            response_failed_event("upstream_unavailable", response_error_message, response_id=get_request_id()),
         )
         return
     except Exception as exc:
@@ -2701,6 +3002,10 @@ async def _stream_responses_with_session(
             status_code=status_code,
             error_code=error_code,
             error_message=error_message,
+            failure_phase=failure_phase,
+            failure_detail=failure_detail,
+            failure_exception_type=failure_exception_type,
+            retryable_same_contract=retryable_same_contract,
         )
 
 
@@ -2803,6 +3108,7 @@ async def compact_responses(
     route: ResolvedUpstreamRoute | None = None,
     codex_client: CodexClient | None = None,
     route_trace: UpstreamProxyRouteTrace | None = None,
+    chatgpt_account_id: str | None = None,
     allow_direct_egress: bool = True,
 ) -> CompactResponsePayload:
     async with lease_http_session(session) as client_session:
@@ -2815,6 +3121,7 @@ async def compact_responses(
             route=route,
             codex_client=codex_client,
             route_trace=route_trace,
+            chatgpt_account_id=chatgpt_account_id,
             allow_direct_egress=allow_direct_egress,
         )
         return await transport.execute()
@@ -2834,6 +3141,7 @@ class _CompactCommandTransport:
     route: ResolvedUpstreamRoute | None = None
     codex_client: CodexClient | None = None
     route_trace: UpstreamProxyRouteTrace | None = None
+    chatgpt_account_id: str | None = None
     allow_direct_egress: bool = False
 
     async def execute(self) -> CompactResponsePayload:
@@ -2847,10 +3155,11 @@ class _CompactCommandTransport:
         )
         if self.route is None and self.route_trace is not None:
             self.route_trace.record_direct()
+        upstream_account_id = self.chatgpt_account_id or self.account_id
         upstream_headers = _build_upstream_headers(
             self.headers,
             self.access_token,
-            self.account_id,
+            upstream_account_id,
             accept="application/json",
         )
         pre_request_started_at = time.monotonic()

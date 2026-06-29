@@ -24,6 +24,7 @@ PERMANENT_FAILURE_CODES = {
     # returned a fresh token pair instead. Treat it as a permanent failure so
     # the account stops being routed to until it is re-authenticated.
     "token_expired": "Authentication token expired - re-login required",
+    "app_session_terminated": "ChatGPT session ended - re-login required",
     "account_session_expired": "ChatGPT session ended - re-login required",
     "account_auth_invalidated": "Authentication failed after token refresh - re-login required",
     "account_deactivated": "Account has been deactivated",
@@ -39,6 +40,7 @@ REAUTH_REQUIRED_FAILURE_CODES = frozenset(
         "invalid_grant",
         "token_invalidated",
         "token_expired",
+        "app_session_terminated",
         "account_session_expired",
         "account_auth_invalidated",
     }

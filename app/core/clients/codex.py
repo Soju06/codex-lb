@@ -6,8 +6,9 @@ from typing import Any, Mapping
 
 import aiohttp
 from aiohttp_socks import ProxyConnector
+from python_socks import ProxyType
 
-from app.core.upstream_proxy import ResolvedUpstreamRoute
+from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
 
 _RESERVED = frozenset({"akamai", "extra_fp", "impersonate", "ja3", "proxies", "proxy"})
 
@@ -163,7 +164,7 @@ class CodexClient:
                     response = await _request_via_socks_proxy(
                         method,
                         url,
-                        endpoint.proxy_url,
+                        endpoint,
                         buffer_response=buffer_response,
                         **kwargs,
                     )
@@ -198,7 +199,7 @@ class CodexClient:
             context: Any | None = None
             try:
                 if endpoint.scheme.startswith("socks"):
-                    websocket, context = await _open_ws_via_socks_proxy(url, endpoint.proxy_url, **kwargs)
+                    websocket, context = await _open_ws_via_socks_proxy(url, endpoint, **kwargs)
                 else:
                     context = self._session.ws_connect(
                         url,
@@ -242,14 +243,12 @@ def create_codex_session(*, max_clients: int = 10) -> Any:
 async def _request_via_socks_proxy(
     method: str,
     url: str,
-    proxy_url: str,
+    endpoint: ResolvedProxyEndpoint,
     *,
     buffer_response: bool,
     **kwargs: Any,
 ) -> Any:
-    from app.core.clients.http import _build_ssl_context
-
-    connector = ProxyConnector.from_url(proxy_url, ssl=_build_ssl_context())
+    connector = _socks_proxy_connector(endpoint)
     session = aiohttp.ClientSession(
         connector=connector,
         timeout=aiohttp.ClientTimeout(total=None),
@@ -268,10 +267,8 @@ async def _request_via_socks_proxy(
             await session.close()
 
 
-async def _open_ws_via_socks_proxy(url: str, proxy_url: str, **kwargs: Any) -> tuple[Any, Any]:
-    from app.core.clients.http import _build_ssl_context
-
-    connector = ProxyConnector.from_url(proxy_url, ssl=_build_ssl_context())
+async def _open_ws_via_socks_proxy(url: str, endpoint: ResolvedProxyEndpoint, **kwargs: Any) -> tuple[Any, Any]:
+    connector = _socks_proxy_connector(endpoint)
     session = aiohttp.ClientSession(
         connector=connector,
         timeout=aiohttp.ClientTimeout(total=None),
@@ -286,6 +283,21 @@ async def _open_ws_via_socks_proxy(url: str, proxy_url: str, **kwargs: Any) -> t
     except Exception:
         await session.close()
         raise
+
+
+def _socks_proxy_connector(endpoint: ResolvedProxyEndpoint) -> ProxyConnector:
+    from app.core.clients.http import _build_ssl_context
+
+    proxy_scheme = endpoint.proxy_url.split(":", 1)[0]
+    return ProxyConnector(
+        host=endpoint.host,
+        port=endpoint.port,
+        proxy_type=ProxyType.SOCKS5,
+        username=endpoint.username,
+        password=endpoint.password,
+        rdns=proxy_scheme == "socks5h",
+        ssl=_build_ssl_context(),
+    )
 
 
 def _normalize_aiohttp_request_kwargs(kwargs: dict[str, Any]) -> None:

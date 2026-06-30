@@ -1,4 +1,4 @@
-## ADDED Requirements
+## MODIFIED Requirements
 
 ### Requirement: Dashboard overview memoizes per-account depletion EWMA state
 
@@ -37,6 +37,8 @@
 #### Scenario: Usage-history ownership mutation clears SQLite bulk history cache
 - **WHEN** an account merge or delete operation updates or deletes `usage_history` rows
 - **THEN** the repository clears the SQLite bulk history cache before serving future cached dashboard history reads
+
+## ADDED Requirements
 
 ### Requirement: Additional usage latest reads avoid SQLite window scans
 

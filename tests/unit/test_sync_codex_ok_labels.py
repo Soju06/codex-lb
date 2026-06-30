@@ -219,9 +219,8 @@ def test_workflow_prefers_privileged_token_and_enables_tolerant_apply() -> None:
     workflow = Path(".github/workflows/codex-review-labels.yml").read_text(encoding="utf-8")
 
     assert "secrets.CODEX_LABEL_SYNC_TOKEN || secrets.RELEASE_PLEASE_TOKEN || github.token" in workflow
-    assert "pull_request_review_thread:" in workflow
-    assert "types: [resolved, unresolved]" in workflow
-    assert "github.event_name == 'pull_request_review_thread'" in workflow
+    assert "pull_request_review_thread:" not in workflow
+    assert "github.event_name == 'pull_request_review_thread'" not in workflow
     assert 'cron: "*/15 * * * *"' in workflow
     assert workflow.count("--tolerate-write-permission-errors") == 2
     assert workflow.count("--tolerate-read-errors") == 1

@@ -225,6 +225,34 @@ async def test_update_unions_service_tiers_across_plans():
 
 
 @pytest.mark.asyncio
+async def test_update_preserves_non_default_service_tier_default():
+    fast = replace(
+        _model("gpt-5.5"),
+        raw={
+            "service_tiers": [{"slug": "fast"}, {"slug": "default"}],
+            "additional_speed_tiers": ["fast"],
+            "default_service_tier": "fast",
+        },
+    )
+    default_only = replace(
+        _model("gpt-5.5"),
+        raw={
+            "service_tiers": [{"slug": "default"}],
+            "additional_speed_tiers": [],
+            "default_service_tier": "default",
+        },
+    )
+
+    registry = ModelRegistry(ttl_seconds=60.0)
+    await registry.update({"pro": [fast], "plus": [default_only]})
+
+    snapshot = registry.get_snapshot()
+    assert snapshot is not None
+    merged = snapshot.models["gpt-5.5"]
+    assert merged.raw["default_service_tier"] == "fast"
+
+
+@pytest.mark.asyncio
 async def test_update_does_not_duplicate_shared_service_tiers():
     # Two accounts that both support Fast must not produce duplicate tier entries.
     fast = replace(

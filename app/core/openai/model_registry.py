@@ -239,6 +239,20 @@ def _union_object_tiers(primary: JsonValue, secondary: JsonValue) -> list[JsonVa
     return merged or None
 
 
+def _merge_default_service_tier(primary: JsonValue, secondary: JsonValue) -> str | None:
+    if not isinstance(primary, str) or not primary:
+        return secondary if isinstance(secondary, str) and secondary else None
+    if not isinstance(secondary, str) or not secondary:
+        return primary
+    if primary == secondary:
+        return primary
+
+    plain_defaults = {"auto", "default"}
+    if primary in plain_defaults and secondary not in plain_defaults:
+        return secondary
+    return primary
+
+
 def _merge_service_tier_metadata(existing: UpstreamModel, incoming: UpstreamModel) -> UpstreamModel:
     """Combine two same-slug models so the speed/service-tier metadata is the
     union of both. ``incoming`` stays the base (last-writer-wins for every other
@@ -260,8 +274,12 @@ def _merge_service_tier_metadata(existing: UpstreamModel, incoming: UpstreamMode
     if service_tiers is not None:
         merged_raw["service_tiers"] = service_tiers
 
-    if not merged_raw.get("default_service_tier") and existing.raw.get("default_service_tier"):
-        merged_raw["default_service_tier"] = existing.raw["default_service_tier"]
+    default_service_tier = _merge_default_service_tier(
+        incoming.raw.get("default_service_tier"),
+        existing.raw.get("default_service_tier"),
+    )
+    if default_service_tier is not None:
+        merged_raw["default_service_tier"] = default_service_tier
 
     if merged_raw == incoming.raw:
         return incoming

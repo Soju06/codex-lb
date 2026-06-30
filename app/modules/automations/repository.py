@@ -87,6 +87,7 @@ class AutomationRunCycleRecord:
     trigger: str
     cycle_expected_accounts: int
     cycle_window_end: datetime | None
+    include_paused_accounts: bool
     accounts: list[AutomationRunCycleAccountRecord]
     created_at: datetime
 
@@ -608,6 +609,7 @@ class AutomationsRepository:
         cycle_expected_accounts: int,
         cycle_window_end: datetime | None,
         accounts: Sequence[tuple[str, datetime]],
+        include_paused_accounts: bool = False,
     ) -> AutomationRunCycleRecord:
         cycle = AutomationRunCycle(
             cycle_key=cycle_key,
@@ -615,6 +617,7 @@ class AutomationsRepository:
             trigger=trigger,
             cycle_expected_accounts=cycle_expected_accounts,
             cycle_window_end=cycle_window_end,
+            include_paused_accounts=include_paused_accounts,
         )
         cycle.cycle_accounts = [
             AutomationRunCycleAccount(
@@ -1622,6 +1625,7 @@ class AutomationsRepository:
             trigger=cycle.trigger,
             cycle_expected_accounts=cycle.cycle_expected_accounts,
             cycle_window_end=cycle.cycle_window_end,
+            include_paused_accounts=cycle.include_paused_accounts,
             accounts=[
                 AutomationRunCycleAccountRecord(
                     account_id=entry.account_id,

@@ -944,6 +944,12 @@ class AutomationRunCycle(Base):
     trigger: Mapped[str] = mapped_column(String(16), nullable=False)
     cycle_expected_accounts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
     cycle_window_end: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    include_paused_accounts: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=false(),
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
 
     job: Mapped[AutomationJob] = relationship("AutomationJob", back_populates="run_cycles")

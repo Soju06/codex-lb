@@ -398,6 +398,56 @@ async def test_automations_api_accepts_server_default_timezone(async_client, mon
 
 
 @pytest.mark.asyncio
+async def test_automations_run_now_times_out_hung_compact_ping(async_client, monkeypatch):
+    from app.core.config.settings import get_settings
+
+    accounts = await _create_accounts("auto-hung-compact")
+    compact_call_started = asyncio.Event()
+    compact_call_cancelled = asyncio.Event()
+
+    monkeypatch.setenv("CODEX_LB_COMPACT_REQUEST_BUDGET_SECONDS", "0.01")
+    get_settings.cache_clear()
+
+    async def _hung_compact(*_args, **_kwargs):
+        compact_call_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            compact_call_cancelled.set()
+            raise
+
+    monkeypatch.setattr("app.modules.automations.service.core_compact_responses", _hung_compact)
+
+    create_response = await async_client.post(
+        "/api/automations",
+        json={
+            "name": "Hung compact ping",
+            "enabled": False,
+            "schedule": {
+                "type": "daily",
+                "time": "05:00",
+                "timezone": "UTC",
+                "days": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+            },
+            "model": "gpt-5.3-codex",
+            "prompt": "ping",
+            "accountIds": [accounts[0].id],
+        },
+    )
+    assert create_response.status_code == 200
+    automation_id = create_response.json()["id"]
+
+    run_response = await asyncio.wait_for(async_client.post(f"/api/automations/{automation_id}/run-now"), timeout=1.0)
+    assert run_response.status_code == 202
+    run_payload = run_response.json()
+    assert run_payload["status"] == "failed"
+    assert run_payload["errorCode"] == "automation_ping_failed"
+    assert run_payload["errorMessage"] == "Automation ping failed"
+    assert compact_call_started.is_set()
+    await asyncio.wait_for(compact_call_cancelled.wait(), timeout=1.0)
+
+
+@pytest.mark.asyncio
 async def test_automations_api_rejects_all_accounts_mode_without_accounts(async_client):
     create_response = await async_client.post(
         "/api/automations",
@@ -2420,6 +2470,162 @@ async def test_automations_due_run_skips_unavailable_accounts_and_can_include_pa
     assert rate_limited.chatgpt_account_id not in called_chatgpt_account_ids
     assert quota.chatgpt_account_id not in called_chatgpt_account_ids
     assert deactivated.chatgpt_account_id not in called_chatgpt_account_ids
+
+
+@pytest.mark.asyncio
+async def test_automations_scheduler_does_not_reclaim_fresh_scheduled_claim(db_setup, monkeypatch):
+    del db_setup
+    account = (await _create_accounts("auto-scheduled-no-reclaim"))[0]
+    now = utcnow().replace(second=0, microsecond=0)
+    first_call_started = asyncio.Event()
+    release_first_call = asyncio.Event()
+    called_chatgpt_account_ids: list[str | None] = []
+
+    async def _fake_compact(*_args, **kwargs):
+        called_chatgpt_account_ids.append(kwargs.get("account_id"))
+        if len(called_chatgpt_account_ids) == 1:
+            first_call_started.set()
+            await release_first_call.wait()
+        return SimpleNamespace()
+
+    monkeypatch.setattr("app.modules.automations.service.core_compact_responses", _fake_compact)
+
+    async with SessionLocal() as session:
+        automations_repository = AutomationsRepository(session)
+        job = await automations_repository.create_job(
+            name="No duplicate scheduled claim",
+            enabled=True,
+            include_paused_accounts=False,
+            schedule_type="daily",
+            schedule_time=now.strftime("%H:%M"),
+            schedule_timezone="UTC",
+            schedule_days=["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+            schedule_threshold_minutes=0,
+            model="gpt-5.3-codex",
+            reasoning_effort=None,
+            prompt="ping",
+            account_ids=[account.id],
+        )
+        await _set_job_updated_at(job.id, now)
+
+    first_run_task = asyncio.create_task(_run_due_jobs(now_utc=now))
+    await asyncio.wait_for(first_call_started.wait(), timeout=1.0)
+    second_executed = await _run_due_jobs(now_utc=now)
+    release_first_call.set()
+    first_executed = await first_run_task
+
+    async with SessionLocal() as session:
+        automations_repository = AutomationsRepository(session)
+        runs = await automations_repository.list_runs(job.id, limit=10)
+
+    assert first_executed == 1
+    assert second_executed == 0
+    assert called_chatgpt_account_ids == [account.chatgpt_account_id]
+    assert len(runs) == 1
+    assert runs[0].started_at > runs[0].scheduled_for
+
+
+@pytest.mark.asyncio
+async def test_automations_scheduler_uses_cycle_include_paused_snapshot(db_setup, monkeypatch):
+    del db_setup
+    account = (await _create_accounts("auto-cycle-paused-snapshot"))[0]
+    await _set_account_status(account.id, AccountStatus.PAUSED)
+    now = utcnow().replace(second=0, microsecond=0)
+    called_chatgpt_account_ids: list[str | None] = []
+
+    async def _fake_compact(*_args, **kwargs):
+        called_chatgpt_account_ids.append(kwargs.get("account_id"))
+        return SimpleNamespace()
+
+    monkeypatch.setattr("app.modules.automations.service.core_compact_responses", _fake_compact)
+
+    async with SessionLocal() as session:
+        automations_repository = AutomationsRepository(session)
+        job = await automations_repository.create_job(
+            name="Frozen paused snapshot",
+            enabled=True,
+            include_paused_accounts=True,
+            schedule_type="daily",
+            schedule_time=now.strftime("%H:%M"),
+            schedule_timezone="UTC",
+            schedule_days=["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+            schedule_threshold_minutes=0,
+            model="gpt-5.3-codex",
+            reasoning_effort=None,
+            prompt="ping",
+            account_ids=[account.id],
+        )
+        await _set_job_updated_at(job.id, now)
+        cycle_key = f"scheduled:{job.id}:{now.isoformat()}"
+        await automations_repository.create_run_cycle(
+            cycle_key=cycle_key,
+            job_id=job.id,
+            trigger="scheduled",
+            cycle_expected_accounts=1,
+            cycle_window_end=now,
+            accounts=[(account.id, now)],
+            include_paused_accounts=True,
+        )
+        await session.execute(
+            update(AutomationJob).where(AutomationJob.id == job.id).values(include_paused_accounts=False)
+        )
+        await session.commit()
+
+    executed = await _run_due_jobs(now_utc=now)
+
+    assert executed == 1
+    assert called_chatgpt_account_ids == [account.chatgpt_account_id]
+
+
+@pytest.mark.asyncio
+async def test_automations_manual_delayed_run_uses_cycle_include_paused_snapshot(db_setup, monkeypatch):
+    del db_setup
+    account = (await _create_accounts("auto-manual-paused-snapshot"))[0]
+    await _set_account_status(account.id, AccountStatus.PAUSED)
+    now = utcnow().replace(second=0, microsecond=0)
+    called_chatgpt_account_ids: list[str | None] = []
+
+    async def _fake_compact(*_args, **kwargs):
+        called_chatgpt_account_ids.append(kwargs.get("account_id"))
+        return SimpleNamespace()
+
+    monkeypatch.setattr("app.modules.automations.service.core_compact_responses", _fake_compact)
+    monkeypatch.setattr(
+        "app.modules.automations.service._pick_dispatch_offsets_seconds",
+        lambda **_kwargs: [60],
+    )
+
+    async with SessionLocal() as session:
+        automations_repository = AutomationsRepository(session)
+        accounts_repository = AccountsRepository(session)
+        service = AutomationsService(automations_repository, accounts_repository)
+        job = await automations_repository.create_job(
+            name="Frozen manual paused snapshot",
+            enabled=False,
+            include_paused_accounts=True,
+            schedule_type="daily",
+            schedule_time=now.strftime("%H:%M"),
+            schedule_timezone="UTC",
+            schedule_days=["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+            schedule_threshold_minutes=1,
+            model="gpt-5.3-codex",
+            reasoning_effort=None,
+            prompt="ping",
+            account_ids=[account.id],
+        )
+
+        run = await service.run_now(job.id, now_utc=now)
+        assert run.status == "running"
+        updated_job = await automations_repository.update_job(job.id, include_paused_accounts=False)
+        assert updated_job is not None
+
+        executed = await service.run_due_jobs(now_utc=now + timedelta(seconds=61))
+        stored_runs = await automations_repository.list_runs(job.id, limit=10)
+
+    assert executed == 1
+    assert called_chatgpt_account_ids == [account.chatgpt_account_id]
+    assert len(stored_runs) == 1
+    assert stored_runs[0].status == "success"
 
 
 @pytest.mark.asyncio

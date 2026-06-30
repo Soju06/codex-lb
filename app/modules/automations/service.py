@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import random
@@ -714,6 +715,7 @@ class AutomationsService:
             cycle_expected_accounts=len(dispatch_plan),
             cycle_window_end=cycle_window_end,
             accounts=dispatch_plan,
+            include_paused_accounts=job.include_paused_accounts,
         )
         if not cycle.accounts:
             slot_key = f"manual:{job.id}:{cycle_id}:none"
@@ -851,7 +853,7 @@ class AutomationsService:
                 existing_cycle_runs_by_account[account_id] = cycle_run
         eligible_cycle_account_ids = await self._resolve_eligible_account_ids(
             [cycle_account.account_id for cycle_account in cycle.accounts],
-            include_paused_accounts=job.include_paused_accounts,
+            include_paused_accounts=cycle.include_paused_accounts,
             now_utc=now_utc,
         )
         executed = 0
@@ -921,6 +923,7 @@ class AutomationsService:
                 if claim is None:
                     continue
             else:
+                claimed_started_at = max(now_utc, cycle_account.scheduled_for + timedelta(microseconds=1))
                 claim_result = await self._repository.claim_scheduled_cycle_account_run(
                     job_id=job.id,
                     trigger=AUTOMATION_RUN_TRIGGER_SCHEDULED,
@@ -933,7 +936,7 @@ class AutomationsService:
                     cycle_expected_accounts=cycle_expected_accounts,
                     cycle_window_end=cycle.cycle_window_end,
                     scheduled_for=cycle_account.scheduled_for,
-                    started_at=now_utc,
+                    started_at=claimed_started_at,
                     account_id=cycle_account.account_id,
                 )
                 if claim_result.run is None:
@@ -955,11 +958,22 @@ class AutomationsService:
         if not due_runs:
             return 0
         jobs_by_id = await self._repository.get_jobs_by_ids([run.job_id for run in due_runs])
+        cycles_by_key: dict[str, AutomationRunCycleRecord | None] = {}
         executed = 0
         for run in due_runs:
             job = jobs_by_id.get(run.job_id)
             if job is None:
                 continue
+            include_paused_accounts = job.include_paused_accounts
+            normalized_cycle_key = _normalize_legacy_manual_cycle_key(run.cycle_key)
+            if normalized_cycle_key is not None:
+                if normalized_cycle_key not in cycles_by_key:
+                    cycles_by_key[normalized_cycle_key] = await self._repository.get_run_cycle(
+                        cycle_key=normalized_cycle_key
+                    )
+                cycle = cycles_by_key[normalized_cycle_key]
+                if cycle is not None:
+                    include_paused_accounts = cycle.include_paused_accounts
             account_id = await self._resolve_manual_run_dispatch_account_id(run, job=job)
             if account_id is None:
                 continue
@@ -968,7 +982,7 @@ class AutomationsService:
                 await self._reactivate_accounts_if_reset_elapsed([account], now_utc=now_utc)
             if account is None or not self._is_account_eligible_for_automation(
                 account,
-                include_paused_accounts=job.include_paused_accounts,
+                include_paused_accounts=include_paused_accounts,
             ):
                 if _is_unclaimed_run_placeholder(run):
                     await self._repository.skip_unclaimed_manual_run_placeholder(
@@ -1045,6 +1059,7 @@ class AutomationsService:
             cycle_expected_accounts=len(dispatch_plan),
             cycle_window_end=due_slot + timedelta(minutes=threshold),
             accounts=dispatch_plan,
+            include_paused_accounts=job.include_paused_accounts,
         )
 
     async def _execute_claimed_run(
@@ -1061,12 +1076,15 @@ class AutomationsService:
         cached_accounts_by_id: dict[str, Account] | None = None
         account_ids_to_try: list[str] = []
         forced_account_id_for_priority = forced_account_id
+        include_paused_accounts = job.include_paused_accounts
         if run.cycle_key:
             cycle = await self._repository.get_run_cycle(cycle_key=run.cycle_key)
-            if cycle is not None and cycle.accounts:
-                account_ids_to_try = [entry.account_id for entry in cycle.accounts]
-                if forced_account_id not in account_ids_to_try:
-                    forced_account_id_for_priority = None
+            if cycle is not None:
+                include_paused_accounts = cycle.include_paused_accounts
+                if cycle.accounts:
+                    account_ids_to_try = [entry.account_id for entry in cycle.accounts]
+                    if forced_account_id not in account_ids_to_try:
+                        forced_account_id_for_priority = None
         if not account_ids_to_try:
             account_ids_to_try = list(job.account_ids)
         if not account_ids_to_try:
@@ -1076,7 +1094,7 @@ class AutomationsService:
                 for account in accounts
                 if self._is_account_eligible_for_automation(
                     account,
-                    include_paused_accounts=job.include_paused_accounts,
+                    include_paused_accounts=include_paused_accounts,
                 )
             ]
             cached_accounts_by_id = {account.id: account for account in accounts}
@@ -1094,7 +1112,7 @@ class AutomationsService:
                 continue
             if not self._is_account_eligible_for_automation(
                 account,
-                include_paused_accounts=job.include_paused_accounts,
+                include_paused_accounts=include_paused_accounts,
             ):
                 continue
 
@@ -1114,13 +1132,16 @@ class AutomationsService:
                     reasoning=ResponsesReasoning(effort=job.reasoning_effort) if job.reasoning_effort else None,
                 )
                 request_started_at = time.monotonic()
-                compact_response = await core_compact_responses(
-                    ping_request,
-                    headers={},
-                    access_token=access_token,
-                    account_id=account.chatgpt_account_id,
-                    route=route,
-                    allow_direct_egress=route is None,
+                compact_response = await asyncio.wait_for(
+                    core_compact_responses(
+                        ping_request,
+                        headers={},
+                        access_token=access_token,
+                        account_id=account.chatgpt_account_id,
+                        route=route,
+                        allow_direct_egress=route is None,
+                    ),
+                    timeout=_automation_compact_request_timeout_seconds(),
                 )
                 latency_ms = _elapsed_ms(request_started_at)
                 request_id = _automation_request_id(getattr(compact_response, "id", None), run.id, attempt_count)
@@ -2347,6 +2368,10 @@ def _automation_request_id(response_id: str | None, run_id: str, attempt_count: 
 def _manual_run_execution_claim_timeout_seconds() -> float:
     settings = get_settings()
     return max(30.0, settings.compact_request_budget_seconds + 30.0)
+
+
+def _automation_compact_request_timeout_seconds() -> float:
+    return get_settings().compact_request_budget_seconds
 
 
 def _elapsed_ms(started_at: float | None) -> int | None:

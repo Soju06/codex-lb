@@ -24,6 +24,7 @@ class _ObservedRunRow(TypedDict):
     cycle_key: str
     job_id: str
     trigger: str
+    include_paused_accounts: bool
     account_id: str | None
     scheduled_for: datetime
     cycle_window_end: datetime | None
@@ -36,6 +37,7 @@ class _ObservedCycleSnapshot(TypedDict):
     trigger: str
     cycle_expected_accounts: int
     cycle_window_end: datetime | None
+    include_paused_accounts: bool
     created_at: datetime
     accounts: list[tuple[str, datetime]]
 
@@ -44,6 +46,7 @@ class _MutableCycleSnapshot(TypedDict):
     job_id: str
     trigger: str
     cycle_window_end: datetime | None
+    include_paused_accounts: bool
     created_at: datetime
     accounts: dict[str, datetime]
 
@@ -85,6 +88,7 @@ def _new_mutable_cycle_snapshot(row: _ObservedRunRow) -> _MutableCycleSnapshot:
         "job_id": row["job_id"],
         "trigger": row["trigger"],
         "cycle_window_end": row["cycle_window_end"] or row["scheduled_for"],
+        "include_paused_accounts": row["include_paused_accounts"],
         "created_at": row["created_at"],
         "accounts": {},
     }
@@ -128,6 +132,7 @@ def _build_cycle_snapshots(rows: list[_ObservedRunRow]) -> list[_ObservedCycleSn
                 "trigger": snapshot["trigger"],
                 "cycle_expected_accounts": len(account_rows),
                 "cycle_window_end": snapshot["cycle_window_end"],
+                "include_paused_accounts": snapshot["include_paused_accounts"],
                 "created_at": snapshot["created_at"],
                 "accounts": account_rows,
             }
@@ -149,6 +154,7 @@ def _create_cycle_tables(connection: Connection) -> None:
                 server_default=sa.text("0"),
             ),
             sa.Column("cycle_window_end", sa.DateTime(), nullable=True),
+            sa.Column("include_paused_accounts", sa.Boolean(), nullable=False, server_default=sa.false()),
             sa.Column(
                 "created_at",
                 sa.DateTime(),
@@ -157,6 +163,11 @@ def _create_cycle_tables(connection: Connection) -> None:
             ),
             sa.ForeignKeyConstraint(["job_id"], ["automation_jobs.id"], ondelete="CASCADE"),
             sa.PrimaryKeyConstraint("cycle_key"),
+        )
+    elif "include_paused_accounts" not in _column_names(connection, "automation_run_cycles"):
+        op.add_column(
+            "automation_run_cycles",
+            sa.Column("include_paused_accounts", sa.Boolean(), nullable=False, server_default=sa.false()),
         )
 
     if not _table_exists(connection, "automation_run_cycle_accounts"):
@@ -201,17 +212,19 @@ def _backfill_cycle_tables(connection: Connection) -> None:
         sa.text(
             """
             SELECT
-                cycle_key,
-                slot_key,
-                job_id,
-                trigger,
-                account_id,
-                scheduled_for,
-                cycle_window_end,
-                created_at
+                automation_runs.cycle_key,
+                automation_runs.slot_key,
+                automation_runs.job_id,
+                automation_runs.trigger,
+                automation_jobs.include_paused_accounts,
+                automation_runs.account_id,
+                automation_runs.scheduled_for,
+                automation_runs.cycle_window_end,
+                automation_runs.created_at
             FROM automation_runs
-            WHERE cycle_key IS NOT NULL AND cycle_key != ''
-            ORDER BY created_at ASC, scheduled_for ASC, id ASC
+            JOIN automation_jobs ON automation_jobs.id = automation_runs.job_id
+            WHERE automation_runs.cycle_key IS NOT NULL AND automation_runs.cycle_key != ''
+            ORDER BY automation_runs.created_at ASC, automation_runs.scheduled_for ASC, automation_runs.id ASC
             """
         )
     ).mappings()
@@ -225,6 +238,7 @@ def _backfill_cycle_tables(connection: Connection) -> None:
                 ),
                 "job_id": str(row["job_id"]),
                 "trigger": str(row["trigger"]),
+                "include_paused_accounts": bool(row["include_paused_accounts"]),
                 "account_id": str(row["account_id"]) if row["account_id"] else None,
                 "scheduled_for": row["scheduled_for"],
                 "cycle_window_end": row["cycle_window_end"],
@@ -249,6 +263,7 @@ def _backfill_cycle_tables(connection: Connection) -> None:
                     trigger,
                     cycle_expected_accounts,
                     cycle_window_end,
+                    include_paused_accounts,
                     created_at
                 ) VALUES (
                     :cycle_key,
@@ -256,6 +271,7 @@ def _backfill_cycle_tables(connection: Connection) -> None:
                     :trigger,
                     :cycle_expected_accounts,
                     :cycle_window_end,
+                    :include_paused_accounts,
                     :created_at
                 )
                 """
@@ -266,6 +282,7 @@ def _backfill_cycle_tables(connection: Connection) -> None:
                 "trigger": snapshot["trigger"],
                 "cycle_expected_accounts": snapshot["cycle_expected_accounts"],
                 "cycle_window_end": snapshot["cycle_window_end"],
+                "include_paused_accounts": snapshot["include_paused_accounts"],
                 "created_at": snapshot["created_at"],
             },
         )

@@ -29,6 +29,7 @@ class _ObservedRunRow(TypedDict):
     slot_key: str
     job_id: str
     trigger: str
+    include_paused_accounts: bool
     account_id: str | None
     scheduled_for: datetime
     cycle_window_end: datetime | None
@@ -42,6 +43,7 @@ class _NormalizedRunRow(TypedDict):
     cycle_key: str
     job_id: str
     trigger: str
+    include_paused_accounts: bool
     account_id: str | None
     scheduled_for: datetime
     cycle_window_end: datetime | None
@@ -54,6 +56,7 @@ class _ObservedCycleSnapshot(TypedDict):
     trigger: str
     cycle_expected_accounts: int
     cycle_window_end: datetime | None
+    include_paused_accounts: bool
     created_at: datetime
     accounts: list[tuple[str, datetime]]
 
@@ -62,6 +65,7 @@ class _MutableCycleSnapshot(TypedDict):
     job_id: str
     trigger: str
     cycle_window_end: datetime | None
+    include_paused_accounts: bool
     created_at: datetime
     accounts: dict[str, datetime]
 
@@ -72,6 +76,7 @@ class _ObservedExistingCycleSnapshot(TypedDict):
     trigger: str
     cycle_expected_accounts: int
     cycle_window_end: datetime | None
+    include_paused_accounts: bool
     created_at: datetime
     schedule_threshold_minutes: int | None
     accounts: list[tuple[str, datetime]]
@@ -191,6 +196,7 @@ def _normalize_run_row(row: _ObservedRunRow) -> _NormalizedRunRow:
             "cycle_key": cycle_key,
             "job_id": row["job_id"],
             "trigger": row["trigger"],
+            "include_paused_accounts": row["include_paused_accounts"],
             "account_id": row["account_id"],
             "scheduled_for": row["scheduled_for"],
             "cycle_window_end": row["cycle_window_end"],
@@ -212,6 +218,7 @@ def _normalize_run_row(row: _ObservedRunRow) -> _NormalizedRunRow:
         "cycle_key": cycle_key,
         "job_id": row["job_id"],
         "trigger": row["trigger"],
+        "include_paused_accounts": row["include_paused_accounts"],
         "account_id": row["account_id"],
         "scheduled_for": row["scheduled_for"],
         "cycle_window_end": cycle_window_end,
@@ -224,6 +231,7 @@ def _new_mutable_cycle_snapshot(row: _NormalizedRunRow) -> _MutableCycleSnapshot
         "job_id": row["job_id"],
         "trigger": row["trigger"],
         "cycle_window_end": row["cycle_window_end"] or row["scheduled_for"],
+        "include_paused_accounts": row["include_paused_accounts"],
         "created_at": row["created_at"],
         "accounts": {},
     }
@@ -267,6 +275,7 @@ def _build_cycle_snapshots(rows: list[_NormalizedRunRow]) -> list[_ObservedCycle
                 "trigger": snapshot["trigger"],
                 "cycle_expected_accounts": len(account_rows),
                 "cycle_window_end": snapshot["cycle_window_end"],
+                "include_paused_accounts": snapshot["include_paused_accounts"],
                 "created_at": snapshot["created_at"],
                 "accounts": account_rows,
             }
@@ -305,6 +314,7 @@ def _load_observed_runs(connection: Connection) -> list[_ObservedRunRow]:
                 automation_runs.cycle_window_end,
                 automation_runs.cycle_expected_accounts,
                 automation_runs.created_at,
+                automation_jobs.include_paused_accounts,
                 automation_jobs.schedule_threshold_minutes
             FROM automation_runs
             JOIN automation_jobs ON automation_jobs.id = automation_runs.job_id
@@ -327,6 +337,7 @@ def _load_observed_runs(connection: Connection) -> list[_ObservedRunRow]:
                 "slot_key": str(row["slot_key"]),
                 "job_id": str(row["job_id"]),
                 "trigger": str(row["trigger"]),
+                "include_paused_accounts": bool(row["include_paused_accounts"]),
                 "account_id": str(row["account_id"]) if row["account_id"] else None,
                 "scheduled_for": scheduled_for,
                 "cycle_window_end": _coerce_datetime(row["cycle_window_end"]),
@@ -352,6 +363,7 @@ def _load_existing_cycle_snapshots(connection: Connection) -> list[_ObservedExis
                 automation_run_cycles.trigger,
                 automation_run_cycles.cycle_expected_accounts,
                 automation_run_cycles.cycle_window_end,
+                automation_run_cycles.include_paused_accounts,
                 automation_run_cycles.created_at,
                 automation_jobs.schedule_threshold_minutes,
                 automation_run_cycle_accounts.account_id,
@@ -381,6 +393,7 @@ def _load_existing_cycle_snapshots(connection: Connection) -> list[_ObservedExis
                 "trigger": str(row["trigger"]),
                 "cycle_expected_accounts": int(row["cycle_expected_accounts"] or 0),
                 "cycle_window_end": _coerce_datetime(row["cycle_window_end"]),
+                "include_paused_accounts": bool(row["include_paused_accounts"]),
                 "created_at": created_at,
                 "schedule_threshold_minutes": (
                     int(row["schedule_threshold_minutes"]) if row["schedule_threshold_minutes"] is not None else None
@@ -439,6 +452,7 @@ def _normalize_existing_cycle_snapshot(snapshot: _ObservedExistingCycleSnapshot)
         "trigger": snapshot["trigger"],
         "cycle_expected_accounts": max(snapshot["cycle_expected_accounts"], len(snapshot["accounts"])),
         "cycle_window_end": cycle_window_end,
+        "include_paused_accounts": snapshot["include_paused_accounts"],
         "created_at": snapshot["created_at"],
         "accounts": list(snapshot["accounts"]),
     }
@@ -492,6 +506,7 @@ def _merge_cycle_snapshots(
                 "job_id": source["job_id"],
                 "trigger": source["trigger"],
                 "cycle_window_end": source["cycle_window_end"],
+                "include_paused_accounts": source["include_paused_accounts"],
                 "created_at": source["created_at"],
                 "accounts": {},
             },
@@ -521,6 +536,7 @@ def _merge_cycle_snapshots(
                 "trigger": snapshot["trigger"],
                 "cycle_expected_accounts": max(expected_accounts.get(cycle_key, 0), len(account_rows)),
                 "cycle_window_end": snapshot["cycle_window_end"],
+                "include_paused_accounts": snapshot["include_paused_accounts"],
                 "created_at": snapshot["created_at"],
                 "accounts": account_rows,
             }
@@ -560,6 +576,7 @@ def _rebuild_cycle_tables(
                     trigger,
                     cycle_expected_accounts,
                     cycle_window_end,
+                    include_paused_accounts,
                     created_at
                 ) VALUES (
                     :cycle_key,
@@ -567,6 +584,7 @@ def _rebuild_cycle_tables(
                     :trigger,
                     :cycle_expected_accounts,
                     :cycle_window_end,
+                    :include_paused_accounts,
                     :created_at
                 )
                 """
@@ -577,6 +595,7 @@ def _rebuild_cycle_tables(
                 "trigger": snapshot["trigger"],
                 "cycle_expected_accounts": snapshot["cycle_expected_accounts"],
                 "cycle_window_end": snapshot["cycle_window_end"],
+                "include_paused_accounts": snapshot["include_paused_accounts"],
                 "created_at": snapshot["created_at"],
             },
         )
@@ -612,6 +631,11 @@ def upgrade() -> None:
         return
     if not _table_exists(bind, "automation_run_cycles") or not _table_exists(bind, "automation_run_cycle_accounts"):
         return
+    if "include_paused_accounts" not in _column_names(bind, "automation_run_cycles"):
+        op.add_column(
+            "automation_run_cycles",
+            sa.Column("include_paused_accounts", sa.Boolean(), nullable=False, server_default=sa.false()),
+        )
 
     observed_rows = _load_observed_runs(bind)
     if not observed_rows:

@@ -151,6 +151,7 @@ async def _fetch_with_failover(
     accounts_repo: AccountsRepository,
 ) -> list[UpstreamModel] | None:
     transport_recovery = _TransportRecoveryState()
+    merged_models: list[UpstreamModel] = []
 
     for account in candidates:
         auth_manager = AuthManager(accounts_repo)
@@ -165,7 +166,7 @@ async def _fetch_with_failover(
                 encryptor,
                 transport_recovery=transport_recovery,
             )
-            return models
+            merged_models.extend(models)
         except ModelFetchError as exc:
             if exc.status_code == 401:
                 try:
@@ -180,7 +181,7 @@ async def _fetch_with_failover(
                         encryptor,
                         transport_recovery=transport_recovery,
                     )
-                    return models
+                    merged_models.extend(models)
                 except (ModelFetchError, RefreshError) as retry_exc:
                     logger.warning(
                         "Model fetch auth retry failed account=%s plan=%s initial_error=%s retry_error=%s",
@@ -214,7 +215,7 @@ async def _fetch_with_failover(
                 exc_info=True,
             )
             continue
-    return None
+    return merged_models or None
 
 
 async def _ensure_fresh_with_transport_recovery(

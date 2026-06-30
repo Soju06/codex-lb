@@ -256,3 +256,29 @@ async def test_fetch_with_failover_attempts_transport_recovery_once_when_retry_f
     refresh_http_client.assert_awaited_once()
     assert fetch_models_for_plan.await_count == 3
     assert encryptor.decrypt.call_count == 3
+
+
+@pytest.mark.asyncio
+async def test_fetch_with_failover_aggregates_same_plan_successes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    accounts = [_account("account-1"), _account("account-2")]
+    encryptor = MagicMock()
+    encryptor.decrypt.return_value = "access-token"
+    first_models = [_model("gpt-5.4")]
+    second_models = [_model("gpt-5.4")]
+    second_models[0].raw["service_tiers"] = [{"slug": "fast"}]
+
+    fetch_models_for_plan = AsyncMock(side_effect=[first_models, second_models])
+
+    monkeypatch.setattr(scheduler_module, "AuthManager", _StubAuthManager)
+    monkeypatch.setattr(scheduler_module, "fetch_models_for_plan", fetch_models_for_plan)
+
+    result = await scheduler_module._fetch_with_failover(accounts, encryptor, MagicMock())
+
+    assert result == [*first_models, *second_models]
+    assert fetch_models_for_plan.await_count == 2
+    assert [call.args[1] for call in fetch_models_for_plan.await_args_list] == [
+        "chatgpt-account-1",
+        "chatgpt-account-2",
+    ]

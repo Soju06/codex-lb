@@ -852,6 +852,34 @@ def test_handle_rate_limit_cooldown_honors_word_unit_hint(monkeypatch):
     assert state.cooldown_until - now == pytest.approx(120.0)
 
 
+def test_handle_rate_limit_cooldown_honors_compact_hint_and_selection_skips_account(monkeypatch):
+    now = 1_700_000_000.0
+    monkeypatch.setattr("app.core.balancer.logic.time.time", lambda: now)
+    rate_limited = AccountState("a", AccountStatus.ACTIVE, used_percent=5.0)
+    fallback = AccountState("b", AccountStatus.ACTIVE, used_percent=10.0)
+
+    handle_rate_limit(rate_limited, {"message": "Please try again in 6m0s."})
+
+    assert rate_limited.cooldown_until is not None
+    assert rate_limited.cooldown_until - now == pytest.approx(360.0)
+    result = select_account([rate_limited, fallback], now=now)
+    assert result.account is fallback
+
+
+def test_handle_rate_limit_cooldown_honors_minute_hint_and_selection_skips_account(monkeypatch):
+    now = 1_700_000_000.0
+    monkeypatch.setattr("app.core.balancer.logic.time.time", lambda: now)
+    rate_limited = AccountState("a", AccountStatus.ACTIVE, used_percent=5.0)
+    fallback = AccountState("b", AccountStatus.ACTIVE, used_percent=10.0)
+
+    handle_rate_limit(rate_limited, {"message": "Try again in 20m"})
+
+    assert rate_limited.cooldown_until is not None
+    assert rate_limited.cooldown_until - now == pytest.approx(1200.0)
+    result = select_account([rate_limited, fallback], now=now)
+    assert result.account is fallback
+
+
 def test_handle_rate_limit_cooldown_ignores_unsupported_longer_unit(monkeypatch):
     # Regression for the externally failing product path: an unsupported word
     # whose prefix is a real unit ("month" -> "m") must not be mis-read as a

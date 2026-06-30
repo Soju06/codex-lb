@@ -491,7 +491,8 @@ The service SHALL remove `tools` and `tool_choice` from compact request payloads
 
 #### Scenario: compact request reuses a full Responses payload shape
 - **WHEN** a client sends `/backend-api/codex/responses/compact` or `/v1/responses/compact` with `tools`, `tool_choice`, or `parallel_tool_calls`
-- **THEN** the proxy drops those fields before the upstream compact request
+- **THEN** the proxy drops `tools` and `tool_choice` before the upstream compact request
+- **AND** the proxy sends `parallel_tool_calls` as `false`
 - **AND** the compact request continues without a local or upstream `invalid_request_error` caused by `param="tools"`
 
 ### Requirement: Responses requests accept input_file content items with a file_id

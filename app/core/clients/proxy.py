@@ -76,6 +76,7 @@ from app.core.utils.request_id import get_request_id
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
 
 CODEX_INSTALLATION_ID_HEADER = "x-codex-installation-id"
+CODEX_RESPONSES_LITE_HEADER = "x-openai-internal-codex-responses-lite"
 
 IGNORE_INBOUND_HEADERS = {
     "authorization",
@@ -87,6 +88,11 @@ IGNORE_INBOUND_HEADERS = {
     CODEX_INSTALLATION_ID_HEADER,
     "true-client-ip",
 }
+INTERNAL_OPENAI_UPSTREAM_HEADERS = frozenset(
+    {
+        CODEX_RESPONSES_LITE_HEADER,
+    }
+)
 
 _ERROR_TYPE_CODE_MAP = {
     "rate_limit_exceeded": "rate_limit_exceeded",
@@ -447,6 +453,8 @@ def _should_drop_inbound_header(name: str) -> bool:
     normalized = name.lower()
     if normalized in IGNORE_INBOUND_HEADERS:
         return True
+    if normalized in INTERNAL_OPENAI_UPSTREAM_HEADERS:
+        return True
     if normalized.startswith("x-forwarded-"):
         return True
     if normalized.startswith("cf-"):
@@ -579,7 +587,7 @@ def _build_upstream_headers(
     account_id: str | None,
     accept: str = "text/event-stream",
 ) -> dict[str, str]:
-    headers = dict(inbound)
+    headers = filter_inbound_headers(inbound)
     native = _is_native_codex_request(headers)
     lower_keys = {key.lower() for key in headers}
     if "x-request-id" not in lower_keys and "request-id" not in lower_keys:
@@ -636,7 +644,8 @@ def _build_upstream_websocket_headers(
             token.strip().lower() for token in value.split(",") if isinstance(value, str) and token.strip()
         )
     blocked_header_names = _HOP_BY_HOP_HEADER_NAMES | connected_header_tokens
-    headers = {key: value for key, value in inbound.items() if key.lower() not in blocked_header_names}
+    filtered = filter_inbound_headers(inbound)
+    headers = {key: value for key, value in filtered.items() if key.lower() not in blocked_header_names}
     native = _is_native_codex_request(headers)
     lower_keys = {key.lower() for key in headers}
     if "x-request-id" not in lower_keys and "request-id" not in lower_keys:

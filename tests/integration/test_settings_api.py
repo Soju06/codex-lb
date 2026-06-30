@@ -75,6 +75,7 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["limitWarmupModel"] == "auto"
     assert payload["limitWarmupPrompt"] == "Say OK."
     assert payload["limitWarmupCooldownSeconds"] == 3600
+    assert payload["limitWarmupExhaustedThresholdPercent"] == 99.0
     assert payload["limitWarmupMinAvailablePercent"] == 100.0
     assert payload["weeklyPaceWorkingDays"] == "0,1,2,3,4,5,6"
     assert payload["limitWarmupStaggeredIdleEnabled"] is False
@@ -109,6 +110,7 @@ async def test_settings_api_get_and_update(async_client):
             "limitWarmupModel": "gpt-5.1-codex-mini",
             "limitWarmupPrompt": "Say OK.",
             "limitWarmupCooldownSeconds": 7200,
+            "limitWarmupExhaustedThresholdPercent": 98.5,
             "limitWarmupMinAvailablePercent": 99.0,
             "weeklyPaceWorkingDays": "0,1,2,3,4",
             "limitWarmupStaggeredIdleEnabled": True,
@@ -144,6 +146,7 @@ async def test_settings_api_get_and_update(async_client):
     assert updated["limitWarmupModel"] == "gpt-5.1-codex-mini"
     assert updated["limitWarmupPrompt"] == "Say OK."
     assert updated["limitWarmupCooldownSeconds"] == 7200
+    assert updated["limitWarmupExhaustedThresholdPercent"] == 98.5
     assert updated["limitWarmupMinAvailablePercent"] == 99.0
     assert updated["weeklyPaceWorkingDays"] == "0,1,2,3,4"
     assert updated["limitWarmupStaggeredIdleEnabled"] is True
@@ -179,6 +182,7 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["limitWarmupModel"] == "gpt-5.1-codex-mini"
     assert payload["limitWarmupPrompt"] == "Say OK."
     assert payload["limitWarmupCooldownSeconds"] == 7200
+    assert payload["limitWarmupExhaustedThresholdPercent"] == 98.5
     assert payload["limitWarmupMinAvailablePercent"] == 99.0
     assert payload["weeklyPaceWorkingDays"] == "0,1,2,3,4"
 

@@ -518,6 +518,21 @@ def test_filter_inbound_headers_strips_proxy_identity_headers():
     assert filtered["Accept"] == "text/event-stream"
 
 
+def test_filter_inbound_headers_strips_internal_responses_lite_header():
+    headers = {
+        "X-OpenAI-Internal-Codex-Responses-Lite": "1",
+        "x-openai-client-version": "2.24.0",
+        "User-Agent": "codex-test",
+    }
+
+    filtered = filter_inbound_headers(headers)
+    lowered = {key.lower() for key in filtered}
+
+    assert "x-openai-internal-codex-responses-lite" not in lowered
+    assert filtered["x-openai-client-version"] == "2.24.0"
+    assert filtered["User-Agent"] == "codex-test"
+
+
 def test_request_log_useragent_fields_extract_full_value_and_group() -> None:
     assert proxy_service._request_log_useragent_fields(
         {
@@ -575,6 +590,21 @@ def test_build_upstream_headers_preserves_native_account_header_casing():
     assert headers["chatgpt-account-id"] == "acc_2"
     assert "ChatGPT-Account-Id" not in headers
     assert headers["User-Agent"] == native_ua
+
+
+def test_build_upstream_headers_strips_internal_responses_lite_header():
+    native_ua = "codex_exec/0.142.1 (Mac OS 27.0.0; arm64) unknown (codex_exec; 0.142.1)"
+    headers = _build_upstream_headers(
+        {
+            "User-Agent": native_ua,
+            "X-OpenAI-Internal-Codex-Responses-Lite": "1",
+        },
+        "token",
+        "acc_2",
+    )
+
+    lowered = {key.lower() for key in headers}
+    assert "x-openai-internal-codex-responses-lite" not in lowered
 
 
 def test_build_upstream_headers_accept_override():
@@ -1117,6 +1147,20 @@ def test_build_upstream_websocket_headers_strip_hop_by_hop_headers_and_connectio
     assert headers["Authorization"] == "Bearer token"
     assert headers["chatgpt-account-id"] == "acc_2"
     assert headers["User-Agent"] == "codex_cli_rs/0.1.0"
+
+
+def test_build_upstream_websocket_headers_strips_internal_responses_lite_header():
+    headers = proxy_module._build_upstream_websocket_headers(
+        {
+            "User-Agent": "codex_cli_rs/0.1.0",
+            "X-OpenAI-Internal-Codex-Responses-Lite": "1",
+        },
+        "token",
+        "acc_2",
+    )
+
+    lowered = {key.lower() for key in headers}
+    assert "x-openai-internal-codex-responses-lite" not in lowered
 
 
 @pytest.mark.asyncio

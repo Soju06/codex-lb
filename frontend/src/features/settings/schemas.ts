@@ -95,6 +95,12 @@ export const DashboardSettingsSchema = z
     limitWarmupModel: LimitWarmupModelSchema.optional().default("auto"),
     limitWarmupPrompt: LimitWarmupPromptSchema.optional().default("Say OK."),
     limitWarmupCooldownSeconds: z.number().int().min(60).optional().default(3600),
+    limitWarmupExhaustedThresholdPercent: z
+      .number()
+      .positive()
+      .max(100)
+      .optional()
+      .default(99),
     limitWarmupMinAvailablePercent: z
       .number()
       .positive()
@@ -159,6 +165,7 @@ export const SettingsUpdateRequestSchema = z.object({
   limitWarmupModel: LimitWarmupModelSchema.optional(),
   limitWarmupPrompt: LimitWarmupPromptSchema.optional(),
   limitWarmupCooldownSeconds: z.number().int().min(60).optional(),
+  limitWarmupExhaustedThresholdPercent: z.number().positive().max(100).optional(),
   limitWarmupMinAvailablePercent: z.number().positive().max(100).optional(),
   weeklyPaceWorkingDays: WeeklyPaceWorkingDaysValueSchema.optional(),
   guestAccessEnabled: z.boolean().optional(),

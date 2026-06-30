@@ -122,4 +122,26 @@ describe("buildSettingsUpdateRequest", () => {
     expect(payload.stickyReallocationPrimaryBudgetThresholdPct).toBe(80);
     expect(payload.stickyReallocationSecondaryBudgetThresholdPct).toBe(100);
   });
+
+  it("includes limit warm-up exhausted threshold updates", () => {
+    const settings = DashboardSettingsSchema.parse({
+      stickyThreadsEnabled: true,
+      upstreamStreamTransport: "default",
+      preferEarlierResetAccounts: false,
+      routingStrategy: "round_robin",
+      openaiCacheAffinityMaxAgeSeconds: 300,
+      dashboardSessionTtlSeconds: 43200,
+      importWithoutOverwrite: true,
+      totpRequiredOnLogin: true,
+      totpConfigured: false,
+      apiKeyAuthEnabled: true,
+      limitWarmupExhaustedThresholdPercent: 99,
+    });
+
+    const payload = buildSettingsUpdateRequest(settings, {
+      limitWarmupExhaustedThresholdPercent: 98.5,
+    });
+
+    expect(payload.limitWarmupExhaustedThresholdPercent).toBe(98.5);
+  });
 });

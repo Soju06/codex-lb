@@ -76,6 +76,7 @@ type RoutingSettingsDraft = {
   limitWarmupModel: string;
   limitWarmupPrompt: string;
   limitWarmupCooldown: string;
+  limitWarmupExhaustedThreshold: string;
   additionalQuotaKey: string;
   additionalQuotaPolicy: AdditionalQuotaRoutingPolicy;
 };
@@ -91,6 +92,7 @@ function createRoutingSettingsDraft(settings: DashboardSettings): RoutingSetting
     limitWarmupModel: settings.limitWarmupModel,
     limitWarmupPrompt: settings.limitWarmupPrompt,
     limitWarmupCooldown: String(settings.limitWarmupCooldownSeconds),
+    limitWarmupExhaustedThreshold: String(settings.limitWarmupExhaustedThresholdPercent),
     additionalQuotaKey: "",
     additionalQuotaPolicy: "inherit",
   };
@@ -148,15 +150,23 @@ export function RoutingSettings({
   const warmupModelValid = draft.warmupModel.trim().length > 0 && draft.warmupModel.trim().length <= WARMUP_MODEL_MAX_LENGTH;
   const parsedLimitWarmupCooldown = Number(draft.limitWarmupCooldown);
   const limitWarmupCooldownValid = Number.isInteger(parsedLimitWarmupCooldown) && parsedLimitWarmupCooldown >= 60;
+  const parsedLimitWarmupExhaustedThreshold = Number(draft.limitWarmupExhaustedThreshold);
+  const limitWarmupExhaustedThresholdValid =
+    Number.isFinite(parsedLimitWarmupExhaustedThreshold) &&
+    parsedLimitWarmupExhaustedThreshold > 0 &&
+    parsedLimitWarmupExhaustedThreshold <= 100;
   const limitWarmupFieldsChanged =
     draft.limitWarmupModel.trim() !== settings.limitWarmupModel ||
     draft.limitWarmupPrompt.trim() !== settings.limitWarmupPrompt ||
+    (limitWarmupExhaustedThresholdValid &&
+      parsedLimitWarmupExhaustedThreshold !== settings.limitWarmupExhaustedThresholdPercent) ||
     (limitWarmupCooldownValid && parsedLimitWarmupCooldown !== settings.limitWarmupCooldownSeconds);
   const limitWarmupFieldsValid =
     draft.limitWarmupModel.trim().length > 0 &&
     draft.limitWarmupModel.trim().length <= LIMIT_WARMUP_MODEL_MAX_LENGTH &&
     draft.limitWarmupPrompt.trim().length > 0 &&
     draft.limitWarmupPrompt.trim().length <= LIMIT_WARMUP_PROMPT_MAX_LENGTH &&
+    limitWarmupExhaustedThresholdValid &&
     limitWarmupCooldownValid;
 
   const parsedRelativeAvailabilityPower = Number.parseFloat(draft.relativeAvailabilityPower);
@@ -768,49 +778,75 @@ export function RoutingSettings({
               />
             </div>
 
-            <div className="grid gap-2 sm:grid-cols-[10rem_minmax(0,1fr)_7rem]">
-              <Select
-                value={settings.limitWarmupWindows}
-                onValueChange={(value) => save({ limitWarmupWindows: value as "primary" | "secondary" | "both" })}
-              >
-                <SelectTrigger className="h-8 text-xs" disabled={busy}>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent align="start">
-                  <SelectItem value="both">{t("settings.routing.limitWarmup.windows.both")}</SelectItem>
-                  <SelectItem value="primary">{t("settings.routing.limitWarmup.windows.primary")}</SelectItem>
-                  <SelectItem value="secondary">{t("settings.routing.limitWarmup.windows.secondary")}</SelectItem>
-                </SelectContent>
-              </Select>
-              <Input
-                value={draft.limitWarmupModel}
-                disabled={busy}
-                maxLength={LIMIT_WARMUP_MODEL_MAX_LENGTH}
-                onChange={(event) => updateDraft({ limitWarmupModel: event.target.value })}
-                className="h-8 text-xs"
-                aria-label={t("settings.routing.limitWarmup.modelAria")}
-              />
-              <Input
-                type="number"
-                min={60}
-                step={60}
-                inputMode="numeric"
-                value={draft.limitWarmupCooldown}
-                disabled={busy}
-                onChange={(event) => updateDraft({ limitWarmupCooldown: event.target.value })}
-                className="h-8 text-xs"
-                aria-label={t("settings.routing.limitWarmup.cooldownAria")}
-              />
+            <div className="grid gap-2 sm:grid-cols-[10rem_minmax(0,1fr)_7rem_7rem]">
+              <div className="space-y-1">
+                <span className="block text-[11px] font-medium text-muted-foreground">Windows</span>
+                <Select
+                  value={settings.limitWarmupWindows}
+                  onValueChange={(value) => save({ limitWarmupWindows: value as "primary" | "secondary" | "both" })}
+                >
+                  <SelectTrigger className="h-8 text-xs" disabled={busy} aria-label="Warm-up windows">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent align="start">
+                    <SelectItem value="both">{t("settings.routing.limitWarmup.windows.both")}</SelectItem>
+                    <SelectItem value="primary">{t("settings.routing.limitWarmup.windows.primary")}</SelectItem>
+                    <SelectItem value="secondary">{t("settings.routing.limitWarmup.windows.secondary")}</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <label className="block space-y-1">
+                <span className="block text-[11px] font-medium text-muted-foreground">Model</span>
+                <Input
+                  value={draft.limitWarmupModel}
+                  disabled={busy}
+                  maxLength={LIMIT_WARMUP_MODEL_MAX_LENGTH}
+                  onChange={(event) => updateDraft({ limitWarmupModel: event.target.value })}
+                  className="h-8 text-xs"
+                  aria-label={t("settings.routing.limitWarmup.modelAria")}
+                />
+              </label>
+              <label className="block space-y-1">
+                <span className="block text-[11px] font-medium text-muted-foreground">Exhausted at %</span>
+                <Input
+                  type="number"
+                  min={1}
+                  max={100}
+                  step={0.1}
+                  inputMode="decimal"
+                  value={draft.limitWarmupExhaustedThreshold}
+                  disabled={busy}
+                  onChange={(event) => updateDraft({ limitWarmupExhaustedThreshold: event.target.value })}
+                  className="h-8 text-xs"
+                />
+              </label>
+              <label className="block space-y-1">
+                <span className="block text-[11px] font-medium text-muted-foreground">Cooldown (sec)</span>
+                <Input
+                  type="number"
+                  min={60}
+                  step={60}
+                  inputMode="numeric"
+                  value={draft.limitWarmupCooldown}
+                  disabled={busy}
+                  onChange={(event) => updateDraft({ limitWarmupCooldown: event.target.value })}
+                  className="h-8 text-xs"
+                  aria-label={t("settings.routing.limitWarmup.cooldownAria")}
+                />
+              </label>
             </div>
-            <div className="flex flex-col gap-2 sm:flex-row">
-              <Input
-                value={draft.limitWarmupPrompt}
-                disabled={busy}
-                maxLength={LIMIT_WARMUP_PROMPT_MAX_LENGTH}
-                onChange={(event) => updateDraft({ limitWarmupPrompt: event.target.value })}
-                className="h-8 text-xs"
-                aria-label={t("settings.routing.limitWarmup.promptAria")}
-              />
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+              <label className="block space-y-1 sm:flex-1">
+                <span className="block text-[11px] font-medium text-muted-foreground">Prompt</span>
+                <Input
+                  value={draft.limitWarmupPrompt}
+                  disabled={busy}
+                  maxLength={LIMIT_WARMUP_PROMPT_MAX_LENGTH}
+                  onChange={(event) => updateDraft({ limitWarmupPrompt: event.target.value })}
+                  className="h-8 text-xs"
+                  aria-label={t("settings.routing.limitWarmup.promptAria")}
+                />
+              </label>
               <Button
                 type="button"
                 size="sm"
@@ -821,6 +857,7 @@ export function RoutingSettings({
                   void save({
                     limitWarmupModel: draft.limitWarmupModel.trim(),
                     limitWarmupPrompt: draft.limitWarmupPrompt.trim(),
+                    limitWarmupExhaustedThresholdPercent: parsedLimitWarmupExhaustedThreshold,
                     limitWarmupCooldownSeconds: parsedLimitWarmupCooldown,
                   })
                 }

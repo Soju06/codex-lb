@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import aiohttp
 import pytest
@@ -497,6 +498,7 @@ async def test_owner_forward_uses_direct_session_without_env_proxy(monkeypatch: 
         def post(self, url: str, **kwargs: object) -> FakeResponse:
             captured["url"] = url
             captured["headers"] = kwargs.get("headers")
+            captured["skip_auto_headers"] = kwargs.get("skip_auto_headers")
             return FakeResponse()
 
     monkeypatch.setattr("app.modules.proxy.http_bridge_forwarding.aiohttp.ClientSession", FakeSession)
@@ -529,3 +531,171 @@ async def test_owner_forward_uses_direct_session_without_env_proxy(monkeypatch: 
     assert '"type":"response.failed"' in events[0]
     assert '"code":"stream_incomplete"' in events[0]
     assert captured["trust_env"] is False
+    skip_auto_headers = captured["skip_auto_headers"]
+    assert isinstance(skip_auto_headers, frozenset)
+    assert skip_auto_headers == {"Accept", "Accept-Encoding"}
+
+
+@pytest.mark.asyncio
+async def test_owner_forward_allows_json_content_type_for_internal_post(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        status = 200
+
+        async def __aenter__(self) -> "FakeResponse":
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def text(self) -> str:
+            return ""
+
+        @property
+        def content(self) -> SimpleNamespace:
+            async def _iter_chunked(_: int) -> AsyncIterator[bytes]:
+                if False:
+                    yield b""
+                return
+
+            return SimpleNamespace(iter_chunked=_iter_chunked)
+
+    class FakeSession:
+        def __init__(self, *, timeout: aiohttp.ClientTimeout, trust_env: bool) -> None:
+            captured["trust_env"] = trust_env
+
+        async def __aenter__(self) -> "FakeSession":
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def post(self, url: str, **kwargs: object) -> FakeResponse:
+            captured["headers"] = kwargs.get("headers")
+            captured["json"] = kwargs.get("json")
+            captured["skip_auto_headers"] = kwargs.get("skip_auto_headers")
+            return FakeResponse()
+
+    monkeypatch.setattr("app.modules.proxy.http_bridge_forwarding.aiohttp.ClientSession", FakeSession)
+    monkeypatch.setattr("app.modules.proxy.http_bridge_forwarding.time.monotonic", lambda: 10.0)
+
+    client = HTTPBridgeOwnerClient()
+    payload = _payload()
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=False,
+        downstream_turn_state=None,
+    )
+
+    events = [
+        event
+        async for event in client.stream_responses(
+            owner_endpoint="http://instance-b:2455",
+            payload=payload,
+            headers={
+                "Authorization": "Bearer proxy-key",
+                "Content-Type": "text/plain",
+            },
+            context=context,
+            request_started_at=10.0,
+        )
+    ]
+
+    assert len(events) == 1
+    assert '"code":"stream_incomplete"' in events[0]
+    headers = cast(dict[str, str], captured["headers"])
+    assert isinstance(headers, dict)
+    assert "Content-Type" not in headers
+    assert "content-type" not in headers
+    assert headers["authorization"] == "Bearer proxy-key"
+    skip_auto_headers = captured["skip_auto_headers"]
+    assert isinstance(skip_auto_headers, frozenset)
+    assert aiohttp.hdrs.CONTENT_TYPE not in skip_auto_headers
+
+
+def test_build_owner_forward_headers_strips_hop_by_hop_headers() -> None:
+    payload = _payload()
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=False,
+        downstream_turn_state=None,
+    )
+    inbound = {
+        "Accept": "application/json",
+        "Accept-Encoding": "gzip, deflate",
+        "Connection": "keep-alive",
+        "Content-Type": "application/json",
+        "Cookie": "session=abc",
+        "x-request-id": "req-123",
+    }
+
+    headers = build_owner_forward_headers(headers=inbound, payload=payload, context=context)
+
+    assert "Accept" not in headers
+    assert "accept" not in headers
+    assert "Accept-Encoding" not in headers
+    assert "accept-encoding" not in headers
+    assert "Connection" not in headers
+    assert "connection" not in headers
+    assert "Content-Type" not in headers
+    assert "content-type" not in headers
+    assert "Cookie" not in headers
+    assert "cookie" not in headers
+    assert headers.get("x-request-id") == "req-123"
+    assert HTTP_BRIDGE_FORWARDED_HEADER in headers
+    assert HTTP_BRIDGE_TARGET_INSTANCE_HEADER in headers
+
+
+def test_build_owner_forward_headers_preserves_authorization_strips_host() -> None:
+    payload = _payload()
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=False,
+        downstream_turn_state=None,
+    )
+    inbound = {
+        "Authorization": "Bearer downstream-key",
+        "Host": "client.example.com",
+        "content-length": "42",
+        "x-openai-client-version": "1.2.3",
+    }
+
+    headers = build_owner_forward_headers(headers=inbound, payload=payload, context=context)
+
+    # The owner instance re-validates the client API key from Authorization
+    # (see _validate_internal_bridge_api_key) before swapping in its own
+    # upstream token, so the header must survive the forward.
+    assert headers.get("authorization") == "Bearer downstream-key"
+    assert "Host" not in headers
+    assert "host" not in headers
+    assert "content-length" not in headers
+    assert headers.get("x-openai-client-version") == "1.2.3"
+
+
+def test_build_owner_forward_headers_drops_connection_named_headers() -> None:
+    payload = _payload()
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=False,
+        downstream_turn_state=None,
+    )
+    inbound = {
+        "Connection": "keep-alive, X-Custom-Hop",
+        "X-Custom-Hop": "drop-me",
+        "x-request-id": "req-123",
+    }
+
+    headers = build_owner_forward_headers(headers=inbound, payload=payload, context=context)
+
+    assert "X-Custom-Hop" not in headers
+    assert "x-custom-hop" not in headers
+    assert "Connection" not in headers
+    assert "connection" not in headers
+    assert headers.get("x-request-id") == "req-123"

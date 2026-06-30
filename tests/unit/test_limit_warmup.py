@@ -61,6 +61,7 @@ def _settings(**overrides: object) -> DashboardSettings:
         "limit_warmup_model": "gpt-5.1-codex-mini",
         "limit_warmup_prompt": "Say OK.",
         "limit_warmup_cooldown_seconds": 3600,
+        "limit_warmup_exhausted_threshold_percent": 99.0,
         "limit_warmup_min_available_percent": 100.0,
         "limit_warmup_staggered_idle_enabled": False,
     }
@@ -571,6 +572,48 @@ async def test_reset_confirmed_candidate_sends_one_warmup() -> None:
     assert repo.rows[0].status == "succeeded"
     assert logs.logs[0]["source"] == "limit_warmup"
     assert logs.logs[0]["request_kind"] == "warmup"
+
+
+@pytest.mark.asyncio
+async def test_exhausted_threshold_accepts_pre_reset_99_percent_usage() -> None:
+    repo = FakeWarmupRepo()
+    logs = FakeRequestLogsRepo()
+    sender = FakeSender()
+    service = LimitWarmupService(repo, logs, sender=sender)
+    account = _account()
+
+    await service.run_after_usage_refresh(
+        accounts=[account],
+        settings=_settings(limit_warmup_exhausted_threshold_percent=99.0),
+        before_primary={account.id: _usage(account.id, used_percent=99.0, reset_at=1000)},
+        before_secondary={},
+        after_primary={account.id: _usage(account.id, used_percent=0, reset_at=2000)},
+        after_secondary={},
+    )
+
+    assert len(sender.calls) == 1
+    assert len(repo.rows) == 1
+    assert repo.rows[0].status == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_exhausted_threshold_skips_usage_below_threshold() -> None:
+    repo = FakeWarmupRepo()
+    sender = FakeSender()
+    service = LimitWarmupService(repo, FakeRequestLogsRepo(), sender=sender)
+    account = _account()
+
+    await service.run_after_usage_refresh(
+        accounts=[account],
+        settings=_settings(limit_warmup_exhausted_threshold_percent=99.0),
+        before_primary={account.id: _usage(account.id, used_percent=98.9, reset_at=1000)},
+        before_secondary={},
+        after_primary={account.id: _usage(account.id, used_percent=0, reset_at=2000)},
+        after_secondary={},
+    )
+
+    assert sender.calls == []
+    assert repo.rows == []
 
 
 @pytest.mark.asyncio

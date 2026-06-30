@@ -62,6 +62,7 @@ class DashboardSettingsResponse(DashboardModel):
     limit_warmup_model: str = Field(min_length=1, max_length=128)
     limit_warmup_prompt: str = Field(min_length=1, max_length=512)
     limit_warmup_cooldown_seconds: int = Field(ge=60)
+    limit_warmup_exhausted_threshold_percent: float = Field(gt=0.0, le=100.0)
     limit_warmup_min_available_percent: float = Field(gt=0.0, le=100.0)
     weekly_pace_working_days: str = _DEFAULT_WEEKLY_PACE_WORKING_DAYS
     limit_warmup_staggered_idle_enabled: bool
@@ -110,6 +111,7 @@ class DashboardSettingsUpdateRequest(DashboardModel):
     limit_warmup_model: str | None = Field(default=None, min_length=1, max_length=128)
     limit_warmup_prompt: str | None = Field(default=None, min_length=1, max_length=512)
     limit_warmup_cooldown_seconds: int | None = Field(default=None, ge=60)
+    limit_warmup_exhausted_threshold_percent: float | None = Field(default=None, gt=0.0, le=100.0)
     limit_warmup_min_available_percent: float | None = Field(default=None, gt=0.0, le=100.0)
     weekly_pace_working_days: str | None = None
     guest_access_enabled: bool | None = None

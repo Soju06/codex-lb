@@ -11,7 +11,7 @@ from typing import cast
 
 import aiohttp
 
-from app.core.clients.proxy import ProxyResponseError
+from app.core.clients.proxy import ProxyResponseError, filter_inbound_headers
 from app.core.config.settings import get_settings
 from app.core.crypto import get_or_create_key
 from app.core.errors import OpenAIErrorEnvelope, openai_error, response_failed_event
@@ -21,6 +21,27 @@ from app.core.utils.request_id import get_request_id
 from app.core.utils.sse import format_sse_event
 from app.modules.api_keys.service import ApiKeyUsageReservationData
 from app.modules.proxy._service.http_bridge.helpers import _http_bridge_request_budget_seconds
+
+# HTTP-only and hop-by-hop headers that must not be forwarded through the
+# internal bridge. These headers are either illegal in WebSocket handshakes or
+# carry HTTP framing semantics that the aiohttp upstream session manages itself.
+# Applies on top of filter_inbound_headers (which already strips authorization,
+# host, content-length, and x-forwarded-* / cf-* headers).
+_BRIDGE_UNSAFE_HEADER_NAMES = frozenset(
+    {
+        "accept",
+        "accept-encoding",
+        "connection",
+        "content-type",
+        "cookie",
+        "keep-alive",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+    }
+)
+_OWNER_FORWARD_SKIP_AUTO_HEADERS = frozenset({aiohttp.hdrs.ACCEPT, aiohttp.hdrs.ACCEPT_ENCODING})
 
 HTTP_BRIDGE_INTERNAL_FORWARD_PATH = "/internal/bridge/responses"
 HTTP_BRIDGE_FORWARDED_HEADER = "x-codex-bridge-forwarded"
@@ -93,6 +114,7 @@ class HTTPBridgeOwnerClient:
                 f"{owner_endpoint}{HTTP_BRIDGE_INTERNAL_FORWARD_PATH}",
                 json=payload.model_dump(mode="json", exclude_none=True),
                 headers=build_owner_forward_headers(headers=headers, payload=payload, context=context),
+                skip_auto_headers=_OWNER_FORWARD_SKIP_AUTO_HEADERS,
             ) as response:
                 if response.status != 200:
                     payload_text = await response.text()
@@ -139,9 +161,27 @@ def build_owner_forward_headers(
     payload: ResponsesRequest,
     context: HTTPBridgeForwardContext,
 ) -> dict[str, str]:
-    forwarded = dict(headers)
-    forwarded.pop("host", None)
-    forwarded.pop("content-length", None)
+    filtered = filter_inbound_headers(headers)
+    # Per the hop-by-hop contract, also drop any header named by the inbound
+    # Connection header in addition to the fixed unsafe set.
+    connection_value = next(
+        (value for key, value in headers.items() if key.lower() == "connection"),
+        "",
+    )
+    connection_named = {token.strip().lower() for token in connection_value.split(",") if token.strip()}
+    drop = _BRIDGE_UNSAFE_HEADER_NAMES | connection_named
+    forwarded = {key: value for key, value in filtered.items() if key.lower() not in drop}
+    # filter_inbound_headers strips Authorization, but the owner instance
+    # re-validates the client API key from this header (see
+    # _validate_internal_bridge_api_key) before swapping in its own upstream
+    # access token. Preserve it so api_key_auth_enabled deployments still
+    # authenticate forwarded bridge requests.
+    authorization = next(
+        (value for key, value in headers.items() if key.lower() == "authorization"),
+        None,
+    )
+    if authorization is not None:
+        forwarded["authorization"] = authorization
     forwarded[HTTP_BRIDGE_FORWARDED_HEADER] = "1"
     forwarded[HTTP_BRIDGE_ORIGIN_INSTANCE_HEADER] = context.origin_instance
     forwarded[HTTP_BRIDGE_TARGET_INSTANCE_HEADER] = context.target_instance

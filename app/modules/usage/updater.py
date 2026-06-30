@@ -20,7 +20,7 @@ from app.core.balancer import (
 from app.core.clients.usage import UsageFetchError, fetch_usage
 from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
-from app.core.plan_types import coerce_account_plan_type
+from app.core.plan_types import ACCOUNT_PLAN_TYPES, coerce_account_plan_type, normalize_account_plan_type
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError, resolve_upstream_route
 from app.core.usage.models import AdditionalRateLimitPayload, UsagePayload, UsageWindow
 from app.core.utils.request_id import get_request_id
@@ -752,11 +752,31 @@ def _credits_snapshot(payload: UsagePayload) -> tuple[bool | None, bool | None, 
 def _payload_mismatches_account_slot(account: Account, payload: UsagePayload) -> bool:
     payload_workspace_id = _clean_optional(payload.workspace_id)
     if account.workspace_id and payload_workspace_id and account.workspace_id != payload_workspace_id:
+        # The payload reports a different workspace slot than the one this
+        # account is bound to; refuse to write another workspace's usage/plan.
         return True
-    if not payload_workspace_id:
+    if not payload_workspace_id and payload.plan_type:
         payload_plan_type = coerce_account_plan_type(payload.plan_type, account.plan_type or "free")
+        normalized_payload_plan_type = normalize_account_plan_type(payload.plan_type)
         stored_plan_type = coerce_account_plan_type(account.plan_type, "free")
-        if payload.plan_type and stored_plan_type not in {"unknown", ""} and payload_plan_type != stored_plan_type:
+        recognized_paid_plans = ACCOUNT_PLAN_TYPES - {"free"}
+        # A transition between two recognized paid plans (e.g. Plus -> Pro) is a
+        # legitimate upgrade/downgrade, not an identity mismatch: the usage
+        # payload carries no independent account identifier and is fetched per
+        # account token, so plan_type alone cannot establish identity. Persist
+        # those via _sync_identity_metadata (issue #1086). A workspace-less
+        # payload that instead introduces "free" or an unrecognized plan stays
+        # untrusted -- the signature of a degraded or wrong-identity usage
+        # response that must not silently rewrite the stored plan.
+        if payload_plan_type != stored_plan_type and not (
+            stored_plan_type == "unknown"
+            and normalized_payload_plan_type in recognized_paid_plans
+            or (
+                not account.workspace_id
+                and stored_plan_type in recognized_paid_plans
+                and payload_plan_type in recognized_paid_plans
+            )
+        ):
             return True
     return False
 

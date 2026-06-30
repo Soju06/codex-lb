@@ -57,7 +57,13 @@ from app.modules.proxy._service.support import (
 )
 from app.modules.proxy._service.websocket import mixin as websocket_mixin
 from app.modules.proxy._service.websocket import mixin as websocket_mixin_module
-from app.modules.proxy.load_balancer import AccountLease, AccountSelection, RuntimeState, SelectionInputs
+from app.modules.proxy.load_balancer import (
+    AccountLease,
+    AccountSelection,
+    RuntimeState,
+    SelectionInputs,
+    _filter_accounts_for_model,
+)
 from app.modules.proxy.repo_bundle import ProxyRepositories
 from app.modules.proxy.sticky_repository import StickySessionsRepository
 from app.modules.request_logs.repository import RequestLogsRepository
@@ -22936,6 +22942,30 @@ async def test_http_bridge_reselects_sticky_session_for_new_service_tier(monkeyp
     create_session.assert_awaited_once()
     assert create_session.await_args is not None
     assert create_session.await_args.kwargs["request_service_tier"] == "priority"
+
+
+@pytest.mark.parametrize("service_tier", ["auto", "default", " Auto "])
+def test_filter_accounts_for_model_treats_omit_equivalent_service_tiers_as_unfiltered(monkeypatch, service_tier):
+    account_a = _make_account("acc_filter_auto_a")
+    account_b = _make_account("acc_filter_auto_b")
+
+    class Registry:
+        def account_ids_for_model_service_tier(self, slug: str, requested_tier: str | None) -> frozenset[str] | None:
+            raise AssertionError(f"unexpected tier-specific account lookup for {slug}:{requested_tier}")
+
+        def plan_types_for_model_service_tier(self, slug: str, requested_tier: str | None) -> frozenset[str] | None:
+            raise AssertionError(f"unexpected tier-specific plan lookup for {slug}:{requested_tier}")
+
+        def plan_types_for_model(self, slug: str) -> frozenset[str] | None:
+            assert slug == "gpt-5.5"
+            return None
+
+    monkeypatch.setattr("app.modules.proxy.load_balancer.get_model_registry", lambda: Registry())
+
+    assert _filter_accounts_for_model([account_a, account_b], "gpt-5.5", service_tier=service_tier) == [
+        account_a,
+        account_b,
+    ]
 
 
 @pytest.mark.asyncio

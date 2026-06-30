@@ -2188,11 +2188,13 @@ def _filter_accounts_for_model(
     service_tier: str | None = None,
 ) -> list[Account]:
     registry = get_model_registry()
-    if service_tier is not None:
-        allowed_account_ids = registry.account_ids_for_model_service_tier(model, service_tier)
+    normalized_service_tier = service_tier.strip().lower() if service_tier is not None else None
+    effective_service_tier = None if normalized_service_tier in {"auto", "default"} else service_tier
+    if effective_service_tier is not None:
+        allowed_account_ids = registry.account_ids_for_model_service_tier(model, effective_service_tier)
         if allowed_account_ids is not None:
             return [account for account in accounts if account.id in allowed_account_ids]
-        allowed_plans = registry.plan_types_for_model_service_tier(model, service_tier)
+        allowed_plans = registry.plan_types_for_model_service_tier(model, effective_service_tier)
     else:
         allowed_plans = registry.plan_types_for_model(model)
     if allowed_plans is None:

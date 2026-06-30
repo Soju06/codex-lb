@@ -390,6 +390,7 @@ from app.modules.proxy._service.websocket.helpers import (
     _websocket_event_error_param,
     _websocket_event_error_type,
     _websocket_full_resend_conflicts_with_visible_pending,
+    _websocket_input_items_are_self_contained_fresh_replay,
     _websocket_precreated_auth_error_code,
     _websocket_precreated_retry_error_code,
     _websocket_receive_timeout_for_pending_requests,
@@ -1401,7 +1402,18 @@ class _WebSocketMixin:
                     request_state=request_state,
                     transport=_REQUEST_TRANSPORT_WEBSOCKET,
                 )
-            request_state.fresh_upstream_request_is_retry_safe = request_state.fresh_upstream_request_text is not None
+            original_full_resend_input = (
+                original_full_resend_payload.get("input")
+                if isinstance(original_full_resend_payload, dict)
+                else original_full_resend_payload.input
+            )
+            request_state.fresh_upstream_request_is_retry_safe = bool(
+                request_state.fresh_upstream_request_text is not None
+                and isinstance(original_full_resend_input, list)
+                and _websocket_input_items_are_self_contained_fresh_replay(
+                    cast(list[JsonValue], original_full_resend_input)
+                )
+            )
             _facade().logger.info(
                 "websocket_session_anchor_injected request_id=%s response_id=%s original_items=%s trimmed_to=%s",
                 request_state.request_id,

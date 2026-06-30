@@ -1395,9 +1395,10 @@ class AutomationsService:
         )
         expected_set = set(expected_account_ids)
         observed_only = [account_id for account_id in latest_run_by_account_id if account_id not in expected_set]
+        include_paused_accounts = cycle.include_paused_accounts if cycle is not None else job.include_paused_accounts
         eligible_pending_account_ids = await self._resolve_eligible_account_ids(
             expected_account_ids,
-            include_paused_accounts=job.include_paused_accounts,
+            include_paused_accounts=include_paused_accounts,
             now_utc=now_utc,
         )
         all_account_ids = [
@@ -1566,9 +1567,10 @@ class AutomationsService:
         observed_account_ids = [
             account_id for account_id in latest_run_by_account_id if account_id not in expected_account_ids
         ]
+        include_paused_accounts = cycle.include_paused_accounts if cycle is not None else job.include_paused_accounts
         eligible_pending_account_ids = await self._resolve_eligible_account_ids(
             expected_account_ids,
-            include_paused_accounts=job.include_paused_accounts,
+            include_paused_accounts=include_paused_accounts,
             now_utc=now_utc,
         )
         all_account_ids = [

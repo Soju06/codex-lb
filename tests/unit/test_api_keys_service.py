@@ -2100,6 +2100,10 @@ class TestNormalizeUsageSections:
         sections = set(result.split(","))
         assert sections == {"upstream_limits", "account_pool_usage"}
 
+    def test_dedupes_sections_preserving_order(self) -> None:
+        result = _normalize_usage_sections("account_pool_usage,upstream_limits,account_pool_usage")
+        assert result == "account_pool_usage,upstream_limits"
+
     def test_rejects_invalid_section(self) -> None:
         with pytest.raises(ApiKeyValidationError, match="Invalid usage sections"):
             _normalize_usage_sections("upstream_limits,invalid_section")

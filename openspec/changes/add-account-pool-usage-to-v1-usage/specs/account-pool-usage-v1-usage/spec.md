@@ -2,7 +2,7 @@
 
 ### Requirement: /v1/usage response includes account_pool_usage
 
-The system SHALL include an `account_pool_usage` object in the `GET /v1/usage` response containing pooled account remaining capacity percentages for the primary (5h) and secondary (7d/weekly) windows, when the API key's `usage_sections` setting includes `account_pool_usage`.
+The system SHALL include an `account_pool_usage` object in the `GET /v1/usage` response containing pooled account remaining capacity percentages for the primary (5h) and secondary (7d/weekly) windows, when the API key's `usage_sections` setting includes `account_pool_usage` and the quota privacy toggle does not hide upstream quota data.
 
 The `account_pool_usage` object SHALL contain:
 - `primary` (float): the remaining percent of primary (5h) pooled account capacity, or `null` if no primary capacity exists
@@ -36,9 +36,16 @@ The computation SHALL use the same account scope as the API key's assigned accou
 - **AND** the API key's `usage_sections` does NOT include `account_pool_usage`
 - **THEN** `account_pool_usage` is `null`
 
+#### Scenario: Account pool usage excluded by quota privacy toggle
+
+- **WHEN** a valid API key calls `GET /v1/usage`
+- **AND** the API key's `usage_sections` includes `account_pool_usage`
+- **AND** `hide_upstream_quota_from_api_keys` is enabled
+- **THEN** `account_pool_usage` is `null`
+
 ### Requirement: API key usage_sections controls which /v1/usage detail sections are returned
 
-The system SHALL store an API key's visible usage sections in a `usage_sections` TEXT field as a comma-separated list. The supported values SHALL be `upstream_limits` and `account_pool_usage`. The system SHALL parse this field when building the `/v1/usage` response and conditionally include the corresponding sections.
+The system SHALL store an API key's visible usage sections in a `usage_sections` TEXT field as a comma-separated list. The supported values SHALL be `upstream_limits` and `account_pool_usage`. The system SHALL parse this field when building the `/v1/usage` response and conditionally include the corresponding sections, subject to global quota privacy settings.
 
 #### Scenario: Default usage_sections includes all sections
 

@@ -1201,7 +1201,7 @@ def _normalize_usage_sections(raw: str | None) -> str:
     invalid = [s for s in sections if s not in _VALID_USAGE_SECTIONS]
     if invalid:
         raise ApiKeyValidationError(f"Invalid usage sections: {', '.join(invalid)}")
-    return ",".join(sections)
+    return ",".join(dict.fromkeys(sections))
 
 
 def _get_usage_sections_with_default(row: ApiKey) -> str:

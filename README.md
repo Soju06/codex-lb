@@ -192,4 +192,4 @@ config.example.toml # example runtime configuration; copy to config.toml for loc
 
 ## Acknowledgements
 
-This project would not exist without the discussions in the LINUX DO community. Special thanks to **@shinorochi** and **@dskdkj** of the LINUX DO community for jointly pinning down the truncation mechanism and GPT's thinking model, and to **@shinorochi** for proposing the better approach based on `commentary` input rather than faked tool calls.
+This project would not exist without the discussions in the [LINUX DO](https://linux.do) community. Special thanks to **@shinorochi** and **@dskdkj** of the LINUX DO community for jointly pinning down the truncation mechanism and GPT's thinking model, and to **@shinorochi** for proposing the better approach based on `commentary` input rather than faked tool calls.

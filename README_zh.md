@@ -192,4 +192,4 @@ config.example.toml # 示例运行配置；复制为 config.toml 后本地使用
 
 ## 致谢
 
-感谢 LINUX DO 社区的相关讨论，没有这些讨论，也就没有本项目。特别感谢 LINUX DO 社区的 @shinorochi 和 @dskdkj 一同明确截断机制和 GPT 的思考模型，感谢 @shinorochi 提出的基于 commentary 输入而非工具调用伪造的更好方案。
+感谢 [LINUX DO](https://linux.do) 社区的相关讨论，没有这些讨论，也就没有本项目。特别感谢 LINUX DO 社区的 @shinorochi 和 @dskdkj 一同明确截断机制和 GPT 的思考模型，感谢 @shinorochi 提出的基于 commentary 输入而非工具调用伪造的更好方案。

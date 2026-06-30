@@ -1,8 +1,8 @@
 """add staggered idle limit warm-up setting
 
-Revision ID: 20260603_000000_add_limit_warmup_staggered_idle
-Revises: 20260611_000000_merge_dashboard_guest_and_weekly_useragent_heads
-Create Date: 2026-06-03 00:00:00.000000
+Revision ID: 20260630_000000_add_limit_warmup_staggered_idle
+Revises: 20260629_000000_add_dashboard_query_hot_path_indexes
+Create Date: 2026-06-30 00:00:00.000000
 """
 
 from __future__ import annotations
@@ -11,8 +11,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.engine import Connection
 
-revision = "20260603_000000_add_limit_warmup_staggered_idle"
-down_revision = "20260611_000000_merge_dashboard_guest_and_weekly_useragent_heads"
+revision = "20260630_000000_add_limit_warmup_staggered_idle"
+down_revision = "20260629_000000_add_dashboard_query_hot_path_indexes"
 branch_labels = None
 depends_on = None
 

@@ -118,8 +118,35 @@ def _clone_filtered_history(
     return filtered_grouped
 
 
-def _max_snapshot_id(grouped: dict[str, list[UsageHistorySnapshot]]) -> int:
-    return max((row.id for rows in grouped.values() for row in rows), default=0)
+def _bulk_history_metadata_from_grouped(
+    grouped: dict[str, list[UsageHistorySnapshot]],
+) -> _BulkHistoryCacheMetadata:
+    digest = sha256()
+    rows = sorted((row for rows in grouped.values() for row in rows), key=lambda row: (row.id, row.account_id))
+    for row in rows:
+        digest.update(str(int(row.id)).encode("utf-8"))
+        digest.update(b"\x1f")
+        account_bytes = str(row.account_id).encode("utf-8")
+        digest.update(str(len(account_bytes)).encode("ascii"))
+        digest.update(b":")
+        digest.update(account_bytes)
+        digest.update(b"\x1f")
+        digest.update(float(row.used_percent).hex().encode("ascii"))
+        digest.update(b"\x1f")
+        recorded_at_bytes = str(row.recorded_at).encode("utf-8")
+        digest.update(str(len(recorded_at_bytes)).encode("ascii"))
+        digest.update(b":")
+        digest.update(recorded_at_bytes)
+        digest.update(b"\x1f")
+        digest.update(b"NULL" if row.reset_at is None else float(row.reset_at).hex().encode("ascii"))
+        digest.update(b"\x1f")
+        digest.update(b"NULL" if row.window_minutes is None else str(int(row.window_minutes)).encode("ascii"))
+        digest.update(b"\x1e")
+    return _BulkHistoryCacheMetadata(
+        row_count=len(rows),
+        max_id=max((row.id for row in rows), default=0),
+        content_digest=digest.hexdigest(),
+    )
 
 
 def _append_grouped_history(
@@ -414,14 +441,8 @@ def _bulk_history_since_sqlite(
                 )
                 if metadata != cached.metadata:
                     grouped = _query_bulk_history_since_sqlite(conn, account_ids, window, cached.since)
-                    cached.max_id = _max_snapshot_id(grouped)
-                    cached.metadata = _query_bulk_history_metadata_sqlite(
-                        conn,
-                        account_ids,
-                        window,
-                        cached.since,
-                        max_id=cached.max_id,
-                    )
+                    cached.metadata = _bulk_history_metadata_from_grouped(grouped)
+                    cached.max_id = cached.metadata.max_id
                     cached.rows_by_account = grouped
                     return _clone_filtered_history(grouped, since)
 
@@ -434,22 +455,16 @@ def _bulk_history_since_sqlite(
                 )
                 if new_rows:
                     _append_grouped_history(cached.rows_by_account, new_rows)
-                    cached.max_id = max(cached.max_id, _max_snapshot_id(new_rows))
-                    cached.metadata = _query_bulk_history_metadata_sqlite(
-                        conn,
-                        account_ids,
-                        window,
-                        cached.since,
-                        max_id=cached.max_id,
-                    )
+                    cached.metadata = _bulk_history_metadata_from_grouped(cached.rows_by_account)
+                    cached.max_id = cached.metadata.max_id
                 return _clone_filtered_history(cached.rows_by_account, since)
 
             grouped = _query_bulk_history_since_sqlite(conn, account_ids, window, since)
-            max_id = _max_snapshot_id(grouped)
+            metadata = _bulk_history_metadata_from_grouped(grouped)
             _BULK_HISTORY_SQLITE_CACHE[cache_key] = _BulkHistoryCacheEntry(
                 since=since,
-                max_id=max_id,
-                metadata=_query_bulk_history_metadata_sqlite(conn, account_ids, window, since, max_id=max_id),
+                max_id=metadata.max_id,
+                metadata=metadata,
                 rows_by_account=grouped,
             )
             return _clone_filtered_history(grouped, since)

@@ -57,6 +57,10 @@ _BULK_HISTORY_SQLITE_CACHE: dict[tuple[str, tuple[str, ...], str], _BulkHistoryC
 _BULK_HISTORY_SQLITE_CACHE_LOCK = RLock()
 
 
+def _normalized_sqlite_datetime_text(value) -> str:
+    return str(_parse_sqlite_datetime(value))
+
+
 class _BulkHistoryDigestAggregate:
     def __init__(self) -> None:
         self._digest = sha256()
@@ -79,7 +83,7 @@ class _BulkHistoryDigestAggregate:
         self._digest.update(b"\x1f")
         self._digest.update(float(used_percent).hex().encode("ascii"))
         self._digest.update(b"\x1f")
-        recorded_at_bytes = str(recorded_at).encode("utf-8")
+        recorded_at_bytes = _normalized_sqlite_datetime_text(recorded_at).encode("utf-8")
         self._digest.update(str(len(recorded_at_bytes)).encode("ascii"))
         self._digest.update(b":")
         self._digest.update(recorded_at_bytes)
@@ -1083,16 +1087,6 @@ class AdditionalUsageRepository:
             conditions.append(AdditionalUsageHistory.account_id.in_(account_ids))
         if since is not None:
             conditions.append(AdditionalUsageHistory.recorded_at >= since)
-        sqlite_path = _sqlite_path_from_bind(bind) if dialect == "sqlite" else None
-        if sqlite_path is not None:
-            return await to_thread.run_sync(
-                _additional_latest_by_account_sqlite,
-                str(sqlite_path),
-                scope,
-                window,
-                list(account_ids) if account_ids is not None else None,
-                since,
-            )
         if dialect == "postgresql":
             latest_rows = (
                 select(AdditionalUsageHistory)

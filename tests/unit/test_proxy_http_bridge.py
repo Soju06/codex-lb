@@ -5099,13 +5099,13 @@ async def test_stream_via_http_bridge_fails_closed_when_previous_response_owner_
         _prepared_payload: proxy_service.ResponsesRequest,
         _headers: dict[str, str] | Any,
         *,
-            api_key: proxy_service.ApiKeyData | None,
-            api_key_reservation: proxy_service.ApiKeyUsageReservationData | None,
-            request_id: str,
-            client_ip: str | None = None,
-        ) -> tuple[proxy_service._WebSocketRequestState, str]:
-            del api_key, api_key_reservation, request_id, client_ip
-            return request_state, '{"type":"response.create"}'
+        api_key: proxy_service.ApiKeyData | None,
+        api_key_reservation: proxy_service.ApiKeyUsageReservationData | None,
+        request_id: str,
+        client_ip: str | None = None,
+    ) -> tuple[proxy_service._WebSocketRequestState, str]:
+        del api_key, api_key_reservation, request_id, client_ip
+        return request_state, '{"type":"response.create"}'
 
     monkeypatch.setattr(
         proxy_service,

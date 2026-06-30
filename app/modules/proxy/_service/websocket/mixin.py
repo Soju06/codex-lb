@@ -1390,6 +1390,7 @@ class _WebSocketMixin:
         request_state.useragent_group = useragent_group
         request_state.client_ip = client_ip
         request_state.expose_stale_previous_response_classifier = codex_session_affinity
+        original_full_resend_input: JsonValue | None = None
         if session_anchor is not None:
             request_state.proxy_injected_previous_response_id = True
             request_state.input_item_count = original_input_item_count or request_state.input_item_count
@@ -1402,11 +1403,11 @@ class _WebSocketMixin:
                     request_state=request_state,
                     transport=_REQUEST_TRANSPORT_WEBSOCKET,
                 )
-            original_full_resend_input = (
-                original_full_resend_payload.get("input")
-                if isinstance(original_full_resend_payload, dict)
-                else original_full_resend_payload.input
-            )
+                original_full_resend_input = (
+                    original_full_resend_payload.get("input")
+                    if isinstance(original_full_resend_payload, dict)
+                    else original_full_resend_payload.input
+                )
             request_state.fresh_upstream_request_is_retry_safe = bool(
                 request_state.fresh_upstream_request_text is not None
                 and isinstance(original_full_resend_input, list)

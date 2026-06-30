@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -282,3 +283,31 @@ async def test_fetch_with_failover_aggregates_same_plan_successes(
         "chatgpt-account-1",
         "chatgpt-account-2",
     ]
+
+
+@pytest.mark.asyncio
+async def test_fetch_with_failover_does_not_warn_after_successful_auth_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    account = _account()
+    encryptor = MagicMock()
+    encryptor.decrypt.return_value = "access-token"
+    expected_models = [_model("gpt-5.4")]
+
+    fetch_models_for_plan = AsyncMock(
+        side_effect=[
+            scheduler_module.ModelFetchError(401, "expired token"),
+            expected_models,
+        ]
+    )
+
+    monkeypatch.setattr(scheduler_module, "AuthManager", _StubAuthManager)
+    monkeypatch.setattr(scheduler_module, "fetch_models_for_plan", fetch_models_for_plan)
+
+    with caplog.at_level(logging.WARNING, logger=scheduler_module.logger.name):
+        result = await scheduler_module._fetch_with_failover([account], encryptor, MagicMock())
+
+    assert result == expected_models
+    assert fetch_models_for_plan.await_count == 2
+    assert "Model fetch failed" not in caplog.text

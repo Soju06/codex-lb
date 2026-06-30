@@ -182,6 +182,7 @@ async def _fetch_with_failover(
                         transport_recovery=transport_recovery,
                     )
                     merged_models.extend(models)
+                    continue
                 except (ModelFetchError, RefreshError) as retry_exc:
                     logger.warning(
                         "Model fetch auth retry failed account=%s plan=%s initial_error=%s retry_error=%s",

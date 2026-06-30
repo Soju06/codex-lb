@@ -591,6 +591,40 @@ async def test_accounts_identity_duplicate_merge_clears_usage_cache_after_commit
 
 
 @pytest.mark.asyncio
+async def test_accounts_delete_clears_usage_cache_after_commit(db_setup, monkeypatch):
+    clear_transaction_states: list[bool] = []
+
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        await repo.upsert(_make_account("acc_delete_cache", "delete-cache@example.com"), merge_by_email=False)
+        session.add(
+            UsageHistory(
+                account_id="acc_delete_cache",
+                used_percent=55.0,
+                window="primary",
+                recorded_at=utcnow(),
+            )
+        )
+        await session.commit()
+
+        def record_cache_clear() -> None:
+            clear_transaction_states.append(session.in_transaction())
+
+        monkeypatch.setattr(accounts_repository_module, "_clear_bulk_history_since_sqlite_cache", record_cache_clear)
+
+        deleted = await repo.delete("acc_delete_cache")
+        remaining = (
+            (await session.execute(select(UsageHistory).where(UsageHistory.account_id == "acc_delete_cache")))
+            .scalars()
+            .all()
+        )
+
+    assert deleted is True
+    assert remaining == []
+    assert clear_transaction_states == [False]
+
+
+@pytest.mark.asyncio
 async def test_accounts_upsert_merge_by_chatgpt_identity_does_not_clear_workspace_on_workspace_less_reauth(db_setup):
     async with SessionLocal() as session:
         repo = AccountsRepository(session)

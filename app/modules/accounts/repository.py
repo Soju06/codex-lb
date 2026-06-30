@@ -582,7 +582,6 @@ class AccountsRepository:
     async def delete(self, account_id: str, *, delete_history: bool = False) -> bool:
         async with sqlite_writer_section():
             await self._session.execute(delete(UsageHistory).where(UsageHistory.account_id == account_id))
-            _clear_bulk_history_since_sqlite_cache()
             if delete_history:
                 await self._session.execute(delete(RequestLog).where(RequestLog.account_id == account_id))
             else:
@@ -593,8 +592,11 @@ class AccountsRepository:
                 )
             await self._session.execute(delete(StickySession).where(StickySession.account_id == account_id))
             result = await self._session.execute(delete(Account).where(Account.id == account_id).returning(Account.id))
+            deleted_id = result.scalar_one_or_none()
             await self._session.commit()
-            return result.scalar_one_or_none() is not None
+            if deleted_id is not None:
+                _clear_bulk_history_since_sqlite_cache()
+            return deleted_id is not None
 
     async def update_tokens(
         self,

@@ -14713,6 +14713,81 @@ async def test_process_upstream_websocket_text_transparently_retries_precreated_
 
 
 @pytest.mark.asyncio
+async def test_process_upstream_websocket_text_does_not_fresh_retry_injected_tool_output_previous_response_not_found(
+    monkeypatch,
+):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    finalize_request_state = AsyncMock()
+    handle_stream_error = AsyncMock()
+    account = _make_account("acc_ws_tool_delta_prev_nf")
+
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize_request_state)
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+
+    trimmed_payload = {
+        "type": "response.create",
+        "model": "gpt-5.1",
+        "previous_response_id": "resp_completed_anchor",
+        "input": [{"type": "function_call_output", "call_id": "call_delta", "output": "ok"}],
+    }
+    full_retry_payload = {
+        "type": "response.create",
+        "model": "gpt-5.1",
+        "input": [
+            {"type": "function_call_output", "call_id": "call_delta", "output": "ok"},
+            {"role": "user", "content": [{"type": "input_text", "text": "continue"}]},
+        ],
+    }
+    pending_request = proxy_service._WebSocketRequestState(
+        request_id="ws_req_tool_delta_prev_nf",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        awaiting_response_created=True,
+        request_text=json.dumps(trimmed_payload, separators=(",", ":")),
+        previous_response_id="resp_completed_anchor",
+        proxy_injected_previous_response_id=True,
+        fresh_upstream_request_text=json.dumps(full_retry_payload, separators=(",", ":")),
+        fresh_upstream_request_is_retry_safe=False,
+    )
+    pending_requests = deque([pending_request])
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    upstream_payload = {
+        "type": "error",
+        "status": 400,
+        "error": {
+            "type": "invalid_request_error",
+            "code": "previous_response_not_found",
+            "message": "Previous response with id 'resp_completed_anchor' not found.",
+            "param": "previous_response_id",
+        },
+    }
+
+    downstream_text = await service._process_upstream_websocket_text(
+        json.dumps(upstream_payload, separators=(",", ":")),
+        account=account,
+        account_id_value=account.id,
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=upstream_control,
+        response_create_gate=asyncio.Semaphore(1),
+    )
+
+    assert '"type":"response.failed"' in downstream_text
+    assert '"code":"stream_incomplete"' in downstream_text
+    assert "previous_response_not_found" not in downstream_text
+    finalize_request_state.assert_awaited_once()
+    handle_stream_error.assert_not_awaited()
+    assert upstream_control.suppress_downstream_event is False
+    assert upstream_control.replay_request_state is None
+    assert list(pending_requests) == []
+
+
+@pytest.mark.asyncio
 async def test_process_upstream_websocket_text_maps_previous_response_usage_limit_to_upstream_unavailable(
     monkeypatch,
 ):

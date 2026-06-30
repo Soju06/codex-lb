@@ -78,6 +78,7 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["limitWarmupExhaustedThresholdPercent"] == 99.0
     assert payload["limitWarmupMinAvailablePercent"] == 100.0
     assert payload["weeklyPaceWorkingDays"] == "0,1,2,3,4,5,6"
+    assert payload["weeklyPaceSmoothingMinutes"] == 30
     assert payload["limitWarmupStaggeredIdleEnabled"] is False
 
     response = await async_client.put(
@@ -113,6 +114,7 @@ async def test_settings_api_get_and_update(async_client):
             "limitWarmupExhaustedThresholdPercent": 98.5,
             "limitWarmupMinAvailablePercent": 99.0,
             "weeklyPaceWorkingDays": "0,1,2,3,4",
+            "weeklyPaceSmoothingMinutes": 120,
             "limitWarmupStaggeredIdleEnabled": True,
         },
     )
@@ -149,6 +151,7 @@ async def test_settings_api_get_and_update(async_client):
     assert updated["limitWarmupExhaustedThresholdPercent"] == 98.5
     assert updated["limitWarmupMinAvailablePercent"] == 99.0
     assert updated["weeklyPaceWorkingDays"] == "0,1,2,3,4"
+    assert updated["weeklyPaceSmoothingMinutes"] == 120
     assert updated["limitWarmupStaggeredIdleEnabled"] is True
 
     response = await async_client.get("/api/settings")
@@ -185,6 +188,7 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["limitWarmupExhaustedThresholdPercent"] == 98.5
     assert payload["limitWarmupMinAvailablePercent"] == 99.0
     assert payload["weeklyPaceWorkingDays"] == "0,1,2,3,4"
+    assert payload["weeklyPaceSmoothingMinutes"] == 120
 
 
 @pytest.mark.asyncio
@@ -373,6 +377,16 @@ async def test_settings_api_rejects_invalid_weekly_pace_working_days(async_clien
     response = await async_client.put(
         "/api/settings",
         json={"weeklyPaceWorkingDays": "0,1,7"},
+    )
+
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_settings_api_rejects_invalid_weekly_pace_smoothing_minutes(async_client):
+    response = await async_client.put(
+        "/api/settings",
+        json={"weeklyPaceSmoothingMinutes": 45},
     )
 
     assert response.status_code == 422

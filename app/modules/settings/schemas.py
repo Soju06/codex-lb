@@ -5,6 +5,7 @@ from pydantic import Field, field_validator
 from app.modules.shared.schemas import DashboardModel
 
 _DEFAULT_WEEKLY_PACE_WORKING_DAYS = "0,1,2,3,4,5,6"
+_WEEKLY_PACE_SMOOTHING_MINUTES = (15, 30, 60, 120, 240)
 _HTTP_DOWNSTREAM_TRANSPORT_POLICY_PATTERN = r"^(smart|always_http|always_websocket|pinned)$"
 
 
@@ -65,6 +66,7 @@ class DashboardSettingsResponse(DashboardModel):
     limit_warmup_exhausted_threshold_percent: float = Field(gt=0.0, le=100.0)
     limit_warmup_min_available_percent: float = Field(gt=0.0, le=100.0)
     weekly_pace_working_days: str = _DEFAULT_WEEKLY_PACE_WORKING_DAYS
+    weekly_pace_smoothing_minutes: int = Field(default=30)
     limit_warmup_staggered_idle_enabled: bool
     additional_quota_routing_policies: dict[str, str] = Field(default_factory=dict)
     additional_quota_policies: list[AdditionalQuotaPolicy] = Field(default_factory=list)
@@ -114,6 +116,7 @@ class DashboardSettingsUpdateRequest(DashboardModel):
     limit_warmup_exhausted_threshold_percent: float | None = Field(default=None, gt=0.0, le=100.0)
     limit_warmup_min_available_percent: float | None = Field(default=None, gt=0.0, le=100.0)
     weekly_pace_working_days: str | None = None
+    weekly_pace_smoothing_minutes: int | None = None
     guest_access_enabled: bool | None = None
     limit_warmup_staggered_idle_enabled: bool | None = None
 
@@ -131,6 +134,15 @@ class DashboardSettingsUpdateRequest(DashboardModel):
     @classmethod
     def _normalize_weekly_pace_days(cls, value: str | None) -> str | None:
         return _normalize_weekly_pace_working_days(value)
+
+    @field_validator("weekly_pace_smoothing_minutes")
+    @classmethod
+    def _validate_weekly_pace_smoothing_minutes(cls, value: int | None) -> int | None:
+        if value is None:
+            return None
+        if value not in _WEEKLY_PACE_SMOOTHING_MINUTES:
+            raise ValueError("weekly_pace_smoothing_minutes must be one of 15, 30, 60, 120, 240")
+        return value
 
 
 class RuntimeConnectAddressResponse(DashboardModel):

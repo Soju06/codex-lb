@@ -240,6 +240,10 @@
           "sun": "周日"
         }
       },
+      "paceSmoothing": {
+        "label": "节奏差距平均",
+        "description": "用最近的配额样本平滑显示的周节奏差距。"
+      },
       "limitWarmup": {
         "label": "额度预热",
         "description": "为已选择的账户发送一次确认重置后的预热请求。",

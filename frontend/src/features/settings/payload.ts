@@ -36,6 +36,7 @@ export function buildSettingsUpdateRequest(
     limitWarmupMinAvailablePercent: settings.limitWarmupMinAvailablePercent,
     limitWarmupStaggeredIdleEnabled: settings.limitWarmupStaggeredIdleEnabled,
     weeklyPaceWorkingDays: settings.weeklyPaceWorkingDays,
+    weeklyPaceSmoothingMinutes: settings.weeklyPaceSmoothingMinutes,
     guestAccessEnabled: settings.guestAccessEnabled,
     hideUpstreamQuotaFromApiKeys: settings.hideUpstreamQuotaFromApiKeys,
     ...patch,

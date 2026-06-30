@@ -192,6 +192,7 @@ class DashboardService:
             now=now,
             usage_refresh_interval_seconds=settings.usage_refresh_interval_seconds,
             working_days=_parse_weekly_pace_working_days(dashboard_settings.weekly_pace_working_days),
+            smoothing_window_minutes=dashboard_settings.weekly_pace_smoothing_minutes,
         )
         return DashboardProjectionsResponse(
             depletion_primary=pri_depletion,

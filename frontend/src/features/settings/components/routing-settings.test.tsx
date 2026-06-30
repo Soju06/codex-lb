@@ -356,6 +356,7 @@ describe("RoutingSettings", () => {
     expect(screen.getByRole("combobox", { name: "Reset preference window" })).toBeInTheDocument();
     expect(screen.getByLabelText("Warm-up model")).toHaveAttribute("maxLength", "128");
     expect(screen.getByRole("combobox", { name: "Warm-up windows" })).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Pace gap average" })).toBeInTheDocument();
     expect(screen.getByLabelText("Model")).toHaveAttribute("maxLength", "128");
     expect(screen.getByLabelText("Exhausted at %")).toHaveAttribute("max", "100");
     expect(screen.getByLabelText("Warm-up prompt")).toHaveAttribute("maxLength", "512");
@@ -390,6 +391,20 @@ describe("RoutingSettings", () => {
     await user.click(onlyDay);
 
     expect(onSave).not.toHaveBeenCalled();
+  });
+
+  it("saves weekly pace smoothing changes", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={onSave} />);
+
+    await user.click(screen.getByRole("combobox", { name: "Pace gap average" }));
+    await user.click(await screen.findByRole("option", { name: "2h" }));
+
+    expect(onSave).toHaveBeenCalledWith({
+      ...BASE_UPDATE_PAYLOAD,
+      weeklyPaceSmoothingMinutes: 120,
+    });
   });
 
   it("does not silently truncate decimal warm-up cooldown values", async () => {

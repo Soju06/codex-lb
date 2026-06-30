@@ -240,6 +240,10 @@
           "sun": "Sun"
         }
       },
+      "paceSmoothing": {
+        "label": "Pace gap average",
+        "description": "Smooth the displayed weekly pace gap over recent quota samples."
+      },
       "limitWarmup": {
         "label": "Limit warm-up",
         "description": "Send one reset-confirmed warm-up for opted-in accounts.",

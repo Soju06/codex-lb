@@ -839,6 +839,16 @@
         "code",
         "test"
       ]
+    },
+    {
+      "login": "zvladru",
+      "name": "zvladru",
+      "avatar_url": "https://avatars.githubusercontent.com/u/30793959?v=4",
+      "profile": "https://github.com/zvladru",
+      "contributions": [
+        "code",
+        "test"
+      ]
     }
   ],
   "contributorsPerLine": 7,

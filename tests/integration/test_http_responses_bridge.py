@@ -3804,6 +3804,10 @@ async def test_v1_responses_http_bridge_reuses_upstream_websocket_and_preserves_
         "instructions": "Return exactly OK.",
         "input": "hello",
         "prompt_cache_key": "http-bridge-thread-1",
+        "client_metadata": {
+            "keep": "yes",
+            "x-codex-installation-id": "client-spoofed-installation-id",
+        },
     }
     first = await async_client.post("/v1/responses", json=payload)
     assert first.status_code == 200
@@ -3820,6 +3824,10 @@ async def test_v1_responses_http_bridge_reuses_upstream_websocket_and_preserves_
     assert second_body["id"] == "resp_bridge_2"
     assert connect_calls == [(account_id, account.chatgpt_account_id)]
     assert len(fake_upstream.sent_text) == 2
+    first_upstream_payload = json.loads(fake_upstream.sent_text[0])
+    assert first_upstream_payload["client_metadata"]["keep"] == "yes"
+    assert first_upstream_payload["client_metadata"]["x-codex-installation-id"] == account.codex_installation_id
+    assert first_upstream_payload["client_metadata"]["x-codex-installation-id"] != "client-spoofed-installation-id"
     assert json.loads(fake_upstream.sent_text[1])["previous_response_id"] == "resp_bridge_1"
 
 
@@ -5716,7 +5724,7 @@ async def test_v1_responses_http_bridge_does_not_evict_active_session_when_pool_
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_http_bridge_does_not_evict_queued_session_when_pool_is_full(
+async def test_v1_responses_http_bridge_times_out_queued_request_on_bounded_startup_gate_wait(
     async_client,
     app_instance,
     monkeypatch,
@@ -5725,11 +5733,10 @@ async def test_v1_responses_http_bridge_does_not_evict_queued_session_when_pool_
         monkeypatch,
         enabled=True,
         max_sessions=1,
-        # This test verifies pool accounting for a queued request. Keep the
-        # synthetic request queued long enough on slow CI hosts so the
-        # response-create gate timeout does not drain it before the pool-full
-        # assertion runs.
-        admission_wait_timeout_seconds=30.0,
+        # Queued HTTP bridge requests have already claimed the bridge queue slot,
+        # so we still wait for the per-session response-create gate, but only
+        # until the bounded startup timeout.
+        admission_wait_timeout_seconds=0.01,
     )
     account_id = await _import_account(
         async_client,
@@ -5846,52 +5853,19 @@ async def test_v1_responses_http_bridge_does_not_evict_queued_session_when_pool_
         )
     )
     await asyncio.sleep(0)
-
-    assert await service._http_bridge_pending_count(first_session) == 1
-    async with first_session.pending_lock:
-        assert list(first_session.pending_requests) == []
-        assert first_session.queued_request_count == 1
-
-    second_payload = proxy_module.ResponsesRequest(
-        model="gpt-5.1",
-        instructions="Return exactly OK.",
-        input="new-session",
-        prompt_cache_key="queued-session-b",
-    )
-    second_affinity = proxy_module._sticky_key_for_responses_request(
-        second_payload,
-        {},
-        codex_session_affinity=False,
-        openai_cache_affinity=True,
-        openai_cache_affinity_max_age_seconds=300,
-        sticky_threads_enabled=False,
-        api_key=None,
-    )
-    second_key = proxy_module._make_http_bridge_session_key(
-        second_payload,
-        headers={},
-        affinity=second_affinity,
-        api_key=None,
-        request_id="req_queue_b",
-    )
+    await asyncio.sleep(0.05)
     with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
-        await service._get_or_create_http_bridge_session(
-            second_key,
-            headers={},
-            affinity=second_affinity,
-            api_key=None,
-            request_model="gpt-5.1",
-            idle_ttl_seconds=120.0,
-            max_sessions=1,
-        )
-
+        await asyncio.wait_for(submit_task, timeout=0.2)
     exc = exc_info.value
     assert exc.status_code == 429
-    assert hanging_upstream.closed is False
+    assert exc.payload["error"]["code"] == "response_create_gate_timeout"
+    assert exc.payload["error"]["type"] == "rate_limit_error"
 
-    submit_task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await submit_task
+    assert await service._http_bridge_pending_count(first_session) == 0
+    async with first_session.pending_lock:
+        assert list(first_session.pending_requests) == []
+        assert first_session.queued_request_count == 0
+
     first_session.response_create_gate.release()
     await service._close_http_bridge_session(first_session)
 

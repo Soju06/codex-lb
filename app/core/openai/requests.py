@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import cast
 
@@ -38,6 +38,13 @@ _INTERLEAVED_REASONING_KEYS = frozenset({"reasoning_content", "reasoning_details
 _INTERLEAVED_REASONING_PART_TYPES = frozenset({"reasoning", "reasoning_content", "reasoning_details"})
 _ASSISTANT_TEXT_PART_TYPES = frozenset({"text", "input_text", "output_text"})
 _TOOL_TEXT_PART_TYPES = frozenset({"text", "input_text", "output_text", "refusal"})
+_COMPACT_STATE_TOOL_NAMES = frozenset({"create_goal", "get_goal", "update_goal", "update_plan"})
+_COMPACT_TOOL_CALL_ITEM_TYPES = frozenset({"function_call", "custom_tool_call", "apply_patch_call"})
+_COMPACT_TOOL_CALL_OUTPUT_ITEM_TYPES = frozenset(
+    {"function_call_output", "custom_tool_call_output", "apply_patch_call_output"}
+)
+_GOAL_CONTINUATION_CONTEXT_PREFIX = '<codex_internal_context source="goal">'
+_PLAN_MODE_CONTEXT_PREFIX = "<collaboration_mode># Plan Mode"
 
 
 def _json_mapping_or_none(value: JsonValue) -> Mapping[str, JsonValue] | None:
@@ -707,15 +714,66 @@ _UNSUPPORTED_UPSTREAM_FIELDS = {
     "user",
 }
 
+_POISONED_LOCAL_COMPACT_FALLBACK_TEXT = "Local compact fallback preserved the latest encrypted reasoning state."
+_MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS = 100_000
+_COMPACT_UPSTREAM_HEAD_ESTIMATED_TOKENS = 12_000
+_ESTIMATED_CHARS_PER_TOKEN = 4
+
 
 def _strip_unsupported_fields(payload: MutableJsonObject) -> MutableJsonObject:
     _normalize_openai_compatible_aliases(payload)
     _normalize_service_tier_aliases(payload)
     _sanitize_interleaved_reasoning_input(payload)
+    _strip_poisoned_local_compact_fallback_items(payload)
     _canonicalize_tools(payload)
     for key in _UNSUPPORTED_UPSTREAM_FIELDS:
         payload.pop(key, None)
     return payload
+
+
+def _strip_poisoned_local_compact_fallback_items(payload: MutableJsonObject) -> None:
+    input_value = payload.get("input")
+    if not is_json_list(input_value):
+        return
+
+    input_items = input_value
+    kept: list[JsonValue] = []
+    skip_next_poison_compaction = False
+    changed = False
+    for item in input_items:
+        if skip_next_poison_compaction and is_json_mapping(item) and item.get("type") == "compaction":
+            encrypted_content = item.get("encrypted_content")
+            if isinstance(encrypted_content, str) and encrypted_content:
+                skip_next_poison_compaction = False
+                changed = True
+                continue
+        skip_next_poison_compaction = False
+
+        if _is_poisoned_local_compact_fallback_message(item):
+            skip_next_poison_compaction = True
+            changed = True
+            continue
+
+        kept.append(item)
+
+    if changed:
+        payload["input"] = kept
+
+
+def _is_poisoned_local_compact_fallback_message(item: JsonValue) -> bool:
+    if not is_json_mapping(item):
+        return False
+    if item.get("type") != "message" or item.get("role") != "assistant":
+        return False
+    content = item.get("content")
+    if not is_json_list(content):
+        return False
+    for part in content:
+        if not is_json_mapping(part):
+            continue
+        if part.get("text") == _POISONED_LOCAL_COMPACT_FALLBACK_TEXT:
+            return True
+    return False
 
 
 def _canonicalize_tools(payload: MutableJsonObject) -> None:
@@ -755,11 +813,280 @@ def _sort_keys_recursive(value: JsonValue) -> JsonValue:
 
 def _strip_compact_unsupported_fields(payload: MutableJsonObject) -> MutableJsonObject:
     payload = _strip_unsupported_fields(payload)
+    normalized_payload = _normalize_responses_input_instructions(payload)
+    if is_json_mapping(normalized_payload):
+        payload = dict(normalized_payload)
+    _trim_compact_input_for_upstream(payload)
     payload.pop("store", None)
+    payload.pop("text", None)
     payload.pop("tools", None)
     payload.pop("tool_choice", None)
     payload.pop("parallel_tool_calls", None)
+    payload.pop("client_metadata", None)
     return payload
+
+
+def _trim_compact_input_for_upstream(payload: MutableJsonObject) -> None:
+    input_value = payload.get("input")
+    if not is_json_list(input_value):
+        return
+    token_counts = [_estimated_json_tokens(item) for item in input_value]
+    total_tokens = sum(token_counts)
+    if total_tokens <= _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS:
+        return
+
+    head_count = _compact_trim_prefix_count(token_counts)
+    preserved_indices = _compact_state_anchor_indices(input_value)
+    selected_indices = set(preserved_indices)
+    selected_indices.update(range(head_count))
+    marker_tokens = _estimated_json_tokens(_compact_trim_marker(omitted_items=0, omitted_tokens=0))
+    selected_tokens = sum(token_counts[index] for index in selected_indices)
+    tail_budget = max(0, _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS - selected_tokens - marker_tokens)
+    selected_indices.update(
+        _compact_trim_suffix_indices(
+            token_counts,
+            selected_indices=selected_indices,
+            start_index=head_count,
+            token_budget=tail_budget,
+        )
+    )
+    selected_indices = _compact_reconciled_tool_call_indices(
+        input_value,
+        selected_indices,
+        token_counts=token_counts,
+        token_budget=max(0, _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS - marker_tokens),
+    )
+    if len(selected_indices) == len(input_value):
+        return
+    payload["input"] = _compact_trimmed_input_with_markers(input_value, token_counts, selected_indices)
+
+
+def _compact_state_anchor_indices(input_value: list[JsonValue]) -> set[int]:
+    preserved_indices: set[int] = set()
+    preserved_call_ids: set[str] = set()
+    for index, item in enumerate(input_value):
+        if not is_json_mapping(item):
+            continue
+        item_mapping = item
+        if _compact_item_is_state_anchor(item_mapping):
+            preserved_indices.add(index)
+            call_id = item_mapping.get("call_id")
+            if isinstance(call_id, str) and call_id:
+                preserved_call_ids.add(call_id)
+
+    if not preserved_call_ids:
+        return preserved_indices
+    for index, item in enumerate(input_value):
+        if index in preserved_indices or not is_json_mapping(item):
+            continue
+        item_mapping = item
+        if item_mapping.get("type") != "function_call_output":
+            continue
+        call_id = item_mapping.get("call_id")
+        if isinstance(call_id, str) and call_id in preserved_call_ids:
+            preserved_indices.add(index)
+    return preserved_indices
+
+
+def _compact_reconciled_tool_call_indices(
+    input_value: list[JsonValue],
+    selected_indices: set[int],
+    *,
+    token_counts: list[int],
+    token_budget: int,
+) -> set[int]:
+    call_indices_by_id: dict[str, list[int]] = {}
+    output_indices_by_id: dict[str, list[int]] = {}
+    for index, item in enumerate(input_value):
+        if not is_json_mapping(item):
+            continue
+        call_id = item.get("call_id")
+        if not isinstance(call_id, str) or not call_id:
+            continue
+        item_type = item.get("type")
+        if item_type in _COMPACT_TOOL_CALL_ITEM_TYPES:
+            call_indices_by_id.setdefault(call_id, []).append(index)
+        elif item_type in _COMPACT_TOOL_CALL_OUTPUT_ITEM_TYPES:
+            output_indices_by_id.setdefault(call_id, []).append(index)
+
+    reconciled = set(selected_indices)
+    selected_tokens = sum(token_counts[index] for index in reconciled)
+
+    def add_indices(indices: Iterable[int]) -> bool:
+        nonlocal selected_tokens
+        missing_indices = [index for index in indices if index not in reconciled]
+        missing_tokens = sum(token_counts[index] for index in missing_indices)
+        if selected_tokens + missing_tokens > token_budget:
+            return False
+        reconciled.update(missing_indices)
+        selected_tokens += missing_tokens
+        return True
+
+    def remove_indices(indices: Iterable[int]) -> None:
+        nonlocal selected_tokens
+        for index in indices:
+            if index in reconciled:
+                reconciled.remove(index)
+                selected_tokens -= token_counts[index]
+
+    def matching_call_index(call_indices: list[int], output_index: int) -> int | None:
+        if not call_indices:
+            return None
+        preceding_call_indices = [call_index for call_index in call_indices if call_index < output_index]
+        if preceding_call_indices:
+            return preceding_call_indices[-1]
+        return call_indices[0]
+
+    def matching_output_indices(call_indices: list[int], call_index: int, output_indices: list[int]) -> list[int]:
+        next_call_indices = [next_call_index for next_call_index in call_indices if next_call_index > call_index]
+        next_call_index = next_call_indices[0] if next_call_indices else None
+        return [
+            output_index
+            for output_index in output_indices
+            if output_index > call_index and (next_call_index is None or output_index < next_call_index)
+        ]
+
+    for call_id, output_indices in output_indices_by_id.items():
+        selected_outputs = [index for index in output_indices if index in reconciled]
+        if not selected_outputs:
+            continue
+        call_indices = call_indices_by_id.get(call_id, [])
+        for output_index in selected_outputs:
+            call_index = matching_call_index(call_indices, output_index)
+            if call_index is None:
+                remove_indices([output_index])
+            elif not add_indices([call_index]):
+                remove_indices([output_index])
+    for call_id, call_indices in call_indices_by_id.items():
+        output_indices = output_indices_by_id.get(call_id, [])
+        for call_index in call_indices:
+            if call_index not in reconciled:
+                continue
+            matched_output_indices = matching_output_indices(call_indices, call_index, output_indices)
+            if not matched_output_indices:
+                remove_indices([call_index])
+                continue
+            if not add_indices(matched_output_indices):
+                remove_indices([call_index, *matched_output_indices])
+    return reconciled
+
+
+def _compact_item_is_state_anchor(item: Mapping[str, JsonValue]) -> bool:
+    item_type = item.get("type")
+    if item_type == "function_call":
+        name = item.get("name")
+        if isinstance(name, str) and name in _COMPACT_STATE_TOOL_NAMES:
+            return True
+        function = item.get("function")
+        if is_json_mapping(function):
+            function_name = function.get("name")
+            if isinstance(function_name, str) and function_name in _COMPACT_STATE_TOOL_NAMES:
+                return True
+    for text in _compact_item_texts(item):
+        stripped = text.lstrip()
+        if stripped.startswith(_GOAL_CONTINUATION_CONTEXT_PREFIX):
+            return True
+        if stripped.startswith(_PLAN_MODE_CONTEXT_PREFIX):
+            return True
+    return False
+
+
+def _compact_item_texts(item: Mapping[str, JsonValue]) -> list[str]:
+    content = item.get("content")
+    if isinstance(content, str):
+        return [content]
+    if is_json_mapping(content):
+        content_parts: list[JsonValue] = [content]
+    elif is_json_list(content):
+        content_parts = content
+    else:
+        return []
+
+    texts: list[str] = []
+    for part in content_parts:
+        if isinstance(part, str):
+            texts.append(part)
+            continue
+        if not is_json_mapping(part):
+            continue
+        text = part.get("text")
+        if isinstance(text, str):
+            texts.append(text)
+    return texts
+
+
+def _compact_trimmed_input_with_markers(
+    input_value: list[JsonValue], token_counts: list[int], selected_indices: set[int]
+) -> list[JsonValue]:
+    trimmed: list[JsonValue] = []
+    omitted_items = 0
+    omitted_tokens = 0
+    for index, item in enumerate(input_value):
+        if index in selected_indices:
+            if omitted_items:
+                trimmed.append(_compact_trim_marker(omitted_items=omitted_items, omitted_tokens=omitted_tokens))
+                omitted_items = 0
+                omitted_tokens = 0
+            trimmed.append(item)
+        else:
+            omitted_items += 1
+            omitted_tokens += token_counts[index]
+    if omitted_items:
+        trimmed.append(_compact_trim_marker(omitted_items=omitted_items, omitted_tokens=omitted_tokens))
+    return trimmed
+
+
+def _compact_trim_prefix_count(token_counts: list[int]) -> int:
+    used = 0
+    count = 0
+    for token_count in token_counts:
+        if used + token_count > _COMPACT_UPSTREAM_HEAD_ESTIMATED_TOKENS:
+            break
+        used += token_count
+        count += 1
+    return count
+
+
+def _compact_trim_suffix_indices(
+    token_counts: list[int], *, selected_indices: set[int], start_index: int, token_budget: int
+) -> set[int]:
+    used = 0
+    indices: set[int] = set()
+    for index in range(len(token_counts) - 1, start_index - 1, -1):
+        if index in selected_indices:
+            continue
+        token_count = token_counts[index]
+        if indices and used + token_count > token_budget:
+            break
+        if not indices and token_count > token_budget:
+            indices.add(index)
+            break
+        used += token_count
+        indices.add(index)
+    return indices
+
+
+def _compact_trim_marker(*, omitted_items: int, omitted_tokens: int) -> JsonObject:
+    return {
+        "type": "message",
+        "role": "user",
+        "content": [
+            {
+                "type": "input_text",
+                "text": (
+                    "[compact trim] Omitted "
+                    f"{omitted_items} input items (~{omitted_tokens} estimated tokens) "
+                    "before forwarding this oversized compact request upstream. The initial "
+                    "context, most recent context, and compact state anchors were preserved."
+                ),
+            }
+        ],
+    }
+
+
+def _estimated_json_tokens(value: JsonValue) -> int:
+    serialized = json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    return max(1, (len(serialized) + _ESTIMATED_CHARS_PER_TOKEN - 1) // _ESTIMATED_CHARS_PER_TOKEN)
 
 
 def _sanitize_interleaved_reasoning_input(payload: MutableJsonObject) -> None:

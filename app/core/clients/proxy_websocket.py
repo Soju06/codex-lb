@@ -27,7 +27,14 @@ from app.core.clients.codex import (
     create_codex_session,
     require_route_or_direct_egress_opt_in,
 )
-from app.core.clients.proxy import ProxyResponseError, filter_inbound_headers
+from app.core.clients.proxy import (
+    _CHATGPT_ACCOUNT_ID_HEADER,
+    _HOP_BY_HOP_HEADER_NAMES,
+    ProxyResponseError,
+    _is_native_codex_request,
+    _normalize_non_native_upstream_fingerprint,
+    filter_inbound_headers,
+)
 from app.core.config.settings import get_settings
 from app.core.conversation_archive import archive_bytes, archive_text
 from app.core.errors import OpenAIErrorDetail, OpenAIErrorEnvelope, openai_error
@@ -37,18 +44,18 @@ from app.core.upstream_proxy import ResolvedUpstreamRoute
 from app.core.utils.proxy_env import resolve_websocket_proxy_from_env
 from app.core.utils.request_id import get_request_id
 
-_WEBSOCKET_HOP_BY_HOP_HEADERS = {
-    "accept",
-    "connection",
-    "content-type",
-    "cookie",
-    "sec-websocket-extensions",
-    "sec-websocket-key",
-    "sec-websocket-protocol",
-    "sec-websocket-version",
-    "upgrade",
-}
+_WEBSOCKET_HOP_BY_HOP_HEADERS = _HOP_BY_HOP_HEADER_NAMES | frozenset(
+    {
+        "accept-encoding",
+        "cookie",
+        "sec-websocket-extensions",
+        "sec-websocket-key",
+        "sec-websocket-protocol",
+        "sec-websocket-version",
+    }
+)
 _RESPONSES_WEBSOCKET_BETA_HEADER = "responses_websockets=2026-02-06"
+_RESPONSES_WEBSOCKET_INCOMPATIBLE_BETA_HEADERS = frozenset({"responses=experimental"})
 
 
 @dataclass(slots=True)
@@ -157,7 +164,10 @@ class CodexResponsesWebSocket:
                 error=codex_transport_error_message("websocket receive", self._endpoint_id, exc),
             )
         if msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSING, aiohttp.WSMsgType.CLOSED):
-            return UpstreamWebSocketMessage(kind="close")
+            return UpstreamWebSocketMessage(
+                kind="close",
+                close_code=_aiohttp_ws_close_code(self._websocket, msg),
+            )
         if msg.type == aiohttp.WSMsgType.ERROR:
             exception = msg.data if isinstance(msg.data, BaseException) else None
             return UpstreamWebSocketMessage(
@@ -241,6 +251,9 @@ class ArchivingResponsesWebSocket:
 
     async def receive(self) -> UpstreamWebSocketMessage:
         message = await self._wrapped.receive()
+        return message
+
+    def archive_received(self, message: UpstreamWebSocketMessage) -> None:
         if message.kind == "text" and message.text is not None:
             archive_text(
                 direction="server_to_codex",
@@ -277,7 +290,6 @@ class ArchivingResponsesWebSocket:
                 headers=self._headers,
                 extra={"frame_type": message.kind, "close_code": message.close_code},
             )
-        return message
 
     async def close(self) -> None:
         await self._wrapped.close()
@@ -286,9 +298,19 @@ class ArchivingResponsesWebSocket:
         return self._wrapped.response_header(name)
 
 
-def filter_inbound_websocket_headers(headers: dict[str, str]) -> dict[str, str]:
+def _connection_header_tokens(headers: Mapping[str, str]) -> set[str]:
+    tokens: set[str] = set()
+    for key, value in headers.items():
+        if key.lower() != "connection":
+            continue
+        tokens.update(token.strip().lower() for token in value.split(",") if token.strip())
+    return tokens
+
+
+def filter_inbound_websocket_headers(headers: Mapping[str, str]) -> dict[str, str]:
     filtered = filter_inbound_headers(headers)
-    return {key: value for key, value in filtered.items() if key.lower() not in _WEBSOCKET_HOP_BY_HOP_HEADERS}
+    blocked_header_names = _WEBSOCKET_HOP_BY_HOP_HEADERS | _connection_header_tokens(filtered)
+    return {key: value for key, value in filtered.items() if key.lower() not in blocked_header_names}
 
 
 def _build_upstream_websocket_headers(
@@ -296,15 +318,27 @@ def _build_upstream_websocket_headers(
     access_token: str,
     account_id: str | None,
 ) -> dict[str, str]:
-    headers = {key: value for key, value in inbound.items() if key.lower() != "cookie"}
+    headers = filter_inbound_websocket_headers(inbound)
+    native = _is_native_codex_request(headers)
     lower_keys = {key.lower() for key in headers}
     if "x-request-id" not in lower_keys and "request-id" not in lower_keys:
         request_id = get_request_id()
         if request_id:
             headers["x-request-id"] = request_id
+    # Normalize a non-native client's fingerprint on the client-facing
+    # ``/v1/responses`` websocket egress too. This builder is the upstream egress
+    # for a direct websocket caller, so without normalization an OpenAI SDK that
+    # speaks the responses websocket protocol would reach upstream with its
+    # ``OpenAI/Python`` / ``x-openai-client-*`` / ``x-stainless-*`` fingerprint
+    # intact and trigger the priority downgrade this change exists to prevent.
+    if not native:
+        _normalize_non_native_upstream_fingerprint(headers)
     headers["Authorization"] = f"Bearer {access_token}"
     if account_id:
-        headers["chatgpt-account-id"] = account_id
+        if native:
+            headers["chatgpt-account-id"] = account_id
+        else:
+            headers[_CHATGPT_ACCOUNT_ID_HEADER] = account_id
     _ensure_responses_websocket_beta_header(headers)
     return headers
 
@@ -312,7 +346,11 @@ def _build_upstream_websocket_headers(
 def _ensure_responses_websocket_beta_header(headers: dict[str, str]) -> None:
     header_key = next((key for key in headers if key.lower() == "openai-beta"), "openai-beta")
     current_value = headers.get(header_key, "")
-    beta_tokens = [token.strip() for token in current_value.split(",") if token.strip()]
+    beta_tokens = [
+        token.strip()
+        for token in current_value.split(",")
+        if token.strip() and token.strip().lower() not in _RESPONSES_WEBSOCKET_INCOMPATIBLE_BETA_HEADERS
+    ]
     if _RESPONSES_WEBSOCKET_BETA_HEADER.lower() not in {token.lower() for token in beta_tokens}:
         beta_tokens.append(_RESPONSES_WEBSOCKET_BETA_HEADER)
     headers[header_key] = ", ".join(beta_tokens)
@@ -325,6 +363,13 @@ def _pop_header_case_insensitive(headers: dict[str, str], name: str) -> str | No
             continue
         return headers.pop(key)
     return None
+
+
+def _aiohttp_ws_close_code(websocket: Any, message: aiohttp.WSMessage) -> int | None:
+    if isinstance(message.data, int):
+        return message.data
+    close_code = getattr(websocket, "close_code", None)
+    return close_code if isinstance(close_code, int) else None
 
 
 def _responses_websocket_url(base_url: str) -> str:

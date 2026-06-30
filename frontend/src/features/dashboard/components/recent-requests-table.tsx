@@ -32,6 +32,7 @@ import {
   formatCompactNumber,
   formatCurrency,
   formatModelLabel,
+  formatElapsed,
   formatSlug,
   formatTimeLong,
 } from "@/utils/formatters";
@@ -44,11 +45,13 @@ const STATUS_CLASS_MAP: Record<string, string> = {
 };
 
 const TRANSPORT_LABELS: Record<string, string> = {
+  auto: "Auto",
   http: "HTTP",
   websocket: "WS",
 };
 
 const TRANSPORT_CLASS_MAP: Record<string, string> = {
+  auto: "bg-purple-500/10 text-purple-700 border-purple-500/20 hover:bg-purple-500/15 dark:text-purple-300",
   http: "bg-slate-500/10 text-slate-700 border-slate-500/20 hover:bg-slate-500/15 dark:text-slate-300",
   websocket: "bg-sky-500/15 text-sky-700 border-sky-500/20 hover:bg-sky-500/20 dark:text-sky-300",
 };
@@ -192,6 +195,7 @@ export function RecentRequestsTable({
                 !!request.requestedServiceTier && request.requestedServiceTier !== visibleServiceTier;
               const planType = request.planType?.trim().toLowerCase() || null;
               const planLabel = planType ? formatSlug(planType) : "--";
+              const upstreamTransport = request.upstreamTransport;
 
               return (
                 <TableRow key={request.requestId}>
@@ -242,12 +246,20 @@ export function RecentRequestsTable({
                   </TableCell>
                   <TableCell className="align-top">
                     {request.transport ? (
-                      <Badge
-                        variant="outline"
-                        className={TRANSPORT_CLASS_MAP[request.transport] ?? TRANSPORT_CLASS_MAP.http}
-                      >
-                        {TRANSPORT_LABELS[request.transport] ?? request.transport}
-                      </Badge>
+                      <div className="space-y-1">
+                        <Badge
+                          variant="outline"
+                          className={TRANSPORT_CLASS_MAP[request.transport] ?? TRANSPORT_CLASS_MAP.http}
+                          title="Downstream client transport"
+                        >
+                          {TRANSPORT_LABELS[request.transport] ?? request.transport}
+                        </Badge>
+                        {upstreamTransport ? (
+                          <div className="text-[11px] text-muted-foreground">
+                            Up {TRANSPORT_LABELS[upstreamTransport] ?? upstreamTransport}
+                          </div>
+                        ) : null}
+                      </div>
                     ) : (
                       <span className="text-xs text-muted-foreground">--</span>
                     )}
@@ -348,6 +360,7 @@ export function RecentRequestsTable({
                 <RequestDetailField label="Model" value={selectedRequest ? formatModelLabel(selectedRequest.model, selectedRequest.reasoningEffort, selectedRequest.actualServiceTier ?? selectedRequest.serviceTier) : "—"} mono />
                 <RequestDetailField label="Request kind" value={selectedRequest ? (REQUEST_KIND_LABELS[selectedRequest.requestKind] ?? selectedRequest.requestKind) : "—"} />
                 <RequestDetailField label="Plan" value={selectedRequest?.planType ? formatSlug(selectedRequest.planType) : "—"} />
+                <RequestDetailField label="Elapsed" value={formatElapsed(selectedRequest?.latencyMs ?? null)} />
               </div>
               <div className="grid gap-3 sm:grid-cols-3">
                 <RequestDetailField label="Transport" value={selectedRequest?.transport ? (TRANSPORT_LABELS[selectedRequest.transport] ?? selectedRequest.transport) : "—"} />
@@ -358,12 +371,22 @@ export function RecentRequestsTable({
                 label="User Agent"
                 value={selectedRequest?.useragent ?? "—"}
                 copyValue={selectedRequest?.useragent ?? undefined}
-                copyLabel="Copy"
+                copyLabel="Copy User Agent"
+                compactCopy
+              />
+              <RequestDetailField
+                label="Client IP"
+                value={selectedRequest?.clientIp ?? "—"}
+                copyValue={selectedRequest?.clientIp ?? undefined}
+                copyLabel="Copy Client IP"
                 compactCopy
               />
             </div>
 
-            <RequestArchivePanel requestId={selectedRequest?.requestId} requestedAt={selectedRequest?.requestedAt} />
+            <RequestArchivePanel
+              requestId={selectedRequest?.archiveRequestId ?? selectedRequest?.requestId}
+              requestedAt={selectedRequest?.requestedAt}
+            />
 
             {selectedRequestCostSummary ? (
               <div className="space-y-2">

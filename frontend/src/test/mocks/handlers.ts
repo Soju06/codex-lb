@@ -53,6 +53,7 @@ const OauthStartPayloadSchema = z.looseObject({
 const ApiKeyCreatePayloadSchema = z.looseObject({
   name: z.string().optional(),
   trafficClass: z.enum(TRAFFIC_CLASSES).optional(),
+  transportPolicyOverride: z.enum(["smart", "always_http", "always_websocket"]).nullable().optional(),
   assignedAccountIds: z.array(z.string()).optional(),
 });
 
@@ -64,6 +65,7 @@ const ApiKeyUpdatePayloadSchema = z.looseObject({
   name: z.string().optional(),
   allowedModels: z.array(z.string()).nullable().optional(),
   trafficClass: z.enum(TRAFFIC_CLASSES).optional(),
+  transportPolicyOverride: z.enum(["smart", "always_http", "always_websocket"]).nullable().optional(),
   isActive: z.boolean().optional(),
   assignedAccountIds: z.array(z.string()).optional(),
   resetUsage: z.boolean().optional(),
@@ -91,6 +93,9 @@ const SettingsPayloadSchema = z.looseObject({
   stickyThreadsEnabled: z.boolean().optional(),
   upstreamStreamTransport: z
     .enum(["default", "auto", "http", "websocket"])
+    .optional(),
+  httpDownstreamTransportPolicy: z
+    .enum(["smart", "always_http", "always_websocket", "pinned"])
     .optional(),
   upstreamProxyRoutingEnabled: z.boolean().optional(),
   upstreamProxyDefaultPoolId: z.string().nullable().optional(),
@@ -126,6 +131,8 @@ const SettingsPayloadSchema = z.looseObject({
   totpRequiredOnLogin: z.boolean().optional(),
   totpConfigured: z.boolean().optional(),
   apiKeyAuthEnabled: z.boolean().optional(),
+  limitWarmupStaggeredIdleEnabled: z.boolean().optional(),
+  hideUpstreamQuotaFromApiKeys: z.boolean().optional(),
 });
 
 const QuotaPlannerSettingsPayloadSchema = z.looseObject({
@@ -805,6 +812,24 @@ export const handlers = [
       endpoints: [...state.upstreamProxyAdmin.endpoints, endpoint],
     };
     return HttpResponse.json(endpoint);
+  }),
+
+  http.post("/api/settings/upstream-proxy/endpoints/:endpointId/test", ({ params }) => {
+    const endpointId = String(params.endpointId);
+    const endpoint = state.upstreamProxyAdmin.endpoints.find((item) => item.id === endpointId);
+    if (!endpoint) {
+      return HttpResponse.json(
+        { error: { code: "proxy_endpoint_not_found", message: "Proxy endpoint not found" } },
+        { status: 404 },
+      );
+    }
+    return HttpResponse.json({
+      endpointId,
+      ok: true,
+      statusCode: 200,
+      elapsedMs: 24,
+      error: null,
+    });
   }),
 
   http.post("/api/settings/upstream-proxy/pools", async ({ request }) => {

@@ -32,6 +32,7 @@ describe("DashboardSettingsSchema", () => {
       guestAccessEnabled: true,
       guestPasswordConfigured: false,
       apiKeyAuthEnabled: true,
+      hideUpstreamQuotaFromApiKeys: false,
       limitWarmupEnabled: false,
       limitWarmupWindows: "both",
       limitWarmupModel: "auto",
@@ -39,6 +40,7 @@ describe("DashboardSettingsSchema", () => {
       limitWarmupCooldownSeconds: 3600,
       limitWarmupExhaustedThresholdPercent: 99,
       limitWarmupMinAvailablePercent: 100,
+      limitWarmupStaggeredIdleEnabled: true,
     });
 
     expect(parsed.stickyThreadsEnabled).toBe(true);
@@ -60,8 +62,10 @@ describe("DashboardSettingsSchema", () => {
     expect(parsed.guestAccessEnabled).toBe(true);
     expect(parsed.guestPasswordConfigured).toBe(false);
     expect(parsed.apiKeyAuthEnabled).toBe(true);
+    expect(parsed.hideUpstreamQuotaFromApiKeys).toBe(false);
     expect(parsed.limitWarmupEnabled).toBe(false);
     expect(parsed.limitWarmupWindows).toBe("both");
+    expect(parsed.limitWarmupStaggeredIdleEnabled).toBe(true);
   });
 
   it("parses legacy settings payload and applies defaults for missing routing fields", () => {
@@ -73,6 +77,7 @@ describe("DashboardSettingsSchema", () => {
       stickyReallocationBudgetThresholdPct: 95,
       totpConfigured: false,
       apiKeyAuthEnabled: true,
+      hideUpstreamQuotaFromApiKeys: false,
     });
 
     expect(parsed.upstreamStreamTransport).toBe("default");
@@ -89,6 +94,7 @@ describe("DashboardSettingsSchema", () => {
     expect(parsed.limitWarmupExhaustedThresholdPercent).toBe(99);
     expect(parsed.limitWarmupMinAvailablePercent).toBe(100);
     expect(parsed.weeklyPaceWorkingDays).toBe("0,1,2,3,4,5,6");
+    expect(parsed.limitWarmupStaggeredIdleEnabled).toBe(false);
     expect(parsed.stickyReallocationPrimaryBudgetThresholdPct).toBe(95);
     expect(parsed.stickyReallocationSecondaryBudgetThresholdPct).toBe(95);
     expect(parsed.guestAccessEnabled).toBe(false);
@@ -159,6 +165,7 @@ describe("SettingsUpdateRequestSchema", () => {
       importWithoutOverwrite: true,
       totpRequiredOnLogin: true,
       apiKeyAuthEnabled: false,
+      hideUpstreamQuotaFromApiKeys: true,
       limitWarmupEnabled: true,
       limitWarmupWindows: "primary",
       limitWarmupModel: "gpt-5.1-codex-mini",
@@ -166,6 +173,7 @@ describe("SettingsUpdateRequestSchema", () => {
       limitWarmupCooldownSeconds: 7200,
       limitWarmupExhaustedThresholdPercent: 98.5,
       limitWarmupMinAvailablePercent: 99,
+      limitWarmupStaggeredIdleEnabled: true,
     });
 
     expect(parsed.openaiCacheAffinityMaxAgeSeconds).toBe(120);
@@ -185,6 +193,7 @@ describe("SettingsUpdateRequestSchema", () => {
     expect(parsed.weeklyPaceWorkingDays).toBe("0,1,2,3,4");
     expect(parsed.totpRequiredOnLogin).toBe(true);
     expect(parsed.apiKeyAuthEnabled).toBe(false);
+    expect(parsed.hideUpstreamQuotaFromApiKeys).toBe(true);
     expect(parsed.limitWarmupEnabled).toBe(true);
     expect(parsed.limitWarmupWindows).toBe("primary");
     expect(parsed.limitWarmupExhaustedThresholdPercent).toBe(98.5);
@@ -212,6 +221,7 @@ describe("SettingsUpdateRequestSchema", () => {
     expect(parsed.importWithoutOverwrite).toBeUndefined();
     expect(parsed.totpRequiredOnLogin).toBeUndefined();
     expect(parsed.apiKeyAuthEnabled).toBeUndefined();
+    expect(parsed.hideUpstreamQuotaFromApiKeys).toBeUndefined();
     expect(parsed.relativeAvailabilityPower).toBeUndefined();
     expect(parsed.relativeAvailabilityTopK).toBeUndefined();
     expect(parsed.singleAccountId).toBeUndefined();

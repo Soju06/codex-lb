@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 import sys
 import time
 from typing import Any, AsyncIterator, Mapping, cast
@@ -11,7 +13,7 @@ import aiohttp
 from app.core.auth.refresh import RefreshError
 from app.core.balancer import failover_decision
 from app.core.balancer.types import UpstreamError
-from app.core.clients.proxy import ProxyResponseError, pop_stream_timeout_overrides
+from app.core.clients.proxy import ProxyResponseError, _resolve_stream_transport, pop_stream_timeout_overrides
 from app.core.errors import openai_error, response_failed_event
 from app.core.openai.requests import ResponsesRequest
 from app.core.upstream_proxy import UpstreamProxyRouteError
@@ -23,6 +25,7 @@ from app.modules.api_keys.service import ApiKeyData, ApiKeyUsageReservationData
 from app.modules.proxy._service.observability import (
     _maybe_log_proxy_request_shape,
     _record_continuity_fail_closed,
+    _record_upstream_transport_decision,
 )
 from app.modules.proxy._service.streaming.protocol import _StreamingServiceProtocol
 from app.modules.proxy._service.support import (
@@ -41,6 +44,8 @@ from app.modules.proxy.affinity import (
     _owner_lookup_session_id_from_headers,
     _prompt_cache_key_from_request_model,
     _sticky_key_for_responses_request,
+    _sticky_key_from_session_header,
+    _sticky_key_from_turn_state_header,
 )
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
 from app.modules.proxy.helpers import (
@@ -52,10 +57,61 @@ from app.modules.proxy.helpers import (
 from app.modules.proxy.load_balancer import AccountLease
 
 _REQUEST_TRANSPORT_HTTP = "http"
+_REQUEST_TRANSPORT_WEBSOCKET = "websocket"
+_HTTP_DOWNSTREAM_TRANSPORT_POLICY_DEFAULT = "smart"
+_HTTP_DOWNSTREAM_TRANSPORT_POLICIES = frozenset({"smart", "always_http", "always_websocket", "pinned"})
+
+logger = logging.getLogger(__name__)
 
 
 def _facade() -> Any:
     return sys.modules["app.modules.proxy.service"]
+
+
+def _http_downstream_request_is_sticky(payload: ResponsesRequest, headers: Mapping[str, str]) -> bool:
+    return (
+        payload.previous_response_id is not None
+        or _prompt_cache_key_from_request_model(payload) is not None
+        or _sticky_key_from_session_header(headers) is not None
+        or _sticky_key_from_turn_state_header(headers) is not None
+    )
+
+
+def _resolve_http_downstream_transport(policy: str, *, payload: ResponsesRequest, headers: Mapping[str, str]) -> str:
+    normalized_policy = policy.strip().lower()
+    if normalized_policy not in _HTTP_DOWNSTREAM_TRANSPORT_POLICIES:
+        raise ValueError(f"Unsupported HTTP downstream transport policy: {policy}")
+    if normalized_policy in ("always_http", "pinned"):
+        return "http"
+    if normalized_policy == "always_websocket":
+        return "websocket"
+    return "websocket" if _http_downstream_request_is_sticky(payload, headers) else "http"
+
+
+def _effective_http_downstream_transport_policy(
+    api_key: ApiKeyData | None,
+    dashboard_settings: Any,
+    base_settings: Any,
+) -> tuple[str, bool]:
+    override = getattr(api_key, "transport_policy_override", None) if api_key is not None else None
+    if override is not None:
+        return override, True
+    dashboard_policy = getattr(dashboard_settings, "http_downstream_transport_policy", None)
+    if isinstance(dashboard_policy, str) and dashboard_policy:
+        return dashboard_policy, False
+    base_policy = getattr(base_settings, "http_downstream_transport_policy", _HTTP_DOWNSTREAM_TRANSPORT_POLICY_DEFAULT)
+    return base_policy, False
+
+
+def _resolved_configured_stream_transport(dashboard_settings: Any, base_settings: Any) -> tuple[str, bool]:
+    configured = getattr(dashboard_settings, "upstream_stream_transport", "default")
+    if configured == "default":
+        configured = getattr(base_settings, "upstream_stream_transport", "auto")
+    return configured, configured in ("http", "websocket")
+
+
+def _payload_size_estimate_bytes(payload: ResponsesRequest) -> int:
+    return len(json.dumps(payload.to_payload(), ensure_ascii=True, separators=(",", ":")).encode("utf-8"))
 
 
 class _StreamingRetryMixin:
@@ -73,6 +129,8 @@ class _StreamingRetryMixin:
         request_transport: str,
         rewritten_file_account_id: str | None = None,
         upstream_stream_transport_override: str | None = None,
+        client_ip: str | None = None,
+        enforce_openai_sdk_contract: bool = True,
     ) -> AsyncIterator[str]:
         proxy = cast(_StreamingServiceProtocol, self)
         useragent, useragent_group = _request_log_useragent_fields(headers)
@@ -85,15 +143,54 @@ class _StreamingRetryMixin:
             request_transport=request_transport,
         )
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
+        upstream_transport_policy_label = "explicit" if upstream_stream_transport_override is not None else "configured"
+        upstream_transport_sticky = _http_downstream_request_is_sticky(payload, headers)
         upstream_stream_transport = upstream_stream_transport_override
         if upstream_stream_transport is None:
-            upstream_stream_transport = _facade()._resolve_upstream_stream_transport(settings.upstream_stream_transport)
-        if request_transport == _REQUEST_TRANSPORT_HTTP and upstream_stream_transport == "websocket":
-            # HTTP/SSE clients can retry a half-rendered turn after an upstream
-            # websocket close, making the same visible message restart. Keep
-            # native websocket clients on their dedicated path, but use upstream
-            # HTTP/SSE for downstream HTTP streams.
-            upstream_stream_transport = "http"
+            configured_transport, explicit_transport = _resolved_configured_stream_transport(settings, base_settings)
+            image_bypass = _facade()._responses_request_uses_image_generation(
+                payload
+            ) or _facade()._responses_request_contains_input_image(payload)
+            resolved_base_transport = _resolve_stream_transport(
+                settings=base_settings,
+                transport=configured_transport,
+                transport_override=None,
+                model=payload.model,
+                headers=headers,
+                has_image_generation_tool=image_bypass,
+                payload_size_estimate_bytes=_payload_size_estimate_bytes(payload),
+            )
+            upstream_stream_transport = resolved_base_transport
+            if not explicit_transport and image_bypass:
+                upstream_stream_transport = "http"
+            if (
+                not explicit_transport
+                and request_transport == _REQUEST_TRANSPORT_HTTP
+                and upstream_stream_transport == "websocket"
+            ):
+                policy, override_applied = _effective_http_downstream_transport_policy(api_key, settings, base_settings)
+                sticky = upstream_transport_sticky
+                upstream_transport_policy_label = policy
+                policy_transport = _resolve_http_downstream_transport(policy, payload=payload, headers=headers)
+                upstream_stream_transport = "http" if policy_transport == "http" else configured_transport
+                logger.info(
+                    "http_downstream_transport_decision policy=%s override_applied=%s sticky=%s "
+                    "upstream_stream_transport=%s request_id=%s",
+                    policy,
+                    override_applied,
+                    sticky,
+                    upstream_stream_transport,
+                    request_id,
+                )
+        elif request_transport == _REQUEST_TRANSPORT_HTTP:
+            logger.info(
+                "http_downstream_transport_decision policy=explicit override_applied=%s sticky=%s "
+                "upstream_stream_transport=%s request_id=%s",
+                False,
+                _http_downstream_request_is_sticky(payload, headers),
+                upstream_stream_transport,
+                request_id,
+            )
         if rewritten_file_account_id is None:
             proxy._raise_for_unsupported_input_image_references(payload)
             rewritten_file_account_id = await proxy._resolve_file_account_for_responses(payload, headers)
@@ -124,6 +221,8 @@ class _StreamingRetryMixin:
         max_attempts = _facade()._STREAM_MAX_ACCOUNT_ATTEMPTS
         settled = False
         any_attempt_logged = False
+        upstream_transport_metric_status: str | None = None
+        upstream_transport_metric_recorded = False
         settlement = _StreamSettlement()
         last_transient_exc: ProxyResponseError | None = None
         last_security_work_retry_error: _RetryableStreamError | None = None
@@ -146,6 +245,19 @@ class _StreamingRetryMixin:
             except ValueError:
                 pass
             await proxy._load_balancer.release_account_lease(lease)
+
+        def _record_upstream_transport_metric_once(status: str) -> None:
+            nonlocal upstream_transport_metric_recorded
+            if upstream_transport_metric_recorded:
+                return
+            upstream_transport_metric_recorded = True
+            _record_upstream_transport_decision(
+                downstream_transport=request_transport,
+                upstream_transport=upstream_stream_transport,
+                policy=upstream_transport_policy_label,
+                sticky=upstream_transport_sticky,
+                status=status,
+            )
 
         try:
             if payload.previous_response_id is not None:
@@ -193,10 +305,12 @@ class _StreamingRetryMixin:
                             error_message=message,
                             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                             transport=request_transport,
+                            upstream_transport=upstream_stream_transport,
                             service_tier=payload.service_tier,
                             requested_service_tier=payload.service_tier,
                             useragent=useragent,
                             useragent_group=useragent_group,
+                            client_ip=client_ip,
                         )
                         return
             file_required_preferred_account = False
@@ -235,8 +349,10 @@ class _StreamingRetryMixin:
                         reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                         service_tier=payload.service_tier,
                         transport=request_transport,
+                        upstream_transport=upstream_stream_transport,
                         useragent=useragent,
                         useragent_group=useragent_group,
+                        client_ip=client_ip,
                     )
                     yield format_sse_event(_facade()._proxy_request_timeout_event(request_id))
                     return
@@ -278,8 +394,10 @@ class _StreamingRetryMixin:
                                 reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                                 service_tier=payload.service_tier,
                                 transport=request_transport,
+                                upstream_transport=upstream_stream_transport,
                                 useragent=useragent,
                                 useragent_group=useragent_group,
+                                client_ip=client_ip,
                             )
                             yield format_sse_event(_facade()._proxy_request_timeout_event(request_id))
                             return
@@ -396,10 +514,12 @@ class _StreamingRetryMixin:
                             error_message=message,
                             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                             transport=request_transport,
+                            upstream_transport=upstream_stream_transport,
                             service_tier=payload.service_tier,
                             requested_service_tier=payload.service_tier,
                             useragent=useragent,
                             useragent_group=useragent_group,
+                            client_ip=client_ip,
                         )
                         return
                     # If a prior attempt stored a transient 500 and the caller
@@ -426,10 +546,12 @@ class _StreamingRetryMixin:
                             error_message=error_message,
                             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                             transport=request_transport,
+                            upstream_transport=upstream_stream_transport,
                             service_tier=payload.service_tier,
                             requested_service_tier=payload.service_tier,
                             useragent=useragent,
                             useragent_group=useragent_group,
+                            client_ip=client_ip,
                         )
                         return
                     if last_security_work_retry_error is not None:
@@ -454,10 +576,12 @@ class _StreamingRetryMixin:
                             error_message=message,
                             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                             transport=request_transport,
+                            upstream_transport=upstream_stream_transport,
                             service_tier=payload.service_tier,
                             requested_service_tier=payload.service_tier,
                             useragent=useragent,
                             useragent_group=useragent_group,
+                            client_ip=client_ip,
                         )
                         return
                     no_accounts_msg = selection.error_message or "No active accounts available"
@@ -479,10 +603,12 @@ class _StreamingRetryMixin:
                         error_message=no_accounts_msg,
                         reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                         transport=request_transport,
+                        upstream_transport=upstream_stream_transport,
                         service_tier=payload.service_tier,
                         requested_service_tier=payload.service_tier,
                         useragent=useragent,
                         useragent_group=useragent_group,
+                        client_ip=client_ip,
                     )
                     return
 
@@ -517,10 +643,12 @@ class _StreamingRetryMixin:
                         error_message=message,
                         reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                         transport=request_transport,
+                        upstream_transport=upstream_stream_transport,
                         service_tier=payload.service_tier,
                         requested_service_tier=payload.service_tier,
                         useragent=useragent,
                         useragent_group=useragent_group,
+                        client_ip=client_ip,
                     )
                     return
                 try:
@@ -544,8 +672,10 @@ class _StreamingRetryMixin:
                             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                             service_tier=payload.service_tier,
                             transport=request_transport,
+                            upstream_transport=upstream_stream_transport,
                             useragent=useragent,
                             useragent_group=useragent_group,
+                            client_ip=client_ip,
                         )
                         yield format_sse_event(_facade()._proxy_request_timeout_event(request_id))
                         return
@@ -564,9 +694,11 @@ class _StreamingRetryMixin:
                             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                             service_tier=payload.service_tier,
                             transport=request_transport,
+                            upstream_transport=upstream_stream_transport,
                             upstream_proxy_fail_closed_reason=exc.reason,
                             useragent=useragent,
                             useragent_group=useragent_group,
+                            client_ip=client_ip,
                         )
                         event = response_failed_event(
                             "upstream_proxy_unavailable",
@@ -613,8 +745,10 @@ class _StreamingRetryMixin:
                             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                             service_tier=payload.service_tier,
                             transport=request_transport,
+                            upstream_transport=upstream_stream_transport,
                             useragent=useragent,
                             useragent_group=useragent_group,
+                            client_ip=client_ip,
                         )
                         event = response_failed_event(
                             "upstream_unavailable",
@@ -646,8 +780,10 @@ class _StreamingRetryMixin:
                             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                             service_tier=payload.service_tier,
                             transport=request_transport,
+                            upstream_transport=upstream_stream_transport,
                             useragent=useragent,
                             useragent_group=useragent_group,
+                            client_ip=client_ip,
                         )
                         yield format_sse_event(_facade()._proxy_request_timeout_event(request_id))
                         return
@@ -678,8 +814,10 @@ class _StreamingRetryMixin:
                                 request_transport=request_transport,
                                 useragent=useragent,
                                 useragent_group=useragent_group,
+                                client_ip=client_ip,
                                 preferred_account_id=preferred_account_id,
                                 tool_call_dedupe=tool_call_dedupe,
+                                enforce_openai_sdk_contract=enforce_openai_sdk_contract,
                             ):
                                 yield line
                         except (_TransientStreamError, ProxyResponseError) as tex:
@@ -877,6 +1015,8 @@ class _StreamingRetryMixin:
                             settlement,
                             request_id,
                         )
+                        upstream_transport_metric_status = settlement.status
+                        _record_upstream_transport_metric_once(settlement.status)
                         return
                     continue  # outer loop: account failover after transient exhaustion
                 except _RetryableStreamError as exc:
@@ -947,8 +1087,10 @@ class _StreamingRetryMixin:
                                 reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                                 service_tier=payload.service_tier,
                                 transport=request_transport,
+                                upstream_transport=upstream_stream_transport,
                                 useragent=useragent,
                                 useragent_group=useragent_group,
+                                client_ip=client_ip,
                             )
                             yield format_sse_event(_facade()._proxy_request_timeout_event(request_id))
                             return
@@ -1000,8 +1142,10 @@ class _StreamingRetryMixin:
                                 reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                                 service_tier=payload.service_tier,
                                 transport=request_transport,
+                                upstream_transport=upstream_stream_transport,
                                 useragent=useragent,
                                 useragent_group=useragent_group,
+                                client_ip=client_ip,
                             )
                             event = response_failed_event(
                                 "upstream_unavailable",
@@ -1031,8 +1175,10 @@ class _StreamingRetryMixin:
                                 reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                                 service_tier=payload.service_tier,
                                 transport=request_transport,
+                                upstream_transport=upstream_stream_transport,
                                 useragent=useragent,
                                 useragent_group=useragent_group,
+                                client_ip=client_ip,
                             )
                             yield format_sse_event(_facade()._proxy_request_timeout_event(request_id))
                             return
@@ -1055,7 +1201,9 @@ class _StreamingRetryMixin:
                                 request_transport=request_transport,
                                 useragent=useragent,
                                 useragent_group=useragent_group,
+                                client_ip=client_ip,
                                 tool_call_dedupe=tool_call_dedupe,
+                                enforce_openai_sdk_contract=enforce_openai_sdk_contract,
                             ):
                                 yield line
                         except ProxyResponseError as retry_exc:
@@ -1176,6 +1324,8 @@ class _StreamingRetryMixin:
                             settlement,
                             request_id,
                         )
+                        upstream_transport_metric_status = settlement.status
+                        _record_upstream_transport_metric_once(settlement.status)
                         return
                     error = _parse_openai_error(exc.payload)
                     error_code = _normalize_error_code(error.code if error else None, error.type if error else None)
@@ -1268,10 +1418,12 @@ class _StreamingRetryMixin:
                         error_message=retries_exhausted_msg,
                         reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                         transport=request_transport,
+                        upstream_transport=upstream_stream_transport,
                         service_tier=payload.service_tier,
                         requested_service_tier=payload.service_tier,
                         useragent=useragent,
                         useragent_group=useragent_group,
+                        client_ip=client_ip,
                     )
                 return
             retries_exhausted_msg = "No available accounts after retries"
@@ -1304,15 +1456,24 @@ class _StreamingRetryMixin:
                     error_message=retries_exhausted_msg,
                     reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                     transport=request_transport,
+                    upstream_transport=upstream_stream_transport,
                     service_tier=payload.service_tier,
                     requested_service_tier=payload.service_tier,
                     useragent=useragent,
                     useragent_group=useragent_group,
+                    client_ip=client_ip,
                 )
         finally:
+            if not upstream_transport_metric_recorded:
+                _record_upstream_transport_metric_once(upstream_transport_metric_status or "error")
             for account_lease in account_leases:
                 await proxy._load_balancer.release_account_lease(account_lease)
-            if not settled and api_key is not None and api_key_reservation is not None:
+            if (
+                not settled
+                and not settlement.usage_settlement_transferred
+                and api_key is not None
+                and api_key_reservation is not None
+            ):
                 release_coro = proxy._release_unsettled_stream_api_key_usage(
                     api_key=api_key,
                     api_key_reservation=api_key_reservation,

@@ -26,7 +26,9 @@ from app.core.clients.proxy import (  # noqa: F401  # noqa: F401
 from app.core.clients.proxy import codex_control_request as core_codex_control_request  # noqa: F401
 from app.core.clients.proxy import compact_responses as core_compact_responses  # noqa: F401
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
+from app.core.clients.proxy_websocket import UpstreamWebSocketMessage
 from app.core.openai.parsing import parse_sse_event
+from app.core.utils.request_id import reset_request_id, set_request_id
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
 from app.modules.proxy._service.api_key_usage import (
     _API_KEY_RESERVATION_HEARTBEAT_SECONDS as _API_KEY_RESERVATION_HEARTBEAT_SECONDS,
@@ -168,6 +170,37 @@ _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS = 5.0
 _HTTP_BRIDGE_BACKGROUND_CLEANUP_WARN_THRESHOLD = 100
 
 
+def _archive_http_bridge_upstream_text(
+    session: "_HTTPBridgeSession",
+    text: str,
+    request_state: "_WebSocketRequestState | None",
+) -> None:
+    _archive_http_bridge_upstream_message(
+        session,
+        UpstreamWebSocketMessage(kind="text", text=text),
+        request_state,
+    )
+
+
+def _archive_http_bridge_upstream_message(
+    session: "_HTTPBridgeSession",
+    message: UpstreamWebSocketMessage,
+    request_state: "_WebSocketRequestState | None",
+) -> None:
+    if request_state is None or request_state.archive_request_id is None:
+        archive_request_id = None
+    else:
+        archive_request_id = request_state.archive_request_id
+    archive_received = getattr(session.upstream, "archive_received", None)
+    if not callable(archive_received):
+        return
+    token = set_request_id(archive_request_id)
+    try:
+        archive_received(message)
+    finally:
+        reset_request_id(token)
+
+
 class _HTTPBridgeUpstreamEventsMixin:
     async def _relay_http_bridge_upstream_messages(
         self: Any,
@@ -227,6 +260,9 @@ class _HTTPBridgeUpstreamEventsMixin:
                         break
                     continue
 
+                async with session.pending_lock:
+                    archive_request_state = session.pending_requests[0] if len(session.pending_requests) == 1 else None
+                _archive_http_bridge_upstream_message(session, message, archive_request_state)
                 session.last_upstream_close_code = message.close_code
                 retried = await self._retry_http_bridge_precreated_request(session)
                 if retried:
@@ -289,6 +325,7 @@ class _HTTPBridgeUpstreamEventsMixin:
         session: "_HTTPBridgeSession",
         text: str,
     ) -> None:
+        original_text = text
         event_block = f"data: {text}\n\n"
         payload = parse_sse_data_json(event_block)
         event = parse_sse_event(event_block)
@@ -353,6 +390,8 @@ class _HTTPBridgeUpstreamEventsMixin:
                 release_create_gate = False
             else:
                 release_create_gate = False
+
+            _archive_http_bridge_upstream_text(session, original_text, matched_request_state)
 
             if matched_request_state is not None:
                 actual_service_tier = _service_tier_from_event_payload(payload)
@@ -679,7 +718,18 @@ class _HTTPBridgeUpstreamEventsMixin:
                     event_type,
                 ) = _build_stream_incomplete_terminal_event_for_request(status_request_state)
 
-        if event_type == "response.completed" and terminal_request_state is not None:
+        completed_usage = (
+            event.response.usage if event_type == "response.completed" and event and event.response else None
+        )
+        completed_empty_prewarm = (
+            event_type == "response.completed"
+            and terminal_request_state is not None
+            and terminal_request_state.request_kind == "prewarm"
+            and completed_usage is not None
+            and completed_usage.output_tokens == 0
+        )
+
+        if event_type == "response.completed" and terminal_request_state is not None and not completed_empty_prewarm:
             # Record the completed response id regardless of input shape so
             # subsequent turns (including ones that never populated
             # input_item_count, e.g. string inputs) can still reuse this
@@ -692,7 +742,13 @@ class _HTTPBridgeUpstreamEventsMixin:
                 session.last_completed_input_count = terminal_request_state.input_item_count
                 session.last_completed_input_prefix_fingerprint = terminal_request_state.input_full_fingerprint
 
-        if event_type == "error":
+        normalize_error_event = (
+            terminal_request_state is None or terminal_request_state.enforce_openai_sdk_contract
+        ) and (matched_request_state is None or matched_request_state.enforce_openai_sdk_contract)
+        settlement_payload = payload
+        settlement_event = event
+        settlement_event_type = event_type
+        if event_type == "error" and normalize_error_event:
             http_status = _http_error_status_from_payload(payload)
             if status_request_state is not None:
                 status_request_state.error_http_status_override = http_status
@@ -706,11 +762,33 @@ class _HTTPBridgeUpstreamEventsMixin:
                 payload=payload,
                 request_state=terminal_request_state or matched_request_state,
             )
+            settlement_payload = payload
+            settlement_event = event
+            settlement_event_type = event_type
+        elif event_type == "error":
+            http_status = _http_error_status_from_payload(payload)
+            if status_request_state is not None:
+                status_request_state.error_http_status_override = http_status
+            (
+                _settlement_event_block,
+                settlement_payload,
+                settlement_event,
+                settlement_event_type,
+            ) = _normalize_http_bridge_error_event(
+                event=event,
+                payload=payload,
+                request_state=terminal_request_state or matched_request_state,
+            )
 
         if event_type == "response.created" and release_create_gate and created_request_state is not None:
             await _release_websocket_response_create_gate(created_request_state, session.response_create_gate)
 
-        if response_id is not None and matched_request_state is not None and event_type == "response.completed":
+        if (
+            response_id is not None
+            and matched_request_state is not None
+            and event_type == "response.completed"
+            and not completed_empty_prewarm
+        ):
             await self._register_http_bridge_previous_response_id(
                 session,
                 response_id,
@@ -726,11 +804,11 @@ class _HTTPBridgeUpstreamEventsMixin:
                 ),
             )
 
-        if terminal_request_state is not None and event_type in {"response.failed", "error"}:
-            if event_type == "error":
-                error = event.error if event else None
+        if terminal_request_state is not None and settlement_event_type in {"response.failed", "error"}:
+            if settlement_event_type == "error":
+                error = settlement_event.error if settlement_event else None
             else:
-                error = event.response.error if event and event.response else None
+                error = settlement_event.response.error if settlement_event and settlement_event.response else None
             terminal_error_code = _normalize_error_code(
                 error.code if error else None,
                 error.type if error else None,
@@ -794,13 +872,13 @@ class _HTTPBridgeUpstreamEventsMixin:
         if terminal_request_state.event_queue is not None:
             await terminal_request_state.event_queue.put(None)
 
-        if event_type in {"response.failed", "response.incomplete", "error"}:
+        if settlement_event_type in {"response.failed", "response.incomplete", "error"}:
             error_code = None
-            if event_type == "error":
-                error = event.error if event else None
+            if settlement_event_type == "error":
+                error = settlement_event.error if settlement_event else None
                 error_code = _normalize_error_code(error.code if error else None, error.type if error else None)
-            elif event and event.response:
-                error = event.response.error
+            elif settlement_event and settlement_event.response:
+                error = settlement_event.response.error
                 error_code = _normalize_error_code(error.code if error else None, error.type if error else None)
             _log_http_bridge_event(
                 "terminal_error",
@@ -817,9 +895,9 @@ class _HTTPBridgeUpstreamEventsMixin:
             terminal_request_state,
             account=session.account,
             account_id_value=session.account.id,
-            event=event,
-            event_type=event_type,
-            payload=payload,
+            event=settlement_event,
+            event_type=settlement_event_type,
+            payload=settlement_payload,
             api_key=terminal_request_state.api_key,
             upstream_control=session.upstream_control,
             response_create_gate=session.response_create_gate,

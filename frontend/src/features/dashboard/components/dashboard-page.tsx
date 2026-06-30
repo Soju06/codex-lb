@@ -4,7 +4,9 @@ import { useQueryClient } from "@tanstack/react-query";
 import { RefreshCw } from "lucide-react";
 
 import { AlertMessage } from "@/components/alert-message";
+import { useDialogState } from "@/hooks/use-dialog-state";
 import { useAccountMutations } from "@/features/accounts/hooks/use-accounts";
+import { ResetCreditConfirmDialog } from "@/features/accounts/components/reset-credit-confirm-dialog";
 import { AccountCards } from "@/features/dashboard/components/account-cards";
 import { AccountList } from "@/features/dashboard/components/account-list";
 import { AccountSummaryLine } from "@/features/dashboard/components/account-summary-line";
@@ -40,7 +42,9 @@ export function DashboardPage() {
   const isDark = useThemeStore((s) => s.theme === "dark");
   const showAccountBurnrate = useDashboardPreferencesStore((s) => s.accountBurnrateEnabled);
   const accountViewMode = useDashboardPreferencesStore((s) => s.accountViewMode);
+  const accountListSort = useDashboardPreferencesStore((s) => s.accountListSort);
   const setAccountViewMode = useDashboardPreferencesStore((s) => s.setAccountViewMode);
+  const setAccountListSort = useDashboardPreferencesStore((s) => s.setAccountListSort);
   const canWrite = useAuthStore((state) => state.canWrite);
   const overviewTimeframe = useMemo(
     () => parseOverviewTimeframe(searchParams.get("overviewTimeframe")),
@@ -50,6 +54,8 @@ export function DashboardPage() {
   const projectionsQuery = useDashboardProjections(Boolean(dashboardQuery.data));
   const { filters, logsQuery, optionsQuery, updateFilters } = useRequestLogs();
   const { resumeMutation, limitWarmupMutation } = useAccountMutations();
+  type ResetCreditDialogTarget = { accountId: string; availableResetCredits: number };
+  const resetCreditDialog = useDialogState<ResetCreditDialogTarget>();
 
   const isRefreshing = dashboardQuery.isFetching || projectionsQuery.isFetching || logsQuery.isFetching;
 
@@ -92,9 +98,15 @@ export function DashboardPage() {
             });
           }
           break;
+        case "reset-credit":
+          resetCreditDialog.show({
+            accountId: account.accountId,
+            availableResetCredits: account.availableResetCredits ?? 0,
+          });
+          break;
       }
     },
-    [canWrite, limitWarmupMutation, navigate, resumeMutation],
+    [canWrite, limitWarmupMutation, navigate, resetCreditDialog, resumeMutation],
   );
 
   const overview = dashboardQuery.data;
@@ -237,7 +249,13 @@ export function DashboardPage() {
               <AccountViewModeToggle value={accountViewMode} onChange={setAccountViewMode} />
             </div>
             {accountViewMode === "list" ? (
-              <AccountList accounts={overview?.accounts ?? []} readOnly={!canWrite} onAction={handleAccountAction} />
+              <AccountList
+                accounts={overview?.accounts ?? []}
+                readOnly={!canWrite}
+                sort={accountListSort}
+                onSortChange={setAccountListSort}
+                onAction={handleAccountAction}
+              />
             ) : (
               <AccountCards accounts={overview?.accounts ?? []} readOnly={!canWrite} onAction={handleAccountAction} />
             )}
@@ -289,6 +307,15 @@ export function DashboardPage() {
           </section>
         </>
       )}
+
+      {resetCreditDialog.data ? (
+        <ResetCreditConfirmDialog
+          open={resetCreditDialog.open}
+          accountId={resetCreditDialog.data.accountId}
+          summaryAvailableCount={resetCreditDialog.data.availableResetCredits}
+          onOpenChange={resetCreditDialog.onOpenChange}
+        />
+      ) : null}
 
     </div>
   );

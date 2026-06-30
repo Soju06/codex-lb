@@ -14,6 +14,14 @@ const DailyReportRowSchema = z.object({
 const ModelCostEntrySchema = z.object({
   model: z.string(),
   costUsd: z.number(),
+  requests: z.number(),
+  percentage: z.number(),
+});
+
+const UseragentCostEntrySchema = z.object({
+  useragent: z.string(),
+  costUsd: z.number(),
+  requests: z.number(),
   percentage: z.number(),
 });
 
@@ -52,11 +60,13 @@ export const ReportsResponseSchema = z.object({
   comparison: ReportComparisonSchema,
   daily: z.array(DailyReportRowSchema),
   byModel: z.array(ModelCostEntrySchema),
+  byUseragent: z.array(UseragentCostEntrySchema),
   byAccount: z.array(AccountCostEntrySchema),
 });
 
 export type DailyReportRow = z.infer<typeof DailyReportRowSchema>;
 export type ModelCostEntry = z.infer<typeof ModelCostEntrySchema>;
+export type UseragentCostEntry = z.infer<typeof UseragentCostEntrySchema>;
 export type AccountCostEntry = z.infer<typeof AccountCostEntrySchema>;
 export type ReportSummary = z.infer<typeof ReportSummarySchema>;
 export type ReportComparison = z.infer<typeof ReportComparisonSchema>;

@@ -2,16 +2,22 @@ import type { AccountSummary } from "@/features/accounts/schemas";
 import type { AccountQuotaDisplayPreference } from "@/hooks/use-account-quota-display";
 import { parseDate } from "@/utils/formatters";
 
-export type AccountSortMode = "reset_soonest" | "reset_latest" | "name_asc" | "name_desc";
+export type AccountSortMode =
+  | "reset_soonest"
+  | "reset_latest"
+  | "name_asc"
+  | "name_desc"
+  | "most_reset_credits";
 
 export const ACCOUNT_SORT_OPTIONS: readonly { value: AccountSortMode; label: string }[] = [
   { value: "reset_soonest", label: "Reset time (soonest)" },
   { value: "reset_latest", label: "Reset time (latest)" },
+  { value: "most_reset_credits", label: "Most reset credits" },
   { value: "name_asc", label: "Name (A-Z)" },
   { value: "name_desc", label: "Name (Z-A)" },
 ] as const;
 
-export const DEFAULT_ACCOUNT_SORT_MODE: AccountSortMode = "reset_soonest";
+export const DEFAULT_ACCOUNT_SORT_MODE: AccountSortMode = "most_reset_credits";
 
 function visibleQuotaResetTimestamps(
   account: AccountSummary,
@@ -50,6 +56,25 @@ function compareResetTimestamps(leftReset: number, rightReset: number, direction
   return direction === "desc" ? rightReset - leftReset : leftReset - rightReset;
 }
 
+function resetCreditNearestExpiry(account: AccountSummary): number {
+  const parsed = parseDate(account.resetCreditNearestExpiresAt);
+  return parsed ? parsed.getTime() : Number.POSITIVE_INFINITY;
+}
+
+function compareByResetCredits(left: AccountSummary, right: AccountSummary): number {
+  const leftCount = left.availableResetCredits ?? 0;
+  const rightCount = right.availableResetCredits ?? 0;
+  if (leftCount !== rightCount) {
+    return rightCount - leftCount;
+  }
+  // Tiebreak by soonest expiry ascending; null expiry (Infinity) sorts last.
+  return compareResetTimestamps(
+    resetCreditNearestExpiry(left),
+    resetCreditNearestExpiry(right),
+    "asc",
+  );
+}
+
 export function sortAccountsForDisplay(
   accounts: AccountSummary[],
   quotaDisplay: AccountQuotaDisplayPreference,
@@ -58,7 +83,12 @@ export function sortAccountsForDisplay(
   return accounts
     .slice()
     .sort((left, right) => {
-      if (sortMode === "reset_latest" || sortMode === "reset_soonest") {
+      if (sortMode === "most_reset_credits") {
+        const creditComparison = compareByResetCredits(left, right);
+        if (creditComparison !== 0) {
+          return creditComparison;
+        }
+      } else if (sortMode === "reset_latest" || sortMode === "reset_soonest") {
         const leftReset = accountResetTimestamp(left, quotaDisplay);
         const rightReset = accountResetTimestamp(right, quotaDisplay);
         const resetComparison = compareResetTimestamps(

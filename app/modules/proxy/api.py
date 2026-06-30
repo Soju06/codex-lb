@@ -5,6 +5,7 @@ import json
 import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from json import JSONDecodeError
 from typing import Any, Final, Literal, cast
@@ -37,10 +38,17 @@ from app.core.auth.dependencies import (
     validate_proxy_api_key_authorization,
     validate_usage_api_key,
 )
+from app.core.auth.refresh import RefreshError
 from app.core.clients.files import FileProxyError
 from app.core.clients.proxy import ProxyResponseError
+from app.core.clients.rate_limit_reset_credits import (
+    ConsumeResetCreditError,
+    ResetCreditItem,
+    consume_reset_credit,
+)
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
+from app.core.crypto import TokenEncryptor
 from app.core.errors import (
     PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
     OpenAIErrorEnvelope,
@@ -75,9 +83,11 @@ from app.core.openai.models import (
 from app.core.openai.parsing import parse_response_payload
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
 from app.core.openai.v1_requests import V1ResponsesCompactRequest, V1ResponsesRequest
+from app.core.request_locality import resolve_request_client_host
 from app.core.resilience.overload import is_local_overload_error_code, merge_retry_after_headers
 from app.core.runtime_logging import log_error_response
 from app.core.types import JsonValue
+from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError, resolve_upstream_route
 from app.core.utils.json_guards import is_json_mapping
 from app.core.utils.request_id import get_request_id
 from app.core.utils.sse import (
@@ -90,6 +100,8 @@ from app.core.utils.sse import (
 from app.db.models import Account, AccountStatus
 from app.db.session import get_background_session
 from app.dependencies import ProxyContext, get_proxy_context, get_proxy_websocket_context
+from app.modules.accounts.auth_manager import AuthManager
+from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import (
     TRAFFIC_CLASS_OPPORTUNISTIC,
@@ -100,12 +112,14 @@ from app.modules.api_keys.service import (
     ApiKeySelfLimitData,
     ApiKeysService,
     ApiKeyUsageReservationData,
+    _compute_pooled_credits,
 )
 from app.modules.firewall.repository import FirewallRepository
 from app.modules.firewall.service import FirewallRepositoryPort, FirewallService
 from app.modules.proxy import affinity as proxy_affinity_module
 from app.modules.proxy import images_service as images_service_module
 from app.modules.proxy import service as proxy_service_module
+from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
 from app.modules.proxy.helpers import _rate_limit_details
 from app.modules.proxy.http_bridge_forwarding import parse_forwarded_request
@@ -121,6 +135,7 @@ from app.modules.proxy.request_policy import (
     validate_model_access,
 )
 from app.modules.proxy.schemas import (
+    AccountPoolUsageResponse,
     CodexModelEntry,
     CodexModelsResponse,
     FileCreateRequest,
@@ -129,6 +144,9 @@ from app.modules.proxy.schemas import (
     ModelMetadata,
     RateLimitStatusPayload,
     ReasoningLevelSchema,
+    V1ResetCreditEntry,
+    V1ResetCreditRedeemRequest,
+    V1ResetCreditRedeemResponse,
     V1UsageLimitResponse,
     V1UsageResponse,
     WarmupFailedAccount,
@@ -142,14 +160,18 @@ from app.modules.proxy.types import (
     RateLimitStatusPayloadData,
     RateLimitWindowSnapshotData,
 )
+from app.modules.rate_limit_reset_credits.api import serialize_reset_credit_redeem
+from app.modules.rate_limit_reset_credits.store import get_rate_limit_reset_credits_store
 from app.modules.usage.mappers import usage_history_to_window_row
-from app.modules.usage.repository import UsageRepository
+from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
+from app.modules.usage.updater import UsageUpdater
 
 logger = logging.getLogger(__name__)
 
 _PUBLIC_RESPONSE_OUTPUT_ITEM_TYPES = frozenset(
     {
         "message",
+        "compaction",
         "function_call",
         "function_call_output",
         "reasoning",
@@ -167,6 +189,15 @@ _PUBLIC_RESPONSE_STREAM_TERMINAL_TYPES = frozenset(
     {"response.completed", "response.incomplete", "response.failed", "error"}
 )
 _PUBLIC_RESPONSES_PRE_CREATED_BUFFER_LIMIT = 64
+
+
+class _V1ResetCreditFreshCredentials:
+    __slots__ = ("access_token_encrypted", "chatgpt_account_id")
+
+    def __init__(self, *, access_token_encrypted: bytes, chatgpt_account_id: str | None) -> None:
+        self.access_token_encrypted = access_token_encrypted
+        self.chatgpt_account_id = chatgpt_account_id
+
 
 router = APIRouter(
     prefix="/backend-api/codex",
@@ -539,6 +570,7 @@ async def responses_websocket(
         codex_session_affinity=True,
         openai_cache_affinity=True,
         api_key=api_key,
+        client_ip=resolve_request_client_host(websocket),
     )
 
 
@@ -639,6 +671,7 @@ async def internal_bridge_responses(
         forwarded_downstream_turn_state=forwarded_request_context.context.downstream_turn_state,
         forwarded_affinity_kind=forwarded_request_context.context.original_affinity_kind,
         forwarded_affinity_key=forwarded_request_context.context.original_affinity_key,
+        forwarded_client_ip=forwarded_request_context.context.client_ip,
         # The OpenAI-SDK contract rewrites (drop ``codex.*``, backfill terminal
         # output, synthesize ``response.created``) MUST be applied by the
         # origin instance — the one that actually responds to the client — so
@@ -672,6 +705,7 @@ async def v1_responses_websocket(
         codex_session_affinity=False,
         openai_cache_affinity=True,
         api_key=api_key,
+        client_ip=resolve_request_client_host(websocket),
     )
 
 
@@ -692,11 +726,22 @@ async def v1_models(
 @v1_router.get("/usage", response_model=V1UsageResponse)
 async def v1_usage(
     api_key: ApiKeyData = Security(validate_usage_api_key),
-) -> V1UsageResponse:
+) -> V1UsageResponse | JSONResponse:
+    usage_sections = _parse_usage_sections(api_key.usage_sections)
     async with get_background_session() as session:
-        service = ApiKeysService(ApiKeysRepository(session))
+        service = ApiKeysService(ApiKeysRepository(session), usage_repository=UsageRepository(session))
         usage = await service.get_key_usage_summary_for_self(api_key.id)
-        aggregate_limits = await _build_aggregate_credit_limits(session)
+        aggregate_limits = await _build_aggregate_credit_limits(session) if "upstream_limits" in usage_sections else {}
+        hide_upstream_limits = await _hide_upstream_quota_for_api_key_clients(api_key)
+        account_pool_usage = (
+            await _build_account_pool_usage(
+                session,
+                assigned_account_ids=api_key.assigned_account_ids,
+                account_assignment_scope_enabled=api_key.account_assignment_scope_enabled,
+            )
+            if "account_pool_usage" in usage_sections and not hide_upstream_limits
+            else None
+        )
 
     if usage is None:
         raise ProxyAuthError("Invalid API key")
@@ -707,7 +752,220 @@ async def v1_usage(
         cached_input_tokens=usage.cached_input_tokens,
         total_cost_usd=usage.total_cost_usd,
         limits=[_to_v1_usage_limit_response(limit) for limit in usage.limits],
-        upstream_limits=_ordered_aggregate_limits(aggregate_limits),
+        upstream_limits=[] if hide_upstream_limits else _ordered_aggregate_limits(aggregate_limits),
+        account_pool_usage=account_pool_usage,
+    )
+
+
+def _is_reset_credit_selectable_account(account: Account) -> bool:
+    return bool(account.chatgpt_account_id) and account.status not in (
+        AccountStatus.REAUTH_REQUIRED,
+        AccountStatus.DEACTIVATED,
+        AccountStatus.PAUSED,
+    )
+
+
+def _eligible_reset_credit_accounts(accounts: list[Account], api_key: ApiKeyData) -> list[Account]:
+    if api_key.account_assignment_scope_enabled:
+        assigned_ids = {account_id for account_id in api_key.assigned_account_ids if account_id}
+        requested_accounts = [account for account in accounts if account.id in assigned_ids]
+    else:
+        requested_accounts = accounts
+    return [account for account in requested_accounts if _is_reset_credit_selectable_account(account)]
+
+
+def _project_reset_credit_accounts(accounts: list[Account], api_key: ApiKeyData) -> list[tuple[str, str]]:
+    eligible_accounts = sorted(
+        _eligible_reset_credit_accounts(accounts, api_key),
+        key=lambda account: (account.email, account.id),
+    )
+    return [(account.id, account.email) for account in eligible_accounts]
+
+
+def _list_available_reset_credits(account_id: str, email: str) -> list[V1ResetCreditEntry]:
+    snapshot = get_rate_limit_reset_credits_store().get(account_id)
+    if snapshot is None or snapshot.available_count <= 0:
+        return []
+
+    available_credits = [credit for credit in snapshot.credits if credit.status == "available"]
+    if not available_credits:
+        return []
+
+    far_future = datetime.max.replace(tzinfo=timezone.utc)
+    ordered_credits = sorted(
+        available_credits,
+        key=lambda credit: (credit.expires_at or far_future, credit.id),
+    )
+    return [
+        V1ResetCreditEntry(
+            account_id=account_id,
+            email=email,
+            redeem_id=credit.id,
+            expired_at=credit.expires_at,
+        )
+        for credit in ordered_credits
+    ]
+
+
+def _is_reset_credit_account_in_api_key_pool(account: Account | None, api_key: ApiKeyData) -> bool:
+    if account is None or not _is_reset_credit_selectable_account(account):
+        return False
+    if not api_key.account_assignment_scope_enabled:
+        return True
+    assigned_ids = {account_id for account_id in api_key.assigned_account_ids if account_id}
+    return account.id in assigned_ids
+
+
+def _select_available_reset_credit_by_id(account_id: str, redeem_id: str) -> ResetCreditItem | None:
+    snapshot = get_rate_limit_reset_credits_store().get(account_id)
+    if snapshot is None or snapshot.available_count <= 0:
+        return None
+    for credit in snapshot.credits:
+        if credit.id == redeem_id and credit.status == "available":
+            return credit
+    return None
+
+
+def _translate_v1_reset_credit_consume_error(exc: ConsumeResetCreditError) -> HTTPException:
+    status_code = exc.status_code if exc.status_code > 0 else 503
+    return HTTPException(status_code=status_code, detail=exc.message)
+
+
+def _should_invalidate_v1_reset_credit_snapshot_on_consume_error(exc: ConsumeResetCreditError) -> bool:
+    return exc.status_code == 409
+
+
+def _translate_v1_reset_credit_refresh_error(exc: RefreshError) -> HTTPException:
+    if exc.is_permanent:
+        get_account_selection_cache().invalidate()
+    return HTTPException(
+        status_code=409,
+        detail=f"Reset credit redeem could not refresh account credentials: {exc.message}",
+    )
+
+
+@asynccontextmanager
+async def _v1_reset_credit_accounts_refresh_scope() -> AsyncIterator[AccountsRepository]:
+    async with get_background_session() as session:
+        yield AccountsRepository(session)
+
+
+async def _ensure_v1_reset_credit_account_fresh(account_id: str) -> _V1ResetCreditFreshCredentials:
+    async with get_background_session() as session:
+        repo = AccountsRepository(session)
+        account = await repo.get_by_id(account_id)
+        if account is None:
+            raise HTTPException(status_code=404, detail="Account not found")
+        auth_manager = AuthManager(
+            repo,
+            refresh_repo_factory=_v1_reset_credit_accounts_refresh_scope,
+        )
+        refreshed = await auth_manager.ensure_fresh(account, force=False)
+        return _V1ResetCreditFreshCredentials(
+            access_token_encrypted=refreshed.access_token_encrypted,
+            chatgpt_account_id=refreshed.chatgpt_account_id,
+        )
+
+
+@usage_router.get("/v1/reset-credit", response_model=list[V1ResetCreditEntry])
+async def v1_reset_credit(
+    api_key: ApiKeyData = Security(validate_usage_api_key),
+) -> list[V1ResetCreditEntry]:
+    async with get_background_session() as session:
+        accounts = await AccountsRepository(session).list_accounts(refresh_existing=True)
+        eligible_accounts = _project_reset_credit_accounts(accounts, api_key)
+
+    response: list[V1ResetCreditEntry] = []
+    for account_id, account_email in eligible_accounts:
+        response.extend(_list_available_reset_credits(account_id, account_email))
+    return response
+
+
+@usage_router.post("/v1/reset-credit", response_model=V1ResetCreditRedeemResponse)
+async def v1_redeem_reset_credit(
+    payload: V1ResetCreditRedeemRequest,
+    api_key: ApiKeyData = Security(validate_usage_api_key),
+) -> V1ResetCreditRedeemResponse:
+    async with get_background_session() as session:
+        account = await AccountsRepository(session).get_by_id(payload.account_id)
+        if not _is_reset_credit_account_in_api_key_pool(account, api_key):
+            raise HTTPException(status_code=403, detail="Account is outside the API key pool")
+        if account is None:
+            raise HTTPException(status_code=403, detail="Account is outside the API key pool")
+        account_id = account.id
+
+        async with serialize_reset_credit_redeem(account_id, session=session):
+            credit = _select_available_reset_credit_by_id(account_id, payload.redeem_id)
+            if credit is None:
+                raise HTTPException(status_code=409, detail="Requested reset credit is unavailable")
+            try:
+                route = await _resolve_reset_credit_route(session, account_id)
+            except UpstreamProxyRouteError as exc:
+                raise HTTPException(status_code=503, detail="Unable to resolve upstream proxy route") from exc
+            try:
+                redeem_credentials = await _ensure_v1_reset_credit_account_fresh(account_id)
+            except RefreshError as exc:
+                raise _translate_v1_reset_credit_refresh_error(exc) from exc
+            access_token = TokenEncryptor().decrypt(redeem_credentials.access_token_encrypted)
+            try:
+                result = await consume_reset_credit(
+                    access_token,
+                    redeem_credentials.chatgpt_account_id,
+                    credit.id,
+                    route=route,
+                    allow_direct_egress=route is None,
+                )
+            except ConsumeResetCreditError as exc:
+                if _should_invalidate_v1_reset_credit_snapshot_on_consume_error(exc):
+                    await get_rate_limit_reset_credits_store().invalidate(account_id)
+                raise _translate_v1_reset_credit_consume_error(exc) from exc
+            await get_rate_limit_reset_credits_store().invalidate(account_id)
+            try:
+                await _refresh_usage_after_v1_reset_credit_redeem(account_id)
+            except Exception:
+                logger.warning(
+                    "V1 reset credit consume succeeded but usage refresh failed account_id=%s",
+                    account_id,
+                    exc_info=True,
+                )
+            redeemed_at = result.credit.redeemed_at if result.credit else None
+            return V1ResetCreditRedeemResponse(
+                code=result.code,
+                windows_reset=result.windows_reset,
+                redeemed_at=redeemed_at,
+            )
+
+
+async def _resolve_reset_credit_route(session: AsyncSession, account_id: str) -> ResolvedUpstreamRoute | None:
+    return await resolve_upstream_route(
+        session,
+        account_id=account_id,
+        operation="reset_credits_consume",
+        scope="account",
+    )
+
+
+async def _refresh_usage_after_v1_reset_credit_redeem(account_id: str) -> None:
+    async with get_background_session() as session:
+        account = await AccountsRepository(session).get_by_id(account_id)
+        if account is None:
+            logger.warning(
+                "V1 reset credit consume succeeded but account disappeared before usage refresh account_id=%s",
+                account_id,
+            )
+            return
+        usage_updater = UsageUpdater(
+            UsageRepository(session),
+            AccountsRepository(session),
+            AdditionalUsageRepository(session),
+        )
+        refreshed = await usage_updater.force_refresh(account)
+    if refreshed:
+        get_account_selection_cache().invalidate()
+        return
+    logger.warning(
+        "V1 reset credit consume succeeded but usage refresh returned no update account_id=%s",
+        account_id,
     )
 
 
@@ -806,6 +1064,45 @@ def _ordered_aggregate_limits(aggregate_limits: dict[str, V1UsageLimitResponse])
     return [limit for window in ("5h", "7d", "monthly") if (limit := aggregate_limits.get(window)) is not None]
 
 
+def _parse_usage_sections(raw: str) -> set[str]:
+    if not raw or not raw.strip():
+        return set()
+    return {s.strip() for s in raw.split(",") if s.strip()}
+
+
+async def _build_account_pool_usage(
+    session: AsyncSession,
+    *,
+    assigned_account_ids: list[str],
+    account_assignment_scope_enabled: bool,
+) -> AccountPoolUsageResponse | None:
+    from app.modules.api_keys.repository import ApiKeysRepository
+
+    repo = ApiKeysRepository(session)
+    usage_repo = UsageRepository(session)
+    if account_assignment_scope_enabled:
+        all_accounts = await repo.list_accounts_by_ids(assigned_account_ids)
+        usage_account_ids: list[str] | None = assigned_account_ids
+    else:
+        all_accounts = await repo.list_all_accounts()
+        usage_account_ids = None
+
+    primary_usage = await usage_repo.latest_by_account("primary", account_ids=usage_account_ids)
+    secondary_usage = await usage_repo.latest_by_account("secondary", account_ids=usage_account_ids)
+
+    data = _compute_pooled_credits(
+        assigned_account_ids=assigned_account_ids,
+        all_accounts=all_accounts,
+        primary_usage=primary_usage,
+        secondary_usage=secondary_usage,
+        account_assignment_scope_enabled=account_assignment_scope_enabled,
+    )
+    return AccountPoolUsageResponse(
+        primary=data.remaining_percent_primary,
+        secondary=data.remaining_percent_secondary,
+    )
+
+
 def _to_v1_usage_limit_response(limit: ApiKeySelfLimitData) -> V1UsageLimitResponse:
     current_value = max(0, min(limit.current_value, limit.max_value))
     return V1UsageLimitResponse(
@@ -844,6 +1141,22 @@ async def _build_codex_usage_payload_for_api_key(api_key: ApiKeyData) -> RateLim
         ),
         credits=_codex_usage_credit_snapshot(primary_credit_limit, secondary_credit_limit, monthly_credit_limit),
     )
+
+
+async def _hide_upstream_quota_for_api_key_clients(api_key: ApiKeyData | None) -> bool:
+    if api_key is None:
+        return False
+    settings = await get_settings_cache().get()
+    return bool(getattr(settings, "hide_upstream_quota_from_api_keys", False))
+
+
+async def _rate_limit_headers_for_request(
+    context: ProxyContext,
+    api_key: ApiKeyData | None,
+) -> dict[str, str]:
+    if await _hide_upstream_quota_for_api_key_clients(api_key):
+        return {}
+    return await context.service.rate_limit_headers()
 
 
 def _select_codex_usage_limit(
@@ -1356,7 +1669,7 @@ async def _proxy_images_generation_request(
         # Re-raise so the global handler maps to 403.
         raise
 
-    rate_limit_headers = await context.service.rate_limit_headers()
+    rate_limit_headers = await _rate_limit_headers_for_request(context, api_key)
     reservation = await _enforce_request_limits(
         api_key,
         request_model=effective_model,
@@ -1394,6 +1707,7 @@ async def _proxy_images_generation_request(
         openai_cache_affinity=True,
         api_key=api_key,
         api_key_reservation=None,
+        client_ip=resolve_request_client_host(request),
     )
 
     # ``images_service`` populates ``response_id`` once the upstream stream
@@ -1552,7 +1866,7 @@ async def _proxy_images_edit_request(
 
     validate_model_access(api_key, effective_model)
 
-    rate_limit_headers = await context.service.rate_limit_headers()
+    rate_limit_headers = await _rate_limit_headers_for_request(context, api_key)
     reservation = await _enforce_request_limits(
         api_key,
         request_model=effective_model,
@@ -1593,6 +1907,7 @@ async def _proxy_images_edit_request(
         openai_cache_affinity=True,
         api_key=api_key,
         api_key_reservation=None,
+        client_ip=resolve_request_client_host(request),
     )
 
     captured: dict[str, object] = {}
@@ -1712,23 +2027,30 @@ async def _build_codex_models_response(api_key: ApiKeyData | None) -> Response:
 
     if not models:
         await _release_reservation(reservation)
-        return JSONResponse(content=CodexModelsResponse(models=[]).model_dump(mode="json"))
+        return JSONResponse(content=CodexModelsResponse(models=[], data=[]).model_dump(mode="json"))
 
     entries: list[CodexModelEntry] = []
+    data: list[ModelListItem] = []
     for slug, model in models.items():
+        if not model.supported_in_api:
+            continue
         if visibility_allowed_models is None:
             if not is_public_model(model, allowed_models):
                 continue
-            entries.append(_to_codex_model_entry(model))
+            entry = _to_codex_model_entry(model)
+            entries.append(entry)
+            if entry.visibility == "list":
+                data.append(_to_model_list_item(slug, model, created=_model_list_created_at(model)))
             continue
-        entries.append(
-            _to_codex_model_entry(
-                model,
-                visibility="list" if slug in visibility_allowed_models else "hide",
-            )
+        entry = _to_codex_model_entry(
+            model,
+            visibility="list" if slug in visibility_allowed_models else "hide",
         )
+        entries.append(entry)
+        if entry.visibility == "list":
+            data.append(_to_model_list_item(slug, model, created=_model_list_created_at(model)))
     await _release_reservation(reservation)
-    return JSONResponse(content=CodexModelsResponse(models=entries).model_dump(mode="json"))
+    return JSONResponse(content=CodexModelsResponse(models=entries, data=data).model_dump(mode="json"))
 
 
 async def _build_models_response(api_key: ApiKeyData | None) -> Response:
@@ -1746,36 +2068,27 @@ async def _build_models_response(api_key: ApiKeyData | None) -> Response:
 
     if not models:
         await _release_reservation(reservation)
-        return JSONResponse(content=ModelListResponse(data=[]).model_dump(mode="json"))
+        return JSONResponse(content=_dump_v1_models_response(ModelListResponse(data=[])))
 
     items: list[ModelListItem] = []
     for slug, model in models.items():
         if not is_public_model(model, allowed_models):
             continue
-        items.append(
-            ModelListItem.model_validate(
-                {
-                    "id": slug,
-                    "created": created,
-                    "owned_by": "codex-lb",
-                    "metadata": _to_model_metadata(model),
-                    "api_types": ["chat_completions"],
-                    "capabilities": _v1_model_capabilities(model),
-                    "context_length": _v1_input_context_window(model),
-                    "contextLength": _v1_input_context_window(model),
-                    "max_output_tokens": _v1_max_output_tokens(model),
-                    "maxOutputTokens": _v1_max_output_tokens(model),
-                    "supports_reasoning": _v1_supports_reasoning(model),
-                    "supportsReasoning": _v1_supports_reasoning(model),
-                    "supports_images": _v1_supports_vision(model),
-                    "supportsImages": _v1_supports_vision(model),
-                    "supports_vision": _v1_supports_vision(model),
-                    "supportsVision": _v1_supports_vision(model),
-                }
-            )
-        )
+        items.append(_to_model_list_item(slug, model, created=created))
     await _release_reservation(reservation)
-    return JSONResponse(content=ModelListResponse(data=items).model_dump(mode="json"))
+    return JSONResponse(content=_dump_v1_models_response(ModelListResponse(data=items)))
+
+
+def _dump_v1_models_response(response: ModelListResponse) -> dict[str, JsonValue]:
+    payload = response.model_dump(mode="json")
+    for item in payload["data"]:
+        metadata = item.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        for key in ("additional_speed_tiers", "service_tiers", "default_service_tier"):
+            if metadata.get(key) is None:
+                metadata.pop(key, None)
+    return payload
 
 
 def _allowed_models_for_api_key(api_key: ApiKeyData | None) -> set[str] | None:
@@ -1792,6 +2105,39 @@ def _canonical_model_set(models: Iterable[str]) -> set[str]:
 
 def _canonical_model_slug(model: str) -> str:
     return resolve_model_alias(model) or model
+
+
+def _to_model_list_item(slug: str, model: UpstreamModel, *, created: int) -> ModelListItem:
+    return ModelListItem.model_validate(
+        {
+            "id": slug,
+            "created": created,
+            "owned_by": "codex-lb",
+            "metadata": _to_model_metadata(model),
+            "api_types": ["chat_completions"],
+            "capabilities": _v1_model_capabilities(model),
+            "context_length": _v1_input_context_window(model),
+            "contextLength": _v1_input_context_window(model),
+            "max_output_tokens": _v1_max_output_tokens(model),
+            "maxOutputTokens": _v1_max_output_tokens(model),
+            "supports_reasoning": _v1_supports_reasoning(model),
+            "supportsReasoning": _v1_supports_reasoning(model),
+            "supports_images": _v1_supports_vision(model),
+            "supportsImages": _v1_supports_vision(model),
+            "supports_vision": _v1_supports_vision(model),
+            "supportsVision": _v1_supports_vision(model),
+        }
+    )
+
+
+def _model_list_created_at(model: UpstreamModel) -> int:
+    for key in ("created", "created_at", "createdAt"):
+        raw_value = model.raw.get(key)
+        if isinstance(raw_value, int):
+            return raw_value
+        if isinstance(raw_value, float):
+            return int(raw_value)
+    return 0
 
 
 def _codex_model_visibility_allowed_models(api_key: ApiKeyData | None) -> set[str] | None:
@@ -1926,7 +2272,29 @@ def _to_model_metadata(model: UpstreamModel) -> ModelMetadata:
         supported_in_api=model.supported_in_api,
         minimal_client_version=model.minimal_client_version,
         priority=model.priority,
+        additional_speed_tiers=_raw_string_list(model.raw, "additional_speed_tiers"),
+        service_tiers=_raw_object_list(model.raw, "service_tiers"),
+        default_service_tier=_raw_optional_string(model.raw, "default_service_tier"),
     )
+
+
+def _raw_string_list(raw: Mapping[str, JsonValue], key: str) -> list[str] | None:
+    value = raw.get(key)
+    if not isinstance(value, list):
+        return None
+    return [item for item in value if isinstance(item, str)]
+
+
+def _raw_object_list(raw: Mapping[str, JsonValue], key: str) -> list[dict[str, JsonValue]] | None:
+    value = raw.get(key)
+    if not isinstance(value, list):
+        return None
+    return [dict(cast(Mapping[str, JsonValue], item)) for item in value if isinstance(item, Mapping)]
+
+
+def _raw_optional_string(raw: Mapping[str, JsonValue], key: str) -> str | None:
+    value = raw.get(key)
+    return value if isinstance(value, str) else None
 
 
 @v1_router.post(
@@ -1952,7 +2320,7 @@ async def v1_chat_completions(
     effective_model = _effective_model_for_api_key(api_key, payload.model)
     validate_model_access(api_key, effective_model)
 
-    rate_limit_headers = await context.service.rate_limit_headers()
+    rate_limit_headers = await _rate_limit_headers_for_request(context, api_key)
     try:
         responses_shaped_payload = not payload.messages and payload.input is not None
         if not responses_shaped_payload:
@@ -1999,6 +2367,7 @@ async def v1_chat_completions(
         api_key=api_key,
         api_key_reservation=reservation,
         suppress_text_done_events=True,
+        client_ip=resolve_request_client_host(request),
     )
     startup_probe_timeout = (
         _CURSOR_CHAT_COMPLETIONS_STARTUP_ERROR_PROBE_SECONDS
@@ -2084,6 +2453,7 @@ async def _stream_responses(
     forwarded_downstream_turn_state: str | None = None,
     forwarded_affinity_kind: str | None = None,
     forwarded_affinity_key: str | None = None,
+    forwarded_client_ip: str | None = None,
     enforce_openai_sdk_contract: bool = True,
 ) -> Response:
     apply_api_key_enforcement(payload, api_key)
@@ -2110,9 +2480,10 @@ async def _stream_responses(
         )
     )
 
-    rate_limit_headers = await context.service.rate_limit_headers() if include_rate_limit_headers else {}
+    rate_limit_headers = await _rate_limit_headers_for_request(context, api_key) if include_rate_limit_headers else {}
     bridge_active = prefer_http_bridge and proxy_service_module.get_settings().http_responses_session_bridge_enabled
     effective_headers = forwarded_headers or request.headers
+    client_ip = forwarded_client_ip if forwarded_request else resolve_request_client_host(request)
     downstream_turn_state = (
         forwarded_downstream_turn_state
         if bridge_active and forwarded_downstream_turn_state is not None
@@ -2157,6 +2528,7 @@ async def _stream_responses(
                     openai_cache_affinity=openai_cache_affinity,
                     api_key=api_key,
                     api_key_reservation=reservation,
+                    client_ip=client_ip,
                 )
             except NotImplementedError:
                 error = OpenAIErrorEnvelopeModel(
@@ -2220,6 +2592,8 @@ async def _stream_responses(
             forwarded_request=forwarded_request,
             forwarded_affinity_kind=forwarded_affinity_kind,
             forwarded_affinity_key=forwarded_affinity_key,
+            client_ip=client_ip,
+            enforce_openai_sdk_contract=enforce_openai_sdk_contract,
         )
     else:
         stream = context.service.stream_responses(
@@ -2231,10 +2605,12 @@ async def _stream_responses(
             api_key=api_key,
             api_key_reservation=reservation,
             suppress_text_done_events=suppress_text_done_events,
+            client_ip=client_ip,
+            enforce_openai_sdk_contract=enforce_openai_sdk_contract,
         )
     stream, startup_error = await _probe_stream_startup_error(
         stream,
-        convert_event_errors=bridge_active,
+        convert_event_errors=bridge_active and enforce_openai_sdk_contract,
         timeout_seconds=(
             _HTTP_BRIDGE_STARTUP_ERROR_PROBE_SECONDS if prefer_http_bridge else _STREAM_STARTUP_ERROR_PROBE_SECONDS
         ),
@@ -2306,11 +2682,12 @@ async def _collect_responses(
         request_usage_budget=estimate_api_key_request_usage(payload),
     )
 
-    rate_limit_headers = await context.service.rate_limit_headers()
+    rate_limit_headers = await _rate_limit_headers_for_request(context, api_key)
     bridge_active = prefer_http_bridge and proxy_service_module.get_settings().http_responses_session_bridge_enabled
     downstream_turn_state = (
         proxy_affinity_module.ensure_http_downstream_turn_state(request.headers) if bridge_active else None
     )
+    client_ip = resolve_request_client_host(request)
     turn_state_headers = (
         proxy_affinity_module.build_downstream_turn_state_response_headers(downstream_turn_state)
         if downstream_turn_state is not None
@@ -2328,6 +2705,7 @@ async def _collect_responses(
             api_key_reservation=reservation,
             suppress_text_done_events=suppress_text_done_events,
             downstream_turn_state=downstream_turn_state,
+            client_ip=client_ip,
         )
     else:
         stream = context.service.stream_responses(
@@ -2339,6 +2717,7 @@ async def _collect_responses(
             api_key=api_key,
             api_key_reservation=reservation,
             suppress_text_done_events=suppress_text_done_events,
+            client_ip=client_ip,
         )
     try:
         response_payload = await _collect_responses_payload(stream)
@@ -2438,7 +2817,7 @@ async def _compact_responses(
         request_usage_budget=estimate_api_key_request_usage(payload),
     )
 
-    rate_limit_headers = await context.service.rate_limit_headers()
+    rate_limit_headers = await _rate_limit_headers_for_request(context, api_key)
     try:
         result = await context.service.compact_responses(
             payload,
@@ -2447,6 +2826,7 @@ async def _compact_responses(
             openai_cache_affinity=openai_cache_affinity,
             api_key=api_key,
             api_key_reservation=reservation,
+            client_ip=resolve_request_client_host(request),
         )
     except NotImplementedError:
         error = OpenAIErrorEnvelopeModel(
@@ -2473,10 +2853,25 @@ async def _compact_responses(
         )
     finally:
         await _release_reservation(reservation)
+    result_payload = result.model_dump(mode="json", exclude_none=True)
+    if codex_session_affinity:
+        result_payload = _normalize_codex_remote_compaction_v2_result(result, result_payload)
     return JSONResponse(
-        content=result.model_dump(mode="json", exclude_none=True),
+        content=result_payload,
         headers=rate_limit_headers,
     )
+
+
+def _normalize_codex_remote_compaction_v2_result(
+    payload: CompactResponsePayload,
+    result_payload: dict[str, JsonValue],
+) -> dict[str, JsonValue]:
+    compaction_item = _compact_response_output_item(payload)
+    if compaction_item is None:
+        return result_payload
+    normalized = dict(result_payload)
+    normalized["output"] = [compaction_item]
+    return normalized
 
 
 def _compact_response_output_item(payload: CompactResponsePayload) -> dict[str, JsonValue] | None:
@@ -2575,7 +2970,7 @@ async def _transcribe_request(
         request_model=_TRANSCRIPTION_MODEL,
         request_service_tier=None,
     )
-    rate_limit_headers = await context.service.rate_limit_headers()
+    rate_limit_headers = await _rate_limit_headers_for_request(context, api_key)
     try:
         audio_bytes = await file.read()
         result = await context.service.transcribe(
@@ -2624,6 +3019,31 @@ async def _read_first_stream_item(stream: AsyncIterator[str]) -> str:
     return await anext(stream)
 
 
+def _retrieve_first_stream_task_exception(task: asyncio.Task[str]) -> None:
+    # Retrieve a finished probe task's exception so an abandoned task does not
+    # surface asyncio's "exception was never retrieved" warning. Consumers that
+    # await the task still re-raise it.
+    if not task.cancelled():
+        task.exception()
+
+
+def _create_first_stream_probe_task(stream: AsyncIterator[str]) -> asyncio.Task[str]:
+    """Create the first-stream-item probe task.
+
+    ``_probe_stream_startup_error`` / ``_probe_chat_stream_startup_error`` race
+    this task against a timeout. On timeout the task keeps running and is handed
+    to the streamed response for consumption. If the wrapping stream is dropped
+    before the task is awaited -- for example the request is torn down while the
+    upstream is still blocked on the response-create admission gate -- the task
+    would otherwise finish with an unretrieved ``ProxyResponseError`` and asyncio
+    would log it. The done-callback retrieves the result in that abandoned case
+    without hiding the error from consumers that do await the task.
+    """
+    task = asyncio.create_task(_read_first_stream_item(stream))
+    task.add_done_callback(_retrieve_first_stream_task_exception)
+    return task
+
+
 async def _probe_stream_startup_error(
     stream: AsyncIterator[str],
     *,
@@ -2632,14 +3052,17 @@ async def _probe_stream_startup_error(
 ) -> tuple[AsyncIterator[str], ProxyResponseError | OpenAIErrorEnvelopeModel | None]:
     if timeout_seconds is None:
         timeout_seconds = _STREAM_STARTUP_ERROR_PROBE_SECONDS
-    first_task = asyncio.create_task(_read_first_stream_item(stream))
-    try:
-        first = await asyncio.wait_for(
-            asyncio.shield(first_task),
-            timeout=timeout_seconds,
-        )
-    except TimeoutError:
+    first_task = _create_first_stream_probe_task(stream)
+    done, _pending = await asyncio.wait({first_task}, timeout=timeout_seconds)
+    if not done:
+        # Probe window elapsed before the first item arrived. Hand the still-
+        # running task off to be consumed by the streamed response. asyncio.wait
+        # (rather than wait_for + shield) never cancels the task on timeout,
+        # avoiding the Python 3.14 "exception in shielded future" log when the
+        # upstream later returns an error such as a 429 from the admission gate.
         return _prepend_first_task(first_task, stream), None
+    try:
+        first = first_task.result()
     except StopAsyncIteration:
         return _prepend_first(None, stream), None
     except ProxyResponseError as exc:
@@ -2944,14 +3367,12 @@ async def _probe_chat_stream_startup_error(
 ) -> tuple[AsyncIterator[str], ProxyResponseError | OpenAIErrorEnvelopeModel | None]:
     buffered: list[str] = []
     for _ in range(max_startup_events):
-        first_task = asyncio.create_task(_read_first_stream_item(stream))
-        try:
-            first = await asyncio.wait_for(
-                asyncio.shield(first_task),
-                timeout=timeout_seconds,
-            )
-        except TimeoutError:
+        first_task = _create_first_stream_probe_task(stream)
+        done, _pending = await asyncio.wait({first_task}, timeout=timeout_seconds)
+        if not done:
             return _prepend_items(buffered, _prepend_first_task(first_task, stream)), None
+        try:
+            first = first_task.result()
         except StopAsyncIteration:
             return _prepend_items(buffered, _prepend_first(None, stream)), None
         except ProxyResponseError as exc:
@@ -2982,9 +3403,16 @@ async def _prepend_items(items: list[str], stream: AsyncIterator[str]) -> AsyncI
 
 async def _prepend_first_task(first_task: asyncio.Task[str], stream: AsyncIterator[str]) -> AsyncIterator[str]:
     try:
-        yield await first_task
+        first = await first_task
     except StopAsyncIteration:
         return
+    finally:
+        # If the wrapping stream is closed before the first item is consumed
+        # (client disconnect, request teardown), cancel the still-running probe
+        # task so it does not hold the upstream connection open.
+        if not first_task.done():
+            first_task.cancel()
+    yield first
     async for line in stream:
         yield line
 
@@ -3557,6 +3985,12 @@ async def _normalize_public_responses_stream(
         if normalized_payload is None:
             continue
         event_type = normalized_payload.get("type")
+        if not enforce_openai_sdk_contract and (
+            event_type == "error" or is_json_mapping(normalized_payload.get("error"))
+        ):
+            terminal_seen = True
+            yield event_block
+            continue
 
         if enforce_openai_sdk_contract and not created_emitted and isinstance(event_type, str):
             if event_type == "response.created":
@@ -3595,6 +4029,14 @@ async def _normalize_public_responses_stream(
                     yield formatted_payload
                 return
 
+        if enforce_openai_sdk_contract and event_type == "error":
+            for formatted_payload in _public_response_failed_event_blocks_from_error(
+                normalized_payload,
+                include_created=not created_emitted,
+            ):
+                yield formatted_payload
+            return
+
         _collect_output_item_event(normalized_payload, output_items)
         if event_type == "response.output_text.delta":
             seen_text_delta_keys.add(_text_delta_stream_key(normalized_payload))
@@ -3606,7 +4048,9 @@ async def _normalize_public_responses_stream(
         if not done_seen and not enforce_openai_sdk_contract:
             yield "data: [DONE]\n\n"
         return
-    error_kind = contract_violation_kind or "upstream_stream_truncated"
+    error_kind = contract_violation_kind or (
+        "upstream_stream_truncated" if enforce_openai_sdk_contract else "stream_incomplete"
+    )
     include_created = enforce_openai_sdk_contract and not created_emitted
     for formatted_payload in _public_response_failed_event_blocks(error_kind, include_created=include_created):
         yield formatted_payload
@@ -3648,12 +4092,22 @@ def _public_response_failed_event_blocks_from_error(
     if error is None:
         error = _default_error_envelope().error
     assert error is not None
+    message = error.message
+    raw_message = payload.get("message")
+    if isinstance(raw_message, str) and raw_message.strip():
+        if not message or message == "Upstream error":
+            message = raw_message.strip()
+    error_type = error.type
+    if not error_type:
+        raw_error_type = payload.get("error_type")
+        if isinstance(raw_error_type, str) and raw_error_type.strip():
+            error_type = raw_error_type.strip()
     failed_payload = cast(
         dict[str, JsonValue],
         response_failed_event(
             error.code or "upstream_error",
-            error.message or "Upstream error",
-            error.type or "server_error",
+            message or "Upstream error",
+            error_type or "server_error",
             response_id=f"resp_{error.code or 'upstream_error'}",
             error_param=error.param,
         ),
@@ -4146,6 +4600,8 @@ def _public_contract_error_message(kind: str) -> str:
         return "Responses stream produced unsupported output items"
     if kind == "upstream_stream_truncated":
         return "Responses stream ended before a terminal event"
+    if kind == "stream_incomplete":
+        return "Upstream stream ended before response.completed"
     return "Responses stream violated the public contract"
 
 

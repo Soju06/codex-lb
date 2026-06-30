@@ -1,4 +1,4 @@
-import { act, fireEvent, screen } from "@testing-library/react";
+import { act, fireEvent, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
@@ -60,6 +60,7 @@ const EMPTY_REPORT: ReportsResponse = {
   },
   daily: [],
   byModel: [],
+  byUseragent: [],
   byAccount: [],
 };
 
@@ -134,6 +135,7 @@ describe("ReportsPage", () => {
         startDate: expect.any(String),
         endDate: expect.any(String),
         model: "",
+        useragent: "",
       }),
       "America/Los_Angeles",
     );
@@ -307,10 +309,16 @@ describe("ReportsPage", () => {
         data: {
           ...EMPTY_REPORT,
           byModel: filters.model
-            ? [{ model: "gpt-5.1", costUsd: 1, percentage: 100 }]
+            ? [{ model: "gpt-5.1", costUsd: 1, requests: 1, percentage: 100 }]
+              : [
+                  { model: "gpt-5.1", costUsd: 1, requests: 1, percentage: 50 },
+                  { model: "gpt-5.2", costUsd: 1, requests: 1, percentage: 50 },
+                ],
+          byUseragent: filters.model
+            ? [{ useragent: "CLI", costUsd: 1, requests: 1, percentage: 100 }]
             : [
-                { model: "gpt-5.1", costUsd: 1, percentage: 50 },
-                { model: "gpt-5.2", costUsd: 1, percentage: 50 },
+                { useragent: "CLI", costUsd: 1, requests: 1, percentage: 50 },
+                { useragent: "SDK", costUsd: 1, requests: 1, percentage: 50 },
               ],
         },
         isLoading: false,
@@ -319,10 +327,43 @@ describe("ReportsPage", () => {
 
     renderWithProviders(<ReportsPage initialFilters={{ model: "gpt-5.1" }} />);
 
-    await user.click(screen.getByRole("button", { name: /gpt-5.1/i }));
+    await user.click(
+      screen.getByRole("button", { name: /gpt-5.1/i, expanded: false }),
+    );
 
     expect(
       await screen.findByRole("menuitemcheckbox", { name: /gpt-5.2/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps user-agent options from the relaxed reports catalog", async () => {
+    const user = userEvent.setup();
+    useReportsMock.mockImplementation((filters) =>
+      asUseReportsResult({
+        data: {
+          ...EMPTY_REPORT,
+          byModel: [
+            { model: "gpt-5.1", costUsd: 1, requests: 1, percentage: 100 },
+          ],
+          byUseragent: filters.useragent
+            ? [{ useragent: "CLI", costUsd: 1, requests: 1, percentage: 100 }]
+            : [
+                { useragent: "CLI", costUsd: 1, requests: 1, percentage: 50 },
+                { useragent: "SDK", costUsd: 1, requests: 1, percentage: 50 },
+              ],
+        },
+        isLoading: false,
+      }),
+    );
+
+    renderWithProviders(<ReportsPage initialFilters={{ useragent: "CLI" }} />);
+
+    await user.click(
+      screen.getByRole("button", { name: /^CLI$/i, expanded: false }),
+    );
+
+    expect(
+      await screen.findByRole("menuitemcheckbox", { name: /^SDK$/i }),
     ).toBeInTheDocument();
   });
 
@@ -399,13 +440,18 @@ describe("ReportsPage", () => {
     expect(screen.getByRole("button", { name: /retry/i })).toBeInTheDocument();
   });
 
-  it("shows model option load failures instead of hiding empty selector silently", async () => {
+  it("shows one shared catalog failure for model and user-agent options", async () => {
     useReportsMock.mockImplementation((filters) =>
-      filters.model
+      filters.model || filters.useragent
         ? asUseReportsResult({
             data: {
               ...EMPTY_REPORT,
-              byModel: [{ model: "gpt-5.1", costUsd: 1, percentage: 100 }],
+              byModel: [
+                { model: "gpt-5.1", costUsd: 1, requests: 1, percentage: 100 },
+              ],
+              byUseragent: [
+                { useragent: "CLI", costUsd: 1, requests: 1, percentage: 100 },
+              ],
             },
             isLoading: false,
             isError: false,
@@ -414,22 +460,97 @@ describe("ReportsPage", () => {
         : asUseReportsResult({
             isLoading: false,
             isError: true,
-            error: new Error("model catalog endpoint unavailable"),
+            error: new Error("shared catalog endpoint unavailable"),
             refetch: vi.fn(),
             data: undefined,
           }),
     );
 
-    renderWithProviders(<ReportsPage initialFilters={{ model: "gpt-5.1" }} />);
+    renderWithProviders(
+      <ReportsPage initialFilters={{ model: "gpt-5.1", useragent: "CLI" }} />,
+    );
 
     expect(
       await screen.findByText(
-        /Failed to load model options: model catalog endpoint unavailable/i,
+        /Failed to load model and user-agent options: shared catalog endpoint unavailable/i,
       ),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: /gpt-5.1/i }),
+      screen.getByRole("button", { name: /gpt-5.1/i, expanded: false }),
     ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /^CLI$/i, expanded: false }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/Failed to load model options:/i),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/Failed to load user-agent options:/i),
+    ).not.toBeInTheDocument();
+  });
+
+  it("renders an independent user-agent distribution card below the model card", async () => {
+    useReportsMock.mockImplementation(() =>
+      asUseReportsResult({
+        data: {
+          ...EMPTY_REPORT,
+          byModel: [{ model: "gpt-5.1", costUsd: 12, requests: 3, percentage: 100 }],
+          byUseragent: [
+            { useragent: "CLI", costUsd: 10, requests: 2, percentage: 100 },
+          ],
+        },
+        isLoading: false,
+        isError: false,
+        refetch: vi.fn(),
+      }),
+    );
+
+    renderWithProviders(<ReportsPage />);
+
+    const modelCard = await screen.findByText("Distribution by Model");
+    const useragentCard = await screen.findByText("Distribution by UserAgent");
+
+    expect(modelCard.compareDocumentPosition(useragentCard)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+  });
+
+  it("keeps the model and user-agent metric toggles independent", async () => {
+    const user = userEvent.setup();
+
+    useReportsMock.mockImplementation(() =>
+      asUseReportsResult({
+        data: {
+          ...EMPTY_REPORT,
+          byModel: [
+            { model: "gpt-5.1", costUsd: 12, requests: 3, percentage: 100 },
+          ],
+          byUseragent: [
+            { useragent: "CLI", costUsd: 10, requests: 2, percentage: 100 },
+          ],
+        },
+        isLoading: false,
+        isError: false,
+        refetch: vi.fn(),
+      }),
+    );
+
+    renderWithProviders(<ReportsPage />);
+
+    const modelCard = (await screen.findByText("Distribution by Model")).closest("div.rounded-xl.border.bg-card.p-5");
+    const useragentCard = (await screen.findByText("Distribution by UserAgent")).closest("div.rounded-xl.border.bg-card.p-5");
+
+    expect(modelCard).not.toBeNull();
+    expect(useragentCard).not.toBeNull();
+
+    await user.click(within(useragentCard as HTMLElement).getByRole("button", { name: /^req$/i }));
+
+    expect(within(modelCard as HTMLElement).getByRole("button", { name: /^cost$/i })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(within(useragentCard as HTMLElement).getByRole("button", { name: /^req$/i })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
   });
 
   it("shows account option load failures instead of hiding empty selector silently", async () => {
@@ -453,7 +574,9 @@ describe("ReportsPage", () => {
       ),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: /accounts/i }),
+      screen
+        .getAllByRole("button", { name: /accounts/i })
+        .find((button) => button.getAttribute("aria-haspopup") === "menu"),
     ).toBeInTheDocument();
   });
 });

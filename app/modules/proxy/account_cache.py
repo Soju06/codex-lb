@@ -67,7 +67,24 @@ class AccountSelectionCache:
 
 
 _account_selection_cache = AccountSelectionCache()
+_routing_unavailable_account_ids: set[str] = set()
 
 
 def get_account_selection_cache() -> AccountSelectionCache:
     return _account_selection_cache
+
+
+def mark_account_routing_unavailable(account_id: str) -> None:
+    _routing_unavailable_account_ids.add(account_id)
+
+
+def clear_account_routing_unavailable(account_id: str) -> None:
+    _routing_unavailable_account_ids.discard(account_id)
+
+
+def clear_all_account_routing_unavailable() -> None:
+    _routing_unavailable_account_ids.clear()
+
+
+def is_account_routing_unavailable(account_id: str) -> bool:
+    return account_id in _routing_unavailable_account_ids

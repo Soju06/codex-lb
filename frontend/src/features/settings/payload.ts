@@ -10,6 +10,7 @@ export function buildSettingsUpdateRequest(
   const payload: SettingsUpdateRequest = {
     stickyThreadsEnabled: settings.stickyThreadsEnabled,
     upstreamStreamTransport: settings.upstreamStreamTransport,
+    httpDownstreamTransportPolicy: settings.httpDownstreamTransportPolicy,
     preferEarlierResetAccounts: settings.preferEarlierResetAccounts,
     preferEarlierResetWindow: settings.preferEarlierResetWindow,
     routingStrategy: settings.routingStrategy,
@@ -33,8 +34,10 @@ export function buildSettingsUpdateRequest(
     limitWarmupCooldownSeconds: settings.limitWarmupCooldownSeconds,
     limitWarmupExhaustedThresholdPercent: settings.limitWarmupExhaustedThresholdPercent,
     limitWarmupMinAvailablePercent: settings.limitWarmupMinAvailablePercent,
+    limitWarmupStaggeredIdleEnabled: settings.limitWarmupStaggeredIdleEnabled,
     weeklyPaceWorkingDays: settings.weeklyPaceWorkingDays,
     guestAccessEnabled: settings.guestAccessEnabled,
+    hideUpstreamQuotaFromApiKeys: settings.hideUpstreamQuotaFromApiKeys,
     ...patch,
   };
   if (

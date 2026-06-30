@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 
-from sqlalchemy import Integer, cast, delete, func, select, true, update
+from sqlalchemy import BigInteger, Integer, cast, delete, func, select, true, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only, selectinload
 
@@ -256,6 +256,47 @@ class ApiKeysRepository:
             total_cost_usd=round(float(row.total_cost_usd or 0.0), 6),
         )
 
+    async def get_limit_usage_value(
+        self,
+        key_id: str,
+        *,
+        limit_type: LimitType,
+        since: datetime,
+        until: datetime,
+        model_filter: str | None,
+    ) -> int:
+        if limit_type == LimitType.CREDITS:
+            return 0
+
+        if limit_type == LimitType.TOTAL_TOKENS:
+            value_expr = func.coalesce(RequestLog.input_tokens, 0) + func.coalesce(
+                RequestLog.output_tokens,
+                RequestLog.reasoning_tokens,
+                0,
+            )
+        elif limit_type == LimitType.INPUT_TOKENS:
+            value_expr = func.coalesce(RequestLog.input_tokens, 0)
+        elif limit_type == LimitType.OUTPUT_TOKENS:
+            value_expr = func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)
+        elif limit_type == LimitType.COST_USD:
+            value_expr = cast(func.floor(func.coalesce(RequestLog.cost_usd, 0.0) * 1_000_000), BigInteger)
+        else:
+            return 0
+
+        stmt = select(func.coalesce(func.sum(value_expr), 0)).where(
+            RequestLog.api_key_id == key_id,
+            RequestLog.status == "success",
+            self._exclude_warmup_clause(),
+            RequestLog.requested_at >= since,
+            RequestLog.requested_at < until,
+        )
+        if model_filter is not None:
+            stmt = stmt.where(RequestLog.model == model_filter)
+
+        result = await self._session.execute(stmt)
+        value = result.scalar_one()
+        return int(value or 0)
+
     async def update(
         self,
         key_id: str,
@@ -267,6 +308,8 @@ class ApiKeysRepository:
         enforced_reasoning_effort: str | None | _Unset = _UNSET,
         enforced_service_tier: str | None | _Unset = _UNSET,
         traffic_class: str | _Unset = _UNSET,
+        transport_policy_override: str | None | _Unset = _UNSET,
+        usage_sections: str | _Unset = _UNSET,
         account_assignment_scope_enabled: bool | _Unset = _UNSET,
         expires_at: datetime | None | _Unset = _UNSET,
         is_active: bool | _Unset = _UNSET,
@@ -298,6 +341,12 @@ class ApiKeysRepository:
         if traffic_class is not _UNSET:
             assert isinstance(traffic_class, str)
             row.traffic_class = traffic_class
+        if transport_policy_override is not _UNSET:
+            assert transport_policy_override is None or isinstance(transport_policy_override, str)
+            row.transport_policy_override = transport_policy_override
+        if usage_sections is not _UNSET:
+            assert isinstance(usage_sections, str)
+            row.usage_sections = usage_sections
         if account_assignment_scope_enabled is not _UNSET:
             assert isinstance(account_assignment_scope_enabled, bool)
             row.account_assignment_scope_enabled = account_assignment_scope_enabled

@@ -62,6 +62,12 @@ if PROMETHEUS_AVAILABLE:
         ["account_id", "status"],
         registry=REGISTRY,
     )
+    upstream_transport_decisions_total = Counter(
+        "codex_lb_upstream_transport_decisions_total",
+        "Total upstream transport decisions for streaming Responses requests",
+        ["downstream_transport", "upstream_transport", "policy", "sticky", "status"],
+        registry=REGISTRY,
+    )
     upstream_request_duration_seconds = Histogram(
         "codex_lb_upstream_request_duration_seconds",
         "Upstream request duration",
@@ -229,6 +235,7 @@ else:
     requests_total: CounterLike | None = None
     request_duration_seconds: HistogramLike | None = None
     upstream_requests_total: CounterLike | None = None
+    upstream_transport_decisions_total: CounterLike | None = None
     upstream_request_duration_seconds: HistogramLike | None = None
     active_connections: GaugeLike | None = None
     rate_limit_hits_total: CounterLike | None = None
@@ -295,4 +302,5 @@ __all__ = [
     "requests_total",
     "upstream_request_duration_seconds",
     "upstream_requests_total",
+    "upstream_transport_decisions_total",
 ]

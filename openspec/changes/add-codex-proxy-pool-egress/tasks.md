@@ -22,4 +22,6 @@
 - [x] Add admin/dashboard pool and account-binding controls.
 - [x] Add route coverage tests for migrated compact/thread/goal/Codex control surfaces.
 - [x] Add route coverage tests for Responses HTTP/SSE, Responses websocket, files, transcription, model, usage, and logging surfaces.
+- [x] Add account-owned Codex installation id persistence and bridge/WebSocket metadata spoofing regressions.
+- [x] Add import-time direct-egress guard for auth.json accounts when proxy routing is required.
 - [x] Run final cleanup/review gate before completing ultragoal.

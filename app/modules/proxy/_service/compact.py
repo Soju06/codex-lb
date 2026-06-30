@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import sys
 import time
@@ -60,6 +61,7 @@ _CompactResponses = Callable[
 class _CompactServiceProtocol(Protocol):
     _encryptor: Any
     _load_balancer: Any
+    _repo_factory: Any
 
     def _get_work_admission(self) -> WorkAdmissionController: ...
 
@@ -165,8 +167,51 @@ def _service_pop_compact_timeout_overrides(token: object) -> None:
     pop_compact_timeout_overrides(cast(Any, token))
 
 
+def _request_kind_from_headers(headers: Mapping[str, str]) -> str:
+    raw_metadata = headers.get("x-codex-turn-metadata") or headers.get("X-Codex-Turn-Metadata")
+    if not raw_metadata:
+        return "normal"
+    try:
+        metadata = json.loads(raw_metadata)
+    except json.JSONDecodeError:
+        return "normal"
+    if not isinstance(metadata, dict):
+        return "normal"
+    raw_request_kind = metadata.get("request_kind")
+    if not isinstance(raw_request_kind, str):
+        return "normal"
+    request_kind = raw_request_kind.strip()
+    if request_kind == "compaction":
+        return request_kind
+    return "normal"
+
+
 def _remaining_budget_seconds(deadline: float) -> float:
     return cast(Callable[[float], float], _service_global("_remaining_budget_seconds"))(deadline)
+
+
+def _compact_upstream_call_budget_reserve_seconds(remaining_budget: float) -> float:
+    if remaining_budget <= 0:
+        return 0.0
+    return min(30.0, max(1.0, remaining_budget * 0.2), remaining_budget * 0.5)
+
+
+def _compact_freshness_budget_seconds(remaining_budget: float) -> float:
+    reserve = _compact_upstream_call_budget_reserve_seconds(remaining_budget)
+    return min(20.0, max(0.0, remaining_budget - reserve))
+
+
+def _compact_upstream_budget_seconds(
+    remaining_budget: float,
+    configured_timeout_seconds: float | None = None,
+) -> float:
+    if remaining_budget <= 0:
+        return 0.0
+    reserve = _compact_upstream_call_budget_reserve_seconds(remaining_budget)
+    available = max(0.0, remaining_budget - reserve)
+    if configured_timeout_seconds is not None:
+        return min(configured_timeout_seconds, available)
+    return available
 
 
 def _raise_proxy_budget_exhausted() -> NoReturn:
@@ -378,11 +423,13 @@ class _CompactMixin:
         openai_cache_affinity: bool = False,
         api_key: ApiKeyData | None = None,
         api_key_reservation: ApiKeyUsageReservationData | None = None,
+        client_ip: str | None = None,
     ) -> CompactResponsePayload:
         proxy = cast(_CompactServiceProtocol, self)
         _maybe_log_proxy_request_payload("compact", payload, headers)
         filtered = filter_inbound_headers(headers)
         useragent, useragent_group = _request_log_useragent_fields(headers)
+        request_kind = _request_kind_from_headers(headers)
         request_id = get_request_id() or ensure_request_id(None)
         start = _service_time().monotonic()
         base_settings = _service_get_settings()
@@ -491,16 +538,8 @@ class _CompactMixin:
                         target.id,
                     )
                     _raise_proxy_budget_exhausted()
-                if base_settings.upstream_compact_timeout_seconds is None:
-                    timeout_tokens = _service_push_compact_timeout_overrides(
-                        connect_timeout_seconds=remaining_budget,
-                    )
-                else:
-                    timeout_tokens = _service_push_compact_timeout_overrides(
-                        connect_timeout_seconds=remaining_budget,
-                        total_timeout_seconds=remaining_budget,
-                    )
                 create_lease: AdmissionLease | None = None
+                timeout_tokens: Any | None = None
                 try:
                     if account_response_create_lease is None:
                         account_response_create_lease = await proxy._acquire_account_response_create_lease_or_overload(
@@ -510,24 +549,111 @@ class _CompactMixin:
                         )
                     create_lease = await proxy._get_work_admission().acquire_response_create(compact=True)
                     route = await proxy._resolve_upstream_route_for_account(target, operation="compact")
+                    remaining_budget = _remaining_budget_seconds(deadline)
+                    if remaining_budget <= 0:
+                        logger.warning(
+                            "Compact request budget exhausted after admission waits request_id=%s account_id=%s",
+                            request_id,
+                            target.id,
+                        )
+                        _raise_proxy_budget_exhausted()
+                    upstream_budget = _compact_upstream_budget_seconds(
+                        remaining_budget,
+                        getattr(settings, "upstream_compact_timeout_seconds", None),
+                    )
+                    if upstream_budget <= 0:
+                        logger.warning(
+                            "Compact request budget exhausted before upstream call cap request_id=%s account_id=%s",
+                            request_id,
+                            target.id,
+                        )
+                        _raise_proxy_budget_exhausted()
+                    timeout_tokens = _service_push_compact_timeout_overrides(
+                        connect_timeout_seconds=upstream_budget,
+                        total_timeout_seconds=upstream_budget,
+                    )
                     if route is not None:
                         route_mode = route.mode
                         route_pool_id = route.pool_id
                         route_endpoint_id = route.endpoint_id
                     route_trace = UpstreamProxyRouteTrace()
+                    upstream_started_at = time.monotonic()
                     try:
-                        return await _call_with_supported_optional_kwargs(
-                            _service_core_compact_responses(),
-                            payload,
-                            filtered,
-                            access_token,
-                            account_id,
-                            optional_kwargs={
-                                "route": route,
-                                "allow_direct_egress": route is None,
-                                "route_trace": route_trace,
-                            },
+                        logger.info(
+                            "Compact upstream call start request_id=%s account_id=%s timeout_seconds=%.2f "
+                            "remaining_budget=%.2f",
+                            request_id,
+                            target.id,
+                            upstream_budget,
+                            remaining_budget,
                         )
+                        response = await asyncio.wait_for(
+                            _call_with_supported_optional_kwargs(
+                                _service_core_compact_responses(),
+                                payload,
+                                filtered,
+                                access_token,
+                                account_id,
+                                optional_kwargs={
+                                    "route": route,
+                                    "allow_direct_egress": route is None,
+                                    "route_trace": route_trace,
+                                    "chatgpt_account_id": account_id,
+                                },
+                            ),
+                            timeout=upstream_budget,
+                        )
+                        logger.info(
+                            "Compact upstream call complete request_id=%s account_id=%s elapsed_seconds=%.2f "
+                            "timeout_seconds=%.2f",
+                            request_id,
+                            target.id,
+                            time.monotonic() - upstream_started_at,
+                            upstream_budget,
+                        )
+                        return response
+                    except ProxyResponseError as exc:
+                        error = _parse_openai_error(exc.payload)
+                        code = _normalize_error_code(
+                            error.code if error else None,
+                            error.type if error else None,
+                        )
+                        error_message = error.message if error and error.message is not None else ""
+                        if (
+                            code == "upstream_unavailable"
+                            and exc.retryable_same_contract
+                            and (
+                                exc.failure_exception_type in {"TimeoutError", "ServerTimeoutError"}
+                                or "timed out" in error_message.lower()
+                                or "timeout" in error_message.lower()
+                            )
+                        ):
+                            logger.warning(
+                                "Compact inner upstream timeout surfaced request_id=%s account_id=%s "
+                                "elapsed_seconds=%.2f timeout_seconds=%.2f",
+                                request_id,
+                                target.id,
+                                time.monotonic() - upstream_started_at,
+                                upstream_budget,
+                            )
+                            raise ProxyResponseError(
+                                502,
+                                openai_error("upstream_request_timeout", "Compact upstream call timed out"),
+                            ) from exc
+                        raise
+                    except asyncio.TimeoutError as exc:
+                        logger.warning(
+                            "Compact upstream call timed out request_id=%s account_id=%s elapsed_seconds=%.2f "
+                            "timeout_seconds=%.2f",
+                            request_id,
+                            target.id,
+                            time.monotonic() - upstream_started_at,
+                            upstream_budget,
+                        )
+                        raise ProxyResponseError(
+                            502,
+                            openai_error("upstream_request_timeout", "Compact upstream call timed out"),
+                        ) from exc
                     finally:
                         if route_trace.mode is not None:
                             route_mode = route_trace.mode
@@ -538,7 +664,8 @@ class _CompactMixin:
                     if create_lease is not None:
                         create_lease.release()
                     await proxy._load_balancer.release_account_lease(account_response_create_lease)
-                    _service_pop_compact_timeout_overrides(timeout_tokens)
+                    if timeout_tokens is not None:
+                        _service_pop_compact_timeout_overrides(timeout_tokens)
 
             last_exc: ProxyResponseError | None = None
             excluded_account_ids: set[str] = set()
@@ -625,8 +752,31 @@ class _CompactMixin:
                     logger.warning("Compact request budget exhausted before freshness check request_id=%s", request_id)
                     await proxy._load_balancer.release_account_lease(selected_account_response_create_lease)
                     _raise_proxy_budget_exhausted()
+                freshness_budget = _compact_freshness_budget_seconds(remaining_budget)
+                if freshness_budget <= 0:
+                    logger.warning(
+                        "Compact request budget exhausted before freshness check reserve request_id=%s "
+                        "remaining_budget=%.2f",
+                        request_id,
+                        remaining_budget,
+                    )
+                    await proxy._load_balancer.release_account_lease(selected_account_response_create_lease)
+                    _raise_proxy_budget_exhausted()
                 try:
-                    account = await proxy._ensure_fresh_with_budget(account, timeout_seconds=remaining_budget)
+                    logger.info(
+                        "Compact freshness start request_id=%s account_id=%s timeout_seconds=%.2f "
+                        "remaining_budget=%.2f",
+                        request_id,
+                        account.id,
+                        freshness_budget,
+                        remaining_budget,
+                    )
+                    account = await proxy._ensure_fresh_with_budget(account, timeout_seconds=freshness_budget)
+                    logger.info(
+                        "Compact freshness complete request_id=%s account_id=%s",
+                        request_id,
+                        account.id,
+                    )
                 except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
                     await proxy._load_balancer.release_account_lease(selected_account_response_create_lease)
                     selected_account_response_create_lease = None
@@ -653,6 +803,15 @@ class _CompactMixin:
                     await proxy._load_balancer.release_account_lease(selected_account_response_create_lease)
                     selected_account_response_create_lease = None
                     raise
+                remaining_budget = _remaining_budget_seconds(deadline)
+                if remaining_budget <= 0:
+                    logger.warning(
+                        "Compact request budget exhausted after freshness check request_id=%s account_id=%s",
+                        request_id,
+                        account.id,
+                    )
+                    await proxy._load_balancer.release_account_lease(selected_account_response_create_lease)
+                    _raise_proxy_budget_exhausted()
                 request_service_tier = _service_tier_from_compact_payload(payload)
 
                 safe_retry_budget = _compact_same_contract_retry_budget()
@@ -720,7 +879,7 @@ class _CompactMixin:
                                 account = await proxy._ensure_fresh_with_budget(
                                     account,
                                     force=True,
-                                    timeout_seconds=remaining_budget,
+                                    timeout_seconds=_compact_freshness_budget_seconds(remaining_budget),
                                 )
                             except RefreshError as refresh_exc:
                                 if refresh_exc.is_permanent:
@@ -841,6 +1000,46 @@ class _CompactMixin:
                                 request_service_tier=request_service_tier,
                             )
                             raise
+                        if code == "upstream_request_timeout":
+                            await proxy._settle_compact_api_key_usage(
+                                api_key=api_key,
+                                api_key_reservation=api_key_reservation,
+                                response=None,
+                                request_service_tier=request_service_tier,
+                            )
+                            classified = await proxy._handle_stream_error(
+                                account,
+                                _upstream_error_from_openai(error),
+                                code,
+                                http_status=exc.status_code,
+                            )
+                            if affinity.key is not None and affinity.kind is not None:
+                                try:
+                                    async with proxy._repo_factory() as repos:
+                                        await repos.sticky_sessions.delete(affinity.key, kind=affinity.kind)
+                                    logger.info(
+                                        "Compact sticky mapping cleared after upstream timeout request_id=%s "
+                                        "sticky_kind=%s",
+                                        request_id,
+                                        affinity.kind.value,
+                                    )
+                                except Exception:
+                                    logger.warning(
+                                        "Failed to clear compact sticky mapping after upstream timeout "
+                                        "request_id=%s sticky_kind=%s",
+                                        request_id,
+                                        affinity.kind.value,
+                                        exc_info=True,
+                                    )
+                            logger.info(
+                                "Failover decision request_id=%s transport=compact account_id=%s "
+                                "attempt=%d failure_class=%s action=surface",
+                                request_id,
+                                account.id,
+                                _account_attempt + 1,
+                                classified["failure_class"],
+                            )
+                            raise
                         classified = await proxy._handle_stream_error(
                             account,
                             _upstream_error_from_openai(error),
@@ -952,6 +1151,8 @@ class _CompactMixin:
                 upstream_proxy_fail_closed_reason=route_fail_closed_reason,
                 useragent=useragent,
                 useragent_group=useragent_group,
+                client_ip=client_ip,
+                request_kind=request_kind,
             )
             _maybe_log_proxy_service_tier_trace(
                 "compact",

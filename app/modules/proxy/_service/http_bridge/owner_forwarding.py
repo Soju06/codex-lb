@@ -42,9 +42,6 @@ from app.core.openai.requests import (
 )
 from app.core.utils.request_id import get_request_id
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
-from app.db.models import (
-    AccountStatus,
-)
 from app.modules.api_keys.service import (
     ApiKeyData,
     ApiKeyUsageReservationData,
@@ -60,7 +57,9 @@ from app.modules.proxy._service.compact import (
 )
 from app.modules.proxy._service.http_bridge.helpers import (
     _durable_bridge_lookup_active_owner,
+    _http_bridge_endpoint_matches_current_instance,
     _http_bridge_previous_response_alias_key,
+    _http_bridge_session_account_active,
     _http_bridge_session_allows_api_key,
     _http_bridge_session_retiring_with_visible_requests,
     _http_bridge_session_reusable_for_request,
@@ -183,7 +182,7 @@ class _HTTPBridgeOwnerForwardingMixin:
                     candidate_keys.append(alias_key)
             for candidate_key in candidate_keys:
                 session = self._http_bridge_sessions.get(candidate_key)
-                if session is None or session.closed or session.account.status != AccountStatus.ACTIVE:
+                if session is None or session.closed or not _http_bridge_session_account_active(session):
                     continue
                 if not _http_bridge_session_allows_api_key(session, api_key):
                     continue
@@ -220,7 +219,7 @@ class _HTTPBridgeOwnerForwardingMixin:
                 candidate_keys.append(previous_key)
             for candidate_key in candidate_keys:
                 session = self._http_bridge_sessions.get(candidate_key)
-                if session is None or session.closed or session.account.status != AccountStatus.ACTIVE:
+                if session is None or session.closed or not _http_bridge_session_account_active(session):
                     continue
                 if not _http_bridge_session_allows_api_key(session, api_key):
                     continue
@@ -264,7 +263,9 @@ class _HTTPBridgeOwnerForwardingMixin:
         except Exception:
             logger.debug("Failed to resolve HTTP bridge owner endpoint during anchor injection decision", exc_info=True)
             return False
-        return owner_endpoint is not None
+        if owner_endpoint is None:
+            return False
+        return not _http_bridge_endpoint_matches_current_instance(owner_endpoint, _service_get_settings())
 
     async def _forward_http_bridge_request_to_owner(
         self: Any,
@@ -277,6 +278,7 @@ class _HTTPBridgeOwnerForwardingMixin:
         downstream_turn_state: str | None,
         request_started_at: float,
         proxy_api_authorization: str | None,
+        client_ip: str | None = None,
     ) -> AsyncIterator[str]:
         current_instance, _ = _normalized_http_bridge_instance_ring(_service_get_settings())
         forwarded_turn_state = _header_value_case_insensitive(headers, "x-codex-turn-state") or downstream_turn_state
@@ -288,6 +290,7 @@ class _HTTPBridgeOwnerForwardingMixin:
             downstream_turn_state=forwarded_turn_state,
             original_affinity_kind=owner_forward.key.affinity_kind,
             original_affinity_key=owner_forward.key.affinity_key,
+            client_ip=client_ip,
         )
         forward_headers = _headers_with_authorization(headers, proxy_api_authorization)
         start = _service_time().monotonic()

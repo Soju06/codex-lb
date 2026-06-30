@@ -6,7 +6,27 @@ import { SessionSettings } from "@/features/settings/components/session-settings
 import { buildSettingsUpdateRequest } from "@/features/settings/payload";
 import { createDashboardSettings } from "@/test/mocks/factories";
 
-const baseSettings = createDashboardSettings();
+const baseSettings = createDashboardSettings({
+  stickyThreadsEnabled: true,
+  upstreamStreamTransport: "default" as const,
+  upstreamProxyRoutingEnabled: false,
+  upstreamProxyDefaultPoolId: null,
+  preferEarlierResetAccounts: false,
+  preferEarlierResetWindow: "secondary" as const,
+  routingStrategy: "usage_weighted" as const,
+  relativeAvailabilityPower: 2,
+  relativeAvailabilityTopK: 5,
+  singleAccountId: null,
+  weeklyPaceWorkingDays: "0,1,2,3,4,5,6",
+  openaiCacheAffinityMaxAgeSeconds: 300,
+  dashboardSessionTtlSeconds: 43200,
+  warmupModel: "gpt-5.4-mini",
+  importWithoutOverwrite: false,
+  totpRequiredOnLogin: false,
+  totpConfigured: true,
+  apiKeyAuthEnabled: true,
+  guestAccessEnabled: false,
+});
 const baseUpdatePayload = buildSettingsUpdateRequest(baseSettings, {});
 
 describe("SessionSettings", () => {
@@ -29,7 +49,6 @@ describe("SessionSettings", () => {
     expect(onSave).toHaveBeenCalledWith({
       ...baseUpdatePayload,
       dashboardSessionTtlSeconds: 86400,
-      guestAccessEnabled: false,
     });
   });
 
@@ -81,7 +100,6 @@ describe("SessionSettings", () => {
     expect(onSave).toHaveBeenCalledWith({
       ...baseUpdatePayload,
       dashboardSessionTtlSeconds: 31536000,
-      guestAccessEnabled: false,
     });
   });
 });

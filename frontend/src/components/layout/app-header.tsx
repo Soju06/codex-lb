@@ -1,19 +1,23 @@
+import { useQuery } from "@tanstack/react-query";
 import { Eye, EyeOff, LogIn, LogOut, Menu } from "lucide-react";
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 import { NavLink } from "react-router-dom";
 
 import { CodexLogo } from "@/components/brand/codex-logo";
+import { LanguageToggle, LanguageToggleMobile } from "@/components/layout/language-toggle";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
+import { listAccounts } from "@/features/accounts/api";
 import { usePrivacyStore } from "@/hooks/use-privacy";
 import { cn } from "@/lib/utils";
 
 const NAV_ITEMS = [
-  { to: "/dashboard", label: "Dashboard" },
-  { to: "/reports", label: "Reports" },
-  { to: "/accounts", label: "Accounts" },
-  { to: "/apis", label: "APIs" },
-  { to: "/settings", label: "Settings" },
+  { to: "/dashboard", labelKey: "nav.dashboard" },
+  { to: "/reports", labelKey: "nav.reports" },
+  { to: "/accounts", labelKey: "nav.accounts" },
+  { to: "/apis", labelKey: "nav.apis" },
+  { to: "/settings", labelKey: "nav.settings" },
 ] as const;
 
 export type AppHeaderProps = {
@@ -31,10 +35,29 @@ export function AppHeader({
   showLogout = true,
   className,
 }: AppHeaderProps) {
+  const { t } = useTranslation();
   const [mobileOpen, setMobileOpen] = useState(false);
   const blurred = usePrivacyStore((s) => s.blurred);
   const togglePrivacy = usePrivacyStore((s) => s.toggle);
   const PrivacyIcon = blurred ? EyeOff : Eye;
+  const { data: accounts = [] } = useQuery({
+    queryKey: ["accounts", "list"],
+    queryFn: listAccounts,
+    select: (data) => data.accounts,
+    refetchInterval: 30_000,
+    refetchIntervalInBackground: false,
+    staleTime: 30_000,
+  });
+  const totalAvailableResetCredits = accounts.reduce(
+    (total, account) => total + Math.max(0, account.availableResetCredits ?? 0),
+    0,
+  );
+  const accountsResetBadge = totalAvailableResetCredits > 99
+    ? "99+"
+    : totalAvailableResetCredits > 0
+      ? String(totalAvailableResetCredits)
+      : null;
+  const privacyLabel = blurred ? t("nav.showEmails") : t("nav.hideEmails");
 
   return (
     <header
@@ -69,19 +92,27 @@ export function AppHeader({
                 )
               }
             >
-              {item.label}
+              <span className="relative inline-flex items-center">
+                {t(item.labelKey)}
+                {item.to === "/accounts" && accountsResetBadge ? (
+                  <span className="absolute -top-2 -right-4 z-10 grid h-4 min-w-[1rem] place-items-center rounded-full bg-primary px-1 text-[10px] font-medium text-primary-foreground">
+                    {accountsResetBadge}
+                  </span>
+                ) : null}
+              </span>
             </NavLink>
           ))}
         </nav>
 
         {/* Actions */}
         <div className="flex flex-1 items-center justify-end gap-1.5">
+          <LanguageToggle />
           <Button
             type="button"
             size="sm"
             variant="ghost"
             onClick={togglePrivacy}
-            aria-label={blurred ? "Show emails" : "Hide emails"}
+            aria-label={privacyLabel}
             className="press-scale hidden h-8 w-8 rounded-lg text-muted-foreground hover:text-foreground sm:inline-flex"
           >
             <PrivacyIcon className="h-3.5 w-3.5" aria-hidden="true" />
@@ -95,7 +126,7 @@ export function AppHeader({
               className="press-scale hidden h-8 gap-1.5 rounded-lg text-xs text-muted-foreground hover:text-foreground sm:inline-flex"
             >
               <LogOut className="h-3.5 w-3.5" aria-hidden="true" />
-              Logout
+              {t("common.logout")}
             </Button>
           )}
           {showAdminLogin && (
@@ -107,14 +138,14 @@ export function AppHeader({
               className="press-scale hidden h-8 gap-1.5 rounded-lg text-xs sm:inline-flex"
             >
               <LogIn className="h-3.5 w-3.5" aria-hidden="true" />
-              Admin
+              {t("nav.adminSignIn")}
             </Button>
           )}
 
           {/* Mobile menu */}
           <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
             <SheetTrigger asChild>
-              <Button type="button" size="icon" variant="ghost" aria-label="Open menu" className="h-8 w-8 rounded-lg sm:hidden">
+              <Button type="button" size="icon" variant="ghost" aria-label={t("nav.openMenu")} className="h-8 w-8 rounded-lg sm:hidden">
                 <Menu className="h-4 w-4" />
               </Button>
             </SheetTrigger>
@@ -133,13 +164,18 @@ export function AppHeader({
                     {({ isActive }) => (
                       <span
                         className={cn(
-                          "block w-full rounded-lg px-3 py-2 text-left text-sm font-medium transition-colors",
+                          "relative block w-full rounded-lg px-3 py-2 text-left text-sm font-medium transition-colors",
                           isActive
                             ? "bg-primary/10 text-primary"
                             : "text-muted-foreground hover:bg-muted hover:text-foreground",
                         )}
                       >
-                        {item.label}
+                        {t(item.labelKey)}
+                        {item.to === "/accounts" && accountsResetBadge ? (
+                          <span className="absolute right-2 top-1 z-10 grid h-5 min-w-[1.25rem] place-items-center rounded-full bg-primary px-1 text-[10px] font-medium text-primary-foreground">
+                            {accountsResetBadge}
+                          </span>
+                        ) : null}
                       </span>
                     )}
                   </NavLink>
@@ -151,8 +187,10 @@ export function AppHeader({
                   onClick={togglePrivacy}
                 >
                   <PrivacyIcon className="h-3.5 w-3.5" aria-hidden="true" />
-                  {blurred ? "Show Emails" : "Hide Emails"}
+                  {privacyLabel}
                 </button>
+                <div className="my-2 h-px bg-border" />
+                <LanguageToggleMobile />
                 {showLogout && (
                   <button
                     type="button"
@@ -163,7 +201,7 @@ export function AppHeader({
                     }}
                   >
                     <LogOut className="h-3.5 w-3.5" aria-hidden="true" />
-                    Logout
+                    {t("common.logout")}
                   </button>
                 )}
                 {showAdminLogin && (
@@ -176,7 +214,7 @@ export function AppHeader({
                     }}
                   >
                     <LogIn className="h-3.5 w-3.5" aria-hidden="true" />
-                    Admin Sign In
+                    {t("nav.adminSignIn")}
                   </button>
                 )}
               </nav>

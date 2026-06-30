@@ -8,6 +8,7 @@ import {
   getSettings,
   getUpstreamProxyAdmin,
   putAccountProxyBinding,
+  testUpstreamProxyEndpoint,
   updateSettings,
 } from "@/features/settings/api";
 import type { SettingsUpdateRequest } from "@/features/settings/schemas";
@@ -107,6 +108,20 @@ export function useUpstreamProxyAdmin() {
     },
   });
 
+  const testEndpointMutation = useMutation({
+    mutationFn: (endpointId: string) => testUpstreamProxyEndpoint(endpointId),
+    onSuccess: (result) => {
+      if (result.ok) {
+        toast.success("Proxy endpoint reachable");
+      } else {
+        toast.error(result.error || "Proxy endpoint test failed");
+      }
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Proxy endpoint test failed");
+    },
+  });
+
   const accountBindingMutation = useMutation({
     mutationFn: ({ accountId, payload }: { accountId: string; payload: AccountProxyBindingRequest }) =>
       putAccountProxyBinding(accountId, payload),
@@ -125,6 +140,7 @@ export function useUpstreamProxyAdmin() {
     createEndpointMutation,
     createPoolMutation,
     addPoolMemberMutation,
+    testEndpointMutation,
     accountBindingMutation,
   };
 }

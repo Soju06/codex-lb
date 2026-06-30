@@ -22,6 +22,7 @@ from app.db.models import (
     UsageHistory,
 )
 from app.db.session import SessionLocal
+from app.modules.accounts import repository as accounts_repository_module
 from app.modules.accounts.repository import (
     AccountIdentityConflictError,
     AccountsRepository,
@@ -550,6 +551,80 @@ async def test_accounts_upsert_merge_by_chatgpt_identity_picks_oldest_canonical(
 
 
 @pytest.mark.asyncio
+async def test_accounts_identity_duplicate_merge_clears_usage_cache_after_commit(db_setup, monkeypatch):
+    clear_transaction_states: list[bool] = []
+
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        canonical = _make_account_with_chatgpt_id("acc_cache_canonical", "cache@example.com", "chatgpt_cache")
+        canonical.created_at = utcnow() - timedelta(days=30)
+        await repo.upsert(canonical, merge_by_email=False)
+
+        duplicate = _make_account_with_chatgpt_id("acc_cache_duplicate", "cache@example.com", "chatgpt_cache")
+        duplicate.created_at = utcnow()
+        await repo.upsert(duplicate, merge_by_email=False)
+        session.add(
+            UsageHistory(
+                account_id="acc_cache_duplicate",
+                used_percent=77.0,
+                window="primary",
+                recorded_at=utcnow(),
+            )
+        )
+        await session.commit()
+
+        def record_cache_clear() -> None:
+            clear_transaction_states.append(session.in_transaction())
+
+        monkeypatch.setattr(accounts_repository_module, "_clear_bulk_history_since_sqlite_cache", record_cache_clear)
+
+        reauth = _make_account_with_chatgpt_id("acc_cache_canonical", "cache@example.com", "chatgpt_cache")
+        saved = await repo.upsert(reauth, merge_by_email=False, merge_by_chatgpt_identity=True)
+
+        assert saved.id == "acc_cache_canonical"
+        moved = (
+            await session.execute(select(UsageHistory).where(UsageHistory.account_id == "acc_cache_canonical"))
+        ).scalar_one()
+        assert moved.used_percent == 77.0
+
+    assert clear_transaction_states == [False]
+
+
+@pytest.mark.asyncio
+async def test_accounts_delete_clears_usage_cache_after_commit(db_setup, monkeypatch):
+    clear_transaction_states: list[bool] = []
+
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        await repo.upsert(_make_account("acc_delete_cache", "delete-cache@example.com"), merge_by_email=False)
+        session.add(
+            UsageHistory(
+                account_id="acc_delete_cache",
+                used_percent=55.0,
+                window="primary",
+                recorded_at=utcnow(),
+            )
+        )
+        await session.commit()
+
+        def record_cache_clear() -> None:
+            clear_transaction_states.append(session.in_transaction())
+
+        monkeypatch.setattr(accounts_repository_module, "_clear_bulk_history_since_sqlite_cache", record_cache_clear)
+
+        deleted = await repo.delete("acc_delete_cache")
+        remaining = (
+            (await session.execute(select(UsageHistory).where(UsageHistory.account_id == "acc_delete_cache")))
+            .scalars()
+            .all()
+        )
+
+    assert deleted is True
+    assert remaining == []
+    assert clear_transaction_states == [False]
+
+
+@pytest.mark.asyncio
 async def test_accounts_upsert_merge_by_chatgpt_identity_does_not_clear_workspace_on_workspace_less_reauth(db_setup):
     async with SessionLocal() as session:
         repo = AccountsRepository(session)
@@ -948,12 +1023,14 @@ async def test_request_logs_repository_persists_useragent_fields(db_setup):
             error_code=None,
             useragent="opencode/1.15.13 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14",
             useragent_group="opencode",
+            client_ip="203.0.113.7",
         )
 
         result = await session.execute(select(RequestLog).where(RequestLog.request_id == "req_useragent_full"))
         stored = result.scalar_one()
         assert stored.useragent == "opencode/1.15.13 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
         assert stored.useragent_group == "opencode"
+        assert stored.client_ip == "203.0.113.7"
 
 
 @pytest.mark.asyncio
@@ -972,12 +1049,14 @@ async def test_request_logs_repository_preserves_null_useragent_fields(db_setup)
             error_code=None,
             useragent="",
             useragent_group="",
+            client_ip="",
         )
 
         result = await session.execute(select(RequestLog).where(RequestLog.request_id == "req_useragent_null"))
         stored = result.scalar_one()
         assert stored.useragent is None
         assert stored.useragent_group is None
+        assert stored.client_ip is None
 
 
 @pytest.mark.asyncio
@@ -1000,6 +1079,7 @@ async def test_request_logs_repository_persists_null_useragent_fields_when_omitt
         stored = result.scalar_one()
         assert stored.useragent is None
         assert stored.useragent_group is None
+        assert stored.client_ip is None
 
 
 @pytest.mark.asyncio
@@ -1018,9 +1098,11 @@ async def test_request_logs_repository_normalizes_whitespace_only_useragent_fiel
             error_code=None,
             useragent=" \t\n ",
             useragent_group="   ",
+            client_ip="   ",
         )
 
         result = await session.execute(select(RequestLog).where(RequestLog.request_id == "req_useragent_whitespace"))
         stored = result.scalar_one()
         assert stored.useragent is None
         assert stored.useragent_group is None
+        assert stored.client_ip is None

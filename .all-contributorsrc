@@ -728,6 +728,16 @@
       ]
     },
     {
+      "login": "mercenarioZ",
+      "name": "mercenarioZ",
+      "avatar_url": "https://avatars.githubusercontent.com/u/122884010?v=4",
+      "profile": "https://github.com/mercenarioZ",
+      "contributions": [
+        "code",
+        "test"
+      ]
+    },
+    {
       "login": "plastictaste",
       "name": "plastictaste",
       "avatar_url": "https://avatars.githubusercontent.com/u/261646970?v=4",
@@ -736,6 +746,18 @@
         "code",
         "test",
         "doc"
+      ]
+    },
+    {
+      "login": "LuoYe17",
+      "name": "落叶",
+      "avatar_url": "https://avatars.githubusercontent.com/u/191728117?v=4",
+      "profile": "https://github.com/LuoYe17",
+      "contributions": [
+        "code",
+        "doc",
+        "test",
+        "translation"
       ]
     },
     {
@@ -762,6 +784,37 @@
       "name": "geoHeil",
       "avatar_url": "https://avatars.githubusercontent.com/u/1694964?v=4",
       "profile": "https://github.com/geoHeil",
+      "contributions": [
+        "code",
+        "test"
+      ]
+    },
+    {
+      "login": "ellentane",
+      "name": "Jonáš Sivek",
+      "avatar_url": "https://avatars.githubusercontent.com/u/70338266?v=4",
+      "profile": "https://github.com/ellentane",
+      "contributions": [
+        "code",
+        "test"
+      ]
+    },
+    {
+      "login": "rupebac",
+      "name": "Rubén Pérez Bachiller",
+      "avatar_url": "https://avatars.githubusercontent.com/u/452231?v=4",
+      "profile": "https://github.com/rupebac",
+      "contributions": [
+        "code",
+        "test",
+        "bug"
+      ]
+    },
+    {
+      "login": "WangErgouaaaa",
+      "name": "Guanwei Chen",
+      "avatar_url": "https://avatars.githubusercontent.com/u/117421439?v=4",
+      "profile": "https://github.com/WangErgouaaaa",
       "contributions": [
         "code",
         "test"

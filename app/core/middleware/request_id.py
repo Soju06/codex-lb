@@ -6,7 +6,7 @@ from uuid import uuid4
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from app.core.utils.request_id import reset_request_id, set_request_id
+from app.core.utils.request_id import clear_request_id, reset_request_id, set_request_id
 
 
 def add_request_id_middleware(app: FastAPI) -> None:
@@ -24,3 +24,4 @@ def add_request_id_middleware(app: FastAPI) -> None:
             return response
         finally:
             reset_request_id(token)
+            clear_request_id()

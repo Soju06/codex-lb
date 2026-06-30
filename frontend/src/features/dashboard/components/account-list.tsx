@@ -10,7 +10,13 @@ import { usePrivacyStore } from "@/hooks/use-privacy";
 import { cn } from "@/lib/utils";
 import { formatCompactAccountId } from "@/utils/account-identifiers";
 import { normalizeStatus, quotaBarColor, quotaBarTrack } from "@/utils/account-status";
-import { formatDateTimeInline, formatPercentNullable, formatQuotaResetLabel, formatSlug } from "@/utils/formatters";
+import {
+  formatDateTimeInline,
+  formatPercentNullable,
+  formatQuotaResetLabel,
+  formatSingleUnitRemaining,
+  formatSlug,
+} from "@/utils/formatters";
 
 const ACCOUNT_LIST_VISIBLE_ROWS = 8;
 const ACCOUNT_LIST_ROW_HEIGHT_REM = 4.5;
@@ -19,12 +25,14 @@ const ACCOUNT_LIST_COLUMNS = "minmax(13rem,1.3fr) 7.75rem 5rem minmax(14rem,1.2f
 type AccountListProps = {
   accounts: AccountSummary[];
   readOnly?: boolean;
+  sort?: AccountListSort;
+  onSortChange?: (sort: AccountListSort) => void;
   onAction?: (account: AccountSummary, action: AccountAction) => void;
 };
 
-type AccountListSortKey = "account" | "status" | "plan" | "quota" | "credits" | "warmup";
-type SortDirection = "asc" | "desc";
-type AccountListSort = {
+export type AccountListSortKey = "account" | "status" | "plan" | "quota" | "credits" | "warmup";
+export type SortDirection = "asc" | "desc";
+export type AccountListSort = {
   key: AccountListSortKey;
   direction: SortDirection;
 } | null;
@@ -37,6 +45,10 @@ const SORTABLE_HEADERS: Array<{ key: AccountListSortKey; label: string }> = [
   { key: "credits", label: "Credits" },
   { key: "warmup", label: "Warm-up" },
 ];
+
+function formatWarmupWindow(window: string): string {
+  return window === "primary" || window === "primary_idle" ? "5h" : "weekly";
+}
 
 function quotaLabel(label: string, percent: number | null, resetAt: string | null | undefined) {
   return {
@@ -238,9 +250,16 @@ function QuotaMeter({ percent }: { percent: number | null }) {
   );
 }
 
-export function AccountList({ accounts, readOnly = false, onAction }: AccountListProps) {
+export function AccountList({
+  accounts,
+  readOnly = false,
+  sort: controlledSort,
+  onSortChange,
+  onAction,
+}: AccountListProps) {
   const blurred = usePrivacyStore((s) => s.blurred);
-  const [sort, setSort] = useState<AccountListSort>(null);
+  const [uncontrolledSort, setUncontrolledSort] = useState<AccountListSort>(null);
+  const sort = controlledSort === undefined ? uncontrolledSort : controlledSort;
   const sortedAccounts = useMemo(() => {
     if (!sort) {
       return accounts;
@@ -252,12 +271,13 @@ export function AccountList({ accounts, readOnly = false, onAction }: AccountLis
   }, [accounts, sort]);
 
   const handleSort = (key: AccountListSortKey) => {
-    setSort((current) => {
-      if (current?.key !== key) {
-        return { key, direction: "asc" };
-      }
-      return { key, direction: current.direction === "asc" ? "desc" : "asc" };
-    });
+    const nextSort: AccountListSort = sort?.key === key
+      ? { key, direction: sort.direction === "asc" ? "desc" : "asc" }
+      : { key, direction: "asc" };
+    if (controlledSort === undefined) {
+      setUncontrolledSort(nextSort);
+    }
+    onSortChange?.(nextSort);
   };
 
   if (accounts.length === 0) {
@@ -304,8 +324,25 @@ export function AccountList({ accounts, readOnly = false, onAction }: AccountLis
           const compactId = formatCompactAccountId(account.accountId);
           const showAccountId = account.isEmailDuplicate === true;
           const warmupDetail = account.limitWarmup
-            ? `${formatSlug(account.limitWarmup.status)} | ${account.limitWarmup.window === "primary" ? "5h" : "weekly"} | ${formatDateTimeInline(account.limitWarmup.completedAt ?? account.limitWarmup.attemptedAt)}`
+            ? `${formatSlug(account.limitWarmup.status)} | ${formatWarmupWindow(account.limitWarmup.window)} | ${formatDateTimeInline(account.limitWarmup.completedAt ?? account.limitWarmup.attemptedAt)}`
             : "No attempts";
+          const availableResetCredits = account.availableResetCredits ?? 0;
+          const hasResetCredits = availableResetCredits > 0;
+          const resetBadgeLabel = availableResetCredits > 99 ? "99+" : String(availableResetCredits);
+          const resetCreditDisabled =
+            readOnly || status === "paused" || status === "reauth" || status === "deactivated";
+          const resetCountdown = account.resetCreditNearestExpiresAt
+            ? formatSingleUnitRemaining(account.resetCreditNearestExpiresAt)
+            : null;
+          const resetButtonTitle = resetCreditDisabled
+            ? status === "paused"
+              ? "Resume account to redeem reset credits"
+              : status === "reauth" || status === "deactivated"
+                ? "Re-authenticate account to redeem reset credits"
+                : "Reset credits unavailable"
+            : resetCountdown
+              ? `Reset (${availableResetCredits}) · ${resetCountdown.label}`
+              : `Reset (${availableResetCredits})`;
           return (
             <div
               key={account.accountId}
@@ -348,6 +385,26 @@ export function AccountList({ accounts, readOnly = false, onAction }: AccountLis
                 >
                   <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
                 </Button>
+                {hasResetCredits ? (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    className="relative h-7 w-7 rounded-md p-0 text-muted-foreground hover:text-foreground"
+                    aria-label={`Redeem reset credit for ${title}`}
+                    title={resetButtonTitle}
+                    disabled={resetCreditDisabled}
+                    onClick={() => onAction?.(account, "reset-credit")}
+                  >
+                    <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
+                    <span
+                      aria-hidden="true"
+                      className="absolute -top-1.5 -right-1.5 grid h-4 min-w-[1rem] place-items-center rounded-full bg-primary px-1 text-[9px] font-semibold leading-none text-primary-foreground"
+                    >
+                      {resetBadgeLabel}
+                    </span>
+                  </Button>
+                ) : null}
                 <Button
                   type="button"
                   size="sm"

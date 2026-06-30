@@ -13,6 +13,7 @@ from app.modules.reports.schemas import (
     ReportComparisonPrevious,
     ReportsResponse,
     ReportSummary,
+    UserAgentCostEntry,
 )
 
 
@@ -27,6 +28,7 @@ class ReportsService:
         report_timezone: str | None = None,
         account_ids: list[str] | None = None,
         model: str | None = None,
+        useragent_group: str | None = None,
     ) -> ReportsResponse:
         timezone_info = _resolve_timezone(report_timezone)
         now = utcnow().replace(tzinfo=timezone.utc).astimezone(timezone_info)
@@ -46,20 +48,22 @@ class ReportsService:
         previous_start_at = _local_midnight_to_utc_naive(previous_start_date, timezone_info)
         previous_end_at = _local_midnight_to_utc_naive(previous_end_date + timedelta(days=1), timezone_info)
 
-        summary = await self._repository.aggregate_summary(start_at, end_at, account_ids, model)
+        summary = await self._repository.aggregate_summary(start_at, end_at, account_ids, model, useragent_group)
         previous_summary = await self._repository.aggregate_summary(
             previous_start_at,
             previous_end_at,
             account_ids,
             model,
+            useragent_group,
         )
-        earliest_activity_at = await self._repository.earliest_report_activity_at(account_ids, model)
+        earliest_activity_at = await self._repository.earliest_report_activity_at(account_ids, model, useragent_group)
         daily_rows = await self._repository.aggregate_daily_rows(
             start_date,
             end_date,
             timezone_info,
             account_ids,
             model,
+            useragent_group,
         )
         daily = [
             DailyReportRow(
@@ -74,12 +78,20 @@ class ReportsService:
             )
             for row in daily_rows
         ]
-        by_model = await self._repository.aggregate_by_model(start_at, end_at, account_ids, model)
-        by_account = await self._repository.aggregate_by_account(start_at, end_at, account_ids, model)
+        by_model = await self._repository.aggregate_by_model(start_at, end_at, account_ids, model, useragent_group)
+        by_account = await self._repository.aggregate_by_account(start_at, end_at, account_ids, model, useragent_group)
+        by_useragent = await self._repository.aggregate_by_useragent(
+            start_at,
+            end_at,
+            account_ids,
+            model,
+            useragent_group,
+        )
 
         day_count = max((end_at.date() - start_at.date()).days, 1)
 
         model_total = sum(m.cost_usd for m in by_model)
+        useragent_total = sum(u.cost_usd for u in by_useragent)
         comparison = ReportComparison(
             can_compare=earliest_activity_at is not None and earliest_activity_at <= previous_start_at,
             previous=ReportComparisonPrevious(
@@ -107,6 +119,7 @@ class ReportsService:
                 ModelCostEntry(
                     model=m.model,
                     cost_usd=round(m.cost_usd, 4),
+                    requests=m.request_count,
                     percentage=round((m.cost_usd / model_total * 100), 1) if model_total > 0 else 0,
                 )
                 for m in by_model
@@ -119,6 +132,15 @@ class ReportsService:
                     requests=a.request_count,
                 )
                 for a in by_account
+            ],
+            by_useragent=[
+                UserAgentCostEntry(
+                    useragent=u.useragent_group,
+                    cost_usd=round(u.cost_usd, 4),
+                    requests=u.request_count,
+                    percentage=round((u.cost_usd / useragent_total * 100), 1) if useragent_total > 0 else 0,
+                )
+                for u in by_useragent
             ],
         )
 

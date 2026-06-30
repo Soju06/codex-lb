@@ -1,5 +1,6 @@
 import { act, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import userEvent from "@testing-library/user-event";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { AccountCard } from "@/features/dashboard/components/account-card";
 import { usePrivacyStore } from "@/hooks/use-privacy";
@@ -62,6 +63,29 @@ describe("AccountCard", () => {
     expect(screen.queryByText("Weekly")).not.toBeInTheDocument();
   });
 
+  it("labels staggered idle warm-up attempts as 5h", () => {
+    const attemptedAt = new Date("2026-06-03T12:00:00Z").toISOString();
+    const account = createAccountSummary({
+      limitWarmupEnabled: true,
+      limitWarmup: {
+        window: "primary_idle",
+        resetAt: 18_000,
+        status: "succeeded",
+        model: "gpt-5.1-codex-mini",
+        attemptedAt,
+        completedAt: attemptedAt,
+        errorCode: null,
+        errorMessage: null,
+      },
+    });
+
+    render(<AccountCard account={account} />);
+
+    expect(
+      screen.getByText((text) => text.includes("Succeeded | 5h | Gpt-5.1-codex-mini")),
+    ).toBeInTheDocument();
+  });
+
   it("blurs the dashboard card title when privacy mode is enabled", () => {
     act(() => {
       usePrivacyStore.setState({ blurred: true });
@@ -107,5 +131,44 @@ describe("AccountCard", () => {
     render(<AccountCard account={account} readOnly />);
 
     expect(screen.getByRole("button", { name: "Enable limit warm-up for Read Only Account" })).toBeDisabled();
+  });
+
+  it("shows reset action when reset credits are available", () => {
+    const account = createAccountSummary({
+      availableResetCredits: 2,
+      resetCreditNearestExpiresAt: "2026-01-03T12:00:00.000Z",
+    });
+
+    render(<AccountCard account={account} />);
+
+    expect(screen.getByRole("button", { name: "Reset (2)" })).toBeInTheDocument();
+  });
+
+  it("hides reset action when no reset credits are available", () => {
+    const account = createAccountSummary({ availableResetCredits: 0 });
+
+    render(<AccountCard account={account} />);
+
+    expect(screen.queryByRole("button", { name: /Reset \(/ })).not.toBeInTheDocument();
+  });
+
+  it("disables reset action for paused accounts", async () => {
+    const user = userEvent.setup();
+    const onAction = vi.fn();
+    const account = createAccountSummary({
+      accountId: "acc-paused",
+      displayName: "Paused Account",
+      status: "paused",
+      availableResetCredits: 1,
+      resetCreditNearestExpiresAt: "2026-01-03T12:00:00.000Z",
+    });
+
+    render(<AccountCard account={account} onAction={onAction} />);
+
+    const resetButton = screen.getByRole("button", { name: "Reset (1)" });
+    expect(resetButton).toBeDisabled();
+
+    await user.click(resetButton);
+    expect(onAction).not.toHaveBeenCalledWith(account, "reset-credit");
   });
 });

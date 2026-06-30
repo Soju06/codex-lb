@@ -18,6 +18,7 @@ async def _create_api_key(
     *,
     name: str,
     limits: list[LimitRuleInput] | None = None,
+    usage_sections: str = "upstream_limits,account_pool_usage",
 ) -> tuple[str, str]:
     async with SessionLocal() as session:
         service = ApiKeysService(ApiKeysRepository(session))
@@ -25,6 +26,7 @@ async def _create_api_key(
             ApiKeyCreateData(
                 name=name,
                 allowed_models=None,
+                usage_sections=usage_sections,
                 limits=limits or [],
             )
         )
@@ -290,6 +292,31 @@ async def test_v1_usage_returns_zero_usage_for_key_without_logs(async_client):
         "total_cost_usd": 0.0,
         "limits": [],
         "upstream_limits": [],
+        "account_pool_usage": {
+            "primary": None,
+            "secondary": None,
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_v1_usage_omits_disabled_account_pool_usage_section(async_client):
+    _, plain_key = await _create_api_key(
+        name="no-account-pool-usage",
+        usage_sections="upstream_limits",
+    )
+
+    response = await async_client.get("/v1/usage", headers={"Authorization": f"Bearer {plain_key}"})
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "request_count": 0,
+        "total_tokens": 0,
+        "cached_input_tokens": 0,
+        "total_cost_usd": 0.0,
+        "limits": [],
+        "upstream_limits": [],
+        "account_pool_usage": None,
     }
 
 
@@ -464,6 +491,27 @@ async def test_v1_usage_returns_aggregate_credit_limits_when_upstream_usage_exis
     }
     assert payload["upstream_limits"][0]["reset_at"].endswith("Z")
     assert payload["upstream_limits"][1]["reset_at"].endswith("Z")
+
+
+@pytest.mark.asyncio
+async def test_v1_usage_hides_upstream_limits_for_api_key_clients_when_setting_enabled(async_client):
+    _, plain_key = await _create_api_key(name="hidden-upstream-aggregate")
+    now = utcnow()
+    await _seed_upstream_usage(now=now)
+
+    settings = await async_client.put(
+        "/api/settings",
+        json={"hideUpstreamQuotaFromApiKeys": True},
+    )
+    assert settings.status_code == 200
+
+    response = await async_client.get("/v1/usage", headers={"Authorization": f"Bearer {plain_key}"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["limits"] == []
+    assert payload["upstream_limits"] == []
+    assert payload["account_pool_usage"] is None
 
 
 @pytest.mark.asyncio

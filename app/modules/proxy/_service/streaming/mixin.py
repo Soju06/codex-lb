@@ -1050,14 +1050,6 @@ class _StreamingMixin(_StreamingRetryMixin):
             settlement.cached_input_tokens = cached_input_tokens
             settlement.error_code = error_code
             settlement.error_message = error_message
-            upstream_proxy_route_mode = route_trace.mode or (route.mode if route is not None else None)
-            upstream_proxy_pool_id = route_trace.pool_id or (route.pool_id if route is not None else None)
-            upstream_proxy_endpoint_id = route_trace.endpoint_id or (route.endpoint_id if route is not None else None)
-            upstream_proxy_fallback_used = (
-                route_trace.fallback_used
-                if route_trace.endpoint_id is not None
-                else (False if route is not None else None)
-            )
             await proxy._write_request_log(
                 account_id=account_id_value,
                 api_key=api_key,
@@ -1086,10 +1078,16 @@ class _StreamingMixin(_StreamingRetryMixin):
                 upstream_status_code=failure_metadata.upstream_status_code,
                 upstream_error_code=failure_metadata.upstream_error_code,
                 bridge_stage=failure_metadata.bridge_stage,
-                upstream_proxy_route_mode=upstream_proxy_route_mode,
-                upstream_proxy_pool_id=upstream_proxy_pool_id,
-                upstream_proxy_endpoint_id=upstream_proxy_endpoint_id,
-                upstream_proxy_fallback_used=upstream_proxy_fallback_used,
+                upstream_proxy_route_mode=route_trace.mode or (route.mode if route is not None else None),
+                upstream_proxy_pool_id=route_trace.pool_id or (route.pool_id if route is not None else None),
+                upstream_proxy_endpoint_id=(
+                    route_trace.endpoint_id or (route.endpoint_id if route is not None else None)
+                ),
+                upstream_proxy_fallback_used=(
+                    route_trace.fallback_used
+                    if route_trace.endpoint_id is not None
+                    else (False if route is not None else None)
+                ),
                 upstream_proxy_fail_closed_reason=route_fail_closed_reason,
                 useragent=useragent,
                 useragent_group=useragent_group,

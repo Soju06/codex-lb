@@ -2,10 +2,10 @@
 
 ### Requirement: WebSocket tool-output deltas are not fresh-retryable
 
-When a direct WebSocket Responses request includes `previous_response_id` and
+The service MUST NOT replay a direct WebSocket Responses request as a fresh turn
+without the previous-response anchor when it includes `previous_response_id` and
 only carries tool output items for tool calls that are not present in the same
-payload, the service MUST NOT replay that payload as a fresh turn without the
-previous-response anchor after an upstream `previous_response_not_found`.
+payload after an upstream `previous_response_not_found`.
 
 #### Scenario: output-only WebSocket tool delta is not replayed as a fresh turn
 
@@ -16,5 +16,5 @@ previous-response anchor after an upstream `previous_response_not_found`.
   matching tool-call items in the same payload
 - **AND** upstream emits `previous_response_not_found` before assigning a
   response id
-- **THEN** the service does not replay that payload as a fresh turn without
+- **THEN** the service MUST NOT replay that payload as a fresh turn without
   `previous_response_id`

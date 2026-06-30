@@ -1415,6 +1415,8 @@ class _WebSocketMixin:
                     cast(list[JsonValue], original_full_resend_input)
                 )
             )
+            if not request_state.fresh_upstream_request_is_retry_safe:
+                request_state.fresh_upstream_request_text = None
             _facade().logger.info(
                 "websocket_session_anchor_injected request_id=%s response_id=%s original_items=%s trimmed_to=%s",
                 request_state.request_id,

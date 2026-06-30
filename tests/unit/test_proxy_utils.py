@@ -11773,7 +11773,7 @@ async def test_prepare_websocket_response_create_request_does_not_fresh_retry_in
     assert upstream_payload["previous_response_id"] == "resp_completed_anchor"
     assert upstream_payload["input"] == [new_input]
     assert prepared.request_state.proxy_injected_previous_response_id is True
-    assert prepared.request_state.fresh_upstream_request_text is not None
+    assert prepared.request_state.fresh_upstream_request_text is None
     assert prepared.request_state.fresh_upstream_request_is_retry_safe is False
 
 

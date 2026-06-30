@@ -1,4 +1,4 @@
-## MODIFIED Requirements
+## ADDED Requirements
 
 ### Requirement: Dashboard overview memoizes per-account depletion EWMA state
 

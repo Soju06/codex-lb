@@ -312,6 +312,7 @@ class QuotaPlannerRepository:
             for row in result.all()
         ]
 
+
 def _settings_from_row(row: QuotaPlannerSettings) -> PlannerSettings:
     return PlannerSettings(
         mode=row.mode,

@@ -41,6 +41,7 @@ _BRIDGE_UNSAFE_HEADER_NAMES = frozenset(
         "upgrade",
     }
 )
+_OWNER_FORWARD_SKIP_AUTO_HEADERS = frozenset({aiohttp.hdrs.ACCEPT, aiohttp.hdrs.ACCEPT_ENCODING})
 
 HTTP_BRIDGE_INTERNAL_FORWARD_PATH = "/internal/bridge/responses"
 HTTP_BRIDGE_FORWARDED_HEADER = "x-codex-bridge-forwarded"
@@ -110,6 +111,7 @@ class HTTPBridgeOwnerClient:
                 f"{owner_endpoint}{HTTP_BRIDGE_INTERNAL_FORWARD_PATH}",
                 json=payload.model_dump(mode="json", exclude_none=True),
                 headers=build_owner_forward_headers(headers=headers, payload=payload, context=context),
+                skip_auto_headers=_OWNER_FORWARD_SKIP_AUTO_HEADERS,
             ) as response:
                 if response.status != 200:
                     payload_text = await response.text()

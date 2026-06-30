@@ -260,15 +260,17 @@ async def test_fetch_with_failover_attempts_transport_recovery_once_when_retry_f
 
 
 @pytest.mark.asyncio
-async def test_fetch_with_failover_aggregates_same_plan_successes(
+async def test_fetch_with_failover_merges_common_same_plan_tiers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     accounts = [_account("account-1"), _account("account-2")]
     encryptor = MagicMock()
     encryptor.decrypt.return_value = "access-token"
     first_models = [_model("gpt-5.4")]
+    first_models[0].raw["service_tiers"] = [{"slug": "default"}]
     second_models = [_model("gpt-5.4")]
     second_models[0].raw["service_tiers"] = [{"slug": "fast"}]
+    second_models[0].raw["additional_speed_tiers"] = ["fast"]
 
     fetch_models_for_plan = AsyncMock(side_effect=[first_models, second_models])
 
@@ -277,12 +279,37 @@ async def test_fetch_with_failover_aggregates_same_plan_successes(
 
     result = await scheduler_module._fetch_with_failover(accounts, encryptor, MagicMock())
 
-    assert result == [*first_models, *second_models]
+    assert result is not None
+    assert [model.slug for model in result] == ["gpt-5.4"]
+    assert result[0].raw["service_tiers"] == [{"slug": "fast"}, {"slug": "default"}]
+    assert result[0].raw["additional_speed_tiers"] == ["fast"]
     assert fetch_models_for_plan.await_count == 2
     assert [call.args[1] for call in fetch_models_for_plan.await_args_list] == [
         "chatgpt-account-1",
         "chatgpt-account-2",
     ]
+
+
+@pytest.mark.asyncio
+async def test_fetch_with_failover_excludes_same_plan_private_model_slug(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    accounts = [_account("account-1"), _account("account-2")]
+    encryptor = MagicMock()
+    encryptor.decrypt.return_value = "access-token"
+    first_models = [_model("gpt-5.4"), _model("private-alpha")]
+    second_models = [_model("gpt-5.4")]
+
+    fetch_models_for_plan = AsyncMock(side_effect=[first_models, second_models])
+
+    monkeypatch.setattr(scheduler_module, "AuthManager", _StubAuthManager)
+    monkeypatch.setattr(scheduler_module, "fetch_models_for_plan", fetch_models_for_plan)
+
+    result = await scheduler_module._fetch_with_failover(accounts, encryptor, MagicMock())
+
+    assert result is not None
+    assert [model.slug for model in result] == ["gpt-5.4"]
+    assert fetch_models_for_plan.await_count == 2
 
 
 @pytest.mark.asyncio

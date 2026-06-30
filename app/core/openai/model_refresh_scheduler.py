@@ -12,7 +12,7 @@ from app.core.clients.http import refresh_http_client
 from app.core.clients.model_fetcher import ModelFetchError, fetch_models_for_plan
 from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
-from app.core.openai.model_registry import UpstreamModel, get_model_registry
+from app.core.openai.model_registry import UpstreamModel, _merge_service_tier_metadata, get_model_registry
 from app.core.upstream_proxy import ResolvedUpstreamRoute, resolve_upstream_route
 from app.db.models import Account, AccountStatus
 from app.db.session import get_background_session
@@ -151,7 +151,7 @@ async def _fetch_with_failover(
     accounts_repo: AccountsRepository,
 ) -> list[UpstreamModel] | None:
     transport_recovery = _TransportRecoveryState()
-    merged_models: list[UpstreamModel] = []
+    successful_results: list[list[UpstreamModel]] = []
 
     for account in candidates:
         auth_manager = AuthManager(accounts_repo)
@@ -166,7 +166,7 @@ async def _fetch_with_failover(
                 encryptor,
                 transport_recovery=transport_recovery,
             )
-            merged_models.extend(models)
+            successful_results.append(models)
         except ModelFetchError as exc:
             if exc.status_code == 401:
                 try:
@@ -181,7 +181,7 @@ async def _fetch_with_failover(
                         encryptor,
                         transport_recovery=transport_recovery,
                     )
-                    merged_models.extend(models)
+                    successful_results.append(models)
                     continue
                 except (ModelFetchError, RefreshError) as retry_exc:
                     logger.warning(
@@ -216,7 +216,27 @@ async def _fetch_with_failover(
                 exc_info=True,
             )
             continue
-    return merged_models or None
+    return _merge_same_plan_model_results(successful_results) or None
+
+
+def _merge_same_plan_model_results(successful_results: list[list[UpstreamModel]]) -> list[UpstreamModel]:
+    if not successful_results:
+        return []
+
+    models_by_slug = [{model.slug: model for model in models} for models in successful_results]
+    common_slugs = set(models_by_slug[0])
+    for models in models_by_slug[1:]:
+        common_slugs.intersection_update(models)
+
+    merged_models: list[UpstreamModel] = []
+    for model in models_by_slug[0].values():
+        if model.slug not in common_slugs:
+            continue
+        merged_model = model
+        for models in models_by_slug[1:]:
+            merged_model = _merge_service_tier_metadata(merged_model, models[model.slug])
+        merged_models.append(merged_model)
+    return merged_models
 
 
 async def _ensure_fresh_with_transport_recovery(

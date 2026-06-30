@@ -69,6 +69,7 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["totpRequiredOnLogin"] is False
     assert payload["totpConfigured"] is False
     assert payload["apiKeyAuthEnabled"] is False
+    assert payload["hideUpstreamQuotaFromApiKeys"] is False
     assert payload["limitWarmupEnabled"] is False
     assert payload["limitWarmupWindows"] == "both"
     assert payload["limitWarmupModel"] == "auto"
@@ -102,6 +103,7 @@ async def test_settings_api_get_and_update(async_client):
             "importWithoutOverwrite": False,
             "totpRequiredOnLogin": False,
             "apiKeyAuthEnabled": True,
+            "hideUpstreamQuotaFromApiKeys": True,
             "limitWarmupEnabled": True,
             "limitWarmupWindows": "primary",
             "limitWarmupModel": "gpt-5.1-codex-mini",
@@ -136,6 +138,7 @@ async def test_settings_api_get_and_update(async_client):
     assert updated["totpRequiredOnLogin"] is False
     assert updated["totpConfigured"] is False
     assert updated["apiKeyAuthEnabled"] is True
+    assert updated["hideUpstreamQuotaFromApiKeys"] is True
     assert updated["limitWarmupEnabled"] is True
     assert updated["limitWarmupWindows"] == "primary"
     assert updated["limitWarmupModel"] == "gpt-5.1-codex-mini"
@@ -170,6 +173,7 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["totpRequiredOnLogin"] is False
     assert payload["totpConfigured"] is False
     assert payload["apiKeyAuthEnabled"] is True
+    assert payload["hideUpstreamQuotaFromApiKeys"] is True
     assert payload["limitWarmupEnabled"] is True
     assert payload["limitWarmupWindows"] == "primary"
     assert payload["limitWarmupModel"] == "gpt-5.1-codex-mini"
@@ -357,6 +361,7 @@ async def test_settings_api_allows_partial_updates(async_client):
     assert updated["routingStrategy"] == original["routingStrategy"]
     assert updated["upstreamProxyRoutingEnabled"] == original["upstreamProxyRoutingEnabled"]
     assert updated["upstreamProxyDefaultPoolId"] == original["upstreamProxyDefaultPoolId"]
+    assert updated["hideUpstreamQuotaFromApiKeys"] == original["hideUpstreamQuotaFromApiKeys"]
 
 
 @pytest.mark.asyncio

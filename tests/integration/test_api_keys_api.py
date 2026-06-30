@@ -209,6 +209,26 @@ async def test_api_key_transport_policy_override_invalid_value_returns_400(async
 
 
 @pytest.mark.asyncio
+async def test_create_api_key_preserves_empty_usage_sections(async_client):
+    create = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "hidden-usage-key",
+            "allowedModels": [],
+            "usageSections": "",
+        },
+    )
+
+    assert create.status_code == 200
+    payload = create.json()
+    assert payload["usageSections"] == ""
+
+    listed = await async_client.get("/api/api-keys/")
+    assert listed.status_code == 200
+    assert listed.json()[0]["usageSections"] == ""
+
+
+@pytest.mark.asyncio
 async def test_api_key_update_persists_assigned_account_ids(async_client):
     first_account_id = await _import_account(async_client, "acc-assigned-a", "assigned-a@example.com")
     second_account_id = await _import_account(async_client, "acc-assigned-b", "assigned-b@example.com")
@@ -340,8 +360,19 @@ async def test_deleted_assigned_accounts_do_not_fall_back_to_other_accounts(asyn
 
     listed = await async_client.get("/api/api-keys/")
     assert listed.status_code == 200
-    assert listed.json()[0]["assignedAccountIds"] == []
-    assert listed.json()[0]["accountAssignmentScopeEnabled"] is True
+    listed_key = listed.json()[0]
+    assert listed_key["assignedAccountIds"] == []
+    assert listed_key["accountAssignmentScopeEnabled"] is True
+    assert listed_key["pooledCapacityCreditsPrimary"] == 0.0
+    assert listed_key["pooledRemainingPercentPrimary"] is None
+    assert listed_key["pooledRemainingPercentSecondary"] is None
+
+    usage = await async_client.get("/v1/usage", headers={"Authorization": f"Bearer {key}"})
+    assert usage.status_code == 200
+    assert usage.json()["account_pool_usage"] == {
+        "primary": None,
+        "secondary": None,
+    }
 
     called = False
 

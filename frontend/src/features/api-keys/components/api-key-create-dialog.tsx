@@ -26,6 +26,7 @@ import { AccountMultiSelect } from "@/features/api-keys/components/account-multi
 import { ExpiryPicker } from "@/features/api-keys/components/expiry-picker";
 import { LimitRulesEditor } from "@/features/api-keys/components/limit-rules-editor";
 import { ModelMultiSelect } from "@/features/api-keys/components/model-multi-select";
+import { UsageSectionsMultiSelect } from "@/features/api-keys/components/usage-sections-multi-select";
 import type {
   ApiKeyCreateRequest,
   LimitRuleCreate,
@@ -63,6 +64,7 @@ type ApiKeyCreateFormProps = {
 type ApiKeyCreateDraft = {
   selectedModels: string[];
   selectedAccountIds: string[];
+  usageSections: string;
   limitRules: LimitRuleCreate[];
   expiresAt: Date | null;
   enforcedModel: string;
@@ -76,6 +78,7 @@ type ApiKeyCreateDraft = {
 const initialApiKeyCreateDraft: ApiKeyCreateDraft = {
   selectedModels: [],
   selectedAccountIds: [],
+  usageSections: "upstream_limits,account_pool_usage",
   limitRules: [],
   expiresAt: null,
   enforcedModel: "",
@@ -108,6 +111,7 @@ function ApiKeyCreateForm({ busy, onClose, onSubmit }: ApiKeyCreateFormProps) {
       allowedModels: draft.selectedModels.length > 0 ? draft.selectedModels : undefined,
       applyToCodexModel: draft.applyToCodexModel,
       ...(draft.selectedAccountIds.length > 0 ? { assignedAccountIds: draft.selectedAccountIds } : {}),
+      usageSections: draft.usageSections,
       enforcedModel: draft.enforcedModel.trim() ? draft.enforcedModel.trim() : null,
       enforcedReasoningEffort:
         draft.enforcedReasoningEffort === "none"
@@ -169,6 +173,11 @@ function ApiKeyCreateForm({ busy, onClose, onSubmit }: ApiKeyCreateFormProps) {
             <div className="space-y-1">
               <p className="text-sm font-medium">Assigned accounts</p>
               <AccountMultiSelect value={draft.selectedAccountIds} onChange={(selectedAccountIds) => updateDraft({ selectedAccountIds })} />
+            </div>
+
+            <div className="space-y-1">
+              <label className="text-sm font-medium">Usage sections shown to client</label>
+              <UsageSectionsMultiSelect value={draft.usageSections} onChange={(usageSections) => updateDraft({ usageSections })} />
             </div>
 
             <div className="space-y-1">

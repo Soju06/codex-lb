@@ -42,7 +42,9 @@ export function DashboardPage() {
   const isDark = useThemeStore((s) => s.theme === "dark");
   const showAccountBurnrate = useDashboardPreferencesStore((s) => s.accountBurnrateEnabled);
   const accountViewMode = useDashboardPreferencesStore((s) => s.accountViewMode);
+  const accountListSort = useDashboardPreferencesStore((s) => s.accountListSort);
   const setAccountViewMode = useDashboardPreferencesStore((s) => s.setAccountViewMode);
+  const setAccountListSort = useDashboardPreferencesStore((s) => s.setAccountListSort);
   const canWrite = useAuthStore((state) => state.canWrite);
   const overviewTimeframe = useMemo(
     () => parseOverviewTimeframe(searchParams.get("overviewTimeframe")),
@@ -247,7 +249,13 @@ export function DashboardPage() {
               <AccountViewModeToggle value={accountViewMode} onChange={setAccountViewMode} />
             </div>
             {accountViewMode === "list" ? (
-              <AccountList accounts={overview?.accounts ?? []} readOnly={!canWrite} onAction={handleAccountAction} />
+              <AccountList
+                accounts={overview?.accounts ?? []}
+                readOnly={!canWrite}
+                sort={accountListSort}
+                onSortChange={setAccountListSort}
+                onAction={handleAccountAction}
+              />
             ) : (
               <AccountCards accounts={overview?.accounts ?? []} readOnly={!canWrite} onAction={handleAccountAction} />
             )}

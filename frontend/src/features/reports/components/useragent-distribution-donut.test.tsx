@@ -5,8 +5,8 @@ import { describe, expect, it, vi } from "vitest";
 
 import { UseragentDistributionDonut } from "./useragent-distribution-donut";
 
-vi.mock("recharts", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("recharts")>();
+vi.mock("@/components/lazy-recharts", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/components/lazy-recharts")>();
 
   return {
     ...actual,

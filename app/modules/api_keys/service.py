@@ -23,7 +23,7 @@ from app.core.usage.types import UsageWindowRow
 from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import Account, AccountStatus, ApiKey, ApiKeyLimit, LimitType, LimitWindow, UsageHistory
 from app.db.session import sqlite_writer_section
-from app.modules.api_keys.limit_windows import advance_limit_reset, next_limit_reset
+from app.modules.api_keys.limit_windows import advance_limit_reset, limit_window_delta, next_limit_reset
 from app.modules.api_keys.repository import (
     _UNSET,
     ApiKeyTrendBucket,
@@ -61,6 +61,15 @@ class ApiKeysRepositoryProtocol(Protocol):
     async def list_all(self) -> list[ApiKey]: ...
     async def list_usage_summary_by_key(self) -> dict[str, ApiKeyUsageSummary]: ...
     async def get_usage_summary_by_key_id(self, key_id: str) -> ApiKeyUsageSummary: ...
+    async def get_limit_usage_value(
+        self,
+        key_id: str,
+        *,
+        limit_type: LimitType,
+        since: datetime,
+        until: datetime,
+        model_filter: str | None,
+    ) -> int: ...
     async def list_accounts_by_ids(self, account_ids: list[str]) -> list[Account]: ...
     async def list_all_accounts(self) -> list[Account]: ...
 
@@ -76,6 +85,7 @@ class ApiKeysRepositoryProtocol(Protocol):
         enforced_service_tier: str | None | _Unset = ...,
         traffic_class: str | _Unset = ...,
         transport_policy_override: str | None | _Unset = ...,
+        usage_sections: str | _Unset = ...,
         account_assignment_scope_enabled: bool | _Unset = ...,
         expires_at: datetime | None | _Unset = ...,
         is_active: bool | _Unset = ...,
@@ -260,6 +270,7 @@ class ApiKeyCreateData:
     enforced_service_tier: str | None = None
     traffic_class: str = TRAFFIC_CLASS_FOREGROUND
     transport_policy_override: str | None = None
+    usage_sections: str = "upstream_limits,account_pool_usage"
     expires_at: datetime | None = None
     assigned_account_ids: list[str] | None = None
     limits: list[LimitRuleInput] = field(default_factory=list)
@@ -283,6 +294,8 @@ class ApiKeyUpdateData:
     traffic_class_set: bool = False
     transport_policy_override: str | None = None
     transport_policy_override_set: bool = False
+    usage_sections: str | None = None
+    usage_sections_set: bool = False
     expires_at: datetime | None = None
     expires_at_set: bool = False
     is_active: bool | None = None
@@ -310,6 +323,7 @@ class ApiKeyData:
     apply_to_codex_model: bool = False
     traffic_class: str = TRAFFIC_CLASS_FOREGROUND
     transport_policy_override: str | None = None
+    usage_sections: str = "upstream_limits,account_pool_usage"
     limits: list[LimitRuleData] = field(default_factory=list)
     usage_summary: "ApiKeyUsageSummaryData | None" = None
     account_assignment_scope_enabled: bool = False
@@ -343,9 +357,13 @@ def _compute_pooled_credits(
     all_accounts: list[Account],
     primary_usage: dict[str, UsageHistory],
     secondary_usage: dict[str, UsageHistory],
+    account_assignment_scope_enabled: bool = False,
 ) -> PooledCreditData:
     import app.core.usage as usage_core
     from app.modules.usage.mappers import usage_history_to_window_row
+
+    if account_assignment_scope_enabled and not assigned_account_ids:
+        return PooledCreditData()
 
     if assigned_account_ids:
         requested_account_ids = set(assigned_account_ids)
@@ -426,6 +444,7 @@ class ApiKeysService:
         enforced_service_tier = _normalize_service_tier(payload.enforced_service_tier)
         traffic_class = _normalize_traffic_class(payload.traffic_class)
         transport_policy_override = _normalize_transport_policy_override(payload.transport_policy_override)
+        usage_sections = _normalize_usage_sections(payload.usage_sections)
         _validate_model_enforcement(enforced_model=enforced_model, allowed_models=normalized_allowed_models)
         row = ApiKey(
             id=str(__import__("uuid").uuid4()),
@@ -440,6 +459,7 @@ class ApiKeysService:
             account_assignment_scope_enabled=bool(assigned_account_ids),
             traffic_class=traffic_class,
             transport_policy_override=transport_policy_override,
+            usage_sections=usage_sections,
             expires_at=expires_at,
             is_active=True,
             created_at=now,
@@ -475,25 +495,35 @@ class ApiKeysService:
             assigned_ids_by_key = {
                 row.id: [a.account_id for a in getattr(row, "account_assignments", [])] for row in rows
             }
-            needs_all_accounts = any(not assigned_ids for assigned_ids in assigned_ids_by_key.values())
+            needs_all_accounts = any(
+                not assigned_ids_by_key[row.id] and not row.account_assignment_scope_enabled for row in rows
+            )
             if needs_all_accounts:
                 all_accounts = await self._repository.list_all_accounts()
                 primary_usage = await self._usage_repository.latest_by_account("primary")
                 secondary_usage = await self._usage_repository.latest_by_account("secondary")
             else:
                 all_account_ids = sorted({account_id for ids in assigned_ids_by_key.values() for account_id in ids})
-                all_accounts = await self._repository.list_accounts_by_ids(all_account_ids)
-                primary_usage = await self._usage_repository.latest_by_account("primary", account_ids=all_account_ids)
-                secondary_usage = await self._usage_repository.latest_by_account(
-                    "secondary",
-                    account_ids=all_account_ids,
-                )
+                if all_account_ids:
+                    all_accounts = await self._repository.list_accounts_by_ids(all_account_ids)
+                    primary_usage = await self._usage_repository.latest_by_account(
+                        "primary", account_ids=all_account_ids
+                    )
+                    secondary_usage = await self._usage_repository.latest_by_account(
+                        "secondary",
+                        account_ids=all_account_ids,
+                    )
+                else:
+                    all_accounts = []
+                    primary_usage = {}
+                    secondary_usage = {}
             for row in rows:
                 pooled_by_key[row.id] = _compute_pooled_credits(
                     assigned_account_ids=assigned_ids_by_key[row.id],
                     all_accounts=all_accounts,
                     primary_usage=primary_usage,
                     secondary_usage=secondary_usage,
+                    account_assignment_scope_enabled=row.account_assignment_scope_enabled,
                 )
 
         return [
@@ -552,6 +582,9 @@ class ApiKeysService:
         transport_policy_override_update: str | None | _Unset = _UNSET
         if payload.transport_policy_override_set:
             transport_policy_override_update = _normalize_transport_policy_override(payload.transport_policy_override)
+        usage_sections: str | _Unset = _UNSET
+        if payload.usage_sections_set:
+            usage_sections = _normalize_usage_sections(payload.usage_sections)
 
         if payload.allowed_models_set or payload.enforced_model_set:
             effective_allowed_models = (
@@ -570,12 +603,13 @@ class ApiKeysService:
             now = utcnow()
             existing_limits = await self._repository.get_limits_by_key(key_id)
             submitted_limits = payload.limits or []
-            limit_rows = _build_limit_rows_for_update(
+            limit_rows = await _build_limit_rows_for_update(
                 key_id=key_id,
                 now=now,
                 submitted_limits=submitted_limits,
                 existing_limits=existing_limits,
                 reset_usage=payload.reset_usage,
+                repository=self._repository,
             )
         elif payload.reset_usage:
             now = utcnow()
@@ -595,6 +629,7 @@ class ApiKeysService:
                 enforced_service_tier=(enforced_service_tier if payload.enforced_service_tier_set else _UNSET),
                 traffic_class=traffic_class_update,
                 transport_policy_override=transport_policy_override_update,
+                usage_sections=usage_sections,
                 account_assignment_scope_enabled=account_assignment_scope_enabled,
                 expires_at=expires_at if payload.expires_at_set else _UNSET,
                 is_active=(payload.is_active if payload.is_active_set and payload.is_active is not None else _UNSET),
@@ -626,6 +661,7 @@ class ApiKeysService:
             or payload.enforced_service_tier_set
             or payload.traffic_class_set
             or payload.transport_policy_override_set
+            or payload.usage_sections_set
             or payload.expires_at_set
             or payload.is_active_set
         ):
@@ -1152,6 +1188,29 @@ def _normalize_name(name: str) -> str:
     return normalized
 
 
+_VALID_USAGE_SECTIONS = {"upstream_limits", "account_pool_usage"}
+_DEFAULT_USAGE_SECTIONS = "upstream_limits,account_pool_usage"
+
+
+def _normalize_usage_sections(raw: str | None) -> str:
+    if raw is None:
+        return _DEFAULT_USAGE_SECTIONS
+    if not raw.strip():
+        return ""
+    sections = [s.strip() for s in raw.split(",") if s.strip()]
+    invalid = [s for s in sections if s not in _VALID_USAGE_SECTIONS]
+    if invalid:
+        raise ApiKeyValidationError(f"Invalid usage sections: {', '.join(invalid)}")
+    return ",".join(dict.fromkeys(sections))
+
+
+def _get_usage_sections_with_default(row: ApiKey) -> str:
+    value = getattr(row, "usage_sections", None)
+    if value is None:
+        return _DEFAULT_USAGE_SECTIONS
+    return value
+
+
 def _generate_plain_key() -> str:
     return f"sk-clb-{secrets.token_urlsafe(32)}"
 
@@ -1502,6 +1561,7 @@ def _to_created_data(data: ApiKeyData, key: str) -> ApiKeyCreatedData:
         enforced_service_tier=data.enforced_service_tier,
         traffic_class=data.traffic_class,
         transport_policy_override=data.transport_policy_override,
+        usage_sections=data.usage_sections,
         expires_at=data.expires_at,
         is_active=data.is_active,
         created_at=data.created_at,
@@ -1535,6 +1595,7 @@ def _to_api_key_data(
         transport_policy_override=_normalize_transport_policy_override_lenient(
             getattr(row, "transport_policy_override", None)
         ),
+        usage_sections=_get_usage_sections_with_default(row),
         expires_at=row.expires_at,
         is_active=row.is_active,
         created_at=row.created_at,
@@ -1580,13 +1641,14 @@ def _limit_input_to_row(
     )
 
 
-def _build_limit_rows_for_update(
+async def _build_limit_rows_for_update(
     *,
     key_id: str,
     now: datetime,
     submitted_limits: list[LimitRuleInput],
     existing_limits: list[ApiKeyLimit],
     reset_usage: bool,
+    repository: ApiKeysRepositoryProtocol | None = None,
 ) -> list[ApiKeyLimit]:
     existing_by_key = {_limit_identity_from_row(limit): limit for limit in existing_limits}
     submitted_by_key = {_limit_identity_from_input(limit): limit for limit in submitted_limits}
@@ -1597,8 +1659,13 @@ def _build_limit_rows_for_update(
     for submitted in submitted_limits:
         identity = _limit_identity_from_input(submitted)
         matched = existing_by_key.get(identity)
-        if matched is None or reset_usage:
+        if reset_usage:
             rows.append(_limit_input_to_row(submitted, key_id, now))
+            continue
+        if matched is None:
+            if repository is None:
+                raise TypeError("repository is required to backfill new API key limit usage")
+            rows.append(await _new_limit_input_to_backfilled_row(submitted, key_id, now, repository))
             continue
         rows.append(
             _limit_input_to_row(
@@ -1610,6 +1677,32 @@ def _build_limit_rows_for_update(
             )
         )
     return rows
+
+
+async def _new_limit_input_to_backfilled_row(
+    submitted: LimitRuleInput,
+    key_id: str,
+    now: datetime,
+    repository: ApiKeysRepositoryProtocol,
+) -> ApiKeyLimit:
+    limit_type = LimitType(submitted.limit_type)
+    window = LimitWindow(submitted.limit_window)
+    reset_at = next_limit_reset(now, window)
+    since = now - limit_window_delta(window)
+    current_value = await repository.get_limit_usage_value(
+        key_id,
+        limit_type=limit_type,
+        since=since,
+        until=now,
+        model_filter=submitted.model_filter,
+    )
+    return _limit_input_to_row(
+        submitted,
+        key_id,
+        now,
+        current_value=current_value,
+        reset_at=reset_at,
+    )
 
 
 def _build_reset_limit_rows(

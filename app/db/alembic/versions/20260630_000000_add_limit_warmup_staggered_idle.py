@@ -1,7 +1,7 @@
 """add staggered idle limit warm-up setting
 
 Revision ID: 20260630_000000_add_limit_warmup_staggered_idle
-Revises: 20260629_000000_add_dashboard_query_hot_path_indexes
+Revises: 20260608_000000_add_hide_upstream_quota_from_api_keys
 Create Date: 2026-06-30 00:00:00.000000
 """
 
@@ -12,7 +12,7 @@ from alembic import op
 from sqlalchemy.engine import Connection
 
 revision = "20260630_000000_add_limit_warmup_staggered_idle"
-down_revision = "20260629_000000_add_dashboard_query_hot_path_indexes"
+down_revision = "20260608_000000_add_hide_upstream_quota_from_api_keys"
 branch_labels = None
 depends_on = None
 

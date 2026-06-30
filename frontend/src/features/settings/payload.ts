@@ -36,6 +36,7 @@ export function buildSettingsUpdateRequest(
     limitWarmupStaggeredIdleEnabled: settings.limitWarmupStaggeredIdleEnabled,
     weeklyPaceWorkingDays: settings.weeklyPaceWorkingDays,
     guestAccessEnabled: settings.guestAccessEnabled,
+    hideUpstreamQuotaFromApiKeys: settings.hideUpstreamQuotaFromApiKeys,
     ...patch,
   };
   if (

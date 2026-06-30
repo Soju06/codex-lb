@@ -314,7 +314,13 @@ class UsageUpdater:
                 continue
         return refreshed
 
-    async def force_refresh(self, account: Account, *, ignore_refresh_disabled: bool = False) -> bool:
+    async def force_refresh(
+        self,
+        account: Account,
+        *,
+        ignore_refresh_disabled: bool = False,
+        access_token_override: str | None = None,
+    ) -> bool:
         """Refresh one account regardless of cached/fresh usage rows."""
         settings = get_settings()
         if not settings.usage_refresh_enabled and not ignore_refresh_disabled:
@@ -327,6 +333,7 @@ class UsageUpdater:
                 lambda: self._refresh_account(
                     account,
                     usage_account_id=account.chatgpt_account_id,
+                    access_token_override=access_token_override,
                 ),
                 join_existing=False,
             )
@@ -377,8 +384,9 @@ class UsageUpdater:
         account: Account,
         *,
         usage_account_id: str | None,
+        access_token_override: str | None = None,
     ) -> AccountRefreshResult:
-        access_token = self._encryptor.decrypt(account.access_token_encrypted)
+        access_token = access_token_override or self._encryptor.decrypt(account.access_token_encrypted)
         payload: UsagePayload | None = None
         try:
             route = await _resolve_upstream_route_for_account(account, operation="usage_refresh")
@@ -399,6 +407,9 @@ class UsageUpdater:
         except UsageFetchError as exc:
             if _should_deactivate_for_usage_error(exc):
                 await self._deactivate_for_client_error(account, exc)
+                return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
+            if access_token_override is not None:
+                _mark_usage_refresh_auth_cooldown(account.id, exc.status_code)
                 return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
             if exc.status_code != 401 or not self._auth_manager:
                 _mark_usage_refresh_auth_cooldown(account.id, exc.status_code)

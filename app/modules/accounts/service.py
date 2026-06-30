@@ -68,6 +68,7 @@ from app.modules.proxy.account_cache import (
     get_account_selection_cache,
     mark_account_routing_unavailable,
 )
+from app.modules.rate_limit_reset_credits.store import get_rate_limit_reset_credits_store
 from app.modules.usage.additional_quota_keys import (
     get_additional_display_label_for_quota_key,
     get_additional_quota_routing_policy,
@@ -230,7 +231,7 @@ class AccountsService:
         account = await self._repo.get_by_id(account_id)
         if account is None:
             return None
-        if account.status in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
+        if account.status in (AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
             raise AccountUsageResetCreditsUnavailableError(
                 f"Account is {account.status.value} and cannot fetch usage reset credits",
             )
@@ -284,7 +285,12 @@ class AccountsService:
                 allow_direct_egress=retry_route is None,
             )
 
-    async def consume_usage_reset_credit(self, account_id: str) -> AccountUsageResetConsumeResponse | None:
+    async def consume_usage_reset_credit(
+        self,
+        account_id: str,
+        *,
+        redeem_request_id: str | None = None,
+    ) -> AccountUsageResetConsumeResponse | None:
         account = await self._repo.get_by_id(account_id)
         if account is None:
             return None
@@ -304,7 +310,11 @@ class AccountsService:
 
         primary_before, secondary_before = await self._latest_usage_percents(account_id)
         status_before = account.status.value
-        upstream_response = await self._consume_usage_reset_credit(account)
+        upstream_response, account = await self._consume_usage_reset_credit(
+            account, redeem_request_id=redeem_request_id
+        )
+        if upstream_response.code in ("reset", "already_redeemed", "no_credit", "nothing_to_reset"):
+            await get_rate_limit_reset_credits_store().invalidate(account_id)
 
         usage_written = False
         if upstream_response.code in ("reset", "already_redeemed") and self._usage_repo and self._usage_updater:
@@ -328,21 +338,27 @@ class AccountsService:
             account_status_after=refreshed.status.value,
         )
 
-    async def _consume_usage_reset_credit(self, account: Account) -> ConsumeRateLimitResetCreditResponse:
+    async def _consume_usage_reset_credit(
+        self,
+        account: Account,
+        *,
+        redeem_request_id: str | None = None,
+    ) -> tuple[ConsumeRateLimitResetCreditResponse, Account]:
         chatgpt_account_id = account.chatgpt_account_id
         if not chatgpt_account_id:
             raise AccountUsageResetConsumeUnavailableError("Account is missing ChatGPT account identity")
-        redeem_request_id = str(uuid4())
+        effective_redeem_request_id = redeem_request_id or str(uuid4())
         access_token = self._encryptor.decrypt(account.access_token_encrypted)
         route = await self._resolve_usage_reset_credit_route(account, operation="usage_reset_credits_consume")
         try:
-            return await consume_rate_limit_reset_credit(
+            response = await consume_rate_limit_reset_credit(
                 access_token=access_token,
                 account_id=chatgpt_account_id,
-                redeem_request_id=redeem_request_id,
+                redeem_request_id=effective_redeem_request_id,
                 route=route,
                 allow_direct_egress=route is None,
             )
+            return response, account
         except UsageFetchError as exc:
             if exc.status_code != 401 or self._auth_manager is None:
                 raise
@@ -356,13 +372,14 @@ class AccountsService:
                 raise AccountUsageResetConsumeUnavailableError("Account is missing ChatGPT account identity") from exc
             access_token = self._encryptor.decrypt(account.access_token_encrypted)
             retry_route = await self._resolve_usage_reset_credit_route(account, operation="usage_reset_credits_consume")
-            return await consume_rate_limit_reset_credit(
+            response = await consume_rate_limit_reset_credit(
                 access_token=access_token,
                 account_id=account.chatgpt_account_id,
-                redeem_request_id=redeem_request_id,
+                redeem_request_id=effective_redeem_request_id,
                 route=retry_route,
                 allow_direct_egress=retry_route is None,
             )
+            return response, account
 
     async def _resolve_usage_reset_credit_route(
         self,

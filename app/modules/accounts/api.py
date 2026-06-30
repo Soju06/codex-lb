@@ -39,6 +39,7 @@ from app.modules.accounts.schemas import (
     AccountTrendsResponse,
     AccountUpdateRequest,
     AccountUpdateResponse,
+    AccountUsageResetConsumeRequest,
     AccountUsageResetConsumeResponse,
     AccountUsageResetCreditsResponse,
 )
@@ -104,11 +105,15 @@ async def get_account_usage_reset_credits(
 async def consume_account_usage_reset_credit(
     request: Request,
     account_id: str,
+    payload: AccountUsageResetConsumeRequest | None = None,
     _write_access=Depends(require_dashboard_write_access),
     context: AccountsContext = Depends(get_accounts_context),
 ) -> AccountUsageResetConsumeResponse:
     try:
-        result = await context.service.consume_usage_reset_credit(account_id)
+        result = await context.service.consume_usage_reset_credit(
+            account_id,
+            redeem_request_id=payload.redeem_request_id if payload is not None else None,
+        )
     except AccountUsageResetConsumeUnavailableError as exc:
         raise DashboardConflictError(str(exc), code="account_usage_reset_consume_unavailable") from exc
     except UpstreamProxyRouteError as exc:

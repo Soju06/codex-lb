@@ -1,8 +1,8 @@
+import { HttpResponse, http } from "msw";
+import type { ReactElement } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import type { ReactElement } from "react";
-import { HttpResponse, http } from "msw";
 import { describe, expect, it, vi } from "vitest";
 
 import { ResetCreditConfirmDialog } from "@/features/accounts/components/reset-credit-confirm-dialog";
@@ -138,6 +138,57 @@ describe("ResetCreditConfirmDialog", () => {
     expect(invalidateSpy).not.toHaveBeenCalledWith({ queryKey: ["dashboard", "overview"] });
     // Failure leaves the dialog open for retry.
     expect(onOpenChange).not.toHaveBeenCalledWith(false);
+  });
+
+  it("reuses one redeem request id when retrying while the dialog stays open", async () => {
+    const user = userEvent.setup();
+    const onOpenChange = vi.fn();
+    const bodies: unknown[] = [];
+    server.use(
+      http.get(SNAPSHOT_URL, snapshotResponse),
+      http.post(CONSUME_URL, async ({ request }) => {
+        bodies.push(await request.json());
+        if (bodies.length === 1) {
+          return HttpResponse.json(
+            {
+              error: {
+                code: "temporary_upstream_error",
+                message: "Upstream response was lost",
+              },
+            },
+            { status: 502 },
+          );
+        }
+        return HttpResponse.json({
+          code: "rate_limit_reset",
+          windowsReset: 1,
+          redeemedAt: "2026-01-01T12:00:00.000Z",
+        });
+      }),
+    );
+
+    renderWithClient(
+      <ResetCreditConfirmDialog
+        open
+        onOpenChange={onOpenChange}
+        accountId="acc_primary"
+      />,
+    );
+
+    expect(await screen.findByText("1 free rate limit reset")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Redeem credit" }));
+    await vi.waitFor(() =>
+      expect(toastError).toHaveBeenCalledWith("Upstream response was lost"),
+    );
+    expect(onOpenChange).not.toHaveBeenCalledWith(false);
+
+    await user.click(screen.getByRole("button", { name: "Redeem credit" }));
+    await vi.waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false));
+
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0]).toEqual({ redeemRequestId: expect.any(String) });
+    expect(bodies[1]).toEqual(bodies[0]);
   });
 
   it("shows a loading state while the reset-credit snapshot is fetching", () => {

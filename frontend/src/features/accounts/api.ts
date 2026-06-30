@@ -12,6 +12,7 @@ import {
   AccountsResponseSchema,
   AccountRoutingPolicyUpdateRequestSchema,
   AccountRoutingPolicyUpdateResponseSchema,
+  AccountUsageResetConsumeRequestSchema,
   AccountUsageResetConsumeResponseSchema,
   AccountUsageResetCreditsResponseSchema,
   AccountTrendsResponseSchema,
@@ -28,7 +29,10 @@ import {
   RateLimitResetCreditsSnapshotSchema,
   RuntimeConnectAddressResponseSchema,
 } from "@/features/accounts/schemas";
-import type { AccountRoutingPolicy } from "@/features/accounts/schemas";
+import type {
+  AccountRoutingPolicy,
+  AccountUsageResetConsumeRequest,
+} from "@/features/accounts/schemas";
 
 const ACCOUNTS_BASE_PATH = "/api/accounts";
 const OAUTH_BASE_PATH = "/api/oauth";
@@ -112,10 +116,15 @@ export function getAccountUsageResetCredits(accountId: string) {
   );
 }
 
-export function consumeAccountUsageResetCredit(accountId: string) {
+export function consumeAccountUsageResetCredit(
+  accountId: string,
+  payload?: AccountUsageResetConsumeRequest,
+) {
+  const validated = payload === undefined ? undefined : AccountUsageResetConsumeRequestSchema.parse(payload);
   return post(
     `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/usage-reset-credits/consume`,
     AccountUsageResetConsumeResponseSchema,
+    validated ? { body: validated } : undefined,
   );
 }
 
@@ -142,10 +151,15 @@ export function getRateLimitResetCredits(accountId: string) {
   );
 }
 
-export function consumeRateLimitResetCredit(accountId: string) {
+export function consumeRateLimitResetCredit(
+  accountId: string,
+  payload?: AccountUsageResetConsumeRequest,
+) {
+  const validated = payload === undefined ? undefined : AccountUsageResetConsumeRequestSchema.parse(payload);
   return post(
     `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/rate-limit-reset-credits/consume`,
     ConsumeRateLimitResetCreditResponseSchema,
+    validated ? { body: validated } : undefined,
   );
 }
 

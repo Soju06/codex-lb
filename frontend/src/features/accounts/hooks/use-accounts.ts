@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useRef } from "react";
 import { toast } from "sonner";
 
 import {
@@ -60,6 +61,10 @@ function usageResetToastMessage(data: AccountUsageResetConsumeResponse): string 
   return "Usage reset request completed";
 }
 
+function createRedeemRequestId(): string {
+  return globalThis.crypto?.randomUUID?.() ?? `dashboard-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
 /**
  * Account mutation actions without the polling query.
  * Use this when you need account actions but already have account data
@@ -67,6 +72,10 @@ function usageResetToastMessage(data: AccountUsageResetConsumeResponse): string 
  */
 export function useAccountMutations() {
   const queryClient = useQueryClient();
+  const usageResetRedeemRequestRef = useRef<{
+    accountId: string;
+    redeemRequestId: string;
+  } | null>(null);
 
   const importMutation = useMutation({
     mutationFn: importAccount,
@@ -138,8 +147,19 @@ export function useAccountMutations() {
   });
 
   const usageResetMutation = useMutation({
-    mutationFn: ({ accountId }: { accountId: string }) => consumeAccountUsageResetCredit(accountId),
+    mutationFn: ({ accountId }: { accountId: string }) => {
+      if (usageResetRedeemRequestRef.current?.accountId !== accountId) {
+        usageResetRedeemRequestRef.current = {
+          accountId,
+          redeemRequestId: createRedeemRequestId(),
+        };
+      }
+      return consumeAccountUsageResetCredit(accountId, {
+        redeemRequestId: usageResetRedeemRequestRef.current.redeemRequestId,
+      });
+    },
     onSuccess: async (data, variables) => {
+      usageResetRedeemRequestRef.current = null;
       await invalidateAccountRelatedQueries(queryClient, variables.accountId);
       toast.success(usageResetToastMessage(data));
     },
@@ -202,7 +222,8 @@ export function useAccountMutations() {
   });
 
   const resetCreditConsumeMutation = useMutation({
-    mutationFn: (accountId: string) => consumeRateLimitResetCredit(accountId),
+    mutationFn: ({ accountId, redeemRequestId }: { accountId: string; redeemRequestId?: string }) =>
+      consumeRateLimitResetCredit(accountId, redeemRequestId ? { redeemRequestId } : undefined),
     onSuccess: (data) => {
       const resetCount = data.windowsReset ?? 0;
       toast.success(

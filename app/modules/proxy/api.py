@@ -3067,6 +3067,9 @@ async def codex_consume_rate_limit_reset_credit(
         request,
         redeem_request_id=redeem_request_id,
     )
+    account_id = _request_state_str(request, "codex_usage_identity_account_id")
+    if account_id is not None:
+        await get_rate_limit_reset_credits_store().invalidate(account_id)
     if upstream_response.code in {"reset", "already_redeemed"}:
         await _force_refresh_codex_usage_identity_account(request)
     return ConsumeRateLimitResetCreditResponse.model_validate(upstream_response.model_dump())
@@ -3102,6 +3105,7 @@ async def _force_refresh_codex_usage_identity_account(request: Request) -> None:
     account_id = _request_state_str(request, "codex_usage_identity_account_id")
     if account_id is None:
         return
+    access_token = _request_state_str(request, "codex_usage_identity_access_token")
     async with get_background_session() as session:
         accounts_repo = AccountsRepository(session)
         account = await accounts_repo.get_by_id(account_id)
@@ -3112,7 +3116,11 @@ async def _force_refresh_codex_usage_identity_account(request: Request) -> None:
             accounts_repo,
             AdditionalUsageRepository(session),
         )
-        usage_written = await updater.force_refresh(account, ignore_refresh_disabled=True)
+        usage_written = await updater.force_refresh(
+            account,
+            ignore_refresh_disabled=True,
+            access_token_override=access_token,
+        )
         if usage_written:
             get_account_selection_cache().invalidate()
 

@@ -342,14 +342,18 @@ class ModelRegistry:
                             model_plans.setdefault(slug, set()).add(plan_type)
 
                 # Merge newly fetched results, aggregating service-tier metadata
-                # across plans so a non-Fast account does not erase Fast from the
-                # shared catalog (issue #1100).
+                # across plans refreshed in this pass. Stale plan slugs still map
+                # to the model, but their previous global union must not re-add a
+                # tier that no current per-plan source has (issue #1106).
+                refreshed_model_slugs: set[str] = set()
                 for plan_type, plan_models_list in per_plan_results.items():
                     for model in plan_models_list:
                         existing = models.get(model.slug)
-                        models[model.slug] = (
-                            _merge_service_tier_metadata(existing, model) if existing is not None else model
-                        )
+                        if existing is not None and model.slug in refreshed_model_slugs:
+                            models[model.slug] = _merge_service_tier_metadata(existing, model)
+                        else:
+                            models[model.slug] = model
+                        refreshed_model_slugs.add(model.slug)
                         model_plans.setdefault(model.slug, set()).add(plan_type)
 
                 frozen_model_plans: dict[str, frozenset[str]] = {

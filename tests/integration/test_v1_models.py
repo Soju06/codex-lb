@@ -274,6 +274,39 @@ async def test_backend_codex_models_unions_service_tiers_across_accounts(async_c
 
 
 @pytest.mark.asyncio
+async def test_backend_codex_models_does_not_reunion_stale_global_service_tiers(async_client):
+    registry = get_model_registry()
+    fast = _make_upstream_model(
+        "gpt-5.5",
+        raw={
+            "shell_type": "shell_command",
+            "visibility": "list",
+            "service_tiers": [{"slug": "default"}, {"slug": "fast"}],
+            "additional_speed_tiers": ["fast"],
+        },
+    )
+    no_fast = _make_upstream_model(
+        "gpt-5.5",
+        raw={
+            "shell_type": "shell_command",
+            "visibility": "list",
+            "service_tiers": [{"slug": "default"}],
+            "additional_speed_tiers": [],
+        },
+    )
+
+    await registry.update({"pro": [fast], "plus": [no_fast]})
+    await registry.update({"plus": [no_fast]})
+
+    resp = await async_client.get("/backend-api/codex/models")
+    assert resp.status_code == 200
+    model = next(m for m in resp.json()["models"] if m["slug"] == "gpt-5.5")
+    tier_slugs = {t.get("slug") for t in (model.get("service_tiers") or [])}
+    assert "fast" not in tier_slugs
+    assert "fast" not in (model.get("additional_speed_tiers") or [])
+
+
+@pytest.mark.asyncio
 async def test_backend_codex_models_data_keeps_only_list_visible_models(async_client):
     registry = get_model_registry()
     models = [

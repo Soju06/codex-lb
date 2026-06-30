@@ -354,11 +354,11 @@ describe("RoutingSettings", () => {
     expect(screen.getByRole("switch", { name: "Enable staggered idle warm-up" })).toBeDisabled();
     expect(screen.getByRole("switch", { name: "Prefer earlier reset accounts" })).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "Reset preference window" })).toBeInTheDocument();
-    expect(screen.getByLabelText("Warmup model")).toHaveAttribute("maxLength", "128");
+    expect(screen.getByLabelText("Warm-up model")).toHaveAttribute("maxLength", "128");
     expect(screen.getByRole("combobox", { name: "Warm-up windows" })).toBeInTheDocument();
     expect(screen.getByLabelText("Model")).toHaveAttribute("maxLength", "128");
     expect(screen.getByLabelText("Exhausted at %")).toHaveAttribute("max", "100");
-    expect(screen.getByLabelText("Prompt")).toHaveAttribute("maxLength", "512");
+    expect(screen.getByLabelText("Warm-up prompt")).toHaveAttribute("maxLength", "512");
   });
 
   it("saves weekly pace working-day changes", async () => {
@@ -397,8 +397,8 @@ describe("RoutingSettings", () => {
     const onSave = vi.fn().mockResolvedValue(undefined);
     render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={onSave} />);
 
-    await user.clear(screen.getByLabelText("Cooldown (sec)"));
-    await user.type(screen.getByLabelText("Cooldown (sec)"), "60.5");
+    await user.clear(screen.getByLabelText("Warm-up cooldown"));
+    await user.type(screen.getByLabelText("Warm-up cooldown"), "60.5");
 
     expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
     expect(onSave).not.toHaveBeenCalled();

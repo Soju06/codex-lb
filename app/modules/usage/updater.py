@@ -768,7 +768,12 @@ def _payload_mismatches_account_slot(account: Account, payload: UsagePayload) ->
         # untrusted -- the signature of a degraded or wrong-identity usage
         # response that must not silently rewrite the stored plan.
         if payload_plan_type != stored_plan_type and not (
-            stored_plan_type in recognized_paid_plans and payload_plan_type in recognized_paid_plans
+            stored_plan_type == "unknown"
+            or (
+                not account.workspace_id
+                and stored_plan_type in recognized_paid_plans
+                and payload_plan_type in recognized_paid_plans
+            )
         ):
             return True
     return False

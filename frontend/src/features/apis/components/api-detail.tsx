@@ -170,7 +170,7 @@ export function ApiDetail({
 							className={
 								hasDonutData
 									? "mt-4 border-t pt-4 lg:mt-0 lg:max-w-[75%] lg:flex-1 lg:border-t-0 lg:border-l lg:pl-4 lg:pt-0"
-									: ""
+									: "lg:w-full"
 							}
 							data-testid="api-trend-panel"
 						>

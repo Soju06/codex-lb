@@ -278,7 +278,7 @@ For stable HTTP bridge continuity across repeated calls, the same logical bridge
 
 If you deploy multiple replicas behind a load balancer, configure front-door affinity using one of:
 
-- explicit session header (`session_id`, `x-codex-session-id`, `x-codex-conversation-id`)
+- explicit session header (`session_id`, `session-id`, `x-codex-session-id`, `x-codex-conversation-id`, `thread-id`)
 - a load balancer rule based on a stable request key
 - single-instance routing for the `/v1/responses` bridge path
 

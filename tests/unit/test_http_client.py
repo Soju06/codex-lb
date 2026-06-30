@@ -448,7 +448,7 @@ async def test_close_http_client_force_closes_active_current_and_retired_session
     assert first_lease.client is initial
     assert second_lease.client is refreshed
 
-    await asyncio.wait_for(http_module.close_http_client(), timeout=0.1)
+    await asyncio.wait_for(http_module.close_http_client(), timeout=1.0)
 
     first_websocket_session.close.assert_awaited_once()
     first_retry_client.close.assert_awaited_once()

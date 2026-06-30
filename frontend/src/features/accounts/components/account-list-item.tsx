@@ -72,16 +72,23 @@ export function AccountListItem({
   const warmupMeta = account.limitWarmup
     ? `${formatSlug(account.limitWarmup.status)} | ${formatSlug(account.limitWarmup.model)} | ${formatDateTimeInline(account.limitWarmup.completedAt ?? account.limitWarmup.attemptedAt)}`
     : "No attempts";
+  const availableResetCredits = account.availableResetCredits ?? 0;
+  const resetBadgeLabel = availableResetCredits > 99 ? "99+" : String(availableResetCredits);
 
   return (
     <button
       type="button"
       onClick={() => onSelect(account.accountId)}
       className={cn(
-        "w-full rounded-lg px-3 py-2.5 text-left transition-colors",
+        "relative w-full rounded-lg px-3 py-2.5 text-left transition-colors",
         selected ? "bg-primary/8 ring-1 ring-primary/25" : "hover:bg-muted/50",
       )}
     >
+      {availableResetCredits > 0 ? (
+        <span className="absolute -top-1 -right-1 grid h-5 min-w-[1.25rem] place-items-center rounded-full bg-primary px-1 text-[10px] font-medium text-primary-foreground">
+          {resetBadgeLabel}
+        </span>
+      ) : null}
       <div className="flex items-center gap-2.5">
         <div className="min-w-0 flex-1">
           <p className="truncate text-sm font-medium">

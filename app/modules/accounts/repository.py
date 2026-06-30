@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -79,20 +80,18 @@ class AccountsRepository:
         if account_ids:
             conditions.append(RequestLog.account_id.in_(account_ids))
 
-        latest_request_log_ids_stmt = select(
-            RequestLog.id.label("request_log_id"),
-            func.row_number()
-            .over(
-                partition_by=(
-                    RequestLog.account_id,
-                    RequestLog.request_id,
-                    RequestLog.requested_at,
-                ),
-                order_by=(RequestLog.requested_at.desc(), RequestLog.id.desc()),
+        latest_request_log_ids = (
+            select(
+                func.max(RequestLog.id).label("request_log_id"),
             )
-            .label("request_log_rank"),
-        ).where(*conditions)
-        latest_request_log_ids = latest_request_log_ids_stmt.subquery("latest_request_log_ids")
+            .where(*conditions)
+            .group_by(
+                RequestLog.account_id,
+                RequestLog.request_id,
+                RequestLog.requested_at,
+            )
+            .subquery("latest_request_log_ids")
+        )
         stmt = (
             select(
                 RequestLog.account_id,
@@ -103,7 +102,6 @@ class AccountsRepository:
                 func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("total_cost_usd"),
             )
             .join(latest_request_log_ids, RequestLog.id == latest_request_log_ids.c.request_log_id)
-            .where(latest_request_log_ids.c.request_log_rank == 1)
             .group_by(RequestLog.account_id)
         )
         result = await self._session.execute(stmt)
@@ -789,6 +787,8 @@ def _apply_account_updates(target: Account, source: Account) -> None:
         target.workspace_id = source.workspace_id
         target.workspace_label = source.workspace_label
         target.seat_type = source.seat_type
+    if not target.codex_installation_id:
+        target.codex_installation_id = source.codex_installation_id or str(uuid.uuid4())
     target.plan_type = source.plan_type
     target.access_token_encrypted = source.access_token_encrypted
     target.refresh_token_encrypted = source.refresh_token_encrypted

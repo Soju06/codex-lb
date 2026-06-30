@@ -16,6 +16,12 @@ const UpstreamStreamTransportSchema = z.enum([
   "http",
   "websocket",
 ]);
+const HttpDownstreamTransportPolicySchema = z.enum([
+  "smart",
+  "always_http",
+  "always_websocket",
+  "pinned",
+]);
 const LimitWarmupWindowsSchema = z.enum([
   "primary",
   "secondary",
@@ -43,6 +49,8 @@ export const DashboardSettingsSchema = z
     stickyThreadsEnabled: z.boolean(),
     upstreamStreamTransport:
       UpstreamStreamTransportSchema.optional().default("default"),
+    httpDownstreamTransportPolicy:
+      HttpDownstreamTransportPolicySchema.optional().default("smart"),
     upstreamProxyRoutingEnabled: z.boolean().optional().default(false),
     upstreamProxyDefaultPoolId: z.string().nullable().optional().default(null),
     preferEarlierResetAccounts: z.boolean(),
@@ -122,6 +130,7 @@ export const DashboardSettingsSchema = z
 export const SettingsUpdateRequestSchema = z.object({
   stickyThreadsEnabled: z.boolean().optional(),
   upstreamStreamTransport: UpstreamStreamTransportSchema.optional(),
+  httpDownstreamTransportPolicy: HttpDownstreamTransportPolicySchema.optional(),
   upstreamProxyRoutingEnabled: z.boolean().optional(),
   upstreamProxyDefaultPoolId: z.string().nullable().optional(),
   preferEarlierResetAccounts: z.boolean().optional(),
@@ -195,6 +204,14 @@ export const UpstreamProxyEndpointCreateRequestSchema = z.object({
   isActive: z.boolean().optional().default(true),
 });
 
+export const UpstreamProxyEndpointTestResponseSchema = z.object({
+  endpointId: z.string(),
+  ok: z.boolean(),
+  statusCode: z.number().int().nullable().optional(),
+  elapsedMs: z.number().int().nullable().optional(),
+  error: z.string().nullable().optional(),
+});
+
 export const UpstreamProxyPoolSchema = z.object({
   id: z.string(),
   name: z.string(),
@@ -236,6 +253,7 @@ export const UpstreamProxyAdminSchema = z.object({
 
 export type UpstreamProxyEndpoint = z.infer<typeof UpstreamProxyEndpointSchema>;
 export type UpstreamProxyEndpointCreateRequest = z.infer<typeof UpstreamProxyEndpointCreateRequestSchema>;
+export type UpstreamProxyEndpointTestResponse = z.infer<typeof UpstreamProxyEndpointTestResponseSchema>;
 export type UpstreamProxyPool = z.infer<typeof UpstreamProxyPoolSchema>;
 export type UpstreamProxyPoolCreateRequest = z.infer<typeof UpstreamProxyPoolCreateRequestSchema>;
 export type UpstreamProxyPoolMemberRequest = z.infer<typeof UpstreamProxyPoolMemberRequestSchema>;

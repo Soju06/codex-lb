@@ -351,6 +351,14 @@ async def test_dashboard_projections_weekly_credit_pace_excludes_inactive_and_st
         usage_repo = UsageRepository(session)
 
         await accounts_repo.upsert(_make_account("acc_active_fresh", "fresh@example.com", plan_type="pro"))
+        await accounts_repo.upsert(
+            _make_account(
+                "acc_quota_exceeded_fresh",
+                "quota@example.com",
+                plan_type="pro",
+                status=AccountStatus.QUOTA_EXCEEDED,
+            )
+        )
         await accounts_repo.upsert(_make_account("acc_active_stale", "stale@example.com", plan_type="pro"))
         await accounts_repo.upsert(
             _make_account(
@@ -360,10 +368,26 @@ async def test_dashboard_projections_weekly_credit_pace_excludes_inactive_and_st
                 status=AccountStatus.DEACTIVATED,
             )
         )
+        await accounts_repo.upsert(
+            _make_account(
+                "acc_reauth_fresh",
+                "reauth@example.com",
+                plan_type="pro",
+                status=AccountStatus.REAUTH_REQUIRED,
+            )
+        )
 
         await usage_repo.add_entry(
             "acc_active_fresh",
             20.0,
+            window="secondary",
+            window_minutes=10080,
+            reset_at=reset_at,
+            recorded_at=fixed_now - timedelta(minutes=1),
+        )
+        await usage_repo.add_entry(
+            "acc_quota_exceeded_fresh",
+            100.0,
             window="secondary",
             window_minutes=10080,
             reset_at=reset_at,
@@ -385,20 +409,28 @@ async def test_dashboard_projections_weekly_credit_pace_excludes_inactive_and_st
             reset_at=reset_at,
             recorded_at=fixed_now - timedelta(minutes=1),
         )
+        await usage_repo.add_entry(
+            "acc_reauth_fresh",
+            100.0,
+            window="secondary",
+            window_minutes=10080,
+            reset_at=reset_at,
+            recorded_at=fixed_now - timedelta(minutes=1),
+        )
 
     response = await async_client.get("/api/dashboard/projections")
     assert response.status_code == 200
     payload = response.json()
 
     pace = payload["weeklyCreditPace"]
-    assert pace["accountCount"] == 1
+    assert pace["accountCount"] == 2
     assert pace["staleAccountCount"] == 1
-    assert pace["inactiveAccountCount"] == 1
-    assert pace["totalFullCredits"] == pytest.approx(50_400.0)
-    assert pace["actualUsedPercent"] == pytest.approx(20.0)
+    assert pace["inactiveAccountCount"] == 2
+    assert pace["totalFullCredits"] == pytest.approx(100_800.0)
+    assert pace["actualUsedPercent"] == pytest.approx(60.0)
     assert pace["scheduledUsedPercent"] == pytest.approx(42.857, abs=0.01)
-    assert pace["scheduleGapCredits"] == 0
-    assert pace["status"] == "behind"
+    assert pace["scheduleGapCredits"] == pytest.approx(17_280.0, abs=1.0)
+    assert pace["status"] == "ahead"
 
 
 @pytest.mark.asyncio

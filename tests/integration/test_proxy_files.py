@@ -644,3 +644,39 @@ async def test_synthesized_turn_state_does_not_block_file_id_pin(async_client):
     headers_client = {"x-codex-turn-state": "client-conversation-handle-42"}
     resolved_blocked = await service._resolve_file_account_for_responses(payload, headers_client)
     assert resolved_blocked is None
+
+
+@pytest.mark.asyncio
+async def test_session_header_aliases_override_file_id_pin(async_client):
+    """Codex session headers are stronger affinity than file pins."""
+    await _import_account(async_client, "acc_session_file_a", "session-file-a@example.com")
+
+    from app.core.openai.requests import ResponsesRequest
+    from app.dependencies import get_proxy_service_for_app
+
+    service = get_proxy_service_for_app(async_client._transport.app)
+    await service._pin_file_account("file_session_alias", "acc_session_file_a")
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.2",
+            "instructions": "You are a helpful assistant.",
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "Describe."},
+                        {"type": "input_file", "file_id": "file_session_alias"},
+                    ],
+                }
+            ],
+        }
+    )
+
+    for headers in (
+        {"session-id": "codex-session-123"},
+        {"thread-id": "codex-thread-123"},
+        {"x-codex-session-id": "codex-session-123"},
+    ):
+        resolved = await service._resolve_file_account_for_responses(payload, headers)
+        assert resolved is None

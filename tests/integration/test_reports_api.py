@@ -169,7 +169,7 @@ async def test_reports_api_includes_preserved_deleted_account_history(async_clie
             "outputTokens": 7,
         }
     ]
-    assert payload["byModel"] == [{"model": "gpt-5.1", "costUsd": 0.42, "percentage": 100.0}]
+    assert payload["byModel"] == [{"model": "gpt-5.1", "costUsd": 0.42, "requests": 1, "percentage": 100.0}]
     assert payload["byAccount"] == [
         {
             "accountId": None,
@@ -1024,7 +1024,7 @@ async def test_reports_api_excludes_warmup_logs(async_client, db_setup):
     assert payload["summary"]["totalRequests"] == 1
     assert payload["summary"]["totalInputTokens"] == 6
     assert payload["summary"]["totalCostUsd"] == 0.4
-    assert payload["byModel"] == [{"model": "gpt-5.1", "costUsd": 0.4, "percentage": 100.0}]
+    assert payload["byModel"] == [{"model": "gpt-5.1", "costUsd": 0.4, "requests": 1, "percentage": 100.0}]
     assert payload["byAccount"] == [
         {
             "accountId": "acc_reports_warmup",
@@ -1105,7 +1105,7 @@ async def test_reports_api_applies_account_and_model_filters(async_client, db_se
             "requests": 1,
         }
     ]
-    assert payload["byModel"] == [{"model": "gpt-5.1", "costUsd": 0.8, "percentage": 100.0}]
+    assert payload["byModel"] == [{"model": "gpt-5.1", "costUsd": 0.8, "requests": 1, "percentage": 100.0}]
 
 
 async def test_reports_api_includes_unpriced_models_in_model_breakdown(async_client, db_setup):
@@ -1149,8 +1149,8 @@ async def test_reports_api_includes_unpriced_models_in_model_breakdown(async_cli
     payload = response.json()
     assert payload["summary"]["totalRequests"] == 2
     assert payload["byModel"] == [
-        {"model": "gpt-priced", "costUsd": 0.8, "percentage": 100.0},
-        {"model": "gpt-unpriced", "costUsd": 0.0, "percentage": 0.0},
+        {"model": "gpt-priced", "costUsd": 0.8, "requests": 1, "percentage": 100.0},
+        {"model": "gpt-unpriced", "costUsd": 0.0, "requests": 1, "percentage": 0.0},
     ]
     assert payload["byAccount"] == [
         {
@@ -1208,6 +1208,149 @@ async def test_reports_api_summary_counts_range_accounts_and_calendar_days(async
     assert payload["summary"]["activeAccounts"] == 2
     assert payload["summary"]["avgCostPerDay"] == 0.5
     assert payload["summary"]["avgRequestsPerDay"] == 0.67
+
+
+async def test_reports_api_supports_useragent_group_filter_and_breakdown(async_client, db_setup):
+    start_at = _naive_utc(datetime(2026, 6, 1, 16, 0, 0, tzinfo=timezone.utc))
+    async with SessionLocal() as session:
+        session.add(_make_account("acc_reports_useragent", "reports-useragent@example.com"))
+        session.add_all(
+            [
+                RequestLog(
+                    account_id="acc_reports_useragent",
+                    request_id="report-useragent-match-1",
+                    requested_at=start_at,
+                    model="gpt-5.1",
+                    useragent_group="opencode",
+                    status="success",
+                    input_tokens=8,
+                    output_tokens=2,
+                    cached_input_tokens=0,
+                    cost_usd=0.8,
+                ),
+                RequestLog(
+                    account_id="acc_reports_useragent",
+                    request_id="report-useragent-match-2",
+                    requested_at=start_at,
+                    model="gpt-5.2",
+                    useragent_group="CodexCLI",
+                    status="success",
+                    input_tokens=7,
+                    output_tokens=2,
+                    cached_input_tokens=0,
+                    cost_usd=0.7,
+                ),
+                RequestLog(
+                    account_id="acc_reports_useragent",
+                    request_id="report-useragent-real-unknown",
+                    requested_at=start_at,
+                    model="gpt-5.0",
+                    useragent_group="Unknown",
+                    status="success",
+                    input_tokens=7,
+                    output_tokens=1,
+                    cached_input_tokens=0,
+                    cost_usd=0.4,
+                ),
+                RequestLog(
+                    account_id="acc_reports_useragent",
+                    request_id="report-useragent-blank",
+                    requested_at=start_at,
+                    model="gpt-5.3",
+                    useragent_group="",
+                    status="success",
+                    input_tokens=6,
+                    output_tokens=2,
+                    cached_input_tokens=0,
+                    cost_usd=0.6,
+                ),
+                RequestLog(
+                    account_id="acc_reports_useragent",
+                    request_id="report-useragent-null",
+                    requested_at=start_at,
+                    model="gpt-5.4",
+                    useragent_group=None,
+                    status="success",
+                    input_tokens=5,
+                    output_tokens=2,
+                    cached_input_tokens=0,
+                    cost_usd=0.5,
+                ),
+            ]
+        )
+        await session.commit()
+
+    response = await async_client.get(
+        "/api/reports",
+        params={"start_date": "2026-06-01", "end_date": "2026-06-01"},
+    )
+    assert response.status_code == 200
+
+    payload = response.json()
+    assert payload["byUseragent"] == [
+        {"useragent": "opencode", "costUsd": 0.8, "requests": 1, "percentage": 33.3},
+        {"useragent": "CodexCLI", "costUsd": 0.7, "requests": 1, "percentage": 29.2},
+        {"useragent": "Missing User-Agent", "costUsd": 0.5, "requests": 1, "percentage": 20.8},
+        {"useragent": "Unknown", "costUsd": 0.4, "requests": 1, "percentage": 16.7},
+    ]
+
+    filtered_response = await async_client.get(
+        "/api/reports",
+        params={
+            "start_date": "2026-06-01",
+            "end_date": "2026-06-01",
+            "useragent_group": "opencode",
+        },
+    )
+    assert filtered_response.status_code == 200
+
+    filtered_payload = filtered_response.json()
+    assert filtered_payload["summary"]["totalRequests"] == 1
+    assert filtered_payload["summary"]["totalCostUsd"] == 0.8
+    assert filtered_payload["byModel"] == [{"model": "gpt-5.1", "costUsd": 0.8, "requests": 1, "percentage": 100.0}]
+    assert filtered_payload["byUseragent"] == [
+        {"useragent": "opencode", "costUsd": 0.8, "requests": 1, "percentage": 100.0}
+    ]
+
+    unknown_filtered_response = await async_client.get(
+        "/api/reports",
+        params={
+            "start_date": "2026-06-01",
+            "end_date": "2026-06-01",
+            "useragent_group": "Unknown",
+        },
+    )
+    assert unknown_filtered_response.status_code == 200
+
+    unknown_filtered_payload = unknown_filtered_response.json()
+    assert unknown_filtered_payload["summary"]["totalRequests"] == 1
+    assert unknown_filtered_payload["summary"]["totalCostUsd"] == 0.4
+    assert unknown_filtered_payload["byModel"] == [
+        {"model": "gpt-5.0", "costUsd": 0.4, "requests": 1, "percentage": 100.0}
+    ]
+    assert unknown_filtered_payload["byUseragent"] == [
+        {"useragent": "Unknown", "costUsd": 0.4, "requests": 1, "percentage": 100.0}
+    ]
+
+    missing_useragent_filtered_response = await async_client.get(
+        "/api/reports",
+        params={
+            "start_date": "2026-06-01",
+            "end_date": "2026-06-01",
+            "useragent_group": "Missing User-Agent",
+        },
+    )
+    assert missing_useragent_filtered_response.status_code == 200
+
+    missing_useragent_filtered_payload = missing_useragent_filtered_response.json()
+    assert missing_useragent_filtered_payload["summary"]["totalRequests"] == 1
+    assert missing_useragent_filtered_payload["summary"]["totalCostUsd"] == 0.5
+    assert missing_useragent_filtered_payload["byModel"] == [
+        {"model": "gpt-5.4", "costUsd": 0.5, "requests": 1, "percentage": 100.0}
+    ]
+    assert missing_useragent_filtered_payload["byUseragent"] == [
+        {"useragent": "Missing User-Agent", "costUsd": 0.5, "requests": 1, "percentage": 100.0}
+    ]
 
 
 async def test_reports_api_summary_uses_sql_range_totals_not_rounded_daily_rows(async_client, db_setup):

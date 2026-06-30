@@ -14,6 +14,8 @@ _INTERNAL_LIMIT_WARMUP_SOURCE = "limit_warmup"
 _INTERNAL_WARMUP_REQUEST_KINDS = ("warmup", "limit_warmup")
 _SQLITE_COMPOUND_SELECT_LIMIT = 500
 MAX_DAILY_REPORT_DAYS = 730
+UNKNOWN_USERAGENT_GROUP = "Unknown"
+MISSING_USERAGENT_GROUP = "Missing User-Agent"
 
 
 class DailyReportRangeTooLargeError(ValueError):
@@ -47,12 +49,20 @@ class SummaryAggregateRow:
 class ModelAggregateRow:
     model: str
     cost_usd: float
+    request_count: int
 
 
 @dataclass(frozen=True)
 class AccountAggregateRow:
     account_id: str | None
     alias: str | None
+    cost_usd: float
+    request_count: int
+
+
+@dataclass(frozen=True)
+class UserAgentAggregateRow:
+    useragent_group: str
     cost_usd: float
     request_count: int
 
@@ -68,6 +78,7 @@ class ReportsRepository:
         timezone_info: ZoneInfo | timezone,
         account_ids: list[str] | None = None,
         model: str | None = None,
+        useragent_group: str | None = None,
     ) -> list[DailyReportAggregateRow]:
         window_days = (end_date - start_date).days + 1
         if window_days > MAX_DAILY_REPORT_DAYS:
@@ -80,7 +91,7 @@ class ReportsRepository:
         # SQLite caps compound SELECTs at 500 terms, so long report ranges are
         # executed in chunks instead of building a single oversized UNION ALL.
         for day_ranges_batch in batched(day_ranges, _SQLITE_COMPOUND_SELECT_LIMIT):
-            stmt = _daily_rows_stmt(list(day_ranges_batch), account_ids, model)
+            stmt = _daily_rows_stmt(list(day_ranges_batch), account_ids, model, useragent_group)
             result = await self._session.execute(stmt)
             rows.extend(
                 DailyReportAggregateRow(
@@ -103,8 +114,9 @@ class ReportsRepository:
         end_date: datetime,
         account_ids: list[str] | None = None,
         model: str | None = None,
+        useragent_group: str | None = None,
     ) -> SummaryAggregateRow:
-        conditions = _report_conditions(start_date, end_date, account_ids, model)
+        conditions = _report_conditions(start_date, end_date, account_ids, model, useragent_group)
 
         result = await self._session.execute(
             select(
@@ -137,9 +149,10 @@ class ReportsRepository:
         end_date: datetime,
         account_ids: list[str] | None = None,
         model: str | None = None,
+        useragent_group: str | None = None,
     ) -> list[ModelAggregateRow]:
         conditions = [
-            *_report_conditions(start_date, end_date, account_ids, model),
+            *_report_conditions(start_date, end_date, account_ids, model, useragent_group),
             RequestLog.model.is_not(None),
         ]
 
@@ -147,6 +160,7 @@ class ReportsRepository:
             select(
                 RequestLog.model,
                 func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("cost_usd"),
+                func.count().label("request_count"),
             )
             .where(and_(*conditions))
             .group_by(RequestLog.model)
@@ -157,6 +171,7 @@ class ReportsRepository:
             ModelAggregateRow(
                 model=row.model,
                 cost_usd=float(row.cost_usd),
+                request_count=int(row.request_count),
             )
             for row in result.all()
         ]
@@ -167,8 +182,9 @@ class ReportsRepository:
         end_date: datetime,
         account_ids: list[str] | None = None,
         model: str | None = None,
+        useragent_group: str | None = None,
     ) -> list[AccountAggregateRow]:
-        conditions = _report_conditions(start_date, end_date, account_ids, model)
+        conditions = _report_conditions(start_date, end_date, account_ids, model, useragent_group)
 
         stmt = (
             select(
@@ -201,15 +217,50 @@ class ReportsRepository:
             for row in rows
         ]
 
+    async def aggregate_by_useragent(
+        self,
+        start_date: datetime,
+        end_date: datetime,
+        account_ids: list[str] | None = None,
+        model: str | None = None,
+        useragent_group: str | None = None,
+    ) -> list[UserAgentAggregateRow]:
+        useragent_group_bucket = _useragent_group_bucket_expr()
+        conditions = [
+            *_report_conditions(start_date, end_date, account_ids, model, useragent_group),
+            or_(RequestLog.useragent_group.is_(None), func.trim(RequestLog.useragent_group) != ""),
+        ]
+
+        stmt = (
+            select(
+                useragent_group_bucket.label("useragent_group"),
+                func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("cost_usd"),
+                func.count().label("request_count"),
+            )
+            .where(and_(*conditions))
+            .group_by(useragent_group_bucket)
+            .order_by(func.coalesce(func.sum(RequestLog.cost_usd), 0.0).desc())
+        )
+        result = await self._session.execute(stmt)
+        return [
+            UserAgentAggregateRow(
+                useragent_group=row.useragent_group,
+                cost_usd=float(row.cost_usd),
+                request_count=int(row.request_count),
+            )
+            for row in result.all()
+        ]
+
     async def count_active_accounts(
         self,
         start_date: datetime,
         end_date: datetime,
         account_ids: list[str] | None = None,
         model: str | None = None,
+        useragent_group: str | None = None,
     ) -> int:
         conditions = [
-            *_report_conditions(start_date, end_date, account_ids, model),
+            *_report_conditions(start_date, end_date, account_ids, model, useragent_group),
             RequestLog.account_id.is_not(None),
         ]
 
@@ -222,12 +273,16 @@ class ReportsRepository:
         self,
         account_ids: list[str] | None = None,
         model: str | None = None,
+        useragent_group: str | None = None,
     ) -> datetime | None:
         conditions = [_normal_traffic_clause()]
         if account_ids:
             conditions.append(RequestLog.account_id.in_(account_ids))
         if model:
             conditions.append(RequestLog.model == model)
+        useragent_group_clause = _useragent_group_filter_clause(useragent_group)
+        if useragent_group_clause is not None:
+            conditions.append(useragent_group_clause)
 
         result = await self._session.execute(select(func.min(RequestLog.requested_at)).where(and_(*conditions)))
         value = result.scalar_one_or_none()
@@ -239,6 +294,7 @@ def _report_conditions(
     end_date: datetime,
     account_ids: list[str] | None,
     model: str | None,
+    useragent_group: str | None,
 ) -> list:
     conditions = [
         RequestLog.requested_at >= start_date,
@@ -249,7 +305,25 @@ def _report_conditions(
         conditions.append(RequestLog.account_id.in_(account_ids))
     if model:
         conditions.append(RequestLog.model == model)
+    useragent_group_clause = _useragent_group_filter_clause(useragent_group)
+    if useragent_group_clause is not None:
+        conditions.append(useragent_group_clause)
     return conditions
+
+
+def _useragent_group_bucket_expr():
+    return case(
+        (RequestLog.useragent_group.is_(None), literal(MISSING_USERAGENT_GROUP)),
+        else_=RequestLog.useragent_group,
+    )
+
+
+def _useragent_group_filter_clause(useragent_group: str | None):
+    if not useragent_group:
+        return None
+    if useragent_group == MISSING_USERAGENT_GROUP:
+        return RequestLog.useragent_group.is_(None)
+    return RequestLog.useragent_group == useragent_group
 
 
 def _normal_traffic_clause():
@@ -266,7 +340,9 @@ def _daily_rows_stmt(
     day_ranges: list[tuple[str, datetime, datetime]],
     account_ids: list[str] | None,
     model: str | None,
+    useragent_group: str | None,
 ):
+    useragent_group_clause = _useragent_group_filter_clause(useragent_group)
     day_range_rows = [
         select(
             literal(report_date).label("report_date"),
@@ -300,6 +376,7 @@ def _daily_rows_stmt(
                     _normal_traffic_clause(),
                     *([RequestLog.account_id.in_(account_ids)] if account_ids else []),
                     *([RequestLog.model == model] if model else []),
+                    *([useragent_group_clause] if useragent_group_clause is not None else []),
                 ),
             )
         )

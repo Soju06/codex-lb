@@ -55,17 +55,24 @@ describe("AccountList", () => {
       displayName: "Paused Account",
       status: "paused",
       limitWarmupEnabled: false,
+      availableResetCredits: 1,
+      resetCreditNearestExpiresAt: "2026-01-03T12:00:00.000Z",
     });
 
     render(<AccountList accounts={[account]} onAction={onAction} />);
 
+    const resetButton = screen.getByRole("button", { name: "Redeem reset credit for Paused Account" });
+    expect(resetButton).toBeDisabled();
+
     await user.click(screen.getByRole("button", { name: "View details for Paused Account" }));
+    await user.click(resetButton);
     await user.click(screen.getByRole("button", { name: "Enable limit warm-up for Paused Account" }));
     await user.click(screen.getByRole("button", { name: "Resume Paused Account" }));
 
     expect(onAction).toHaveBeenNthCalledWith(1, account, "details");
     expect(onAction).toHaveBeenNthCalledWith(2, account, "warmup-toggle");
     expect(onAction).toHaveBeenNthCalledWith(3, account, "resume");
+    expect(onAction).not.toHaveBeenCalledWith(account, "reset-credit");
   });
 
   it("blurs list identity text when privacy mode is enabled", () => {
@@ -214,5 +221,58 @@ describe("AccountList", () => {
     await user.click(screen.getByRole("button", { name: "Credits, sorted ascending" }));
 
     expect(rowNames()).toEqual(["Low Account", "Empty Account", "Unknown Account"]);
+  });
+
+  it("hides the reset action when no reset credits are available", () => {
+    render(
+      <AccountList
+        accounts={[
+          createAccountSummary({
+            accountId: "acc-no-reset",
+            displayName: "No Reset Account",
+            availableResetCredits: 0,
+            resetCreditNearestExpiresAt: null,
+          }),
+        ]}
+      />,
+    );
+
+    expect(
+      screen.queryByRole("button", { name: "Redeem reset credit for No Reset Account" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows the banked reset count as a bubble on the reset button", () => {
+    render(
+      <AccountList
+        accounts={[
+          createAccountSummary({
+            accountId: "acc-reset",
+            displayName: "Reset Account",
+            availableResetCredits: 3,
+          }),
+        ]}
+      />,
+    );
+
+    const resetButton = screen.getByRole("button", { name: "Redeem reset credit for Reset Account" });
+    expect(within(resetButton).getByText("3")).toBeInTheDocument();
+  });
+
+  it("caps the reset count bubble at 99+", () => {
+    render(
+      <AccountList
+        accounts={[
+          createAccountSummary({
+            accountId: "acc-many-reset",
+            displayName: "Many Reset Account",
+            availableResetCredits: 120,
+          }),
+        ]}
+      />,
+    );
+
+    const resetButton = screen.getByRole("button", { name: "Redeem reset credit for Many Reset Account" });
+    expect(within(resetButton).getByText("99+")).toBeInTheDocument();
   });
 });

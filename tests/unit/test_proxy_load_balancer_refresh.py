@@ -25,6 +25,7 @@ from app.db.models import (
 )
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
+from app.modules.proxy.account_cache import is_account_routing_unavailable
 from app.modules.proxy.load_balancer import (
     ADDITIONAL_QUOTA_DATA_UNAVAILABLE,
     ADDITIONAL_QUOTA_EXHAUSTED,
@@ -1544,6 +1545,34 @@ async def test_record_errors_does_not_restore_terminal_status(monkeypatch) -> No
 
 
 @pytest.mark.asyncio
+async def test_mark_permanent_failure_marks_account_routing_unavailable() -> None:
+    account = _make_account("acc-permanent-routing-unavailable", "permanent-routing@example.com")
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(primary={}, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+
+    await balancer.mark_permanent_failure(account, "refresh_token_expired")
+
+    assert account.status == AccountStatus.REAUTH_REQUIRED
+    assert is_account_routing_unavailable(account.id) is True
+
+
+@pytest.mark.asyncio
+async def test_mark_rate_limit_does_not_mark_account_routing_unavailable() -> None:
+    account = _make_account("acc-rate-limit-stays-routable", "rate-limit-routing@example.com")
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(primary={}, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+
+    await balancer.mark_rate_limit(account, {"message": "Try again in 1s"})
+
+    assert account.status == AccountStatus.RATE_LIMITED
+    assert is_account_routing_unavailable(account.id) is False
+
+
+@pytest.mark.asyncio
 async def test_select_account_does_not_hold_runtime_lock_during_input_loading(monkeypatch) -> None:
     accounts_started = asyncio.Event()
     release_accounts = asyncio.Event()
@@ -2684,7 +2713,9 @@ async def test_select_account_allows_plus_plan_without_additional_quota_rows(mon
 
 
 @pytest.mark.asyncio
-async def test_select_account_keeps_standard_quota_for_plus_gated_model_without_additional_rows(monkeypatch) -> None:
+async def test_select_account_treats_standard_quota_as_advisory_for_plus_gated_model_without_additional_rows(
+    monkeypatch,
+) -> None:
     account = _make_account("acc-plus-standard-exhausted", "plus-standard-exhausted@example.com")
     now = utcnow()
     now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
@@ -2717,7 +2748,8 @@ async def test_select_account_keeps_standard_quota_for_plus_gated_model_without_
     )
     selection = await balancer.select_account(model="gpt-5.3-codex-spark")
 
-    assert selection.account is None
+    assert selection.account is not None
+    assert selection.account.id == account.id
 
 
 @pytest.mark.asyncio

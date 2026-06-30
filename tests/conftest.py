@@ -28,6 +28,14 @@ from app.db.session import engine  # noqa: E402
 from app.main import create_app  # noqa: E402
 
 
+class _NoopScheduler:
+    async def start(self) -> None:
+        return None
+
+    async def stop(self) -> None:
+        return None
+
+
 def _drop_test_migration_tables(sync_conn) -> None:
     sync_conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
     sync_conn.execute(text("DROP TABLE IF EXISTS schema_migrations"))
@@ -62,8 +70,16 @@ async def app_instance(_reset_db_state, monkeypatch):
         return None
 
     monkeypatch.setattr(main_module, "init_db", _noop_init_db)
+    monkeypatch.setattr(main_module, "build_rate_limit_reset_credits_scheduler", lambda: _NoopScheduler())
     app = create_app()
     return app
+
+
+@pytest.fixture(autouse=True)
+def _disable_rate_limit_reset_credits_scheduler_startup(monkeypatch):
+    import app.main as main_module
+
+    monkeypatch.setattr(main_module, "build_rate_limit_reset_credits_scheduler", lambda: _NoopScheduler())
 
 
 @pytest_asyncio.fixture(scope="session", autouse=True)
@@ -133,9 +149,10 @@ def _reset_global_state() -> None:
     except Exception:
         pass
     try:
-        from app.modules.proxy.account_cache import get_account_selection_cache
+        from app.modules.proxy.account_cache import clear_all_account_routing_unavailable, get_account_selection_cache
 
         get_account_selection_cache().invalidate()
+        clear_all_account_routing_unavailable()
     except Exception:
         pass
     try:

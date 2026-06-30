@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import Integer, and_, cast, func, literal, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.utils.time import utcnow
+from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import (
     Account,
     QuotaPlannerDecision,
@@ -19,6 +19,21 @@ from app.db.session import sqlite_writer_section
 from app.modules.quota_planner.logic import PlannerSettings, encode_working_days, parse_working_days
 
 _SETTINGS_ID = 1
+
+
+def _to_db_naive_utc(value: datetime | None) -> datetime | None:
+    """Normalize a decision datetime for the timezone-naive DB columns.
+
+    ``QuotaPlannerDecision.scheduled_at`` / ``executed_at`` are timezone-naive
+    ``DateTime`` columns. Persisting timezone-aware instants into them fails on
+    Postgres/asyncpg ("can't subtract offset-naive and offset-aware datetimes").
+    Aware values are converted to UTC and stripped of ``tzinfo`` so the absolute
+    instant is preserved; naive values are returned unchanged.
+    """
+
+    if value is None:
+        return None
+    return to_utc_naive(value)
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,8 +115,8 @@ class QuotaPlannerRepository:
             mode=mode,
             action=action,
             account_id=account_id,
-            scheduled_at=scheduled_at,
-            executed_at=executed_at,
+            scheduled_at=_to_db_naive_utc(scheduled_at),
+            executed_at=_to_db_naive_utc(executed_at),
             score=score,
             reason=reason,
             forecast_snapshot_hash=forecast_snapshot_hash,
@@ -138,7 +153,7 @@ class QuotaPlannerRepository:
         if reason is not None:
             values["reason"] = reason
         if executed_at is not None:
-            values["executed_at"] = executed_at
+            values["executed_at"] = _to_db_naive_utc(executed_at)
         if state_after_json is not None:
             values["state_after_json"] = state_after_json
         stmt = update(QuotaPlannerDecision).where(QuotaPlannerDecision.id == decision_id).values(**values)

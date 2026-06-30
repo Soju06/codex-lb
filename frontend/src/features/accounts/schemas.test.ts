@@ -4,8 +4,10 @@ import {
   AccountAuthExportResponseSchema,
   AccountProbeResponseSchema,
   AccountSummarySchema,
+  ConsumeRateLimitResetCreditResponseSchema,
   ImportStateSchema,
   OAuthStateSchema,
+  RateLimitResetCreditsSnapshotSchema,
 } from "@/features/accounts/schemas";
 
 const ISO = "2026-01-01T00:00:00+00:00";
@@ -185,5 +187,52 @@ describe("AccountProbeResponseSchema", () => {
 
     expect(parsed.probeStatusCode).toBe(200);
     expect(parsed.accountId).toBe("acc-1");
+  });
+});
+
+describe("RateLimitResetCreditsSnapshotSchema", () => {
+  it("parses reset-credit items when nullable backend fields are omitted or null", () => {
+    const parsed = RateLimitResetCreditsSnapshotSchema.parse({
+      availableCount: 2,
+      nearestExpiresAt: null,
+      credits: [
+        {
+          id: "credit-1",
+          expiresAt: ISO,
+        },
+        {
+          id: "credit-2",
+          status: null,
+          expiresAt: null,
+        },
+      ],
+    });
+
+    expect(parsed.credits[0]?.status).toBeUndefined();
+    expect(parsed.credits[1]?.status).toBeNull();
+  });
+});
+
+describe("ConsumeRateLimitResetCreditResponseSchema", () => {
+  it("parses consume responses when nullable backend fields are omitted or null", () => {
+    expect(
+      ConsumeRateLimitResetCreditResponseSchema.parse({
+        redeemedAt: ISO,
+      }),
+    ).toMatchObject({
+      redeemedAt: ISO,
+    });
+
+    expect(
+      ConsumeRateLimitResetCreditResponseSchema.parse({
+        code: null,
+        windowsReset: null,
+        redeemedAt: null,
+      }),
+    ).toMatchObject({
+      code: null,
+      windowsReset: null,
+      redeemedAt: null,
+    });
   });
 });

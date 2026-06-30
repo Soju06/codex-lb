@@ -174,7 +174,7 @@ def _sticky_key_from_payload(payload: ResponsesRequest) -> str | None:
 
 def _sticky_key_from_session_header(headers: Mapping[str, str]) -> str | None:
     normalized = {key.lower(): value for key, value in headers.items()}
-    for key in ("session_id", "x-codex-session-id", "x-codex-conversation-id"):
+    for key in ("session_id", "session-id", "x-codex-session-id", "x-codex-conversation-id", "thread-id"):
         value = normalized.get(key)
         if not isinstance(value, str):
             continue

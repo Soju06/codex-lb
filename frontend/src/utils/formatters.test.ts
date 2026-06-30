@@ -7,6 +7,7 @@ import {
   formatDateTimeInline,
   formatAccessTokenLabel,
   formatCachedTokensMeta,
+  formatLocalDateTimeSeconds,
   formatCompactNumber,
   formatCountdown,
   formatCurrency,
@@ -20,6 +21,7 @@ import {
   formatQuotaResetMeta,
   formatRate,
   formatResetRelative,
+  formatSingleUnitRemaining,
   formatRefreshTokenLabel,
   formatRelative,
   formatTimeLong,
@@ -58,6 +60,8 @@ describe("formatters", () => {
   it("formats number-like values", () => {
     expect(formatNumber(1200)).toBe("1,200");
     expect(formatCompactNumber(1200)).toMatch(/K$/);
+    expect(formatCompactNumber(1430)).toBe("1.43K");
+    expect(formatCompactNumber(1_500_000_000)).toBe("1.5B");
     expect(formatCurrency(12)).toMatch(/^\$/);
     expect(formatNumber("abc")).toBe("--");
   });
@@ -115,6 +119,15 @@ describe("formatters", () => {
     expect(formatChartDateTime(iso)).not.toMatch(/AM|PM/);
   });
 
+  it("formats local timestamps as yyyy-mm-dd hh:mm:ss", () => {
+    const iso = "2026-01-01T00:00:00.000Z";
+    const local = new Date(iso);
+    const expected = `${local.getFullYear()}-${String(local.getMonth() + 1).padStart(2, "0")}-${String(local.getDate()).padStart(2, "0")} ${String(local.getHours()).padStart(2, "0")}:${String(local.getMinutes()).padStart(2, "0")}:${String(local.getSeconds()).padStart(2, "0")}`;
+
+    expect(formatLocalDateTimeSeconds(iso)).toBe(expected);
+    expect(formatLocalDateTimeSeconds("bad-date")).toBe("--");
+  });
+
   it("formats relative and countdown values", () => {
     expect(formatRelative(30 * 60_000)).toBe("in 30m");
     expect(formatRelative(90 * 60_000)).toBe("in 2h");
@@ -123,6 +136,29 @@ describe("formatters", () => {
     expect(formatResetRelative((4 * 60 + 13) * 60_000)).toBe("in 4h 13m");
     expect(formatResetRelative((6 * 24 + 13) * 60 * 60_000)).toBe("in 6d 13h");
     expect(formatCountdown(125)).toBe("2:05");
+  });
+
+  it("formats single-unit reset-credit countdowns", () => {
+    expect(formatSingleUnitRemaining("2026-01-08T00:00:00.000Z")).toEqual({
+      label: "7d",
+      expiringSoon: false,
+    });
+    expect(formatSingleUnitRemaining("2026-01-07T00:00:00.000Z")).toEqual({
+      label: "6d",
+      expiringSoon: true,
+    });
+    expect(formatSingleUnitRemaining("2026-01-01T01:00:00.000Z")).toEqual({
+      label: "1h",
+      expiringSoon: true,
+    });
+    expect(formatSingleUnitRemaining("2026-01-01T00:01:00.000Z")).toEqual({
+      label: "1m",
+      expiringSoon: true,
+    });
+    expect(formatSingleUnitRemaining("2025-12-31T23:59:59.000Z")).toEqual({
+      label: "now",
+      expiringSoon: true,
+    });
   });
 
   it("formats quota reset labels", () => {

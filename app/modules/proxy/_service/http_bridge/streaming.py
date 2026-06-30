@@ -79,6 +79,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _log_http_bridge_event,
     _make_http_bridge_session_key,
     _record_bridge_reattach,
+    _record_continuity_fail_closed,
     _trim_http_bridge_previous_response_input_items,
 )
 from app.modules.proxy._service.http_bridge.service_stubs import (
@@ -278,6 +279,7 @@ class _HTTPBridgeStreamingMixin:
         forwarded_affinity_kind: str | None = None,
         forwarded_affinity_key: str | None = None,
         client_ip: str | None = None,
+        enforce_openai_sdk_contract: bool = True,
     ) -> AsyncIterator[str]:
         _maybe_log_proxy_request_payload("stream_http", payload, headers)
         proxy_api_authorization = _header_value_case_insensitive(headers, "authorization")
@@ -297,6 +299,7 @@ class _HTTPBridgeStreamingMixin:
             forwarded_affinity_kind=forwarded_affinity_kind,
             forwarded_affinity_key=forwarded_affinity_key,
             client_ip=client_ip,
+            enforce_openai_sdk_contract=enforce_openai_sdk_contract,
         )
 
     async def _stream_http_bridge_or_retry(
@@ -316,6 +319,7 @@ class _HTTPBridgeStreamingMixin:
         forwarded_affinity_kind: str | None = None,
         forwarded_affinity_key: str | None = None,
         client_ip: str | None = None,
+        enforce_openai_sdk_contract: bool = True,
     ) -> AsyncIterator[str]:
         dashboard_settings = await _service_get_settings_cache().get()
         runtime_config = _http_bridge_runtime_config(dashboard_settings, _service_get_settings())
@@ -361,6 +365,7 @@ class _HTTPBridgeStreamingMixin:
                 rewritten_file_account_id=rewritten_file_account_id,
                 upstream_stream_transport_override=force_upstream_stream_transport,
                 client_ip=client_ip,
+                enforce_openai_sdk_contract=enforce_openai_sdk_contract,
             ):
                 yield line
             return
@@ -386,6 +391,7 @@ class _HTTPBridgeStreamingMixin:
             forwarded_affinity_key=forwarded_affinity_key,
             rewritten_file_account_id=rewritten_file_account_id,
             client_ip=client_ip,
+            enforce_openai_sdk_contract=enforce_openai_sdk_contract,
         ):
             yield line
 
@@ -412,6 +418,7 @@ class _HTTPBridgeStreamingMixin:
         forwarded_affinity_key: str | None = None,
         rewritten_file_account_id: str | None = None,
         client_ip: str | None = None,
+        enforce_openai_sdk_contract: bool = True,
     ) -> AsyncIterator[str]:
         del suppress_text_done_events
         request_id = ensure_request_id()
@@ -552,6 +559,8 @@ class _HTTPBridgeStreamingMixin:
             request_id=request_id,
             client_ip=client_ip,
         )
+        request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
+        request_state.affinity_policy = affinity
         if downstream_turn_state is not None:
             request_state.session_id = _normalize_session_id(downstream_turn_state)
         if previous_response_trimmed_input_count is not None:
@@ -602,6 +611,19 @@ class _HTTPBridgeStreamingMixin:
                 api_key=api_key,
                 session_id=request_state.session_id,
                 surface="http_bridge",
+            )
+        if request_state.previous_response_id is not None and request_state.preferred_account_id is None:
+            message = "Previous response owner account is unavailable; retry later."
+            _record_continuity_fail_closed(
+                surface="http_bridge",
+                reason="owner_account_unavailable",
+                previous_response_id=request_state.previous_response_id,
+                session_id=request_state.session_id,
+                upstream_error_code="owner_lookup_miss",
+            )
+            raise ProxyResponseError(
+                502,
+                openai_error("previous_response_owner_unavailable", message),
             )
         file_required_preferred_account = False
         if request_state.preferred_account_id is None:
@@ -706,6 +728,7 @@ class _HTTPBridgeStreamingMixin:
                     request_id=request_id,
                     client_ip=client_ip,
                 )
+                request_state.affinity_policy = affinity
                 if downstream_turn_state is not None:
                     request_state.session_id = _normalize_session_id(downstream_turn_state)
                 request_state.transport = _REQUEST_TRANSPORT_HTTP
@@ -878,6 +901,8 @@ class _HTTPBridgeStreamingMixin:
                         request_id=request_id,
                         client_ip=client_ip,
                     )
+                    retry_request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
+                    retry_request_state.affinity_policy = affinity
                     if downstream_turn_state is not None:
                         retry_request_state.session_id = _normalize_session_id(downstream_turn_state)
                     retry_request_state.transport = _REQUEST_TRANSPORT_HTTP
@@ -972,6 +997,8 @@ class _HTTPBridgeStreamingMixin:
                 request_id=request_id,
                 client_ip=client_ip,
             )
+            request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
+            request_state.affinity_policy = affinity
             request_state.transport = _REQUEST_TRANSPORT_HTTP
             request_state.request_stage = _http_bridge_request_stage(
                 headers=headers,
@@ -1023,6 +1050,8 @@ class _HTTPBridgeStreamingMixin:
                     request_id=request_id,
                     client_ip=client_ip,
                 )
+                request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
+                request_state.affinity_policy = affinity
                 if downstream_turn_state is not None:
                     request_state.session_id = _normalize_session_id(downstream_turn_state)
                 request_state.transport = _REQUEST_TRANSPORT_HTTP
@@ -1350,6 +1379,7 @@ class _HTTPBridgeStreamingMixin:
                     request_id=request_id,
                     client_ip=client_ip,
                 )
+                retry_request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
                 if downstream_turn_state is not None:
                     retry_request_state.session_id = _normalize_session_id(downstream_turn_state)
                 retry_request_state.transport = _REQUEST_TRANSPORT_HTTP

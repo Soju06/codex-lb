@@ -6,6 +6,7 @@ type ReportsFilterState = {
   endDate: string | undefined;
   accountId: string[];
   model: string | undefined;
+  useragent?: string | undefined;
 };
 
 export function useReports(
@@ -20,6 +21,7 @@ export function useReports(
         endDate: filters.endDate,
         accountId: filters.accountId.length > 0 ? filters.accountId : undefined,
         model: filters.model || undefined,
+        useragent: filters.useragent || undefined,
         timezone: timeZone,
       }),
     refetchInterval: 60_000,

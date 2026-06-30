@@ -155,13 +155,14 @@ class Settings(BaseSettings):
     database_alembic_auto_remap_enabled: bool = True
     upstream_base_url: str = "https://chatgpt.com/backend-api"
     upstream_stream_transport: Literal["http", "websocket", "auto"] = "auto"
+    http_downstream_transport_policy: Literal["smart", "always_http", "always_websocket", "pinned"] = "smart"
     upstream_connect_timeout_seconds: float = 8.0
     upstream_compact_timeout_seconds: float | None = None
     upstream_websocket_trust_env: bool = Field(default_factory=_default_upstream_websocket_trust_env)
     proxy_request_budget_seconds: float = Field(default=600.0, gt=0)
     http_responses_stream_request_budget_seconds: float = Field(default=7200.0, gt=0)
     compact_request_budget_seconds: float = Field(default=180.0, gt=0)
-    stream_idle_timeout_seconds: float = 600.0
+    stream_idle_timeout_seconds: float = Field(default=7200.0, gt=0)
     sse_keepalive_interval_seconds: float = Field(default=10.0, ge=0)
     proxy_downstream_websocket_idle_timeout_seconds: float = Field(default=120.0, gt=0)
     # Applies to both upstream SSE event buffering and upstream websocket message
@@ -193,6 +194,7 @@ class Settings(BaseSettings):
     usage_fetch_max_retries: int = 2
     usage_refresh_enabled: bool = True
     usage_refresh_interval_seconds: int = Field(default=60, gt=0)
+    rate_limit_reset_credits_refresh_interval_seconds: int = Field(default=60, gt=0)
     openai_cache_affinity_max_age_seconds: int = Field(default=1800, gt=0)
     warmup_model: str = "gpt-5.4-mini"
     openai_prompt_cache_key_derivation_enabled: bool = True
@@ -242,6 +244,9 @@ class Settings(BaseSettings):
     model_registry_enabled: bool = True
     model_registry_refresh_interval_seconds: int = Field(default=300, gt=0)
     model_registry_client_version: str = "0.101.0"
+    codex_fingerprint_os: str = "Mac OS 26.5.0"
+    codex_fingerprint_arch: str = "arm64"
+    codex_fingerprint_terminal: str = "iTerm.app/3.6.10"
     model_context_window_overrides: Annotated[dict[str, int], NoDecode] = Field(default_factory=dict)
     proxy_unauthenticated_client_cidrs: Annotated[list[str], NoDecode] = Field(default_factory=list)
     firewall_trust_proxy_headers: bool = False

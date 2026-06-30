@@ -405,15 +405,57 @@ def _resolve_additional_quota_query_scope(
     )
 
 
-def _additional_quota_match_clause(scope: AdditionalQuotaQueryScope):
+def _additional_quota_match_clause(scope: AdditionalQuotaQueryScope, *, canonical_only: bool = False):
     clauses = [AdditionalUsageHistory.quota_key.in_(tuple(scope.quota_key_match_values or {scope.quota_key}))]
+    if canonical_only:
+        return clauses[0]
+    alias_clause = _additional_quota_alias_match_clause(scope)
+    if alias_clause is not None:
+        clauses.append(alias_clause)
+    return or_(*clauses)
+
+
+def _additional_quota_alias_match_clause(scope: AdditionalQuotaQueryScope):
+    clauses = []
     if scope.limit_name_match_values:
         clauses.append(func.lower(AdditionalUsageHistory.limit_name).in_(tuple(scope.limit_name_match_values)))
     if scope.metered_feature_match_values:
         clauses.append(
             func.lower(AdditionalUsageHistory.metered_feature).in_(tuple(scope.metered_feature_match_values))
         )
+    if not clauses:
+        return None
     return or_(*clauses)
+
+
+def _newer_additional_usage_entry(
+    current: AdditionalUsageHistory | None,
+    candidate: AdditionalUsageHistory,
+) -> AdditionalUsageHistory:
+    if current is None:
+        return candidate
+    current_key = (
+        current.recorded_at,
+        current.used_percent,
+        current.id,
+    )
+    candidate_key = (
+        candidate.recorded_at,
+        candidate.used_percent,
+        candidate.id,
+    )
+    return candidate if candidate_key > current_key else current
+
+
+def _merge_latest_additional_usage_entries(
+    entries: dict[str, AdditionalUsageHistory],
+    candidates: Collection[AdditionalUsageHistory],
+) -> None:
+    for candidate in candidates:
+        entries[candidate.account_id] = _newer_additional_usage_entry(
+            entries.get(candidate.account_id),
+            candidate,
+        )
 
 
 class UsageRepository:
@@ -933,36 +975,100 @@ class AdditionalUsageRepository:
         )
         if scope is None or window is None:
             raise ValueError("quota_key/limit_name and window are required")
+        bind = self._session.get_bind()
+        dialect = bind.dialect.name if bind else "sqlite"
+        canonical_only = dialect == "postgresql"
         conditions = [
-            _additional_quota_match_clause(scope),
+            _additional_quota_match_clause(scope, canonical_only=canonical_only),
             AdditionalUsageHistory.window == window,
         ]
         if account_ids is not None:
+            account_ids = list(account_ids)
+            if not account_ids:
+                return {}
             conditions.append(AdditionalUsageHistory.account_id.in_(account_ids))
         if since is not None:
             conditions.append(AdditionalUsageHistory.recorded_at >= since)
-        subq = (
-            select(
-                AdditionalUsageHistory.id.label("usage_id"),
-                func.row_number()
-                .over(
-                    partition_by=AdditionalUsageHistory.account_id,
-                    order_by=(
+        if dialect == "postgresql":
+            latest_rows = (
+                select(AdditionalUsageHistory)
+                .where(*conditions)
+                .distinct(AdditionalUsageHistory.account_id)
+                .order_by(
+                    AdditionalUsageHistory.account_id.asc(),
+                    AdditionalUsageHistory.recorded_at.desc(),
+                    AdditionalUsageHistory.used_percent.desc(),
+                    AdditionalUsageHistory.id.desc(),
+                )
+            )
+            result = await self._session.execute(latest_rows)
+            entries = {entry.account_id: entry for entry in result.scalars().all()}
+            alias_clause = _additional_quota_alias_match_clause(scope)
+            if alias_clause is not None:
+                alias_conditions = [
+                    alias_clause,
+                    AdditionalUsageHistory.window == window,
+                ]
+                if account_ids is not None:
+                    alias_conditions.append(AdditionalUsageHistory.account_id.in_(account_ids))
+                if since is not None:
+                    alias_conditions.append(AdditionalUsageHistory.recorded_at >= since)
+                alias_rows = (
+                    select(AdditionalUsageHistory)
+                    .where(*alias_conditions)
+                    .distinct(AdditionalUsageHistory.account_id)
+                    .order_by(
+                        AdditionalUsageHistory.account_id.asc(),
                         AdditionalUsageHistory.recorded_at.desc(),
                         AdditionalUsageHistory.used_percent.desc(),
                         AdditionalUsageHistory.id.desc(),
-                    ),
+                    )
                 )
-                .label("row_number"),
+                alias_result = await self._session.execute(alias_rows)
+                _merge_latest_additional_usage_entries(entries, alias_result.scalars().all())
+            return entries
+
+        latest_ids = (
+            select(
+                AdditionalUsageHistory.account_id.label("account_id"),
+                func.max(AdditionalUsageHistory.recorded_at).label("max_recorded_at"),
             )
             .where(*conditions)
-            .subquery()
+            .group_by(AdditionalUsageHistory.account_id)
+            .subquery("latest_additional_usage_recorded_at")
         )
-        stmt = (
-            select(AdditionalUsageHistory)
-            .join(subq, AdditionalUsageHistory.id == subq.c.usage_id)
-            .where(subq.c.row_number == 1)
+        latest_tie_breakers = (
+            select(
+                AdditionalUsageHistory.account_id.label("account_id"),
+                AdditionalUsageHistory.recorded_at.label("recorded_at"),
+                func.max(AdditionalUsageHistory.used_percent).label("max_used_percent"),
+            )
+            .join(
+                latest_ids,
+                and_(
+                    AdditionalUsageHistory.account_id == latest_ids.c.account_id,
+                    AdditionalUsageHistory.recorded_at == latest_ids.c.max_recorded_at,
+                ),
+            )
+            .where(*conditions)
+            .group_by(AdditionalUsageHistory.account_id, AdditionalUsageHistory.recorded_at)
+            .subquery("latest_additional_usage_tie_breakers")
         )
+        row_ids = (
+            select(func.max(AdditionalUsageHistory.id).label("usage_id"))
+            .join(
+                latest_tie_breakers,
+                and_(
+                    AdditionalUsageHistory.account_id == latest_tie_breakers.c.account_id,
+                    AdditionalUsageHistory.recorded_at == latest_tie_breakers.c.recorded_at,
+                    AdditionalUsageHistory.used_percent == latest_tie_breakers.c.max_used_percent,
+                ),
+            )
+            .where(*conditions)
+            .group_by(AdditionalUsageHistory.account_id)
+            .subquery("latest_additional_usage_ids")
+        )
+        stmt = select(AdditionalUsageHistory).join(row_ids, AdditionalUsageHistory.id == row_ids.c.usage_id)
         result = await self._session.execute(stmt)
         return {entry.account_id: entry for entry in result.scalars().all()}
 

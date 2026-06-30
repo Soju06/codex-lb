@@ -15,6 +15,13 @@ PRO_WEEKLY_CAPACITY_CREDITS = 50_400.0
 RECENT_BURN_WINDOW = timedelta(hours=6)
 MIN_FRESHNESS_SECONDS = 300.0
 FRESHNESS_MISSED_REFRESH_CYCLES = 3.0
+PACE_ELIGIBLE_ACCOUNT_STATUSES = frozenset(
+    (
+        AccountStatus.ACTIVE,
+        AccountStatus.RATE_LIMITED,
+        AccountStatus.QUOTA_EXCEEDED,
+    )
+)
 
 
 @dataclass
@@ -85,7 +92,7 @@ def build_weekly_credit_pace(
             continue
 
         account = accounts_by_id.get(summary.account_id)
-        if account is None or account.status != AccountStatus.ACTIVE:
+        if account is None or account.status not in PACE_ELIGIBLE_ACCOUNT_STATUSES:
             inactive_account_count += 1
             continue
 

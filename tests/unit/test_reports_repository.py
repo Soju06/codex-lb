@@ -162,3 +162,163 @@ async def test_aggregate_daily_rows_rejects_ranges_over_supported_window(
             date(2026, 1, 1),
             timezone.utc,
         )
+
+
+@pytest.mark.asyncio
+async def test_report_filters_apply_to_all_aggregates_including_earliest_activity(
+    async_session: AsyncSession,
+) -> None:
+    repo = ReportsRepository(async_session)
+    matched_at = datetime(2026, 6, 1, 9, 0, tzinfo=timezone.utc).replace(tzinfo=None)
+    filtered_out_at = datetime(2026, 5, 30, 9, 0, tzinfo=timezone.utc).replace(tzinfo=None)
+
+    async_session.add(_make_account("acc_reports_filters", "reports-filters@example.com"))
+    async_session.add_all(
+        [
+            RequestLog(
+                account_id="acc_reports_filters",
+                request_id="report-filter-match",
+                requested_at=matched_at,
+                model="gpt-5.1",
+                useragent_group="opencode",
+                status="success",
+                input_tokens=10,
+                output_tokens=4,
+                cached_input_tokens=2,
+                cost_usd=0.25,
+            ),
+            RequestLog(
+                account_id="acc_reports_filters",
+                request_id="report-filter-other-useragent",
+                requested_at=filtered_out_at,
+                model="gpt-5.1",
+                useragent_group="CodexCLI",
+                status="success",
+                input_tokens=100,
+                output_tokens=40,
+                cached_input_tokens=20,
+                cost_usd=2.5,
+            ),
+        ]
+    )
+    await async_session.commit()
+
+    summary = await repo.aggregate_summary(
+        datetime(2026, 6, 1, 0, 0),
+        datetime(2026, 6, 2, 0, 0),
+        useragent_group="opencode",
+    )
+    daily_rows = await repo.aggregate_daily_rows(
+        date(2026, 6, 1),
+        date(2026, 6, 1),
+        timezone.utc,
+        useragent_group="opencode",
+    )
+    by_model = await repo.aggregate_by_model(
+        datetime(2026, 6, 1, 0, 0),
+        datetime(2026, 6, 2, 0, 0),
+        useragent_group="opencode",
+    )
+    by_account = await repo.aggregate_by_account(
+        datetime(2026, 6, 1, 0, 0),
+        datetime(2026, 6, 2, 0, 0),
+        useragent_group="opencode",
+    )
+    earliest_activity_at = await repo.earliest_report_activity_at(useragent_group="opencode")
+
+    assert summary.total_requests == 1
+    assert summary.total_cost_usd == 0.25
+    assert len(daily_rows) == 1
+    assert daily_rows[0].requests == 1
+    assert by_model[0].model == "gpt-5.1"
+    assert by_model[0].cost_usd == 0.25
+    assert by_model[0].request_count == 1
+    assert by_account[0].account_id == "acc_reports_filters"
+    assert by_account[0].request_count == 1
+    assert earliest_activity_at == matched_at
+
+
+@pytest.mark.asyncio
+async def test_aggregate_by_useragent_separates_real_unknown_from_missing_groups(
+    async_session: AsyncSession,
+) -> None:
+    repo = ReportsRepository(async_session)
+
+    async_session.add(_make_account("acc_reports_useragents", "reports-useragents@example.com"))
+    async_session.add_all(
+        [
+            RequestLog(
+                account_id="acc_reports_useragents",
+                request_id="report-useragent-opencode",
+                requested_at=datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc).replace(tzinfo=None),
+                model="gpt-5.1",
+                useragent_group="opencode",
+                status="success",
+                input_tokens=10,
+                output_tokens=4,
+                cached_input_tokens=0,
+                cost_usd=0.5,
+            ),
+            RequestLog(
+                account_id="acc_reports_useragents",
+                request_id="report-useragent-codex",
+                requested_at=datetime(2026, 6, 1, 13, 0, tzinfo=timezone.utc).replace(tzinfo=None),
+                model="gpt-5.2",
+                useragent_group="CodexCLI",
+                status="success",
+                input_tokens=9,
+                output_tokens=3,
+                cached_input_tokens=0,
+                cost_usd=0.3,
+            ),
+            RequestLog(
+                account_id="acc_reports_useragents",
+                request_id="report-useragent-real-unknown",
+                requested_at=datetime(2026, 6, 1, 13, 30, tzinfo=timezone.utc).replace(tzinfo=None),
+                model="gpt-5.0",
+                useragent_group="Unknown",
+                status="success",
+                input_tokens=9,
+                output_tokens=2,
+                cached_input_tokens=0,
+                cost_usd=0.4,
+            ),
+            RequestLog(
+                account_id="acc_reports_useragents",
+                request_id="report-useragent-blank",
+                requested_at=datetime(2026, 6, 1, 14, 0, tzinfo=timezone.utc).replace(tzinfo=None),
+                model="gpt-5.3",
+                useragent_group="",
+                status="success",
+                input_tokens=8,
+                output_tokens=2,
+                cached_input_tokens=0,
+                cost_usd=0.2,
+            ),
+            RequestLog(
+                account_id="acc_reports_useragents",
+                request_id="report-useragent-null",
+                requested_at=datetime(2026, 6, 1, 15, 0, tzinfo=timezone.utc).replace(tzinfo=None),
+                model="gpt-5.4",
+                useragent_group=None,
+                status="success",
+                input_tokens=7,
+                output_tokens=1,
+                cached_input_tokens=0,
+                cost_usd=0.1,
+            ),
+        ]
+    )
+    await async_session.commit()
+
+    rows = await repo.aggregate_by_useragent(
+        datetime(2026, 6, 1, 0, 0),
+        datetime(2026, 6, 2, 0, 0),
+    )
+
+    assert [(row.useragent_group, row.cost_usd, row.request_count) for row in rows] == [
+        ("opencode", 0.5, 1),
+        ("Unknown", 0.4, 1),
+        ("CodexCLI", 0.3, 1),
+        ("Missing User-Agent", 0.1, 1),
+    ]

@@ -34,6 +34,10 @@ def _enum_values(enum_cls: type[Enum]) -> list[str]:
     return [str(member.value) for member in enum_cls]
 
 
+def new_codex_installation_id() -> str:
+    return str(uuid.uuid4())
+
+
 class AccountStatus(str, Enum):
     ACTIVE = "active"
     RATE_LIMITED = "rate_limited"
@@ -65,6 +69,11 @@ class Account(Base):
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
     chatgpt_account_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    codex_installation_id: Mapped[str] = mapped_column(
+        String(36),
+        default=new_codex_installation_id,
+        nullable=False,
+    )
     email: Mapped[str] = mapped_column(String, nullable=False)
     alias: Mapped[str | None] = mapped_column(String, nullable=True)
     workspace_id: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -218,6 +227,7 @@ class RequestLog(Base):
     upstream_error_code: Mapped[str | None] = mapped_column(String, nullable=True)
     bridge_stage: Mapped[str | None] = mapped_column(String, nullable=True)
     upstream_proxy_route_mode: Mapped[str | None] = mapped_column(String, nullable=True)
+    upstream_transport: Mapped[str | None] = mapped_column(String, nullable=True)
     upstream_proxy_pool_id: Mapped[str | None] = mapped_column(String, nullable=True)
     upstream_proxy_endpoint_id: Mapped[str | None] = mapped_column(String, nullable=True)
     upstream_proxy_fallback_used: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
@@ -415,6 +425,12 @@ class DashboardSettings(Base):
         String,
         default="default",
         server_default=text("'default'"),
+        nullable=False,
+    )
+    http_downstream_transport_policy: Mapped[str] = mapped_column(
+        String,
+        default="smart",
+        server_default=text("'smart'"),
         nullable=False,
     )
     prefer_earlier_reset_accounts: Mapped[bool] = mapped_column(
@@ -624,6 +640,7 @@ class ApiKey(Base):
         server_default=text("'foreground'"),
         nullable=False,
     )
+    transport_policy_override: Mapped[str | None] = mapped_column(String, nullable=True)
     account_assignment_scope_enabled: Mapped[bool] = mapped_column(
         Boolean,
         default=False,
@@ -1046,6 +1063,21 @@ Index("idx_logs_account_time", RequestLog.account_id, RequestLog.requested_at)
 Index("idx_logs_api_key_time", RequestLog.api_key_id, RequestLog.requested_at.desc(), RequestLog.id.desc())
 Index("idx_logs_api_key_time_account", RequestLog.api_key_id, RequestLog.requested_at.desc(), RequestLog.account_id)
 Index("idx_logs_request_kind_time", RequestLog.request_kind, RequestLog.requested_at.desc(), RequestLog.id.desc())
+Index(
+    "idx_logs_account_kind_deleted_latest",
+    RequestLog.account_id,
+    RequestLog.request_kind,
+    RequestLog.deleted_at,
+    RequestLog.requested_at,
+    RequestLog.id,
+)
+Index(
+    "idx_logs_account_request_latest",
+    RequestLog.account_id,
+    RequestLog.request_id,
+    RequestLog.requested_at,
+    RequestLog.id,
+)
 Index("idx_logs_requested_at", RequestLog.requested_at)
 Index("idx_logs_source_requested_at", RequestLog.source, RequestLog.requested_at.desc())
 Index("idx_logs_requested_at_id", RequestLog.requested_at.desc(), RequestLog.id.desc())
@@ -1169,4 +1201,13 @@ Index(
     AdditionalUsageHistory.window,
     AdditionalUsageHistory.account_id,
     AdditionalUsageHistory.recorded_at,
+)
+Index(
+    "ix_additional_usage_quota_window_latest",
+    AdditionalUsageHistory.quota_key,
+    AdditionalUsageHistory.window,
+    AdditionalUsageHistory.account_id,
+    AdditionalUsageHistory.recorded_at.desc(),
+    AdditionalUsageHistory.used_percent.desc(),
+    AdditionalUsageHistory.id.desc(),
 )

@@ -178,7 +178,6 @@ _BOOTSTRAP_STATIC_MODELS: tuple[UpstreamModel, ...] = (
         context_window=128_000,
         input_modalities=("text",),
         default_reasoning_level="high",
-        supported_in_api=False,
         minimal_client_version="0.100.0",
     ),
     _bootstrap_model(
@@ -312,6 +311,8 @@ def get_model_registry() -> ModelRegistry:
 
 
 def is_public_model(model: UpstreamModel, allowed_models: set[str] | None) -> bool:
+    if not model.supported_in_api:
+        return False
     if allowed_models is None:
         return True
     return model.slug in allowed_models

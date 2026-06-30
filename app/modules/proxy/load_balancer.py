@@ -52,7 +52,7 @@ from app.core.resilience.degradation import set_degraded, set_normal
 from app.core.usage.quota import apply_usage_quota
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, AdditionalUsageHistory, StickySessionKind, UsageHistory
-from app.modules.proxy.account_cache import get_account_selection_cache
+from app.modules.proxy.account_cache import get_account_selection_cache, mark_account_routing_unavailable
 from app.modules.proxy.additional_model_limits import get_additional_quota_key_for_model_id
 from app.modules.proxy.repo_bundle import ProxyRepoFactory, ProxyRepositories
 from app.modules.quota_planner.logic import PlannerSettings, build_routing_costs
@@ -1463,6 +1463,7 @@ class LoadBalancer:
             self._sync_runtime_state(account, state)
             async with self._repo_factory() as repos:
                 await self._persist_state(repos.accounts, account, state)
+            mark_account_routing_unavailable(account.id)
             self._selection_inputs_cache.invalidate()
 
     async def record_error(self, account: Account) -> None:
@@ -1881,7 +1882,10 @@ def _state_from_account(
     db_reset_at = (
         None if ignore_zero_capacity_primary_runtime_reset else (float(account.reset_at) if account.reset_at else None)
     )
-    effective_runtime_reset = db_reset_at or runtime.reset_at
+    if status_seed in (AccountStatus.RATE_LIMITED, AccountStatus.QUOTA_EXCEEDED) or runtime.blocked_at is not None:
+        effective_runtime_reset = db_reset_at or runtime.reset_at
+    else:
+        effective_runtime_reset = None
     effective_blocked_at = float(account.blocked_at) if account.blocked_at is not None else runtime.blocked_at
 
     if (
@@ -1941,6 +1945,7 @@ def _state_from_account(
         credits_has=credits_has,
         credits_unlimited=credits_unlimited,
         credits_balance=credits_balance,
+        infer_status_from_usage=False,
     )
 
     if status == AccountStatus.QUOTA_EXCEEDED:

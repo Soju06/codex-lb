@@ -479,6 +479,14 @@ describe("RoutingSettings", () => {
     expect(screen.getAllByText("Fill first").length).toBeGreaterThan(0);
   });
 
+  it("explains routing strategy trade-offs and account-safety guidance", () => {
+    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={vi.fn().mockResolvedValue(undefined)} />);
+
+    expect(screen.getByText("Strategy guide")).toBeInTheDocument();
+    expect(screen.getByText(/Good default for compliant mixed-account pools/i)).toBeInTheDocument();
+    expect(screen.getByText(/No strategy can guarantee account-safety outcomes/i)).toBeInTheDocument();
+  });
+
   it("saves staggered idle warm-up when limit warm-up is enabled", async () => {
     const user = userEvent.setup();
     const onSave = vi.fn().mockResolvedValue(undefined);

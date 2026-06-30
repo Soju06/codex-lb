@@ -384,6 +384,27 @@ export function RoutingSettings({
               </SelectContent>
             </Select>
           </div>
+          <div className="space-y-2 px-3 pb-3 text-xs text-muted-foreground">
+            <p className="font-medium text-foreground">{t("settings.routing.strategy.guideTitle")}</p>
+            <dl className="grid gap-2 md:grid-cols-2">
+              {[
+                "capacityWeighted",
+                "relativeAvailability",
+                "usageWeighted",
+                "roundRobin",
+                "fillFirst",
+                "sequentialDrain",
+                "resetDrain",
+                "singleAccount",
+              ].map((strategy) => (
+                <div key={strategy} className="space-y-0.5">
+                  <dt className="font-medium text-foreground">{t(`settings.routing.strategy.${strategy}`)}</dt>
+                  <dd>{t(`settings.routing.strategy.guide.${strategy}`)}</dd>
+                </div>
+              ))}
+            </dl>
+            <p>{t("settings.routing.strategy.safetyNote")}</p>
+          </div>
 
           <div className="space-y-3 p-3">
             <div>

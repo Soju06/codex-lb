@@ -948,12 +948,14 @@ async def test_request_logs_repository_persists_useragent_fields(db_setup):
             error_code=None,
             useragent="opencode/1.15.13 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14",
             useragent_group="opencode",
+            client_ip="203.0.113.7",
         )
 
         result = await session.execute(select(RequestLog).where(RequestLog.request_id == "req_useragent_full"))
         stored = result.scalar_one()
         assert stored.useragent == "opencode/1.15.13 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
         assert stored.useragent_group == "opencode"
+        assert stored.client_ip == "203.0.113.7"
 
 
 @pytest.mark.asyncio
@@ -972,12 +974,14 @@ async def test_request_logs_repository_preserves_null_useragent_fields(db_setup)
             error_code=None,
             useragent="",
             useragent_group="",
+            client_ip="",
         )
 
         result = await session.execute(select(RequestLog).where(RequestLog.request_id == "req_useragent_null"))
         stored = result.scalar_one()
         assert stored.useragent is None
         assert stored.useragent_group is None
+        assert stored.client_ip is None
 
 
 @pytest.mark.asyncio
@@ -1000,6 +1004,7 @@ async def test_request_logs_repository_persists_null_useragent_fields_when_omitt
         stored = result.scalar_one()
         assert stored.useragent is None
         assert stored.useragent_group is None
+        assert stored.client_ip is None
 
 
 @pytest.mark.asyncio
@@ -1018,9 +1023,11 @@ async def test_request_logs_repository_normalizes_whitespace_only_useragent_fiel
             error_code=None,
             useragent=" \t\n ",
             useragent_group="   ",
+            client_ip="   ",
         )
 
         result = await session.execute(select(RequestLog).where(RequestLog.request_id == "req_useragent_whitespace"))
         stored = result.scalar_one()
         assert stored.useragent is None
         assert stored.useragent_group is None
+        assert stored.client_ip is None

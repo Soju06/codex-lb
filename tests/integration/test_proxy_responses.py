@@ -1612,6 +1612,7 @@ async def test_proxy_responses_streams_upstream(async_client, monkeypatch):
         log = result.scalars().first()
         assert log is not None
         assert log.request_id == "resp_1"
+        assert log.archive_request_id == request_id
         assert log.transport == "http"
 
 

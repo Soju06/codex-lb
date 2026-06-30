@@ -42,7 +42,7 @@ from app.core.openai.requests import (
 )
 from app.core.resilience.overload import is_local_overload_error_code
 from app.core.types import JsonValue
-from app.core.utils.request_id import ensure_request_id, get_request_id
+from app.core.utils.request_id import ensure_request_id, get_request_id, reset_request_id, set_request_id
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
 from app.modules.api_keys.service import (
     ApiKeyData,
@@ -77,7 +77,6 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
     _prewarm_response_timeout_seconds,
     _release_websocket_response_create_gate,
     _response_create_client_metadata,
-    _response_create_text_with_account_installation_id,
     _security_work_advisory_event,
     _service_as_image_fetch_session,
     _service_get_settings,
@@ -182,6 +181,18 @@ _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS = 5.0
 _HTTP_BRIDGE_BACKGROUND_CLEANUP_WARN_THRESHOLD = 100
 
 
+async def _send_http_bridge_request_text_with_archive_id(
+    session: "_HTTPBridgeSession",
+    request_state: _WebSocketRequestState,
+    text_data: str,
+) -> None:
+    token = set_request_id(request_state.archive_request_id)
+    try:
+        await session.upstream.send_text(text_data)
+    finally:
+        reset_request_id(token)
+
+
 def _text_with_account_installation_id(text_data: str, codex_installation_id: str | None) -> str:
     payload = json.loads(text_data)
     if not isinstance(payload, dict):
@@ -232,6 +243,7 @@ class _HTTPBridgeRequestSubmitMixin:
         api_key: ApiKeyData | None,
         api_key_reservation: ApiKeyUsageReservationData | None,
         request_id: str | None = None,
+        client_ip: str | None = None,
         enforce_openai_sdk_contract: bool = True,
     ) -> tuple[_WebSocketRequestState, str]:
         request_state, text_data = self._prepare_response_bridge_request_state(
@@ -248,6 +260,7 @@ class _HTTPBridgeRequestSubmitMixin:
             enforce_openai_sdk_contract=enforce_openai_sdk_contract,
         )
         request_state.useragent, request_state.useragent_group = _request_log_useragent_fields(headers)
+        request_state.client_ip = client_ip
         return request_state, text_data
 
     def _prepare_response_bridge_request_state(
@@ -296,9 +309,11 @@ class _HTTPBridgeRequestSubmitMixin:
             if input_item_count > 0:
                 input_full_fingerprint = _fingerprint_input_items(payload_input_list)
 
+        resolved_request_id = request_id or f"ws_{uuid4().hex}"
         request_state = _WebSocketRequestState(
-            request_id=request_id or f"ws_{uuid4().hex}",
+            request_id=resolved_request_id,
             request_log_id=request_log_id,
+            archive_request_id=request_log_id or resolved_request_id,
             model=payload.model,
             service_tier=forwarded_service_tier,
             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
@@ -627,7 +642,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 async with session.pending_lock:
                     session.pending_requests.append(request_state)
                 request_enqueued = True
-                await session.upstream.send_text(text_data)
+                await _send_http_bridge_request_text_with_archive_id(session, request_state, text_data)
                 session.last_used_at = _service_time().monotonic()
         except ProxyResponseError:
             await self._cleanup_http_bridge_submit_interruption(
@@ -1049,12 +1064,7 @@ class _HTTPBridgeRequestSubmitMixin:
                     request_state.previous_response_id = None
                     request_state.proxy_injected_previous_response_id = False
                     request_state.request_text = retry_text_data
-                retry_text_data = _response_create_text_with_account_installation_id(
-                    retry_text_data,
-                    account=session.account,
-                )
-                request_state.request_text = retry_text_data
-                await session.upstream.send_text(retry_text_data)
+                await _send_http_bridge_request_text_with_archive_id(session, request_state, retry_text_data)
             _clear_websocket_request_error_overrides(request_state)
             session.last_used_at = _service_time().monotonic()
             return True
@@ -1111,7 +1121,7 @@ class _HTTPBridgeRequestSubmitMixin:
         try:
             await self._reconnect_http_bridge_session(session, request_state=request_state)
             request_text = self._http_bridge_text_with_account_installation_id(session, request_state, request_text)
-            await session.upstream.send_text(request_text)
+            await _send_http_bridge_request_text_with_archive_id(session, request_state, request_text)
             session.last_used_at = _service_time().monotonic()
             return True
         except Exception as exc:
@@ -1178,7 +1188,7 @@ class _HTTPBridgeRequestSubmitMixin:
         try:
             await self._reconnect_http_bridge_session(session, request_state=request_state)
             request_text = self._http_bridge_text_with_account_installation_id(session, request_state, request_text)
-            await session.upstream.send_text(request_text)
+            await _send_http_bridge_request_text_with_archive_id(session, request_state, request_text)
             session.last_used_at = _service_time().monotonic()
             return "retried"
         except Exception as exc:
@@ -1246,7 +1256,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 require_security_work_authorized=True,
             )
             retry_text = self._http_bridge_text_with_account_installation_id(session, request_state, retry_text)
-            await session.upstream.send_text(retry_text)
+            await _send_http_bridge_request_text_with_archive_id(session, request_state, retry_text)
             session.last_used_at = _service_time().monotonic()
             return True
         except Exception as exc:

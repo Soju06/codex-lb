@@ -498,6 +498,7 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
             assert "transport" in request_log_columns
             assert "plan_type" in request_log_columns
             assert "source" in request_log_columns
+            assert "archive_request_id" in request_log_columns
             assert "limit_warmup_enabled" in account_columns
             legacy_plan_type = (
                 await session.execute(text("SELECT plan_type FROM request_logs WHERE id=1"))

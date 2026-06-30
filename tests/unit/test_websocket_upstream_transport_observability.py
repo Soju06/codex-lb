@@ -114,6 +114,7 @@ async def test_websocket_finalizer_records_bridge_upstream_transport_and_metric(
             "account_id": "acc_bridge",
             "api_key": None,
             "request_id": "resp_bridge_success",
+            "archive_request_id": None,
             "model": "gpt-5.1",
             "latency_ms": service.request_log_calls[0]["latency_ms"],
             "status": "success",
@@ -138,6 +139,7 @@ async def test_websocket_finalizer_records_bridge_upstream_transport_and_metric(
             "upstream_proxy_fail_closed_reason": None,
             "useragent": None,
             "useragent_group": None,
+            "client_ip": None,
             "request_kind": "normal",
         }
     ]
@@ -187,6 +189,7 @@ async def test_websocket_connect_failure_records_bridge_upstream_transport_and_m
             "account_id": "acc_bridge",
             "api_key": None,
             "request_id": "resp_bridge_failure",
+            "archive_request_id": None,
             "model": "gpt-5.1",
             "latency_ms": service.request_log_calls[0]["latency_ms"],
             "status": "error",
@@ -207,6 +210,7 @@ async def test_websocket_connect_failure_records_bridge_upstream_transport_and_m
             "upstream_proxy_fail_closed_reason": None,
             "useragent": None,
             "useragent_group": None,
+            "client_ip": None,
             "request_kind": "normal",
         }
     ]
@@ -250,6 +254,7 @@ async def test_fail_pending_websocket_requests_records_bridge_upstream_transport
             "account_id": "acc_bridge",
             "api_key": None,
             "request_id": "resp_bridge_pending_failure",
+            "archive_request_id": None,
             "model": "gpt-5.1",
             "latency_ms": service.request_log_calls[0]["latency_ms"],
             "status": "error",
@@ -270,6 +275,7 @@ async def test_fail_pending_websocket_requests_records_bridge_upstream_transport
             "upstream_proxy_fail_closed_reason": None,
             "useragent": None,
             "useragent_group": None,
+            "client_ip": None,
             "request_kind": "normal",
         }
     ]

@@ -251,6 +251,9 @@ class ArchivingResponsesWebSocket:
 
     async def receive(self) -> UpstreamWebSocketMessage:
         message = await self._wrapped.receive()
+        return message
+
+    def archive_received(self, message: UpstreamWebSocketMessage) -> None:
         if message.kind == "text" and message.text is not None:
             archive_text(
                 direction="server_to_codex",
@@ -287,7 +290,6 @@ class ArchivingResponsesWebSocket:
                 headers=self._headers,
                 extra={"frame_type": message.kind, "close_code": message.close_code},
             )
-        return message
 
     async def close(self) -> None:
         await self._wrapped.close()

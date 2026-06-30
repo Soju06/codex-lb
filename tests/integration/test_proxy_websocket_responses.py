@@ -12,6 +12,7 @@ from starlette.websockets import WebSocketDisconnect
 
 import app.modules.proxy.api as proxy_api_module
 import app.modules.proxy.service as proxy_module
+from app.core.utils.request_id import get_request_id
 
 pytestmark = pytest.mark.integration
 
@@ -72,20 +73,33 @@ class _FakeUpstreamMessage:
 class _FakeUpstreamWebSocket:
     def __init__(self, messages: list[_FakeUpstreamMessage]) -> None:
         self.sent_text: list[str] = []
+        self.sent_text_request_ids: list[str | None] = []
         self.sent_bytes: list[bytes] = []
+        self.sent_bytes_request_ids: list[str | None] = []
+        self.receive_request_ids: list[str | None] = []
+        self.archived_receive_request_ids: list[str | None] = []
+        self.archived_receive_texts: list[str] = []
         self.closed = False
         self._messages: asyncio.Queue[_FakeUpstreamMessage] = asyncio.Queue()
         for message in messages:
             self._messages.put_nowait(message)
 
     async def send_text(self, text: str) -> None:
+        self.sent_text_request_ids.append(get_request_id())
         self.sent_text.append(text)
 
     async def send_bytes(self, data: bytes) -> None:
+        self.sent_bytes_request_ids.append(get_request_id())
         self.sent_bytes.append(data)
 
     async def receive(self) -> _FakeUpstreamMessage:
+        self.receive_request_ids.append(get_request_id())
         return await self._messages.get()
+
+    def archive_received(self, message: _FakeUpstreamMessage) -> None:
+        self.archived_receive_request_ids.append(get_request_id())
+        if message.text is not None:
+            self.archived_receive_texts.append(message.text)
 
     async def close(self) -> None:
         self.closed = True
@@ -720,6 +734,9 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_insta
     log = log_calls[0]
     assert log["account_id"] == "acct_ws_proxy"
     assert log["request_id"] == "resp_ws_1"
+    assert log["archive_request_id"] == seen["request_id"]
+    assert fake_upstream.sent_text_request_ids == [log["archive_request_id"]]
+    assert fake_upstream.archived_receive_request_ids[0] == log["archive_request_id"]
     assert log["model"] == "gpt-5.4"
     assert log["service_tier"] == "priority"
     assert log["transport"] == "websocket"
@@ -1379,6 +1396,159 @@ def test_v1_responses_websocket_reuses_upstream_for_sequential_requests(app_inst
             },
         ],
     )
+
+
+def test_v1_responses_websocket_archives_multiplexed_upstream_frames_by_response_id(app_instance, monkeypatch):
+    fake_upstream = _SequencedUpstreamWebSocket(
+        [
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {"type": "response.created", "response": {"id": "resp_ws_first", "status": "in_progress"}},
+                    separators=(",", ":"),
+                ),
+            ),
+        ],
+        deferred_message_batches=[
+            [],
+            [
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {"type": "response.created", "response": {"id": "resp_ws_second", "status": "in_progress"}},
+                        separators=(",", ":"),
+                    ),
+                ),
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.completed",
+                            "response": {
+                                "id": "resp_ws_second",
+                                "status": "completed",
+                                "usage": {"input_tokens": 2, "output_tokens": 1, "total_tokens": 3},
+                            },
+                        },
+                        separators=(",", ":"),
+                    ),
+                ),
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.completed",
+                            "response": {
+                                "id": "resp_ws_first",
+                                "status": "completed",
+                                "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                            },
+                        },
+                        separators=(",", ":"),
+                    ),
+                ),
+            ],
+        ],
+    )
+    log_calls: list[dict[str, object]] = []
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
+        return None
+
+    async def fake_connect_proxy_websocket(
+        self,
+        headers,
+        *,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset,
+        prefer_earlier_reset_window,
+        routing_strategy,
+        model,
+        request_state,
+        api_key,
+        client_send_lock,
+        websocket,
+    ):
+        del (
+            self,
+            headers,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset,
+            prefer_earlier_reset_window,
+            routing_strategy,
+            model,
+            request_state,
+            api_key,
+            client_send_lock,
+            websocket,
+        )
+        return SimpleNamespace(id="acct_ws_proxy"), fake_upstream
+
+    async def fake_write_request_log(self, **kwargs):
+        del self
+        log_calls.append(kwargs)
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+    monkeypatch.setattr(proxy_module.ProxyService, "_write_request_log", fake_write_request_log)
+
+    first_request = {
+        "type": "response.create",
+        "model": "gpt-5.4",
+        "input": "first",
+        "promptCacheKey": "thread_a",
+        "stream": True,
+    }
+    second_request = {
+        "type": "response.create",
+        "model": "gpt-5.5",
+        "input": "second",
+        "promptCacheKey": "thread_b",
+        "stream": True,
+    }
+
+    with TestClient(app_instance) as client:
+        with client.websocket_connect("/v1/responses") as websocket:
+            websocket.send_text(json.dumps(first_request))
+            first_created = json.loads(websocket.receive_text())
+            websocket.send_text(json.dumps(second_request))
+            second_created = json.loads(websocket.receive_text())
+            second_completed = json.loads(websocket.receive_text())
+            first_completed = json.loads(websocket.receive_text())
+
+    assert first_created["response"]["id"] == "resp_ws_first"
+    assert second_created["response"]["id"] == "resp_ws_second"
+    assert second_completed["response"]["id"] == "resp_ws_second"
+    assert first_completed["response"]["id"] == "resp_ws_first"
+
+    first_archive_request_id, second_archive_request_id = fake_upstream.sent_text_request_ids
+    assert first_archive_request_id is not None
+    assert second_archive_request_id is not None
+    assert fake_upstream.archived_receive_request_ids == [
+        first_archive_request_id,
+        second_archive_request_id,
+        second_archive_request_id,
+        first_archive_request_id,
+    ]
+
+    logs_by_request_id = {cast(str, log["request_id"]): log for log in log_calls}
+    assert logs_by_request_id["resp_ws_first"]["archive_request_id"] == first_archive_request_id
+    assert logs_by_request_id["resp_ws_second"]["archive_request_id"] == second_archive_request_id
 
 
 def test_v1_responses_websocket_accepts_and_reuses_generated_turn_state(app_instance, monkeypatch):

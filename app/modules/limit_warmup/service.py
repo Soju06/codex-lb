@@ -117,6 +117,7 @@ class LimitWarmupRequestLogRepository(Protocol):
         source: str | None = None,
         useragent: str | None = None,
         useragent_group: str | None = None,
+        client_ip: str | None = None,
         failure_phase: str | None = None,
         failure_detail: str | None = None,
         failure_exception_type: str | None = None,

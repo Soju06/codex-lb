@@ -317,6 +317,7 @@ export function createRequestLogEntry(
 		transport: "http",
 		useragent: null,
 		useragentGroup: null,
+		clientIp: null,
 		serviceTier: null,
 		requestedServiceTier: null,
 		actualServiceTier: null,

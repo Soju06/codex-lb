@@ -66,6 +66,16 @@ from app.modules.usage.repository import AdditionalUsageRepository, UsageReposit
 pytestmark = pytest.mark.unit
 
 
+def test_websocket_archive_request_context_clears_unmatched_frame_request_id():
+    token = set_request_id("req_previous_response")
+    try:
+        with websocket_mixin_module._websocket_archive_request_context(None):
+            assert get_request_id() is None
+        assert get_request_id() == "req_previous_response"
+    finally:
+        reset_request_id(token)
+
+
 def test_account_selection_recovery_sleep_uses_retry_hint_with_bounds():
     selection = AccountSelection(
         account=None,
@@ -7648,10 +7658,12 @@ async def test_compact_responses_persists_useragent_fields_in_request_log(monkey
     await service.compact_responses(
         payload,
         {"session_id": "sid-compact", "User-Agent": "opencode/1.15.13 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"},
+        client_ip="203.0.113.7",
     )
 
     assert request_logs.calls[0]["useragent"] == "opencode/1.15.13 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
     assert request_logs.calls[0]["useragent_group"] == "opencode"
+    assert request_logs.calls[0]["client_ip"] == "203.0.113.7"
 
 
 @pytest.mark.asyncio
@@ -12512,6 +12524,57 @@ def test_websocket_receive_timeout_honors_idle_when_equal_to_full_budget(monkeyp
     assert timeout.error_code == "stream_idle_timeout"
     assert timeout.error_message == "Upstream stream idle timeout"
     assert timeout.fail_all_pending is False
+
+
+@pytest.mark.asyncio
+async def test_websocket_archive_request_id_for_non_text_uses_single_pending_request() -> None:
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_binary_archive",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        archive_request_id="archive_ws_req_binary",
+    )
+
+    archive_request_id = await websocket_mixin_module._websocket_archive_request_id_for_message(
+        SimpleNamespace(kind="bytes", text=None),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+    )
+
+    assert archive_request_id == "archive_ws_req_binary"
+
+
+@pytest.mark.asyncio
+async def test_websocket_archive_request_id_for_non_text_keeps_ambiguous_frames_unattributed() -> None:
+    first_request = proxy_service._WebSocketRequestState(
+        request_id="ws_req_binary_archive_a",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        archive_request_id="archive_ws_req_binary_a",
+    )
+    second_request = proxy_service._WebSocketRequestState(
+        request_id="ws_req_binary_archive_b",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        archive_request_id="archive_ws_req_binary_b",
+    )
+
+    archive_request_id = await websocket_mixin_module._websocket_archive_request_id_for_message(
+        SimpleNamespace(kind="bytes", text=None),
+        pending_requests=deque([first_request, second_request]),
+        pending_lock=anyio.Lock(),
+    )
+
+    assert archive_request_id is None
 
 
 @pytest.mark.asyncio
@@ -23545,6 +23608,66 @@ async def test_http_bridge_prewarm_times_out_on_silent_upstream(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_retry_http_bridge_request_on_fresh_upstream_uses_archive_request_id(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    send_request_ids: list[str | None] = []
+
+    async def capture_send_text(_text: str) -> None:
+        send_request_ids.append(get_request_id())
+
+    send_text = AsyncMock(side_effect=capture_send_text)
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_bridge_retry_fresh",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        awaiting_response_created=True,
+        request_text='{"type":"response.create","model":"gpt-5.1","input":"retry"}',
+        archive_request_id="archive_bridge_retry_fresh",
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "bridge-key", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(),
+        request_model="gpt-5.1",
+        account=_make_account("acc_bridge_retry_fresh"),
+        upstream=cast(
+            proxy_service.UpstreamResponsesWebSocket,
+            SimpleNamespace(send_text=send_text, close=AsyncMock()),
+        ),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=0.0,
+        idle_ttl_seconds=30.0,
+        last_upstream_close_code=1011,
+    )
+    reconnect = AsyncMock(return_value=None)
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+
+    token = set_request_id("ambient_old_session_request")
+    try:
+        retried = await service._retry_http_bridge_request_on_fresh_upstream(
+            session,
+            request_state=request_state,
+            text_data=request_state.request_text or "",
+        )
+        assert get_request_id() == "ambient_old_session_request"
+    finally:
+        reset_request_id(token)
+
+    assert retried is True
+    reconnect.assert_awaited_once_with(session, request_state=request_state, restart_reader=True)
+    send_text.assert_awaited_once_with('{"type":"response.create","model":"gpt-5.1","input":"retry"}')
+    assert send_request_ids == ["archive_bridge_retry_fresh"]
+
+
+@pytest.mark.asyncio
 async def test_retry_http_bridge_precreated_request_suppresses_retry_for_rejected_close():
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
@@ -23630,7 +23753,12 @@ async def test_retry_http_bridge_precreated_request_suppresses_retry_after_respo
 async def test_retry_http_bridge_precreated_request_replays_created_without_visible_output(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
-    send_text = AsyncMock()
+    send_request_ids: list[str | None] = []
+
+    async def capture_send_text(_text: str) -> None:
+        send_request_ids.append(get_request_id())
+
+    send_text = AsyncMock(side_effect=capture_send_text)
     request_state = proxy_service._WebSocketRequestState(
         request_id="req_bridge_created_no_output",
         model="gpt-5.1",
@@ -23639,6 +23767,7 @@ async def test_retry_http_bridge_precreated_request_replays_created_without_visi
         api_key_reservation=None,
         started_at=0.0,
         request_text='{"type":"response.create","model":"gpt-5.1","input":"retry"}',
+        archive_request_id="archive_bridge_created_no_output",
         response_id="resp_bridge_created_then_closed",
         awaiting_response_created=False,
         response_event_count=1,
@@ -23663,11 +23792,17 @@ async def test_retry_http_bridge_precreated_request_replays_created_without_visi
     reconnect = AsyncMock(return_value=None)
     monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
 
-    retried = await service._retry_http_bridge_precreated_request(session)
+    token = set_request_id("ambient_old_session_request")
+    try:
+        retried = await service._retry_http_bridge_precreated_request(session)
+        assert get_request_id() == "ambient_old_session_request"
+    finally:
+        reset_request_id(token)
 
     assert retried is True
     reconnect.assert_awaited_once_with(session, request_state=request_state)
     send_text.assert_awaited_once_with('{"type":"response.create","model":"gpt-5.1","input":"retry"}')
+    assert send_request_ids == ["archive_bridge_created_no_output"]
     assert request_state.replay_count == 1
     assert request_state.awaiting_response_created is True
     assert request_state.response_id is None
@@ -24092,8 +24227,14 @@ async def test_submit_http_bridge_request_reinlines_final_text(monkeypatch):
         awaiting_response_created=True,
         event_queue=asyncio.Queue(),
         request_text=original_text,
+        archive_request_id="archive_submit_inline",
     )
-    send_text = AsyncMock()
+    send_request_ids: list[str | None] = []
+
+    async def capture_send_text(_text: str) -> None:
+        send_request_ids.append(get_request_id())
+
+    send_text = AsyncMock(side_effect=capture_send_text)
     upstream = cast(proxy_service.UpstreamResponsesWebSocket, SimpleNamespace(send_text=send_text, close=AsyncMock()))
     session = proxy_service._HTTPBridgeSession(
         key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-submit-inline", None),
@@ -24117,12 +24258,17 @@ async def test_submit_http_bridge_request_reinlines_final_text(monkeypatch):
     monkeypatch.setattr(service, "_acquire_request_state_response_create_admission", AsyncMock())
     monkeypatch.setattr(service, "_start_request_state_api_key_reservation_heartbeat", lambda *args, **kwargs: None)
 
-    await service._submit_http_bridge_request(
-        session,
-        request_state=request_state,
-        text_data=original_text,
-        queue_limit=1,
-    )
+    token = set_request_id("ambient_old_session_request")
+    try:
+        await service._submit_http_bridge_request(
+            session,
+            request_state=request_state,
+            text_data=original_text,
+            queue_limit=1,
+        )
+        assert get_request_id() == "ambient_old_session_request"
+    finally:
+        reset_request_id(token)
 
     inline.assert_awaited_once()
     inline_await = inline.await_args
@@ -24133,6 +24279,7 @@ async def test_submit_http_bridge_request_reinlines_final_text(monkeypatch):
     send_text_await = send_text.await_args
     assert send_text_await is not None
     assert _json_text_without_installation_metadata(send_text_await.args[0]) == json.loads(inlined_text)
+    assert send_request_ids == ["archive_submit_inline"]
     assert list(session.pending_requests) == [request_state]
 
 

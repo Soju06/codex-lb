@@ -176,7 +176,10 @@ class AdditionalUsageHistory(Base):
 
 class RequestLog(Base):
     __tablename__ = "request_logs"
-    __table_args__ = (Index("idx_logs_useragent_group", "useragent_group"),)
+    __table_args__ = (
+        Index("idx_logs_useragent_group", "useragent_group"),
+        Index("idx_logs_client_ip", "client_ip"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     account_id: Mapped[str | None] = mapped_column(
@@ -187,6 +190,7 @@ class RequestLog(Base):
     api_key_id: Mapped[str | None] = mapped_column(String, nullable=True)
     session_id: Mapped[str | None] = mapped_column(String, nullable=True)
     request_id: Mapped[str] = mapped_column(String, nullable=False)
+    archive_request_id: Mapped[str | None] = mapped_column(String, nullable=True)
     request_kind: Mapped[str] = mapped_column(
         String,
         default=RequestKind.NORMAL.value,
@@ -200,6 +204,7 @@ class RequestLog(Base):
     source: Mapped[str | None] = mapped_column(String, nullable=True)
     useragent: Mapped[str | None] = mapped_column(Text, nullable=True)
     useragent_group: Mapped[str | None] = mapped_column(String, nullable=True)
+    client_ip: Mapped[str | None] = mapped_column(String, nullable=True)
     transport: Mapped[str | None] = mapped_column(String, nullable=True)
     service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
     requested_service_tier: Mapped[str | None] = mapped_column(String, nullable=True)

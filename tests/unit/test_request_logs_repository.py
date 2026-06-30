@@ -66,6 +66,44 @@ async def test_add_log_persists_request_kind(db_setup) -> None:
 
 
 @pytest.mark.asyncio
+async def test_add_log_persists_archive_request_id(db_setup) -> None:
+    del db_setup
+    async with SessionLocal() as session:
+        repo = RequestLogsRepository(session)
+
+        explicit = await repo.add_log(
+            account_id=None,
+            request_id="resp_downstream",
+            archive_request_id="req_archive_origin",
+            model="gpt-5.2",
+            input_tokens=10,
+            output_tokens=5,
+            latency_ms=1,
+            status="success",
+            error_code=None,
+        )
+        fallback = await repo.add_log(
+            account_id=None,
+            request_id="req_archive_same",
+            model="gpt-5.2",
+            input_tokens=10,
+            output_tokens=5,
+            latency_ms=1,
+            status="success",
+            error_code=None,
+        )
+
+        explicit_persisted = await session.scalar(select(RequestLog).where(RequestLog.id == explicit.id))
+        fallback_persisted = await session.scalar(select(RequestLog).where(RequestLog.id == fallback.id))
+
+    assert explicit_persisted is not None
+    assert explicit_persisted.request_id == "resp_downstream"
+    assert explicit_persisted.archive_request_id == "req_archive_origin"
+    assert fallback_persisted is not None
+    assert fallback_persisted.archive_request_id == "req_archive_same"
+
+
+@pytest.mark.asyncio
 async def test_find_latest_account_id_for_response_id_prefers_session_then_falls_back_to_api_key_scope() -> None:
     session = AsyncMock()
     repo = RequestLogsRepository(session)

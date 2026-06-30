@@ -1,7 +1,7 @@
 """add hide upstream quota from api keys setting
 
 Revision ID: 20260608_000000_add_hide_upstream_quota_from_api_keys
-Revises: 20260607_000000_merge_weekly_monthly_useragent_heads
+Revises: 20260601_010000_add_api_key_usage_sections
 Create Date: 2026-06-08 00:00:00.000000
 """
 
@@ -12,7 +12,7 @@ from alembic import op
 from sqlalchemy.engine import Connection
 
 revision = "20260608_000000_add_hide_upstream_quota_from_api_keys"
-down_revision = "20260607_000000_merge_weekly_monthly_useragent_heads"
+down_revision = "20260601_010000_add_api_key_usage_sections"
 branch_labels = None
 depends_on = None
 

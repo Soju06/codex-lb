@@ -51,6 +51,8 @@ OpenCode-compatible `auth.json` payload with explicit raw-token warnings.
 - **WHEN** a user clicks pause/resume/delete on an account
 - **THEN** the corresponding API is called and the account list is refreshed
 
+## ADDED Requirements
+
 ### Requirement: API key edit dialog
 
 The API key edit dialog SHALL allow operators to update restrictions and

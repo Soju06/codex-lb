@@ -39,7 +39,6 @@ const baseSettings = createDashboardSettings({
   totpConfigured: false,
   apiKeyAuthEnabled: true,
 });
-const baseUpdatePayload = buildSettingsUpdateRequest(baseSettings, {});
 
 function renderWithClient(ui: React.ReactElement) {
   const queryClient = new QueryClient({

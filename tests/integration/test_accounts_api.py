@@ -199,6 +199,45 @@ async def test_account_usage_reset_consume_consumes_credit_and_refreshes(async_c
 
 
 @pytest.mark.asyncio
+async def test_account_usage_reset_consume_rejects_paused_account(async_client, monkeypatch):
+    email = "reset-consume-paused-dashboard@example.com"
+    raw_account_id = "acc_reset_consume_paused_dashboard"
+    payload = {
+        "email": email,
+        "chatgpt_account_id": raw_account_id,
+        "https://api.openai.com/auth": {"chatgpt_plan_type": "plus"},
+    }
+    auth_json = {
+        "tokens": {
+            "idToken": _encode_jwt(payload),
+            "accessToken": "access-reset-consume-paused-dashboard",
+            "refreshToken": "refresh-reset-consume-paused-dashboard",
+            "accountId": raw_account_id,
+        },
+    }
+
+    async def should_not_consume(**_: object) -> ConsumeRateLimitResetCreditResponse:
+        raise AssertionError("paused account should not consume upstream reset credits")
+
+    expected_account_id = generate_unique_account_id(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+    pause_response = await async_client.post(f"/api/accounts/{expected_account_id}/pause")
+    assert pause_response.status_code == 200
+
+    monkeypatch.setattr(
+        "app.modules.accounts.service.consume_rate_limit_reset_credit",
+        should_not_consume,
+    )
+
+    reset = await async_client.post(f"/api/accounts/{expected_account_id}/usage-reset-credits/consume")
+
+    assert reset.status_code == 409
+    assert reset.json()["error"]["code"] == "account_usage_reset_consume_unavailable"
+
+
+@pytest.mark.asyncio
 async def test_reactivate_missing_account_returns_404(async_client):
     response = await async_client.post("/api/accounts/missing/reactivate")
     assert response.status_code == 404

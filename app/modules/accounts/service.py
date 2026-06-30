@@ -288,7 +288,7 @@ class AccountsService:
         account = await self._repo.get_by_id(account_id)
         if account is None:
             return None
-        if account.status in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
+        if account.status in (AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
             raise AccountUsageResetConsumeUnavailableError(
                 f"Account is {account.status.value} and cannot consume usage reset credits",
             )

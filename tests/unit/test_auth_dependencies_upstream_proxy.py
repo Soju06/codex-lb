@@ -28,6 +28,10 @@ def _account() -> Account:
 @pytest.mark.asyncio
 async def test_validate_codex_usage_identity_passes_resolved_route(monkeypatch: pytest.MonkeyPatch) -> None:
     account = _account()
+    request = SimpleNamespace(
+        headers={"Authorization": "Bearer access", "chatgpt-account-id": "chatgpt_1"},
+        state=SimpleNamespace(),
+    )
     route = ResolvedUpstreamRoute(
         mode="account_bound",
         pool_id="pool_1",
@@ -59,15 +63,17 @@ async def test_validate_codex_usage_identity_passes_resolved_route(monkeypatch: 
     monkeypatch.setattr(auth_dependencies, "resolve_upstream_route", resolve_route)
     monkeypatch.setattr(auth_dependencies, "fetch_usage", fetch_usage)
 
-    result = await auth_dependencies.validate_codex_usage_identity(
-        cast(Any, SimpleNamespace(headers={"Authorization": "Bearer access", "chatgpt-account-id": "chatgpt_1"}))
-    )
+    result = await auth_dependencies.validate_codex_usage_identity(cast(Any, request))
 
     assert result is None
     assert calls["lookup"] == "chatgpt_1"
     assert calls["resolve_kwargs"]["account_id"] == "acc_1"
     assert calls["resolve_kwargs"]["operation"] == "usage_identity"
     assert calls["fetch_kwargs"]["route"] is route
+    assert request.state.codex_usage_identity_access_token == "access"
+    assert request.state.codex_usage_identity_chatgpt_account_id == "chatgpt_1"
+    assert request.state.codex_usage_identity_account_id == "acc_1"
+    assert request.state.codex_usage_identity_route is route
 
 
 @pytest.mark.asyncio

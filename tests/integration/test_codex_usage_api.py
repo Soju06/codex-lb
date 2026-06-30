@@ -13,6 +13,7 @@ from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import ApiKeyCreateData, ApiKeysService, LimitRuleInput
+from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 
 pytestmark = pytest.mark.integration
@@ -692,6 +693,7 @@ async def test_codex_usage_reset_consume_forwards_and_refreshes(async_client, db
     monkeypatch.setattr("app.core.auth.dependencies.fetch_usage", stub_fetch_usage)
     monkeypatch.setattr("app.modules.proxy.api.consume_rate_limit_reset_credit", stub_consume_rate_limit_reset_credit)
     monkeypatch.setattr("app.modules.proxy.api.UsageUpdater", StubUsageUpdater)
+    cache_generation = get_account_selection_cache().generation
 
     response = await async_client.post(
         "/api/codex/rate-limit-reset-credits/consume",
@@ -713,6 +715,7 @@ async def test_codex_usage_reset_consume_forwards_and_refreshes(async_client, db
         }
     ]
     assert refreshed_account_ids == ["acc_reset_consume:True"]
+    assert get_account_selection_cache().generation > cache_generation
 
 
 @pytest.mark.asyncio

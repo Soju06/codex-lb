@@ -3112,7 +3112,9 @@ async def _force_refresh_codex_usage_identity_account(request: Request) -> None:
             accounts_repo,
             AdditionalUsageRepository(session),
         )
-        await updater.force_refresh(account, ignore_refresh_disabled=True)
+        usage_written = await updater.force_refresh(account, ignore_refresh_disabled=True)
+        if usage_written:
+            get_account_selection_cache().invalidate()
 
 
 def _request_state_str(request: Request, name: str) -> str | None:

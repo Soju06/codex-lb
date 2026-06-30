@@ -102,7 +102,8 @@ export function AccountDetail({
   const seatLabel = account.seatType ? ` | ${formatSlug(account.seatType)}` : "";
   const operatorRecoveryAction =
     account.status === "reauth_required" || account.status === "deactivated";
-  const usageResetDisabled = busy || readOnly || operatorRecoveryAction || (resetCredits?.availableCount ?? 0) <= 0;
+  const usageResetDisabled =
+    busy || readOnly || account.status === "paused" || operatorRecoveryAction || (resetCredits?.availableCount ?? 0) <= 0;
 
   return (
     <div

@@ -460,6 +460,62 @@ def test_bulk_history_since_sqlite_cache_hit_does_not_materialize_cached_rows(tm
     _clear_bulk_history_since_sqlite_cache()
 
 
+def test_bulk_history_since_sqlite_empty_cache_hit_does_not_materialize_rows(tmp_path, monkeypatch):
+    db_path = tmp_path / "usage.db"
+    statements: list[str] = []
+    original_connect = sqlite3.connect
+
+    def connect_with_trace(*args, **kwargs):
+        conn = original_connect(*args, **kwargs)
+        conn.set_trace_callback(lambda statement: statements.append(" ".join(statement.lower().split())))
+        return conn
+
+    _clear_bulk_history_since_sqlite_cache()
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            create table usage_history (
+                id integer primary key,
+                account_id text not null,
+                used_percent real not null,
+                recorded_at text not null,
+                reset_at real,
+                window_minutes integer,
+                window text
+            )
+            """
+        )
+        conn.commit()
+
+    first = _bulk_history_since_sqlite(
+        str(db_path),
+        ["acc_empty"],
+        "secondary",
+        datetime(2026, 1, 1, 0, 0, 0),
+    )
+    assert first == {}
+
+    monkeypatch.setattr(sqlite3, "connect", connect_with_trace)
+    second = _bulk_history_since_sqlite(
+        str(db_path),
+        ["acc_empty"],
+        "secondary",
+        datetime(2026, 1, 1, 0, 1, 0),
+    )
+
+    assert second == {}
+    full_history_refreshes = [
+        statement
+        for statement in statements
+        if "select id, account_id, used_percent, recorded_at, reset_at, window_minutes" in statement
+        and "order by account_id, recorded_at asc" in statement
+        and "id > 0" not in statement
+    ]
+    assert full_history_refreshes == []
+
+    _clear_bulk_history_since_sqlite_cache()
+
+
 def test_bulk_history_since_sqlite_cache_detects_same_id_corrections(tmp_path):
     db_path = tmp_path / "usage.db"
     _clear_bulk_history_since_sqlite_cache()

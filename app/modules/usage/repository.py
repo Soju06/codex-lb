@@ -55,6 +55,7 @@ class _BulkHistoryCacheEntry:
 
 _BULK_HISTORY_SQLITE_CACHE: dict[tuple[str, tuple[str, ...], str], _BulkHistoryCacheEntry] = {}
 _BULK_HISTORY_SQLITE_CACHE_LOCK = RLock()
+_EMPTY_BULK_HISTORY_DIGEST = sha256().hexdigest()
 
 
 def _normalized_sqlite_datetime_text(value) -> str:
@@ -235,7 +236,7 @@ def _query_bulk_history_metadata_sqlite(
                coalesce(max(id), 0),
                coalesce(
                    clb_bulk_history_digest(id, account_id, used_percent, recorded_at, reset_at, window_minutes),
-                   ''
+                   '{_EMPTY_BULK_HISTORY_DIGEST}'
                )
         from (
             select id, account_id, used_percent, recorded_at, reset_at, window_minutes

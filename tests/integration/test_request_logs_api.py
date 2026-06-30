@@ -61,6 +61,7 @@ async def test_request_logs_api_returns_recent(async_client, db_setup):
         await logs_repo.add_log(
             account_id="acc_logs",
             request_id="req_logs_2",
+            archive_request_id="archive_req_logs_2",
             model="legacy-model",
             input_tokens=50,
             output_tokens=0,
@@ -92,6 +93,8 @@ async def test_request_logs_api_returns_recent(async_client, db_setup):
     assert latest["apiKeyId"] == "key_logs_1"
     assert latest["apiKeyName"] == "Debug Key"
     assert latest["errorCode"] == "rate_limit_exceeded"
+    assert latest["requestId"] == "req_logs_2"
+    assert latest["archiveRequestId"] == "archive_req_logs_2"
     assert latest["errorMessage"] == "Rate limit reached"
     assert latest["failurePhase"] == "owner_forward_status"
     assert latest["failureDetail"] == "owner_forward_non_200"
@@ -110,6 +113,8 @@ async def test_request_logs_api_returns_recent(async_client, db_setup):
 
     older = payload[1]
     assert older["status"] == "ok"
+    assert older["requestId"] == "req_logs_1"
+    assert older["archiveRequestId"] == "req_logs_1"
     assert older["apiKeyId"] is None
     assert older["apiKeyName"] is None
     assert older["tokens"] == 300
@@ -146,6 +151,7 @@ async def test_request_logs_api_returns_useragent_fields(async_client, db_setup)
             requested_at=now,
             useragent="opencode/1.15.13 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14",
             useragent_group="opencode",
+            client_ip="203.0.113.7",
         )
         await logs_repo.add_log(
             account_id="acc_logs_useragent",
@@ -170,10 +176,12 @@ async def test_request_logs_api_returns_useragent_fields(async_client, db_setup)
     latest = payload[0]
     assert latest["useragent"] == "opencode/1.15.13 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
     assert latest["useragentGroup"] == "opencode"
+    assert latest["clientIp"] == "203.0.113.7"
 
     older = payload[1]
     assert older["useragent"] is None
     assert older["useragentGroup"] is None
+    assert older["clientIp"] is None
 
 
 @pytest.mark.asyncio

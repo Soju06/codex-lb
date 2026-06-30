@@ -46,6 +46,7 @@ class DashboardSettingsData:
     weekly_pace_working_days: str
     guest_access_enabled: bool
     guest_password_configured: bool
+    limit_warmup_staggered_idle_enabled: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,6 +83,7 @@ class DashboardSettingsUpdateData:
     limit_warmup_min_available_percent: float
     weekly_pace_working_days: str
     guest_access_enabled: bool
+    limit_warmup_staggered_idle_enabled: bool
 
 
 class SettingsService:
@@ -129,6 +131,7 @@ class SettingsService:
             weekly_pace_working_days=row.weekly_pace_working_days,
             guest_access_enabled=row.guest_access_enabled,
             guest_password_configured=row.guest_password_hash is not None,
+            limit_warmup_staggered_idle_enabled=row.limit_warmup_staggered_idle_enabled,
         )
 
     async def update_settings(self, payload: DashboardSettingsUpdateData) -> DashboardSettingsData:
@@ -172,6 +175,7 @@ class SettingsService:
             limit_warmup_min_available_percent=payload.limit_warmup_min_available_percent,
             weekly_pace_working_days=payload.weekly_pace_working_days,
             guest_access_enabled=payload.guest_access_enabled,
+            limit_warmup_staggered_idle_enabled=payload.limit_warmup_staggered_idle_enabled,
         )
         return DashboardSettingsData(
             sticky_threads_enabled=row.sticky_threads_enabled,
@@ -212,6 +216,7 @@ class SettingsService:
             weekly_pace_working_days=row.weekly_pace_working_days,
             guest_access_enabled=row.guest_access_enabled,
             guest_password_configured=row.guest_password_hash is not None,
+            limit_warmup_staggered_idle_enabled=row.limit_warmup_staggered_idle_enabled,
         )
 
 

@@ -26,7 +26,9 @@ from app.core.clients.proxy import (  # noqa: F401  # noqa: F401
 from app.core.clients.proxy import codex_control_request as core_codex_control_request  # noqa: F401
 from app.core.clients.proxy import compact_responses as core_compact_responses  # noqa: F401
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
+from app.core.clients.proxy_websocket import UpstreamWebSocketMessage
 from app.core.openai.parsing import parse_sse_event
+from app.core.utils.request_id import reset_request_id, set_request_id
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
 from app.modules.proxy._service.api_key_usage import (
     _API_KEY_RESERVATION_HEARTBEAT_SECONDS as _API_KEY_RESERVATION_HEARTBEAT_SECONDS,
@@ -168,6 +170,37 @@ _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS = 5.0
 _HTTP_BRIDGE_BACKGROUND_CLEANUP_WARN_THRESHOLD = 100
 
 
+def _archive_http_bridge_upstream_text(
+    session: "_HTTPBridgeSession",
+    text: str,
+    request_state: "_WebSocketRequestState | None",
+) -> None:
+    _archive_http_bridge_upstream_message(
+        session,
+        UpstreamWebSocketMessage(kind="text", text=text),
+        request_state,
+    )
+
+
+def _archive_http_bridge_upstream_message(
+    session: "_HTTPBridgeSession",
+    message: UpstreamWebSocketMessage,
+    request_state: "_WebSocketRequestState | None",
+) -> None:
+    if request_state is None or request_state.archive_request_id is None:
+        archive_request_id = None
+    else:
+        archive_request_id = request_state.archive_request_id
+    archive_received = getattr(session.upstream, "archive_received", None)
+    if not callable(archive_received):
+        return
+    token = set_request_id(archive_request_id)
+    try:
+        archive_received(message)
+    finally:
+        reset_request_id(token)
+
+
 class _HTTPBridgeUpstreamEventsMixin:
     async def _relay_http_bridge_upstream_messages(
         self: Any,
@@ -227,6 +260,9 @@ class _HTTPBridgeUpstreamEventsMixin:
                         break
                     continue
 
+                async with session.pending_lock:
+                    archive_request_state = session.pending_requests[0] if len(session.pending_requests) == 1 else None
+                _archive_http_bridge_upstream_message(session, message, archive_request_state)
                 session.last_upstream_close_code = message.close_code
                 retried = await self._retry_http_bridge_precreated_request(session)
                 if retried:
@@ -289,6 +325,7 @@ class _HTTPBridgeUpstreamEventsMixin:
         session: "_HTTPBridgeSession",
         text: str,
     ) -> None:
+        original_text = text
         event_block = f"data: {text}\n\n"
         payload = parse_sse_data_json(event_block)
         event = parse_sse_event(event_block)
@@ -353,6 +390,8 @@ class _HTTPBridgeUpstreamEventsMixin:
                 release_create_gate = False
             else:
                 release_create_gate = False
+
+            _archive_http_bridge_upstream_text(session, original_text, matched_request_state)
 
             if matched_request_state is not None:
                 actual_service_tier = _service_tier_from_event_payload(payload)

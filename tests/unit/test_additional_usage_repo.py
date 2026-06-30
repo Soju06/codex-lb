@@ -318,6 +318,112 @@ async def test_latest_by_account_merges_alias_rows_conservatively(
 
 
 @pytest.mark.asyncio
+async def test_latest_by_account_sqlite_fast_path_uses_depletion_tie_breaker(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    registry = tmp_path / "additional_quota_registry.json"
+    _write_registry(registry, quota_key="spark_enterprise", quota_key_aliases=["codex_spark"])
+    monkeypatch.setenv("CODEX_LB_ADDITIONAL_QUOTA_REGISTRY_FILE", str(registry))
+    clear_additional_quota_registry_cache()
+
+    db_path = tmp_path / "usage.db"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    async_session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with async_session_factory() as session:
+        repo = AdditionalUsageRepository(session)
+        now = datetime.now(tz=timezone.utc)
+
+        session.add_all(
+            [
+                AdditionalUsageHistory(
+                    account_id="acc_sqlite_tie",
+                    quota_key="codex_spark",
+                    limit_name="codex_other",
+                    metered_feature="codex_bengalfox",
+                    window="primary",
+                    used_percent=92.0,
+                    recorded_at=now,
+                ),
+                AdditionalUsageHistory(
+                    account_id="acc_sqlite_tie",
+                    quota_key="spark_enterprise",
+                    limit_name="GPT-5.3-Codex-Spark",
+                    metered_feature="codex_bengalfox",
+                    window="primary",
+                    used_percent=40.0,
+                    recorded_at=now,
+                ),
+            ]
+        )
+        await session.commit()
+
+        result = await repo.latest_by_account(quota_key="spark_enterprise", window="primary")
+
+    await engine.dispose()
+
+    assert list(result) == ["acc_sqlite_tie"]
+    assert result["acc_sqlite_tie"].quota_key == "codex_spark"
+    assert result["acc_sqlite_tie"].used_percent == 92.0
+
+
+@pytest.mark.asyncio
+async def test_latest_by_account_sqlite_fast_path_preserves_newer_raw_alias(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    registry = tmp_path / "additional_quota_registry.json"
+    _write_registry(registry, quota_key="spark_enterprise", quota_key_aliases=["codex_spark"])
+    monkeypatch.setenv("CODEX_LB_ADDITIONAL_QUOTA_REGISTRY_FILE", str(registry))
+    clear_additional_quota_registry_cache()
+
+    db_path = tmp_path / "usage.db"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    async_session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with async_session_factory() as session:
+        repo = AdditionalUsageRepository(session)
+        now = datetime.now(tz=timezone.utc)
+
+        session.add_all(
+            [
+                AdditionalUsageHistory(
+                    account_id="acc_sqlite_raw_alias",
+                    quota_key="spark_enterprise",
+                    limit_name="GPT-5.3-Codex-Spark",
+                    metered_feature="codex_bengalfox",
+                    window="primary",
+                    used_percent=88.0,
+                    recorded_at=now - timedelta(seconds=10),
+                ),
+                AdditionalUsageHistory(
+                    account_id="acc_sqlite_raw_alias",
+                    quota_key="codex_spark",
+                    limit_name="codex_other",
+                    metered_feature="codex_bengalfox",
+                    window="primary",
+                    used_percent=12.0,
+                    recorded_at=now,
+                ),
+            ]
+        )
+        await session.commit()
+
+        result = await repo.latest_by_account(quota_key="spark_enterprise", window="primary")
+
+    await engine.dispose()
+
+    assert list(result) == ["acc_sqlite_raw_alias"]
+    assert result["acc_sqlite_raw_alias"].quota_key == "codex_spark"
+    assert result["acc_sqlite_raw_alias"].used_percent == 12.0
+
+
+@pytest.mark.asyncio
 async def test_latest_by_account_prefers_newer_alias_row_after_reset(
     async_session: AsyncSession,
     monkeypatch,

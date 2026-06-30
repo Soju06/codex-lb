@@ -116,6 +116,7 @@ class UsageRefreshScheduler:
                         await _invalidate_usage_refresh_caches()
                         return float(self.interval_seconds)
                     updater = UsageUpdater(usage_repo, accounts_repo, additional_usage_repo)
+                    refresh_started_at = usage_updater_module.utcnow()
                     usage_written = await updater.refresh_accounts([selected_account], before_primary)
                     if usage_written:
                         after_primary = await usage_repo.latest_by_account(window="primary")
@@ -137,6 +138,8 @@ class UsageRefreshScheduler:
                             before_secondary=before_secondary,
                             after_primary=after_primary,
                             after_secondary=after_secondary,
+                            refresh_started_at=refresh_started_at,
+                            usage_refresh_interval_seconds=self.interval_seconds,
                         )
                         await reconcile_recoverable_account_statuses(
                             accounts_repo=accounts_repo,

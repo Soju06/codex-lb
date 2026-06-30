@@ -107,6 +107,7 @@ export function SettingsPage() {
                 settings.limitWarmupModel,
                 settings.limitWarmupPrompt,
                 settings.limitWarmupCooldownSeconds,
+                settings.limitWarmupStaggeredIdleEnabled,
               ].join(":")}
               settings={settings}
               accounts={accountsQuery.data ?? []}

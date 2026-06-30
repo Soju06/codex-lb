@@ -498,6 +498,7 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
             assert "transport" in request_log_columns
             assert "plan_type" in request_log_columns
             assert "source" in request_log_columns
+            assert "archive_request_id" in request_log_columns
             assert "limit_warmup_enabled" in account_columns
             legacy_plan_type = (
                 await session.execute(text("SELECT plan_type FROM request_logs WHERE id=1"))
@@ -512,6 +513,7 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
             assert "hide_upstream_quota_from_api_keys" in dashboard_columns
             assert dashboard_column_defaults["hide_upstream_quota_from_api_keys"] in ("0", 0, False)
             assert "single_account_id" in dashboard_columns
+            assert "limit_warmup_staggered_idle_enabled" in dashboard_columns
             assert "usage_sections" in api_key_columns
             assert api_key_column_defaults["usage_sections"] in (
                 "'upstream_limits,account_pool_usage'",

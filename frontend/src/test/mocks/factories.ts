@@ -317,6 +317,7 @@ export function createRequestLogEntry(
 		transport: "http",
 		useragent: null,
 		useragentGroup: null,
+		clientIp: null,
 		serviceTier: null,
 		requestedServiceTier: null,
 		actualServiceTier: null,
@@ -457,6 +458,7 @@ export function createDashboardSettings(
 		limitWarmupMinAvailablePercent: 100,
 		guestAccessEnabled: false,
 		guestPasswordConfigured: false,
+		limitWarmupStaggeredIdleEnabled: false,
 		...overrides,
 	});
 }

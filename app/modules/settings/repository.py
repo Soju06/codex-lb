@@ -55,6 +55,7 @@ class SettingsRepository:
             limit_warmup_cooldown_seconds=3600,
             limit_warmup_min_available_percent=100.0,
             weekly_pace_working_days="0,1,2,3,4,5,6",
+            limit_warmup_staggered_idle_enabled=False,
         )
         self._session.add(row)
         try:
@@ -103,6 +104,7 @@ class SettingsRepository:
         limit_warmup_min_available_percent: float | None = None,
         weekly_pace_working_days: str | None = None,
         guest_access_enabled: bool | None = None,
+        limit_warmup_staggered_idle_enabled: bool | None = None,
     ) -> DashboardSettings:
         settings = await self.get_or_create()
         if sticky_threads_enabled is not None:
@@ -168,12 +170,12 @@ class SettingsRepository:
             settings.limit_warmup_cooldown_seconds = limit_warmup_cooldown_seconds
         if limit_warmup_min_available_percent is not None:
             settings.limit_warmup_min_available_percent = limit_warmup_min_available_percent
-        if additional_quota_routing_policies_json is not None:
-            settings.additional_quota_routing_policies_json = additional_quota_routing_policies_json
         if weekly_pace_working_days is not None:
             settings.weekly_pace_working_days = weekly_pace_working_days
         if guest_access_enabled is not None:
             settings.guest_access_enabled = guest_access_enabled
+        if limit_warmup_staggered_idle_enabled is not None:
+            settings.limit_warmup_staggered_idle_enabled = limit_warmup_staggered_idle_enabled
         await self.commit_refresh(settings)
         return settings
 

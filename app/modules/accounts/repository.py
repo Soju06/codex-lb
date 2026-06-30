@@ -26,6 +26,7 @@ from app.db.models import (
 )
 from app.db.session import sqlite_writer_section
 from app.modules.usage.additional_quota_keys import normalize_additional_quota_routing_policy_overrides
+from app.modules.usage.repository import _clear_bulk_history_since_sqlite_cache
 
 _SETTINGS_ROW_ID = 1
 _DUPLICATE_ACCOUNT_SUFFIX = "__copy"
@@ -219,13 +220,15 @@ class AccountsRepository:
             )
             if canonical is not None:
                 _apply_account_updates(canonical, account)
-                await self._reconcile_chatgpt_identity_duplicates(
+                usage_cache_dirty = await self._reconcile_chatgpt_identity_duplicates(
                     canonical=canonical,
                     chatgpt_account_id=account.chatgpt_account_id,
                     workspace_id=account.workspace_id,
                     email=account.email,
                 )
                 await self._session.commit()
+                if usage_cache_dirty:
+                    _clear_bulk_history_since_sqlite_cache()
                 await self._session.refresh(canonical)
                 return canonical
 
@@ -374,7 +377,7 @@ class AccountsRepository:
         chatgpt_account_id: str,
         workspace_id: str | None,
         email: str | None,
-    ) -> None:
+    ) -> bool:
         duplicate_stmt = select(Account.id).where(
             Account.chatgpt_account_id == chatgpt_account_id,
             Account.id != canonical.id,
@@ -388,7 +391,7 @@ class AccountsRepository:
         duplicate_accounts = (await self._session.execute(duplicate_stmt)).scalars().all()
         duplicate_ids = list(duplicate_accounts)
         if not duplicate_ids:
-            return
+            return False
 
         duplicate_api_key_ids = (
             (
@@ -438,6 +441,7 @@ class AccountsRepository:
             .values(account_id=canonical.id)
         )
         await self._session.execute(delete(Account).where(Account.id.in_(duplicate_ids)))
+        return True
 
     async def _reconcile_limit_warmups(self, canonical_account_id: str, duplicate_ids: list[str]) -> None:
         existing_keys = {
@@ -588,8 +592,11 @@ class AccountsRepository:
                 )
             await self._session.execute(delete(StickySession).where(StickySession.account_id == account_id))
             result = await self._session.execute(delete(Account).where(Account.id == account_id).returning(Account.id))
+            deleted_id = result.scalar_one_or_none()
             await self._session.commit()
-            return result.scalar_one_or_none() is not None
+            if deleted_id is not None:
+                _clear_bulk_history_since_sqlite_cache()
+            return deleted_id is not None
 
     async def update_tokens(
         self,

@@ -77,6 +77,7 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["limitWarmupCooldownSeconds"] == 3600
     assert payload["limitWarmupMinAvailablePercent"] == 100.0
     assert payload["weeklyPaceWorkingDays"] == "0,1,2,3,4,5,6"
+    assert payload["limitWarmupStaggeredIdleEnabled"] is False
 
     response = await async_client.put(
         "/api/settings",
@@ -110,6 +111,7 @@ async def test_settings_api_get_and_update(async_client):
             "limitWarmupCooldownSeconds": 7200,
             "limitWarmupMinAvailablePercent": 99.0,
             "weeklyPaceWorkingDays": "0,1,2,3,4",
+            "limitWarmupStaggeredIdleEnabled": True,
         },
     )
     assert response.status_code == 200
@@ -144,6 +146,7 @@ async def test_settings_api_get_and_update(async_client):
     assert updated["limitWarmupCooldownSeconds"] == 7200
     assert updated["limitWarmupMinAvailablePercent"] == 99.0
     assert updated["weeklyPaceWorkingDays"] == "0,1,2,3,4"
+    assert updated["limitWarmupStaggeredIdleEnabled"] is True
 
     response = await async_client.get("/api/settings")
     assert response.status_code == 200

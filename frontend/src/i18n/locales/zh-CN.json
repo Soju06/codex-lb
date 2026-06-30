@@ -23,6 +23,9 @@
     "routing": "路由策略：",
     "version": "版本：",
     "live": "实时",
+    "updateAvailable": "有新版本可用。打开发布说明。",
+    "updateAvailableWithVersion": "有新版本可用：{{version}}。打开发布说明。",
+    "repositoryLabel": "打开官方 GitHub 仓库",
     "routingLabels": {
       "stickyThreads": "粘性会话",
       "sticky": "粘性",
@@ -88,6 +91,7 @@
         "save": "保存",
         "remove": "移除"
       },
+      "toggleAria": "启用访客访问",
       "toasts": {
         "passwordSaved": "访客密码已保存",
         "passwordRemoved": "访客密码已移除"
@@ -121,7 +125,8 @@
       },
       "burnProjection": {
         "label": "账户消耗预测",
-        "description": "在仪表盘上显示账户等效预测卡片。"
+        "description": "在仪表盘上显示账户等效预测卡片。",
+        "ariaLabel": "显示账户消耗预测"
       }
     },
     "routing": {
@@ -255,7 +260,8 @@
       "description": "控制账户导入时如何处理凭据槽位。",
       "allowDuplicates": {
         "label": "允许导入而不覆盖",
-        "description": "保留单独的 workspace 或未知凭据槽位，而不是按邮箱替换。"
+        "description": "保留单独的 workspace 或未知凭据槽位，而不是按邮箱替换。",
+        "ariaLabel": "允许导入而不覆盖"
       }
     },
     "session": {

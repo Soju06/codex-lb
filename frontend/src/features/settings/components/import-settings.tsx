@@ -39,6 +39,7 @@ export function ImportSettings({ settings, busy, onSave }: ImportSettingsProps) 
             </p>
           </div>
           <Switch
+            aria-label={t("settings.import.allowDuplicates.ariaLabel")}
             checked={settings.importWithoutOverwrite}
             disabled={busy}
             onCheckedChange={(checked) => save({ importWithoutOverwrite: checked })}

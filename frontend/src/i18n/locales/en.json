@@ -23,6 +23,9 @@
     "routing": "Routing:",
     "version": "Version:",
     "live": "Live",
+    "updateAvailable": "New version available. Open release notes.",
+    "updateAvailableWithVersion": "New version available: {{version}}. Open release notes.",
+    "repositoryLabel": "Open official GitHub repository",
     "routingLabels": {
       "stickyThreads": "Sticky threads",
       "sticky": "Sticky",
@@ -88,6 +91,7 @@
         "save": "Save",
         "remove": "Remove"
       },
+      "toggleAria": "Enable guest access",
       "toasts": {
         "passwordSaved": "Guest password saved",
         "passwordRemoved": "Guest password removed"
@@ -121,7 +125,8 @@
       },
       "burnProjection": {
         "label": "Account burn projection",
-        "description": "Show the account-equivalent projection card on the dashboard."
+        "description": "Show the account-equivalent projection card on the dashboard.",
+        "ariaLabel": "Show account burn projection"
       }
     },
     "routing": {
@@ -255,7 +260,8 @@
       "description": "Control how account import handles credential slots.",
       "allowDuplicates": {
         "label": "Allow import without overwrite",
-        "description": "Keep separate workspace or unknown credential slots instead of replacing by email."
+        "description": "Keep separate workspace or unknown credential slots instead of replacing by email.",
+        "ariaLabel": "Allow import without overwrite"
       }
     },
     "session": {

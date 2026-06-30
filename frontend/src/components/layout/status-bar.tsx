@@ -51,6 +51,9 @@ function getRoutingLabel(
   const stickyShortLabel = t("statusBar.routingLabels.sticky");
   const supportsEarlyReset = EARLY_RESET_STRATEGIES.has(strategy);
   const showEarlyReset = preferEarlier && supportsEarlyReset;
+  if (strategy === "single_account") {
+    return strategyLabel;
+  }
   const earlyResetLabel =
     preferEarlierWindow === "secondary"
       ? t("statusBar.routingLabels.earlyWeeklyReset")
@@ -121,8 +124,8 @@ export function StatusBar() {
   const latestVersion = runtimeVersion?.latestVersion ?? null;
   const showUpdateAvailable = runtimeVersion?.updateAvailable === true && latestVersion;
   const updateLabel = latestVersion
-    ? `New version available: ${latestVersion}. Open release notes.`
-    : "New version available. Open release notes.";
+    ? t("statusBar.updateAvailableWithVersion", { version: latestVersion })
+    : t("statusBar.updateAvailable");
 
   return (
     <footer className="fixed bottom-0 left-0 right-0 z-50 border-t border-white/[0.08] bg-background/50 px-4 py-2 shadow-[0_-1px_12px_rgba(0,0,0,0.06)] backdrop-blur-xl backdrop-saturate-[1.8] supports-[backdrop-filter]:bg-background/40 dark:shadow-[0_-1px_12px_rgba(0,0,0,0.25)]">
@@ -158,7 +161,7 @@ export function StatusBar() {
           </span>
         </div>
         <a
-          aria-label="Open official GitHub repository"
+          aria-label={t("statusBar.repositoryLabel")}
           className="ml-auto inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-border/70 bg-background/70 text-muted-foreground transition-colors hover:bg-muted/70 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
           href={GITHUB_REPOSITORY_URL}
           rel="noreferrer"

@@ -10,6 +10,8 @@ import {
 } from "@/features/auth/api";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import { TotpSettings } from "@/features/settings/components/totp-settings";
+import { buildSettingsUpdateRequest } from "@/features/settings/payload";
+import { createDashboardSettings } from "@/test/mocks/factories";
 
 vi.mock("@/features/auth/api", () => ({
   startTotpSetup: vi.fn(),
@@ -17,43 +19,9 @@ vi.mock("@/features/auth/api", () => ({
   disableTotp: vi.fn(),
 }));
 
-const LIMIT_WARMUP_DEFAULTS = {
-  limitWarmupEnabled: false,
-  limitWarmupWindows: "both" as const,
-  limitWarmupModel: "auto",
-  limitWarmupPrompt: "Say OK.",
-  limitWarmupCooldownSeconds: 3600,
-  limitWarmupMinAvailablePercent: 100,
-};
-const ADDITIONAL_QUOTA_DEFAULTS = {
-  additionalQuotaRoutingPolicies: {},
-  additionalQuotaPolicies: [],
-};
-
-const baseSettings = {
-  stickyThreadsEnabled: true,
-  upstreamStreamTransport: "default" as const,
-  upstreamProxyRoutingEnabled: false,
-  upstreamProxyDefaultPoolId: null,
-  preferEarlierResetAccounts: false,
-  preferEarlierResetWindow: "secondary" as const,
-  routingStrategy: "usage_weighted" as const,
-  relativeAvailabilityPower: 2,
-  relativeAvailabilityTopK: 5,
-  singleAccountId: null,
-  weeklyPaceWorkingDays: "0,1,2,3,4,5,6",
-  openaiCacheAffinityMaxAgeSeconds: 300,
-  dashboardSessionTtlSeconds: 43200,
-  warmupModel: "gpt-5.4-mini",
-  importWithoutOverwrite: false,
-  totpRequiredOnLogin: false,
+const baseSettings = createDashboardSettings({
   totpConfigured: false,
-  guestAccessEnabled: false,
-  guestPasswordConfigured: false,
-  apiKeyAuthEnabled: true,
-  ...LIMIT_WARMUP_DEFAULTS,
-  ...ADDITIONAL_QUOTA_DEFAULTS,
-};
+});
 
 function renderWithClient(ui: React.ReactElement) {
   const queryClient = new QueryClient({
@@ -162,20 +130,13 @@ describe("TotpSettings", () => {
   it("toggles require-on-login via switch", async () => {
     const user = userEvent.setup();
     const onSave = vi.fn().mockResolvedValue(undefined);
-    const saveSettings: Record<string, unknown> = { ...baseSettings };
-    delete saveSettings.additionalQuotaPolicies;
-    delete saveSettings.totpConfigured;
-    delete saveSettings.upstreamProxyRoutingEnabled;
-    delete saveSettings.upstreamProxyDefaultPoolId;
-    delete saveSettings.guestPasswordConfigured;
 
     renderWithClient(<TotpSettings settings={baseSettings} onSave={onSave} />);
 
     await user.click(screen.getByRole("switch"));
-    expect(onSave).toHaveBeenCalledWith({
-      ...saveSettings,
-      totpRequiredOnLogin: true,
-    });
+    expect(onSave).toHaveBeenCalledWith(
+      buildSettingsUpdateRequest(baseSettings, { totpRequiredOnLogin: true }),
+    );
   });
 
   it("supports disable flow via dialog", async () => {

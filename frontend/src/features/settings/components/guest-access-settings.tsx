@@ -93,6 +93,7 @@ export function GuestAccessSettings({
             </div>
           </div>
           <Switch
+            aria-label={t("settings.guestAccess.toggleAria")}
             checked={settings.guestAccessEnabled}
             disabled={disabled}
             onCheckedChange={(checked) => save({ guestAccessEnabled: checked })}

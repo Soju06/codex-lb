@@ -123,6 +123,21 @@ describe("StatusBar", () => {
     expect(screen.queryByText("Round robin + Early weekly reset")).not.toBeInTheDocument();
   });
 
+  it("keeps single-account routing label unadorned", async () => {
+    mockSettings({
+      routingStrategy: "single_account",
+      stickyThreadsEnabled: true,
+      preferEarlierResetAccounts: true,
+      preferEarlierResetWindow: "secondary",
+    });
+
+    renderStatusBar();
+
+    expect(await screen.findByText("Single account")).toBeInTheDocument();
+    expect(screen.queryByText("Single account + Sticky threads")).not.toBeInTheDocument();
+    expect(screen.queryByText("Single account + Sticky + Early weekly reset")).not.toBeInTheDocument();
+  });
+
   it("still shows early reset for supported strategies", async () => {
     mockSettings({
       routingStrategy: "fill_first",

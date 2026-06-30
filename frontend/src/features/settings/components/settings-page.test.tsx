@@ -132,6 +132,7 @@ describe("SettingsPage", () => {
       createEndpointMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
       createPoolMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
       addPoolMemberMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
+      testEndpointMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
     });
 
     routingSettingsMock.mockReset();

@@ -150,7 +150,11 @@ export function AppearanceSettings() {
               <p className="text-sm font-medium">{t("settings.appearance.burnProjection.label")}</p>
               <p className="text-xs text-muted-foreground">{t("settings.appearance.burnProjection.description")}</p>
             </div>
-            <Switch checked={accountBurnrateEnabled} onCheckedChange={setAccountBurnrateEnabled} />
+            <Switch
+              aria-label={t("settings.appearance.burnProjection.ariaLabel")}
+              checked={accountBurnrateEnabled}
+              onCheckedChange={setAccountBurnrateEnabled}
+            />
           </div>
         </div>
       </div>

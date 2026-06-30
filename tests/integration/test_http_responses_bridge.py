@@ -1515,7 +1515,7 @@ async def test_v1_responses_http_bridge_creation_honors_prefer_earlier_reset(asy
     account = await _get_account(account_id)
     service = get_proxy_service_for_app(app_instance)
     fake_upstream = _FakeBridgeUpstreamWebSocket()
-    select_calls: list[bool] = []
+    select_calls: list[tuple[bool, str | None]] = []
 
     async def fake_select_account_with_budget(
         self,
@@ -1529,6 +1529,7 @@ async def test_v1_responses_http_bridge_creation_honors_prefer_earlier_reset(asy
         reallocate_sticky,
         sticky_max_age_seconds,
         prefer_earlier_reset_accounts,
+        service_tier=None,
         routing_strategy,
         model,
         exclude_account_ids=None,
@@ -1552,7 +1553,7 @@ async def test_v1_responses_http_bridge_creation_honors_prefer_earlier_reset(asy
             exclude_account_ids,
             additional_limit_name,
         )
-        select_calls.append(prefer_earlier_reset_accounts)
+        select_calls.append((prefer_earlier_reset_accounts, service_tier))
         return AccountSelection(account=account, error_message=None, error_code=None)
 
     async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
@@ -1577,6 +1578,7 @@ async def test_v1_responses_http_bridge_creation_honors_prefer_earlier_reset(asy
             "instructions": "",
             "input": "hello",
             "prompt_cache_key": "bridge_prefer_earlier_reset",
+            "service_tier": "priority",
         }
     )
     affinity = proxy_module._sticky_key_for_responses_request(
@@ -1601,12 +1603,13 @@ async def test_v1_responses_http_bridge_creation_honors_prefer_earlier_reset(asy
         affinity=affinity,
         api_key=None,
         request_model=payload.model,
+        request_service_tier=payload.service_tier,
         idle_ttl_seconds=120.0,
         max_sessions=8,
         gateway_safe_mode=True,
     )
 
-    assert select_calls == [True]
+    assert select_calls == [(True, "priority")]
     await service._close_http_bridge_session(session)
 
 

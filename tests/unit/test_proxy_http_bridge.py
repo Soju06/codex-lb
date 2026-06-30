@@ -1878,6 +1878,7 @@ async def test_reconnect_http_bridge_session_passes_dashboard_reset_window_to_se
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     session = _make_bridge_session()
+    session.request_service_tier = "priority"
     settings = SimpleNamespace(
         prefer_earlier_reset_accounts=True,
         prefer_earlier_reset_window="primary",
@@ -1908,6 +1909,7 @@ async def test_reconnect_http_bridge_session_passes_dashboard_reset_window_to_se
 
     assert selection_kwargs[0]["prefer_earlier_reset_accounts"] is True
     assert selection_kwargs[0]["prefer_earlier_reset_window"] == "primary"
+    assert selection_kwargs[0]["service_tier"] == "priority"
 
 
 @pytest.mark.asyncio

@@ -12,7 +12,11 @@ from app.core.clients.http import refresh_http_client
 from app.core.clients.model_fetcher import ModelFetchError, fetch_models_for_plan
 from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
-from app.core.openai.model_registry import UpstreamModel, _merge_service_tier_metadata, get_model_registry
+from app.core.openai.model_registry import (
+    UpstreamModel,
+    _merge_service_tier_metadata,
+    get_model_registry,
+)
 from app.core.upstream_proxy import ResolvedUpstreamRoute, resolve_upstream_route
 from app.db.models import Account, AccountStatus
 from app.db.session import get_background_session
@@ -30,6 +34,12 @@ class _LeaderElectionLike(Protocol):
 @dataclass(slots=True)
 class _TransportRecoveryState:
     attempted: bool = False
+
+
+@dataclass(slots=True)
+class _FetchResult:
+    models: list[UpstreamModel]
+    account_models: dict[str, tuple[str, list[UpstreamModel]]]
 
 
 def _get_leader_election() -> _LeaderElectionLike:
@@ -84,19 +94,28 @@ class ModelRefreshScheduler:
 
                 encryptor = TokenEncryptor()
                 per_plan_results: dict[str, list[UpstreamModel]] = {}
+                per_account_results: dict[str, tuple[str, list[UpstreamModel]]] = {}
+                active_account_plans: dict[str, str] = {}
 
                 for plan_type, candidates in grouped.items():
-                    models = await _fetch_with_failover(
+                    for account in candidates:
+                        active_account_plans[account.id] = plan_type
+                    result = await _fetch_with_failover(
                         candidates,
                         encryptor,
                         accounts_repo,
                     )
-                    if models is not None:
-                        per_plan_results[plan_type] = models
+                    if result is not None:
+                        per_plan_results[plan_type] = result.models
+                        per_account_results.update(result.account_models)
 
                 if per_plan_results:
                     registry = get_model_registry()
-                    await registry.update(per_plan_results)
+                    await registry.update(
+                        per_plan_results,
+                        per_account_results=per_account_results,
+                        active_account_plans=active_account_plans,
+                    )
                     snapshot = registry.get_snapshot()
                     total_models = len(snapshot.models) if snapshot else 0
                     logger.info(
@@ -149,9 +168,10 @@ async def _fetch_with_failover(
     candidates: list[Account],
     encryptor: TokenEncryptor,
     accounts_repo: AccountsRepository,
-) -> list[UpstreamModel] | None:
+) -> _FetchResult | None:
     transport_recovery = _TransportRecoveryState()
     successful_results: list[list[UpstreamModel]] = []
+    account_models: dict[str, tuple[str, list[UpstreamModel]]] = {}
 
     for account in candidates:
         auth_manager = AuthManager(accounts_repo)
@@ -167,6 +187,7 @@ async def _fetch_with_failover(
                 transport_recovery=transport_recovery,
             )
             successful_results.append(models)
+            account_models[account.id] = (account.plan_type, models)
         except ModelFetchError as exc:
             if exc.status_code == 401:
                 try:
@@ -182,6 +203,7 @@ async def _fetch_with_failover(
                         transport_recovery=transport_recovery,
                     )
                     successful_results.append(models)
+                    account_models[account.id] = (account.plan_type, models)
                     continue
                 except (ModelFetchError, RefreshError) as retry_exc:
                     logger.warning(
@@ -216,7 +238,10 @@ async def _fetch_with_failover(
                 exc_info=True,
             )
             continue
-    return _merge_same_plan_model_results(successful_results) or None
+    merged_models = _merge_same_plan_model_results(successful_results)
+    if not merged_models:
+        return None
+    return _FetchResult(models=merged_models, account_models=account_models)
 
 
 def _merge_same_plan_model_results(successful_results: list[list[UpstreamModel]]) -> list[UpstreamModel]:

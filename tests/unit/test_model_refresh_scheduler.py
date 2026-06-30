@@ -151,7 +151,9 @@ async def test_fetch_with_failover_refreshes_http_client_after_transport_error(
 
     result = await scheduler_module._fetch_with_failover([account], encryptor, MagicMock())
 
-    assert result == expected_models
+    assert result is not None
+    assert result.models == expected_models
+    assert result.account_models == {account.id: (account.plan_type, expected_models)}
     refresh_http_client.assert_awaited_once()
     assert fetch_models_for_plan.await_count == 2
     assert encryptor.decrypt.call_count == 2
@@ -224,7 +226,9 @@ async def test_fetch_with_failover_refreshes_http_client_after_token_refresh_tra
 
     result = await scheduler_module._fetch_with_failover([account], encryptor, MagicMock())
 
-    assert result == expected_models
+    assert result is not None
+    assert result.models == expected_models
+    assert result.account_models == {account.id: (account.plan_type, expected_models)}
     refresh_http_client.assert_awaited_once()
     assert ensure_fresh_calls == 2
     fetch_models_for_plan.assert_awaited_once()
@@ -260,7 +264,7 @@ async def test_fetch_with_failover_attempts_transport_recovery_once_when_retry_f
 
 
 @pytest.mark.asyncio
-async def test_fetch_with_failover_merges_common_same_plan_tiers(
+async def test_fetch_with_failover_unions_same_plan_tiers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     accounts = [_account("account-1"), _account("account-2")]
@@ -280,9 +284,15 @@ async def test_fetch_with_failover_merges_common_same_plan_tiers(
     result = await scheduler_module._fetch_with_failover(accounts, encryptor, MagicMock())
 
     assert result is not None
-    assert [model.slug for model in result] == ["gpt-5.4"]
-    assert result[0].raw["service_tiers"] == [{"slug": "fast"}, {"slug": "default"}]
-    assert result[0].raw["additional_speed_tiers"] == ["fast"]
+    assert [model.slug for model in result.models] == ["gpt-5.4"]
+    assert result.account_models == {
+        accounts[0].id: (accounts[0].plan_type, first_models),
+        accounts[1].id: (accounts[1].plan_type, second_models),
+    }
+    service_tiers = result.models[0].raw["service_tiers"]
+    assert isinstance(service_tiers, list)
+    assert {tier.get("slug") for tier in service_tiers if isinstance(tier, dict)} == {"default", "fast"}
+    assert result.models[0].raw["additional_speed_tiers"] == ["fast"]
     assert fetch_models_for_plan.await_count == 2
     assert [call.args[1] for call in fetch_models_for_plan.await_args_list] == [
         "chatgpt-account-1",
@@ -308,7 +318,7 @@ async def test_fetch_with_failover_excludes_same_plan_private_model_slug(
     result = await scheduler_module._fetch_with_failover(accounts, encryptor, MagicMock())
 
     assert result is not None
-    assert [model.slug for model in result] == ["gpt-5.4"]
+    assert [model.slug for model in result.models] == ["gpt-5.4"]
     assert fetch_models_for_plan.await_count == 2
 
 
@@ -335,6 +345,8 @@ async def test_fetch_with_failover_does_not_warn_after_successful_auth_retry(
     with caplog.at_level(logging.WARNING, logger=scheduler_module.logger.name):
         result = await scheduler_module._fetch_with_failover([account], encryptor, MagicMock())
 
-    assert result == expected_models
+    assert result is not None
+    assert result.models == expected_models
+    assert result.account_models == {account.id: (account.plan_type, expected_models)}
     assert fetch_models_for_plan.await_count == 2
     assert "Model fetch failed" not in caplog.text

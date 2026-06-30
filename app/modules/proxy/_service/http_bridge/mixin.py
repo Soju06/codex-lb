@@ -146,6 +146,7 @@ from app.modules.proxy._service.support import (
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
     _copy_websocket_route_metadata_to_session,
+    _http_bridge_session_supports_service_tier,
     _HTTPBridgeOwnerForward,
     _HTTPBridgeSession,
     _HTTPBridgeSessionKey,
@@ -438,6 +439,7 @@ class _HTTPBridgeMixin(
         request_model: str | None,
         idle_ttl_seconds: float,
         max_sessions: int,
+        request_service_tier: str | None = None,
         previous_response_id: str | None = None,
         gateway_safe_mode: bool = False,
         allow_forward_to_owner: Literal[False] = False,
@@ -465,6 +467,7 @@ class _HTTPBridgeMixin(
         request_model: str | None,
         idle_ttl_seconds: float,
         max_sessions: int,
+        request_service_tier: str | None = None,
         previous_response_id: str | None = None,
         gateway_safe_mode: bool = False,
         allow_forward_to_owner: Literal[True],
@@ -491,6 +494,7 @@ class _HTTPBridgeMixin(
         request_model: str | None,
         idle_ttl_seconds: float,
         max_sessions: int,
+        request_service_tier: str | None = None,
         previous_response_id: str | None = None,
         gateway_safe_mode: bool = False,
         allow_forward_to_owner: bool = False,
@@ -681,11 +685,17 @@ class _HTTPBridgeMixin(
                         preferred_account_id=preferred_account_id,
                         require_preferred_account=require_preferred_account,
                     )
+                    and _http_bridge_session_supports_service_tier(
+                        existing,
+                        request_model=request_model,
+                        request_service_tier=request_service_tier,
+                    )
                 ):
                     current_instance = settings.http_responses_session_bridge_instance_id
                     if _durable_bridge_lookup_allows_local_reuse(durable_lookup, current_instance=current_instance):
                         existing.api_key = api_key
                         existing.request_model = request_model
+                        existing.request_service_tier = request_service_tier
                         existing.last_used_at = _service_time().monotonic()
                         await self._refresh_durable_http_bridge_session(existing)
                         _log_http_bridge_event(
@@ -1272,19 +1282,14 @@ class _HTTPBridgeMixin(
                 if owns_creation:
                     await self._fail_http_bridge_inflight_session_creation(key, inflight_future, exc)
                 raise
-
             if session_to_return_after_close is not None:
                 return session_to_return_after_close
-
             if owner_forward is not None:
                 return owner_forward
-
             if owner_mismatch_error is not None:
                 raise owner_mismatch_error
-
             if continuity_error is not None:
                 raise continuity_error
-
             if capacity_wait_future is not None:
                 wait_timeout_seconds = _proxy_admission_wait_timeout_seconds(settings)
                 try:
@@ -1397,6 +1402,7 @@ class _HTTPBridgeMixin(
                     "affinity": affinity,
                     "api_key": api_key,
                     "request_model": request_model,
+                    "request_service_tier": request_service_tier,
                     "idle_ttl_seconds": effective_idle_ttl_seconds,
                     "request_stage": request_stage,
                     "preferred_account_id": preferred_account_id,
@@ -1415,18 +1421,10 @@ class _HTTPBridgeMixin(
                     parameter.kind is inspect.Parameter.VAR_KEYWORD
                     for parameter in create_signature.parameters.values()
                 )
-                if (
-                    create_signature is not None
-                    and not create_accepts_var_keyword
-                    and "request_usage_budget" not in create_signature.parameters
-                ):
-                    create_kwargs.pop("request_usage_budget", None)
-                if (
-                    create_signature is not None
-                    and not create_accepts_var_keyword
-                    and "request_deadline" not in create_signature.parameters
-                ):
-                    create_kwargs.pop("request_deadline", None)
+                if create_signature is not None and not create_accepts_var_keyword:
+                    for optional_kwarg in ("request_service_tier", "request_usage_budget", "request_deadline"):
+                        if optional_kwarg not in create_signature.parameters:
+                            create_kwargs.pop(optional_kwarg, None)
                 created_session = await create_session(key, **create_kwargs)
                 await self._claim_durable_http_bridge_session(
                     created_session,
@@ -1497,7 +1495,6 @@ class _HTTPBridgeMixin(
             self._http_bridge_sessions.clear()
             self._http_bridge_inflight_sessions.clear()
             self._http_bridge_previous_response_index.clear()
-
         shutdown_error = ProxyResponseError(
             503,
             openai_error(
@@ -1511,7 +1508,6 @@ class _HTTPBridgeMixin(
                 continue
             inflight_future.set_exception(shutdown_error)
             inflight_future.exception()
-
         for session in sessions_to_close:
             await self._close_http_bridge_session(session)
         await self._drain_http_bridge_background_cleanup_tasks(reason="shutdown")
@@ -1778,7 +1774,7 @@ class _HTTPBridgeMixin(
                     lease_ttl_seconds=_http_bridge_durable_lease_ttl_seconds(),
                     account_id=session.account.id,
                     model=session.request_model,
-                    service_tier=None,
+                    service_tier=getattr(session, "request_service_tier", None),
                     latest_turn_state=session.downstream_turn_state,
                     latest_response_id=None,
                     allow_takeover=allow_takeover,
@@ -1867,6 +1863,7 @@ class _HTTPBridgeMixin(
         api_key: ApiKeyData | None,
         request_model: str | None,
         idle_ttl_seconds: float,
+        request_service_tier: str | None = None,
         request_stage: str = "first_turn",
         preferred_account_id: str | None = None,
         require_preferred_account: bool = False,
@@ -1877,7 +1874,7 @@ class _HTTPBridgeMixin(
         request_state = _WebSocketRequestState(
             request_id=f"http_bridge_connect_{uuid4().hex}",
             model=request_model,
-            service_tier=None,
+            service_tier=request_service_tier,
             reasoning_effort=None,
             api_key_reservation=None,
             started_at=_service_time().monotonic(),
@@ -1910,6 +1907,7 @@ class _HTTPBridgeMixin(
                 "prefer_earlier_reset_window": _prefer_earlier_reset_window(settings),
                 "routing_strategy": _routing_strategy(settings),
                 "model": request_model,
+                "service_tier": request_service_tier,
                 "exclude_account_ids": excluded_account_ids,
                 "preferred_account_id": preferred_candidate_id,
                 "lease_kind": "stream",
@@ -2104,6 +2102,7 @@ class _HTTPBridgeMixin(
             affinity=affinity,
             api_key=api_key,
             request_model=request_model,
+            request_service_tier=request_service_tier,
             account=account,
             upstream=upstream,
             upstream_control=_WebSocketUpstreamControl(),
@@ -2215,6 +2214,7 @@ class _HTTPBridgeMixin(
                 prefer_earlier_reset_window=_prefer_earlier_reset_window(settings),
                 routing_strategy=_routing_strategy(settings),
                 model=session.request_model,
+                service_tier=session.request_service_tier,
                 exclude_account_ids=excluded_account_ids,
                 preferred_account_id=preferred_candidate_id,
                 require_security_work_authorized=require_security_work_authorized,

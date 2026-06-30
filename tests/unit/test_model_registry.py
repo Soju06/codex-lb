@@ -253,20 +253,99 @@ async def test_update_preserves_non_default_service_tier_default():
 
 
 @pytest.mark.asyncio
+async def test_plan_types_for_model_service_tier_tracks_tier_plans():
+    fast = replace(
+        _model("gpt-5.5"),
+        raw={
+            "service_tiers": [{"id": "priority", "name": "Fast"}],
+            "additional_speed_tiers": ["fast"],
+            "default_service_tier": "priority",
+        },
+    )
+    no_fast = replace(
+        _model("gpt-5.5"),
+        raw={
+            "service_tiers": [{"slug": "default"}],
+            "additional_speed_tiers": [],
+            "default_service_tier": "default",
+        },
+    )
+
+    registry = ModelRegistry(ttl_seconds=60.0)
+    await registry.update({"pro": [fast], "plus": [no_fast]})
+
+    assert registry.plan_types_for_model("gpt-5.5") == frozenset({"pro", "plus"})
+    assert registry.plan_types_for_model_service_tier("gpt-5.5", "priority") == frozenset({"pro"})
+    assert registry.plan_types_for_model_service_tier("gpt-5.5", "fast") == frozenset({"pro"})
+    assert registry.plan_types_for_model_service_tier("gpt-5.5", "default") == frozenset({"plus"})
+
+
+@pytest.mark.asyncio
+async def test_account_ids_for_model_service_tier_tracks_account_catalogs():
+    fast = replace(
+        _model("gpt-5.5"),
+        raw={"service_tiers": [{"slug": "fast"}], "additional_speed_tiers": ["fast"]},
+    )
+    no_fast = replace(_model("gpt-5.5"), raw={"service_tiers": [{"slug": "default"}]})
+
+    registry = ModelRegistry(ttl_seconds=60.0)
+    await registry.update(
+        {"pro": [fast]},
+        per_account_results={
+            "account-fast": ("pro", [fast]),
+            "account-default": ("pro", [no_fast]),
+        },
+    )
+
+    assert registry.account_ids_for_model_service_tier("gpt-5.5", "priority") == frozenset({"account-fast"})
+    assert registry.account_ids_for_model_service_tier("gpt-5.5", "fast") == frozenset({"account-fast"})
+    assert registry.account_ids_for_model_service_tier("gpt-5.5", "default") == frozenset({"account-default"})
+
+
+@pytest.mark.asyncio
+async def test_account_ids_for_model_service_tier_preserves_missing_active_accounts():
+    fast = replace(_model("gpt-5.5"), raw={"service_tiers": [{"slug": "fast"}], "additional_speed_tiers": ["fast"]})
+    no_fast = replace(_model("gpt-5.5"), raw={"service_tiers": [{"slug": "default"}]})
+
+    registry = ModelRegistry(ttl_seconds=60.0)
+    await registry.update(
+        {"pro": [fast]},
+        per_account_results={
+            "account-fast": ("pro", [fast]),
+            "account-default": ("pro", [no_fast]),
+        },
+        active_account_plans={"account-fast": "pro", "account-default": "pro"},
+    )
+
+    await registry.update(
+        {"pro": [no_fast]},
+        per_account_results={"account-default": ("pro", [no_fast])},
+        active_account_plans={"account-fast": "pro", "account-default": "pro"},
+    )
+
+    assert registry.account_ids_for_model_service_tier("gpt-5.5", "priority") == frozenset({"account-fast"})
+    assert registry.account_ids_for_model_service_tier("gpt-5.5", "default") == frozenset({"account-default"})
+
+
+@pytest.mark.asyncio
 async def test_update_does_not_duplicate_shared_service_tiers():
     # Two accounts that both support Fast must not produce duplicate tier entries.
     fast = replace(
         _model("gpt-5.5"),
         raw={"service_tiers": [{"slug": "fast"}], "additional_speed_tiers": ["fast"]},
     )
+    priority = replace(
+        _model("gpt-5.5"),
+        raw={"service_tiers": [{"id": "priority", "name": "Fast"}], "additional_speed_tiers": ["priority"]},
+    )
     registry = ModelRegistry(ttl_seconds=60.0)
-    await registry.update({"pro": [fast], "plus": [replace(fast, raw=dict(fast.raw))]})
+    await registry.update({"pro": [fast], "plus": [priority]})
 
     snapshot = registry.get_snapshot()
     assert snapshot is not None
     merged = snapshot.models["gpt-5.5"]
-    assert merged.raw["service_tiers"] == [{"slug": "fast"}]
-    assert merged.raw["additional_speed_tiers"] == ["fast"]
+    assert merged.raw["service_tiers"] == [{"id": "priority", "name": "Fast"}]
+    assert merged.raw["additional_speed_tiers"] == ["priority"]
 
 
 @pytest.mark.asyncio

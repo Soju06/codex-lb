@@ -712,6 +712,9 @@ def _build_registry_with_model(slug: str, efforts: list[str]):
         models={slug: upstream},
         model_plans={slug: frozenset({"pro"})},
         plan_models={"pro": frozenset({slug})},
+        model_service_tier_plans={},
+        model_service_tier_accounts={},
+        account_plans={},
         fetched_at=0.0,
     )
     registry = ModelRegistry()
@@ -22842,6 +22845,97 @@ def test_prepare_http_bridge_request_kind_uses_headers_over_payload_metadata():
     assert upstream_payload["client_metadata"]["x-codex-turn-metadata"] == json.dumps(
         {"request_kind": "prewarm", "turn_id": "payload-turn"}
     )
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_reselects_sticky_session_for_new_service_tier(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account_a = _make_account("acc_bridge_default_tier")
+    account_b = _make_account("acc_bridge_priority_tier")
+    key = proxy_service._HTTPBridgeSessionKey("prompt_cache", "bridge-tier-key", None)
+    existing = proxy_service._HTTPBridgeSession(
+        key=key,
+        headers={},
+        affinity=proxy_service._AffinityPolicy(key="bridge-tier-key"),
+        request_model="gpt-5.5",
+        request_service_tier=None,
+        account=account_a,
+        upstream=AsyncMock(),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque(),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=0,
+        last_used_at=0.0,
+        idle_ttl_seconds=30.0,
+    )
+    replacement = proxy_service._HTTPBridgeSession(
+        key=key,
+        headers={},
+        affinity=proxy_service._AffinityPolicy(key="bridge-tier-key"),
+        request_model="gpt-5.5",
+        request_service_tier="priority",
+        account=account_b,
+        upstream=AsyncMock(),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque(),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=0,
+        last_used_at=0.0,
+        idle_ttl_seconds=30.0,
+    )
+    service._http_bridge_sessions[key] = existing
+
+    class Registry:
+        def account_ids_for_model_service_tier(self, slug: str, service_tier: str | None) -> frozenset[str] | None:
+            if slug == "gpt-5.5" and service_tier == "priority":
+                return frozenset({account_b.id})
+            return None
+
+        def plan_types_for_model_service_tier(self, slug: str, service_tier: str | None) -> frozenset[str] | None:
+            return None
+
+    create_session = AsyncMock(return_value=replacement)
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        "app.modules.proxy._service.support.get_model_registry",
+        lambda: Registry(),
+    )
+    monkeypatch.setattr(
+        "app.modules.proxy._service.http_bridge.mixin._http_bridge_owner_instance",
+        AsyncMock(return_value=settings.http_responses_session_bridge_instance_id),
+    )
+    monkeypatch.setattr(
+        "app.modules.proxy._service.http_bridge.mixin._active_http_bridge_instance_ring",
+        AsyncMock(
+            return_value=(
+                settings.http_responses_session_bridge_instance_id,
+                (settings.http_responses_session_bridge_instance_id,),
+            )
+        ),
+    )
+    monkeypatch.setattr(service, "_create_http_bridge_session", create_session)
+    monkeypatch.setattr(service, "_claim_durable_http_bridge_session", AsyncMock())
+
+    result = await service._get_or_create_http_bridge_session(
+        key,
+        headers={},
+        affinity=proxy_service._AffinityPolicy(key="bridge-tier-key"),
+        api_key=None,
+        request_model="gpt-5.5",
+        request_service_tier="priority",
+        idle_ttl_seconds=30.0,
+        max_sessions=10,
+    )
+
+    assert result is replacement
+    assert existing.closed is True
+    create_session.assert_awaited_once()
+    assert create_session.await_args is not None
+    assert create_session.await_args.kwargs["request_service_tier"] == "priority"
 
 
 @pytest.mark.asyncio

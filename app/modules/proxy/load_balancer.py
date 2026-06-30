@@ -297,6 +297,7 @@ class LoadBalancer:
         relative_availability_power: float = 2.0,
         relative_availability_top_k: int = 5,
         model: str | None = None,
+        service_tier: str | None = None,
         additional_limit_name: str | None = None,
         account_ids: Collection[str] | None = None,
         exclude_account_ids: Collection[str] | None = None,
@@ -314,6 +315,7 @@ class LoadBalancer:
         async def load_selection_inputs() -> _SelectionInputs:
             selection_inputs = await self._load_selection_inputs(
                 model=model,
+                service_tier=service_tier,
                 additional_limit_name=additional_limit_name,
                 account_ids=scoped_account_ids,
             )
@@ -774,6 +776,7 @@ class LoadBalancer:
         self,
         *,
         model: str | None,
+        service_tier: str | None = None,
         additional_limit_name: str | None = None,
         account_ids: Collection[str] | None = None,
     ) -> _SelectionInputs:
@@ -788,6 +791,7 @@ class LoadBalancer:
         )
         cache_key = (
             model,
+            service_tier,
             additional_limit_name,
             additional_quota_routing_policies_cache_key,
             None if account_ids is None else tuple(sorted(set(account_ids))),
@@ -826,7 +830,7 @@ class LoadBalancer:
                 accounts = [account for account in accounts if account.id in allowed_account_ids]
             pre_model_filter_accounts = accounts
             if model and _mapped_model_has_registry_entry(model):
-                accounts = _filter_accounts_for_model(pre_model_filter_accounts, model)
+                accounts = _filter_accounts_for_model(pre_model_filter_accounts, model, service_tier=service_tier)
             if model and not accounts:
                 if not all_accounts:
                     selection_inputs = _SelectionInputs(
@@ -2177,8 +2181,20 @@ def _usage_refresh_interval_seconds() -> int:
     return int(getattr(settings, "usage_refresh_interval_seconds", _DEFAULT_USAGE_REFRESH_INTERVAL_SECONDS))
 
 
-def _filter_accounts_for_model(accounts: list[Account], model: str) -> list[Account]:
-    allowed_plans = get_model_registry().plan_types_for_model(model)
+def _filter_accounts_for_model(
+    accounts: list[Account],
+    model: str,
+    *,
+    service_tier: str | None = None,
+) -> list[Account]:
+    registry = get_model_registry()
+    if service_tier is not None:
+        allowed_account_ids = registry.account_ids_for_model_service_tier(model, service_tier)
+        if allowed_account_ids is not None:
+            return [account for account in accounts if account.id in allowed_account_ids]
+        allowed_plans = registry.plan_types_for_model_service_tier(model, service_tier)
+    else:
+        allowed_plans = registry.plan_types_for_model(model)
     if allowed_plans is None:
         return accounts
     return [a for a in accounts if account_plan_matches_allowed(a.plan_type, allowed_plans)]

@@ -145,6 +145,29 @@ async def test_http_bridge_activity_snapshot_cleans_stale_inflight_session(
         await inflight_future
 
 
+@pytest.mark.asyncio
+async def test_http_bridge_activity_snapshot_skips_inflight_cleanup_when_registry_locked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, SimpleNamespace()))
+    key = proxy_service._HTTPBridgeSessionKey("session_header", "locked-stale-inflight-drain-status", None)
+    inflight_future: asyncio.Future[proxy_service._HTTPBridgeSession] = asyncio.get_running_loop().create_future()
+    setattr(inflight_future, "_codex_lb_started_at", -1000.0)
+    service._http_bridge_inflight_sessions[key] = inflight_future
+
+    monkeypatch.setattr(proxy_service, "_proxy_admission_wait_timeout_seconds", lambda settings=None: 0.001)
+
+    async with service._http_bridge_lock:
+        snapshot = service.http_bridge_activity_snapshot_nowait()
+
+    assert key in service._http_bridge_inflight_sessions
+    assert not inflight_future.done()
+    assert snapshot["http_bridge_inflight_session_creates"] == 1
+    assert snapshot["http_bridge_stale_inflight_session_creates"] == 1
+    assert snapshot["http_bridge_cleaned_inflight_session_creates"] == 0
+    assert snapshot["http_bridge_restart_blocking"] is True
+
+
 async def _wait_for_close_await(close_session: AsyncMock, session: proxy_service._HTTPBridgeSession) -> None:
     for _ in range(10):
         if any(call.args == (session,) for call in close_session.await_args_list):

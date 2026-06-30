@@ -305,47 +305,64 @@ class _HTTPBridgeMixin(
         cleaned = 0
         stale = 0
         oldest_age_seconds = 0
-        for key, future in list(self._http_bridge_inflight_sessions.items()):
-            current_future = self._http_bridge_inflight_sessions.get(key)
-            if current_future is not future:
-                continue
-            started_at = getattr(future, _HTTP_BRIDGE_INFLIGHT_STARTED_AT_ATTR, None)
-            age_seconds = max(0.0, now - started_at) if isinstance(started_at, (int, float)) else 0.0
-            oldest_age_seconds = max(oldest_age_seconds, int(age_seconds))
-            cleanup_reason: str | None = None
-            cleanup_exc: BaseException | None = None
-            if future.done():
-                cleanup_reason = "done"
-            elif isinstance(started_at, (int, float)) and age_seconds >= stale_after_seconds:
-                stale += 1
-                cleanup_reason = "stale"
-                cleanup_exc = _http_bridge_startup_wait_timeout_error(
-                    "http_bridge_inflight_session_stale",
-                    code="capacity_exhausted_active_sessions",
-                )
-            if cleanup_reason is None:
-                continue
-            self._http_bridge_inflight_sessions.pop(key, None)
-            cleaned += 1
-            if cleanup_exc is not None and not future.done():
-                future.set_exception(cleanup_exc)
-                future.exception()
-            elif future.done() and not future.cancelled():
-                try:
+        try:
+            self._http_bridge_lock.acquire_nowait()
+        except (anyio.WouldBlock, RuntimeError):
+            for future in self._http_bridge_inflight_sessions.values():
+                started_at = getattr(future, _HTTP_BRIDGE_INFLIGHT_STARTED_AT_ATTR, None)
+                age_seconds = max(0.0, now - started_at) if isinstance(started_at, (int, float)) else 0.0
+                oldest_age_seconds = max(oldest_age_seconds, int(age_seconds))
+                if isinstance(started_at, (int, float)) and age_seconds >= stale_after_seconds:
+                    stale += 1
+            return {
+                "cleaned": 0,
+                "stale": stale,
+                "oldest_age_seconds": oldest_age_seconds,
+            }
+        try:
+            for key, future in list(self._http_bridge_inflight_sessions.items()):
+                current_future = self._http_bridge_inflight_sessions.get(key)
+                if current_future is not future:
+                    continue
+                started_at = getattr(future, _HTTP_BRIDGE_INFLIGHT_STARTED_AT_ATTR, None)
+                age_seconds = max(0.0, now - started_at) if isinstance(started_at, (int, float)) else 0.0
+                oldest_age_seconds = max(oldest_age_seconds, int(age_seconds))
+                cleanup_reason: str | None = None
+                cleanup_exc: BaseException | None = None
+                if future.done():
+                    cleanup_reason = "done"
+                elif isinstance(started_at, (int, float)) and age_seconds >= stale_after_seconds:
+                    stale += 1
+                    cleanup_reason = "stale"
+                    cleanup_exc = _http_bridge_startup_wait_timeout_error(
+                        "http_bridge_inflight_session_stale",
+                        code="capacity_exhausted_active_sessions",
+                    )
+                if cleanup_reason is None:
+                    continue
+                self._http_bridge_inflight_sessions.pop(key, None)
+                cleaned += 1
+                if cleanup_exc is not None and not future.done():
+                    future.set_exception(cleanup_exc)
                     future.exception()
-                except Exception:
-                    pass
-            logger.warning(
-                "http_bridge_inflight_session_create_cleanup reason=%s bridge_kind=%s bridge_key=%s"
-                " age_seconds=%d stale_after_seconds=%d done=%s cancelled=%s",
-                cleanup_reason,
-                key.affinity_kind,
-                _hash_identifier(key.affinity_key),
-                int(age_seconds),
-                int(stale_after_seconds),
-                future.done(),
-                future.cancelled(),
-            )
+                elif future.done() and not future.cancelled():
+                    try:
+                        future.exception()
+                    except Exception:
+                        pass
+                logger.warning(
+                    "http_bridge_inflight_session_create_cleanup reason=%s bridge_kind=%s bridge_key=%s"
+                    " age_seconds=%d stale_after_seconds=%d done=%s cancelled=%s",
+                    cleanup_reason,
+                    key.affinity_kind,
+                    _hash_identifier(key.affinity_key),
+                    int(age_seconds),
+                    int(stale_after_seconds),
+                    future.done(),
+                    future.cancelled(),
+                )
+        finally:
+            self._http_bridge_lock.release()
         return {
             "cleaned": cleaned,
             "stale": stale,

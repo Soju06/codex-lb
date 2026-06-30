@@ -115,12 +115,30 @@ async def test_http_bridge_activity_snapshot_counts_pending_and_inflight_session
         "http_bridge_stale_inflight_session_creates": 0,
         "http_bridge_cleaned_inflight_session_creates": 0,
         "http_bridge_background_cleanup_tasks": 0,
+        "http_bridge_active": True,
         "http_bridge_restart_blocking": True,
     }
 
 
 @pytest.mark.asyncio
-async def test_http_bridge_activity_snapshot_cleans_stale_inflight_session(
+async def test_http_bridge_activity_snapshot_counts_only_bridge_cleanup_tasks():
+    service = proxy_service.ProxyService(cast(Any, SimpleNamespace()))
+    bridge_task = asyncio.create_task(asyncio.sleep(60), name="proxy-http_bridge_session_close-test")
+    api_key_task = asyncio.create_task(asyncio.sleep(60), name="proxy-stream-api-key-settle-test")
+    service._background_cleanup_tasks.update({bridge_task, api_key_task})
+
+    try:
+        snapshot = service.http_bridge_activity_snapshot_nowait()
+    finally:
+        bridge_task.cancel()
+        api_key_task.cancel()
+        await asyncio.gather(bridge_task, api_key_task, return_exceptions=True)
+
+    assert snapshot["http_bridge_background_cleanup_tasks"] == 1
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_activity_snapshot_cleans_completed_stale_inflight_session(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -128,6 +146,7 @@ async def test_http_bridge_activity_snapshot_cleans_stale_inflight_session(
     key = proxy_service._HTTPBridgeSessionKey("session_header", "stale-inflight-drain-status", None)
     inflight_future: asyncio.Future[proxy_service._HTTPBridgeSession] = asyncio.get_running_loop().create_future()
     setattr(inflight_future, "_codex_lb_started_at", -1000.0)
+    inflight_future.set_result(_make_bridge_session())
     service._http_bridge_inflight_sessions[key] = inflight_future
 
     monkeypatch.setattr(proxy_service, "_proxy_admission_wait_timeout_seconds", lambda settings=None: 0.001)
@@ -139,10 +158,32 @@ async def test_http_bridge_activity_snapshot_cleans_stale_inflight_session(
     assert snapshot["http_bridge_inflight_session_creates"] == 0
     assert snapshot["http_bridge_stale_inflight_session_creates"] == 1
     assert snapshot["http_bridge_cleaned_inflight_session_creates"] == 1
+    assert snapshot["http_bridge_active"] is False
     assert snapshot["http_bridge_restart_blocking"] is False
     assert "http_bridge_inflight_session_create_cleanup" in caplog.text
-    with pytest.raises(ProxyResponseError):
-        await inflight_future
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_activity_snapshot_does_not_expire_live_inflight_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, SimpleNamespace()))
+    key = proxy_service._HTTPBridgeSessionKey("session_header", "live-stale-inflight-drain-status", None)
+    inflight_future: asyncio.Future[proxy_service._HTTPBridgeSession] = asyncio.get_running_loop().create_future()
+    setattr(inflight_future, "_codex_lb_started_at", -1000.0)
+    service._http_bridge_inflight_sessions[key] = inflight_future
+
+    monkeypatch.setattr(proxy_service, "_proxy_admission_wait_timeout_seconds", lambda settings=None: 0.001)
+
+    snapshot = service.http_bridge_activity_snapshot_nowait()
+
+    assert key in service._http_bridge_inflight_sessions
+    assert not inflight_future.done()
+    assert snapshot["http_bridge_inflight_session_creates"] == 1
+    assert snapshot["http_bridge_stale_inflight_session_creates"] == 1
+    assert snapshot["http_bridge_cleaned_inflight_session_creates"] == 0
+    assert snapshot["http_bridge_active"] is True
+    assert snapshot["http_bridge_restart_blocking"] is True
 
 
 @pytest.mark.asyncio
@@ -165,6 +206,7 @@ async def test_http_bridge_activity_snapshot_skips_inflight_cleanup_when_registr
     assert snapshot["http_bridge_inflight_session_creates"] == 1
     assert snapshot["http_bridge_stale_inflight_session_creates"] == 1
     assert snapshot["http_bridge_cleaned_inflight_session_creates"] == 0
+    assert snapshot["http_bridge_active"] is True
     assert snapshot["http_bridge_restart_blocking"] is True
 
 

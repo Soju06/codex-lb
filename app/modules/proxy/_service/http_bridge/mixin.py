@@ -65,6 +65,7 @@ from app.modules.proxy._service.compact import (
 )
 from app.modules.proxy._service.http_bridge.account_sessions import _HTTPBridgeAccountSessionsMixin
 from app.modules.proxy._service.http_bridge.helpers import (
+    _HTTP_BRIDGE_INFLIGHT_STARTED_AT_ATTR,
     _active_http_bridge_instance_ring,
     _durable_bridge_lookup_active_owner,
     _durable_bridge_lookup_allows_local_reuse,
@@ -101,6 +102,12 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _record_bridge_drain_recovery_allowed,
     _record_bridge_first_turn_timeout,
     _record_bridge_reattach,
+)
+from app.modules.proxy._service.http_bridge.helpers import (
+    _http_bridge_pending_count_nowait as helpers_http_bridge_pending_count_nowait,
+)
+from app.modules.proxy._service.http_bridge.helpers import (
+    http_bridge_activity_snapshot_nowait as helpers_http_bridge_activity_snapshot_nowait,
 )
 from app.modules.proxy._service.http_bridge.owner_forwarding import _HTTPBridgeOwnerForwardingMixin
 from app.modules.proxy._service.http_bridge.protocol import _HTTPBridgeServiceProtocol
@@ -216,9 +223,6 @@ _SECURITY_WORK_NO_AUTHORIZED_ACCOUNTS_MESSAGE = (
 )
 _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS = 5.0
 _HTTP_BRIDGE_BACKGROUND_CLEANUP_WARN_THRESHOLD = 100
-_HTTP_BRIDGE_INFLIGHT_STARTED_AT_ATTR = "_codex_lb_started_at"
-_HTTP_BRIDGE_STALE_INFLIGHT_MIN_SECONDS = 120.0
-_HTTP_BRIDGE_STALE_INFLIGHT_TIMEOUT_MULTIPLIER = 6.0
 
 
 class _HTTPBridgeMixin(
@@ -238,146 +242,16 @@ class _HTTPBridgeMixin(
             )
             return max(visible_pending_count, session.queued_request_count)
 
+    def http_bridge_activity_snapshot_nowait(self) -> dict[str, int | bool]:
+        return helpers_http_bridge_activity_snapshot_nowait(self)
+
     def _http_bridge_pending_count_nowait(
         self,
         session: "_HTTPBridgeSession",
         *,
         context: str,
     ) -> int | None:
-        try:
-            session.pending_lock.acquire_nowait()
-        except (anyio.WouldBlock, RuntimeError):
-            logger.warning(
-                "http_bridge_pending_count_unavailable context=%s bridge_kind=%s bridge_key=%s account_id=%s model=%s",
-                context,
-                session.key.affinity_kind,
-                _hash_identifier(session.key.affinity_key),
-                session.account.id,
-                session.request_model,
-            )
-            return None
-        try:
-            visible_pending_count = sum(
-                1
-                for request_state in session.pending_requests
-                if _http_bridge_request_counts_against_queue(request_state)
-            )
-            return max(visible_pending_count, session.queued_request_count)
-        finally:
-            session.pending_lock.release()
-
-    def http_bridge_activity_snapshot_nowait(self) -> dict[str, int | bool]:
-        inflight_cleanup = self._cleanup_http_bridge_inflight_sessions_nowait()
-        live_sessions = 0
-        pending_or_queued_requests = 0
-        pending_unknown_sessions = 0
-
-        for session in list(self._http_bridge_sessions.values()):
-            if session.closed:
-                continue
-            live_sessions += 1
-            pending_count = self._http_bridge_pending_count_nowait(session, context="drain_status")
-            if pending_count is None:
-                pending_unknown_sessions += 1
-            else:
-                pending_or_queued_requests += max(0, pending_count)
-
-        inflight_session_creates = len(self._http_bridge_inflight_sessions)
-        active_cleanup_tasks = sum(1 for task in self._background_cleanup_tasks if not task.done())
-        restart_blocking = (
-            pending_or_queued_requests > 0 or pending_unknown_sessions > 0 or inflight_session_creates > 0
-        )
-        return {
-            "http_bridge_live_sessions": live_sessions,
-            "http_bridge_pending_or_queued_requests": pending_or_queued_requests,
-            "http_bridge_pending_unknown_sessions": pending_unknown_sessions,
-            "http_bridge_inflight_session_creates": inflight_session_creates,
-            "http_bridge_inflight_session_create_oldest_age_seconds": inflight_cleanup["oldest_age_seconds"],
-            "http_bridge_stale_inflight_session_creates": inflight_cleanup["stale"],
-            "http_bridge_cleaned_inflight_session_creates": inflight_cleanup["cleaned"],
-            "http_bridge_background_cleanup_tasks": active_cleanup_tasks,
-            "http_bridge_restart_blocking": restart_blocking,
-        }
-
-    def _cleanup_http_bridge_inflight_sessions_nowait(self) -> dict[str, int]:
-        now = _service_time().monotonic()
-        stale_after_seconds = self._http_bridge_stale_inflight_seconds()
-        cleaned = 0
-        stale = 0
-        oldest_age_seconds = 0
-        try:
-            self._http_bridge_lock.acquire_nowait()
-        except (anyio.WouldBlock, RuntimeError):
-            for future in self._http_bridge_inflight_sessions.values():
-                started_at = getattr(future, _HTTP_BRIDGE_INFLIGHT_STARTED_AT_ATTR, None)
-                age_seconds = max(0.0, now - started_at) if isinstance(started_at, (int, float)) else 0.0
-                oldest_age_seconds = max(oldest_age_seconds, int(age_seconds))
-                if isinstance(started_at, (int, float)) and age_seconds >= stale_after_seconds:
-                    stale += 1
-            return {
-                "cleaned": 0,
-                "stale": stale,
-                "oldest_age_seconds": oldest_age_seconds,
-            }
-        try:
-            for key, future in list(self._http_bridge_inflight_sessions.items()):
-                current_future = self._http_bridge_inflight_sessions.get(key)
-                if current_future is not future:
-                    continue
-                started_at = getattr(future, _HTTP_BRIDGE_INFLIGHT_STARTED_AT_ATTR, None)
-                age_seconds = max(0.0, now - started_at) if isinstance(started_at, (int, float)) else 0.0
-                oldest_age_seconds = max(oldest_age_seconds, int(age_seconds))
-                cleanup_reason: str | None = None
-                cleanup_exc: BaseException | None = None
-                if future.done():
-                    cleanup_reason = "done"
-                elif isinstance(started_at, (int, float)) and age_seconds >= stale_after_seconds:
-                    stale += 1
-                    cleanup_reason = "stale"
-                    cleanup_exc = _http_bridge_startup_wait_timeout_error(
-                        "http_bridge_inflight_session_stale",
-                        code="capacity_exhausted_active_sessions",
-                    )
-                if cleanup_reason is None:
-                    continue
-                self._http_bridge_inflight_sessions.pop(key, None)
-                cleaned += 1
-                if cleanup_exc is not None and not future.done():
-                    future.set_exception(cleanup_exc)
-                    future.exception()
-                elif future.done() and not future.cancelled():
-                    try:
-                        future.exception()
-                    except Exception:
-                        pass
-                logger.warning(
-                    "http_bridge_inflight_session_create_cleanup reason=%s bridge_kind=%s bridge_key=%s"
-                    " age_seconds=%d stale_after_seconds=%d done=%s cancelled=%s",
-                    cleanup_reason,
-                    key.affinity_kind,
-                    _hash_identifier(key.affinity_key),
-                    int(age_seconds),
-                    int(stale_after_seconds),
-                    future.done(),
-                    future.cancelled(),
-                )
-        finally:
-            self._http_bridge_lock.release()
-        return {
-            "cleaned": cleaned,
-            "stale": stale,
-            "oldest_age_seconds": oldest_age_seconds,
-        }
-
-    def _http_bridge_stale_inflight_seconds(self) -> float:
-        try:
-            admission_timeout = _proxy_admission_wait_timeout_seconds()
-        except Exception:
-            admission_timeout = 10.0
-        return max(
-            _HTTP_BRIDGE_STALE_INFLIGHT_MIN_SECONDS,
-            admission_timeout * _HTTP_BRIDGE_STALE_INFLIGHT_TIMEOUT_MULTIPLIER,
-        )
+        return helpers_http_bridge_pending_count_nowait(session, context=context)
 
     async def _close_http_bridge_session_bounded(
         self,

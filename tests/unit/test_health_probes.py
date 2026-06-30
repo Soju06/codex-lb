@@ -456,6 +456,7 @@ async def test_internal_drain_status_reports_bridge_activity():
                 "http_bridge_pending_or_queued_requests": 1,
                 "http_bridge_pending_unknown_sessions": 0,
                 "http_bridge_inflight_session_creates": 1,
+                "http_bridge_active": True,
                 "http_bridge_restart_blocking": True,
             }
         )
@@ -476,6 +477,7 @@ async def test_internal_drain_status_reports_bridge_activity():
     assert response.checks["http_bridge_live_sessions"] == "2"
     assert response.checks["http_bridge_pending_or_queued_requests"] == "1"
     assert response.checks["http_bridge_inflight_session_creates"] == "1"
+    assert response.checks["http_bridge_active"] == "true"
     assert response.checks["http_bridge_restart_blocking"] == "true"
 
 

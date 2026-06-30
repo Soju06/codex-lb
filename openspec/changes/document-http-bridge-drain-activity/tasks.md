@@ -1,0 +1,4 @@
+- [x] 1. Expose HTTP bridge activity in `/internal/drain/status`.
+- [x] 2. Clean stale/completed in-flight bridge session create markers during the snapshot.
+- [x] 3. Add focused health and bridge regression coverage.
+- [x] 4. Validate OpenSpec and focused tests.

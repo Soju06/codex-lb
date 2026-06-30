@@ -5,7 +5,7 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import AsyncContextManager, Callable, Protocol
 
 from app.core import usage as usage_core
@@ -19,7 +19,7 @@ from app.core.openai.requests import ResponsesRequest
 from app.core.plan_types import account_plan_matches_allowed
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError, resolve_upstream_route
 from app.core.usage.pricing import get_pricing_for_model
-from app.core.utils.time import utcnow
+from app.core.utils.time import naive_utc_to_epoch, utcnow
 from app.db.models import Account, AccountLimitWarmup, AccountStatus, DashboardSettings, UsageHistory
 from app.modules.accounts.auth_manager import AuthManager
 from app.modules.accounts.repository import AccountsRepository
@@ -34,6 +34,9 @@ _DEFAULT_WARMUP_INSTRUCTIONS = "Reply with OK only."
 _TERMINAL_ERROR_EVENTS = {"response.failed", "response.incomplete", "error"}
 _QUOTA_ERROR_CODES = {"insufficient_quota", "quota_exceeded", "rate_limit_exceeded", "usage_limit_reached"}
 _MAX_CONCURRENT_WARMUP_SENDS = 4
+_ROLLING_WINDOW_SECONDS = 300 * 60
+_STAGGER_SLOT_GRACE_SECONDS = 60
+_IDLE_PRIMARY_WINDOW = "primary_idle"
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,12 +113,14 @@ class LimitWarmupRequestLogRepository(Protocol):
         requested_service_tier: str | None = None,
         actual_service_tier: str | None = None,
         transport: str | None = None,
+        upstream_transport: str | None = None,
         api_key_id: str | None = None,
         session_id: str | None = None,
         plan_type: str | None = None,
         source: str | None = None,
         useragent: str | None = None,
         useragent_group: str | None = None,
+        client_ip: str | None = None,
         failure_phase: str | None = None,
         failure_detail: str | None = None,
         failure_exception_type: str | None = None,
@@ -308,6 +313,8 @@ class LimitWarmupService:
         before_secondary: dict[str, UsageHistory],
         after_primary: dict[str, UsageHistory],
         after_secondary: dict[str, UsageHistory],
+        refresh_started_at: datetime | None = None,
+        usage_refresh_interval_seconds: int = _STAGGER_SLOT_GRACE_SECONDS,
     ) -> None:
         if not settings.limit_warmup_enabled:
             return
@@ -322,6 +329,10 @@ class LimitWarmupService:
             raise RuntimeError("LimitWarmupService requires a sender")
         send_tasks: dict[asyncio.Task[LimitWarmupSendOutcome], AccountLimitWarmup] = {}
         send_semaphore = asyncio.Semaphore(_MAX_CONCURRENT_WARMUP_SENDS)
+        staggered_accounts = [
+            account for account in accounts if _account_is_safe_candidate(account) and account.limit_warmup_enabled
+        ]
+        now = utcnow()
 
         for account in accounts:
             if not _account_is_safe_candidate(account):
@@ -335,16 +346,30 @@ class LimitWarmupService:
             ):
                 continue
 
-            for window in selected_windows:
-                candidate = _build_candidate(
-                    account=account,
-                    window=window,
-                    before_primary=before_primary,
-                    before_secondary=before_secondary,
-                    after_primary=after_primary,
-                    after_secondary=after_secondary,
-                    min_available_percent=settings.limit_warmup_min_available_percent,
-                )
+            windows_to_evaluate = list(selected_windows)
+            if settings.limit_warmup_staggered_idle_enabled and "primary" not in windows_to_evaluate:
+                windows_to_evaluate.append("primary")
+            for window in windows_to_evaluate:
+                candidate = None
+                if window in selected_windows:
+                    candidate = _build_candidate(
+                        account=account,
+                        window=window,
+                        before_primary=before_primary,
+                        before_secondary=before_secondary,
+                        after_primary=after_primary,
+                        after_secondary=after_secondary,
+                        min_available_percent=settings.limit_warmup_min_available_percent,
+                    )
+                if candidate is None and settings.limit_warmup_staggered_idle_enabled and window == "primary":
+                    candidate = _build_staggered_idle_candidate(
+                        account=account,
+                        accounts=staggered_accounts,
+                        now=now,
+                        after_primary=after_primary,
+                        refresh_started_at=refresh_started_at,
+                        usage_refresh_interval_seconds=usage_refresh_interval_seconds,
+                    )
                 if candidate is None:
                     continue
 
@@ -352,7 +377,7 @@ class LimitWarmupService:
                 if model is None:
                     skipped = await self._warmup_repo.try_create_attempt(
                         account_id=account.id,
-                        window=window,
+                        window=candidate.window,
                         reset_at=candidate.reset_at,
                         model="auto",
                         attempted_at=utcnow(),
@@ -370,7 +395,7 @@ class LimitWarmupService:
 
                 attempt = await self._warmup_repo.try_create_attempt(
                     account_id=account.id,
-                    window=window,
+                    window=candidate.window,
                     reset_at=candidate.reset_at,
                     model=model,
                     attempted_at=utcnow(),
@@ -595,6 +620,7 @@ class LimitWarmupService:
 @dataclass(frozen=True, slots=True)
 class _WarmupCandidate:
     reset_at: int
+    window: str
 
 
 def _selected_windows(value: str) -> tuple[str, ...]:
@@ -651,7 +677,107 @@ def _build_candidate(
         return None
     if after.reset_at <= before.reset_at:
         return None
-    return _WarmupCandidate(reset_at=after.reset_at)
+    return _WarmupCandidate(reset_at=after.reset_at, window=window)
+
+
+def _build_staggered_idle_candidate(
+    *,
+    account: Account,
+    accounts: list[Account],
+    now: datetime,
+    after_primary: dict[str, UsageHistory],
+    refresh_started_at: datetime | None,
+    usage_refresh_interval_seconds: int,
+) -> _WarmupCandidate | None:
+    after = after_primary.get(account.id)
+    if after is None:
+        return None
+    if after.reset_at is None:
+        return None
+    if usage_core.is_weekly_window_minutes(after.window_minutes):
+        return None
+    if after.used_percent > 0.0:
+        return None
+
+    due = _staggered_idle_due(
+        account.id,
+        [candidate.id for candidate in accounts],
+        now=now,
+        reset_at=after.reset_at,
+        interval_started_at=refresh_started_at,
+        usage_refresh_interval_seconds=usage_refresh_interval_seconds,
+    )
+    if due is None:
+        return None
+    if not _usage_entry_refreshed_for_cycle(
+        after,
+        refresh_started_at=refresh_started_at,
+        cycle_end=due.cycle_end,
+    ):
+        return None
+    return _WarmupCandidate(reset_at=after.reset_at, window=_IDLE_PRIMARY_WINDOW)
+
+
+@dataclass(frozen=True, slots=True)
+class _StaggeredIdleDue:
+    cycle_end: int
+    slot_offset_seconds: int
+
+
+def _staggered_idle_due(
+    account_id: str,
+    account_ids: list[str],
+    *,
+    now: datetime,
+    reset_at: int,
+    interval_started_at: datetime | None = None,
+    usage_refresh_interval_seconds: int = _STAGGER_SLOT_GRACE_SECONDS,
+) -> _StaggeredIdleDue | None:
+    if not account_ids:
+        return None
+    ordered_account_ids = sorted(set(account_ids))
+    try:
+        account_index = ordered_account_ids.index(account_id)
+    except ValueError:
+        return None
+
+    now_epoch = naive_utc_to_epoch(now)
+    cycle_start = reset_at - _ROLLING_WINDOW_SECONDS
+    if now_epoch < cycle_start or now_epoch >= reset_at:
+        return None
+    elapsed = now_epoch - cycle_start
+    slot_offset = int(account_index * _ROLLING_WINDOW_SECONDS / len(ordered_account_ids))
+    grace_seconds = max(_STAGGER_SLOT_GRACE_SECONDS, usage_refresh_interval_seconds)
+    interval_start_epoch = naive_utc_to_epoch(interval_started_at) if interval_started_at is not None else now_epoch
+    interval_start_epoch = min(interval_start_epoch, now_epoch)
+    interval_start_elapsed = max(0, interval_start_epoch - cycle_start)
+    if not slot_offset <= elapsed:
+        return None
+    if slot_offset + grace_seconds <= interval_start_elapsed:
+        return None
+    return _StaggeredIdleDue(
+        cycle_end=cycle_start + _ROLLING_WINDOW_SECONDS,
+        slot_offset_seconds=slot_offset,
+    )
+
+
+def _usage_entry_refreshed_for_cycle(
+    entry: UsageHistory,
+    *,
+    refresh_started_at: datetime | None,
+    cycle_end: int | None,
+) -> bool:
+    if entry.recorded_at is None:
+        return False
+    if cycle_end is not None:
+        cycle_start = cycle_end - _ROLLING_WINDOW_SECONDS
+        if entry.recorded_at < datetime.fromtimestamp(cycle_start, tz=timezone.utc).replace(tzinfo=None):
+            return False
+        if entry.reset_at is not None and entry.reset_at <= cycle_start:
+            return False
+    if refresh_started_at is None:
+        return True
+    return entry.recorded_at >= refresh_started_at
 
 
 def _effective_usage_entry(

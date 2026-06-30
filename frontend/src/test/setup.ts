@@ -1,15 +1,12 @@
+import "@/test/setup-local-storage";
 import "@testing-library/jest-dom/vitest";
 import { cleanup, configure } from "@testing-library/react";
 import { afterAll, afterEach, beforeAll, vi } from "vitest";
 
-import { ensureLocalStorageShim } from "@/test/local-storage-shim";
+import "@/i18n";
+import { LANGUAGE_STORAGE_KEY } from "@/i18n";
 import { resetMockState } from "@/test/mocks/handlers";
 import { server, startMockServer } from "@/test/mocks/server";
-
-vi.mock("@/components/lazy-recharts", async () => {
-  const recharts = await import("recharts");
-  return { ...recharts };
-});
 
 if (typeof window !== "undefined" && typeof window.matchMedia !== "function") {
   Object.defineProperty(window, "matchMedia", {
@@ -30,8 +27,6 @@ if (typeof window !== "undefined" && typeof window.matchMedia !== "function") {
 if (typeof document !== "undefined" && typeof document.elementFromPoint !== "function") {
   document.elementFromPoint = () => null;
 }
-
-ensureLocalStorageShim();
 
 if (typeof Element !== "undefined") {
   const proto = Element.prototype as unknown as Record<string, unknown>;
@@ -78,6 +73,11 @@ beforeAll(() => {
 afterEach(() => {
   if (typeof window !== "undefined") {
     window.history.replaceState({}, "", "/");
+    try {
+      window.localStorage.removeItem(LANGUAGE_STORAGE_KEY);
+    } catch {
+      /* ignore */
+    }
   }
   resetMockState();
   server.resetHandlers();

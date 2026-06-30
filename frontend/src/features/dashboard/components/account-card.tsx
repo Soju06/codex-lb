@@ -11,9 +11,15 @@ import {
   quotaBarColor,
   quotaBarTrack,
 } from "@/utils/account-status";
-import { formatDateTimeInline, formatPercentNullable, formatQuotaResetLabel, formatSlug } from "@/utils/formatters";
+import {
+  formatDateTimeInline,
+  formatPercentNullable,
+  formatQuotaResetLabel,
+  formatSingleUnitRemaining,
+  formatSlug,
+} from "@/utils/formatters";
 
-export type AccountAction = "details" | "resume" | "reauth" | "warmup-toggle";
+export type AccountAction = "details" | "resume" | "reauth" | "warmup-toggle" | "reset-credit";
 
 export type AccountCardProps = {
   account: AccountSummary;
@@ -21,6 +27,10 @@ export type AccountCardProps = {
   readOnly?: boolean;
   onAction?: (account: AccountSummary, action: AccountAction) => void;
 };
+
+function formatWarmupWindow(window: string): string {
+  return window === "primary" || window === "primary_idle" ? "5h" : "weekly";
+}
 
 function QuotaBar({
   label,
@@ -103,8 +113,24 @@ export function AccountCard({ account, showAccountId = false, readOnly = false, 
   const warmupStatus = account.limitWarmupEnabled ? "Warm-up on" : "Warm-up off";
   const warmupToggleLabel = `${account.limitWarmupEnabled ? "Disable" : "Enable"} limit warm-up for ${title}`;
   const warmupDetail = account.limitWarmup
-    ? `${formatSlug(account.limitWarmup.status)} | ${account.limitWarmup.window === "primary" ? "5h" : "weekly"} | ${formatSlug(account.limitWarmup.model)} | ${formatDateTimeInline(account.limitWarmup.completedAt ?? account.limitWarmup.attemptedAt)}`
+    ? `${formatSlug(account.limitWarmup.status)} | ${formatWarmupWindow(account.limitWarmup.window)} | ${formatSlug(account.limitWarmup.model)} | ${formatDateTimeInline(account.limitWarmup.completedAt ?? account.limitWarmup.attemptedAt)}`
     : "No attempts";
+  const availableResetCredits = account.availableResetCredits ?? 0;
+  const hasResetCredits = availableResetCredits > 0;
+  const resetCreditDisabled =
+    readOnly || status === "paused" || status === "reauth" || status === "deactivated";
+  const resetCountdown = account.resetCreditNearestExpiresAt
+    ? formatSingleUnitRemaining(account.resetCreditNearestExpiresAt)
+    : null;
+  const resetButtonTitle = resetCreditDisabled
+    ? status === "paused"
+      ? "Resume account to redeem reset credits"
+      : status === "reauth" || status === "deactivated"
+        ? "Re-authenticate account to redeem reset credits"
+        : "Reset credits unavailable"
+    : resetCountdown
+      ? `Reset (${availableResetCredits}) · ${resetCountdown.label}`
+      : `Reset (${availableResetCredits})`;
 
   return (
     <div className="card-hover rounded-xl border bg-card p-4">
@@ -184,6 +210,31 @@ export function AccountCard({ account, showAccountId = false, readOnly = false, 
           <ExternalLink className="h-3 w-3" />
           Details
         </Button>
+        {hasResetCredits ? (
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            className="relative h-7 gap-1.5 rounded-lg pr-8 text-xs text-muted-foreground hover:text-foreground"
+            title={resetButtonTitle}
+            disabled={resetCreditDisabled}
+            onClick={() => onAction?.(account, "reset-credit")}
+          >
+            <RotateCcw className="h-3 w-3" />
+            {`Reset (${availableResetCredits})`}
+            {resetCountdown ? (
+              <span
+                aria-hidden="true"
+                className={cn(
+                  "pointer-events-none absolute -top-1 right-1 text-[10px] tabular-nums",
+                  resetCountdown.expiringSoon ? "text-destructive" : "text-muted-foreground",
+                )}
+              >
+                {resetCountdown.label}
+              </span>
+            ) : null}
+          </Button>
+        ) : null}
         {status === "paused" && (
           <Button
             type="button"

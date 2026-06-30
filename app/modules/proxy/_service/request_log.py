@@ -91,6 +91,7 @@ class _RequestLogMixin:
         reasoning_tokens: int | None = None,
         reasoning_effort: str | None = None,
         transport: str | None = None,
+        upstream_transport: str | None = None,
         service_tier: str | None = None,
         requested_service_tier: str | None = None,
         actual_service_tier: str | None = None,
@@ -109,12 +110,15 @@ class _RequestLogMixin:
         upstream_proxy_fail_closed_reason: str | None = None,
         useragent: str | None = None,
         useragent_group: str | None = None,
+        client_ip: str | None = None,
+        archive_request_id: str | None = None,
     ) -> None:
         task = asyncio.create_task(
             self._persist_request_log(
                 account_id=account_id,
                 api_key_id=api_key.id if api_key else None,
                 request_id=request_id,
+                archive_request_id=archive_request_id,
                 model=model,
                 latency_ms=latency_ms,
                 status=status,
@@ -127,6 +131,7 @@ class _RequestLogMixin:
                 reasoning_tokens=reasoning_tokens,
                 reasoning_effort=reasoning_effort,
                 transport=transport,
+                upstream_transport=upstream_transport,
                 service_tier=service_tier,
                 requested_service_tier=requested_service_tier,
                 actual_service_tier=actual_service_tier,
@@ -145,6 +150,7 @@ class _RequestLogMixin:
                 upstream_proxy_fail_closed_reason=upstream_proxy_fail_closed_reason,
                 useragent=useragent,
                 useragent_group=useragent_group,
+                client_ip=client_ip,
             ),
             name=f"proxy-request-log-{request_id}",
         )
@@ -190,6 +196,7 @@ class _RequestLogMixin:
         account_id: str | None,
         api_key_id: str | None,
         request_id: str,
+        archive_request_id: str | None,
         model: str | None,
         latency_ms: int,
         status: str,
@@ -202,6 +209,7 @@ class _RequestLogMixin:
         reasoning_tokens: int | None = None,
         reasoning_effort: str | None = None,
         transport: str | None = None,
+        upstream_transport: str | None = None,
         service_tier: str | None = None,
         requested_service_tier: str | None = None,
         actual_service_tier: str | None = None,
@@ -220,6 +228,7 @@ class _RequestLogMixin:
         upstream_proxy_fail_closed_reason: str | None = None,
         useragent: str | None = None,
         useragent_group: str | None = None,
+        client_ip: str | None = None,
     ) -> None:
         proxy = cast(_RequestLogServiceProtocol, self)
         try:
@@ -229,6 +238,7 @@ class _RequestLogMixin:
                     api_key_id=api_key_id,
                     session_id=_normalize_session_id(session_id),
                     request_id=request_id,
+                    archive_request_id=archive_request_id,
                     model=model or "",
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
@@ -236,6 +246,7 @@ class _RequestLogMixin:
                     reasoning_tokens=reasoning_tokens,
                     reasoning_effort=reasoning_effort,
                     transport=transport,
+                    upstream_transport=upstream_transport,
                     service_tier=service_tier,
                     requested_service_tier=requested_service_tier,
                     actual_service_tier=actual_service_tier,
@@ -258,6 +269,7 @@ class _RequestLogMixin:
                     upstream_proxy_fail_closed_reason=upstream_proxy_fail_closed_reason,
                     useragent=useragent,
                     useragent_group=useragent_group,
+                    client_ip=client_ip,
                 )
         except Exception:
             logger.warning(
@@ -280,9 +292,11 @@ class _RequestLogMixin:
         reasoning_effort: str | None,
         service_tier: str | None,
         transport: str = _REQUEST_TRANSPORT_HTTP,
+        upstream_transport: str | None = None,
         upstream_proxy_fail_closed_reason: str | None = None,
         useragent: str | None = None,
         useragent_group: str | None = None,
+        client_ip: str | None = None,
     ) -> None:
         await self._write_request_log(
             account_id=account_id,
@@ -295,9 +309,11 @@ class _RequestLogMixin:
             error_message=error_message,
             reasoning_effort=reasoning_effort,
             transport=transport,
+            upstream_transport=upstream_transport,
             service_tier=service_tier,
             requested_service_tier=service_tier,
             upstream_proxy_fail_closed_reason=upstream_proxy_fail_closed_reason,
             useragent=useragent,
             useragent_group=useragent_group,
+            client_ip=client_ip,
         )

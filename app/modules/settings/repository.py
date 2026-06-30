@@ -22,6 +22,7 @@ class SettingsRepository:
             id=_SETTINGS_ID,
             sticky_threads_enabled=True,
             upstream_stream_transport="default",
+            http_downstream_transport_policy=get_settings().http_downstream_transport_policy,
             upstream_proxy_routing_enabled=False,
             upstream_proxy_default_pool_id=None,
             prefer_earlier_reset_accounts=True,
@@ -41,6 +42,7 @@ class SettingsRepository:
             bootstrap_token_encrypted=None,
             bootstrap_token_hash=None,
             api_key_auth_enabled=False,
+            hide_upstream_quota_from_api_keys=False,
             totp_secret_encrypted=None,
             totp_last_verified_step=None,
             sticky_reallocation_primary_budget_threshold_pct=95.0,
@@ -53,6 +55,7 @@ class SettingsRepository:
             limit_warmup_cooldown_seconds=3600,
             limit_warmup_min_available_percent=100.0,
             weekly_pace_working_days="0,1,2,3,4,5,6",
+            limit_warmup_staggered_idle_enabled=False,
         )
         self._session.add(row)
         try:
@@ -71,6 +74,7 @@ class SettingsRepository:
         *,
         sticky_threads_enabled: bool | None = None,
         upstream_stream_transport: str | None = None,
+        http_downstream_transport_policy: str | None = None,
         upstream_proxy_routing_enabled: bool | None = None,
         upstream_proxy_default_pool_id: str | None = None,
         prefer_earlier_reset_accounts: bool | None = None,
@@ -91,6 +95,7 @@ class SettingsRepository:
         import_without_overwrite: bool | None = None,
         totp_required_on_login: bool | None = None,
         api_key_auth_enabled: bool | None = None,
+        hide_upstream_quota_from_api_keys: bool | None = None,
         limit_warmup_enabled: bool | None = None,
         limit_warmup_windows: str | None = None,
         limit_warmup_model: str | None = None,
@@ -99,12 +104,15 @@ class SettingsRepository:
         limit_warmup_min_available_percent: float | None = None,
         weekly_pace_working_days: str | None = None,
         guest_access_enabled: bool | None = None,
+        limit_warmup_staggered_idle_enabled: bool | None = None,
     ) -> DashboardSettings:
         settings = await self.get_or_create()
         if sticky_threads_enabled is not None:
             settings.sticky_threads_enabled = sticky_threads_enabled
         if upstream_stream_transport is not None:
             settings.upstream_stream_transport = upstream_stream_transport
+        if http_downstream_transport_policy is not None:
+            settings.http_downstream_transport_policy = http_downstream_transport_policy
         if upstream_proxy_routing_enabled is not None:
             settings.upstream_proxy_routing_enabled = upstream_proxy_routing_enabled
         settings.upstream_proxy_default_pool_id = upstream_proxy_default_pool_id or None
@@ -148,6 +156,8 @@ class SettingsRepository:
             settings.totp_required_on_login = totp_required_on_login
         if api_key_auth_enabled is not None:
             settings.api_key_auth_enabled = api_key_auth_enabled
+        if hide_upstream_quota_from_api_keys is not None:
+            settings.hide_upstream_quota_from_api_keys = hide_upstream_quota_from_api_keys
         if limit_warmup_enabled is not None:
             settings.limit_warmup_enabled = limit_warmup_enabled
         if limit_warmup_windows is not None:
@@ -160,12 +170,12 @@ class SettingsRepository:
             settings.limit_warmup_cooldown_seconds = limit_warmup_cooldown_seconds
         if limit_warmup_min_available_percent is not None:
             settings.limit_warmup_min_available_percent = limit_warmup_min_available_percent
-        if additional_quota_routing_policies_json is not None:
-            settings.additional_quota_routing_policies_json = additional_quota_routing_policies_json
         if weekly_pace_working_days is not None:
             settings.weekly_pace_working_days = weekly_pace_working_days
         if guest_access_enabled is not None:
             settings.guest_access_enabled = guest_access_enabled
+        if limit_warmup_staggered_idle_enabled is not None:
+            settings.limit_warmup_staggered_idle_enabled = limit_warmup_staggered_idle_enabled
         await self.commit_refresh(settings)
         return settings
 

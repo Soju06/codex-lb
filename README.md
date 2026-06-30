@@ -10,6 +10,8 @@ Resources
 
 # codex-lb
 
+**English** | [简体中文](./README.zh-CN.md)
+
 Load balancer for ChatGPT accounts. Pool multiple accounts, track usage, manage API keys, view everything in a dashboard.
 
 | ![dashboard](docs/screenshots/dashboard.jpg) | ![accounts](docs/screenshots/accounts.jpg) |
@@ -580,11 +582,15 @@ Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/e
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/KakatkarAkshay"><img src="https://avatars.githubusercontent.com/u/49910222?v=4?s=100" width="100px;" alt="Akshay Kakatkar"/><br /><sub><b>Akshay Kakatkar</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=KakatkarAkshay" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=KakatkarAkshay" title="Tests">⚠️</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/softkleenex"><img src="https://avatars.githubusercontent.com/u/92619941?v=4?s=100" width="100px;" alt="softkleenex"/><br /><sub><b>softkleenex</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=softkleenex" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=softkleenex" title="Tests">⚠️</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/plastictaste"><img src="https://avatars.githubusercontent.com/u/261646970?v=4?s=100" width="100px;" alt="plastictaste"/><br /><sub><b>plastictaste</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=plastictaste" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=plastictaste" title="Tests">⚠️</a> <a href="https://github.com/Soju06/codex-lb/commits?author=plastictaste" title="Documentation">📖</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/rupebac"><img src="https://avatars.githubusercontent.com/u/452231?v=4?s=100" width="100px;" alt="Rubén Pérez Bachiller"/><br /><sub><b>Rubén Pérez Bachiller</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=rupebac" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=rupebac" title="Tests">⚠️</a> <a href="https://github.com/Soju06/codex-lb/issues?q=author%3Arupebac" title="Bug reports">🐛</a></td>
     </tr>
     <tr>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/n3crosis"><img src="https://avatars.githubusercontent.com/u/11072158?v=4?s=100" width="100px;" alt="n3crosis"/><br /><sub><b>n3crosis</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=n3crosis" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=n3crosis" title="Tests">⚠️</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/copilot"><img src="https://github.com/copilot.png?s=100" width="100px;" alt="copilot"/><br /><sub><b>copilot</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=copilot" title="Code">💻</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/geoHeil"><img src="https://avatars.githubusercontent.com/u/1694964?v=4?s=100" width="100px;" alt="geoHeil"/><br /><sub><b>geoHeil</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=geoHeil" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=geoHeil" title="Tests">⚠️</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/ellentane"><img src="https://avatars.githubusercontent.com/u/70338266?v=4?s=100" width="100px;" alt="Jonáš Sivek"/><br /><sub><b>Jonáš Sivek</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=ellentane" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=ellentane" title="Tests">⚠️</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/WangErgouaaaa"><img src="https://avatars.githubusercontent.com/u/117421439?v=4?s=100" width="100px;" alt="Guanwei Chen"/><br /><sub><b>Guanwei Chen</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=WangErgouaaaa" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=WangErgouaaaa" title="Tests">⚠️</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/LuoYe17"><img src="https://avatars.githubusercontent.com/u/191728117?v=4?s=100" width="100px;" alt="落叶"/><br /><sub><b>落叶</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=LuoYe17" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=LuoYe17" title="Documentation">📖</a> <a href="https://github.com/Soju06/codex-lb/commits?author=LuoYe17" title="Tests">⚠️</a> <a href="#translation-LuoYe17" title="Translation">🌍</a></td>
     </tr>
   </tbody>
 </table>

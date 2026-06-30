@@ -1,5 +1,7 @@
 import { zodResolver } from "@hookform/resolvers/zod";
+import { useEffect } from "react";
 import { useForm } from "react-hook-form";
+import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 
 import { AlertMessage } from "@/components/alert-message";
@@ -26,6 +28,7 @@ export type PasswordSetupDialogProps = {
 };
 
 export function PasswordSetupDialog({ open, onOpenChange, disabled = false }: PasswordSetupDialogProps) {
+  const { t } = useTranslation();
   const bootstrapRequired = useAuthStore((s) => s.bootstrapRequired);
   const bootstrapTokenConfigured = useAuthStore((s) => s.bootstrapTokenConfigured);
   const passwordManagementEnabled = useAuthStore((s) => s.passwordManagementEnabled);
@@ -38,14 +41,20 @@ export function PasswordSetupDialog({ open, onOpenChange, disabled = false }: Pa
 
   const busy = form.formState.isSubmitting;
   const lock = busy || disabled || !passwordManagementEnabled;
+  const resolveValidationMessage = (message?: string): string | undefined => {
+    if (!message) {
+      return undefined;
+    }
+    const translated = t(message);
+    return translated === message ? message : translated;
+  };
 
-  const handleOpenChange = (next: boolean) => {
-    if (!next) {
+  useEffect(() => {
+    if (!open) {
       form.reset();
       form.clearErrors();
     }
-    onOpenChange(next);
-  };
+  }, [open, form]);
 
   const handleSubmit = async (values: { password: string; bootstrapToken?: string }) => {
     form.clearErrors("root");
@@ -55,8 +64,8 @@ export function PasswordSetupDialog({ open, onOpenChange, disabled = false }: Pa
         bootstrapToken: values.bootstrapToken?.trim() ? values.bootstrapToken.trim() : undefined,
       });
       await refreshSession();
-      toast.success("Password configured");
-      handleOpenChange(false);
+      toast.success(t("settings.password.toasts.configured"));
+      onOpenChange(false);
     } catch (caught) {
       form.setError("root", { message: getErrorMessage(caught) });
     }
@@ -65,17 +74,17 @@ export function PasswordSetupDialog({ open, onOpenChange, disabled = false }: Pa
   const rootError = form.formState.errors.root?.message;
 
   return (
-    <Dialog open={open} onOpenChange={handleOpenChange}>
+    <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>Set password</DialogTitle>
-          <DialogDescription>Set a password for dashboard login.</DialogDescription>
+          <DialogTitle>{t("settings.password.setupDialog.title")}</DialogTitle>
+          <DialogDescription>{t("settings.password.setupDialog.description")}</DialogDescription>
         </DialogHeader>
         {bootstrapRequired ? (
           <AlertMessage variant="error">
             {bootstrapTokenConfigured
-              ? "Remote setup requires the configured bootstrap token (from server logs or CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN)."
-              : "Remote setup is blocked. Set CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN on the server or restart to auto-generate a token."}
+              ? t("settings.password.setupDialog.bootstrapTokenConfigured")
+              : t("settings.password.setupDialog.bootstrapTokenMissing")}
           </AlertMessage>
         ) : null}
         {rootError ? <AlertMessage variant="error">{rootError}</AlertMessage> : null}
@@ -84,13 +93,18 @@ export function PasswordSetupDialog({ open, onOpenChange, disabled = false }: Pa
             <FormField
               control={form.control}
               name="password"
-              render={({ field }) => (
+              render={({ field, fieldState }) => (
                 <FormItem>
-                  <FormLabel>Password</FormLabel>
+                  <FormLabel>{t("settings.password.setupDialog.passwordLabel")}</FormLabel>
                   <FormControl>
-                    <Input {...field} type="password" autoComplete="new-password" placeholder="Min. 8 characters" />
+                    <Input
+                      {...field}
+                      type="password"
+                      autoComplete="new-password"
+                      placeholder={t("settings.password.setupDialog.passwordPlaceholder")}
+                    />
                   </FormControl>
-                  <FormMessage />
+                  {fieldState.error?.message ? <FormMessage>{resolveValidationMessage(fieldState.error.message)}</FormMessage> : <FormMessage />}
                 </FormItem>
               )}
             />
@@ -100,9 +114,14 @@ export function PasswordSetupDialog({ open, onOpenChange, disabled = false }: Pa
                 name="bootstrapToken"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Bootstrap token</FormLabel>
+                    <FormLabel>{t("settings.password.setupDialog.bootstrapTokenLabel")}</FormLabel>
                     <FormControl>
-                      <Input {...field} type="password" autoComplete="one-time-code" placeholder="Enter bootstrap token" />
+                      <Input
+                        {...field}
+                        type="password"
+                        autoComplete="one-time-code"
+                        placeholder={t("settings.password.setupDialog.bootstrapTokenPlaceholder")}
+                      />
                     </FormControl>
                     <FormMessage />
                   </FormItem>
@@ -110,11 +129,11 @@ export function PasswordSetupDialog({ open, onOpenChange, disabled = false }: Pa
               />
             ) : null}
             <DialogFooter>
-              <Button type="button" variant="outline" onClick={() => handleOpenChange(false)} disabled={busy}>
-                Cancel
+              <Button type="button" variant="outline" onClick={() => onOpenChange(false)} disabled={busy}>
+                {t("common.cancel")}
               </Button>
               <Button type="submit" disabled={lock}>
-                Set password
+                {t("settings.password.setupDialog.submit")}
               </Button>
             </DialogFooter>
           </form>

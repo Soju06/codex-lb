@@ -27,10 +27,26 @@ import { ExpiryPicker } from "@/features/api-keys/components/expiry-picker";
 import { LimitRulesEditor } from "@/features/api-keys/components/limit-rules-editor";
 import { AccountMultiSelect } from "@/features/api-keys/components/account-multi-select";
 import { ModelMultiSelect } from "@/features/api-keys/components/model-multi-select";
-import type { ApiKey, ApiKeyUpdateRequest, LimitRuleCreate, LimitType, ServiceTierType, TrafficClass } from "@/features/api-keys/schemas";
+import { UsageSectionsMultiSelect } from "@/features/api-keys/components/usage-sections-multi-select";
+import type {
+  ApiKey,
+  ApiKeyUpdateRequest,
+  LimitRuleCreate,
+  LimitType,
+  ServiceTierType,
+  TrafficClass,
+  TransportPolicyOverride,
+} from "@/features/api-keys/schemas";
 import { parseDate } from "@/utils/formatters";
 
 import { hasLimitRuleChanges, normalizeLimitRules } from "./limit-rules-utils";
+
+const TRANSPORT_POLICY_FOLLOW_GLOBAL = "follow_global";
+const TRANSPORT_POLICY_LABELS = {
+  smart: "Session-aware",
+  always_http: "Prefer request/response",
+  always_websocket: "Prefer persistent sessions",
+} as const;
 
 const formSchema = z.object({
   name: z.string().min(1, "Name is required"),
@@ -75,6 +91,7 @@ function hasSelectionChange(initialIds: string[], nextIds: string[]): boolean {
 type ApiKeyEditDraft = {
   selectedModels: string[];
   selectedAccountIds: string[];
+  usageSections: string;
   limitRules: LimitRuleCreate[];
   expiresAt: Date | null;
   applyToCodexModel: boolean;
@@ -82,12 +99,14 @@ type ApiKeyEditDraft = {
   enforcedReasoningEffort: string;
   enforcedServiceTier: string;
   trafficClass: TrafficClass;
+  transportPolicyOverride: TransportPolicyOverride | null;
 };
 
 function createApiKeyEditDraft(apiKey: ApiKey): ApiKeyEditDraft {
   return {
     selectedModels: apiKey.allowedModels || [],
     selectedAccountIds: apiKey.assignedAccountIds,
+    usageSections: apiKey.usageSections,
     limitRules: limitsToCreateRules(apiKey),
     expiresAt: parseDate(apiKey.expiresAt),
     applyToCodexModel: apiKey.applyToCodexModel,
@@ -95,6 +114,7 @@ function createApiKeyEditDraft(apiKey: ApiKey): ApiKeyEditDraft {
     enforcedReasoningEffort: apiKey.enforcedReasoningEffort || "none",
     enforcedServiceTier: apiKey.enforcedServiceTier || "none",
     trafficClass: apiKey.trafficClass || "foreground",
+    transportPolicyOverride: apiKey.transportPolicyOverride,
   };
 }
 
@@ -130,6 +150,8 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
       enforcedReasoningEffort: draft.enforcedReasoningEffort === "none" ? null : draft.enforcedReasoningEffort as "minimal" | "low" | "medium" | "high" | "xhigh",
       enforcedServiceTier: draft.enforcedServiceTier === "none" ? null : draft.enforcedServiceTier as ServiceTierType,
       trafficClass: draft.trafficClass,
+      transportPolicyOverride: draft.transportPolicyOverride,
+      usageSections: draft.usageSections,
       expiresAt: draft.expiresAt?.toISOString() ?? null,
       isActive: values.isActive,
     };
@@ -191,6 +213,11 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
             </div>
 
             <div className="space-y-1">
+              <div className="text-sm font-medium">Usage sections shown to client</div>
+              <UsageSectionsMultiSelect value={draft.usageSections} onChange={(usageSections) => updateDraft({ usageSections })} />
+            </div>
+
+            <div className="space-y-1">
               <div className="text-sm font-medium">Enforced model</div>
               <Input
                 value={draft.enforcedModel}
@@ -244,6 +271,33 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
                 <SelectContent>
                   <SelectItem value="foreground">Foreground</SelectItem>
                   <SelectItem value="opportunistic">Opportunistic</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-1">
+              <label className="text-sm font-medium" htmlFor="edit-api-key-transport-policy">
+                HTTP client routing
+              </label>
+              <Select
+                value={draft.transportPolicyOverride ?? TRANSPORT_POLICY_FOLLOW_GLOBAL}
+                onValueChange={(value) =>
+                  updateDraft({
+                    transportPolicyOverride:
+                      value === TRANSPORT_POLICY_FOLLOW_GLOBAL ? null : value as TransportPolicyOverride,
+                  })
+                }
+              >
+                <SelectTrigger id="edit-api-key-transport-policy">
+                  <SelectValue placeholder="Follow global default" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={TRANSPORT_POLICY_FOLLOW_GLOBAL}>Follow global default</SelectItem>
+                  {Object.entries(TRANSPORT_POLICY_LABELS).map(([value, label]) => (
+                    <SelectItem key={value} value={value}>
+                      {label}
+                    </SelectItem>
+                  ))}
                 </SelectContent>
               </Select>
             </div>

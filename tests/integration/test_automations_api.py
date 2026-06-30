@@ -1514,6 +1514,83 @@ async def test_automations_due_run_spreads_accounts_with_threshold(db_setup, mon
 
 
 @pytest.mark.asyncio
+async def test_automations_due_run_uses_scheduled_slot_owner_before_fallback_account(db_setup, monkeypatch):
+    del db_setup
+    accounts = await _create_accounts("auto-slot-owner-a", "auto-slot-owner-b")
+    now = utcnow().replace(second=0, microsecond=0)
+    schedule_time = now.strftime("%H:%M")
+    due_slot = datetime(now.year, now.month, now.day, now.hour, now.minute)
+    second_slot = due_slot + timedelta(minutes=1)
+
+    async def _fake_compact(*_args, **_kwargs):
+        return SimpleNamespace()
+
+    monkeypatch.setattr("app.modules.automations.service.core_compact_responses", _fake_compact)
+
+    async with SessionLocal() as session:
+        automations_repository = AutomationsRepository(session)
+        accounts_repository = AccountsRepository(session)
+        service = AutomationsService(automations_repository, accounts_repository)
+
+        job = await automations_repository.create_job(
+            name="Scheduled fallback slot owner",
+            enabled=True,
+            include_paused_accounts=False,
+            schedule_type="daily",
+            schedule_time=schedule_time,
+            schedule_timezone="UTC",
+            schedule_days=["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+            schedule_threshold_minutes=2,
+            model="gpt-5.3-codex",
+            reasoning_effort=None,
+            prompt="ping",
+            account_ids=[account.id for account in accounts],
+        )
+        await _set_job_updated_at(job.id, now)
+        cycle_key = f"scheduled:{job.id}:{due_slot.isoformat()}"
+        cycle_window_end = second_slot
+        await automations_repository.create_run_cycle(
+            cycle_key=cycle_key,
+            job_id=job.id,
+            trigger="scheduled",
+            cycle_expected_accounts=2,
+            cycle_window_end=cycle_window_end,
+            accounts=[(accounts[0].id, due_slot), (accounts[1].id, second_slot)],
+        )
+        fallback_run = await automations_repository.claim_run(
+            job_id=job.id,
+            trigger="scheduled",
+            slot_key=_scheduled_slot_key(job.id, account_id=accounts[0].id, due_slot=due_slot),
+            cycle_key=cycle_key,
+            cycle_expected_accounts=2,
+            cycle_window_end=cycle_window_end,
+            scheduled_for=due_slot,
+            started_at=due_slot,
+            account_id=accounts[1].id,
+        )
+        assert fallback_run is not None
+        await automations_repository.complete_run(
+            fallback_run.id,
+            status="success",
+            finished_at=due_slot + timedelta(seconds=5),
+            account_id=accounts[1].id,
+            error_code=None,
+            error_message=None,
+            attempt_count=1,
+        )
+
+        executed = await service.run_due_jobs(now_utc=second_slot + timedelta(seconds=1))
+
+        assert executed == 1
+        runs = await automations_repository.list_runs(job.id, limit=20)
+        assert len(runs) == 2
+        assert {(run.slot_key, run.account_id) for run in runs} == {
+            (_scheduled_slot_key(job.id, account_id=accounts[0].id, due_slot=due_slot), accounts[1].id),
+            (_scheduled_slot_key(job.id, account_id=accounts[1].id, due_slot=due_slot), accounts[1].id),
+        }
+
+
+@pytest.mark.asyncio
 async def test_automations_due_run_freezes_all_accounts_snapshot_for_cycle(db_setup, monkeypatch):
     del db_setup
     accounts = await _create_accounts("auto-freeze-a", "auto-freeze-b", "auto-freeze-c")

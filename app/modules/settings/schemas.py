@@ -5,6 +5,7 @@ from pydantic import Field, field_validator
 from app.modules.shared.schemas import DashboardModel
 
 _DEFAULT_WEEKLY_PACE_WORKING_DAYS = "0,1,2,3,4,5,6"
+_HTTP_DOWNSTREAM_TRANSPORT_POLICY_PATTERN = r"^(smart|always_http|always_websocket|pinned)$"
 
 
 def _normalize_weekly_pace_working_days(value: str | None) -> str | None:
@@ -32,6 +33,7 @@ class AdditionalQuotaPolicy(DashboardModel):
 class DashboardSettingsResponse(DashboardModel):
     sticky_threads_enabled: bool
     upstream_stream_transport: str = Field(pattern=r"^(default|auto|http|websocket)$")
+    http_downstream_transport_policy: str = Field(pattern=_HTTP_DOWNSTREAM_TRANSPORT_POLICY_PATTERN)
     upstream_proxy_routing_enabled: bool
     upstream_proxy_default_pool_id: str | None = None
     prefer_earlier_reset_accounts: bool
@@ -54,6 +56,7 @@ class DashboardSettingsResponse(DashboardModel):
     totp_required_on_login: bool
     totp_configured: bool
     api_key_auth_enabled: bool
+    hide_upstream_quota_from_api_keys: bool
     limit_warmup_enabled: bool
     limit_warmup_windows: str = Field(pattern=r"^(primary|secondary|both)$")
     limit_warmup_model: str = Field(min_length=1, max_length=128)
@@ -61,6 +64,7 @@ class DashboardSettingsResponse(DashboardModel):
     limit_warmup_cooldown_seconds: int = Field(ge=60)
     limit_warmup_min_available_percent: float = Field(gt=0.0, le=100.0)
     weekly_pace_working_days: str = _DEFAULT_WEEKLY_PACE_WORKING_DAYS
+    limit_warmup_staggered_idle_enabled: bool
     additional_quota_routing_policies: dict[str, str] = Field(default_factory=dict)
     additional_quota_policies: list[AdditionalQuotaPolicy] = Field(default_factory=list)
     guest_access_enabled: bool
@@ -72,6 +76,10 @@ class DashboardSettingsUpdateRequest(DashboardModel):
     upstream_stream_transport: str | None = Field(
         default=None,
         pattern=r"^(default|auto|http|websocket)$",
+    )
+    http_downstream_transport_policy: str | None = Field(
+        default=None,
+        pattern=_HTTP_DOWNSTREAM_TRANSPORT_POLICY_PATTERN,
     )
     upstream_proxy_routing_enabled: bool | None = None
     upstream_proxy_default_pool_id: str | None = None
@@ -96,6 +104,7 @@ class DashboardSettingsUpdateRequest(DashboardModel):
     import_without_overwrite: bool | None = None
     totp_required_on_login: bool | None = None
     api_key_auth_enabled: bool | None = None
+    hide_upstream_quota_from_api_keys: bool | None = None
     limit_warmup_enabled: bool | None = None
     limit_warmup_windows: str | None = Field(default=None, pattern=r"^(primary|secondary|both)$")
     limit_warmup_model: str | None = Field(default=None, min_length=1, max_length=128)
@@ -104,6 +113,7 @@ class DashboardSettingsUpdateRequest(DashboardModel):
     limit_warmup_min_available_percent: float | None = Field(default=None, gt=0.0, le=100.0)
     weekly_pace_working_days: str | None = None
     guest_access_enabled: bool | None = None
+    limit_warmup_staggered_idle_enabled: bool | None = None
 
     @field_validator("warmup_model")
     @classmethod
@@ -143,6 +153,14 @@ class UpstreamProxyEndpointResponse(DashboardModel):
     port: int
     username: str | None
     is_active: bool
+
+
+class UpstreamProxyEndpointTestResponse(DashboardModel):
+    endpoint_id: str
+    ok: bool
+    status_code: int | None = None
+    elapsed_ms: int | None = None
+    error: str | None = None
 
 
 class UpstreamProxyPoolCreateRequest(DashboardModel):

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.core.clients.files import OPENAI_FILE_UPLOAD_LIMIT_BYTES, OPENAI_FILE_USE_CASE
@@ -157,10 +159,6 @@ class CodexModelEntry(BaseModel):
     visibility: str = "list"
 
 
-class CodexModelsResponse(BaseModel):
-    models: list[CodexModelEntry]
-
-
 class ModelMetadata(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -180,6 +178,9 @@ class ModelMetadata(BaseModel):
     supported_in_api: bool = True
     minimal_client_version: str | None = None
     priority: int = 0
+    additional_speed_tiers: list[str] | None = None
+    service_tiers: list[dict[str, JsonValue]] | None = None
+    default_service_tier: str | None = None
 
 
 class ModelListItem(BaseModel):
@@ -203,6 +204,12 @@ class ModelListResponse(BaseModel):
     data: list[ModelListItem]
 
 
+class CodexModelsResponse(BaseModel):
+    models: list[CodexModelEntry]
+    object: str = "list"
+    data: list[ModelListItem] = []
+
+
 class V1UsageLimitResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -216,6 +223,13 @@ class V1UsageLimitResponse(BaseModel):
     source: str = "api_key_limit"
 
 
+class AccountPoolUsageResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    primary: float | None = None
+    secondary: float | None = None
+
+
 class V1UsageResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -225,6 +239,31 @@ class V1UsageResponse(BaseModel):
     total_cost_usd: float
     limits: list[V1UsageLimitResponse]
     upstream_limits: list[V1UsageLimitResponse] = []
+    account_pool_usage: AccountPoolUsageResponse | None = None
+
+
+class V1ResetCreditEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    account_id: str
+    email: str
+    redeem_id: str
+    expired_at: datetime | None = Field(serialization_alias="expiredAt")
+
+
+class V1ResetCreditRedeemRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    account_id: str
+    redeem_id: str
+
+
+class V1ResetCreditRedeemResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    code: str
+    windows_reset: int
+    redeemed_at: datetime | None = None
 
 
 class WarmupRequest(BaseModel):

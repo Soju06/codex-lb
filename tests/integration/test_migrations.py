@@ -486,14 +486,19 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
             await session.execute(text("PRAGMA foreign_keys=ON"))
             dashboard_columns_rows = (await session.execute(text("PRAGMA table_info(dashboard_settings)"))).fetchall()
             dashboard_columns = {str(row[1]) for row in dashboard_columns_rows if len(row) > 1}
+            dashboard_column_defaults = {str(row[1]): row[4] for row in dashboard_columns_rows if len(row) > 4}
             account_columns_rows = (await session.execute(text("PRAGMA table_info(accounts)"))).fetchall()
             account_columns = {str(row[1]) for row in account_columns_rows if len(row) > 1}
+            api_key_columns_rows = (await session.execute(text("PRAGMA table_info(api_keys)"))).fetchall()
+            api_key_columns = {str(row[1]) for row in api_key_columns_rows if len(row) > 1}
+            api_key_column_defaults = {str(row[1]): row[4] for row in api_key_columns_rows if len(row) > 4}
             request_log_columns_rows = (await session.execute(text("PRAGMA table_info(request_logs)"))).fetchall()
             request_log_columns = {str(row[1]) for row in request_log_columns_rows if len(row) > 1}
             assert "deleted_at" in request_log_columns
             assert "transport" in request_log_columns
             assert "plan_type" in request_log_columns
             assert "source" in request_log_columns
+            assert "archive_request_id" in request_log_columns
             assert "limit_warmup_enabled" in account_columns
             legacy_plan_type = (
                 await session.execute(text("SELECT plan_type FROM request_logs WHERE id=1"))
@@ -505,7 +510,16 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
             assert "limit_warmup_prompt" in dashboard_columns
             assert "limit_warmup_cooldown_seconds" in dashboard_columns
             assert "limit_warmup_min_available_percent" in dashboard_columns
+            assert "hide_upstream_quota_from_api_keys" in dashboard_columns
+            assert dashboard_column_defaults["hide_upstream_quota_from_api_keys"] in ("0", 0, False)
             assert "single_account_id" in dashboard_columns
+            assert "limit_warmup_staggered_idle_enabled" in dashboard_columns
+            assert "usage_sections" in api_key_columns
+            assert api_key_column_defaults["usage_sections"] in (
+                "'upstream_limits,account_pool_usage'",
+                '"upstream_limits,account_pool_usage"',
+                "upstream_limits,account_pool_usage",
+            )
             if "routing_strategy" in dashboard_columns:
                 routing_strategy = (
                     await session.execute(text("SELECT routing_strategy FROM dashboard_settings WHERE id=1"))
@@ -636,12 +650,12 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
                 text(
                     """
                     INSERT INTO accounts (
-                        id, chatgpt_account_id, email, plan_type,
+                        id, chatgpt_account_id, codex_installation_id, email, plan_type,
                         access_token_encrypted, refresh_token_encrypted, id_token_encrypted,
                         last_refresh, created_at, status, deactivation_reason, reset_at
                     )
                     VALUES (
-                        'acc_legacy_2', 'chatgpt_legacy_2', 'legacy@example.com', 'team',
+                        'acc_legacy_2', 'chatgpt_legacy_2', 'legacy-installation-2', 'legacy@example.com', 'team',
                         x'11', x'12', x'13',
                         '2026-01-01 00:00:00', '2026-01-01 00:00:00', 'active', NULL, NULL
                     )

@@ -8,6 +8,7 @@ import { useDashboardPreferencesStore } from "@/hooks/use-dashboard-preferences"
 import { queryClient } from "@/lib/query-client";
 import { useThemeStore } from "@/hooks/use-theme";
 import { installExternalDomMutationGuard } from "@/utils/external-dom-mutation-guard";
+import "@/i18n";
 
 import "./index.css";
 

@@ -9,6 +9,7 @@ const FILTERS: ReportsFiltersState = {
   endDate: "2026-06-07",
   accountId: [],
   model: "",
+  useragent: "",
 };
 
 describe("ReportsFilters", () => {
@@ -25,6 +26,7 @@ describe("ReportsFilters", () => {
         selectedPresetDays={7}
         accountOptions={[{ value: "acc_one", label: "Primary account", isEmail: false }]}
         modelOptions={[]}
+        useragentOptions={[]}
         onPresetSelect={vi.fn()}
         onFiltersChange={onFiltersChange}
       />,
@@ -48,6 +50,7 @@ describe("ReportsFilters", () => {
           { value: "gpt-5.1", label: "gpt-5.1" },
           { value: "gpt-5.2", label: "gpt-5.2" },
         ]}
+        useragentOptions={[]}
         onPresetSelect={vi.fn()}
         onFiltersChange={onFiltersChange}
       />,
@@ -62,6 +65,33 @@ describe("ReportsFilters", () => {
     });
   });
 
+  it("keeps the reports user-agent filter as a single selected value", async () => {
+    const user = userEvent.setup();
+    const onFiltersChange = vi.fn();
+    render(
+      <ReportsFilters
+        filters={{ ...FILTERS, useragent: "CLI" }}
+        selectedPresetDays={7}
+        accountOptions={[]}
+        modelOptions={[]}
+        useragentOptions={[
+          { value: "CLI", label: "CLI" },
+          { value: "SDK", label: "SDK" },
+        ]}
+        onPresetSelect={vi.fn()}
+        onFiltersChange={onFiltersChange}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /^CLI$/i }));
+    await user.click(await screen.findByRole("menuitemcheckbox", { name: /^SDK$/i }));
+
+    expect(onFiltersChange).toHaveBeenCalledWith({
+      ...FILTERS,
+      useragent: "SDK",
+    });
+  });
+
   it("renders the selected preset as pressed and forwards preset clicks", () => {
     const onFiltersChange = vi.fn();
     const onPresetSelect = vi.fn();
@@ -72,6 +102,7 @@ describe("ReportsFilters", () => {
         selectedPresetDays={30}
         accountOptions={[]}
         modelOptions={[]}
+        useragentOptions={[]}
         onPresetSelect={onPresetSelect}
         onFiltersChange={onFiltersChange}
       />,
@@ -100,6 +131,7 @@ describe("ReportsFilters", () => {
         selectedPresetDays={30}
         accountOptions={[]}
         modelOptions={[]}
+        useragentOptions={[]}
         onPresetSelect={vi.fn()}
         onFiltersChange={vi.fn()}
       />,

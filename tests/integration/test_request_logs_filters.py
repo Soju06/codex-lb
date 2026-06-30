@@ -300,6 +300,35 @@ async def test_request_logs_expose_account_plan_type(async_client, db_setup):
 
 
 @pytest.mark.asyncio
+async def test_request_logs_expose_upstream_transport(async_client, db_setup):
+    now = utcnow()
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        logs_repo = RequestLogsRepository(session)
+        await accounts_repo.upsert(_make_account("acc_upstream_transport", "upstream-transport@example.com"))
+
+        await logs_repo.add_log(
+            account_id="acc_upstream_transport",
+            request_id="req_upstream_transport_1",
+            model="gpt-5.4",
+            input_tokens=1,
+            output_tokens=1,
+            latency_ms=10,
+            status="success",
+            error_code=None,
+            transport="http",
+            upstream_transport="auto",
+            requested_at=now,
+        )
+
+    response = await async_client.get("/api/request-logs")
+    assert response.status_code == 200
+    payload = response.json()["requests"]
+    assert payload[0]["transport"] == "http"
+    assert payload[0]["upstreamTransport"] == "auto"
+
+
+@pytest.mark.asyncio
 async def test_request_logs_filters_by_multiple_accounts_returns_union(async_client, db_setup):
     now = utcnow()
     async with SessionLocal() as session:
@@ -395,6 +424,7 @@ async def test_request_logs_search_matches_email_and_error(async_client, db_setu
         accounts_repo = AccountsRepository(session)
         logs_repo = RequestLogsRepository(session)
         await accounts_repo.upsert(_make_account("acc_search", "example@myemail.com"))
+        await accounts_repo.upsert(_make_account("acc_search_ip", "ip-search@other.test"))
 
         await logs_repo.add_log(
             account_id="acc_search",
@@ -419,11 +449,28 @@ async def test_request_logs_search_matches_email_and_error(async_client, db_setu
             error_message="This is an example string",
             requested_at=now,
         )
+        await logs_repo.add_log(
+            account_id="acc_search_ip",
+            request_id="req_search_client_ip",
+            model="gpt-5.1",
+            input_tokens=1,
+            output_tokens=1,
+            latency_ms=10,
+            status="success",
+            error_code=None,
+            client_ip="203.0.113.7",
+            requested_at=now - timedelta(minutes=2),
+        )
 
     response = await async_client.get("/api/request-logs?search=example&limit=50")
     assert response.status_code == 200
     payload = response.json()["requests"]
     assert {entry["requestId"] for entry in payload} == {"req_search_1", "req_search_2"}
+
+    response = await async_client.get("/api/request-logs?search=203.0.113.7&limit=50")
+    assert response.status_code == 200
+    payload = response.json()["requests"]
+    assert [entry["requestId"] for entry in payload] == ["req_search_client_ip"]
 
 
 @pytest.mark.asyncio

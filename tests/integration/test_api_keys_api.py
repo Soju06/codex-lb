@@ -149,6 +149,86 @@ async def test_api_keys_crud_and_regenerate(async_client):
 
 
 @pytest.mark.asyncio
+async def test_api_key_create_with_transport_policy_override_round_trips(async_client):
+    create = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "transport-policy-key",
+            "transportPolicyOverride": "always_websocket",
+        },
+    )
+
+    assert create.status_code == 200
+    payload = create.json()
+    assert payload["transportPolicyOverride"] == "always_websocket"
+
+    listed = await async_client.get("/api/api-keys/")
+    assert listed.status_code == 200
+    assert listed.json()[0]["transportPolicyOverride"] == "always_websocket"
+
+
+@pytest.mark.asyncio
+async def test_api_key_update_sets_and_clears_transport_policy_override(async_client):
+    create = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "transport-policy-update-key",
+        },
+    )
+    assert create.status_code == 200
+    key_id = create.json()["id"]
+    assert create.json()["transportPolicyOverride"] is None
+
+    update = await async_client.patch(
+        f"/api/api-keys/{key_id}",
+        json={"transportPolicyOverride": "smart"},
+    )
+    assert update.status_code == 200
+    assert update.json()["transportPolicyOverride"] == "smart"
+
+    cleared = await async_client.patch(
+        f"/api/api-keys/{key_id}",
+        json={"transportPolicyOverride": None},
+    )
+    assert cleared.status_code == 200
+    assert cleared.json()["transportPolicyOverride"] is None
+
+
+@pytest.mark.asyncio
+async def test_api_key_transport_policy_override_invalid_value_returns_400(async_client):
+    create = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "transport-policy-invalid-key",
+            "transportPolicyOverride": "sometimes",
+        },
+    )
+
+    assert create.status_code == 400
+    assert create.json()["error"]["code"] == "invalid_api_key_payload"
+
+
+@pytest.mark.asyncio
+async def test_create_api_key_preserves_empty_usage_sections(async_client):
+    create = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "hidden-usage-key",
+            "allowedModels": [],
+            "usageSections": "",
+        },
+    )
+
+    assert create.status_code == 200
+    payload = create.json()
+    assert payload["usageSections"] == ""
+
+    listed = await async_client.get("/api/api-keys/")
+    assert listed.status_code == 200
+    assert listed.json()[0]["usageSections"] == ""
+
+
+@pytest.mark.asyncio
 async def test_api_key_update_persists_assigned_account_ids(async_client):
     first_account_id = await _import_account(async_client, "acc-assigned-a", "assigned-a@example.com")
     second_account_id = await _import_account(async_client, "acc-assigned-b", "assigned-b@example.com")
@@ -280,8 +360,19 @@ async def test_deleted_assigned_accounts_do_not_fall_back_to_other_accounts(asyn
 
     listed = await async_client.get("/api/api-keys/")
     assert listed.status_code == 200
-    assert listed.json()[0]["assignedAccountIds"] == []
-    assert listed.json()[0]["accountAssignmentScopeEnabled"] is True
+    listed_key = listed.json()[0]
+    assert listed_key["assignedAccountIds"] == []
+    assert listed_key["accountAssignmentScopeEnabled"] is True
+    assert listed_key["pooledCapacityCreditsPrimary"] == 0.0
+    assert listed_key["pooledRemainingPercentPrimary"] is None
+    assert listed_key["pooledRemainingPercentSecondary"] is None
+
+    usage = await async_client.get("/v1/usage", headers={"Authorization": f"Bearer {key}"})
+    assert usage.status_code == 200
+    assert usage.json()["account_pool_usage"] == {
+        "primary": None,
+        "secondary": None,
+    }
 
     called = False
 
@@ -2356,7 +2447,7 @@ async def test_release_stale_usage_reservations_uses_sqlite_writer_section(async
 
 
 @pytest.mark.asyncio
-async def test_allowed_but_unsupported_model_is_exposed(async_client):
+async def test_allowed_but_unsupported_model_is_not_exposed(async_client):
     registry = get_model_registry()
     models = [
         _make_upstream_model(_TEST_MODELS[0], supported_in_api=True),
@@ -2389,7 +2480,7 @@ async def test_allowed_but_unsupported_model_is_exposed(async_client):
     assert listed.status_code == 200
     ids = {item["id"] for item in listed.json()["data"]}
     assert _TEST_MODELS[0] in ids
-    assert _HIDDEN_MODEL in ids
+    assert _HIDDEN_MODEL not in ids
 
 
 # ---------------------------------------------------------------------------

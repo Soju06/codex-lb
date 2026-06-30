@@ -846,7 +846,7 @@ class AutomationsService:
         }
         existing_cycle_runs_by_account: dict[str, AutomationRunRecord] = {}
         for cycle_run in existing_cycle_runs:
-            account_id = cycle_run.account_id or cycle_account_id_by_slot_key.get(cycle_run.slot_key)
+            account_id = cycle_account_id_by_slot_key.get(cycle_run.slot_key) or cycle_run.account_id
             if account_id is not None:
                 existing_cycle_runs_by_account[account_id] = cycle_run
         eligible_cycle_account_ids = await self._resolve_eligible_account_ids(

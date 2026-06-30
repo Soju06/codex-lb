@@ -15,6 +15,7 @@ import {
 
 import { cn } from "@/lib/utils"
 import { Label } from "@/components/ui/label"
+import i18n, { normalizeSupportedLanguage } from "@/i18n"
 
 const Form = FormProvider
 
@@ -35,18 +36,16 @@ const FormField = <
 >({
   ...props
 }: ControllerProps<TFieldValues, TName>) => {
-  const fieldContextValue = React.useMemo(() => ({ name: props.name }), [props.name])
-
   return (
-    <FormFieldContext.Provider value={fieldContextValue}>
+    <FormFieldContext.Provider value={{ name: props.name }}>
       <Controller {...props} />
     </FormFieldContext.Provider>
   )
 }
 
 const useFormField = () => {
-  const fieldContext = React.use(FormFieldContext)
-  const itemContext = React.use(FormItemContext)
+  const fieldContext = React.useContext(FormFieldContext)
+  const itemContext = React.useContext(FormItemContext)
   const { getFieldState } = useFormContext()
   const formState = useFormState({ name: fieldContext.name })
   const fieldState = getFieldState(fieldContext.name, formState)
@@ -77,10 +76,9 @@ const FormItemContext = React.createContext<FormItemContextValue>(
 
 function FormItem({ className, ...props }: React.ComponentProps<"div">) {
   const id = React.useId()
-  const formItemContextValue = React.useMemo(() => ({ id }), [id])
 
   return (
-    <FormItemContext.Provider value={formItemContextValue}>
+    <FormItemContext.Provider value={{ id }}>
       <div
         data-slot="form-item"
         className={cn("grid gap-2", className)}
@@ -138,9 +136,28 @@ function FormDescription({ className, ...props }: React.ComponentProps<"p">) {
   )
 }
 
+function resolveValidationMessage(message: string): string {
+  if (!message) {
+    return ""
+  }
+
+  const activeLanguage = normalizeSupportedLanguage(i18n.resolvedLanguage ?? i18n.language)
+  const translatedMessage = i18n.getFixedT(activeLanguage)(message)
+  if (translatedMessage !== message) {
+    return translatedMessage
+  }
+
+  const english = i18n.getFixedT("en")(message)
+  if (english !== message) {
+    return english
+  }
+
+  return i18n.getFixedT("zh-CN")(message)
+}
+
 function FormMessage({ className, ...props }: React.ComponentProps<"p">) {
   const { error, formMessageId } = useFormField()
-  const body = error ? String(error?.message ?? "") : props.children
+  const body = props.children ?? (error ? resolveValidationMessage(String(error?.message ?? "")) : null)
 
   if (!body) {
     return null

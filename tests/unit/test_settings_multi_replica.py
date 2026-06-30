@@ -31,7 +31,7 @@ def test_settings_multi_replica_defaults():
     assert settings.compact_request_budget_seconds == 180.0
     assert settings.proxy_request_budget_seconds == 600.0
     assert settings.http_responses_session_bridge_request_budget_seconds == 7200.0
-    assert settings.stream_idle_timeout_seconds == 600.0
+    assert settings.stream_idle_timeout_seconds == 7200.0
     assert settings.proxy_downstream_websocket_idle_timeout_seconds == 120.0
     assert settings.http_responses_stream_request_budget_seconds == 7200.0
     assert settings.max_sse_event_bytes == 16 * 1024 * 1024
@@ -43,6 +43,20 @@ def test_settings_multi_replica_defaults():
     assert settings.shutdown_drain_timeout_seconds == 30
     assert settings.http_connector_limit == 100
     assert settings.http_connector_limit_per_host == 50
+    assert settings.http_downstream_transport_policy == "smart"
+
+
+@pytest.mark.parametrize("policy", ["smart", "always_http", "always_websocket", "pinned"])
+def test_settings_http_downstream_transport_policy_from_env(monkeypatch, policy: str):
+    monkeypatch.setenv("CODEX_LB_HTTP_DOWNSTREAM_TRANSPORT_POLICY", policy)
+    settings = Settings()
+    assert settings.http_downstream_transport_policy == policy
+
+
+def test_settings_http_downstream_transport_policy_rejects_unknown(monkeypatch):
+    monkeypatch.setenv("CODEX_LB_HTTP_DOWNSTREAM_TRANSPORT_POLICY", "sometimes")
+    with pytest.raises(ValidationError):
+        Settings()
 
 
 def test_settings_metrics_enabled_from_env(monkeypatch):

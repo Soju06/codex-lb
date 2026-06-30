@@ -14,6 +14,7 @@ from app.modules.usage.additional_quota_keys import (
 class DashboardSettingsData:
     sticky_threads_enabled: bool
     upstream_stream_transport: str
+    http_downstream_transport_policy: str
     upstream_proxy_routing_enabled: bool
     upstream_proxy_default_pool_id: str | None
     prefer_earlier_reset_accounts: bool
@@ -35,6 +36,7 @@ class DashboardSettingsData:
     totp_required_on_login: bool
     totp_configured: bool
     api_key_auth_enabled: bool
+    hide_upstream_quota_from_api_keys: bool
     limit_warmup_enabled: bool
     limit_warmup_windows: str
     limit_warmup_model: str
@@ -44,12 +46,14 @@ class DashboardSettingsData:
     weekly_pace_working_days: str
     guest_access_enabled: bool
     guest_password_configured: bool
+    limit_warmup_staggered_idle_enabled: bool
 
 
 @dataclass(frozen=True, slots=True)
 class DashboardSettingsUpdateData:
     sticky_threads_enabled: bool
     upstream_stream_transport: str
+    http_downstream_transport_policy: str
     upstream_proxy_routing_enabled: bool
     upstream_proxy_default_pool_id: str | None
     prefer_earlier_reset_accounts: bool
@@ -70,6 +74,7 @@ class DashboardSettingsUpdateData:
     import_without_overwrite: bool
     totp_required_on_login: bool
     api_key_auth_enabled: bool
+    hide_upstream_quota_from_api_keys: bool
     limit_warmup_enabled: bool
     limit_warmup_windows: str
     limit_warmup_model: str
@@ -78,6 +83,7 @@ class DashboardSettingsUpdateData:
     limit_warmup_min_available_percent: float
     weekly_pace_working_days: str
     guest_access_enabled: bool
+    limit_warmup_staggered_idle_enabled: bool
 
 
 class SettingsService:
@@ -89,6 +95,7 @@ class SettingsService:
         return DashboardSettingsData(
             sticky_threads_enabled=row.sticky_threads_enabled,
             upstream_stream_transport=row.upstream_stream_transport,
+            http_downstream_transport_policy=row.http_downstream_transport_policy,
             upstream_proxy_routing_enabled=row.upstream_proxy_routing_enabled,
             upstream_proxy_default_pool_id=row.upstream_proxy_default_pool_id,
             prefer_earlier_reset_accounts=row.prefer_earlier_reset_accounts,
@@ -114,6 +121,7 @@ class SettingsService:
             totp_required_on_login=row.totp_required_on_login,
             totp_configured=row.totp_secret_encrypted is not None,
             api_key_auth_enabled=row.api_key_auth_enabled,
+            hide_upstream_quota_from_api_keys=row.hide_upstream_quota_from_api_keys,
             limit_warmup_enabled=row.limit_warmup_enabled,
             limit_warmup_windows=row.limit_warmup_windows,
             limit_warmup_model=row.limit_warmup_model,
@@ -123,6 +131,7 @@ class SettingsService:
             weekly_pace_working_days=row.weekly_pace_working_days,
             guest_access_enabled=row.guest_access_enabled,
             guest_password_configured=row.guest_password_hash is not None,
+            limit_warmup_staggered_idle_enabled=row.limit_warmup_staggered_idle_enabled,
         )
 
     async def update_settings(self, payload: DashboardSettingsUpdateData) -> DashboardSettingsData:
@@ -132,6 +141,7 @@ class SettingsService:
         row = await self._repository.update(
             sticky_threads_enabled=payload.sticky_threads_enabled,
             upstream_stream_transport=payload.upstream_stream_transport,
+            http_downstream_transport_policy=payload.http_downstream_transport_policy,
             upstream_proxy_routing_enabled=payload.upstream_proxy_routing_enabled,
             upstream_proxy_default_pool_id=payload.upstream_proxy_default_pool_id,
             prefer_earlier_reset_accounts=payload.prefer_earlier_reset_accounts,
@@ -156,6 +166,7 @@ class SettingsService:
             import_without_overwrite=payload.import_without_overwrite,
             totp_required_on_login=payload.totp_required_on_login,
             api_key_auth_enabled=payload.api_key_auth_enabled,
+            hide_upstream_quota_from_api_keys=payload.hide_upstream_quota_from_api_keys,
             limit_warmup_enabled=payload.limit_warmup_enabled,
             limit_warmup_windows=payload.limit_warmup_windows,
             limit_warmup_model=payload.limit_warmup_model,
@@ -164,10 +175,12 @@ class SettingsService:
             limit_warmup_min_available_percent=payload.limit_warmup_min_available_percent,
             weekly_pace_working_days=payload.weekly_pace_working_days,
             guest_access_enabled=payload.guest_access_enabled,
+            limit_warmup_staggered_idle_enabled=payload.limit_warmup_staggered_idle_enabled,
         )
         return DashboardSettingsData(
             sticky_threads_enabled=row.sticky_threads_enabled,
             upstream_stream_transport=row.upstream_stream_transport,
+            http_downstream_transport_policy=row.http_downstream_transport_policy,
             upstream_proxy_routing_enabled=row.upstream_proxy_routing_enabled,
             upstream_proxy_default_pool_id=row.upstream_proxy_default_pool_id,
             prefer_earlier_reset_accounts=row.prefer_earlier_reset_accounts,
@@ -193,6 +206,7 @@ class SettingsService:
             totp_required_on_login=row.totp_required_on_login,
             totp_configured=row.totp_secret_encrypted is not None,
             api_key_auth_enabled=row.api_key_auth_enabled,
+            hide_upstream_quota_from_api_keys=row.hide_upstream_quota_from_api_keys,
             limit_warmup_enabled=row.limit_warmup_enabled,
             limit_warmup_windows=row.limit_warmup_windows,
             limit_warmup_model=row.limit_warmup_model,
@@ -202,6 +216,7 @@ class SettingsService:
             weekly_pace_working_days=row.weekly_pace_working_days,
             guest_access_enabled=row.guest_access_enabled,
             guest_password_configured=row.guest_password_hash is not None,
+            limit_warmup_staggered_idle_enabled=row.limit_warmup_staggered_idle_enabled,
         )
 
 

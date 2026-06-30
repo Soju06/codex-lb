@@ -24,6 +24,7 @@ def test_classify_refresh_error_permanent():
     assert classify_refresh_error("refresh_token_expired") is True
     assert classify_refresh_error("account_deactivated") is True
     assert classify_refresh_error("invalid_grant") is True
+    assert classify_refresh_error("app_session_terminated") is True
 
 
 def test_classify_refresh_error_token_expired_is_permanent():

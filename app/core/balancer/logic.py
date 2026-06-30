@@ -24,6 +24,7 @@ PERMANENT_FAILURE_CODES = {
     # returned a fresh token pair instead. Treat it as a permanent failure so
     # the account stops being routed to until it is re-authenticated.
     "token_expired": "Authentication token expired - re-login required",
+    "app_session_terminated": "ChatGPT session ended - re-login required",
     "account_session_expired": "ChatGPT session ended - re-login required",
     "account_auth_invalidated": "Authentication failed after token refresh - re-login required",
     "account_deactivated": "Account has been deactivated",
@@ -39,6 +40,7 @@ REAUTH_REQUIRED_FAILURE_CODES = frozenset(
         "invalid_grant",
         "token_invalidated",
         "token_expired",
+        "app_session_terminated",
         "account_session_expired",
         "account_auth_invalidated",
     }
@@ -580,24 +582,15 @@ def select_account(
         return _planner_cost(state, routing_costs), state.last_selected_at or 0.0, state.account_id
 
     if routing_strategy == "single_account":
-        candidate_pool = [state for state in available if not _usage_exhausted(state)]
-        if not candidate_pool:
-            return SelectionResult(None, "Selected account is exhausted or unavailable")
-        selected = min(candidate_pool, key=lambda state: state.account_id)
+        selected = min(available, key=lambda state: state.account_id)
         return SelectionResult(selected, None)
 
     if routing_strategy == "sequential_drain":
-        candidate_pool = [state for state in available if not _usage_exhausted(state)]
-        if not candidate_pool:
-            return SelectionResult(None, "No available accounts")
-        selected = min(candidate_pool, key=_sequential_drain_sort_key)
+        selected = min(available, key=_sequential_drain_sort_key)
         return SelectionResult(selected, None)
 
     if routing_strategy == "reset_drain":
-        candidate_pool = [state for state in available if not _usage_exhausted(state)]
-        if not candidate_pool:
-            return SelectionResult(None, "No available accounts")
-        selected = min(candidate_pool, key=lambda state: _reset_drain_sort_key(state, current))
+        selected = min(available, key=lambda state: _reset_drain_sort_key(state, current))
         return SelectionResult(selected, None)
 
     healthy = [s for s in available if s.health_tier == HEALTH_TIER_HEALTHY]
@@ -879,12 +872,6 @@ def _configured_capacity_credits(state: AccountState) -> float:
     if state.capacity_credits is not None and state.capacity_credits > 0:
         return state.capacity_credits
     return _fallback_secondary_capacity_credits(state.plan_type)
-
-
-def _usage_exhausted(state: AccountState) -> bool:
-    primary_used = state.used_percent if state.used_percent is not None else 0.0
-    secondary_used = state.secondary_used_percent if state.secondary_used_percent is not None else primary_used
-    return primary_used >= 100.0 or secondary_used >= 100.0
 
 
 def _sequential_drain_sort_key(state: AccountState) -> tuple[float, str, str]:

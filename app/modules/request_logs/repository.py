@@ -232,12 +232,14 @@ class RequestLogsRepository:
         requested_service_tier: str | None = None,
         actual_service_tier: str | None = None,
         transport: str | None = None,
+        upstream_transport: str | None = None,
         api_key_id: str | None = None,
         session_id: str | None = None,
         plan_type: str | None = None,
         source: str | None = None,
         useragent: str | None = None,
         useragent_group: str | None = None,
+        client_ip: str | None = None,
         failure_phase: str | None = None,
         failure_detail: str | None = None,
         failure_exception_type: str | None = None,
@@ -250,9 +252,11 @@ class RequestLogsRepository:
         upstream_proxy_endpoint_id: str | None = None,
         upstream_proxy_fallback_used: bool | None = None,
         upstream_proxy_fail_closed_reason: str | None = None,
+        archive_request_id: str | None = None,
     ) -> RequestLog:
         async with sqlite_writer_section():
             resolved_request_id = ensure_request_id(request_id)
+            resolved_archive_request_id = (archive_request_id or "").strip() or resolved_request_id
             resolved_plan_type = plan_type
             if resolved_plan_type is None and account_id:
                 resolved_plan_type = await self._resolve_account_plan_type(account_id)
@@ -260,17 +264,21 @@ class RequestLogsRepository:
             resolved_useragent_group = (
                 useragent_group if not isinstance(useragent_group, str) or useragent_group.strip() else None
             )
+            resolved_client_ip = client_ip if not isinstance(client_ip, str) or client_ip.strip() else None
             log = RequestLog(
                 account_id=account_id,
                 api_key_id=api_key_id,
                 session_id=session_id,
                 request_id=resolved_request_id,
+                archive_request_id=resolved_archive_request_id,
                 model=model,
                 plan_type=resolved_plan_type,
                 transport=transport,
+                upstream_transport=upstream_transport,
                 request_kind=request_kind,
                 useragent=resolved_useragent,
                 useragent_group=resolved_useragent_group,
+                client_ip=resolved_client_ip,
                 service_tier=service_tier,
                 requested_service_tier=requested_service_tier,
                 actual_service_tier=actual_service_tier,
@@ -378,8 +386,7 @@ class RequestLogsRepository:
             exclude_soft_deleted=True,
         )
 
-        total_col = func.count().over().label("_total")
-        stmt = select(RequestLog, total_col).order_by(RequestLog.requested_at.desc(), RequestLog.id.desc())
+        stmt = select(RequestLog).order_by(RequestLog.requested_at.desc(), RequestLog.id.desc())
         stmt = self._apply_related_search_joins(stmt, filters.needs_related_search_joins)
         if filters.conditions:
             stmt = stmt.where(and_(*filters.conditions))
@@ -388,11 +395,8 @@ class RequestLogsRepository:
         if limit:
             stmt = stmt.limit(limit)
         result = await self._session.execute(stmt)
-        rows = result.all()
-        if not rows:
-            return [], await self._count_recent(filters)
-        logs = [row[0] for row in rows]
-        total = rows[0][1]
+        logs = list(result.scalars().all())
+        total = await self._count_recent(filters)
         return logs, total
 
     async def _count_recent(self, filters: _RequestLogFilters) -> int:
@@ -567,6 +571,7 @@ class RequestLogsRepository:
                     RequestLog.model.ilike(search_pattern),
                     RequestLog.reasoning_effort.ilike(search_pattern),
                     RequestLog.source.ilike(search_pattern),
+                    RequestLog.client_ip.ilike(search_pattern),
                     RequestLog.status.ilike(search_pattern),
                     RequestLog.error_code.ilike(search_pattern),
                     RequestLog.error_message.ilike(search_pattern),

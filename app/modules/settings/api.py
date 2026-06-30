@@ -3,8 +3,13 @@ from __future__ import annotations
 import ipaddress
 import os
 import socket
+import time
 
+import aiohttp
+import httpx
+from aiohttp_socks import ProxyConnector
 from fastapi import APIRouter, Body, Depends, Request
+from python_socks import ProxyType
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
@@ -14,11 +19,14 @@ from app.core.auth.dependencies import (
     set_dashboard_error_format,
     validate_dashboard_session,
 )
+from app.core.clients.http import _build_ssl_context
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
 from app.core.exceptions import DashboardBadRequestError
-from app.db.models import Account, AccountProxyBinding, ProxyEndpoint, ProxyPool, ProxyPoolMember
-from app.dependencies import SettingsContext, get_settings_context
+from app.core.upstream_proxy import resolve_proxy_endpoint
+from app.db.models import Account, AccountProxyBinding, AccountStatus, ProxyEndpoint, ProxyPool, ProxyPoolMember
+from app.dependencies import SettingsContext, get_proxy_service_for_app, get_settings_context
+from app.modules.proxy.account_cache import clear_account_routing_unavailable, get_account_selection_cache
 from app.modules.settings.schemas import (
     AccountProxyBindingRequest,
     AccountProxyBindingResponse,
@@ -29,6 +37,7 @@ from app.modules.settings.schemas import (
     UpstreamProxyAdminResponse,
     UpstreamProxyEndpointCreateRequest,
     UpstreamProxyEndpointResponse,
+    UpstreamProxyEndpointTestResponse,
     UpstreamProxyPoolCreateRequest,
     UpstreamProxyPoolMemberRequest,
     UpstreamProxyPoolResponse,
@@ -40,6 +49,10 @@ from app.modules.usage.additional_quota_keys import (
 )
 
 LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1", "[::1]"}
+UPSTREAM_PROXY_TEST_URL = "https://chatgpt.com/cdn-cgi/trace"
+UPSTREAM_PROXY_TEST_TIMEOUT_SECONDS = 8.0
+HTTP_PROXY_AUTHENTICATION_REQUIRED = 407
+IMPORT_PROXY_REQUIRED_PAUSE_REASON = "upstream_proxy_required_on_import"
 
 
 def _is_non_loopback_ipv4(value: str | None) -> bool:
@@ -107,6 +120,7 @@ def _dashboard_settings_response(settings) -> DashboardSettingsResponse:
     return DashboardSettingsResponse(
         sticky_threads_enabled=settings.sticky_threads_enabled,
         upstream_stream_transport=settings.upstream_stream_transport,
+        http_downstream_transport_policy=settings.http_downstream_transport_policy,
         upstream_proxy_routing_enabled=settings.upstream_proxy_routing_enabled,
         upstream_proxy_default_pool_id=settings.upstream_proxy_default_pool_id,
         prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
@@ -129,6 +143,7 @@ def _dashboard_settings_response(settings) -> DashboardSettingsResponse:
         totp_required_on_login=settings.totp_required_on_login,
         totp_configured=settings.totp_configured,
         api_key_auth_enabled=settings.api_key_auth_enabled,
+        hide_upstream_quota_from_api_keys=settings.hide_upstream_quota_from_api_keys,
         limit_warmup_enabled=settings.limit_warmup_enabled,
         limit_warmup_windows=settings.limit_warmup_windows,
         limit_warmup_model=settings.limit_warmup_model,
@@ -138,6 +153,7 @@ def _dashboard_settings_response(settings) -> DashboardSettingsResponse:
         weekly_pace_working_days=settings.weekly_pace_working_days,
         guest_access_enabled=settings.guest_access_enabled,
         guest_password_configured=settings.guest_password_configured,
+        limit_warmup_staggered_idle_enabled=settings.limit_warmup_staggered_idle_enabled,
     )
 
 
@@ -212,6 +228,44 @@ async def create_upstream_proxy_endpoint(
     await context.session.commit()
     await context.session.refresh(row)
     return _proxy_endpoint_response(row)
+
+
+@router.post("/upstream-proxy/endpoints/{endpoint_id}/test", response_model=UpstreamProxyEndpointTestResponse)
+async def test_upstream_proxy_endpoint(
+    endpoint_id: str,
+    _write_access=Depends(require_dashboard_write_access),
+    context: SettingsContext = Depends(get_settings_context),
+) -> UpstreamProxyEndpointTestResponse:
+    row = await context.session.get(ProxyEndpoint, endpoint_id)
+    if row is None:
+        raise DashboardBadRequestError("Proxy endpoint not found", code="proxy_endpoint_not_found")
+    endpoint = resolve_proxy_endpoint(row, encryptor=TokenEncryptor())
+    started = time.monotonic()
+    try:
+        status_code = await _probe_upstream_proxy_endpoint(endpoint)
+    except Exception as exc:
+        return UpstreamProxyEndpointTestResponse(
+            endpoint_id=endpoint.id,
+            ok=False,
+            elapsed_ms=_elapsed_ms(started),
+            error=type(exc).__name__,
+        )
+    if status_code == HTTP_PROXY_AUTHENTICATION_REQUIRED:
+        return UpstreamProxyEndpointTestResponse(
+            endpoint_id=endpoint.id,
+            ok=False,
+            status_code=status_code,
+            elapsed_ms=_elapsed_ms(started),
+            error="proxy_auth_failed",
+        )
+    ok = status_code < 500
+    return UpstreamProxyEndpointTestResponse(
+        endpoint_id=endpoint.id,
+        ok=ok,
+        status_code=status_code,
+        elapsed_ms=_elapsed_ms(started),
+        error=None if ok else "upstream_probe_failed",
+    )
 
 
 @router.post("/upstream-proxy/pools", response_model=UpstreamProxyPoolResponse)
@@ -332,9 +386,11 @@ async def _validate_proxy_pool_id(context: SettingsContext, pool_id: str | None)
         raise DashboardBadRequestError("Proxy pool not found", code="proxy_pool_not_found")
 
 
-async def _validate_account_id(context: SettingsContext, account_id: str) -> None:
-    if await context.session.get(Account, account_id) is None:
+async def _get_account_or_error(context: SettingsContext, account_id: str) -> Account:
+    account = await context.session.get(Account, account_id)
+    if account is None:
         raise DashboardBadRequestError("Account not found", code="account_not_found")
+    return account
 
 
 def _is_missing_proxy_endpoint_error(exc: Exception) -> bool:
@@ -362,10 +418,11 @@ def _duplicate_proxy_pool_member_error() -> DashboardBadRequestError:
 async def put_account_proxy_binding(
     account_id: str,
     payload: AccountProxyBindingRequest,
+    request: Request,
     _write_access=Depends(require_dashboard_write_access),
     context: SettingsContext = Depends(get_settings_context),
 ) -> AccountProxyBindingResponse:
-    await _validate_account_id(context, account_id)
+    account = await _get_account_or_error(context, account_id)
     await _validate_proxy_pool_id(context, payload.pool_id)
     row = (
         (
@@ -376,13 +433,24 @@ async def put_account_proxy_binding(
         .scalars()
         .one_or_none()
     )
+    close_bridge_sessions = payload.is_active
     if row is None:
         row = AccountProxyBinding(account_id=account_id, pool_id=payload.pool_id, is_active=payload.is_active)
         context.session.add(row)
     else:
+        close_bridge_sessions = row.pool_id != payload.pool_id or row.is_active != payload.is_active
         row.pool_id = payload.pool_id
         row.is_active = payload.is_active
+    if payload.is_active and _account_proxy_binding_should_reactivate(account):
+        account.status = AccountStatus.ACTIVE
+        account.deactivation_reason = None
+        account.reset_at = None
+        account.blocked_at = None
+        clear_account_routing_unavailable(account_id)
+        get_account_selection_cache().invalidate()
     await context.session.commit()
+    if close_bridge_sessions:
+        await get_proxy_service_for_app(request.app).close_http_bridge_sessions_for_account(account_id)
     await context.session.refresh(row)
     return AccountProxyBindingResponse(account_id=row.account_id, pool_id=row.pool_id, is_active=row.is_active)
 
@@ -397,6 +465,47 @@ def _proxy_endpoint_response(row: ProxyEndpoint) -> UpstreamProxyEndpointRespons
         username=row.username,
         is_active=row.is_active,
     )
+
+
+def _account_proxy_binding_should_reactivate(account: Account) -> bool:
+    reason = account.deactivation_reason or ""
+    return (
+        account.status == AccountStatus.PAUSED
+        and reason == IMPORT_PROXY_REQUIRED_PAUSE_REASON
+        or account.status == AccountStatus.DEACTIVATED
+        and (reason == "proxy_unreachable" or reason.startswith("proxy_unreachable:"))
+    )
+
+
+async def _probe_upstream_proxy_endpoint(endpoint) -> int:
+    if endpoint.scheme.startswith("socks"):
+        connector = ProxyConnector(
+            host=endpoint.host,
+            port=endpoint.port,
+            proxy_type=ProxyType.SOCKS5,
+            username=endpoint.username,
+            password=endpoint.password,
+            rdns=endpoint.proxy_url.split(":", 1)[0] == "socks5h",
+            ssl=_build_ssl_context(),
+        )
+        async with aiohttp.ClientSession(
+            connector=connector,
+            timeout=aiohttp.ClientTimeout(total=UPSTREAM_PROXY_TEST_TIMEOUT_SECONDS),
+            trust_env=False,
+        ) as client:
+            response = await client.get(UPSTREAM_PROXY_TEST_URL, allow_redirects=False)
+            return response.status
+    async with httpx.AsyncClient(
+        proxy=endpoint.proxy_url,
+        timeout=httpx.Timeout(UPSTREAM_PROXY_TEST_TIMEOUT_SECONDS),
+        follow_redirects=False,
+    ) as client:
+        response = await client.get(UPSTREAM_PROXY_TEST_URL)
+        return response.status_code
+
+
+def _elapsed_ms(started: float) -> int:
+    return max(0, round((time.monotonic() - started) * 1000))
 
 
 @router.put("", response_model=DashboardSettingsResponse)
@@ -458,6 +567,9 @@ async def update_settings(
                     else current.sticky_threads_enabled
                 ),
                 upstream_stream_transport=payload.upstream_stream_transport or current.upstream_stream_transport,
+                http_downstream_transport_policy=(
+                    payload.http_downstream_transport_policy or current.http_downstream_transport_policy
+                ),
                 upstream_proxy_routing_enabled=(
                     payload.upstream_proxy_routing_enabled
                     if payload.upstream_proxy_routing_enabled is not None
@@ -534,6 +646,11 @@ async def update_settings(
                     if payload.api_key_auth_enabled is not None
                     else current.api_key_auth_enabled
                 ),
+                hide_upstream_quota_from_api_keys=(
+                    payload.hide_upstream_quota_from_api_keys
+                    if payload.hide_upstream_quota_from_api_keys is not None
+                    else current.hide_upstream_quota_from_api_keys
+                ),
                 limit_warmup_enabled=(
                     payload.limit_warmup_enabled
                     if payload.limit_warmup_enabled is not None
@@ -562,6 +679,11 @@ async def update_settings(
                     if payload.guest_access_enabled is not None
                     else current.guest_access_enabled
                 ),
+                limit_warmup_staggered_idle_enabled=(
+                    payload.limit_warmup_staggered_idle_enabled
+                    if payload.limit_warmup_staggered_idle_enabled is not None
+                    else current.limit_warmup_staggered_idle_enabled
+                ),
             )
         )
     except ValueError as exc:
@@ -573,6 +695,7 @@ async def update_settings(
         for field_name in (
             "sticky_threads_enabled",
             "upstream_stream_transport",
+            "http_downstream_transport_policy",
             "upstream_proxy_routing_enabled",
             "upstream_proxy_default_pool_id",
             "prefer_earlier_reset_accounts",
@@ -593,6 +716,7 @@ async def update_settings(
             "import_without_overwrite",
             "totp_required_on_login",
             "api_key_auth_enabled",
+            "hide_upstream_quota_from_api_keys",
             "limit_warmup_enabled",
             "limit_warmup_windows",
             "limit_warmup_model",
@@ -600,8 +724,8 @@ async def update_settings(
             "limit_warmup_cooldown_seconds",
             "limit_warmup_min_available_percent",
             "weekly_pace_working_days",
-            "weekly_pace_working_days",
             "guest_access_enabled",
+            "limit_warmup_staggered_idle_enabled",
         )
         if getattr(current, field_name) != getattr(updated, field_name)
     ]

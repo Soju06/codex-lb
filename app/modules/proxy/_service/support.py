@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import re
 import time
@@ -28,6 +29,7 @@ from app.modules.proxy.work_admission import AdmissionLease
 
 logger = logging.getLogger(__name__)
 
+_REQUEST_TRANSPORT_HTTP = "http"
 _REQUEST_TRANSPORT_WEBSOCKET = "websocket"
 _WEBSOCKET_FULL_REPLAY_WAIT_MIN_ITEMS = 20
 _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS = 0.05
@@ -151,6 +153,38 @@ async def _sleep_for_account_selection_recovery(
     return True
 
 
+async def _call_with_supported_optional_kwargs(
+    func: Callable[..., Awaitable[Any]],
+    /,
+    *args: Any,
+    optional_kwargs: Mapping[str, Any],
+    **required_kwargs: Any,
+) -> Any:
+    return await func(*args, **_supported_optional_kwargs(func, optional_kwargs, required_kwargs))
+
+
+def _supported_optional_kwargs(
+    func: Callable[..., Any],
+    optional_kwargs: Mapping[str, Any],
+    required_kwargs: Mapping[str, Any],
+) -> dict[str, Any]:
+    kwargs = dict(required_kwargs)
+    kwargs.update(optional_kwargs)
+    if optional_kwargs:
+        try:
+            signature = inspect.signature(func)
+        except (TypeError, ValueError):
+            signature = None
+        accepts_var_keyword = signature is not None and any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in signature.parameters.values()
+        )
+        if signature is not None and not accepts_var_keyword:
+            for name in optional_kwargs:
+                if name not in signature.parameters:
+                    kwargs.pop(name, None)
+    return kwargs
+
+
 def _request_log_useragent_fields(headers: Mapping[str, str]) -> tuple[str | None, str | None]:
     raw_useragent = next((value for key, value in headers.items() if key.lower() == "user-agent"), None)
     if raw_useragent is None:
@@ -214,6 +248,7 @@ class _StreamSettlement:
     downstream_visible: bool = False
     downstream_text_visible: bool = False
     response_id: str | None = None
+    usage_settlement_transferred: bool = False
 
 
 def _stream_settlement_error_payload(settlement: _StreamSettlement) -> UpstreamError:
@@ -262,12 +297,16 @@ class _WebSocketRequestState:
     started_at: float
     latency_first_token_ms: int | None = None
     request_log_id: str | None = None
+    archive_request_id: str | None = None
     requested_service_tier: str | None = None
     actual_service_tier: str | None = None
     response_id: str | None = None
     awaiting_response_created: bool = False
     event_queue: asyncio.Queue[str | None] | None = None
     transport: str = _REQUEST_TRANSPORT_WEBSOCKET
+    upstream_transport: str | None = _REQUEST_TRANSPORT_WEBSOCKET
+    enforce_openai_sdk_contract: bool = True
+    request_kind: str = "normal"
     api_key: ApiKeyData | None = None
     request_usage_budget: ApiKeyRequestUsageBudget | None = None
     request_text: str | None = None
@@ -325,6 +364,7 @@ class _WebSocketRequestState:
     upstream_proxy_fail_closed_reason: str | None = None
     useragent: str | None = None
     useragent_group: str | None = None
+    client_ip: str | None = None
     downstream_visible: bool = False
     suppress_next_created_downstream: bool = False
     replay_downstream_response_id: str | None = None

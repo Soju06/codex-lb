@@ -5,8 +5,9 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from sqlalchemy.dialects.postgresql import dialect as postgresql_dialect
 
-from app.db.models import LimitWindow
+from app.db.models import LimitType, LimitWindow
 from app.modules.api_keys.repository import ApiKeyAccountCost, ApiKeysRepository
 
 pytestmark = pytest.mark.unit
@@ -246,3 +247,41 @@ class TestUsage7d:
             ),
         ]
         session.execute.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cost_limit_backfill_uses_bigint_cast_for_microdollars() -> None:
+    session = AsyncMock()
+    repo = ApiKeysRepository(session)
+    since = datetime(2026, 5, 1, 0, 0, 0)
+    until = datetime(2026, 5, 8, 0, 0, 0)
+    int32_max = 2_147_483_647
+    overflow_total = int32_max + 100
+    executed_sql: list[str] = []
+
+    async def _execute(statement):
+        executed_sql.append(
+            str(
+                statement.compile(
+                    dialect=postgresql_dialect(),
+                    compile_kwargs={"literal_binds": True},
+                )
+            )
+        )
+        return SimpleNamespace(scalar_one=lambda: overflow_total)
+
+    session.execute.side_effect = _execute
+
+    value = await repo.get_limit_usage_value(
+        "key_1",
+        limit_type=LimitType.COST_USD,
+        since=since,
+        until=until,
+        model_filter=None,
+    )
+
+    assert value == overflow_total
+    assert value > int32_max
+    assert "BIGINT" in executed_sql[0]
+    assert "sum(CAST(floor(coalesce(request_logs.cost_usd, 0.0) * 1000000) AS BIGINT))" in executed_sql[0]
+    assert "request_logs.request_kind NOT IN ('warmup', 'limit_warmup')" in executed_sql[0]

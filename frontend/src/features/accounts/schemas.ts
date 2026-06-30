@@ -91,6 +91,32 @@ export const AccountSummarySchema = z.object({
   limitWarmupEnabled: z.boolean().default(false),
   limitWarmup: AccountLimitWarmupStatusSchema.nullable().optional(),
   isEmailDuplicate: z.boolean().optional(),
+  availableResetCredits: z.number().nullable().optional(),
+  resetCreditNearestExpiresAt: z.iso.datetime({ offset: true }).nullable().optional(),
+});
+
+const RateLimitResetCreditItemSchema = z.object({
+  id: z.string(),
+  status: z.string().nullable().optional(),
+  resetType: z.string().nullable().optional(),
+  grantedAt: z.iso.datetime({ offset: true }).nullable().optional(),
+  expiresAt: z.iso.datetime({ offset: true }).nullable().optional(),
+  title: z.string().nullable().optional(),
+  description: z.string().nullable().optional(),
+  redeemedAt: z.iso.datetime({ offset: true }).nullable().optional(),
+  redeemStartedAt: z.iso.datetime({ offset: true }).nullable().optional(),
+});
+
+export const RateLimitResetCreditsSnapshotSchema = z.object({
+  availableCount: z.number(),
+  nearestExpiresAt: z.iso.datetime({ offset: true }).nullable(),
+  credits: z.array(RateLimitResetCreditItemSchema),
+});
+
+export const ConsumeRateLimitResetCreditResponseSchema = z.object({
+  code: z.string().nullable().optional(),
+  windowsReset: z.number().nullable().optional(),
+  redeemedAt: z.iso.datetime({ offset: true }).nullable(),
 });
 
 export const AccountTrendsResponseSchema = z.object({
@@ -281,6 +307,13 @@ export const ImportStateSchema = z.object({
 
 export type UsageTrendPoint = z.infer<typeof UsageTrendPointSchema>;
 export type AccountSummary = z.infer<typeof AccountSummarySchema>;
+export type RateLimitResetCreditItem = z.infer<typeof RateLimitResetCreditItemSchema>;
+export type RateLimitResetCreditsSnapshot = z.infer<
+  typeof RateLimitResetCreditsSnapshotSchema
+>;
+export type ConsumeRateLimitResetCreditResponse = z.infer<
+  typeof ConsumeRateLimitResetCreditResponseSchema
+>;
 export type AccountRoutingPolicy = z.infer<typeof AccountRoutingPolicySchema>;
 export type AccountAliasResponse = z.infer<typeof AccountAliasResponseSchema>;
 export type AccountLimitWarmupStatus = z.infer<

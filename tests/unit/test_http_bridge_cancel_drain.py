@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.core.clients.proxy_websocket import UpstreamResponsesWebSocket
 from app.db.models import AccountStatus, Base
+from app.modules.api_keys.service import ApiKeyData, ApiKeyUsageReservationData
 from app.modules.proxy import service as proxy_service
 from app.modules.proxy.durable_bridge_coordinator import DurableBridgeSessionCoordinator
 
@@ -65,6 +66,71 @@ def _make_request_state(
         transport="http",
         skip_request_log=True,
     )
+
+
+def _make_api_key() -> ApiKeyData:
+    return ApiKeyData(
+        id="key-cancel-settle",
+        name="cancel settle",
+        key_prefix="sk-test",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=proxy_service.utcnow(),
+        last_used_at=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_cancelled_stream_settlement_task_releases_reservation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, SimpleNamespace()))
+    scheduled: list[tuple[str, str]] = []
+    cleanup_tasks: list[asyncio.Task[None]] = []
+
+    async def release_unsettled(
+        *,
+        api_key: ApiKeyData,
+        api_key_reservation: ApiKeyUsageReservationData,
+        request_id: str,
+    ) -> None:
+        scheduled.append((api_key.id, api_key_reservation.reservation_id))
+
+    def schedule_cleanup(
+        coro: Any,
+        *,
+        action: str,
+        request_id: str,
+    ) -> None:
+        scheduled.append((action, request_id))
+        cleanup_tasks.append(asyncio.create_task(coro))
+
+    monkeypatch.setattr(service, "_release_unsettled_stream_api_key_usage", release_unsettled)
+    monkeypatch.setattr(service, "_schedule_cancel_safe_cleanup", schedule_cleanup)
+
+    task: asyncio.Task[bool] = asyncio.create_task(asyncio.sleep(60, result=True))
+    service._track_stream_usage_settlement_task(
+        task,
+        api_key=_make_api_key(),
+        api_key_reservation=ApiKeyUsageReservationData(
+            reservation_id="res-cancel-settle",
+            key_id="key-cancel-settle",
+            model="gpt-5.5",
+        ),
+        request_id="req-cancel-settle",
+    )
+    task.cancel()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    if cleanup_tasks:
+        await asyncio.gather(*cleanup_tasks)
+
+    assert ("release_stream_api_key_reservation_after_cancelled_settlement", "req-cancel-settle") in scheduled
+    assert ("key-cancel-settle", "res-cancel-settle") in scheduled
 
 
 @pytest.mark.asyncio

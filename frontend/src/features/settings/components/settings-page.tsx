@@ -1,5 +1,6 @@
 import { Suspense, lazy } from "react";
 import { Settings } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { AlertMessage } from "@/components/alert-message";
 import { LoadingOverlay } from "@/components/layout/loading-overlay";
@@ -9,8 +10,8 @@ import { FirewallSection } from "@/features/firewall/components/firewall-section
 import { QuotaPlannerSection } from "@/features/quota-planner/components/quota-planner-section";
 import { buildSettingsUpdateRequest } from "@/features/settings/payload";
 import { AppearanceSettings } from "@/features/settings/components/appearance-settings";
-import { ImportSettings } from "@/features/settings/components/import-settings";
 import { GuestAccessSettings } from "@/features/settings/components/guest-access-settings";
+import { ImportSettings } from "@/features/settings/components/import-settings";
 import { PasswordSettings } from "@/features/settings/components/password-settings";
 import { RoutingSettings } from "@/features/settings/components/routing-settings";
 import { SessionSettings } from "@/features/settings/components/session-settings";
@@ -27,6 +28,7 @@ const TotpSettings = lazy(() =>
 );
 
 export function SettingsPage() {
+  const { t } = useTranslation();
   const { settingsQuery, updateSettingsMutation } = useSettings();
   const { accountsQuery } = useAccounts();
   const {
@@ -34,6 +36,7 @@ export function SettingsPage() {
     createEndpointMutation,
     createPoolMutation,
     addPoolMemberMutation,
+    testEndpointMutation,
   } = useUpstreamProxyAdmin();
   const authMode = useAuthStore((state) => state.authMode);
   const passwordManagementEnabled = useAuthStore((state) => state.passwordManagementEnabled);
@@ -45,7 +48,8 @@ export function SettingsPage() {
     updateSettingsMutation.isPending ||
     createEndpointMutation.isPending ||
     createPoolMutation.isPending ||
-    addPoolMemberMutation.isPending;
+    addPoolMemberMutation.isPending ||
+    testEndpointMutation.isPending;
   const controlsDisabled = busy || !canWrite;
   const error =
     getErrorMessageOrNull(settingsQuery.error) ||
@@ -53,7 +57,8 @@ export function SettingsPage() {
     getErrorMessageOrNull(updateSettingsMutation.error) ||
     getErrorMessageOrNull(createEndpointMutation.error) ||
     getErrorMessageOrNull(createPoolMutation.error) ||
-    getErrorMessageOrNull(addPoolMemberMutation.error);
+    getErrorMessageOrNull(addPoolMemberMutation.error) ||
+    getErrorMessageOrNull(testEndpointMutation.error);
 
   const handleSave = async (payload: SettingsUpdateRequest) => {
     await updateSettingsMutation.mutateAsync(payload);
@@ -65,9 +70,9 @@ export function SettingsPage() {
       <div>
         <h1 className="flex items-center gap-2 text-2xl font-semibold tracking-tight">
           <Settings className="h-5 w-5 text-primary" />
-          Settings
+          {t("settings.page.title")}
         </h1>
-        <p className="mt-1 text-sm text-muted-foreground">Configure routing, auth, API key management, and firewall.</p>
+        <p className="mt-1 text-sm text-muted-foreground">{t("settings.page.subtitle")}</p>
       </div>
 
       {!settings ? (
@@ -77,21 +82,19 @@ export function SettingsPage() {
           {error ? <AlertMessage variant="error">{error}</AlertMessage> : null}
           {!canWrite ? (
             <div className="rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 text-xs font-medium text-foreground">
-              You are viewing the dashboard with read-only guest access. Admin controls are disabled.
+              {t("settings.page.readOnlyNotice")}
             </div>
           ) : null}
 
           {authMode === "trusted_header" ? (
             <div className="rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 text-xs font-medium text-foreground">
-              Dashboard access is authenticated by a trusted reverse-proxy header. Password and TOTP stay
-              available only as optional fallback login.
+              {t("settings.page.trustedHeaderNotice")}
             </div>
           ) : null}
 
           {authMode === "disabled" ? (
             <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs font-medium text-foreground">
-              Dashboard auth is fully bypassed by configuration. Only use this mode behind network restrictions
-              or external access control.
+              {t("settings.page.disabledNotice")}
             </div>
           ) : null}
 
@@ -104,6 +107,7 @@ export function SettingsPage() {
                 settings.limitWarmupModel,
                 settings.limitWarmupPrompt,
                 settings.limitWarmupCooldownSeconds,
+                settings.limitWarmupStaggeredIdleEnabled,
               ].join(":")}
               settings={settings}
               accounts={accountsQuery.data ?? []}
@@ -117,6 +121,7 @@ export function SettingsPage() {
                 busy={controlsDisabled}
                 onSaveSettings={handleSave}
                 onCreateEndpoint={(payload) => createEndpointMutation.mutateAsync(payload)}
+                onTestEndpoint={(endpointId) => testEndpointMutation.mutateAsync(endpointId)}
                 onCreatePool={(payload) => createPoolMutation.mutateAsync(payload)}
                 onAddPoolMember={(poolId, payload) =>
                   addPoolMemberMutation.mutateAsync({ poolId, payload })
@@ -144,9 +149,13 @@ export function SettingsPage() {
 
             <ApiKeysSection
               apiKeyAuthEnabled={settings.apiKeyAuthEnabled}
+              hideUpstreamQuotaFromApiKeys={settings.hideUpstreamQuotaFromApiKeys}
               disabled={controlsDisabled}
               onApiKeyAuthEnabledChange={(enabled) =>
                 void handleSave(buildSettingsUpdateRequest(settings, { apiKeyAuthEnabled: enabled }))
+              }
+              onHideUpstreamQuotaFromApiKeysChange={(enabled) =>
+                void handleSave(buildSettingsUpdateRequest(settings, { hideUpstreamQuotaFromApiKeys: enabled }))
               }
             />
             <FirewallSection disabled={controlsDisabled} />
@@ -154,7 +163,7 @@ export function SettingsPage() {
             <StickySessionsSection disabled={controlsDisabled} />
           </div>
 
-          <LoadingOverlay visible={!!settings && busy} label="Saving settings..." />
+          <LoadingOverlay visible={!!settings && busy} label={t("settings.page.savingLabel")} />
         </>
       )}
     </div>

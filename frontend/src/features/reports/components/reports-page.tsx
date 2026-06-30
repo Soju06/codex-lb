@@ -11,6 +11,7 @@ import { ReportsSummaryCards } from "./reports-summary-cards";
 import type { CostPerDayChartProps } from "./cost-per-day-chart";
 import type { TokensPerDayChartProps } from "./tokens-per-day-chart";
 import type { ModelDistributionDonutProps } from "./model-distribution-donut";
+import type { UseragentDistributionDonutProps } from "./useragent-distribution-donut";
 import { DailyDetailTable } from "./daily-detail-table";
 import { daysAgoLocalISO, getBrowserReportsTimeZone, localDateISO } from "../date";
 
@@ -29,6 +30,13 @@ const ModelDistributionDonut = lazy(() =>
     default: (props: ModelDistributionDonutProps) => <module.ModelDistributionDonut {...props} />,
   })),
 );
+const UseragentDistributionDonut = lazy(() =>
+  import("./useragent-distribution-donut").then((module) => ({
+    default: (props: UseragentDistributionDonutProps) => (
+      <module.UseragentDistributionDonut {...props} />
+    ),
+  })),
+);
 
 const REPORTS_TIMEZONE_REFRESH_INTERVAL_MS = 60_000;
 const DEFAULT_PRESET_DAYS = 7;
@@ -38,6 +46,7 @@ const createDefaultFilters = (): ReportsFiltersState => ({
   endDate: localDateISO(),
   accountId: [],
   model: "",
+  useragent: "",
 });
 
 export type ReportsPageProps = {
@@ -80,11 +89,11 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
   }, []);
 
   const reportsQuery = useReports(filters, reportsTimeZone);
-  const modelCatalogFilters = useMemo(
-    () => ({ ...filters, model: "" }),
+  const filterCatalogFilters = useMemo(
+    () => ({ ...filters, model: "", useragent: "" }),
     [filters],
   );
-  const modelCatalogQuery = useReports(modelCatalogFilters, reportsTimeZone);
+  const filterCatalogQuery = useReports(filterCatalogFilters, reportsTimeZone);
   const {
     data: accountsData,
     error: accountsError,
@@ -110,25 +119,34 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
 
   const modelOptions = useMemo(
     () =>
-      (modelCatalogQuery.data?.byModel ?? []).map((entry) => ({
+      (filterCatalogQuery.data?.byModel ?? []).map((entry) => ({
         value: entry.model,
         label: entry.model,
       })),
-    [modelCatalogQuery.data],
+    [filterCatalogQuery.data],
+  );
+
+  const useragentOptions = useMemo(
+    () =>
+      (filterCatalogQuery.data?.byUseragent ?? []).map((entry) => ({
+        value: entry.useragent,
+        label: entry.useragent,
+      })),
+    [filterCatalogQuery.data],
   );
 
   const mainReportsError = getErrorMessageOrNull(reportsQuery.error);
-  const modelOptionsError = getErrorMessageOrNull(modelCatalogQuery.error);
+  const sharedOptionsError = getErrorMessageOrNull(filterCatalogQuery.error);
   const accountOptionsError = getErrorMessageOrNull(accountsError);
 
   const hasAnyError = Boolean(
-    mainReportsError || modelOptionsError || accountOptionsError,
+    mainReportsError || sharedOptionsError || accountOptionsError,
   );
 
   const handleRetry = async () => {
     await Promise.allSettled([
       reportsQuery.refetch(),
-      modelCatalogQuery.refetch(),
+      filterCatalogQuery.refetch(),
       refetchAccounts(),
     ]);
   };
@@ -168,6 +186,7 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
         selectedPresetDays={selectedPresetDays}
         accountOptions={accountOptions}
         modelOptions={modelOptions}
+        useragentOptions={useragentOptions}
         onPresetSelect={handlePresetSelect}
         onFiltersChange={handleFiltersChange}
       />
@@ -177,9 +196,9 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
           Failed to load report data: {mainReportsError}
         </AlertMessage>
       ) : null}
-      {modelOptionsError ? (
+      {sharedOptionsError ? (
         <AlertMessage variant="error">
-          Failed to load model options: {modelOptionsError}
+          Failed to load model and user-agent options: {sharedOptionsError}
         </AlertMessage>
       ) : null}
       {accountOptionsError ? (
@@ -200,16 +219,27 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
           />
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
             <Suspense fallback={<div className="h-[270px] rounded-xl border bg-card" />}>
-              <CostPerDayChart data={reportsQuery.data.daily} />
+              <CostPerDayChart
+                startDate={filters.startDate}
+                endDate={filters.endDate}
+                data={reportsQuery.data.daily}
+              />
             </Suspense>
             <Suspense fallback={<div className="h-[270px] rounded-xl border bg-card" />}>
-              <TokensPerDayChart data={reportsQuery.data.daily} />
+              <TokensPerDayChart
+                startDate={filters.startDate}
+                endDate={filters.endDate}
+                data={reportsQuery.data.daily}
+              />
             </Suspense>
           </div>
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
-            <div className="lg:col-span-1">
+            <div className="space-y-4 lg:col-span-1">
               <Suspense fallback={<div className="h-[220px] rounded-xl border bg-card" />}>
                 <ModelDistributionDonut data={reportsQuery.data.byModel} />
+              </Suspense>
+              <Suspense fallback={<div className="h-[220px] rounded-xl border bg-card" />}>
+                <UseragentDistributionDonut data={reportsQuery.data.byUseragent} />
               </Suspense>
             </div>
             <div className="lg:col-span-2">

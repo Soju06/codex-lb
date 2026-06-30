@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { RoutingSettings } from "@/features/settings/components/routing-settings";
 import { buildSettingsUpdateRequest } from "@/features/settings/payload";
+import type { DashboardSettings } from "@/features/settings/schemas";
 import { createAccountSummary, createDashboardSettings } from "@/test/mocks/factories";
 
 if (!HTMLElement.prototype.hasPointerCapture) {
@@ -19,11 +20,23 @@ if (!HTMLElement.prototype.scrollIntoView) {
   HTMLElement.prototype.scrollIntoView = () => undefined;
 }
 
-const BASE_SETTINGS = createDashboardSettings({
+const LIMIT_WARMUP_DEFAULTS = {
+  limitWarmupEnabled: false,
+  limitWarmupWindows: "both" as const,
+  limitWarmupModel: "auto",
+  limitWarmupPrompt: "Say OK.",
+  limitWarmupCooldownSeconds: 3600,
+  limitWarmupMinAvailablePercent: 100,
+  limitWarmupStaggeredIdleEnabled: false,
+};
+
+const BASE_SETTINGS: DashboardSettings = {
+  ...createDashboardSettings(),
+  ...LIMIT_WARMUP_DEFAULTS,
   stickyThreadsEnabled: false,
   preferEarlierResetAccounts: true,
   totpConfigured: false,
-});
+};
 const BASE_UPDATE_PAYLOAD = buildSettingsUpdateRequest(BASE_SETTINGS, {});
 
 describe("RoutingSettings", () => {
@@ -318,7 +331,13 @@ describe("RoutingSettings", () => {
       />,
     );
 
-    await user.click(screen.getAllByRole("combobox")[1]);
+    const routingStrategySelect = screen
+      .getAllByRole("combobox")
+      .find((element) => element.textContent?.includes("Capacity weighted"));
+    if (!routingStrategySelect) {
+      throw new Error("Routing strategy select not found");
+    }
+    await user.click(routingStrategySelect);
     await user.click(await screen.findByRole("option", { name: "Single account" }));
 
     expect(onSave).toHaveBeenCalledWith({
@@ -332,6 +351,7 @@ describe("RoutingSettings", () => {
     render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={vi.fn().mockResolvedValue(undefined)} />);
 
     expect(screen.getByRole("switch", { name: "Enable limit warm-up" })).toBeInTheDocument();
+    expect(screen.getByRole("switch", { name: "Enable staggered idle warm-up" })).toBeDisabled();
     expect(screen.getByRole("switch", { name: "Prefer earlier reset accounts" })).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "Reset preference window" })).toBeInTheDocument();
     expect(screen.getByLabelText("Warmup model")).toHaveAttribute("maxLength", "128");
@@ -404,6 +424,20 @@ describe("RoutingSettings", () => {
     });
   });
 
+  it("renders and saves the HTTP client routing policy", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={onSave} />);
+
+    await user.click(screen.getByRole("combobox", { name: "HTTP client routing" }));
+    await user.click(await screen.findByRole("option", { name: "Prefer persistent sessions" }));
+
+    expect(onSave).toHaveBeenCalledWith({
+      ...BASE_UPDATE_PAYLOAD,
+      httpDownstreamTransportPolicy: "always_websocket",
+    });
+  });
+
   it("offers Fill first as a routing strategy option", () => {
     render(
       <RoutingSettings
@@ -414,5 +448,26 @@ describe("RoutingSettings", () => {
     );
 
     expect(screen.getAllByText("Fill first").length).toBeGreaterThan(0);
+  });
+
+  it("saves staggered idle warm-up when limit warm-up is enabled", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(
+      <RoutingSettings
+        settings={{ ...BASE_SETTINGS, limitWarmupEnabled: true }}
+        busy={false}
+        onSave={onSave}
+      />,
+    );
+
+    await user.click(screen.getByRole("switch", { name: "Enable staggered idle warm-up" }));
+
+    expect(onSave).toHaveBeenCalledWith(
+      buildSettingsUpdateRequest(
+        { ...BASE_SETTINGS, limitWarmupEnabled: true },
+        { limitWarmupEnabled: true, limitWarmupStaggeredIdleEnabled: true },
+      ),
+    );
   });
 });

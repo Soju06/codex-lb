@@ -110,12 +110,14 @@ describe("buildSettingsUpdateRequest", () => {
       totpRequiredOnLogin: true,
       totpConfigured: false,
       apiKeyAuthEnabled: true,
+      limitWarmupStaggeredIdleEnabled: true,
     });
 
     const payload = buildSettingsUpdateRequest(settings, {
       stickyReallocationPrimaryBudgetThresholdPct: 80,
     });
 
+    expect(payload.limitWarmupStaggeredIdleEnabled).toBe(true);
     expect(payload.stickyReallocationBudgetThresholdPct).toBe(80);
     expect(payload.stickyReallocationPrimaryBudgetThresholdPct).toBe(80);
     expect(payload.stickyReallocationSecondaryBudgetThresholdPct).toBe(100);

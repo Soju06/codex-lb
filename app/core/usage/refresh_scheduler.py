@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import importlib
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import AsyncIterator, Protocol, cast
 
@@ -61,6 +62,7 @@ def _get_leader_election() -> _LeaderElectionLike:
 class UsageRefreshScheduler:
     interval_seconds: int
     enabled: bool
+    _next_account_index: int = 0
     _task: asyncio.Task[None] | None = None
     _stop: asyncio.Event = field(default_factory=asyncio.Event)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -84,15 +86,19 @@ class UsageRefreshScheduler:
 
     async def _run_loop(self) -> None:
         while not self._stop.is_set():
-            await self._refresh_once()
+            started_at = time.monotonic()
+            delay = await self._refresh_once()
+            remaining_delay = max(0.0, delay - (time.monotonic() - started_at))
+            if remaining_delay <= 0:
+                continue
             try:
-                await asyncio.wait_for(self._stop.wait(), timeout=self.interval_seconds)
+                await asyncio.wait_for(self._stop.wait(), timeout=remaining_delay)
             except asyncio.TimeoutError:
                 continue
 
-    async def _refresh_once(self) -> None:
+    async def _refresh_once(self) -> float:
         if not await _get_leader_election().try_acquire():
-            return
+            return float(self.interval_seconds)
         async with self._lock:
             try:
                 async with get_background_session() as session:
@@ -104,9 +110,14 @@ class UsageRefreshScheduler:
                     request_logs_repo = RequestLogsRepository(session)
                     before_primary = await usage_repo.latest_by_account(window="primary")
                     before_secondary = await usage_repo.latest_by_account(window="secondary")
-                    accounts = await accounts_repo.list_accounts()
+                    accounts = _ordered_usage_refresh_accounts(await accounts_repo.list_accounts())
+                    selected_account, cycle_complete = self._select_next_account(accounts)
+                    if selected_account is None:
+                        await _invalidate_usage_refresh_caches()
+                        return float(self.interval_seconds)
                     updater = UsageUpdater(usage_repo, accounts_repo, additional_usage_repo)
-                    usage_written = await updater.refresh_accounts(accounts, before_primary)
+                    refresh_started_at = usage_updater_module.utcnow()
+                    usage_written = await updater.refresh_accounts([selected_account], before_primary)
                     if usage_written:
                         after_primary = await usage_repo.latest_by_account(window="primary")
                         after_secondary = await usage_repo.latest_by_account(window="secondary")
@@ -127,16 +138,29 @@ class UsageRefreshScheduler:
                             before_secondary=before_secondary,
                             after_primary=after_primary,
                             after_secondary=after_secondary,
+                            refresh_started_at=refresh_started_at,
+                            usage_refresh_interval_seconds=self.interval_seconds,
                         )
                         await reconcile_recoverable_account_statuses(
                             accounts_repo=accounts_repo,
                             usage_repo=usage_repo,
                             accounts=refreshed_accounts,
                         )
-                    await get_rate_limit_headers_cache().invalidate()
-                    get_account_selection_cache().invalidate()
+                    if cycle_complete:
+                        await _invalidate_usage_refresh_caches()
             except Exception:
                 logger.exception("Usage refresh loop failed")
+                return float(self.interval_seconds)
+        return _usage_refresh_slice_seconds(self.interval_seconds, len(accounts))
+
+    def _select_next_account(self, accounts: list[Account]) -> tuple[Account | None, bool]:
+        if not accounts:
+            self._next_account_index = 0
+            return None, True
+        index = self._next_account_index % len(accounts)
+        next_index = (index + 1) % len(accounts)
+        self._next_account_index = next_index
+        return accounts[index], next_index == 0
 
 
 def build_usage_refresh_scheduler() -> UsageRefreshScheduler:
@@ -145,6 +169,28 @@ def build_usage_refresh_scheduler() -> UsageRefreshScheduler:
         interval_seconds=settings.usage_refresh_interval_seconds,
         enabled=settings.usage_refresh_enabled,
     )
+
+
+def _ordered_usage_refresh_accounts(accounts: list[Account]) -> list[Account]:
+    return sorted(
+        (
+            account
+            for account in accounts
+            if account.status not in (AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED)
+        ),
+        key=lambda account: account.id,
+    )
+
+
+def _usage_refresh_slice_seconds(interval_seconds: int, account_count: int) -> float:
+    if account_count <= 0:
+        return float(interval_seconds)
+    return float(interval_seconds) / account_count
+
+
+async def _invalidate_usage_refresh_caches() -> None:
+    await get_rate_limit_headers_cache().invalidate()
+    get_account_selection_cache().invalidate()
 
 
 @contextlib.asynccontextmanager

@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import base64
 import json
+from typing import Any, cast
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import text
 
 from app.core.auth import generate_unique_account_id
+from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal
 
 pytestmark = pytest.mark.integration
@@ -66,6 +69,7 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["totpRequiredOnLogin"] is False
     assert payload["totpConfigured"] is False
     assert payload["apiKeyAuthEnabled"] is False
+    assert payload["hideUpstreamQuotaFromApiKeys"] is False
     assert payload["limitWarmupEnabled"] is False
     assert payload["limitWarmupWindows"] == "both"
     assert payload["limitWarmupModel"] == "auto"
@@ -73,6 +77,7 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["limitWarmupCooldownSeconds"] == 3600
     assert payload["limitWarmupMinAvailablePercent"] == 100.0
     assert payload["weeklyPaceWorkingDays"] == "0,1,2,3,4,5,6"
+    assert payload["limitWarmupStaggeredIdleEnabled"] is False
 
     response = await async_client.put(
         "/api/settings",
@@ -98,6 +103,7 @@ async def test_settings_api_get_and_update(async_client):
             "importWithoutOverwrite": False,
             "totpRequiredOnLogin": False,
             "apiKeyAuthEnabled": True,
+            "hideUpstreamQuotaFromApiKeys": True,
             "limitWarmupEnabled": True,
             "limitWarmupWindows": "primary",
             "limitWarmupModel": "gpt-5.1-codex-mini",
@@ -105,6 +111,7 @@ async def test_settings_api_get_and_update(async_client):
             "limitWarmupCooldownSeconds": 7200,
             "limitWarmupMinAvailablePercent": 99.0,
             "weeklyPaceWorkingDays": "0,1,2,3,4",
+            "limitWarmupStaggeredIdleEnabled": True,
         },
     )
     assert response.status_code == 200
@@ -131,6 +138,7 @@ async def test_settings_api_get_and_update(async_client):
     assert updated["totpRequiredOnLogin"] is False
     assert updated["totpConfigured"] is False
     assert updated["apiKeyAuthEnabled"] is True
+    assert updated["hideUpstreamQuotaFromApiKeys"] is True
     assert updated["limitWarmupEnabled"] is True
     assert updated["limitWarmupWindows"] == "primary"
     assert updated["limitWarmupModel"] == "gpt-5.1-codex-mini"
@@ -138,6 +146,7 @@ async def test_settings_api_get_and_update(async_client):
     assert updated["limitWarmupCooldownSeconds"] == 7200
     assert updated["limitWarmupMinAvailablePercent"] == 99.0
     assert updated["weeklyPaceWorkingDays"] == "0,1,2,3,4"
+    assert updated["limitWarmupStaggeredIdleEnabled"] is True
 
     response = await async_client.get("/api/settings")
     assert response.status_code == 200
@@ -164,6 +173,7 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["totpRequiredOnLogin"] is False
     assert payload["totpConfigured"] is False
     assert payload["apiKeyAuthEnabled"] is True
+    assert payload["hideUpstreamQuotaFromApiKeys"] is True
     assert payload["limitWarmupEnabled"] is True
     assert payload["limitWarmupWindows"] == "primary"
     assert payload["limitWarmupModel"] == "gpt-5.1-codex-mini"
@@ -351,6 +361,7 @@ async def test_settings_api_allows_partial_updates(async_client):
     assert updated["routingStrategy"] == original["routingStrategy"]
     assert updated["upstreamProxyRoutingEnabled"] == original["upstreamProxyRoutingEnabled"]
     assert updated["upstreamProxyDefaultPoolId"] == original["upstreamProxyDefaultPoolId"]
+    assert updated["hideUpstreamQuotaFromApiKeys"] == original["hideUpstreamQuotaFromApiKeys"]
 
 
 @pytest.mark.asyncio
@@ -412,6 +423,161 @@ async def test_upstream_proxy_admin_controls(async_client):
     assert admin_payload["defaultPoolId"] == pool_payload["id"]
     assert admin_payload["endpoints"][0]["id"] == endpoint_payload["id"]
     assert admin_payload["pools"][0]["endpointIds"] == [endpoint_payload["id"]]
+
+
+@pytest.mark.asyncio
+async def test_upstream_proxy_endpoint_test_probes_configured_proxy(async_client, monkeypatch):
+    captured: dict[str, object] = {}
+
+    class _Response:
+        status_code = 204
+
+    class _FakeAsyncClient:
+        def __init__(self, **kwargs):
+            captured["client_kwargs"] = kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def get(self, url):
+            captured["url"] = url
+            return _Response()
+
+    monkeypatch.setattr("app.modules.settings.api.httpx.AsyncClient", _FakeAsyncClient)
+
+    endpoint = await async_client.post(
+        "/api/settings/upstream-proxy/endpoints",
+        json={
+            "name": "Proxy A",
+            "scheme": "http",
+            "host": "proxy.internal",
+            "port": 8080,
+            "username": "user",
+            "password": "secret",
+        },
+    )
+    assert endpoint.status_code == 200
+
+    response = await async_client.post(
+        f"/api/settings/upstream-proxy/endpoints/{endpoint.json()['id']}/test",
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["statusCode"] == 204
+    assert payload["error"] is None
+    client_kwargs = cast(dict[str, Any], captured["client_kwargs"])
+    assert captured["url"] == "https://chatgpt.com/cdn-cgi/trace"
+    assert client_kwargs["proxy"] == "http://user:secret@proxy.internal:8080"
+    assert "secret" not in str(payload)
+
+
+@pytest.mark.asyncio
+async def test_upstream_proxy_endpoint_test_rejects_proxy_auth_response(async_client, monkeypatch):
+    class _Response:
+        status_code = 407
+
+    class _FakeAsyncClient:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def get(self, url):
+            return _Response()
+
+    monkeypatch.setattr("app.modules.settings.api.httpx.AsyncClient", _FakeAsyncClient)
+
+    endpoint = await async_client.post(
+        "/api/settings/upstream-proxy/endpoints",
+        json={
+            "name": "Proxy Auth",
+            "scheme": "http",
+            "host": "proxy.internal",
+            "port": 8080,
+            "username": "user",
+            "password": "wrong",
+        },
+    )
+    assert endpoint.status_code == 200
+
+    response = await async_client.post(
+        f"/api/settings/upstream-proxy/endpoints/{endpoint.json()['id']}/test",
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is False
+    assert payload["statusCode"] == 407
+    assert payload["error"] == "proxy_auth_failed"
+    assert "wrong" not in str(payload)
+
+
+@pytest.mark.asyncio
+async def test_upstream_proxy_endpoint_test_probes_socks_proxy(async_client, monkeypatch):
+    captured: dict[str, object] = {}
+
+    class _Response:
+        status = 204
+
+    class _FakeConnector:
+        def __init__(self, **kwargs):
+            captured["connector_kwargs"] = kwargs
+
+    class _FakeAiohttpSession:
+        def __init__(self, **kwargs):
+            captured["session_kwargs"] = kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def get(self, url, **kwargs):
+            captured["url"] = url
+            captured["get_kwargs"] = kwargs
+            return _Response()
+
+    monkeypatch.setattr("app.modules.settings.api.ProxyConnector", _FakeConnector)
+    monkeypatch.setattr("app.modules.settings.api.aiohttp.ClientSession", _FakeAiohttpSession)
+
+    endpoint = await async_client.post(
+        "/api/settings/upstream-proxy/endpoints",
+        json={
+            "name": "Proxy A",
+            "scheme": "socks5",
+            "host": "proxy.internal",
+            "port": 1080,
+        },
+    )
+    assert endpoint.status_code == 200
+
+    response = await async_client.post(
+        f"/api/settings/upstream-proxy/endpoints/{endpoint.json()['id']}/test",
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["statusCode"] == 204
+    assert payload["error"] is None
+    connector_kwargs = cast(dict[str, Any], captured["connector_kwargs"])
+    session_kwargs = cast(dict[str, Any], captured["session_kwargs"])
+    assert captured["url"] == "https://chatgpt.com/cdn-cgi/trace"
+    assert cast(dict[str, Any], captured["get_kwargs"])["allow_redirects"] is False
+    assert connector_kwargs["host"] == "proxy.internal"
+    assert connector_kwargs["port"] == 1080
+    assert connector_kwargs["rdns"] is True
+    assert session_kwargs["trust_env"] is False
 
 
 @pytest.mark.asyncio
@@ -493,3 +659,197 @@ async def test_account_proxy_binding_rejects_missing_targets(async_client):
     )
     assert missing_pool.status_code == 400
     assert missing_pool.json()["error"]["code"] == "proxy_pool_not_found"
+
+
+@pytest.mark.asyncio
+async def test_account_proxy_binding_reactivates_proxy_unreachable_account(async_client):
+    from app.modules.proxy.account_cache import (
+        get_account_selection_cache,
+        is_account_routing_unavailable,
+        mark_account_routing_unavailable,
+    )
+
+    cache_generation = get_account_selection_cache().generation
+    account_id = await _import_account(async_client, "acc-settings-proxy-repair", "settings-proxy-repair@example.com")
+    mark_account_routing_unavailable(account_id)
+    async with SessionLocal() as session:
+        account = await session.get(Account, account_id)
+        assert account is not None
+        account.status = AccountStatus.DEACTIVATED
+        account.deactivation_reason = "proxy_unreachable: ProxyConnectionError - connection refused"
+        await session.commit()
+
+    endpoint = await async_client.post(
+        "/api/settings/upstream-proxy/endpoints",
+        json={"name": "repair proxy", "scheme": "http", "host": "proxy.test", "port": 8080},
+    )
+    assert endpoint.status_code == 200
+    pool = await async_client.post(
+        "/api/settings/upstream-proxy/pools",
+        json={"name": "repair pool", "endpointIds": [endpoint.json()["id"]]},
+    )
+    assert pool.status_code == 200
+    binding = await async_client.put(
+        f"/api/settings/upstream-proxy/accounts/{account_id}/binding",
+        json={"poolId": pool.json()["id"], "isActive": True},
+    )
+
+    assert binding.status_code == 200
+    async with SessionLocal() as session:
+        account = await session.get(Account, account_id)
+        assert account is not None
+        assert account.status == AccountStatus.ACTIVE
+        assert account.deactivation_reason is None
+    assert get_account_selection_cache().generation > cache_generation
+    assert is_account_routing_unavailable(account_id) is False
+
+
+@pytest.mark.asyncio
+async def test_account_proxy_binding_closes_existing_bridge_sessions(async_client, monkeypatch):
+    close_sessions = AsyncMock()
+    monkeypatch.setattr(
+        "app.modules.settings.api.get_proxy_service_for_app",
+        lambda _app: type("_ProxyService", (), {"close_http_bridge_sessions_for_account": close_sessions})(),
+    )
+    account_id = await _import_account(async_client, "acc-settings-proxy-close", "settings-proxy-close@example.com")
+    endpoint = await async_client.post(
+        "/api/settings/upstream-proxy/endpoints",
+        json={"name": "close proxy", "scheme": "http", "host": "proxy.test", "port": 8080},
+    )
+    assert endpoint.status_code == 200
+    pool = await async_client.post(
+        "/api/settings/upstream-proxy/pools",
+        json={"name": "close pool", "endpointIds": [endpoint.json()["id"]]},
+    )
+    assert pool.status_code == 200
+
+    binding = await async_client.put(
+        f"/api/settings/upstream-proxy/accounts/{account_id}/binding",
+        json={"poolId": pool.json()["id"], "isActive": True},
+    )
+
+    assert binding.status_code == 200
+    close_sessions.assert_awaited_once_with(account_id)
+
+
+@pytest.mark.asyncio
+async def test_account_proxy_binding_disable_closes_existing_bridge_sessions(async_client, monkeypatch):
+    close_sessions = AsyncMock()
+    monkeypatch.setattr(
+        "app.modules.settings.api.get_proxy_service_for_app",
+        lambda _app: type("_ProxyService", (), {"close_http_bridge_sessions_for_account": close_sessions})(),
+    )
+    account_id = await _import_account(
+        async_client,
+        "acc-settings-proxy-disable-close",
+        "settings-proxy-disable-close@example.com",
+    )
+    endpoint = await async_client.post(
+        "/api/settings/upstream-proxy/endpoints",
+        json={"name": "disable close proxy", "scheme": "http", "host": "proxy.test", "port": 8080},
+    )
+    assert endpoint.status_code == 200
+    pool = await async_client.post(
+        "/api/settings/upstream-proxy/pools",
+        json={"name": "disable close pool", "endpointIds": [endpoint.json()["id"]]},
+    )
+    assert pool.status_code == 200
+    enabled = await async_client.put(
+        f"/api/settings/upstream-proxy/accounts/{account_id}/binding",
+        json={"poolId": pool.json()["id"], "isActive": True},
+    )
+    assert enabled.status_code == 200
+    close_sessions.reset_mock()
+
+    disabled = await async_client.put(
+        f"/api/settings/upstream-proxy/accounts/{account_id}/binding",
+        json={"poolId": pool.json()["id"], "isActive": False},
+    )
+
+    assert disabled.status_code == 200
+    close_sessions.assert_awaited_once_with(account_id)
+
+
+@pytest.mark.asyncio
+async def test_account_proxy_binding_rebind_active_account_closes_bridge_sessions(async_client, monkeypatch):
+    close_sessions = AsyncMock()
+    monkeypatch.setattr(
+        "app.modules.settings.api.get_proxy_service_for_app",
+        lambda _app: type("_ProxyService", (), {"close_http_bridge_sessions_for_account": close_sessions})(),
+    )
+
+    account_id = await _import_account(
+        async_client,
+        "acc-settings-proxy-rebind-close",
+        "settings-proxy-rebind-close@example.com",
+    )
+
+    endpoint_one = await async_client.post(
+        "/api/settings/upstream-proxy/endpoints",
+        json={"name": "rebind close proxy one", "scheme": "http", "host": "proxy.test", "port": 8080},
+    )
+    assert endpoint_one.status_code == 200
+    pool_one = await async_client.post(
+        "/api/settings/upstream-proxy/pools",
+        json={"name": "rebind close pool one", "endpointIds": [endpoint_one.json()["id"]]},
+    )
+    assert pool_one.status_code == 200
+
+    endpoint_two = await async_client.post(
+        "/api/settings/upstream-proxy/endpoints",
+        json={"name": "rebind close proxy two", "scheme": "http", "host": "proxy-2.test", "port": 8080},
+    )
+    assert endpoint_two.status_code == 200
+    pool_two = await async_client.post(
+        "/api/settings/upstream-proxy/pools",
+        json={"name": "rebind close pool two", "endpointIds": [endpoint_two.json()["id"]]},
+    )
+    assert pool_two.status_code == 200
+
+    first_binding = await async_client.put(
+        f"/api/settings/upstream-proxy/accounts/{account_id}/binding",
+        json={"poolId": pool_one.json()["id"], "isActive": True},
+    )
+    assert first_binding.status_code == 200
+    close_sessions.assert_awaited_once_with(account_id)
+    close_sessions.reset_mock()
+
+    rebinding = await async_client.put(
+        f"/api/settings/upstream-proxy/accounts/{account_id}/binding",
+        json={"poolId": pool_two.json()["id"], "isActive": True},
+    )
+    assert rebinding.status_code == 200
+    close_sessions.assert_awaited_once_with(account_id)
+
+
+@pytest.mark.asyncio
+async def test_account_proxy_binding_does_not_reactivate_session_deactivated_account(async_client):
+    account_id = await _import_account(async_client, "acc-settings-proxy-reauth", "settings-proxy-reauth@example.com")
+    async with SessionLocal() as session:
+        account = await session.get(Account, account_id)
+        assert account is not None
+        account.status = AccountStatus.DEACTIVATED
+        account.deactivation_reason = "ChatGPT session ended - re-login required"
+        await session.commit()
+
+    endpoint = await async_client.post(
+        "/api/settings/upstream-proxy/endpoints",
+        json={"name": "reauth proxy", "scheme": "http", "host": "proxy.test", "port": 8080},
+    )
+    assert endpoint.status_code == 200
+    pool = await async_client.post(
+        "/api/settings/upstream-proxy/pools",
+        json={"name": "reauth pool", "endpointIds": [endpoint.json()["id"]]},
+    )
+    assert pool.status_code == 200
+    binding = await async_client.put(
+        f"/api/settings/upstream-proxy/accounts/{account_id}/binding",
+        json={"poolId": pool.json()["id"], "isActive": True},
+    )
+
+    assert binding.status_code == 200
+    async with SessionLocal() as session:
+        account = await session.get(Account, account_id)
+        assert account is not None
+        assert account.status == AccountStatus.DEACTIVATED
+        assert account.deactivation_reason == "ChatGPT session ended - re-login required"

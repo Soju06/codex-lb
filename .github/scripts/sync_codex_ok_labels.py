@@ -148,6 +148,12 @@ query($owner: String!, $name: String!, $number: Int!, $after: String) {
               }
               body
               url
+              commit {
+                oid
+              }
+              originalCommit {
+                oid
+              }
             }
           }
         }
@@ -373,8 +379,65 @@ def timeline_head_oid(node: dict[str, Any]) -> str | None:
     return None
 
 
+def timeline_node_timestamp(node: dict[str, Any]) -> str | None:
+    for key in ("createdAt", "submittedAt", "committedDate"):
+        value = node.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def unresolved_review_comment_urls(repo: str, number: int) -> set[str]:
+    owner, name = repo.split("/", 1)
+    after: str | None = None
+    urls: set[str] = set()
+
+    while True:
+        fields: dict[str, object] = {"owner": owner, "name": name, "number": number}
+        if after is not None:
+            fields["after"] = after
+        payload = graphql(PR_REVIEW_THREADS_QUERY, **fields)
+        pr = payload.get("data", {}).get("repository", {}).get("pullRequest")
+        if not isinstance(pr, dict):
+            raise GhError(f"{repo}#{number}: GraphQL did not return a pull request")
+
+        threads = pr.get("reviewThreads")
+        if not isinstance(threads, dict):
+            raise GhError(f"{repo}#{number}: GraphQL did not return review threads")
+        nodes = threads.get("nodes", [])
+        if not isinstance(nodes, list):
+            raise GhError(f"{repo}#{number}: GraphQL did not return review thread nodes")
+
+        for thread in nodes:
+            if not isinstance(thread, dict):
+                continue
+            if thread.get("isResolved") or thread.get("isOutdated"):
+                continue
+            comments = thread.get("comments")
+            comment_nodes = comments.get("nodes") if isinstance(comments, dict) else []
+            if not isinstance(comment_nodes, list):
+                continue
+            for comment in comment_nodes:
+                if not isinstance(comment, dict):
+                    continue
+                url = comment.get("url")
+                if isinstance(url, str):
+                    urls.add(url)
+
+        page_info = threads.get("pageInfo")
+        if not isinstance(page_info, dict) or not page_info.get("hasNextPage"):
+            break
+        end_cursor = page_info.get("endCursor")
+        if not isinstance(end_cursor, str) or not end_cursor:
+            break
+        after = end_cursor
+
+    return urls
+
+
 def pull_review_comment_nodes(repo: str, number: int, *, head_sha: str) -> list[dict[str, Any]]:
     comments = paged_api(f"/repos/{repo}/pulls/{number}/comments")
+    unresolved_urls = unresolved_review_comment_urls(repo, number)
     nodes: list[dict[str, Any]] = []
     for comment in comments:
         body = comment.get("body")
@@ -383,7 +446,15 @@ def pull_review_comment_nodes(repo: str, number: int, *, head_sha: str) -> list[
         commit_id = comment.get("commit_id")
         original_commit_id = comment.get("original_commit_id")
         review_id = comment.get("pull_request_review_id")
-        if commit_id != head_sha and original_commit_id != head_sha:
+        commit_matches_head = commit_id == head_sha
+        original_matches_head = original_commit_id == head_sha
+        body_mentions_current_head = body_mentions_head(body, head_sha)
+        if not commit_matches_head and not original_matches_head and not body_mentions_current_head:
+            continue
+        effective_commit_id = original_commit_id if original_matches_head else commit_id
+        effective_review_id = review_id if original_matches_head else None
+        html_url = comment.get("html_url") or comment.get("url")
+        if is_needs_work_codex_body(body) and html_url not in unresolved_urls:
             continue
         user = comment.get("user")
         login = user.get("login") if isinstance(user, dict) else None
@@ -393,9 +464,9 @@ def pull_review_comment_nodes(repo: str, number: int, *, head_sha: str) -> list[
                 "author": {"login": login} if isinstance(login, str) else None,
                 "bodyText": body,
                 "createdAt": comment.get("created_at"),
-                "url": comment.get("html_url") or comment.get("url"),
-                "commit": {"oid": commit_id} if isinstance(commit_id, str) else None,
-                "pullRequestReviewDatabaseId": review_id if isinstance(review_id, int) else None,
+                "url": html_url,
+                "commit": {"oid": effective_commit_id} if isinstance(effective_commit_id, str) else None,
+                "pullRequestReviewDatabaseId": effective_review_id if isinstance(effective_review_id, int) else None,
             }
         )
     return nodes
@@ -433,7 +504,18 @@ def merge_review_comment_nodes(
     for node in comment_nodes:
         if id(node) not in placed_ids and node not in unplaced:
             unplaced.append(node)
-    merged.extend(unplaced)
+    for node in unplaced:
+        timestamp = timeline_node_timestamp(node)
+        if timestamp is None:
+            merged.append(node)
+            continue
+        insert_at = len(merged)
+        for index, candidate in enumerate(merged):
+            candidate_timestamp = timeline_node_timestamp(candidate)
+            if candidate_timestamp is not None and candidate_timestamp > timestamp:
+                insert_at = index
+                break
+        merged.insert(insert_at, node)
     return merged
 
 
@@ -611,8 +693,19 @@ def classify_check_state(
 ) -> str:
     states: list[str] = []
     seen_check_names: set[str] = set()
+    named_check_runs: dict[str, dict[str, Any]] = {}
+    unnamed_check_runs: list[dict[str, Any]] = []
 
     for item in check_runs:
+        name = item.get("name")
+        if isinstance(name, str):
+            previous = named_check_runs.get(name)
+            if previous is None or check_run_recency_key(item) >= check_run_recency_key(previous):
+                named_check_runs[name] = item
+        else:
+            unnamed_check_runs.append(item)
+
+    for item in [*named_check_runs.values(), *unnamed_check_runs]:
         name = item.get("name")
         if isinstance(name, str):
             seen_check_names.add(name)
@@ -635,6 +728,21 @@ def classify_check_state(
     if all(state in SUCCESS_CHECK_STATES for state in states):
         return "success"
     return "unknown"
+
+
+def check_run_recency_key(item: dict[str, Any]) -> tuple[str, str]:
+    return (
+        str(
+            item.get("started_at")
+            or item.get("startedAt")
+            or item.get("created_at")
+            or item.get("createdAt")
+            or item.get("completed_at")
+            or item.get("completedAt")
+            or ""
+        ),
+        str(item.get("completed_at") or item.get("completedAt") or ""),
+    )
 
 
 def commit_checks_state(repo: str, head_sha: str) -> str:
@@ -679,6 +787,7 @@ def unresolved_codex_finding_thread_urls(
     repo: str,
     number: int,
     *,
+    head_sha: str,
     allowed_authors: set[str],
 ) -> tuple[str, ...]:
     owner, name = repo.split("/", 1)
@@ -718,6 +827,20 @@ def unresolved_codex_finding_thread_urls(
                 if login not in allowed_authors:
                     continue
                 if not is_needs_work_codex_body(comment.get("body")):
+                    continue
+                body = comment.get("body")
+                commit = comment.get("commit")
+                commit_oid = commit.get("oid") if isinstance(commit, dict) else None
+                original_commit = comment.get("originalCommit")
+                original_oid = original_commit.get("oid") if isinstance(original_commit, dict) else None
+                body_mentions_current_head = body_mentions_head(body, head_sha)
+                if body_mentions_current_head:
+                    pass
+                elif commit_oid == head_sha:
+                    pass
+                elif original_oid == head_sha:
+                    pass
+                else:
                     continue
                 url = comment.get("url")
                 urls.append(str(url) if isinstance(url, str) else "unresolved Codex review thread")
@@ -840,7 +963,12 @@ def decide_pr(
         head_sha=head_sha,
         allowed_authors=allowed_authors,
     )
-    unresolved_finding_urls = unresolved_codex_finding_thread_urls(repo, number, allowed_authors=allowed_authors)
+    unresolved_finding_urls = unresolved_codex_finding_thread_urls(
+        repo,
+        number,
+        head_sha=head_sha,
+        allowed_authors=allowed_authors,
+    )
     has_codex_news = has_codex_news_after_current_head(
         timeline_nodes,
         head_sha=head_sha,

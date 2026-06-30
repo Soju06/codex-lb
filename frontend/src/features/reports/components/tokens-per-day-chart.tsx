@@ -8,9 +8,12 @@ import {
   ResponsiveContainer,
 } from "@/components/lazy-recharts";
 import type { DailyReportRow } from "../schemas";
+import { buildContinuousDailyRows } from "../daily-series";
 import { ChartTooltip } from "./chart-tooltip";
 
 export type TokensPerDayChartProps = {
+  startDate: string;
+  endDate: string;
   data: DailyReportRow[];
 };
 
@@ -21,8 +24,8 @@ function formatTokens(v: number): string {
   return String(v);
 }
 
-export function TokensPerDayChart({ data }: TokensPerDayChartProps) {
-  const chartData = data.map((d) => ({
+export function TokensPerDayChart({ startDate, endDate, data }: TokensPerDayChartProps) {
+  const chartData = buildContinuousDailyRows(startDate, endDate, data).map((d) => ({
     date: d.date.slice(5),
     input: d.inputTokens,
     output: d.outputTokens,

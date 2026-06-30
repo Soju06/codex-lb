@@ -5,6 +5,7 @@ from typing import Any, cast
 
 import aiohttp
 import pytest
+from python_socks import ProxyType
 
 from app.core.clients.codex import CodexClient, require_route_or_direct_egress_opt_in
 from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
@@ -87,10 +88,8 @@ class _SocksWsSession:
 class _SocksConnector:
     calls: list[dict[str, Any]] = []
 
-    @classmethod
-    def from_url(cls, proxy_url: str, **kwargs: Any) -> object:
-        cls.calls.append({"proxy_url": proxy_url, **kwargs})
-        return object()
+    def __init__(self, **kwargs: Any) -> None:
+        self.calls.append(kwargs)
 
 
 @pytest.fixture
@@ -237,11 +236,15 @@ async def test_websocket_transport_error_preserves_handshake_status(route: Resol
 
 
 @pytest.mark.asyncio
-async def test_socks_websocket_uses_proxy_connector_and_closes_session(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("scheme", ["socks5", "socks5h"])
+async def test_socks_websocket_uses_proxy_connector_and_closes_session(
+    monkeypatch: pytest.MonkeyPatch,
+    scheme: str,
+) -> None:
     route = ResolvedUpstreamRoute(
         mode="account_bound",
         pool_id="pool_1",
-        endpoint=ResolvedProxyEndpoint("ep_1", "socks5h", "proxy.test", 1080, "u", "p"),
+        endpoint=ResolvedProxyEndpoint("ep_1", scheme, "proxy.test", 1080, "u;session", "p@x:y"),
     )
     _SocksConnector.calls = []
     _SocksWsSession.latest = None
@@ -253,7 +256,16 @@ async def test_socks_websocket_uses_proxy_connector_and_closes_session(monkeypat
 
     session = _SocksWsSession.latest
     assert session is not None
-    assert _SocksConnector.calls[0]["proxy_url"] == "socks5h://u:p@proxy.test:1080"
+    assert _SocksConnector.calls[0]["ssl"] is not None
+    assert _SocksConnector.calls[0] | {"ssl": "present"} == {
+        "host": "proxy.test",
+        "port": 1080,
+        "proxy_type": ProxyType.SOCKS5,
+        "username": "u;session",
+        "password": "p@x:y",
+        "rdns": True,
+        "ssl": "present",
+    }
     assert session.calls == [{"url": "wss://upstream.test", "heartbeat": 30}]
     assert "proxy" not in session.calls[0]
     assert result.websocket is session.context.websocket

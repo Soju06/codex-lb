@@ -202,6 +202,57 @@ def test_schema_migration_contract_matches_after_upgrade(tmp_path: Path) -> None
     assert check_schema_drift(url) == ()
 
 
+def test_accounts_codex_installation_id_migration_backfills_existing_rows(tmp_path: Path) -> None:
+    db_path = tmp_path / "codex-installation-id.db"
+    url = _db_url(db_path)
+    parent_revision = "20260607_000000_merge_weekly_monthly_useragent_heads"
+    target_revision = "20260613_000000_add_accounts_codex_installation_id"
+
+    run_upgrade(url, parent_revision, bootstrap_legacy=False)
+    engine = create_engine(to_sync_database_url(url), future=True)
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO accounts "
+                    "(id, email, plan_type, access_token_encrypted, refresh_token_encrypted, "
+                    "id_token_encrypted, last_refresh, status, deactivation_reason) "
+                    "VALUES (:id, :email, :plan_type, :access_token, :refresh_token, "
+                    ":id_token, :last_refresh, :status, :deactivation_reason)"
+                ),
+                {
+                    "id": "acc_codex_installation_backfill",
+                    "email": "codex-installation@example.com",
+                    "plan_type": "plus",
+                    "access_token": b"access",
+                    "refresh_token": b"refresh",
+                    "id_token": b"id",
+                    "last_refresh": "2026-06-10 00:00:00",
+                    "status": "active",
+                    "deactivation_reason": None,
+                },
+            )
+    finally:
+        engine.dispose()
+
+    run_upgrade(url, target_revision, bootstrap_legacy=False)
+
+    engine = create_engine(to_sync_database_url(url), future=True)
+    try:
+        with engine.begin() as connection:
+            columns = {column["name"]: column for column in inspect(connection).get_columns("accounts")}
+            value = connection.execute(
+                text("SELECT codex_installation_id FROM accounts WHERE id = :id"),
+                {"id": "acc_codex_installation_backfill"},
+            ).scalar_one()
+    finally:
+        engine.dispose()
+
+    assert columns["codex_installation_id"]["nullable"] is False
+    assert isinstance(value, str)
+    assert len(value) == 36
+
+
 def test_reauth_required_status_migration_downgrade_remaps_rows(tmp_path: Path) -> None:
     db_path = tmp_path / "reauth-status.db"
     url = _db_url(db_path)
@@ -312,6 +363,59 @@ def test_reauth_required_status_migration_downgrade_remaps_rows(tmp_path: Path) 
     }
     assert str(status_column["type"]).upper() == "VARCHAR(14)"
     assert inspect_migration_state(url).current_revision == parent_revision
+
+
+def test_http_downstream_transport_policy_migration_round_trips_with_default_null_api_key(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "http-transport-policy.db"
+    url = _db_url(db_path)
+    parent_revision = "20260611_000000_merge_dashboard_guest_and_weekly_useragent_heads"
+    revision = "20260626_000000_add_http_downstream_transport_policy"
+
+    run_upgrade(url, parent_revision, bootstrap_legacy=False)
+    engine = create_engine(to_sync_database_url(url))
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO api_keys "
+                    "(id, name, key_hash, key_prefix, is_active, created_at) "
+                    "VALUES (:id, :name, :key_hash, :key_prefix, :is_active, CURRENT_TIMESTAMP)"
+                ),
+                {
+                    "id": "key_transport_policy_migration",
+                    "name": "transport policy migration",
+                    "key_hash": "hash_transport_policy_migration",
+                    "key_prefix": "sk-migration",
+                    "is_active": True,
+                },
+            )
+
+        config = _build_alembic_config(url)
+        command.upgrade(config, revision)
+        with engine.connect() as connection:
+            assert (
+                connection.execute(
+                    text("SELECT transport_policy_override FROM api_keys WHERE id = 'key_transport_policy_migration'")
+                ).scalar_one()
+                is None
+            )
+            inspector = inspect(connection)
+            assert "transport_policy_override" in {column["name"] for column in inspector.get_columns("api_keys")}
+            assert "http_downstream_transport_policy" in {
+                column["name"] for column in inspector.get_columns("dashboard_settings")
+            }
+
+        command.downgrade(config, parent_revision)
+        with engine.connect() as connection:
+            inspector = inspect(connection)
+            assert "transport_policy_override" not in {column["name"] for column in inspector.get_columns("api_keys")}
+            assert "http_downstream_transport_policy" not in {
+                column["name"] for column in inspector.get_columns("dashboard_settings")
+            }
+    finally:
+        engine.dispose()
 
 
 def test_base_revision_does_not_depend_on_live_metadata(tmp_path: Path, monkeypatch) -> None:

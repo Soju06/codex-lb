@@ -12,16 +12,17 @@ from uuid import uuid4
 import aiohttp
 
 from app.core.auth.refresh import RefreshError
-from app.core.clients.proxy import ProxyResponseError, filter_inbound_headers
+from app.core.clients.proxy import ProxyResponseError, UpstreamProxyRouteTrace, filter_inbound_headers
 from app.core.clients.proxy import compact_responses as core_compact_responses
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.exceptions import ProxyAuthError, ProxyRateLimitError
 from app.core.openai.models import CompactResponsePayload
 from app.core.openai.requests import ResponsesCompactRequest
+from app.core.upstream_proxy import UpstreamProxyRouteError
 from app.db.models import Account, AccountStatus
 from app.modules.api_keys.service import ApiKeyData, ApiKeyUsageReservationData
-from app.modules.proxy._service.support import _request_log_useragent_fields
+from app.modules.proxy._service.support import _call_with_supported_optional_kwargs, _request_log_useragent_fields
 from app.modules.proxy.helpers import _header_account_id, _normalize_error_code, _parse_openai_error
 from app.modules.proxy.request_policy import normalize_upstream_model_alias, validate_model_access
 
@@ -43,6 +44,8 @@ class _WarmupServiceProtocol(Protocol):
     async def _ensure_fresh_with_budget(self, account: Account, *, timeout_seconds: float) -> Account: ...
 
     async def _handle_proxy_error(self, account: Account, exc: ProxyResponseError) -> None: ...
+
+    async def _resolve_upstream_route_for_account(self, account: Account, *, operation: str) -> Any: ...
 
     async def _write_request_log(self, **kwargs: Any) -> None: ...
 
@@ -305,6 +308,11 @@ class _WarmupMixin:
         cached_input_tokens: int | None = None
         reasoning_tokens: int | None = None
         reservation: ApiKeyUsageReservationData | None = None
+        upstream_proxy_route_mode: str | None = None
+        upstream_proxy_pool_id: str | None = None
+        upstream_proxy_endpoint_id: str | None = None
+        upstream_proxy_fallback_used: bool | None = None
+        upstream_proxy_fail_closed_reason: str | None = None
         proxy = cast(_WarmupServiceProtocol, self)
 
         try:
@@ -312,6 +320,12 @@ class _WarmupMixin:
             live_account = await proxy._ensure_fresh_with_budget(live_account, timeout_seconds=refresh_timeout)
             access_token = proxy._encryptor.decrypt(live_account.access_token_encrypted)
             account_header_id = _header_account_id(live_account.chatgpt_account_id)
+            route = await proxy._resolve_upstream_route_for_account(live_account, operation="warmup")
+            if route is not None:
+                upstream_proxy_route_mode = route.mode
+                upstream_proxy_pool_id = route.pool_id
+                upstream_proxy_endpoint_id = route.endpoint_id
+            route_trace = UpstreamProxyRouteTrace()
             payload = ResponsesCompactRequest(
                 model=warmup_model,
                 instructions="Warmup request.",
@@ -319,12 +333,24 @@ class _WarmupMixin:
                 store=False,
             )
             normalize_upstream_model_alias(payload)
-            response = await _service_core_compact_responses()(
+            response = await _call_with_supported_optional_kwargs(
+                _service_core_compact_responses(),
                 payload,
                 upstream_headers,
                 access_token,
                 account_header_id,
+                optional_kwargs={
+                    "route": route,
+                    "allow_direct_egress": route is None,
+                    "route_trace": route_trace,
+                    "chatgpt_account_id": account_header_id,
+                },
             )
+            if route_trace.mode is not None:
+                upstream_proxy_route_mode = route_trace.mode
+                upstream_proxy_pool_id = route_trace.pool_id
+                upstream_proxy_endpoint_id = route_trace.endpoint_id
+                upstream_proxy_fallback_used = route_trace.fallback_used
             await proxy._load_balancer.record_success(live_account)
             status = "success"
             request_id = response.id or request_id
@@ -342,6 +368,10 @@ class _WarmupMixin:
                 await proxy._load_balancer.mark_permanent_failure(live_account, exc.code)
             error_code = "invalid_api_key"
             error_message = exc.message
+        except UpstreamProxyRouteError as exc:
+            upstream_proxy_fail_closed_reason = exc.reason
+            error_code = "upstream_proxy_unavailable"
+            error_message = str(exc) or "Warmup upstream proxy route is unavailable"
         except ProxyResponseError as exc:
             await proxy._handle_proxy_error(live_account, exc)
             error = _parse_openai_error(exc.payload)
@@ -383,6 +413,11 @@ class _WarmupMixin:
                     reasoning_tokens=reasoning_tokens,
                     transport=_REQUEST_TRANSPORT_HTTP,
                     request_kind="warmup",
+                    upstream_proxy_route_mode=upstream_proxy_route_mode,
+                    upstream_proxy_pool_id=upstream_proxy_pool_id,
+                    upstream_proxy_endpoint_id=upstream_proxy_endpoint_id,
+                    upstream_proxy_fallback_used=upstream_proxy_fallback_used,
+                    upstream_proxy_fail_closed_reason=upstream_proxy_fail_closed_reason,
                     useragent=useragent,
                     useragent_group=useragent_group,
                 )

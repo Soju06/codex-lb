@@ -36,4 +36,5 @@
       validated canonical PRs.
 - [x] 4.2 Run focused ruff and pytest checks for the guard implementation.
 - [x] 4.3 Validate the OpenSpec change strictly.
-- [ ] 4.4 Confirm GitHub CI and Codex review on the PR head.
+- [x] 4.4 Add a regression test for PEP 440 `uv.lock` beta version equivalence.
+- [ ] 4.5 Confirm GitHub CI and Codex review on the PR head.

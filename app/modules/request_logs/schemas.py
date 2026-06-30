@@ -21,12 +21,15 @@ class RequestLogEntry(DashboardModel):
     api_key_id: str | None = None
     api_key_name: str | None = None
     request_id: str
+    archive_request_id: str | None = None
     request_kind: str = "normal"
     model: str
     source: str | None = None
     useragent: str | None = None
     useragent_group: str | None = None
+    client_ip: str | None = None
     transport: str | None = None
+    upstream_transport: str | None = None
     service_tier: str | None = None
     requested_service_tier: str | None = None
     actual_service_tier: str | None = None

@@ -821,9 +821,34 @@ class AutomationsService:
     ) -> int:
         cycle_key = cycle.cycle_key
         existing_cycle_runs = await self._repository.list_runs_for_cycle_key(cycle_key=cycle_key)
+        stale_started_before = now_utc - timedelta(seconds=_manual_run_execution_claim_timeout_seconds())
         if not cycle.accounts:
             if existing_cycle_runs:
-                return 0
+                existing_cycle_run = existing_cycle_runs[0]
+                existing_run_is_stale = existing_cycle_run.status == AUTOMATION_RUN_STATUS_RUNNING and (
+                    existing_cycle_run.started_at <= existing_cycle_run.scheduled_for
+                    or existing_cycle_run.started_at < stale_started_before
+                )
+                if not existing_run_is_stale:
+                    return 0
+                claim = await self._repository.claim_scheduled_cycle_run_execution(
+                    run_id=existing_cycle_run.id,
+                    observed_started_at=existing_cycle_run.started_at,
+                    claimed_started_at=now_utc,
+                    stale_started_before=stale_started_before,
+                )
+                if claim is None:
+                    return 0
+                await self._repository.complete_run(
+                    claim.id,
+                    status=AUTOMATION_RUN_STATUS_FAILED,
+                    finished_at=utcnow(),
+                    account_id=None,
+                    error_code="no_available_accounts",
+                    error_message="No available accounts configured for automation job",
+                    attempt_count=claim.attempt_count,
+                )
+                return 1
             claim = await self._repository.claim_run(
                 job_id=job.id,
                 trigger=AUTOMATION_RUN_TRIGGER_SCHEDULED,
@@ -858,7 +883,6 @@ class AutomationsService:
         )
         executed = 0
         cycle_expected_accounts = cycle.cycle_expected_accounts
-        stale_started_before = now_utc - timedelta(seconds=_manual_run_execution_claim_timeout_seconds())
         for cycle_account in cycle.accounts:
             if cycle_account.scheduled_for > now_utc:
                 continue
@@ -1075,19 +1099,20 @@ class AutomationsService:
         last_attempted_account_id: str | None = forced_account_id
         cached_accounts_by_id: dict[str, Account] | None = None
         account_ids_to_try: list[str] = []
+        cycle_account_ids: list[str] | None = None
         forced_account_id_for_priority = forced_account_id
         include_paused_accounts = job.include_paused_accounts
         if run.cycle_key:
             cycle = await self._repository.get_run_cycle(cycle_key=run.cycle_key)
             if cycle is not None:
                 include_paused_accounts = cycle.include_paused_accounts
-                if cycle.accounts:
-                    account_ids_to_try = [entry.account_id for entry in cycle.accounts]
-                    if forced_account_id not in account_ids_to_try:
-                        forced_account_id_for_priority = None
-        if not account_ids_to_try:
+                cycle_account_ids = [entry.account_id for entry in cycle.accounts]
+                account_ids_to_try = cycle_account_ids
+                if forced_account_id not in account_ids_to_try:
+                    forced_account_id_for_priority = None
+        if cycle_account_ids is None and not account_ids_to_try:
             account_ids_to_try = list(job.account_ids)
-        if not account_ids_to_try:
+        if cycle_account_ids is None and not account_ids_to_try:
             accounts = await self._accounts_repository.list_accounts()
             account_ids_to_try = [
                 account.id

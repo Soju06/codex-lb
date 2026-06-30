@@ -93,6 +93,13 @@ The scheduler MUST execute each enabled daily job once per local calendar day at
 - **THEN** the scheduler continues dispatching the remaining accounts from that existing cycle
 - **AND** it does not create a second cycle for the same local-day slot
 
+#### Scenario: Empty persisted scheduled cycle is completed after restart
+
+- **GIVEN** a scheduled cycle snapshot has no eligible accounts and no terminal run row yet
+- **WHEN** the scheduler restarts after that due slot
+- **THEN** it records one failed scheduled run for that cycle
+- **AND** the run uses `no_available_accounts` error details without calling upstream
+
 #### Scenario: Ineligible snapshot accounts are skipped before dispatch
 
 - **GIVEN** a daily cycle snapshot contains an account whose scheduled dispatch time has arrived
@@ -168,6 +175,13 @@ The system MUST persist run history rows and expose them via dashboard APIs so o
 
 - **WHEN** the background scheduler executes a due job slot
 - **THEN** persisted run history marks `trigger: "scheduled"`
+
+#### Scenario: Run history keeps execution model snapshot
+
+- **GIVEN** a run is claimed while the job uses model `A` and reasoning effort `R`
+- **WHEN** an admin later edits that job to model `B`
+- **THEN** existing run history still returns model `A` and reasoning effort `R`
+- **AND** run-history model filters match the execution model snapshot, not the job's current model
 
 #### Scenario: Deleted accounts do not rewrite completed cycle outcomes
 

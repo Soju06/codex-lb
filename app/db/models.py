@@ -914,6 +914,8 @@ class AutomationRun(Base):
     cycle_key: Mapped[str] = mapped_column(String(160), nullable=False)
     cycle_expected_accounts: Mapped[int | None] = mapped_column(Integer, nullable=True)
     cycle_window_end: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    model: Mapped[str | None] = mapped_column(String, nullable=True)
+    reasoning_effort: Mapped[str | None] = mapped_column(String(16), nullable=True)
     scheduled_for: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     started_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

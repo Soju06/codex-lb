@@ -253,7 +253,8 @@ export function AutomationsPage() {
         const display = resolveAccountDisplay(accountId, accountDisplayIndex);
         const account = accountRecordsById.get(accountId);
         const email = (account?.email ?? "").trim();
-        const shouldBlur = email.length > 0 && isEmailLabel(display.primary, email);
+        const shouldBlur =
+          accountBlurIndex.get(accountId)?.any ?? (email.length > 0 && isEmailLabel(display.primary, email));
         return {
           value: accountId,
           label: display.secondary ? `${display.primary} (${display.secondary})` : display.primary,
@@ -261,7 +262,7 @@ export function AutomationsPage() {
         };
       });
     },
-    [accountDisplayIndex, accountRecordsById, accountsQuery.data, jobOptionsQuery.data?.accountIds],
+    [accountBlurIndex, accountDisplayIndex, accountRecordsById, accountsQuery.data, jobOptionsQuery.data?.accountIds],
   );
 
   const jobsModelOptions = useMemo(
@@ -312,7 +313,8 @@ export function AutomationsPage() {
         const display = resolveAccountDisplay(accountId, accountDisplayIndex);
         const account = accountRecordsById.get(accountId);
         const email = (account?.email ?? "").trim();
-        const shouldBlur = email.length > 0 && isEmailLabel(display.primary, email);
+        const shouldBlur =
+          accountBlurIndex.get(accountId)?.any ?? (email.length > 0 && isEmailLabel(display.primary, email));
         return {
           value: accountId,
           label: display.secondary ? `${display.primary} (${display.secondary})` : display.primary,
@@ -320,7 +322,7 @@ export function AutomationsPage() {
         };
       });
     },
-    [accountDisplayIndex, accountRecordsById, accountsQuery.data, runOptionsQuery.data?.accountIds],
+    [accountBlurIndex, accountDisplayIndex, accountRecordsById, accountsQuery.data, runOptionsQuery.data?.accountIds],
   );
 
   const runsModelOptions = useMemo(

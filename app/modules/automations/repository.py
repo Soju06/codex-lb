@@ -397,6 +397,7 @@ class AutomationsRepository:
         started_at: datetime,
         account_id: str | None = None,
     ) -> AutomationRunRecord | None:
+        model, reasoning_effort = await self._get_job_model_snapshot(job_id)
         run = AutomationRun(
             id=f"run_{uuid4().hex}",
             job_id=job_id,
@@ -405,6 +406,8 @@ class AutomationsRepository:
             cycle_key=cycle_key,
             cycle_expected_accounts=cycle_expected_accounts,
             cycle_window_end=cycle_window_end,
+            model=model,
+            reasoning_effort=reasoning_effort,
             scheduled_for=scheduled_for,
             started_at=started_at,
             status="running",
@@ -433,6 +436,7 @@ class AutomationsRepository:
         started_at: datetime,
         account_id: str,
     ) -> AutomationScheduledRunClaimRecord:
+        model, reasoning_effort = await self._get_job_model_snapshot(job_id)
         run_id = f"run_{uuid4().hex}"
         stmt = (
             insert(AutomationRun)
@@ -445,6 +449,8 @@ class AutomationsRepository:
                     "cycle_key",
                     "cycle_expected_accounts",
                     "cycle_window_end",
+                    "model",
+                    "reasoning_effort",
                     "scheduled_for",
                     "started_at",
                     "status",
@@ -459,6 +465,8 @@ class AutomationsRepository:
                     literal(cycle_key),
                     literal(cycle_expected_accounts),
                     literal(cycle_window_end),
+                    literal(model),
+                    literal(reasoning_effort),
                     literal(scheduled_for),
                     literal(started_at),
                     literal("running"),
@@ -583,6 +591,10 @@ class AutomationsRepository:
                 due_cycles.append(cycle)
                 continue
             occupied_slot_keys = occupied_slot_keys_by_cycle_key.get(cycle.cycle_key, set())
+            if not cycle.accounts:
+                if not occupied_slot_keys and due_slot <= now_utc:
+                    due_cycles.append(cycle)
+                continue
             has_due_account = False
             for cycle_account in cycle.accounts:
                 if cycle_account.scheduled_for > now_utc:
@@ -674,6 +686,15 @@ class AutomationsRepository:
             self._run_from_model(run, job_name=job_name, model=model, reasoning_effort=reasoning_effort)
             for run, job_name, model, reasoning_effort in result.all()
         ]
+
+    async def _get_job_model_snapshot(self, job_id: str) -> tuple[str | None, str | None]:
+        result = await self._session.execute(
+            select(AutomationJob.model, AutomationJob.reasoning_effort).where(AutomationJob.id == job_id).limit(1)
+        )
+        row = result.one_or_none()
+        if row is None:
+            return None, None
+        return row[0], row[1]
 
     async def get_run(self, run_id: str) -> AutomationRunRecord | None:
         result = await self._session.execute(
@@ -808,7 +829,6 @@ class AutomationsRepository:
             .where(AutomationRun.trigger == "scheduled")
             .where(AutomationRun.status == "running")
             .where(AutomationRun.finished_at.is_(None))
-            .where(AutomationRun.account_id.is_not(None))
             .where(AutomationRun.started_at == observed_started_at)
             .where(
                 or_(
@@ -1423,11 +1443,12 @@ class AutomationsRepository:
                 .order_by(AutomationRun.account_id.asc())
             )
             model_stmt = (
-                select(AutomationJob.model)
+                select(func.coalesce(AutomationRun.model, AutomationJob.model))
+                .select_from(AutomationRun)
                 .distinct()
-                .join(AutomationRun, AutomationRun.job_id == AutomationJob.id)
+                .join(AutomationJob, AutomationJob.id == AutomationRun.job_id)
                 .join(matching_cycles, matching_cycles.c.cycle_key == AutomationRun.cycle_key)
-                .order_by(AutomationJob.model.asc())
+                .order_by(func.coalesce(AutomationRun.model, AutomationJob.model).asc())
             )
             status_stmt = (
                 select(AutomationRun.status)
@@ -1458,10 +1479,11 @@ class AutomationsRepository:
                 .order_by(AutomationRun.account_id.asc())
             )
             model_stmt = (
-                select(AutomationJob.model)
+                select(func.coalesce(AutomationRun.model, AutomationJob.model))
+                .select_from(AutomationRun)
                 .distinct()
-                .join(AutomationRun, AutomationRun.job_id == AutomationJob.id)
-                .order_by(AutomationJob.model.asc())
+                .join(AutomationJob, AutomationJob.id == AutomationRun.job_id)
+                .order_by(func.coalesce(AutomationRun.model, AutomationJob.model).asc())
             )
             status_stmt = (
                 select(AutomationRun.status)
@@ -1599,8 +1621,8 @@ class AutomationsRepository:
             id=run.id,
             job_id=run.job_id,
             job_name=job_name,
-            model=model,
-            reasoning_effort=reasoning_effort,
+            model=run.model or model,
+            reasoning_effort=run.reasoning_effort if run.model is not None else reasoning_effort,
             trigger=run.trigger,
             status=run.status,
             slot_key=run.slot_key,
@@ -1702,6 +1724,8 @@ class AutomationsRepository:
     ) -> list:
         conditions = []
         normalized_search = (search or "").strip()
+        run_model = func.coalesce(AutomationRun.model, AutomationJob.model)
+        run_reasoning_effort = func.coalesce(AutomationRun.reasoning_effort, AutomationJob.reasoning_effort)
         if normalized_search:
             like = f"%{normalized_search}%"
             conditions.append(
@@ -1712,8 +1736,8 @@ class AutomationsRepository:
                     AutomationRun.error_code.ilike(like),
                     AutomationRun.error_message.ilike(like),
                     AutomationJob.name.ilike(like),
-                    AutomationJob.model.ilike(like),
-                    AutomationJob.reasoning_effort.ilike(like),
+                    run_model.ilike(like),
+                    run_reasoning_effort.ilike(like),
                 )
             )
         normalized_accounts = [value.strip() for value in (account_ids or []) if value and value.strip()]
@@ -1721,7 +1745,7 @@ class AutomationsRepository:
             conditions.append(AutomationRun.account_id.in_(normalized_accounts))
         normalized_models = [value.strip() for value in (models or []) if value and value.strip()]
         if normalized_models:
-            conditions.append(AutomationJob.model.in_(normalized_models))
+            conditions.append(run_model.in_(normalized_models))
         normalized_statuses = [value.strip().lower() for value in (statuses or []) if value and value.strip()]
         if normalized_statuses:
             conditions.append(AutomationRun.status.in_(normalized_statuses))

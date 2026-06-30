@@ -344,6 +344,68 @@ async def test_automations_patch_model_rejects_retained_unsupported_reasoning_ef
 
 
 @pytest.mark.asyncio
+async def test_automations_run_history_keeps_claimed_model_snapshot(async_client, monkeypatch):
+    await _populate_automation_reasoning_models()
+    accounts = await _create_accounts("auto-run-model-snapshot")
+
+    async def _fake_compact(*_args, **_kwargs):
+        return SimpleNamespace(id="resp-model-snapshot")
+
+    monkeypatch.setattr("app.modules.automations.service.core_compact_responses", _fake_compact)
+
+    create_response = await async_client.post(
+        "/api/automations",
+        json={
+            "name": "Run model snapshot",
+            "enabled": False,
+            "schedule": {
+                "type": "daily",
+                "time": "05:00",
+                "timezone": "UTC",
+                "days": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+            },
+            "model": "automation-reasoning-xhigh",
+            "reasoningEffort": "xhigh",
+            "prompt": "ping",
+            "accountIds": [accounts[0].id],
+        },
+    )
+    assert create_response.status_code == 200
+    automation_id = create_response.json()["id"]
+
+    run_response = await async_client.post(f"/api/automations/{automation_id}/run-now")
+    assert run_response.status_code == 202
+    run_id = run_response.json()["id"]
+
+    update_response = await async_client.patch(
+        f"/api/automations/{automation_id}",
+        json={"model": "automation-reasoning-medium", "reasoningEffort": None},
+    )
+    assert update_response.status_code == 200
+
+    runs_response = await async_client.get(f"/api/automations/{automation_id}/runs")
+    assert runs_response.status_code == 200
+    run_item = runs_response.json()["items"][0]
+    assert run_item["id"] == run_id
+    assert run_item["model"] == "automation-reasoning-xhigh"
+    assert run_item["reasoningEffort"] == "xhigh"
+
+    old_model_response = await async_client.get(
+        "/api/automations/runs",
+        params={"automationId": automation_id, "model": "automation-reasoning-xhigh", "limit": 25, "offset": 0},
+    )
+    assert old_model_response.status_code == 200
+    assert [item["id"] for item in old_model_response.json()["items"]] == [run_id]
+
+    new_model_response = await async_client.get(
+        "/api/automations/runs",
+        params={"automationId": automation_id, "model": "automation-reasoning-medium", "limit": 25, "offset": 0},
+    )
+    assert new_model_response.status_code == 200
+    assert new_model_response.json()["items"] == []
+
+
+@pytest.mark.asyncio
 async def test_automations_api_accepts_server_default_timezone(async_client, monkeypatch):
     accounts = await _create_accounts("auto-server-default")
     started_at = utcnow()
@@ -5034,6 +5096,193 @@ async def test_automations_scheduled_cycle_records_failed_run_without_available_
     assert run_item["pendingAccounts"] == 0
     assert run_item["errorCode"] == "no_available_accounts"
     assert run_item["errorMessage"] == "No available accounts configured for automation job"
+
+
+@pytest.mark.asyncio
+async def test_automations_scheduler_finishes_persisted_empty_scheduled_cycle_after_restart(db_setup, monkeypatch):
+    del db_setup
+    now = utcnow().replace(second=0, microsecond=0)
+    due_slot = now - timedelta(minutes=5)
+
+    async def _fake_compact(*_args, **_kwargs):
+        raise AssertionError("scheduled zero-account cycle must not call upstream")
+
+    monkeypatch.setattr("app.modules.automations.service.core_compact_responses", _fake_compact)
+
+    async with SessionLocal() as session:
+        automations_repository = AutomationsRepository(session)
+        job = await automations_repository.create_job(
+            name="Restarted empty scheduled cycle",
+            enabled=False,
+            include_paused_accounts=False,
+            schedule_type="daily",
+            schedule_time=due_slot.strftime("%H:%M"),
+            schedule_timezone="UTC",
+            schedule_days=["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+            schedule_threshold_minutes=0,
+            model="gpt-5.3-codex",
+            reasoning_effort=None,
+            prompt="ping",
+            account_ids=[],
+        )
+        cycle_key = f"scheduled:{job.id}:{due_slot.isoformat()}"
+        await automations_repository.create_run_cycle(
+            cycle_key=cycle_key,
+            job_id=job.id,
+            trigger="scheduled",
+            cycle_expected_accounts=0,
+            cycle_window_end=due_slot,
+            accounts=[],
+        )
+
+    async with SessionLocal() as session:
+        await session.execute(
+            update(AutomationJob)
+            .where(AutomationJob.id == job.id)
+            .values(enabled=True, updated_at=now + timedelta(hours=1))
+        )
+        await session.commit()
+
+    async with SessionLocal() as session:
+        automations_repository = AutomationsRepository(session)
+        enabled_job_ids = [enabled_job.id for enabled_job in await automations_repository.list_enabled_jobs()]
+        assert job.id in enabled_job_ids
+        due_cycles = await automations_repository.list_due_scheduled_run_cycles(job_id=job.id, now_utc=now)
+        assert [cycle.cycle_key for cycle in due_cycles] == [cycle_key]
+        assert await automations_repository.list_runs_for_cycle_key(cycle_key=cycle_key) == []
+
+    executed = await _run_due_jobs(now_utc=now)
+    assert executed == 1
+
+    async with SessionLocal() as session:
+        automations_repository = AutomationsRepository(session)
+        runs = await automations_repository.list_runs_for_cycle_key(cycle_key=cycle_key)
+        assert len(runs) == 1
+        assert runs[0].cycle_key == cycle_key
+        assert runs[0].status == "failed"
+        assert runs[0].error_code == "no_available_accounts"
+        assert runs[0].model == "gpt-5.3-codex"
+
+
+@pytest.mark.asyncio
+async def test_automations_scheduler_empty_cycle_does_not_fallback_to_reactivated_accounts(
+    db_setup,
+    monkeypatch,
+):
+    del db_setup
+    account = (await _create_accounts("auto-empty-cycle-reactivated"))[0]
+    now = utcnow().replace(second=0, microsecond=0)
+    due_slot = now - timedelta(minutes=5)
+    compact_calls = 0
+
+    async def _fake_compact(*_args, **_kwargs):
+        nonlocal compact_calls
+        compact_calls += 1
+        raise AssertionError("empty scheduled cycle must not call upstream")
+
+    monkeypatch.setattr("app.modules.automations.service.core_compact_responses", _fake_compact)
+
+    async with SessionLocal() as session:
+        automations_repository = AutomationsRepository(session)
+        job = await automations_repository.create_job(
+            name="Empty scheduled cycle stays empty",
+            enabled=True,
+            include_paused_accounts=False,
+            schedule_type="daily",
+            schedule_time=due_slot.strftime("%H:%M"),
+            schedule_timezone="UTC",
+            schedule_days=["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+            schedule_threshold_minutes=0,
+            model="gpt-5.3-codex",
+            reasoning_effort=None,
+            prompt="ping",
+            account_ids=[account.id],
+        )
+        cycle_key = f"scheduled:{job.id}:{due_slot.isoformat()}"
+        await automations_repository.create_run_cycle(
+            cycle_key=cycle_key,
+            job_id=job.id,
+            trigger="scheduled",
+            cycle_expected_accounts=0,
+            cycle_window_end=due_slot,
+            accounts=[],
+        )
+
+    executed = await _run_due_jobs(now_utc=now)
+    assert executed == 1
+    assert compact_calls == 0
+
+    async with SessionLocal() as session:
+        automations_repository = AutomationsRepository(session)
+        runs = await automations_repository.list_runs_for_cycle_key(cycle_key=cycle_key)
+        assert len(runs) == 1
+        assert runs[0].status == "failed"
+        assert runs[0].account_id is None
+        assert runs[0].attempt_count == 0
+        assert runs[0].error_code == "no_available_accounts"
+
+
+@pytest.mark.asyncio
+async def test_automations_scheduler_reclaims_stale_empty_cycle_run_after_restart(db_setup, monkeypatch):
+    del db_setup
+    now = utcnow().replace(second=0, microsecond=0)
+    due_slot = now - timedelta(minutes=5)
+    stale_started_at = now - timedelta(hours=2)
+
+    async def _fake_compact(*_args, **_kwargs):
+        raise AssertionError("stale empty scheduled cycle must not call upstream")
+
+    monkeypatch.setattr("app.modules.automations.service.core_compact_responses", _fake_compact)
+
+    async with SessionLocal() as session:
+        automations_repository = AutomationsRepository(session)
+        job = await automations_repository.create_job(
+            name="Stale empty scheduled cycle",
+            enabled=True,
+            include_paused_accounts=False,
+            schedule_type="daily",
+            schedule_time=due_slot.strftime("%H:%M"),
+            schedule_timezone="UTC",
+            schedule_days=["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+            schedule_threshold_minutes=0,
+            model="gpt-5.3-codex",
+            reasoning_effort=None,
+            prompt="ping",
+            account_ids=[],
+        )
+        cycle_key = f"scheduled:{job.id}:{due_slot.isoformat()}"
+        await automations_repository.create_run_cycle(
+            cycle_key=cycle_key,
+            job_id=job.id,
+            trigger="scheduled",
+            cycle_expected_accounts=0,
+            cycle_window_end=due_slot,
+            accounts=[],
+        )
+        stale_run = await automations_repository.claim_run(
+            job_id=job.id,
+            trigger="scheduled",
+            slot_key=f"scheduled:{job.id}:{due_slot.isoformat()}:none",
+            cycle_key=cycle_key,
+            cycle_expected_accounts=0,
+            cycle_window_end=due_slot,
+            scheduled_for=due_slot,
+            started_at=stale_started_at,
+        )
+        assert stale_run is not None
+
+    executed = await _run_due_jobs(now_utc=now)
+    assert executed == 1
+
+    async with SessionLocal() as session:
+        automations_repository = AutomationsRepository(session)
+        runs = await automations_repository.list_runs_for_cycle_key(cycle_key=cycle_key)
+        assert len(runs) == 1
+        assert runs[0].id == stale_run.id
+        assert runs[0].status == "failed"
+        assert runs[0].account_id is None
+        assert runs[0].error_code == "no_available_accounts"
+        assert runs[0].started_at == now
 
 
 @pytest.mark.asyncio

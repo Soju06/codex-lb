@@ -14,7 +14,7 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.core.auth.refresh import RefreshError
-from app.core.balancer import PERMANENT_FAILURE_CODES
+from app.core.balancer import PERMANENT_FAILURE_CODES, account_status_for_permanent_failure
 from app.core.clients.proxy import ProxyResponseError
 from app.core.clients.proxy import compact_responses as core_compact_responses
 from app.core.config.settings import get_settings
@@ -33,6 +33,8 @@ from app.modules.automations.repository import (
     AutomationRunRecord,
     AutomationsRepository,
 )
+from app.modules.proxy.account_cache import get_account_selection_cache, mark_account_routing_unavailable
+from app.modules.proxy.helpers import _header_account_id
 from app.modules.request_logs.repository import RequestLogsRepository
 
 AUTOMATION_SCHEDULE_DAILY = "daily"
@@ -1124,6 +1126,9 @@ class AutomationsService:
             ]
             cached_accounts_by_id = {account.id: account for account in accounts}
         account_ids_to_try = _prioritize_forced_account(account_ids_to_try, forced_account_id_for_priority)
+        run_model = run.model or job.model
+        run_reasoning_effort = run.reasoning_effort
+        run_prompt = run.prompt or job.prompt
 
         for account_id in account_ids_to_try:
             request_started_at: float | None = None
@@ -1151,10 +1156,10 @@ class AutomationsService:
                     encryptor=self._encryptor,
                 )
                 ping_request = ResponsesCompactRequest(
-                    model=job.model,
-                    input=job.prompt,
+                    model=run_model,
+                    input=run_prompt,
                     instructions="Automation ping",
-                    reasoning=ResponsesReasoning(effort=job.reasoning_effort) if job.reasoning_effort else None,
+                    reasoning=ResponsesReasoning(effort=run_reasoning_effort) if run_reasoning_effort else None,
                 )
                 request_started_at = time.monotonic()
                 compact_response = await asyncio.wait_for(
@@ -1162,7 +1167,7 @@ class AutomationsService:
                         ping_request,
                         headers={},
                         access_token=access_token,
-                        account_id=account.chatgpt_account_id,
+                        account_id=_header_account_id(account.chatgpt_account_id),
                         route=route,
                         allow_direct_egress=route is None,
                     ),
@@ -1180,8 +1185,8 @@ class AutomationsService:
                 await self._write_request_log(
                     account_id=account.id,
                     request_id=request_id,
-                    model=job.model,
-                    reasoning_effort=job.reasoning_effort,
+                    model=run_model,
+                    reasoning_effort=run_reasoning_effort,
                     latency_ms=latency_ms,
                     status="success",
                     input_tokens=input_tokens,
@@ -1213,13 +1218,14 @@ class AutomationsService:
                 await self._write_request_log(
                     account_id=account.id,
                     request_id=_automation_request_id(None, run.id, attempt_count),
-                    model=job.model,
-                    reasoning_effort=job.reasoning_effort,
+                    model=run_model,
+                    reasoning_effort=run_reasoning_effort,
                     latency_ms=_elapsed_ms(request_started_at),
                     status="error",
                     error_code=error_code,
                     error_message=error_message,
                 )
+                await self._mark_permanent_account_failure(account, error_code)
                 if self._is_retryable_account_failure(error_code):
                     continue
                 break
@@ -1230,8 +1236,8 @@ class AutomationsService:
                     await self._write_request_log(
                         account_id=account.id,
                         request_id=_automation_request_id(None, run.id, attempt_count),
-                        model=job.model,
-                        reasoning_effort=job.reasoning_effort,
+                        model=run_model,
+                        reasoning_effort=run_reasoning_effort,
                         latency_ms=_elapsed_ms(request_started_at),
                         status="error",
                         error_code=last_error_code,
@@ -2078,6 +2084,21 @@ class AutomationsService:
                 request_id,
                 exc_info=True,
             )
+
+    async def _mark_permanent_account_failure(self, account: Account, error_code: str | None) -> None:
+        if error_code not in PERMANENT_FAILURE_CODES:
+            return
+        status = account_status_for_permanent_failure(error_code)
+        reason = PERMANENT_FAILURE_CODES[error_code]
+        updated = await self._accounts_repository.update_status(account.id, status, reason)
+        if not updated:
+            return
+        account.status = status
+        account.deactivation_reason = reason
+        account.reset_at = None
+        account.blocked_at = None
+        mark_account_routing_unavailable(account.id)
+        get_account_selection_cache().invalidate()
 
 
 def _normalize_schedule_type(value: str) -> str:

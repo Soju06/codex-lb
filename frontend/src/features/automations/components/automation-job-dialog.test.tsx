@@ -145,6 +145,7 @@ describe("AutomationJobDialog", () => {
       prompt: "ping",
       reasoningEffort: null,
     });
+    expect(payload).not.toHaveProperty("accountIds");
   });
 
   it("preserves stored reasoning effort when selected model metadata is unavailable", async () => {
@@ -224,6 +225,7 @@ describe("AutomationJobDialog", () => {
       prompt: "ping",
     });
     expect(payload).not.toHaveProperty("reasoningEffort");
+    expect(payload).not.toHaveProperty("accountIds");
   });
 
   it("refreshes edit form defaults when the same automation receives updated data", async () => {

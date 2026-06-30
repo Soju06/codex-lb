@@ -105,25 +105,6 @@ function formatScheduleSummary(
   return `${formatScheduleDays(days)} at ${hour}`;
 }
 
-function formatLocalScheduleTime(iso: string, timeFormat: TimeFormatPreference): string | null {
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) {
-    return null;
-  }
-
-  const hour = date.getHours();
-  const minute = date.getMinutes();
-  const minuteLabel = minute.toString().padStart(2, "0");
-
-  if (timeFormat === "24h") {
-    return `${hour.toString().padStart(2, "0")}:${minuteLabel}`;
-  }
-
-  const hour12 = ((hour + 11) % 12) + 1;
-  const suffix = hour >= 12 ? "PM" : "AM";
-  return `${hour12.toString().padStart(2, "0")}:${minuteLabel} ${suffix}`;
-}
-
 function formatTimezoneLabel(value: string): string {
   return value === SERVER_DEFAULT_TIMEZONE ? "Server default" : value;
 }
@@ -504,14 +485,10 @@ export function AutomationsPage() {
                   <TableBody>
                     {jobs.map((job) => {
                       const nextRun = job.nextRunAt ? formatTimeLong(job.nextRunAt) : null;
-                      const localScheduleTime =
-                        job.schedule.timezone === SERVER_DEFAULT_TIMEZONE && job.nextRunAt
-                          ? formatLocalScheduleTime(job.nextRunAt, timeFormat)
-                          : null;
                       const accountSummary = formatAccountsSummary(job.accountIds, accountDisplayIndex);
                       const scheduleSummary = formatScheduleSummary(
                         job.schedule.days,
-                        localScheduleTime ?? job.schedule.time,
+                        job.schedule.time,
                         timeFormat,
                       );
                       const scheduleTimezoneLabel = formatTimezoneLabel(job.schedule.timezone);

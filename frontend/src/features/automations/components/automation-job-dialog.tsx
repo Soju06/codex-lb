@@ -120,6 +120,14 @@ function timezoneOptions(current: string): string[] {
   return Array.from(new Set([SERVER_DEFAULT_TIMEZONE, current, ...defaults].filter((value) => value.trim().length > 0)));
 }
 
+function automationAccountTargetsChanged(previous: string[], next: string[]): boolean {
+  if (previous.length !== next.length) {
+    return true;
+  }
+  const previousSet = new Set(previous);
+  return next.some((accountId) => !previousSet.has(accountId));
+}
+
 function formatTimezoneLabel(value: string): string {
   return value === SERVER_DEFAULT_TIMEZONE ? "Server default" : value;
 }
@@ -380,7 +388,7 @@ function AutomationJobDialogForm({
     }
     const promptText = (promptRef.current?.value ?? promptDefaultValue).trim() || "ping";
 
-    const payloadBase: AutomationCreateRequest | AutomationUpdateRequest = {
+    const payloadBase: Omit<AutomationCreateRequest, "accountIds"> | AutomationUpdateRequest = {
       name: nameValue,
       includePausedAccounts,
       schedule: {
@@ -392,24 +400,29 @@ function AutomationJobDialogForm({
       },
       model: selectedModel.trim(),
       prompt: promptText,
-      accountIds,
     };
 
     try {
       if (editingJob) {
+        const targetPatch = automationAccountTargetsChanged(editingJob.accountIds, accountIds) ? { accountIds } : {};
         const updatePayload: AutomationUpdateRequest =
           reasoningEffortTouched ||
           shouldPersistReasoningEffortOnUpdate ||
           shouldClearStoredUnsupportedReasoningEffortOnUpdate
             ? {
                 ...(payloadBase as AutomationUpdateRequest),
+                ...targetPatch,
                 reasoningEffort: selectedReasoningEffort,
               }
-            : (payloadBase as AutomationUpdateRequest);
+            : {
+                ...(payloadBase as AutomationUpdateRequest),
+                ...targetPatch,
+              };
         await onUpdate(editingJob.id, updatePayload);
       } else {
         await onCreate({
           ...(payloadBase as AutomationCreateRequest),
+          accountIds,
           reasoningEffort: selectedReasoningEffort,
           enabled: true,
         });

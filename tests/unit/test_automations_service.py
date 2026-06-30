@@ -209,6 +209,7 @@ def test_to_run_data_falls_back_to_run_finished_at_when_cycle_summary_finished_a
         job_name="job",
         model="gpt-5.3-codex",
         reasoning_effort=None,
+        prompt="ping",
         trigger="scheduled",
         status="success",
         slot_key="slot",

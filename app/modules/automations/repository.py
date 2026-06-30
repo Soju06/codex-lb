@@ -33,6 +33,7 @@ class AutomationRunRecord:
     job_name: str | None
     model: str | None
     reasoning_effort: str | None
+    prompt: str | None
     trigger: str
     status: str
     slot_key: str
@@ -397,7 +398,7 @@ class AutomationsRepository:
         started_at: datetime,
         account_id: str | None = None,
     ) -> AutomationRunRecord | None:
-        model, reasoning_effort = await self._get_job_model_snapshot(job_id)
+        model, reasoning_effort, prompt = await self._get_job_snapshot(job_id)
         run = AutomationRun(
             id=f"run_{uuid4().hex}",
             job_id=job_id,
@@ -408,6 +409,7 @@ class AutomationsRepository:
             cycle_window_end=cycle_window_end,
             model=model,
             reasoning_effort=reasoning_effort,
+            prompt=prompt,
             scheduled_for=scheduled_for,
             started_at=started_at,
             status="running",
@@ -436,7 +438,7 @@ class AutomationsRepository:
         started_at: datetime,
         account_id: str,
     ) -> AutomationScheduledRunClaimRecord:
-        model, reasoning_effort = await self._get_job_model_snapshot(job_id)
+        model, reasoning_effort, prompt = await self._get_job_snapshot(job_id)
         run_id = f"run_{uuid4().hex}"
         stmt = (
             insert(AutomationRun)
@@ -451,6 +453,7 @@ class AutomationsRepository:
                     "cycle_window_end",
                     "model",
                     "reasoning_effort",
+                    "prompt",
                     "scheduled_for",
                     "started_at",
                     "status",
@@ -467,6 +470,7 @@ class AutomationsRepository:
                     literal(cycle_window_end),
                     literal(model),
                     literal(reasoning_effort),
+                    literal(prompt),
                     literal(scheduled_for),
                     literal(started_at),
                     literal("running"),
@@ -687,14 +691,16 @@ class AutomationsRepository:
             for run, job_name, model, reasoning_effort in result.all()
         ]
 
-    async def _get_job_model_snapshot(self, job_id: str) -> tuple[str | None, str | None]:
+    async def _get_job_snapshot(self, job_id: str) -> tuple[str | None, str | None, str | None]:
         result = await self._session.execute(
-            select(AutomationJob.model, AutomationJob.reasoning_effort).where(AutomationJob.id == job_id).limit(1)
+            select(AutomationJob.model, AutomationJob.reasoning_effort, AutomationJob.prompt)
+            .where(AutomationJob.id == job_id)
+            .limit(1)
         )
         row = result.one_or_none()
         if row is None:
-            return None, None
-        return row[0], row[1]
+            return None, None, None
+        return row[0], row[1], row[2]
 
     async def get_run(self, run_id: str) -> AutomationRunRecord | None:
         result = await self._session.execute(
@@ -1623,6 +1629,7 @@ class AutomationsRepository:
             job_name=job_name,
             model=run.model or model,
             reasoning_effort=run.reasoning_effort if run.model is not None else reasoning_effort,
+            prompt=run.prompt,
             trigger=run.trigger,
             status=run.status,
             slot_key=run.slot_key,

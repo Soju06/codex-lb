@@ -346,9 +346,12 @@ async def test_automations_patch_model_rejects_retained_unsupported_reasoning_ef
 @pytest.mark.asyncio
 async def test_automations_run_history_keeps_claimed_model_snapshot(async_client, monkeypatch):
     await _populate_automation_reasoning_models()
+    started_at = utcnow()
     accounts = await _create_accounts("auto-run-model-snapshot")
+    compact_requests = []
 
-    async def _fake_compact(*_args, **_kwargs):
+    async def _fake_compact(request, *_args, **_kwargs):
+        compact_requests.append(request)
         return SimpleNamespace(id="resp-model-snapshot")
 
     monkeypatch.setattr("app.modules.automations.service.core_compact_responses", _fake_compact)
@@ -366,7 +369,7 @@ async def test_automations_run_history_keeps_claimed_model_snapshot(async_client
             },
             "model": "automation-reasoning-xhigh",
             "reasoningEffort": "xhigh",
-            "prompt": "ping",
+            "prompt": "old ping",
             "accountIds": [accounts[0].id],
         },
     )
@@ -379,7 +382,7 @@ async def test_automations_run_history_keeps_claimed_model_snapshot(async_client
 
     update_response = await async_client.patch(
         f"/api/automations/{automation_id}",
-        json={"model": "automation-reasoning-medium", "reasoningEffort": None},
+        json={"model": "automation-reasoning-medium", "reasoningEffort": None, "prompt": "new ping"},
     )
     assert update_response.status_code == 200
 
@@ -403,6 +406,27 @@ async def test_automations_run_history_keeps_claimed_model_snapshot(async_client
     )
     assert new_model_response.status_code == 200
     assert new_model_response.json()["items"] == []
+    assert len(compact_requests) == 1
+    assert compact_requests[0].model == "automation-reasoning-xhigh"
+    assert compact_requests[0].reasoning is not None
+    assert compact_requests[0].reasoning.effort == "xhigh"
+    assert compact_requests[0].input == [{"role": "user", "content": [{"type": "input_text", "text": "old ping"}]}]
+
+    async with SessionLocal() as session:
+        request_logs_repository = RequestLogsRepository(session)
+        recent_logs, _ = await request_logs_repository.list_recent(limit=200, since=started_at)
+        matching_logs = [
+            log
+            for log in recent_logs
+            if (
+                log.transport == "automation"
+                and log.account_id == accounts[0].id
+                and log.request_id == "resp-model-snapshot"
+            )
+        ]
+        assert len(matching_logs) == 1
+        assert matching_logs[0].model == "automation-reasoning-xhigh"
+        assert matching_logs[0].reasoning_effort == "xhigh"
 
 
 @pytest.mark.asyncio
@@ -860,6 +884,107 @@ async def test_automations_run_now_fails_over_for_retryable_forced_account_failu
         f"chatgpt-{accounts[1].id}",
         f"chatgpt-{accounts[1].id}",
     ]
+
+
+@pytest.mark.asyncio
+async def test_automations_run_now_omits_synthetic_chatgpt_account_id(async_client, monkeypatch):
+    account = (await _create_accounts("auto-synthetic-account"))[0]
+    async with SessionLocal() as session:
+        await session.execute(
+            update(Account)
+            .where(Account.id == account.id)
+            .values(chatgpt_account_id="email_auto_synthetic_account_example_com")
+        )
+        await session.commit()
+
+    called_chatgpt_account_ids: list[str | None] = []
+
+    async def _fake_compact(*_args, **kwargs):
+        called_chatgpt_account_ids.append(kwargs.get("account_id"))
+        return SimpleNamespace()
+
+    monkeypatch.setattr("app.modules.automations.service.core_compact_responses", _fake_compact)
+
+    create_response = await async_client.post(
+        "/api/automations",
+        json={
+            "name": "Synthetic account ping",
+            "enabled": False,
+            "schedule": {
+                "type": "daily",
+                "time": "05:00",
+                "timezone": "UTC",
+                "days": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+            },
+            "model": "gpt-5.3-codex",
+            "prompt": "ping",
+            "accountIds": [account.id],
+        },
+    )
+    assert create_response.status_code == 200
+
+    run_response = await async_client.post(f"/api/automations/{create_response.json()['id']}/run-now")
+    assert run_response.status_code == 202
+    assert run_response.json()["status"] == "success"
+    assert called_chatgpt_account_ids == [None]
+
+
+@pytest.mark.asyncio
+async def test_automations_run_now_records_permanent_account_failure_before_failover(async_client, monkeypatch):
+    accounts = await _create_accounts("auto-permanent-failure-a", "auto-permanent-failure-b")
+    call_order: list[str | None] = []
+
+    async def _fake_compact(*_args, **kwargs):
+        account_id = kwargs.get("account_id")
+        call_order.append(account_id)
+        if account_id == accounts[0].chatgpt_account_id:
+            raise ProxyResponseError(
+                403,
+                openai_error("account_deactivated", "Account has been deactivated"),
+            )
+        return SimpleNamespace()
+
+    monkeypatch.setattr("app.modules.automations.service.core_compact_responses", _fake_compact)
+
+    create_response = await async_client.post(
+        "/api/automations",
+        json={
+            "name": "Permanent failover ping",
+            "enabled": False,
+            "schedule": {
+                "type": "daily",
+                "time": "05:00",
+                "timezone": "UTC",
+                "days": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+            },
+            "model": "gpt-5.3-codex",
+            "prompt": "ping",
+            "accountIds": [accounts[0].id, accounts[1].id],
+        },
+    )
+    assert create_response.status_code == 200
+    automation_id = create_response.json()["id"]
+
+    run_response = await async_client.post(f"/api/automations/{automation_id}/run-now")
+    assert run_response.status_code == 202
+    assert call_order == [
+        accounts[0].chatgpt_account_id,
+        accounts[1].chatgpt_account_id,
+        accounts[1].chatgpt_account_id,
+    ]
+
+    runs_response = await async_client.get(f"/api/automations/{automation_id}/runs")
+    assert runs_response.status_code == 200
+    runs_payload = runs_response.json()["items"]
+    assert len(runs_payload) == 2
+    assert sorted(entry["status"] for entry in runs_payload) == ["partial", "success"]
+
+    async with SessionLocal() as session:
+        accounts_repository = AccountsRepository(session)
+        failed_account = await accounts_repository.get_by_id(accounts[0].id)
+        assert failed_account is not None
+        assert failed_account.status == AccountStatus.DEACTIVATED
+        assert failed_account.deactivation_reason == "Account has been deactivated"
 
 
 @pytest.mark.asyncio

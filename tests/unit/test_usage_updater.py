@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Collection
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -71,6 +72,103 @@ async def test_usage_refresh_singleflight_cancel_all_cancels_inflight_task() -> 
         await task
     assert cancelled.is_set()
     assert usage_updater_module._USAGE_REFRESH_SINGLEFLIGHT._inflight == {}
+
+
+@pytest.mark.asyncio
+async def test_refresh_accounts_owned_singleflight_session_outlives_caller_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account = _make_account("acc_owned_session", "workspace_owned")
+    refresh_started = asyncio.Event()
+    allow_refresh_finish = asyncio.Event()
+    inner_session_closed = asyncio.Event()
+    session_was_open_during_refresh: list[bool] = []
+
+    @dataclass(frozen=True, slots=True)
+    class Settings:
+        usage_refresh_enabled: bool = True
+        usage_refresh_interval_seconds: int = 0
+        usage_refresh_auth_failure_cooldown_seconds: int = 0
+
+    class OuterUsageRepository:
+        async def latest_entry_for_account(self, account_id: str, *, window: str | None = None):
+            return None
+
+        async def add_entry(
+            self,
+            account_id: str,
+            used_percent: float,
+            input_tokens: int | None = None,
+            output_tokens: int | None = None,
+            recorded_at: datetime | None = None,
+            window: str | None = None,
+            reset_at: int | None = None,
+            window_minutes: int | None = None,
+            credits_has: bool | None = None,
+            credits_unlimited: bool | None = None,
+            credits_balance: float | None = None,
+        ) -> UsageHistory | None:
+            return None
+
+    class InnerUsageRepository(OuterUsageRepository):
+        def __init__(self, session) -> None:
+            self.session = session
+
+    class InnerAdditionalUsageRepository:
+        def __init__(self, session) -> None:
+            self.session = session
+
+    class InnerAccountsRepository:
+        def __init__(self, session) -> None:
+            self.session = session
+
+        async def get_by_id(self, account_id: str):
+            return account if account_id == account.id else None
+
+    @asynccontextmanager
+    async def recording_background_session():
+        try:
+            yield object()
+        finally:
+            inner_session_closed.set()
+
+    async def fake_refresh_account_if_stale(
+        self,
+        account_arg: Account,
+        *,
+        usage_account_id: str | None,
+        interval_seconds: int,
+    ) -> usage_updater_module.AccountRefreshResult:
+        refresh_started.set()
+        await allow_refresh_finish.wait()
+        session_was_open_during_refresh.append(not inner_session_closed.is_set())
+        return usage_updater_module.AccountRefreshResult(usage_written=True)
+
+    monkeypatch.setattr(usage_updater_module, "get_background_session", recording_background_session)
+    monkeypatch.setattr(usage_updater_module, "AccountsRepository", InnerAccountsRepository)
+    monkeypatch.setattr(usage_updater_module, "UsageRepository", InnerUsageRepository)
+    monkeypatch.setattr(usage_updater_module, "AdditionalUsageRepository", InnerAdditionalUsageRepository)
+    monkeypatch.setattr(UsageUpdater, "_refresh_account_if_stale", fake_refresh_account_if_stale)
+    monkeypatch.setattr(usage_updater_module, "get_settings", Settings)
+
+    task = asyncio.create_task(
+        UsageUpdater(OuterUsageRepository()).refresh_accounts(
+            [account],
+            {},
+            own_singleflight_sessions=True,
+        )
+    )
+    await asyncio.wait_for(refresh_started.wait(), timeout=1)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.sleep(0)
+
+    assert not inner_session_closed.is_set()
+    allow_refresh_finish.set()
+    await asyncio.wait_for(inner_session_closed.wait(), timeout=1)
+    assert session_was_open_during_refresh == [True]
 
 
 @pytest.mark.asyncio

@@ -55,9 +55,23 @@ async def get_fleet_summary(
 ) -> FleetSummaryResponse:
     """Read-only, minimal per-account capacity summary for fleet consumers."""
 
-    accounts = await context.service.list_accounts(account_ids=_visible_account_ids(api_key))
+    visible_account_ids = _visible_account_ids(api_key)
+    include_usage = await _can_view_fleet_usage(api_key)
+    accounts = await context.service.list_accounts(account_ids=visible_account_ids)
+    persisted_status_by_account_id: dict[str, str] | None = None
+    if not include_usage:
+        persisted_accounts = (
+            await context.repository.list_accounts_by_ids(visible_account_ids, refresh_existing=True)
+            if visible_account_ids is not None
+            else await context.repository.list_accounts(refresh_existing=True)
+        )
+        persisted_status_by_account_id = {account.id: account.status.value for account in persisted_accounts}
     return FleetSummaryResponse(
-        accounts=build_fleet_account_summaries(accounts, include_usage=await _can_view_fleet_usage(api_key))
+        accounts=build_fleet_account_summaries(
+            accounts,
+            include_usage=include_usage,
+            persisted_status_by_account_id=persisted_status_by_account_id,
+        )
     )
 
 
@@ -94,7 +108,7 @@ async def _refresh_fleet_usage_with_owned_session(visible_account_ids: list[str]
             usage_repo,
             accounts_repo,
             additional_usage_repo,
-        ).refresh_accounts(eligible_accounts, latest_primary)
+        ).refresh_accounts(eligible_accounts, latest_primary, own_singleflight_sessions=True)
         if usage_written:
             await get_rate_limit_headers_cache().invalidate()
             get_account_selection_cache().invalidate()

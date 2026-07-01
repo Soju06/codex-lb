@@ -282,7 +282,7 @@ async def test_fleet_summary_hides_usage_when_key_disables_account_pool_usage(as
     await _seed_account_with_windows(
         "acc_usage_hidden",
         "usage-hidden@example.com",
-        primary_used_percent=10.0,
+        primary_used_percent=100.0,
         secondary_used_percent=20.0,
         primary_reset_at=1735862400,
         secondary_reset_at=1736467200,
@@ -298,6 +298,7 @@ async def test_fleet_summary_hides_usage_when_key_disables_account_pool_usage(as
     account = response.json()["accounts"][0]
     assert account["accountId"] == "acc_usage_hidden"
     assert account["email"] == "usage-hidden@example.com"
+    assert account["status"] == "active"
     assert account["lastRefreshAt"] is None
     assert account["primary"] == {"remainingPercent": None, "resetAt": None, "windowMinutes": None}
     assert account["secondary"] == {"remainingPercent": None, "resetAt": None, "windowMinutes": None}
@@ -422,7 +423,8 @@ async def test_fleet_refresh_uses_route_local_usage_updater_and_invalidates_on_w
             self.accounts_repo = accounts_repo
             self.additional_usage_repo = additional_usage_repo
 
-        async def refresh_accounts(self, accounts, latest_primary):
+        async def refresh_accounts(self, accounts, latest_primary, *, own_singleflight_sessions=False):
+            assert own_singleflight_sessions is True
             updater_session_ids.append(id(self.usage_repo._session))
             refresh_calls.append([account.id for account in accounts])
             assert isinstance(latest_primary, dict)
@@ -498,7 +500,8 @@ async def test_fleet_refresh_respects_account_scoped_api_key(async_client, db_se
             self.accounts_repo = accounts_repo
             self.additional_usage_repo = additional_usage_repo
 
-        async def refresh_accounts(self, accounts, latest_primary):
+        async def refresh_accounts(self, accounts, latest_primary, *, own_singleflight_sessions=False):
+            assert own_singleflight_sessions is True
             refresh_calls.append([account.id for account in accounts])
             assert set(latest_primary) <= {"acc_refresh_scope_visible"}
             return False
@@ -539,7 +542,9 @@ async def test_fleet_refresh_owns_session_until_shielded_refresh_finishes(db_set
             self.accounts_repo = accounts_repo
             self.additional_usage_repo = additional_usage_repo
 
-        async def refresh_accounts(self, accounts, latest_primary):
+        async def refresh_accounts(self, accounts, latest_primary, *, own_singleflight_sessions=False):
+            assert own_singleflight_sessions is True
+
             async def shielded_refresh() -> bool:
                 refresh_started.set()
                 await allow_refresh_finish.wait()

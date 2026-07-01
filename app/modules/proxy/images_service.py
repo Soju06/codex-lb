@@ -733,6 +733,8 @@ async def translate_responses_stream_to_images_stream(
                 continue
             status = item.get("status")
             if isinstance(status, str) and status == "failed":
+                if captured is not None:
+                    captured["image_stream_outcome"] = "image_error"
                 yield format_sse_event(_failed_image_item_error_event(item))
                 terminal_emitted = True
                 completion_pending = False
@@ -769,7 +771,11 @@ async def translate_responses_stream_to_images_stream(
                     yield format_sse_event(event)
                 pending_completed_events.clear()
                 terminal_emitted = True
+                if captured is not None:
+                    captured["image_stream_outcome"] = "success"
             elif not terminal_emitted:
+                if captured is not None:
+                    captured["image_stream_outcome"] = "image_error"
                 yield format_sse_event(
                     _build_error_event(
                         "image_generation_failed",
@@ -782,6 +788,8 @@ async def translate_responses_stream_to_images_stream(
 
         if event_type == _UPSTREAM_RESPONSE_INCOMPLETE_EVENT:
             if not terminal_emitted:
+                if captured is not None:
+                    captured["image_stream_outcome"] = "image_error"
                 yield format_sse_event(
                     _build_error_event(
                         "image_generation_failed",
@@ -793,12 +801,16 @@ async def translate_responses_stream_to_images_stream(
             break
 
         if event_type == _UPSTREAM_RESPONSE_FAILED_EVENT:
+            if captured is not None:
+                captured["image_stream_outcome"] = "image_error"
             yield format_sse_event(_response_failed_to_error_event(payload))
             terminal_emitted = True
             completion_pending = False
             break
 
         if event_type == _UPSTREAM_ERROR_EVENT:
+            if captured is not None:
+                captured["image_stream_outcome"] = "image_error"
             yield format_sse_event(_error_event_to_error_event(payload))
             terminal_emitted = True
             completion_pending = False
@@ -818,8 +830,12 @@ async def translate_responses_stream_to_images_stream(
             yield format_sse_event(event)
         pending_completed_events.clear()
         terminal_emitted = True
+        if captured is not None:
+            captured["image_stream_outcome"] = "truncated_with_image"
 
     if completion_pending and not terminal_emitted:
+        if captured is not None:
+            captured["image_stream_outcome"] = "truncated"
         yield format_sse_event(
             _build_error_event(
                 "image_generation_failed",

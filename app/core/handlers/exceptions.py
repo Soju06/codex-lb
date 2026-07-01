@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import time
+from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.exception_handlers import (
@@ -29,6 +31,7 @@ from app.core.exceptions import (
     ProxyUpstreamError,
 )
 from app.core.runtime_logging import log_error_response
+from app.modules.proxy.images_observability import ImageRoute, record_images_route_observability
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +66,39 @@ def _error_format(request: Request) -> str | None:
     if path.startswith("/v1/") or path.startswith("/backend-api/"):
         return "openai"
     return None
+
+
+async def _record_image_request_validation_error(request: Request) -> None:
+    path = request.url.path
+    route: ImageRoute | None = None
+    if path == "/v1/images/generations":
+        route = "generations"
+    elif path == "/v1/images/edits":
+        route = "edits"
+    if route is None:
+        return
+
+    model: str | None = None
+    stream = False
+    if route == "generations":
+        try:
+            payload: Any = await request.json()
+        except Exception:
+            payload = None
+        if isinstance(payload, dict):
+            model_value = payload.get("model")
+            if isinstance(model_value, str) and model_value:
+                model = model_value
+            stream = payload.get("stream") is True
+
+    record_images_route_observability(
+        route=route,
+        model=model,
+        stream=stream,
+        status=400,
+        outcome="invalid_request",
+        started_at=time.perf_counter(),
+    )
 
 
 def add_exception_handlers(app: FastAPI) -> None:
@@ -153,6 +189,7 @@ def add_exception_handlers(app: FastAPI) -> None:
                 first_message or "Invalid request payload",
                 category="openai_error_response",
             )
+            await _record_image_request_validation_error(request)
             return JSONResponse(status_code=400, content=error)
         return await request_validation_exception_handler(request, exc)
 

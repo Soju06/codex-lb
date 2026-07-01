@@ -73,6 +73,18 @@ if PROMETHEUS_AVAILABLE:
         "Upstream request duration",
         registry=REGISTRY,
     )
+    image_requests_total = Counter(
+        "codex_lb_image_requests_total",
+        "Total OpenAI-compatible image route requests",
+        ["route", "model", "stream", "status", "outcome"],
+        registry=REGISTRY,
+    )
+    image_request_duration_seconds = Histogram(
+        "codex_lb_image_request_duration_seconds",
+        "OpenAI-compatible image route request duration",
+        ["route", "model", "stream", "status", "outcome"],
+        registry=REGISTRY,
+    )
 
     _gauge_kwargs: dict[str, str] = {}
     if MULTIPROCESS_MODE:
@@ -244,6 +256,8 @@ else:
     upstream_requests_total: CounterLike | None = None
     upstream_transport_decisions_total: CounterLike | None = None
     upstream_request_duration_seconds: HistogramLike | None = None
+    image_requests_total: CounterLike | None = None
+    image_request_duration_seconds: HistogramLike | None = None
     active_connections: GaugeLike | None = None
     rate_limit_hits_total: CounterLike | None = None
     circuit_breaker_state: GaugeLike | None = None
@@ -303,6 +317,8 @@ __all__ = [
     "circuit_breaker_state",
     "continuity_fail_closed_total",
     "continuity_owner_resolution_total",
+    "image_request_duration_seconds",
+    "image_requests_total",
     "make_scrape_registry",
     "mark_process_dead",
     "prometheus_client",

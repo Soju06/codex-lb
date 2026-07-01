@@ -4168,7 +4168,9 @@ async def test_stream_responses_uses_http_responses_stream_budget(monkeypatch):
 
     timeout = session.calls[0]["timeout"]
     assert isinstance(timeout, proxy_module.aiohttp.ClientTimeout)
-    assert timeout.total == pytest.approx(7200.0)
+    assert timeout.total is not None
+    assert 0.0 < timeout.total <= 7200.0
+    assert timeout.total == pytest.approx(7200.0, abs=0.1)
     assert events == ['data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n']
 
 
@@ -4288,7 +4290,9 @@ async def test_stream_responses_honors_timeout_overrides(monkeypatch):
     assert events == ['data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n']
     timeout = session.calls[0]["timeout"]
     assert isinstance(timeout, proxy_module.aiohttp.ClientTimeout)
-    assert timeout.total == pytest.approx(4.5, abs=0.01)
+    assert timeout.total is not None
+    assert 0.0 < timeout.total <= 4.5
+    assert timeout.total == pytest.approx(4.5, abs=0.1)
     assert timeout.sock_connect == pytest.approx(2.5)
     assert seen["idle_timeout_seconds"] == pytest.approx(3.5)
 

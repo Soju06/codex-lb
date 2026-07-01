@@ -642,6 +642,7 @@ async def test_owner_forward_allows_json_content_type_for_internal_post(
             },
             context=context,
             request_started_at=10.0,
+            proxy_request_budget_seconds=75.0,
         )
     ]
 

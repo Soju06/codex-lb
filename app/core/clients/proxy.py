@@ -3185,11 +3185,9 @@ class _CompactCommandTransport:
         if self.route is None and self.route_trace is not None:
             self.route_trace.record_direct()
         upstream_account_id = self.chatgpt_account_id or self.account_id
-        upstream_headers = _build_upstream_headers(
-            self.headers,
+        upstream_headers = _build_upstream_compact_headers(
             self.access_token,
             upstream_account_id,
-            accept="application/json",
         )
         pre_request_started_at = time.monotonic()
         compact_timeout_seconds = _effective_compact_total_timeout(settings.upstream_compact_timeout_seconds)

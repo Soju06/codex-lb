@@ -1,0 +1,32 @@
+from __future__ import annotations
+
+from app.modules.accounts.schemas import AccountSummary
+from app.modules.fleet.schemas import FleetAccountSummary, FleetWindowSummary
+
+
+def fleet_account_summary_from_account(account: AccountSummary) -> FleetAccountSummary:
+    """Project a dashboard account into the minimal fleet payload."""
+
+    usage = account.usage
+    return FleetAccountSummary(
+        account_id=account.account_id,
+        display_name=account.display_name,
+        email=account.email,
+        status=account.status,
+        plan_type=account.plan_type,
+        primary=FleetWindowSummary(
+            remaining_percent=usage.primary_remaining_percent if usage is not None else None,
+            reset_at=account.reset_at_primary,
+            window_minutes=account.window_minutes_primary,
+        ),
+        secondary=FleetWindowSummary(
+            remaining_percent=usage.secondary_remaining_percent if usage is not None else None,
+            reset_at=account.reset_at_secondary,
+            window_minutes=account.window_minutes_secondary,
+        ),
+        last_refresh_at=account.last_refresh_at,
+    )
+
+
+def build_fleet_account_summaries(accounts: list[AccountSummary]) -> list[FleetAccountSummary]:
+    return [fleet_account_summary_from_account(account) for account in accounts]

@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import sys
 import time
+from dataclasses import dataclass
 from typing import Any, AsyncIterator, Mapping, cast
 
 import aiohttp
@@ -427,6 +428,83 @@ def _facade() -> Any:
 _REQUEST_TRANSPORT_HTTP = "http"
 
 
+@dataclass(frozen=True, slots=True)
+class _StreamUsageAccounting:
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cached_input_tokens: int | None = None
+    reasoning_tokens: int | None = None
+
+
+def _token_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    return None
+
+
+def _usage_accounting_from_mapping(usage: Mapping[str, Any]) -> _StreamUsageAccounting | None:
+    input_tokens = _token_int(usage.get("input_tokens"))
+    output_tokens = _token_int(usage.get("output_tokens"))
+    if input_tokens is None or output_tokens is None:
+        return None
+
+    cached_input_tokens = None
+    input_details = usage.get("input_tokens_details")
+    if isinstance(input_details, Mapping):
+        cached_input_tokens = _token_int(input_details.get("cached_tokens"))
+
+    reasoning_tokens = None
+    output_details = usage.get("output_tokens_details")
+    if isinstance(output_details, Mapping):
+        reasoning_tokens = _token_int(output_details.get("reasoning_tokens"))
+
+    return _StreamUsageAccounting(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cached_input_tokens=cached_input_tokens,
+        reasoning_tokens=reasoning_tokens,
+    )
+
+
+def _usage_accounting_from_response_usage(usage: Any) -> _StreamUsageAccounting:
+    input_tokens = usage.input_tokens if usage else None
+    output_tokens = usage.output_tokens if usage else None
+    cached_input_tokens = usage.input_tokens_details.cached_tokens if usage and usage.input_tokens_details else None
+    reasoning_tokens = usage.output_tokens_details.reasoning_tokens if usage and usage.output_tokens_details else None
+    return _StreamUsageAccounting(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cached_input_tokens=cached_input_tokens,
+        reasoning_tokens=reasoning_tokens,
+    )
+
+
+def _proxy_billed_usage_from_event_payload(event_payload: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
+    if event_payload is None:
+        return None
+    response_payload = event_payload.get("response")
+    if not isinstance(response_payload, Mapping):
+        return None
+    metadata = response_payload.get("metadata")
+    if not isinstance(metadata, Mapping):
+        return None
+    billed_usage = metadata.get("proxy_billed_usage")
+    return billed_usage if isinstance(billed_usage, Mapping) else None
+
+
+def _stream_usage_accounting(
+    usage: Any,
+    billed_usage_payload: Mapping[str, Any] | None,
+) -> _StreamUsageAccounting:
+    if billed_usage_payload is not None:
+        billed_accounting = _usage_accounting_from_mapping(billed_usage_payload)
+        if billed_accounting is not None:
+            return billed_accounting
+    return _usage_accounting_from_response_usage(usage)
+
+
 class _StreamingMixin(_StreamingRetryMixin):
     _handle_stream_error = _handle_stream_error_helper
     _resolve_upstream_route_for_account = _resolve_upstream_route_for_account_helper
@@ -504,6 +582,7 @@ class _StreamingMixin(_StreamingRetryMixin):
         failure_metadata = _RequestLogFailureMetadata()
         response_id = request_id
         usage = None
+        billed_usage_payload: Mapping[str, Any] | None = None
         route: ResolvedUpstreamRoute | None = None
         route_trace = UpstreamProxyRouteTrace()
         route_fail_closed_reason: str | None = None
@@ -743,6 +822,7 @@ class _StreamingMixin(_StreamingRetryMixin):
 
             if event and event.type in ("response.completed", "response.incomplete"):
                 usage = event.response.usage if event.response else None
+                billed_usage_payload = _proxy_billed_usage_from_event_payload(first_payload)
                 if event.response and event.response.id:
                     response_id = event.response.id
                 if event.type == "response.incomplete":
@@ -914,6 +994,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                 if event_type in ("response.completed", "response.incomplete"):
                     response = event.response if event is not None else None
                     usage = response.usage if response else None
+                    billed_usage_payload = _proxy_billed_usage_from_event_payload(event_payload)
                     if response and response.id:
                         response_id = response.id
                         settlement.response_id = response_id
@@ -1034,14 +1115,11 @@ class _StreamingMixin(_StreamingRetryMixin):
                 proxy._cancel_api_key_reservation_heartbeat_task(api_key_reservation_heartbeat_task)
             response_create_lease.release()
             await proxy._load_balancer.release_account_lease(account_response_create_lease)
-            input_tokens = usage.input_tokens if usage else None
-            output_tokens = usage.output_tokens if usage else None
-            cached_input_tokens = (
-                usage.input_tokens_details.cached_tokens if usage and usage.input_tokens_details else None
-            )
-            reasoning_tokens = (
-                usage.output_tokens_details.reasoning_tokens if usage and usage.output_tokens_details else None
-            )
+            usage_accounting = _stream_usage_accounting(usage, billed_usage_payload)
+            input_tokens = usage_accounting.input_tokens
+            output_tokens = usage_accounting.output_tokens
+            cached_input_tokens = usage_accounting.cached_input_tokens
+            reasoning_tokens = usage_accounting.reasoning_tokens
             settlement.status = status
             settlement.model = model
             settlement.service_tier = service_tier

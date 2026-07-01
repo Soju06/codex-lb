@@ -12,3 +12,4 @@
 - [x] 2.2 Run the CodexCont middleware tests.
 - [x] 2.3 Validate OpenSpec artifacts.
 - [x] 2.4 Add codex-lb unit coverage for passive folding and HTTP bridge bypass.
+- [x] 2.5 Add regression coverage for terminal round drainage and billed-usage settlement.

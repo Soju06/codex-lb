@@ -7853,6 +7853,86 @@ async def test_stream_once_records_top_level_raw_codex_error_first(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_stream_once_accounts_codex_continuation_billed_usage(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_stream_codexcont_billed_usage")
+    settlement = proxy_service._StreamSettlement()
+    terminal_payload: dict[str, JsonValue] = {
+        "type": "response.completed",
+        "response": {
+            "id": "resp_folded",
+            "status": "completed",
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 536,
+                "total_tokens": 636,
+                "input_tokens_details": {"cached_tokens": 25},
+                "output_tokens_details": {"reasoning_tokens": 526},
+            },
+            "metadata": {
+                "proxy_billed_usage": {
+                    "input_tokens": 220,
+                    "output_tokens": 620,
+                    "total_tokens": 840,
+                    "input_tokens_details": {"cached_tokens": 50},
+                    "output_tokens_details": {"reasoning_tokens": 526},
+                }
+            },
+        },
+    }
+
+    async def fake_stream(
+        payload,
+        headers,
+        access_token,
+        account_id,
+        base_url=None,
+        raise_for_status=False,
+        enforce_openai_sdk_contract=True,
+    ):
+        del payload, headers, access_token, account_id, base_url, raise_for_status, enforce_openai_sdk_contract
+        yield proxy_module.format_sse_event(terminal_payload)
+
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.4", "instructions": "hi", "input": [], "stream": True})
+
+    chunks = [
+        chunk
+        async for chunk in service._stream_once(
+            account,
+            payload,
+            {"session_id": "sid-stream"},
+            "req_stream_codexcont_billed_usage",
+            False,
+            request_started_at=0.0,
+            api_key=None,
+            api_key_reservation=None,
+            settlement=settlement,
+            suppress_text_done_events=False,
+            upstream_stream_transport=None,
+            request_transport="http",
+        )
+    ]
+
+    assert len(chunks) == 1
+    downstream = parse_sse_data_json(chunks[0])
+    assert downstream is not None
+    response = cast(dict[str, JsonValue], downstream["response"])
+    usage = cast(dict[str, JsonValue], response["usage"])
+    assert usage["input_tokens"] == 100
+    assert usage["output_tokens"] == 536
+    assert settlement.input_tokens == 220
+    assert settlement.output_tokens == 620
+    assert settlement.cached_input_tokens == 50
+    assert request_logs.calls[0]["input_tokens"] == 220
+    assert request_logs.calls[0]["output_tokens"] == 620
+    assert request_logs.calls[0]["cached_input_tokens"] == 50
+    assert request_logs.calls[0]["reasoning_tokens"] == 526
+
+
+@pytest.mark.asyncio
 async def test_stream_once_penalizes_upstream_eof_after_visible_event(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))

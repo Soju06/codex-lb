@@ -56,6 +56,11 @@ The middleware MUST present folded upstream rounds as one coherent downstream SS
 - **THEN** the downstream stream includes the final round output
 - **AND** the reconstructed terminal response includes proxy round and billed-usage metadata
 
+#### Scenario: Folded codex-lb stream settles usage
+- **WHEN** a folded codex-lb stream returns agent-facing `response.usage` and `metadata.proxy_billed_usage`
+- **THEN** downstream clients receive the agent-facing `response.usage`
+- **AND** codex-lb API-key settlement and request logs use `metadata.proxy_billed_usage`
+
 ### Requirement: Protect Configured Credentials On Header-Selected Upstreams
 The middleware MUST strip `Responses-API-Base` before forwarding upstream. When a request-supplied upstream URL is used, the middleware MUST reject requests that would inject configured credentials into that request-supplied URL. The middleware MAY forward caller-supplied authorization headers according to the configured passthrough auth mode.
 

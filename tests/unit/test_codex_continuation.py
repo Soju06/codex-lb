@@ -195,11 +195,47 @@ async def test_fold_responses_stream_continues_truncated_round_and_reuses_payloa
         {"round": 1, "reasoning_tokens": 516, "n": 1},
         {"round": 2, "reasoning_tokens": 10, "n": None},
     ]
+    assert metadata["proxy_billed_usage"] == {
+        "input_tokens": 220,
+        "output_tokens": 620,
+        "total_tokens": 840,
+        "input_tokens_details": {"cached_tokens": 50},
+        "output_tokens_details": {"reasoning_tokens": 526},
+    }
     usage = cast(dict[str, JsonValue], response["usage"])
     assert usage["input_tokens"] == 100
     assert usage["output_tokens"] == 536
     assert usage["total_tokens"] == 636
     assert usage["output_tokens_details"] == {"reasoning_tokens": 526}
+
+
+@pytest.mark.asyncio
+async def test_fold_responses_stream_drains_terminal_round_before_returning() -> None:
+    round_drained = False
+
+    async def open_round(payload: JsonObject) -> AsyncIterator[str]:
+        nonlocal round_drained
+        del payload
+        try:
+            yield _event(_completed("resp_terminal", input_tokens=5, output_tokens=7, reasoning_tokens=3))
+            yield "data: [DONE]\n\n"
+        finally:
+            round_drained = True
+
+    chunks = [
+        chunk
+        async for chunk in fold_responses_stream_with_codex_continuation(
+            base_payload={"model": "gpt-5.5", "input": [], "stream": True},
+            open_round=open_round,
+            config=CodexContinuationConfig(),
+        )
+    ]
+
+    assert round_drained is True
+    assert chunks[-1] == "data: [DONE]\n\n"
+    terminal = parse_sse_data_json(chunks[-2])
+    assert terminal is not None
+    assert terminal["type"] == "response.completed"
 
 
 def test_should_apply_codex_continuation_respects_explicit_reasoning_opt_out() -> None:

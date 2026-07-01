@@ -124,7 +124,8 @@ async def fold_responses_stream_with_codex_continuation(
             terminal: dict[str, Any] | None = None
             usage: dict[str, Any] | None = None
 
-            async for event_block in open_round(cast(JsonObject, next_payload)):
+            round_stream = open_round(cast(JsonObject, next_payload))
+            async for event_block in round_stream:
                 event = _parse_event_block(event_block)
                 if event is _Done:
                     saw_done = True
@@ -147,6 +148,7 @@ async def fold_responses_stream_with_codex_continuation(
                 if event_type in _TERMINAL_EVENT_TYPES:
                     terminal = event
                     usage = _response_usage(event)
+                    saw_done = await _drain_round_stream(round_stream, saw_done=saw_done)
                     break
 
                 upstream_output_index = event.get("output_index")
@@ -336,6 +338,16 @@ def _parse_event_block(event_block: str) -> dict[str, Any] | _DoneType | None:
 
 def _is_done_event_block(event_block: str) -> bool:
     return any(line.strip() == "data: [DONE]" for line in event_block.splitlines())
+
+
+async def _drain_round_stream(round_stream: AsyncIterator[str], *, saw_done: bool) -> bool:
+    try:
+        async for event_block in round_stream:
+            if _parse_event_block(event_block) is _Done:
+                saw_done = True
+    except Exception:
+        logger.warning("codex_continuation_round_drain_failed", exc_info=True)
+    return saw_done
 
 
 def _event_type(event: dict[str, Any]) -> str:

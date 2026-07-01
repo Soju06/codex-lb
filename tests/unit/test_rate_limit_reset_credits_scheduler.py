@@ -316,6 +316,9 @@ async def test_refresh_once_caches_snapshots_on_each_replica(monkeypatch: pytest
         async def __aexit__(self, exc_type, exc, tb) -> None:
             return None
 
+        def expunge_all(self) -> None:
+            captured.append("expunge_all")
+
     @asynccontextmanager
     async def _fake_background_session():
         captured.append("session_opened")
@@ -340,3 +343,44 @@ async def test_refresh_once_caches_snapshots_on_each_replica(monkeypatch: pytest
     assert snapshot is not None
     assert snapshot.available_count == 7
     assert account.status == AccountStatus.ACTIVE
+
+
+@pytest.mark.asyncio
+async def test_refresh_once_closes_account_read_session_before_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
+    account = _make_account("acc_session")
+    store = RateLimitResetCreditsStore()
+    session_closed = False
+
+    class _FakeRepo:
+        async def list_accounts(self) -> list[Account]:
+            return [account]
+
+    class _FakeSession:
+        def expunge_all(self) -> None:
+            return None
+
+    @asynccontextmanager
+    async def _fake_background_session():
+        nonlocal session_closed
+        session_closed = False
+        try:
+            yield _FakeSession()
+        finally:
+            session_closed = True
+
+    async def fetch_fn(access_token: str, account_id: str | None, **kwargs: Any) -> ResetCreditsResponse:
+        assert session_closed is True
+        return _response(available_count=8)
+
+    monkeypatch.setattr(scheduler_module, "get_background_session", _fake_background_session)
+    monkeypatch.setattr(scheduler_module, "AccountsRepository", lambda session: _FakeRepo())
+    monkeypatch.setattr(scheduler_module, "TokenEncryptor", lambda: StubEncryptor())
+    monkeypatch.setattr(scheduler_module, "get_rate_limit_reset_credits_store", lambda: store)
+    monkeypatch.setattr(scheduler_module, "fetch_reset_credits", fetch_fn)
+
+    scheduler = RateLimitResetCreditsRefreshScheduler(interval_seconds=60)
+    await scheduler._refresh_once()
+
+    snapshot = store.get(account.id)
+    assert snapshot is not None
+    assert snapshot.available_count == 8

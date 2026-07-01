@@ -42,7 +42,7 @@ from app.core.resilience.bulkhead import BulkheadMiddleware, get_bulkhead
 from app.core.resilience.memory_monitor import configure as configure_memory_monitor
 from app.core.usage.refresh_scheduler import build_usage_refresh_scheduler
 from app.core.usage.reset_credits_refresh_scheduler import build_rate_limit_reset_credits_scheduler
-from app.db.session import SessionLocal, close_db, init_background_db, init_db
+from app.db.session import SessionLocal, close_db, close_session, init_background_db, init_db
 from app.modules.accounts import api as accounts_api
 from app.modules.api_keys import api as api_keys_api
 from app.modules.api_keys.reset_scheduler import build_api_key_limit_reset_scheduler
@@ -451,7 +451,7 @@ async def _ensure_bridge_durable_schema_ready(settings) -> bool:
     try:
         missing_tables = await missing_durable_bridge_tables(session)
     finally:
-        await session.close()
+        await close_session(session)
     if not missing_tables:
         return True
     missing = ", ".join(missing_tables)

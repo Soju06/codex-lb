@@ -16,8 +16,11 @@ from app.modules.accounts.repository import AccountsRepository
 from app.modules.usage.repository import (
     AdditionalUsageRepository,
     UsageRepository,
+    _additional_latest_by_account_sqlite,
     _bulk_history_since_sqlite,
     _clear_bulk_history_since_sqlite_cache,
+    _latest_by_account_sqlite,
+    _resolve_additional_quota_query_scope,
 )
 
 pytestmark = pytest.mark.integration
@@ -41,6 +44,30 @@ def _make_account(account_id: str) -> Account:
 def _dialect_name(session: AsyncSession) -> str:
     bind = session.get_bind()
     return bind.dialect.name if bind is not None else "sqlite"
+
+
+class _TrackedSqliteConnection:
+    def __init__(self, conn: sqlite3.Connection, closed: list[bool]) -> None:
+        self._conn = conn
+        self._closed = closed
+
+    def close(self) -> None:
+        self._closed.append(True)
+        self._conn.close()
+
+    def __getattr__(self, name: str):
+        return getattr(self._conn, name)
+
+
+def _track_sqlite_connect_close(monkeypatch):
+    closed: list[bool] = []
+    original_connect = sqlite3.connect
+
+    def connect(*args, **kwargs):
+        return _TrackedSqliteConnection(original_connect(*args, **kwargs), closed)
+
+    monkeypatch.setattr(sqlite3, "connect", connect)
+    return closed
 
 
 @pytest.mark.asyncio
@@ -392,6 +419,123 @@ def test_bulk_history_since_sqlite_cache_reuses_superset_and_picks_up_appends(tm
     assert [row.id for row in second["acc1"]] == [2, 4]
     assert [row.id for row in second["acc2"]] == [3]
 
+    _clear_bulk_history_since_sqlite_cache()
+
+
+def test_latest_by_account_sqlite_closes_direct_connection(tmp_path, monkeypatch):
+    db_path = tmp_path / "usage.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("create table accounts (id text primary key)")
+        conn.execute(
+            """
+            create table usage_history (
+                id integer primary key,
+                account_id text not null,
+                recorded_at text not null,
+                window text,
+                used_percent real not null,
+                input_tokens integer,
+                output_tokens integer,
+                reset_at integer,
+                window_minutes integer,
+                credits_has integer,
+                credits_unlimited integer,
+                credits_balance real
+            )
+            """
+        )
+        conn.execute("insert into accounts (id) values ('acc1')")
+        conn.execute(
+            """
+            insert into usage_history
+                (id, account_id, recorded_at, window, used_percent)
+            values (1, 'acc1', '2026-01-01 00:00:00', 'primary', 10.0)
+            """
+        )
+        conn.commit()
+
+    closed = _track_sqlite_connect_close(monkeypatch)
+
+    result = _latest_by_account_sqlite(str(db_path), "primary", None)
+
+    assert result["acc1"].used_percent == 10.0
+    assert closed == [True]
+
+
+def test_additional_latest_by_account_sqlite_closes_direct_connection(tmp_path, monkeypatch):
+    db_path = tmp_path / "usage.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            create table additional_usage_history (
+                id integer primary key,
+                account_id text not null,
+                quota_key text not null,
+                limit_name text not null,
+                metered_feature text not null,
+                window text not null,
+                used_percent real not null,
+                reset_at integer,
+                window_minutes integer,
+                recorded_at text not null
+            )
+            """
+        )
+        conn.execute(
+            """
+            insert into additional_usage_history
+                (id, account_id, quota_key, limit_name, metered_feature, window, used_percent, recorded_at)
+            values (1, 'acc1', 'codex_spark', 'Codex Spark', 'codex_spark', 'primary', 20.0,
+                    '2026-01-01 00:00:00')
+            """
+        )
+        conn.commit()
+    scope = _resolve_additional_quota_query_scope(quota_key="codex_spark")
+    assert scope is not None
+    closed = _track_sqlite_connect_close(monkeypatch)
+
+    result = _additional_latest_by_account_sqlite(str(db_path), scope, "primary", None, None)
+
+    assert result["acc1"].used_percent == 20.0
+    assert closed == [True]
+
+
+def test_bulk_history_since_sqlite_closes_direct_connection(tmp_path, monkeypatch):
+    db_path = tmp_path / "usage.db"
+    _clear_bulk_history_since_sqlite_cache()
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            create table usage_history (
+                id integer primary key,
+                account_id text not null,
+                used_percent real not null,
+                recorded_at text not null,
+                reset_at real,
+                window_minutes integer,
+                window text
+            )
+            """
+        )
+        conn.execute(
+            """
+            insert into usage_history
+                (id, account_id, used_percent, recorded_at, reset_at, window_minutes, window)
+            values (1, 'acc1', 30.0, '2026-01-01 00:00:00', 1000.0, 10080, 'secondary')
+            """
+        )
+        conn.commit()
+    closed = _track_sqlite_connect_close(monkeypatch)
+
+    result = _bulk_history_since_sqlite(
+        str(db_path),
+        ["acc1"],
+        "secondary",
+        datetime(2026, 1, 1, 0, 0, 0),
+    )
+
+    assert [row.id for row in result["acc1"]] == [1]
+    assert closed == [True]
     _clear_bulk_history_since_sqlite_cache()
 
 

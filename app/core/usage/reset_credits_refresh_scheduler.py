@@ -16,7 +16,7 @@ from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError
 from app.db.models import Account, AccountStatus
-from app.db.session import get_background_session
+from app.db.session import detach_session_objects, get_background_session
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.rate_limit_reset_credits.store import (
     RateLimitResetCreditsStore,
@@ -70,13 +70,14 @@ class RateLimitResetCreditsRefreshScheduler:
                 async with get_background_session() as session:
                     accounts_repo = AccountsRepository(session)
                     accounts = await accounts_repo.list_accounts()
-                    await refresh_reset_credits_for_accounts(
-                        accounts=accounts,
-                        encryptor=TokenEncryptor(),
-                        store=get_rate_limit_reset_credits_store(),
-                        fetch_fn=fetch_reset_credits,
-                        resolve_route=_resolve_reset_credits_refresh_route,
-                    )
+                    detach_session_objects(session)
+                await refresh_reset_credits_for_accounts(
+                    accounts=accounts,
+                    encryptor=TokenEncryptor(),
+                    store=get_rate_limit_reset_credits_store(),
+                    fetch_fn=fetch_reset_credits,
+                    resolve_route=_resolve_reset_credits_refresh_route,
+                )
             except Exception:
                 logger.exception("Reset credits refresh loop failed")
 

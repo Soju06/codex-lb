@@ -28,8 +28,10 @@ from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, UsageHistory
 from app.db.session import get_background_session
 from app.modules.accounts.auth_manager import AccountsRepositoryPort, AuthManager
+from app.modules.accounts.background_repository import BackgroundAccountsRepository
 from app.modules.proxy.account_cache import get_account_selection_cache, mark_account_routing_unavailable
 from app.modules.usage.additional_quota_keys import canonicalize_additional_quota_key
+from app.modules.usage.background_repository import BackgroundAdditionalUsageRepository, BackgroundUsageRepository
 from app.modules.usage.repository import AdditionalUsageRepository
 
 logger = logging.getLogger(__name__)
@@ -229,13 +231,16 @@ class UsageUpdater:
         usage_repo: UsageRepositoryPort,
         accounts_repo: AccountsRepositoryPort | None = None,
         additional_usage_repo: AdditionalUsageRepositoryPort | AdditionalUsageRepository | None = None,
+        *,
+        auth_manager: AuthManager | None = None,
     ) -> None:
         self._usage_repo = usage_repo
         self._accounts_repo = accounts_repo
         self._additional_usage_repo = additional_usage_repo
-        self._accounts_repo = accounts_repo
         self._encryptor = TokenEncryptor()
-        self._auth_manager = AuthManager(accounts_repo) if accounts_repo else None
+        self._auth_manager = (
+            auth_manager if auth_manager is not None else AuthManager(accounts_repo) if accounts_repo else None
+        )
 
     async def refresh_accounts(
         self,
@@ -748,6 +753,16 @@ class UsageUpdater:
         account.deactivation_reason = stored.deactivation_reason
         account.reset_at = stored.reset_at
         account.blocked_at = stored.blocked_at
+
+
+def build_background_usage_updater() -> UsageUpdater:
+    accounts_repo = BackgroundAccountsRepository()
+    return UsageUpdater(
+        BackgroundUsageRepository(),
+        accounts_repo=accounts_repo,
+        additional_usage_repo=BackgroundAdditionalUsageRepository(),
+        auth_manager=AuthManager(accounts_repo),
+    )
 
 
 def _credits_snapshot(payload: UsagePayload) -> tuple[bool | None, bool | None, float | None]:

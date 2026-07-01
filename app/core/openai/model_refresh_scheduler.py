@@ -19,8 +19,9 @@ from app.core.openai.model_registry import (
 )
 from app.core.upstream_proxy import ResolvedUpstreamRoute, resolve_upstream_route
 from app.db.models import Account, AccountStatus
-from app.db.session import get_background_session
+from app.db.session import detach_session_objects, get_background_session
 from app.modules.accounts.auth_manager import AuthManager
+from app.modules.accounts.background_repository import BackgroundAccountsRepository
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.proxy.account_cache import get_account_selection_cache
 
@@ -87,45 +88,45 @@ class ModelRefreshScheduler:
             async with get_background_session() as session:
                 accounts_repo = AccountsRepository(session)
                 accounts = await accounts_repo.list_accounts()
-                grouped = _group_by_plan(accounts)
-                if not grouped:
-                    logger.debug("No active accounts for model registry refresh")
-                    return
+                detach_session_objects(session)
+            grouped = _group_by_plan(accounts)
+            if not grouped:
+                logger.debug("No active accounts for model registry refresh")
+                return
 
-                encryptor = TokenEncryptor()
-                per_plan_results: dict[str, list[UpstreamModel]] = {}
-                per_account_results: dict[str, tuple[str, list[UpstreamModel]]] = {}
-                active_account_plans: dict[str, str] = {}
+            encryptor = TokenEncryptor()
+            per_plan_results: dict[str, list[UpstreamModel]] = {}
+            per_account_results: dict[str, tuple[str, list[UpstreamModel]]] = {}
+            active_account_plans: dict[str, str] = {}
 
-                for plan_type, candidates in grouped.items():
-                    for account in candidates:
-                        active_account_plans[account.id] = plan_type
-                    result = await _fetch_with_failover(
-                        candidates,
-                        encryptor,
-                        accounts_repo,
-                    )
-                    if result is not None:
-                        per_plan_results[plan_type] = result.models
-                        per_account_results.update(result.account_models)
+            for plan_type, candidates in grouped.items():
+                for account in candidates:
+                    active_account_plans[account.id] = plan_type
+                result = await _fetch_with_failover(
+                    candidates,
+                    encryptor,
+                )
+                if result is not None:
+                    per_plan_results[plan_type] = result.models
+                    per_account_results.update(result.account_models)
 
-                if per_plan_results:
-                    registry = get_model_registry()
-                    await registry.update(
-                        per_plan_results,
-                        per_account_results=per_account_results,
-                        active_account_plans=active_account_plans,
-                    )
-                    snapshot = registry.get_snapshot()
-                    total_models = len(snapshot.models) if snapshot else 0
-                    logger.info(
-                        "Model registry refreshed plans=%d total_models=%d",
-                        len(per_plan_results),
-                        total_models,
-                    )
-                    get_account_selection_cache().invalidate()
-                else:
-                    logger.warning("Model registry refresh failed for all plans")
+            if per_plan_results:
+                registry = get_model_registry()
+                await registry.update(
+                    per_plan_results,
+                    per_account_results=per_account_results,
+                    active_account_plans=active_account_plans,
+                )
+                snapshot = registry.get_snapshot()
+                total_models = len(snapshot.models) if snapshot else 0
+                logger.info(
+                    "Model registry refreshed plans=%d total_models=%d",
+                    len(per_plan_results),
+                    total_models,
+                )
+                get_account_selection_cache().invalidate()
+            else:
+                logger.warning("Model registry refresh failed for all plans")
         except Exception:
             logger.exception("Model registry refresh loop failed")
 
@@ -167,14 +168,15 @@ def _compact_error_message(message: str) -> str:
 async def _fetch_with_failover(
     candidates: list[Account],
     encryptor: TokenEncryptor,
-    accounts_repo: AccountsRepository,
+    accounts_repo: AccountsRepository | None = None,
 ) -> _FetchResult | None:
     transport_recovery = _TransportRecoveryState()
     successful_results: list[list[UpstreamModel]] = []
     account_models: dict[str, tuple[str, list[UpstreamModel]]] = {}
+    auth_accounts_repo = accounts_repo or BackgroundAccountsRepository()
+    auth_manager = AuthManager(auth_accounts_repo)
 
     for account in candidates:
-        auth_manager = AuthManager(accounts_repo)
         try:
             account = await _ensure_fresh_with_transport_recovery(
                 auth_manager,

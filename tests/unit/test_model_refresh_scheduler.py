@@ -4,6 +4,7 @@ import contextlib
 import logging
 from datetime import datetime
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import aiohttp
@@ -350,3 +351,70 @@ async def test_fetch_with_failover_does_not_warn_after_successful_auth_retry(
     assert result.account_models == {account.id: (account.plan_type, expected_models)}
     assert fetch_models_for_plan.await_count == 2
     assert "Model fetch failed" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_refresh_once_closes_account_read_session_before_fetch_models(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account = _account()
+    session_closed = False
+
+    class _Leader:
+        async def try_acquire(self) -> bool:
+            return True
+
+    class _Session:
+        def expunge_all(self) -> None:
+            return None
+
+    @contextlib.asynccontextmanager
+    async def _background_session():
+        nonlocal session_closed
+        session_closed = False
+        try:
+            yield _Session()
+        finally:
+            session_closed = True
+
+    class _AccountsRepo:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def list_accounts(self) -> list[Account]:
+            return [account]
+
+    class _AuthManager:
+        def __init__(self, _repo: object) -> None:
+            pass
+
+        async def ensure_fresh(self, account: Account, *, force: bool = False) -> Account:
+            return account
+
+    class _Registry:
+        async def update(self, *args: Any, **kwargs: Any) -> None:
+            return None
+
+        def get_snapshot(self) -> SimpleNamespace:
+            return SimpleNamespace(models={"gpt-5.4": object()})
+
+    async def _fetch_models_for_plan(access_token: str, account_id: str | None, **kwargs: Any) -> list[UpstreamModel]:
+        assert session_closed is True
+        return [_model("gpt-5.4")]
+
+    monkeypatch.setattr(scheduler_module, "_get_leader_election", lambda: _Leader())
+    monkeypatch.setattr(scheduler_module, "get_background_session", _background_session)
+    monkeypatch.setattr(scheduler_module, "AccountsRepository", _AccountsRepo)
+    monkeypatch.setattr(scheduler_module, "AuthManager", _AuthManager)
+    monkeypatch.setattr(scheduler_module, "fetch_models_for_plan", _fetch_models_for_plan)
+    monkeypatch.setattr(scheduler_module, "get_model_registry", lambda: _Registry())
+    monkeypatch.setattr(
+        scheduler_module,
+        "get_account_selection_cache",
+        lambda: SimpleNamespace(invalidate=lambda: None),
+    )
+    monkeypatch.setattr(scheduler_module, "TokenEncryptor", lambda: SimpleNamespace(decrypt=lambda _value: "access"))
+    monkeypatch.setattr(scheduler_module, "_resolve_upstream_route_for_account", AsyncMock(return_value=None))
+
+    scheduler = scheduler_module.ModelRefreshScheduler(interval_seconds=60, enabled=True)
+    await scheduler._refresh_once()

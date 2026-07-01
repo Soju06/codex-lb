@@ -128,18 +128,35 @@ class AccountsService:
         self._encryptor = TokenEncryptor()
         self._auth_manager = auth_manager
 
-    async def list_accounts(self) -> list[AccountSummary]:
-        accounts = await self._repo.list_accounts()
+    async def list_accounts(self, *, account_ids: list[str] | None = None) -> list[AccountSummary]:
+        accounts = (
+            await self._repo.list_accounts_by_ids(account_ids)
+            if account_ids is not None
+            else await self._repo.list_accounts()
+        )
         if not accounts:
             return []
-        account_ids = [account.id for account in accounts]
-        account_id_set = set(account_ids)
-        primary_usage = await self._usage_repo.latest_by_account(window="primary") if self._usage_repo else {}
-        secondary_usage = await self._usage_repo.latest_by_account(window="secondary") if self._usage_repo else {}
-        monthly_usage = await self._usage_repo.latest_by_account(window="monthly") if self._usage_repo else {}
-        request_usage_rows = await self._repo.list_request_usage_summary_by_account(account_ids)
+        visible_account_ids = [account.id for account in accounts]
+        account_id_set = set(visible_account_ids)
+        usage_account_ids = visible_account_ids if account_ids is not None else None
+        primary_usage = (
+            await self._usage_repo.latest_by_account(window="primary", account_ids=usage_account_ids)
+            if self._usage_repo
+            else {}
+        )
+        secondary_usage = (
+            await self._usage_repo.latest_by_account(window="secondary", account_ids=usage_account_ids)
+            if self._usage_repo
+            else {}
+        )
+        monthly_usage = (
+            await self._usage_repo.latest_by_account(window="monthly", account_ids=usage_account_ids)
+            if self._usage_repo
+            else {}
+        )
+        request_usage_rows = await self._repo.list_request_usage_summary_by_account(visible_account_ids)
         limit_warmups_by_account = (
-            await self._limit_warmup_repo.latest_by_account(account_ids) if self._limit_warmup_repo else {}
+            await self._limit_warmup_repo.latest_by_account(visible_account_ids) if self._limit_warmup_repo else {}
         )
         request_usage_by_account = {
             account_id: AccountRequestUsage(
@@ -154,10 +171,18 @@ class AccountsService:
         additional_usage_repo = cast(AdditionalUsageRepository | None, self._additional_usage_repo)
         if additional_usage_repo:
             additional_quota_routing_overrides = await self._repo.additional_quota_routing_policy_overrides()
-            quota_keys = await additional_usage_repo.list_quota_keys(account_ids=account_ids)
+            quota_keys = await additional_usage_repo.list_quota_keys(account_ids=visible_account_ids)
             for quota_key in quota_keys:
-                primary_entries = await additional_usage_repo.latest_by_account(quota_key, "primary")
-                secondary_entries = await additional_usage_repo.latest_by_account(quota_key, "secondary")
+                primary_entries = await additional_usage_repo.latest_by_account(
+                    quota_key,
+                    "primary",
+                    account_ids=visible_account_ids,
+                )
+                secondary_entries = await additional_usage_repo.latest_by_account(
+                    quota_key,
+                    "secondary",
+                    account_ids=visible_account_ids,
+                )
                 for account_id in (set(primary_entries) | set(secondary_entries)) & account_id_set:
                     primary_entry = primary_entries.get(account_id)
                     secondary_entry = secondary_entries.get(account_id)

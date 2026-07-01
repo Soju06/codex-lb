@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import asynccontextmanager
 
 import pytest
 
@@ -69,10 +70,17 @@ def _make_account(
     )
 
 
-async def _create_api_key(name: str) -> str:
+async def _create_api_key(name: str, *, assigned_account_ids: list[str] | None = None) -> str:
     async with SessionLocal() as session:
         service = ApiKeysService(ApiKeysRepository(session))
-        created = await service.create_key(ApiKeyCreateData(name=name, allowed_models=None, limits=[]))
+        created = await service.create_key(
+            ApiKeyCreateData(
+                name=name,
+                allowed_models=None,
+                limits=[],
+                assigned_account_ids=assigned_account_ids,
+            )
+        )
     return created.key
 
 
@@ -229,6 +237,39 @@ async def test_fleet_summary_omits_sensitive_fields(async_client, db_setup):
 
 
 @pytest.mark.asyncio
+async def test_fleet_summary_respects_account_scoped_api_key(async_client, db_setup):
+    await _seed_account_with_windows(
+        "acc_scope_visible",
+        "scope-visible@example.com",
+        primary_used_percent=10.0,
+        secondary_used_percent=20.0,
+        primary_reset_at=1735862400,
+        secondary_reset_at=1736467200,
+    )
+    await _seed_account_with_windows(
+        "acc_scope_hidden",
+        "scope-hidden@example.com",
+        primary_used_percent=70.0,
+        secondary_used_percent=80.0,
+        primary_reset_at=1735862400,
+        secondary_reset_at=1736467200,
+    )
+    plain_key = await _create_api_key("fleet-summary-scoped-key", assigned_account_ids=["acc_scope_visible"])
+
+    response = await async_client.get(
+        "/api/fleet/summary",
+        headers={"Authorization": f"Bearer {plain_key}"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert [account["accountId"] for account in payload["accounts"]] == ["acc_scope_visible"]
+    raw = json.dumps(payload)
+    assert "scope-visible@example.com" in raw
+    assert "scope-hidden@example.com" not in raw
+
+
+@pytest.mark.asyncio
 async def test_fleet_refresh_requires_api_key(async_client, db_setup):
     response = await async_client.post("/api/fleet/refresh")
 
@@ -307,6 +348,8 @@ async def test_fleet_refresh_uses_route_local_usage_updater_and_invalidates_on_w
 
     refresh_calls: list[list[str]] = []
     invalidations: list[str] = []
+    updater_session_ids: list[int] = []
+    background_session_ids: list[int] = []
 
     class FakeUsageUpdater:
         def __init__(self, usage_repo, accounts_repo, additional_usage_repo):
@@ -315,6 +358,7 @@ async def test_fleet_refresh_uses_route_local_usage_updater_and_invalidates_on_w
             self.additional_usage_repo = additional_usage_repo
 
         async def refresh_accounts(self, accounts, latest_primary):
+            updater_session_ids.append(id(self.usage_repo._session))
             refresh_calls.append([account.id for account in accounts])
             assert isinstance(latest_primary, dict)
             return True
@@ -327,6 +371,13 @@ async def test_fleet_refresh_uses_route_local_usage_updater_and_invalidates_on_w
         def invalidate(self):
             invalidations.append("account_selection")
 
+    @asynccontextmanager
+    async def recording_background_session():
+        async with SessionLocal() as session:
+            background_session_ids.append(id(session))
+            yield session
+
+    monkeypatch.setattr("app.modules.fleet.api.get_background_session", recording_background_session)
     monkeypatch.setattr("app.modules.fleet.api.UsageUpdater", FakeUsageUpdater)
     monkeypatch.setattr(
         "app.modules.fleet.api.get_rate_limit_headers_cache",
@@ -348,4 +399,54 @@ async def test_fleet_refresh_uses_route_local_usage_updater_and_invalidates_on_w
     assert payload["accountCount"] == 1
     assert payload["attemptedCount"] == 1
     assert refresh_calls == [["acc_refresh_write"]]
+    assert updater_session_ids == background_session_ids
     assert invalidations == ["rate_limit_headers", "account_selection"]
+
+
+@pytest.mark.asyncio
+async def test_fleet_refresh_respects_account_scoped_api_key(async_client, db_setup, monkeypatch):
+    await _seed_account_with_windows(
+        "acc_refresh_scope_visible",
+        "refresh-scope-visible@example.com",
+        primary_used_percent=10.0,
+        secondary_used_percent=10.0,
+        primary_reset_at=1735862400,
+        secondary_reset_at=1736467200,
+    )
+    await _seed_account_with_windows(
+        "acc_refresh_scope_hidden",
+        "refresh-scope-hidden@example.com",
+        primary_used_percent=20.0,
+        secondary_used_percent=20.0,
+        primary_reset_at=1735862400,
+        secondary_reset_at=1736467200,
+    )
+    plain_key = await _create_api_key(
+        "fleet-refresh-scoped-key",
+        assigned_account_ids=["acc_refresh_scope_visible"],
+    )
+    refresh_calls: list[list[str]] = []
+
+    class FakeUsageUpdater:
+        def __init__(self, usage_repo, accounts_repo, additional_usage_repo):
+            self.usage_repo = usage_repo
+            self.accounts_repo = accounts_repo
+            self.additional_usage_repo = additional_usage_repo
+
+        async def refresh_accounts(self, accounts, latest_primary):
+            refresh_calls.append([account.id for account in accounts])
+            assert set(latest_primary) <= {"acc_refresh_scope_visible"}
+            return False
+
+    monkeypatch.setattr("app.modules.fleet.api.UsageUpdater", FakeUsageUpdater)
+
+    response = await async_client.post(
+        "/api/fleet/refresh",
+        headers={"Authorization": f"Bearer {plain_key}"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["accountCount"] == 1
+    assert payload["attemptedCount"] == 1
+    assert refresh_calls == [["acc_refresh_scope_visible"]]

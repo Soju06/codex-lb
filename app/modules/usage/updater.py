@@ -224,6 +224,10 @@ class _UsageRefreshSingleflight:
 _USAGE_REFRESH_SINGLEFLIGHT = _UsageRefreshSingleflight()
 
 
+def _usage_refresh_singleflight_key(account_id: str, *, own_singleflight_session: bool = False) -> str:
+    return f"owned-session:{account_id}" if own_singleflight_session else account_id
+
+
 class UsageUpdater:
     def __init__(
         self,
@@ -307,7 +311,10 @@ class UsageUpdater:
                         )
 
                 result = await _USAGE_REFRESH_SINGLEFLIGHT.run(
-                    account.id,
+                    _usage_refresh_singleflight_key(
+                        account.id,
+                        own_singleflight_session=own_singleflight_sessions,
+                    ),
                     refresh_factory,
                 )
                 if not own_singleflight_sessions:

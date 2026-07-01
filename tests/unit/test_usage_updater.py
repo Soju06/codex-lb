@@ -81,6 +81,8 @@ async def test_refresh_accounts_owned_singleflight_session_outlives_caller_cance
     account = _make_account("acc_owned_session", "workspace_owned")
     refresh_started = asyncio.Event()
     allow_refresh_finish = asyncio.Event()
+    non_owned_started = asyncio.Event()
+    allow_non_owned_finish = asyncio.Event()
     inner_session_closed = asyncio.Event()
     session_was_open_during_refresh: list[bool] = []
 
@@ -151,6 +153,16 @@ async def test_refresh_accounts_owned_singleflight_session_outlives_caller_cance
     monkeypatch.setattr(UsageUpdater, "_refresh_account_if_stale", fake_refresh_account_if_stale)
     monkeypatch.setattr(usage_updater_module, "get_settings", Settings)
 
+    async def non_owned_refresh_factory() -> usage_updater_module.AccountRefreshResult:
+        non_owned_started.set()
+        await allow_non_owned_finish.wait()
+        return usage_updater_module.AccountRefreshResult(usage_written=False)
+
+    non_owned_task = asyncio.create_task(
+        usage_updater_module._USAGE_REFRESH_SINGLEFLIGHT.run(account.id, non_owned_refresh_factory)
+    )
+    await asyncio.wait_for(non_owned_started.wait(), timeout=1)
+
     task = asyncio.create_task(
         UsageUpdater(OuterUsageRepository()).refresh_accounts(
             [account],
@@ -168,6 +180,8 @@ async def test_refresh_accounts_owned_singleflight_session_outlives_caller_cance
     assert not inner_session_closed.is_set()
     allow_refresh_finish.set()
     await asyncio.wait_for(inner_session_closed.wait(), timeout=1)
+    allow_non_owned_finish.set()
+    await non_owned_task
     assert session_was_open_during_refresh == [True]
 
 

@@ -5,7 +5,7 @@ import contextlib
 import logging
 import math
 import time
-from collections.abc import Awaitable, Callable, Collection
+from collections.abc import Awaitable, Callable, Collection, Hashable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Mapping, Protocol, cast
@@ -151,12 +151,12 @@ _usage_refresh_auth_cooldowns: dict[str, float] = {}
 
 class _UsageRefreshSingleflight:
     def __init__(self) -> None:
-        self._inflight: dict[str, asyncio.Task[AccountRefreshResult]] = {}
+        self._inflight: dict[Hashable, asyncio.Task[AccountRefreshResult]] = {}
         self._lock = asyncio.Lock()
 
     async def run(
         self,
-        account_id: str,
+        account_id: Hashable,
         factory: Callable[[], Awaitable[AccountRefreshResult]],
         *,
         join_existing: bool = True,
@@ -195,7 +195,7 @@ class _UsageRefreshSingleflight:
 
     def _clear_if_current(
         self,
-        key: str,
+        key: Hashable,
         task: asyncio.Task[AccountRefreshResult],
     ) -> None:
         current = self._inflight.get(key)
@@ -224,8 +224,12 @@ class _UsageRefreshSingleflight:
 _USAGE_REFRESH_SINGLEFLIGHT = _UsageRefreshSingleflight()
 
 
-def _usage_refresh_singleflight_key(account_id: str, *, own_singleflight_session: bool = False) -> str:
-    return f"owned-session:{account_id}" if own_singleflight_session else account_id
+def _usage_refresh_singleflight_key(
+    account_id: str,
+    *,
+    own_singleflight_session: bool = False,
+) -> str | tuple[str, str]:
+    return ("owned-session", account_id) if own_singleflight_session else account_id
 
 
 class UsageUpdater:

@@ -47,7 +47,7 @@ export function AccountsPage() {
     routingPolicyMutation,
     exportAuthMutation,
   } = useAccounts();
-  const { upstreamProxyQuery, accountBindingMutation } = useUpstreamProxyAdmin();
+  const { upstreamProxyQuery, accountBindingMutation, testEndpointMutation } = useUpstreamProxyAdmin();
   const oauth = useOauth();
   const canWrite = useAuthStore((state) => state.canWrite);
 
@@ -113,7 +113,8 @@ export function AccountsPage() {
     routingPolicyMutation.isPending ||
     exportAuthMutation.isPending ||
     updateMutation.isPending ||
-    accountBindingMutation.isPending;
+    accountBindingMutation.isPending ||
+    testEndpointMutation.isPending;
 
   const mutationError =
     getErrorMessageOrNull(importMutation.error) ||
@@ -127,7 +128,8 @@ export function AccountsPage() {
     getErrorMessageOrNull(exportAuthMutation.error) ||
     getErrorMessageOrNull(updateMutation.error) ||
     getErrorMessageOrNull(upstreamProxyQuery.error) ||
-    getErrorMessageOrNull(accountBindingMutation.error);
+    getErrorMessageOrNull(accountBindingMutation.error) ||
+    getErrorMessageOrNull(testEndpointMutation.error);
 
   return (
     <div className="animate-fade-in-up space-y-6">
@@ -213,6 +215,7 @@ export function AccountsPage() {
             onProxyBindingSave={(accountId, payload) =>
               accountBindingMutation.mutateAsync({ accountId, payload })
             }
+            onProxyEndpointTest={(endpointId) => testEndpointMutation.mutateAsync(endpointId)}
           />
         </div>
       )}

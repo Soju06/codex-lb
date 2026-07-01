@@ -15,7 +15,11 @@ import type {
   AccountSummary,
 } from "@/features/accounts/schemas";
 import { useAccountTrends } from "@/features/accounts/hooks/use-accounts";
-import type { AccountProxyBindingRequest, UpstreamProxyAdmin } from "@/features/settings/schemas";
+import type {
+  AccountProxyBindingRequest,
+  UpstreamProxyAdmin,
+  UpstreamProxyEndpointTestResponse,
+} from "@/features/settings/schemas";
 import { formatCompactAccountId } from "@/utils/account-identifiers";
 import { formatSlug } from "@/utils/formatters";
 
@@ -40,6 +44,7 @@ export type AccountDetailProps = {
   onSecurityWorkAuthorizedChange: (accountId: string, enabled: boolean) => void;
   upstreamProxyAdmin?: UpstreamProxyAdmin | null;
   onProxyBindingSave?: (accountId: string, payload: AccountProxyBindingRequest) => Promise<unknown>;
+  onProxyEndpointTest?: (endpointId: string) => Promise<UpstreamProxyEndpointTestResponse>;
 };
 
 export function AccountDetail({
@@ -60,6 +65,7 @@ export function AccountDetail({
   onSecurityWorkAuthorizedChange,
   upstreamProxyAdmin = null,
   onProxyBindingSave,
+  onProxyEndpointTest,
 }: AccountDetailProps) {
   const { data: trends } = useAccountTrends(account?.accountId ?? null);
   const blurred = usePrivacyStore((s) => s.blurred);
@@ -136,6 +142,7 @@ export function AccountDetail({
           busy={busy}
           readOnly={readOnly}
           onSave={onProxyBindingSave}
+          onTestEndpoint={onProxyEndpointTest}
         />
       ) : null}
       <AccountUsagePanel account={account} trends={trends} />

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from contextlib import asynccontextmanager
 
@@ -11,7 +12,8 @@ from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
-from app.modules.api_keys.service import ApiKeyCreateData, ApiKeysService
+from app.modules.api_keys.service import ApiKeyCreateData, ApiKeyData, ApiKeysService
+from app.modules.fleet import api as fleet_api
 from app.modules.usage.repository import UsageRepository
 
 pytestmark = pytest.mark.integration
@@ -513,3 +515,87 @@ async def test_fleet_refresh_respects_account_scoped_api_key(async_client, db_se
     assert payload["accountCount"] == 1
     assert payload["attemptedCount"] == 1
     assert refresh_calls == [["acc_refresh_scope_visible"]]
+
+
+@pytest.mark.asyncio
+async def test_fleet_refresh_owns_session_until_shielded_refresh_finishes(db_setup, monkeypatch):
+    await _seed_account_with_windows(
+        "acc_refresh_cancel",
+        "refresh-cancel@example.com",
+        primary_used_percent=10.0,
+        secondary_used_percent=10.0,
+        primary_reset_at=1735862400,
+        secondary_reset_at=1736467200,
+    )
+    refresh_started = asyncio.Event()
+    allow_refresh_finish = asyncio.Event()
+    session_exited = asyncio.Event()
+    session_was_open_during_refresh: list[bool] = []
+    invalidations: list[str] = []
+
+    class FakeUsageUpdater:
+        def __init__(self, usage_repo, accounts_repo, additional_usage_repo):
+            self.usage_repo = usage_repo
+            self.accounts_repo = accounts_repo
+            self.additional_usage_repo = additional_usage_repo
+
+        async def refresh_accounts(self, accounts, latest_primary):
+            async def shielded_refresh() -> bool:
+                refresh_started.set()
+                await allow_refresh_finish.wait()
+                session_was_open_during_refresh.append(not session_exited.is_set())
+                return True
+
+            return await asyncio.shield(asyncio.create_task(shielded_refresh()))
+
+    class FakeRateLimitHeadersCache:
+        async def invalidate(self):
+            invalidations.append("rate_limit_headers")
+
+    class FakeAccountSelectionCache:
+        def invalidate(self):
+            invalidations.append("account_selection")
+
+    @asynccontextmanager
+    async def recording_background_session():
+        async with SessionLocal() as session:
+            try:
+                yield session
+            finally:
+                session_exited.set()
+
+    monkeypatch.setattr(fleet_api, "get_background_session", recording_background_session)
+    monkeypatch.setattr(fleet_api, "UsageUpdater", FakeUsageUpdater)
+    monkeypatch.setattr(fleet_api, "get_rate_limit_headers_cache", lambda: FakeRateLimitHeadersCache())
+    monkeypatch.setattr(fleet_api, "get_account_selection_cache", lambda: FakeAccountSelectionCache())
+
+    request_task = asyncio.create_task(
+        fleet_api.refresh_fleet_usage(
+            api_key=ApiKeyData(
+                id="fleet-refresh-cancel-key",
+                name="fleet refresh cancel key",
+                key_prefix="fleet-refresh-cancel",
+                allowed_models=None,
+                enforced_model=None,
+                enforced_reasoning_effort=None,
+                enforced_service_tier=None,
+                expires_at=None,
+                is_active=True,
+                created_at=utcnow(),
+                last_used_at=None,
+            )
+        )
+    )
+    await asyncio.wait_for(refresh_started.wait(), timeout=1)
+
+    request_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await request_task
+    await asyncio.sleep(0)
+
+    assert not session_exited.is_set()
+    allow_refresh_finish.set()
+    await asyncio.wait_for(session_exited.wait(), timeout=1)
+
+    assert session_was_open_during_refresh == [True]
+    assert invalidations == ["rate_limit_headers", "account_selection"]

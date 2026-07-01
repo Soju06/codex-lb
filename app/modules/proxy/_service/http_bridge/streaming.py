@@ -11,6 +11,10 @@ from uuid import uuid4
 
 import anyio
 
+from app.core.clients.codex_continuation import (
+    codex_continuation_config_from_settings,
+    should_apply_codex_continuation,
+)
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
 from app.core.clients.files import finalize_file as core_finalize_file  # noqa: F401
 from app.core.clients.proxy import CodexControlResponse as CodexControlResponse
@@ -322,14 +326,28 @@ class _HTTPBridgeStreamingMixin:
         enforce_openai_sdk_contract: bool = True,
     ) -> AsyncIterator[str]:
         dashboard_settings = await _service_get_settings_cache().get()
-        runtime_config = _http_bridge_runtime_config(dashboard_settings, _service_get_settings())
+        settings = _service_get_settings()
+        runtime_config = _http_bridge_runtime_config(dashboard_settings, settings)
         request_id = ensure_request_id()
         self._raise_for_unsupported_input_image_references(payload)
         payload_size_estimate_bytes = len(
             json.dumps(payload.to_payload(), ensure_ascii=True, separators=(",", ":")).encode("utf-8")
         )
         rewritten_file_account_id = await self._resolve_file_account_for_responses(payload, headers)
-        ws_payload_budget_bytes = _ws_transport_payload_budget_bytes(_service_get_settings())
+        ws_payload_budget_bytes = _ws_transport_payload_budget_bytes(settings)
+        if (
+            runtime_config.enabled
+            and settings.codex_continuation_bypass_http_bridge
+            and should_apply_codex_continuation(
+                payload.to_payload(),
+                codex_continuation_config_from_settings(settings),
+            )
+        ):
+            logger.info(
+                "stream_responses bypassing http bridge for codex continuation request_id=%s",
+                request_id,
+            )
+            runtime_config = dataclasses.replace(runtime_config, enabled=False)
         if runtime_config.enabled and payload_size_estimate_bytes > ws_payload_budget_bytes:
             logger.info(
                 "stream_responses bypassing http bridge for large payload size=%s budget=%s request_id=%s",

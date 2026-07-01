@@ -8,12 +8,36 @@ The repository SHALL provide a standalone Starlette middleware runtime for Respo
 - **AND** starts the runtime with `uv run python run.py`
 - **THEN** the runtime serves the configured host, port, and listen paths
 
+### Requirement: Passive Codex-LB Responses Stream Integration
+codex-lb SHALL apply CodexCont continuation folding by default to Responses-compatible HTTP streaming requests that enter the normal codex-lb Responses stream service path and do not fail the continuation gates. The integrated fold MUST be controlled by `CODEX_LB_CODEX_CONTINUATION_ENABLED`.
+
+#### Scenario: Normal codex-lb Responses stream is continuation eligible
+- **WHEN** a codex-lb HTTP Responses stream is created while `CODEX_LB_CODEX_CONTINUATION_ENABLED=true`
+- **AND** reasoning is not explicitly disabled
+- **THEN** codex-lb applies continuation folding before yielding the downstream SSE stream
+
+### Requirement: Hidden Continuation Rounds Reuse Selected Upstream Contract
+The integrated codex-lb fold MUST open hidden continuation rounds through the same selected upstream account, auth headers, upstream route, Codex client/session, transport override, and SDK-contract normalization as the visible round. Hidden continuation rounds MUST NOT re-enter account selection as separate user-visible stream requests and MUST NOT create independent API-key reservations.
+
+#### Scenario: Truncated codex-lb stream opens hidden round
+- **WHEN** a codex-lb stream detects a continuation-eligible truncation fingerprint
+- **THEN** the hidden round uses the already selected account and route
+- **AND** codex-lb presents the folded rounds as one downstream stream
+
+### Requirement: HTTP Bridge Does Not Bypass Continuation Folding
+When the HTTP session bridge is enabled and `CODEX_LB_CODEX_CONTINUATION_BYPASS_HTTP_BRIDGE=true`, codex-lb MUST route continuation-eligible HTTP Responses streams through the standard stream path instead of the HTTP bridge so the passive continuation fold is applied.
+
+#### Scenario: Bridge would otherwise handle continuation-eligible stream
+- **WHEN** the HTTP session bridge is enabled
+- **AND** a stream is continuation eligible
+- **THEN** codex-lb bypasses the bridge and uses the standard stream path
+
 ### Requirement: Transparent Passthrough For Non-Continuation Requests
-The middleware MUST forward requests without folding when continuation is disabled, the request body is not a JSON object, streaming is not enabled, reasoning is explicitly disabled, or the request is otherwise outside the configured continuation gates.
+The middleware and integrated codex-lb path MUST forward requests without continuation folding when continuation is disabled, the request body is not a JSON object, reasoning is explicitly disabled, or the request is otherwise outside the configured continuation gates.
 
 #### Scenario: Request disables reasoning
 - **WHEN** a streaming Responses request explicitly disables reasoning
-- **THEN** the middleware forwards the upstream stream without opening hidden continuation rounds
+- **THEN** the request is forwarded without opening hidden continuation rounds
 
 ### Requirement: Fold Detected Reasoning-Truncation Streams
 For streaming Responses requests that pass the continuation gates, the middleware MUST inspect terminal upstream usage. When `usage.output_tokens_details.reasoning_tokens` matches `truncation_step * n - 2`, encrypted reasoning content is available, and configured caps allow continuation, the middleware MUST discard tentative final output from the truncated round, append the prior reasoning plus the configured continuation marker to the next upstream request, and open another upstream streaming round.

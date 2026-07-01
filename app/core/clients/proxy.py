@@ -44,6 +44,11 @@ from app.core.clients.codex import (
     create_codex_session,
     require_route_or_direct_egress_opt_in,
 )
+from app.core.clients.codex_continuation import (
+    codex_continuation_config_from_settings,
+    fold_responses_stream_with_codex_continuation,
+    should_apply_codex_continuation,
+)
 from app.core.clients.codex_version import get_codex_version_cache
 from app.core.clients.http import acquire_http_client, lease_http_session
 from app.core.config.settings import Settings, get_settings
@@ -2403,6 +2408,7 @@ async def _stream_responses_with_session(
     allow_direct_egress: bool = True,
     codex_installation_id: str | None = None,
     enforce_openai_sdk_contract: bool = True,
+    _codex_continuation_enabled: bool = True,
 ) -> AsyncIterator[str]:
     settings = get_settings()
     upstream_base = (base_url or settings.upstream_base_url).rstrip("/")
@@ -2448,6 +2454,37 @@ async def _stream_responses_with_session(
             _as_image_fetch_session(client_session),
             effective_connect_timeout,
         )
+    codex_continuation_config = codex_continuation_config_from_settings(settings)
+    if _codex_continuation_enabled and should_apply_codex_continuation(payload_dict, codex_continuation_config):
+
+        async def _open_continuation_round(round_payload: JsonObject) -> AsyncIterator[str]:
+            round_request = ResponsesRequest.model_validate(dict(round_payload))
+            async for event_block in _stream_responses_with_session(
+                payload=round_request,
+                headers=headers,
+                access_token=access_token,
+                account_id=account_id,
+                base_url=base_url,
+                raise_for_status=raise_for_status,
+                session=client_session,
+                upstream_stream_transport_override=upstream_stream_transport_override,
+                route=route,
+                codex_client=codex_client,
+                route_trace=route_trace,
+                allow_direct_egress=allow_direct_egress,
+                codex_installation_id=codex_installation_id,
+                enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+                _codex_continuation_enabled=False,
+            ):
+                yield event_block
+
+        async for event_block in fold_responses_stream_with_codex_continuation(
+            base_payload=payload_dict,
+            open_round=_open_continuation_round,
+            config=codex_continuation_config,
+        ):
+            yield event_block
+        return
     payload_json = json.dumps(payload_dict, ensure_ascii=True, separators=(",", ":"))
     payload_size_estimate_bytes = len(payload_json.encode("utf-8"))
     transport_mode = _configured_stream_transport(

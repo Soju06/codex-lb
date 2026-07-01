@@ -4,10 +4,12 @@
 
 Continue-thinking middleware for Codex / OpenAI Responses-compatible APIs.
 
-CodexCont is a small Starlette proxy that sits between a coding agent and an upstream Responses endpoint. It detects the observed reasoning-truncation fingerprint `usage.output_tokens_details.reasoning_tokens == 518 * n - 2`, asks the model to continue thinking, and folds multiple upstream streaming responses into one downstream SSE response.
+CodexCont detects the observed reasoning-truncation fingerprint `usage.output_tokens_details.reasoning_tokens == 518 * n - 2`, asks the model to continue thinking, and folds multiple upstream streaming responses into one downstream SSE response.
+
+In codex-lb, that folding is passively integrated into the normal Responses-compatible HTTP stream path and is enabled by default. The standalone Starlette proxy is still available for isolated use.
 
 ```text
-Coding agent  ->  CodexCont  ->  Codex / Responses API
+Coding agent  ->  codex-lb Responses stream  ->  CodexCont fold  ->  Codex / Responses API
 ```
 
 > Installing via an AI agent? Hand it [`INSTALL-GUIDE-AGENT/AGENT.md`](INSTALL-GUIDE-AGENT/AGENT.md), a step-by-step runbook written for an AI agent to execute on your machine.
@@ -33,6 +35,19 @@ The default continuation method is a hidden `phase: commentary` assistant messag
 - Runtime dependencies: `httpx`, `starlette`, and `uvicorn`.
 
 ## Quick Start
+
+### Integrated codex-lb path
+
+The codex-lb integration is controlled by `CODEX_LB_CODEX_CONTINUATION_*` settings:
+
+- `CODEX_LB_CODEX_CONTINUATION_ENABLED=true` enables passive folding.
+- `CODEX_LB_CODEX_CONTINUATION_MAX_CONTINUE=3` caps hidden continuation rounds after round 1.
+- `CODEX_LB_CODEX_CONTINUATION_BYPASS_HTTP_BRIDGE=true` routes continuation-eligible HTTP streams through the standard stream path so the fold cannot be bypassed by the HTTP session bridge.
+- `CODEX_LB_CODEX_CONTINUATION_FORCE_INCLUDE_ENCRYPTED=true` ensures continuation rounds request encrypted reasoning content.
+
+Hidden continuation rounds reuse the selected upstream account/auth route inside the same service stream. They are not exposed as separate downstream responses.
+
+### Standalone proxy
 
 ```bash
 uv sync
@@ -74,15 +89,14 @@ Do not commit secrets. `config.toml`, `rt.json`, and `free_rt.json` are ignored 
 
 ## When Continuation Is Applied
 
-The middleware folds only when all of the following are true:
+The integrated path folds Responses-compatible HTTP streams when all of the following are true:
 
-- `[continue].enabled = true`.
-- The request body is a JSON object.
-- `stream` is truthy.
+- `CODEX_LB_CODEX_CONTINUATION_ENABLED=true`.
+- The request is handled by codex-lb's HTTP Responses stream path.
+- Streaming is enabled by the route.
 - Reasoning is not explicitly disabled.
-- For `method = tool_pair`, the request does not declare a real tool with the configured continue-tool name.
 
-All other requests are proxied unchanged as passthrough streams.
+All other requests are proxied without continuation folding. The standalone proxy uses the matching `[continue]` and `[stream]` keys from `config.toml`.
 
 ## Response Metadata
 

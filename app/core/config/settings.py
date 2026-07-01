@@ -159,6 +159,17 @@ class Settings(BaseSettings):
     upstream_connect_timeout_seconds: float = 8.0
     upstream_compact_timeout_seconds: float | None = None
     upstream_websocket_trust_env: bool = Field(default_factory=_default_upstream_websocket_trust_env)
+    codex_continuation_enabled: bool = True
+    codex_continuation_truncation_step: int = Field(default=518, gt=0)
+    codex_continuation_max_continue: int = Field(default=3, ge=0)
+    codex_continuation_min_n: int = Field(default=1, ge=1)
+    codex_continuation_max_n: int = Field(default=0, ge=0)
+    codex_continuation_marker_text: str = "Continue thinking..."
+    codex_continuation_force_include_encrypted: bool = True
+    codex_continuation_rechunk_final_answer: bool = True
+    codex_continuation_rechunk_size: int = Field(default=16, gt=0)
+    codex_continuation_max_total_output_tokens: int = Field(default=0, ge=0)
+    codex_continuation_bypass_http_bridge: bool = True
     proxy_request_budget_seconds: float = Field(default=600.0, gt=0)
     http_responses_stream_request_budget_seconds: float = Field(default=7200.0, gt=0)
     compact_request_budget_seconds: float = Field(default=180.0, gt=0)

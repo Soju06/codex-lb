@@ -1887,6 +1887,88 @@ async def test_stream_http_bridge_or_retry_bypasses_bridge_for_input_image(monke
 
 
 @pytest.mark.asyncio
+async def test_stream_http_bridge_or_retry_bypasses_bridge_for_codex_continuation(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    settings.codex_continuation_enabled = True
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        proxy_service,
+        "_http_bridge_runtime_config",
+        lambda _dashboard_settings, _app_settings: proxy_service._HTTPBridgeRuntimeConfig(
+            enabled=True,
+            idle_ttl_seconds=30.0,
+            codex_idle_ttl_seconds=30.0,
+            max_sessions=8,
+            queue_limit=16,
+            prompt_cache_idle_ttl_seconds=30.0,
+            gateway_safe_mode=False,
+        ),
+    )
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.5",
+            "instructions": "hi",
+            "input": [{"role": "user", "content": "hello"}],
+            "stream": True,
+        }
+    )
+    monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=None))
+    calls: list[str] = []
+
+    async def fake_stream_with_retry(payload, headers, **kwargs):
+        del payload, headers, kwargs
+        calls.append("retry")
+        yield "data: retry\n\n"
+
+    async def fake_stream_via_http_bridge(payload, headers, **kwargs):
+        del payload, headers, kwargs
+        calls.append("bridge")
+        yield "data: bridge\n\n"
+
+    monkeypatch.setattr(service, "_stream_with_retry", fake_stream_with_retry)
+    monkeypatch.setattr(service, "_stream_via_http_bridge", fake_stream_via_http_bridge)
+
+    output = [
+        line
+        async for line in service._stream_http_bridge_or_retry(
+            payload=payload,
+            headers={},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+        )
+    ]
+
+    assert output == ["data: retry\n\n"]
+    assert calls == ["retry"]
+
+    settings.codex_continuation_bypass_http_bridge = False
+    calls.clear()
+    bridge_output = [
+        line
+        async for line in service._stream_http_bridge_or_retry(
+            payload=payload,
+            headers={},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+        )
+    ]
+
+    assert bridge_output == ["data: bridge\n\n"]
+    assert calls == ["bridge"]
+
+
+@pytest.mark.asyncio
 async def test_stream_http_bridge_or_retry_bypasses_bridge_for_image_generation_tool(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
@@ -2736,6 +2818,17 @@ def _make_proxy_settings(*, log_proxy_service_tier_trace: bool) -> SimpleNamespa
         compact_request_budget_seconds=75.0,
         transcription_request_budget_seconds=120.0,
         upstream_compact_timeout_seconds=None,
+        codex_continuation_enabled=False,
+        codex_continuation_truncation_step=518,
+        codex_continuation_max_continue=3,
+        codex_continuation_min_n=1,
+        codex_continuation_max_n=0,
+        codex_continuation_marker_text="Continue thinking...",
+        codex_continuation_force_include_encrypted=True,
+        codex_continuation_rechunk_final_answer=True,
+        codex_continuation_rechunk_size=16,
+        codex_continuation_max_total_output_tokens=0,
+        codex_continuation_bypass_http_bridge=True,
         http_responses_session_bridge_gateway_safe_mode=False,
         log_proxy_request_payload=False,
         log_proxy_request_shape=False,
@@ -4172,6 +4265,217 @@ async def test_stream_responses_uses_http_responses_stream_budget(monkeypatch):
     assert 0.0 < timeout.total <= 7200.0
     assert timeout.total == pytest.approx(7200.0, abs=0.1)
     assert events == ['data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n']
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_applies_codex_continuation_in_core_client(monkeypatch):
+    class Settings:
+        upstream_base_url = "https://chatgpt.com/backend-api"
+        upstream_connect_timeout_seconds = 8.0
+        stream_idle_timeout_seconds = 600.0
+        max_sse_event_bytes = 1024 * 1024
+        image_inline_fetch_enabled = False
+        log_upstream_request_payload = False
+        log_upstream_request_summary = False
+        proxy_request_budget_seconds = 600.0
+        http_responses_stream_request_budget_seconds = 7200.0
+        upstream_stream_transport = "http"
+        codex_continuation_enabled = True
+        codex_continuation_truncation_step = 518
+        codex_continuation_max_continue = 1
+        codex_continuation_min_n = 1
+        codex_continuation_max_n = 0
+        codex_continuation_marker_text = "Continue thinking..."
+        codex_continuation_force_include_encrypted = True
+        codex_continuation_rechunk_final_answer = True
+        codex_continuation_rechunk_size = 64
+        codex_continuation_max_total_output_tokens = 0
+
+    class QueueSseSession:
+        def __init__(self, responses: list[_SsePostResponse]) -> None:
+            self._responses = responses
+            self.calls: list[dict[str, object]] = []
+
+        def post(
+            self,
+            url: str,
+            *,
+            json=None,
+            headers: dict[str, str] | None = None,
+            timeout=None,
+        ):
+            self.calls.append({"url": url, "json": json, "headers": headers, "timeout": timeout})
+            return self._responses.pop(0)
+
+    def sse(payload: Mapping[str, JsonValue]) -> bytes:
+        return proxy_module.format_sse_event(payload).encode("utf-8")
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module, "archive_json", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module, "archive_text", lambda **kwargs: None)
+
+    round_one = _SsePostResponse(
+        [
+            sse({"type": "response.created", "response": {"id": "resp_1", "status": "in_progress"}}),
+            sse(
+                {
+                    "type": "response.output_item.added",
+                    "output_index": 0,
+                    "item": {"id": "rs_1", "type": "reasoning"},
+                }
+            ),
+            sse(
+                {
+                    "type": "response.output_item.done",
+                    "output_index": 0,
+                    "item": {"id": "rs_1", "type": "reasoning", "encrypted_content": "enc1"},
+                }
+            ),
+            sse(
+                {
+                    "type": "response.output_item.added",
+                    "output_index": 1,
+                    "item": {"id": "msg_1", "type": "message", "role": "assistant", "content": []},
+                }
+            ),
+            sse(
+                {
+                    "type": "response.output_text.delta",
+                    "output_index": 1,
+                    "item_id": "msg_1",
+                    "content_index": 0,
+                    "delta": "partial",
+                }
+            ),
+            sse(
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_1",
+                        "status": "completed",
+                        "usage": {
+                            "input_tokens": 100,
+                            "output_tokens": 600,
+                            "total_tokens": 700,
+                            "output_tokens_details": {"reasoning_tokens": 516},
+                        },
+                    },
+                }
+            ),
+        ]
+    )
+    round_two = _SsePostResponse(
+        [
+            sse({"type": "response.created", "response": {"id": "resp_2", "status": "in_progress"}}),
+            sse(
+                {
+                    "type": "response.output_item.added",
+                    "output_index": 0,
+                    "item": {"id": "rs_2", "type": "reasoning"},
+                }
+            ),
+            sse(
+                {
+                    "type": "response.output_item.done",
+                    "output_index": 0,
+                    "item": {"id": "rs_2", "type": "reasoning", "encrypted_content": "enc2"},
+                }
+            ),
+            sse(
+                {
+                    "type": "response.output_item.added",
+                    "output_index": 1,
+                    "item": {"id": "msg_2", "type": "message", "role": "assistant", "content": []},
+                }
+            ),
+            sse(
+                {
+                    "type": "response.output_text.delta",
+                    "output_index": 1,
+                    "item_id": "msg_2",
+                    "content_index": 0,
+                    "delta": "final",
+                }
+            ),
+            sse(
+                {
+                    "type": "response.output_item.done",
+                    "output_index": 1,
+                    "item": {
+                        "id": "msg_2",
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "final"}],
+                    },
+                }
+            ),
+            sse(
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_2",
+                        "status": "completed",
+                        "usage": {
+                            "input_tokens": 120,
+                            "output_tokens": 20,
+                            "total_tokens": 140,
+                            "output_tokens_details": {"reasoning_tokens": 10},
+                        },
+                    },
+                }
+            ),
+        ]
+    )
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.5",
+            "instructions": "hi",
+            "input": [{"role": "user", "content": "hi"}],
+            "previous_response_id": "resp_previous",
+            "stream": True,
+        }
+    )
+    session = QueueSseSession([round_one, round_two])
+
+    events = [
+        parse_sse_data_json(event)
+        async for event in proxy_module.stream_responses(
+            payload,
+            headers={},
+            access_token="token",
+            account_id="acc_1",
+            session=cast(proxy_module.aiohttp.ClientSession, session),
+        )
+    ]
+    payloads = [cast(dict[str, JsonValue], call["json"]) for call in session.calls]
+
+    assert len(payloads) == 2
+    assert payloads[0]["previous_response_id"] == "resp_previous"
+    assert payloads[0]["include"] == ["reasoning.encrypted_content"]
+    assert "previous_response_id" not in payloads[1]
+    replay_input = cast(list[JsonValue], payloads[1]["input"])
+    assert replay_input[-1] == {
+        "type": "message",
+        "role": "assistant",
+        "content": [{"type": "output_text", "text": "Continue thinking..."}],
+        "phase": "commentary",
+    }
+    deltas = "".join(
+        str(event.get("delta", ""))
+        for event in events
+        if isinstance(event, dict) and event.get("type") == "response.output_text.delta"
+    )
+    assert deltas == "final"
+    terminal = cast(dict[str, JsonValue], events[-1])
+    response = cast(dict[str, JsonValue], terminal["response"])
+    assert response["id"] == "resp_1"
+    metadata = cast(dict[str, JsonValue], response["metadata"])
+    assert metadata["proxy_rounds"] == [
+        {"round": 1, "reasoning_tokens": 516, "n": 1},
+        {"round": 2, "reasoning_tokens": 10, "n": None},
+    ]
 
 
 @pytest.mark.asyncio

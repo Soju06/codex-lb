@@ -102,6 +102,30 @@ def test_http_bridge_account_capacity_wait_treats_workspace_spend_cap_as_recover
     assert http_bridge_streaming_module._http_bridge_account_capacity_wait_seconds(exc) == 30.0
 
 
+def test_http_bridge_account_capacity_wait_honors_upstream_rate_limit_retry_hint() -> None:
+    exc = ProxyResponseError(
+        429,
+        openai_error(
+            "rate_limit_exceeded",
+            "Rate limit exceeded. Try again in 120s",
+        ),
+    )
+
+    assert http_bridge_streaming_module._http_bridge_account_capacity_wait_seconds(exc) == 120.0
+
+
+def test_http_bridge_account_capacity_wait_ignores_local_no_accounts_retry_hint() -> None:
+    exc = ProxyResponseError(
+        429,
+        openai_error(
+            "no_accounts",
+            "Rate limit exceeded. Try again in 120s",
+        ),
+    )
+
+    assert http_bridge_streaming_module._http_bridge_account_capacity_wait_seconds(exc) is None
+
+
 def _make_api_key(
     *,
     key_id: str,

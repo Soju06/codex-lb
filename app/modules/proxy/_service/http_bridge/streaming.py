@@ -215,7 +215,10 @@ def _http_bridge_account_capacity_wait_seconds(exc: ProxyResponseError) -> float
     code, message = _proxy_error_code_message(exc)
     if code in {"account_response_create_cap", "account_stream_cap", "capacity_exhausted_active_sessions"}:
         return None
-    return _account_selection_recovery_sleep_seconds_from_message(message)
+    return _account_selection_recovery_sleep_seconds_from_message(
+        message,
+        error_code=code,
+    )
 
 
 def _http_bridge_capacity_wait_plan(

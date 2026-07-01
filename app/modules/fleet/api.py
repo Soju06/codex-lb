@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Security
 
 from app.core.auth.dependencies import set_dashboard_error_format, validate_usage_api_key
+from app.core.config.settings_cache import get_settings_cache
 from app.core.utils.time import utcnow
 from app.db.models import AccountStatus
 from app.db.session import get_background_session
@@ -29,6 +30,19 @@ def _visible_account_ids(api_key: ApiKeyData) -> list[str] | None:
     return list(api_key.assigned_account_ids) if api_key.account_assignment_scope_enabled else None
 
 
+def _usage_sections(raw: str) -> set[str]:
+    if not raw or not raw.strip():
+        return set()
+    return {section.strip() for section in raw.split(",") if section.strip()}
+
+
+async def _can_view_fleet_usage(api_key: ApiKeyData) -> bool:
+    if "account_pool_usage" not in _usage_sections(api_key.usage_sections):
+        return False
+    settings = await get_settings_cache().get()
+    return not bool(getattr(settings, "hide_upstream_quota_from_api_keys", False))
+
+
 @router.get("/summary", response_model=FleetSummaryResponse)
 async def get_fleet_summary(
     context: AccountsContext = Depends(get_accounts_context),
@@ -37,7 +51,9 @@ async def get_fleet_summary(
     """Read-only, minimal per-account capacity summary for fleet consumers."""
 
     accounts = await context.service.list_accounts(account_ids=_visible_account_ids(api_key))
-    return FleetSummaryResponse(accounts=build_fleet_account_summaries(accounts))
+    return FleetSummaryResponse(
+        accounts=build_fleet_account_summaries(accounts, include_usage=await _can_view_fleet_usage(api_key))
+    )
 
 
 @router.post("/refresh", response_model=FleetRefreshResponse)

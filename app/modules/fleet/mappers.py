@@ -4,7 +4,7 @@ from app.modules.accounts.schemas import AccountSummary
 from app.modules.fleet.schemas import FleetAccountSummary, FleetWindowSummary
 
 
-def fleet_account_summary_from_account(account: AccountSummary) -> FleetAccountSummary:
+def fleet_account_summary_from_account(account: AccountSummary, *, include_usage: bool = True) -> FleetAccountSummary:
     """Project a dashboard account into the minimal fleet payload."""
 
     usage = account.usage
@@ -15,18 +15,22 @@ def fleet_account_summary_from_account(account: AccountSummary) -> FleetAccountS
         status=account.status,
         plan_type=account.plan_type,
         primary=FleetWindowSummary(
-            remaining_percent=usage.primary_remaining_percent if usage is not None else None,
-            reset_at=account.reset_at_primary,
-            window_minutes=account.window_minutes_primary,
+            remaining_percent=usage.primary_remaining_percent if include_usage and usage is not None else None,
+            reset_at=account.reset_at_primary if include_usage else None,
+            window_minutes=account.window_minutes_primary if include_usage else None,
         ),
         secondary=FleetWindowSummary(
-            remaining_percent=usage.secondary_remaining_percent if usage is not None else None,
-            reset_at=account.reset_at_secondary,
-            window_minutes=account.window_minutes_secondary,
+            remaining_percent=usage.secondary_remaining_percent if include_usage and usage is not None else None,
+            reset_at=account.reset_at_secondary if include_usage else None,
+            window_minutes=account.window_minutes_secondary if include_usage else None,
         ),
-        last_refresh_at=account.last_refresh_at,
+        last_refresh_at=account.last_refresh_at if include_usage else None,
     )
 
 
-def build_fleet_account_summaries(accounts: list[AccountSummary]) -> list[FleetAccountSummary]:
-    return [fleet_account_summary_from_account(account) for account in accounts]
+def build_fleet_account_summaries(
+    accounts: list[AccountSummary],
+    *,
+    include_usage: bool = True,
+) -> list[FleetAccountSummary]:
+    return [fleet_account_summary_from_account(account, include_usage=include_usage) for account in accounts]

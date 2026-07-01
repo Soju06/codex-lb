@@ -70,7 +70,12 @@ def _make_account(
     )
 
 
-async def _create_api_key(name: str, *, assigned_account_ids: list[str] | None = None) -> str:
+async def _create_api_key(
+    name: str,
+    *,
+    assigned_account_ids: list[str] | None = None,
+    usage_sections: str = "upstream_limits,account_pool_usage",
+) -> str:
     async with SessionLocal() as session:
         service = ApiKeysService(ApiKeysRepository(session))
         created = await service.create_key(
@@ -79,6 +84,7 @@ async def _create_api_key(name: str, *, assigned_account_ids: list[str] | None =
                 allowed_models=None,
                 limits=[],
                 assigned_account_ids=assigned_account_ids,
+                usage_sections=usage_sections,
             )
         )
     return created.key
@@ -267,6 +273,63 @@ async def test_fleet_summary_respects_account_scoped_api_key(async_client, db_se
     raw = json.dumps(payload)
     assert "scope-visible@example.com" in raw
     assert "scope-hidden@example.com" not in raw
+
+
+@pytest.mark.asyncio
+async def test_fleet_summary_hides_usage_when_key_disables_account_pool_usage(async_client, db_setup):
+    await _seed_account_with_windows(
+        "acc_usage_hidden",
+        "usage-hidden@example.com",
+        primary_used_percent=10.0,
+        secondary_used_percent=20.0,
+        primary_reset_at=1735862400,
+        secondary_reset_at=1736467200,
+    )
+    plain_key = await _create_api_key("fleet-summary-no-usage-key", usage_sections="")
+
+    response = await async_client.get(
+        "/api/fleet/summary",
+        headers={"Authorization": f"Bearer {plain_key}"},
+    )
+
+    assert response.status_code == 200
+    account = response.json()["accounts"][0]
+    assert account["accountId"] == "acc_usage_hidden"
+    assert account["email"] == "usage-hidden@example.com"
+    assert account["lastRefreshAt"] is None
+    assert account["primary"] == {"remainingPercent": None, "resetAt": None, "windowMinutes": None}
+    assert account["secondary"] == {"remainingPercent": None, "resetAt": None, "windowMinutes": None}
+
+
+@pytest.mark.asyncio
+async def test_fleet_summary_hides_usage_when_global_api_key_quota_privacy_enabled(async_client, db_setup):
+    plain_key = await _create_api_key("fleet-summary-global-hidden-key")
+    await _seed_account_with_windows(
+        "acc_global_usage_hidden",
+        "global-usage-hidden@example.com",
+        primary_used_percent=10.0,
+        secondary_used_percent=20.0,
+        primary_reset_at=1735862400,
+        secondary_reset_at=1736467200,
+    )
+
+    settings = await async_client.put(
+        "/api/settings",
+        json={"hideUpstreamQuotaFromApiKeys": True},
+    )
+    assert settings.status_code == 200
+
+    response = await async_client.get(
+        "/api/fleet/summary",
+        headers={"Authorization": f"Bearer {plain_key}"},
+    )
+
+    assert response.status_code == 200
+    account = response.json()["accounts"][0]
+    assert account["accountId"] == "acc_global_usage_hidden"
+    assert account["lastRefreshAt"] is None
+    assert account["primary"] == {"remainingPercent": None, "resetAt": None, "windowMinutes": None}
+    assert account["secondary"] == {"remainingPercent": None, "resetAt": None, "windowMinutes": None}
 
 
 @pytest.mark.asyncio

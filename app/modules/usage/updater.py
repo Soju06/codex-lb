@@ -5,7 +5,7 @@ import contextlib
 import logging
 import math
 import time
-from collections.abc import Awaitable, Callable, Collection
+from collections.abc import Awaitable, Callable, Collection, Hashable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Mapping, Protocol, cast
@@ -28,9 +28,10 @@ from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, UsageHistory
 from app.db.session import get_background_session
 from app.modules.accounts.auth_manager import AccountsRepositoryPort, AuthManager
+from app.modules.accounts.repository import AccountsRepository
 from app.modules.proxy.account_cache import get_account_selection_cache, mark_account_routing_unavailable
 from app.modules.usage.additional_quota_keys import canonicalize_additional_quota_key
-from app.modules.usage.repository import AdditionalUsageRepository
+from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 
 logger = logging.getLogger(__name__)
 
@@ -150,12 +151,12 @@ _usage_refresh_auth_cooldowns: dict[str, float] = {}
 
 class _UsageRefreshSingleflight:
     def __init__(self) -> None:
-        self._inflight: dict[str, asyncio.Task[AccountRefreshResult]] = {}
+        self._inflight: dict[Hashable, asyncio.Task[AccountRefreshResult]] = {}
         self._lock = asyncio.Lock()
 
     async def run(
         self,
-        account_id: str,
+        account_id: Hashable,
         factory: Callable[[], Awaitable[AccountRefreshResult]],
         *,
         join_existing: bool = True,
@@ -194,7 +195,7 @@ class _UsageRefreshSingleflight:
 
     def _clear_if_current(
         self,
-        key: str,
+        key: Hashable,
         task: asyncio.Task[AccountRefreshResult],
     ) -> None:
         current = self._inflight.get(key)
@@ -223,6 +224,14 @@ class _UsageRefreshSingleflight:
 _USAGE_REFRESH_SINGLEFLIGHT = _UsageRefreshSingleflight()
 
 
+def _usage_refresh_singleflight_key(
+    account_id: str,
+    *,
+    own_singleflight_session: bool = False,
+) -> str | tuple[str, str]:
+    return ("owned-session", account_id) if own_singleflight_session else account_id
+
+
 class UsageUpdater:
     def __init__(
         self,
@@ -241,6 +250,8 @@ class UsageUpdater:
         self,
         accounts: list[Account],
         latest_usage: Mapping[str, UsageHistory],
+        *,
+        own_singleflight_sessions: bool = False,
     ) -> bool:
         """Refresh usage for all accounts. Returns True if usage rows were written."""
         settings = get_settings()
@@ -286,15 +297,32 @@ class UsageUpdater:
             # within the request-scoped session to avoid PK collisions and
             # flush-time warnings (SAWarning: Session.add during flush).
             try:
+                if own_singleflight_sessions:
+
+                    async def refresh_factory(account_id: str = account.id) -> AccountRefreshResult:
+                        return await self._refresh_account_if_stale_with_owned_session(
+                            account_id,
+                            interval_seconds=interval,
+                        )
+
+                else:
+
+                    async def refresh_factory(account: Account = account) -> AccountRefreshResult:
+                        return await self._refresh_account_if_stale(
+                            account,
+                            usage_account_id=account.chatgpt_account_id,
+                            interval_seconds=interval,
+                        )
+
                 result = await _USAGE_REFRESH_SINGLEFLIGHT.run(
-                    account.id,
-                    lambda account=account: self._refresh_account_if_stale(
-                        account,
-                        usage_account_id=account.chatgpt_account_id,
-                        interval_seconds=interval,
+                    _usage_refresh_singleflight_key(
+                        account.id,
+                        own_singleflight_session=own_singleflight_sessions,
                     ),
+                    refresh_factory,
                 )
-                await self._sync_account_from_repo(account)
+                if not own_singleflight_sessions:
+                    await self._sync_account_from_repo(account)
                 refreshed = refreshed or result.usage_written
                 # Only cache when the upstream fetch actually succeeded.
                 # Transient errors (401 retry failure, 5xx, etc.) must not
@@ -378,6 +406,29 @@ class UsageUpdater:
         if usage_core.capacity_for_plan(account.plan_type, "monthly") is None:
             return None
         return await self._usage_repo.latest_entry_for_account(account.id, window="monthly")
+
+    async def _refresh_account_if_stale_with_owned_session(
+        self,
+        account_id: str,
+        *,
+        interval_seconds: int,
+    ) -> AccountRefreshResult:
+        async with get_background_session() as session:
+            accounts_repo = AccountsRepository(session)
+            usage_repo = UsageRepository(session)
+            additional_usage_repo = AdditionalUsageRepository(session)
+            account = await accounts_repo.get_by_id(account_id)
+            if account is None:
+                return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
+            return await UsageUpdater(
+                usage_repo,
+                accounts_repo,
+                additional_usage_repo,
+            )._refresh_account_if_stale(
+                account,
+                usage_account_id=account.chatgpt_account_id,
+                interval_seconds=interval_seconds,
+            )
 
     async def _refresh_account(
         self,

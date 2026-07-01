@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import logging
+
 from fastapi import APIRouter, Depends, Security
 
 from app.core.auth.dependencies import set_dashboard_error_format, validate_usage_api_key
@@ -16,6 +19,8 @@ from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 from app.modules.usage.updater import UsageUpdater
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(
     prefix="/api/fleet",
@@ -62,7 +67,18 @@ async def refresh_fleet_usage(
 ) -> FleetRefreshResponse:
     """Request a bounded usage refresh using codex-lb's normal refresh rules."""
 
-    visible_account_ids = _visible_account_ids(api_key)
+    task = asyncio.create_task(
+        _refresh_fleet_usage_with_owned_session(_visible_account_ids(api_key)),
+        name="fleet-usage-refresh",
+    )
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        task.add_done_callback(_log_cancelled_refresh_task_exception)
+        raise
+
+
+async def _refresh_fleet_usage_with_owned_session(visible_account_ids: list[str] | None) -> FleetRefreshResponse:
     async with get_background_session() as session:
         accounts_repo = AccountsRepository(session)
         usage_repo = UsageRepository(session)
@@ -79,12 +95,26 @@ async def refresh_fleet_usage(
             accounts_repo,
             additional_usage_repo,
         ).refresh_accounts(eligible_accounts, latest_primary)
-    if usage_written:
-        await get_rate_limit_headers_cache().invalidate()
-        get_account_selection_cache().invalidate()
-    return FleetRefreshResponse(
-        usage_written=usage_written,
-        account_count=len(accounts),
-        attempted_count=len(eligible_accounts),
-        generated_at=utcnow(),
-    )
+        if usage_written:
+            await get_rate_limit_headers_cache().invalidate()
+            get_account_selection_cache().invalidate()
+        return FleetRefreshResponse(
+            usage_written=usage_written,
+            account_count=len(accounts),
+            attempted_count=len(eligible_accounts),
+            generated_at=utcnow(),
+        )
+
+
+def _log_cancelled_refresh_task_exception(task: asyncio.Task[FleetRefreshResponse]) -> None:
+    if task.cancelled():
+        return
+    try:
+        exc = task.exception()
+    except asyncio.CancelledError:
+        return
+    if exc is not None:
+        logger.error(
+            "Fleet usage refresh failed after request cancellation",
+            exc_info=(type(exc), exc, exc.__traceback__),
+        )

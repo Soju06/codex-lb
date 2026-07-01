@@ -45,6 +45,14 @@ Load balancer for ChatGPT accounts. Pool multiple accounts, track usage, manage 
 </tr>
 </table>
 
+## CodexCont Middleware
+
+This repository also vendors the CodexCont continue-thinking middleware under
+[`middleware/`](middleware/). It can run as a standalone Starlette proxy via
+[`run.py`](run.py) with [`config.example.toml`](config.example.toml), and it
+folds detected reasoning-truncation rounds into one downstream SSE response.
+See [`CODEXCONT.md`](CODEXCONT.md) for setup, behavior, guards, and tests.
+
 ## Quick Start
 
 ```bash

@@ -1,0 +1,52 @@
+[server]
+host = "127.0.0.1"
+port = 8787
+listen_paths = ["/v1/responses"]
+
+[upstream]
+url = "https://chatgpt.com/backend-api/codex/responses"
+mode = "header"                    # "fixed" = always use url; "header" = Responses-API-Base header (a BASE url, /responses appended) overrides url (else url); "header_required" = header MUST be present (else 400). Header is stripped before forwarding.
+# OPTIONAL explicit header overrides, applied last; EMPTY by default — the proxy
+# passes the agent's headers through and invents none (no User-Agent of our own).
+[upstream.headers]
+
+[auth]
+mode = "passthrough"               # passthrough | inject | passthrough_then_inject
+access_token = ""                  # Bearer token; sent as `Authorization: Bearer <access_token>`
+chatgpt_account_id = ""            # chatgpt-account-id; Codex needs it, empty = omit the header (plain Responses)
+
+[continue]
+enabled = true
+truncation_step = 518
+max_continue = 3                   # hard round cap after round 1 (primary runaway guard)
+min_n = 1                          # only continue when truncation tier n >= min_n
+max_n = 6                          # 0 = no cap; else stop forcing once n > max_n
+method = "commentary"              # continuation provocation method:
+                                   #   "commentary" (default) = ONE phase:"commentary" assistant
+                                   #     message (clean; an official Responses-API field). Verified
+                                   #     to defeat truncation identically to the tool pair.
+                                   #   "tool_pair" = synthetic continue_thinking function_call + output
+marker_text = "Continue thinking..."   # commentary path: the assistant message text that nudges
+                                       # the model to keep thinking
+forward_marker = false             # commentary path: also emit the marker into the DOWNSTREAM output
+                                   # so the agent echoes it back next turn (preserves cross-turn
+                                   # reasoning structure + prompt-cache; codex & pi both verified to
+                                   # preserve `phase`). false = hidden (clean agent history).
+# --- tool_pair path only (used when method = "tool_pair") ---
+continue_tool_name = "continue_thinking"   # synthetic tool name; ALSO the collision-bypass name: if
+                                           # the agent itself DECLARES a tool with this name, the proxy
+                                           # passes the request through untouched (tool_pair only)
+continue_output_text = "Please continue thinking about the query."  # the function_call_output text
+repair_followup = "off"            # tool_pair cross-turn: "off" (default) | "stateful" (id-keyed
+                                   # re-insertion; codex strips reasoning ids, so mainly for agents
+                                   # that preserve them — commentary's forward_marker is preferred)
+max_total_output_tokens = 0        # optional cumulative cost cap across rounds (0 = off)
+
+[stream]
+force_include_encrypted = true     # add reasoning.encrypted_content upstream; always forwarded downstream
+rechunk_final_answer = true        # re-slice the buffered final message into small synthetic deltas
+rechunk_size = 16
+
+[log]
+level = "info"
+dump_rounds_dir = ""               # if set, dump per-round upstream SSE (codex_mw_r{n}.sse.txt)

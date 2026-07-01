@@ -6,6 +6,7 @@ poc/
 .venv/
 __pycache__/
 *.py[cod]
+*.egg-info/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
@@ -16,6 +17,9 @@ __pycache__/
 .envrc
 !.env.example
 .python-version
+config.toml
+rt.json
+free_rt.json
 
 # Build artifacts
 build/
@@ -41,6 +45,7 @@ frontend/coverage/
 .local/
 .worktrees/
 certs/
+legacy/
 
 .codex-lb/
 .sisyphus/

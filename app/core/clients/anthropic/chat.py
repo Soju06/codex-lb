@@ -139,19 +139,35 @@ class ClaudeChatClient:
             return body if isinstance(body, dict) else dict(body), out_headers
 
         if status == 401:
-            raise ClaudeAuthError(f"anthropic 401: {body!r}")
+            raise ClaudeAuthError(
+                f"anthropic 401: {body!r}",
+                headers=out_headers,
+                body=body,
+            )
         if status == 429:
-            raise ClaudeRateLimited(f"anthropic 429: {body!r}")
+            raise ClaudeRateLimited(
+                f"anthropic 429: {body!r}",
+                headers=out_headers,
+                body=body,
+            )
         if 500 <= status < 600:
-            raise ClaudeUpstreamError(f"anthropic {status}: {body!r}")
-        raise ClaudeAPIError(f"anthropic {status}: {body!r}")
+            raise ClaudeUpstreamError(
+                f"anthropic {status}: {body!r}",
+                headers=out_headers,
+                body=body,
+            )
+        raise ClaudeAPIError(
+            f"anthropic {status}: {body!r}",
+            headers=out_headers,
+            body=body,
+        )
 
     async def stream_messages(
         self,
         *,
         access_token: str,
         request_body: Mapping[str, Any],
-    ) -> AsyncIterator[StreamChunk]:
+    ) -> "_StreamingChatIterator":
         """Open a streaming POST to ``/v1/messages`` and yield SSE chunks.
 
         Returns an :class:`_StreamingChatIterator` (an async iterator) that
@@ -469,16 +485,24 @@ class _StreamingChatIterator:
 
     def _initial_status_error(self) -> Exception | None:
         if self._status == 401:
-            return ClaudeAuthError("anthropic 401: status only; no body available")
+            return ClaudeAuthError(
+                "anthropic 401: status only; no body available",
+                headers=self._response_headers,
+            )
         if self._status == 429:
-            return ClaudeRateLimited("anthropic 429: status only; no body available")
+            return ClaudeRateLimited(
+                "anthropic 429: status only; no body available",
+                headers=self._response_headers,
+            )
         if self._status and (self._status < 200 or self._status >= 300):
             if 500 <= self._status < 600:
                 return ClaudeUpstreamError(
-                    f"anthropic {self._status}: status only; no body available"
+                    f"anthropic {self._status}: status only; no body available",
+                    headers=self._response_headers,
                 )
             return ClaudeAPIError(
-                f"anthropic {self._status}: status only; no body available"
+                f"anthropic {self._status}: status only; no body available",
+                headers=self._response_headers,
             )
         return None
 

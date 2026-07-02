@@ -1,9 +1,5 @@
 import { z } from "zod";
 
-const OPTIONAL_EMAIL_OR_BLANK = z
-  .union([z.literal(""), z.string().email()])
-  .optional();
-
 export const ClaudeAccountSchema = z.object({
   id: z.string(),
   claudeAccountUuid: z.string(),

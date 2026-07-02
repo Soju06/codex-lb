@@ -33,7 +33,6 @@ function truncateUuid(uuid: string): string {
 export type ClaudeAccountListProps = {
   accounts: ClaudeAccount[];
   busy?: boolean;
-  onAdd: () => void;
   onDisable: (accountId: string) => void;
   onEnable: (accountId: string) => void;
 };
@@ -41,7 +40,6 @@ export type ClaudeAccountListProps = {
 export function ClaudeAccountList({
   accounts,
   busy = false,
-  onAdd,
   onDisable,
   onEnable,
 }: ClaudeAccountListProps) {

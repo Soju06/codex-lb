@@ -280,6 +280,22 @@ class ClaudeAuthManager:
 
     # ----------------------------------------------------------- rotation
 
+    async def get_access_token(self, account: Account) -> str:
+        """Decrypt and return the OAuth access token for ``account``.
+
+        Used by :class:`app.modules.claude.service.ClaudeProxyService` to
+        resolve the bearer token at request time without re-loading the
+        SQLAlchemy row. The decryption envelope is the existing
+        :class:`TokenEncryptor` (Fernet); plain-text material never leaves
+        the manager.
+        """
+        token_bytes = account.claude_access_token_encrypted
+        if token_bytes is None:
+            raise ClaudeAuthError(
+                f"no access token stored for account '{account.id}'"
+            )
+        return self._encryptor.decrypt(token_bytes)
+
     async def rotate_claude_access_token(
         self,
         account: Account,

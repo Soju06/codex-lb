@@ -94,7 +94,7 @@ from app.core.runtime_logging import log_error_response
 from app.core.types import JsonValue
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError, resolve_upstream_route
 from app.core.utils.json_guards import is_json_mapping
-from app.core.utils.request_id import get_request_id
+from app.core.utils.request_id import ensure_request_id, get_request_id
 from app.core.utils.sse import (
     CODEX_KEEPALIVE_FRAME,
     SSE_KEEPALIVE_FRAME,
@@ -103,7 +103,7 @@ from app.core.utils.sse import (
     parse_sse_data_json,
 )
 from app.db.models import Account, AccountStatus, ModelSource
-from app.db.session import get_background_session
+from app.db.session import detach_session_objects, get_background_session
 from app.dependencies import ProxyContext, get_proxy_context, get_proxy_websocket_context
 from app.modules.accounts.auth_manager import AuthManager
 from app.modules.accounts.repository import AccountsRepository
@@ -127,8 +127,14 @@ from app.modules.model_sources.forwarding import (
     SourceUsage,
     SourceUsageHolder,
     forward_chat_completion,
+)
+from app.modules.model_sources.forwarding import (
     forward_responses as forward_source_responses,
+)
+from app.modules.model_sources.forwarding import (
     stream_chat_completion as stream_source_chat_completion,
+)
+from app.modules.model_sources.forwarding import (
     stream_responses as stream_source_responses,
 )
 from app.modules.model_sources.repository import ModelSourcesRepository
@@ -181,6 +187,7 @@ from app.modules.proxy.types import (
 )
 from app.modules.rate_limit_reset_credits.api import serialize_reset_credit_redeem
 from app.modules.rate_limit_reset_credits.store import get_rate_limit_reset_credits_store
+from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.mappers import usage_history_to_window_row
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 from app.modules.usage.updater import UsageUpdater
@@ -2202,6 +2209,10 @@ async def _list_enabled_source_catalog_models(
 ) -> list[UpstreamModel]:
     async with get_background_session() as session:
         sources = await ModelSourcesRepository(session).list_enabled_sources()
+        # ``close_session`` rolls back the read transaction, which would
+        # expire the loaded rows; detach them so their attributes stay
+        # readable after this session boundary.
+        detach_session_objects(session)
     if require_responses:
         sources = [source for source in sources if source.supports_responses]
     assigned_source_ids = _allowed_source_ids_for_api_key(api_key)
@@ -2598,10 +2609,15 @@ async def _select_chat_model_source(model: str, api_key: ApiKeyData | None) -> M
     if assigned_source_ids is None and subscription_model is not None:
         return None
     async with get_background_session() as session:
-        return await ModelSourcesRepository(session).find_chat_source_for_model(
+        source = await ModelSourcesRepository(session).find_chat_source_for_model(
             model,
             allowed_source_ids=assigned_source_ids,
         )
+        # ``close_session`` rolls back the read transaction, which would
+        # expire the loaded row; detach it so the forwarding path can read
+        # its attributes after this session boundary.
+        detach_session_objects(session)
+        return source
 
 
 async def _select_responses_model_source(model: str, api_key: ApiKeyData | None) -> ModelSource | None:
@@ -2610,10 +2626,15 @@ async def _select_responses_model_source(model: str, api_key: ApiKeyData | None)
     if assigned_source_ids is None and subscription_model is not None:
         return None
     async with get_background_session() as session:
-        return await ModelSourcesRepository(session).find_responses_source_for_model(
+        source = await ModelSourcesRepository(session).find_responses_source_for_model(
             model,
             allowed_source_ids=assigned_source_ids,
         )
+        # ``close_session`` rolls back the read transaction, which would
+        # expire the loaded row; detach it so the forwarding path can read
+        # its attributes after this session boundary.
+        detach_session_objects(session)
+        return source
 
 
 def _allowed_source_ids_for_api_key(api_key: ApiKeyData | None) -> set[str] | None:
@@ -4531,7 +4552,7 @@ async def _log_source_chat_completion(
                 model_source_id=source.id,
                 model_source_kind=source.kind,
                 api_key_id=api_key.id if api_key is not None else None,
-                request_id=get_request_id(),
+                request_id=ensure_request_id(),
                 model=model,
                 input_tokens=usage.input_tokens if usage is not None else None,
                 output_tokens=usage.output_tokens if usage is not None else None,

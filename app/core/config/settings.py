@@ -224,6 +224,7 @@ class Settings(BaseSettings):
     conversation_archive_enabled: bool = False
     conversation_archive_dir: Path = DEFAULT_CONVERSATION_ARCHIVE_DIR
     conversation_archive_queue_max_bytes: int = Field(default=256 * 1024 * 1024, gt=0)
+    request_log_retention_days: int = Field(default=30, ge=1)
     max_decompressed_body_bytes: int = Field(default=32 * 1024 * 1024, gt=0)
     max_decompressed_responses_body_bytes: int = Field(default=128 * 1024 * 1024, gt=0)
     image_inline_fetch_enabled: bool = True

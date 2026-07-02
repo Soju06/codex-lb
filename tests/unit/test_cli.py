@@ -195,6 +195,40 @@ def test_codex_sessions_retag_yes_updates_jsonl_and_sqlite(capsys, tmp_path):
         assert conn.execute("SELECT model_provider FROM threads").fetchone()[0] == "codex-lb"
 
 
+def test_request_logs_prune_defaults_to_dry_run(monkeypatch):
+    captured: dict[str, Any] = {}
+
+    def fake_anyio_run(func, args):
+        captured["func"] = func
+        captured["args"] = args
+
+    monkeypatch.setattr(cli.anyio, "run", fake_anyio_run)
+
+    cli.main(["request-logs", "prune"])
+
+    assert captured["func"] is cli._run_request_logs_prune
+    args = captured["args"]
+    assert args.apply is False
+    assert args.retention_days is None
+
+
+def test_request_logs_prune_apply_requires_explicit_flag(monkeypatch):
+    captured: dict[str, Any] = {}
+
+    def fake_anyio_run(func, args):
+        captured["func"] = func
+        captured["args"] = args
+
+    monkeypatch.setattr(cli.anyio, "run", fake_anyio_run)
+
+    cli.main(["request-logs", "prune", "--retention-days", "45", "--apply"])
+
+    assert captured["func"] is cli._run_request_logs_prune
+    args = captured["args"]
+    assert args.apply is True
+    assert args.retention_days == 45
+
+
 def test_utc_default_formatter_formats_without_converter_binding_error():
     formatter = UtcDefaultFormatter(
         fmt="%(asctime)s %(message)s",

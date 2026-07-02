@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from enum import Enum
 
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    Date,
     DateTime,
     Float,
     ForeignKey,
@@ -230,6 +231,47 @@ class RequestLog(Base):
     account: Mapped[Account | None] = relationship(
         "Account",
         back_populates="request_logs",
+    )
+
+
+class RequestLogDailyAggregate(Base):
+    __tablename__ = "request_log_daily_aggregates"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    aggregate_key: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    bucket_date: Mapped[date] = mapped_column(Date, nullable=False)
+    api_key_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    account_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    model: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    error_code: Mapped[str | None] = mapped_column(String, nullable=True)
+    request_kind: Mapped[str] = mapped_column(String, nullable=False)
+    service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
+    requested_service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
+    actual_service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
+    transport: Mapped[str | None] = mapped_column(String, nullable=True)
+    upstream_transport: Mapped[str | None] = mapped_column(String, nullable=True)
+    source: Mapped[str | None] = mapped_column(String, nullable=True)
+    useragent_group: Mapped[str | None] = mapped_column(String, nullable=True)
+    plan_type: Mapped[str | None] = mapped_column(String, nullable=True)
+    is_deleted: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false(), nullable=False)
+    request_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    error_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    input_tokens: Mapped[int] = mapped_column(Integer, nullable=False)
+    output_tokens: Mapped[int] = mapped_column(Integer, nullable=False)
+    cached_input_tokens: Mapped[int] = mapped_column(Integer, nullable=False)
+    reasoning_tokens: Mapped[int] = mapped_column(Integer, nullable=False)
+    cost_usd: Mapped[float] = mapped_column(Float, nullable=False)
+    latency_ms_sum: Mapped[int] = mapped_column(Integer, nullable=False)
+    latency_ms_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    latency_first_token_ms_sum: Mapped[int] = mapped_column(Integer, nullable=False)
+    latency_first_token_ms_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
     )
 
 
@@ -1103,6 +1145,16 @@ Index(
     RequestLog.session_id,
     RequestLog.requested_at.desc(),
     RequestLog.id.desc(),
+)
+Index(
+    "idx_request_log_daily_aggregates_date_key",
+    RequestLogDailyAggregate.bucket_date,
+    RequestLogDailyAggregate.api_key_id,
+)
+Index(
+    "idx_request_log_daily_aggregates_account_date",
+    RequestLogDailyAggregate.account_id,
+    RequestLogDailyAggregate.bucket_date,
 )
 Index("idx_sticky_account", StickySession.account_id)
 Index("idx_sticky_kind_updated_at", StickySession.kind, StickySession.updated_at.desc())

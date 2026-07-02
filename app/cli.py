@@ -8,7 +8,10 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import anyio
+
 from app.codex_sessions_retag import RetagResult, default_codex_home, retag_codex_sessions
+from app.core.config.settings import get_settings
 
 if TYPE_CHECKING:
     from app.core.runtime_logging import LogConfig
@@ -55,6 +58,25 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Confirm that Codex/Codex CLI is closed and allow a non-interactive write.",
     )
 
+    request_logs = subparsers.add_parser(
+        "request-logs",
+        help="Manage request-log storage.",
+        formatter_class=_CliHelpFormatter,
+    )
+    request_logs_subparsers = request_logs.add_subparsers(dest="request_logs_command")
+    prune = request_logs_subparsers.add_parser(
+        "prune",
+        help="Roll up and prune old raw request logs. Dry-run by default.",
+        formatter_class=_CliHelpFormatter,
+    )
+    prune.add_argument(
+        "--retention-days",
+        type=int,
+        default=None,
+        help="Raw request-log retention window. Defaults to CODEX_LB_REQUEST_LOG_RETENTION_DAYS.",
+    )
+    prune.add_argument("--apply", action="store_true", help="Write aggregates and delete eligible raw rows.")
+
     parser.add_argument("--host", default=os.getenv("HOST", "127.0.0.1"))
     parser.add_argument("--port", default=os.getenv("PORT", "2455"))
     parser.add_argument("--ssl-certfile", default=os.getenv("SSL_CERTFILE"))
@@ -80,6 +102,11 @@ def main(argv: Sequence[str] | None = None) -> None:
             _run_codex_sessions_retag(args)
             return
         raise SystemExit("codex-sessions requires a subcommand")
+    if args.command == "request-logs":
+        if args.request_logs_command == "prune":
+            anyio.run(_run_request_logs_prune, args)
+            return
+        raise SystemExit("request-logs requires a subcommand")
 
     if bool(args.ssl_certfile) ^ bool(args.ssl_keyfile):
         raise SystemExit("Both --ssl-certfile and --ssl-keyfile must be provided together.")
@@ -185,6 +212,36 @@ def _print_retag_summary(result: RetagResult) -> None:
     print(f"- {action} SQLite rows: {result.sqlite_rows_matched if result.dry_run else result.sqlite_rows_updated}")
     if result.backup_path is not None:
         print(f"- Backup: {result.backup_path}")
+
+
+async def _run_request_logs_prune(args: argparse.Namespace) -> None:
+    from app.db.session import SessionLocal, close_db, init_db
+    from app.modules.request_logs.retention import RequestLogRetentionService
+
+    settings = get_settings()
+    retention_days = args.retention_days if args.retention_days is not None else settings.request_log_retention_days
+    try:
+        await init_db()
+        async with SessionLocal() as session:
+            result = await RequestLogRetentionService(session).run(
+                retention_days=retention_days,
+                dry_run=not args.apply,
+            )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    finally:
+        await close_db()
+
+    action = "Would prune" if result.dry_run else "Pruned"
+    print("")
+    print("Request log retention summary")
+    print(f"- Mode: {'dry-run' if result.dry_run else 'apply'}")
+    print(f"- Retention days: {result.retention_days}")
+    print(f"- Cutoff: {result.cutoff.isoformat()}")
+    print(f"- Eligible raw rows: {result.eligible_rows}")
+    print(f"- Aggregate groups: {result.aggregate_groups}")
+    print(f"- Aggregate rows written: {result.aggregate_rows_written}")
+    print(f"- {action} raw rows: {result.raw_rows_deleted if not result.dry_run else result.eligible_rows}")
 
 
 if __name__ == "__main__":

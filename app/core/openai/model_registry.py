@@ -12,6 +12,9 @@ from app.core.types import JsonValue
 
 logger = logging.getLogger(__name__)
 
+MODEL_SOURCE_KIND_SUBSCRIPTION = "subscription"
+MODEL_SOURCE_KIND_OPENAI_COMPATIBLE = "openai_compatible"
+
 
 @dataclass(frozen=True)
 class ReasoningLevel:
@@ -38,6 +41,8 @@ class UpstreamModel:
     priority: int
     available_in_plans: frozenset[str]
     base_instructions: str = ""
+    source_kind: str = MODEL_SOURCE_KIND_SUBSCRIPTION
+    source_id: str | None = None
     raw: dict[str, JsonValue] = field(default_factory=dict, hash=False, compare=False)
 
 

@@ -89,6 +89,10 @@ const EXPECTED_ENDPOINTS = [
 	"DELETE /api/firewall/ips/:ipAddress",
 	// models
 	"GET /api/models",
+	"GET /api/model-sources/",
+	"POST /api/model-sources/",
+	"PATCH /api/model-sources/:sourceId",
+	"DELETE /api/model-sources/:sourceId",
 	// api-keys
 	"GET /api/api-keys/",
 	"POST /api/api-keys/",

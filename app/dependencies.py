@@ -27,6 +27,8 @@ from app.modules.dashboard_auth.service import (
 from app.modules.firewall.repository import FirewallRepository
 from app.modules.firewall.service import FirewallRepositoryPort, FirewallService
 from app.modules.limit_warmup.repository import LimitWarmupRepository
+from app.modules.model_sources.repository import ModelSourcesRepository
+from app.modules.model_sources.service import ModelSourcesService
 from app.modules.oauth.service import OauthService
 from app.modules.proxy.repo_bundle import ProxyRepositories
 from app.modules.proxy.service import ProxyService
@@ -86,6 +88,13 @@ class ApiKeysContext:
     session: AsyncSession
     repository: ApiKeysRepository
     service: ApiKeysService
+
+
+@dataclass(slots=True)
+class ModelSourcesContext:
+    session: AsyncSession
+    repository: ModelSourcesRepository
+    service: ModelSourcesService
 
 
 @dataclass(slots=True)
@@ -245,6 +254,14 @@ def get_api_keys_context(
     usage_repository = UsageRepository(session)
     service = ApiKeysService(repository, usage_repository=usage_repository)
     return ApiKeysContext(session=session, repository=repository, service=service)
+
+
+def get_model_sources_context(
+    session: AsyncSession = Depends(get_session),
+) -> ModelSourcesContext:
+    repository = ModelSourcesRepository(session)
+    service = ModelSourcesService(repository)
+    return ModelSourcesContext(session=session, repository=repository, service=service)
 
 
 def get_request_logs_context(

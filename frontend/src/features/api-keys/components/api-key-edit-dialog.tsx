@@ -28,6 +28,7 @@ import { LimitRulesEditor } from "@/features/api-keys/components/limit-rules-edi
 import { AccountMultiSelect } from "@/features/api-keys/components/account-multi-select";
 import { ModelMultiSelect } from "@/features/api-keys/components/model-multi-select";
 import { UsageSectionsMultiSelect } from "@/features/api-keys/components/usage-sections-multi-select";
+import { ModelSourceMultiSelect } from "@/features/model-sources/components/model-source-multi-select";
 import type {
   ApiKey,
   ApiKeyUpdateRequest,
@@ -91,6 +92,7 @@ function hasSelectionChange(initialIds: string[], nextIds: string[]): boolean {
 type ApiKeyEditDraft = {
   selectedModels: string[];
   selectedAccountIds: string[];
+  selectedSourceIds: string[];
   usageSections: string;
   limitRules: LimitRuleCreate[];
   expiresAt: Date | null;
@@ -106,6 +108,7 @@ function createApiKeyEditDraft(apiKey: ApiKey): ApiKeyEditDraft {
   return {
     selectedModels: apiKey.allowedModels || [],
     selectedAccountIds: apiKey.assignedAccountIds,
+    selectedSourceIds: apiKey.assignedSourceIds,
     usageSections: apiKey.usageSections,
     limitRules: limitsToCreateRules(apiKey),
     expiresAt: parseDate(apiKey.expiresAt),
@@ -142,6 +145,9 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
     const shouldSubmitAssignedAccountIds =
       hasSelectionChange(apiKey.assignedAccountIds, draft.selectedAccountIds) ||
       (apiKey.accountAssignmentScopeEnabled && draft.selectedAccountIds.length === 0);
+    const shouldSubmitAssignedSourceIds =
+      hasSelectionChange(apiKey.assignedSourceIds, draft.selectedSourceIds) ||
+      (apiKey.sourceAssignmentScopeEnabled && draft.selectedSourceIds.length === 0);
     const payload: ApiKeyUpdateRequest = {
       name: values.name,
       allowedModels: draft.selectedModels.length > 0 ? draft.selectedModels : null,
@@ -157,6 +163,9 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
     };
     if (shouldSubmitAssignedAccountIds) {
       payload.assignedAccountIds = draft.selectedAccountIds;
+    }
+    if (shouldSubmitAssignedSourceIds) {
+      payload.assignedSourceIds = draft.selectedSourceIds;
     }
     if (hasLimitRuleChanges(initialLimitRules, draft.limitRules)) {
       payload.limits = normalizedLimits;
@@ -210,6 +219,14 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
             <div className="space-y-1">
               <div className="text-sm font-medium">Assigned accounts</div>
               <AccountMultiSelect value={draft.selectedAccountIds} onChange={(selectedAccountIds) => updateDraft({ selectedAccountIds })} />
+            </div>
+
+            <div className="space-y-1">
+              <div className="text-sm font-medium">Assigned model sources</div>
+              <ModelSourceMultiSelect
+                value={draft.selectedSourceIds}
+                onChange={(selectedSourceIds) => updateDraft({ selectedSourceIds })}
+              />
             </div>
 
             <div className="space-y-1">

@@ -25,6 +25,8 @@ import {
 	ApiKeyTrendsResponseSchema,
 	ApiKeyUsage7DayResponseSchema,
 } from "@/features/apis/schemas";
+import type { ModelSource } from "@/features/model-sources/schemas";
+import { ModelSourceSchema } from "@/features/model-sources/schemas";
 import type { AuthSession } from "@/features/auth/schemas";
 import { AuthSessionSchema } from "@/features/auth/schemas";
 import type {
@@ -79,6 +81,7 @@ export type {
 	ApiKeyCreateResponse,
 	ApiKeyTrendsResponse,
 	ApiKeyUsage7DayResponse,
+	ModelSource,
 };
 
 const BASE_TIME = new Date("2026-01-01T12:00:00Z");
@@ -145,6 +148,50 @@ export function createDefaultAccounts(): AccountSummary[] {
 			},
 		}),
 	];
+}
+
+export function createModelSource(
+	overrides: Partial<ModelSource> = {},
+): ModelSource {
+	return ModelSourceSchema.parse({
+		id: "src_vllm",
+		name: "vLLM",
+		kind: "openai_compatible",
+		baseUrl: "http://localhost:8000/v1",
+		isEnabled: true,
+		healthStatus: "unknown",
+		supportsChatCompletions: true,
+		supportsResponses: false,
+		timeoutSeconds: null,
+		maxConcurrency: null,
+		createdAt: offsetIso(-30),
+		updatedAt: offsetIso(-5),
+		models: [
+			{
+				id: 1,
+				sourceId: "src_vllm",
+				model: "local-coder",
+				displayName: "local-coder",
+				contextWindow: 8192,
+				maxOutputTokens: 1024,
+				supportsStreaming: true,
+				supportsTools: true,
+				supportsVision: false,
+				inputPer1M: null,
+				cachedInputPer1M: null,
+				outputPer1M: null,
+				rawMetadataJson: null,
+				isEnabled: true,
+				createdAt: offsetIso(-30),
+				updatedAt: offsetIso(-5),
+			},
+		],
+		...overrides,
+	});
+}
+
+export function createDefaultModelSources(): ModelSource[] {
+	return [createModelSource()];
 }
 
 function createTrendPoints(
@@ -613,13 +660,15 @@ export function createApiKey(overrides: Partial<ApiKey> = {}): ApiKey {
 		id: "key_1",
 		name: "Default key",
 		keyPrefix: "sk-test",
-			allowedModels: ["gpt-5.1"],
-			applyToCodexModel: false,
-			transportPolicyOverride: null,
-			expiresAt: null,
+		allowedModels: ["gpt-5.1"],
+		applyToCodexModel: false,
+		transportPolicyOverride: null,
+		expiresAt: null,
 		isActive: true,
 		accountAssignmentScopeEnabled: false,
+		sourceAssignmentScopeEnabled: false,
 		assignedAccountIds: [],
+		assignedSourceIds: [],
 		createdAt: offsetIso(-60),
 		lastUsedAt: offsetIso(-5),
 		usageSummary: {

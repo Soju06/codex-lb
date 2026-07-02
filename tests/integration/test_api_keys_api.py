@@ -10,6 +10,7 @@ import pytest
 from sqlalchemy import select, update
 
 import app.modules.api_keys.repository as api_keys_repository_module
+import app.modules.proxy.api as proxy_api
 import app.modules.proxy.load_balancer as load_balancer_module
 import app.modules.proxy.service as proxy_module
 from app.core.auth import generate_unique_account_id
@@ -21,6 +22,12 @@ from app.db.models import Account, AccountStatus, ApiKeyUsageReservation, LimitW
 from app.db.session import SessionLocal
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import ApiKeyCreateData, ApiKeysService, LimitRuleInput
+from app.modules.model_sources.forwarding import (
+    SourceChatCompletion,
+    SourceResponsesStream,
+    SourceUsage,
+    SourceUsageHolder,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -84,6 +91,37 @@ async def _import_account(async_client, account_id: str, email: str) -> str:
     response = await async_client.post("/api/accounts/import", files=files)
     assert response.status_code == 200
     return generate_unique_account_id(account_id, email)
+
+
+async def _create_model_source(
+    async_client,
+    *,
+    name: str,
+    model: str,
+    supports_responses: bool = False,
+) -> str:
+    response = await async_client.post(
+        "/api/model-sources/",
+        json={
+            "name": name,
+            "baseUrl": f"https://{name}.example.invalid/v1",
+            "apiKey": f"token-{name}",
+            "supportsChatCompletions": True,
+            "supportsResponses": supports_responses,
+            "models": [
+                {
+                    "model": model,
+                    "displayName": model,
+                    "contextWindow": 8192,
+                    "maxOutputTokens": 1024,
+                    "supportsStreaming": True,
+                    "supportsTools": True,
+                }
+            ],
+        },
+    )
+    assert response.status_code == 200
+    return response.json()["id"]
 
 
 @pytest.mark.asyncio
@@ -916,6 +954,144 @@ async def test_api_key_usage_tracking_and_request_log_link(async_client, monkeyp
     assert usage_key_row["usageSummary"]["totalTokens"] == 15
     assert usage_key_row["usageSummary"]["cachedInputTokens"] == 0
     assert usage_key_row["usageSummary"]["totalCostUsd"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_source_routed_chat_completion_settles_api_key_usage(async_client, monkeypatch):
+    enable = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert enable.status_code == 200
+
+    model = "vllm-chat-usage"
+    source_id = await _create_model_source(async_client, name="vllm-usage", model=model)
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "source-usage-key",
+            "assignedSourceIds": [source_id],
+            "limits": [
+                {"limitType": "total_tokens", "limitWindow": "weekly", "maxValue": 1_000},
+            ],
+        },
+    )
+    assert created.status_code == 200
+    assert created.json()["sourceAssignmentScopeEnabled"] is True
+    key = created.json()["key"]
+    key_id = created.json()["id"]
+    observed: dict[str, object] = {}
+
+    async def fake_forward(source, payload):
+        observed["source_id"] = source.id
+        observed["payload"] = dict(payload)
+        return SourceChatCompletion(
+            payload={
+                "id": "chatcmpl_source_usage",
+                "object": "chat.completion",
+                "created": 1,
+                "model": model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 11,
+                    "completion_tokens": 7,
+                    "total_tokens": 18,
+                    "prompt_tokens_details": {"cached_tokens": 3},
+                },
+            },
+            usage=SourceUsage(input_tokens=11, output_tokens=7, cached_input_tokens=3),
+            upstream_status_code=200,
+        )
+
+    monkeypatch.setattr(proxy_api, "forward_chat_completion", fake_forward)
+
+    response = await async_client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"model": model, "messages": [{"role": "user", "content": "hi"}]},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["id"] == "chatcmpl_source_usage"
+    assert observed["source_id"] == source_id
+    forwarded_payload = observed["payload"]
+    assert isinstance(forwarded_payload, dict)
+    assert forwarded_payload["model"] == model
+    assert forwarded_payload["messages"] == [{"role": "user", "content": "hi"}]
+    assert forwarded_payload["stream"] is False
+
+    async with SessionLocal() as session:
+        repo = ApiKeysRepository(session)
+        limits = await repo.get_limits_by_key(key_id)
+        assert len(limits) == 1
+        assert limits[0].current_value == 18
+
+        result = await session.execute(select(RequestLog).order_by(RequestLog.requested_at.desc()))
+        latest_log = result.scalars().first()
+        assert latest_log is not None
+        assert latest_log.api_key_id == key_id
+        assert latest_log.account_id is None
+        assert latest_log.model_source_id == source_id
+        assert latest_log.model_source_kind == "openai_compatible"
+        assert latest_log.model == model
+        assert latest_log.input_tokens == 11
+        assert latest_log.output_tokens == 7
+        assert latest_log.cached_input_tokens == 3
+        assert latest_log.status == "success"
+
+
+@pytest.mark.asyncio
+async def test_backend_codex_responses_routes_responses_capable_model_source(async_client, monkeypatch):
+    model = "external-codex-responses"
+    source_id = await _create_model_source(
+        async_client,
+        name="codex-responses-route",
+        model=model,
+        supports_responses=True,
+    )
+    observed: dict[str, object] = {}
+
+    async def fake_stream(source, payload):
+        observed["source_id"] = source.id
+        observed["payload"] = dict(payload)
+        usage_holder = SourceUsageHolder()
+
+        async def body():
+            usage_holder.usage = SourceUsage(input_tokens=2, output_tokens=1, cached_input_tokens=0)
+            yield (
+                b'data: {"type":"response.completed","response":{"id":"resp_source",'
+                b'"usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}}}\n\n'
+            )
+
+        return SourceResponsesStream(body=body(), usage_holder=usage_holder, upstream_status_code=200)
+
+    monkeypatch.setattr(proxy_api, "stream_source_responses", fake_stream)
+
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        json={"model": model, "instructions": "hi", "input": []},
+    ) as response:
+        assert response.status_code == 200
+        lines = [line async for line in response.aiter_lines() if line]
+
+    assert observed["source_id"] == source_id
+    forwarded_payload = observed["payload"]
+    assert isinstance(forwarded_payload, dict)
+    assert forwarded_payload["model"] == model
+    assert forwarded_payload["stream"] is True
+    assert any("resp_source" in line for line in lines)
 
 
 @pytest.mark.asyncio

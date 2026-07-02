@@ -7,6 +7,7 @@ import { LoadingOverlay } from "@/components/layout/loading-overlay";
 import { ApiKeysSection } from "@/features/api-keys/components/api-keys-section";
 import { useAccounts } from "@/features/accounts/hooks/use-accounts";
 import { FirewallSection } from "@/features/firewall/components/firewall-section";
+import { ModelSourcesSettings } from "@/features/model-sources/components/model-sources-settings";
 import { QuotaPlannerSection } from "@/features/quota-planner/components/quota-planner-section";
 import { buildSettingsUpdateRequest } from "@/features/settings/payload";
 import { AppearanceSettings } from "@/features/settings/components/appearance-settings";
@@ -130,6 +131,7 @@ export function SettingsPage() {
               />
             ) : null}
             <ImportSettings settings={settings} busy={controlsDisabled} onSave={handleSave} />
+            <ModelSourcesSettings disabled={controlsDisabled} />
             {canWrite ? (
               <GuestAccessSettings
                 settings={settings}

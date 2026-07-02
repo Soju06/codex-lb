@@ -16,10 +16,12 @@ from app.db.models import (
     ApiKey,
     ApiKeyAccountAssignment,
     ApiKeyLimit,
+    ApiKeyModelSourceAssignment,
     ApiKeyUsageReservation,
     ApiKeyUsageReservationItem,
     LimitType,
     LimitWindow,
+    ModelSource,
     RequestLog,
 )
 from app.db.session import sqlite_writer_section
@@ -144,6 +146,7 @@ class ApiKeysRepository:
             .options(
                 selectinload(ApiKey.limits),
                 selectinload(ApiKey.account_assignments),
+                selectinload(ApiKey.source_assignments),
             )
         )
 
@@ -175,6 +178,12 @@ class ApiKeysRepository:
             .options(load_only(Account.id, Account.plan_type, Account.status))
             .where(Account.id.in_(account_ids))
         )
+        return list(result.scalars().all())
+
+    async def list_model_sources_by_ids(self, source_ids: list[str]) -> list[ModelSource]:
+        if not source_ids:
+            return []
+        result = await self._session.execute(select(ModelSource).where(ModelSource.id.in_(source_ids)))
         return list(result.scalars().all())
 
     async def list_all_accounts(self) -> list[Account]:
@@ -311,6 +320,7 @@ class ApiKeysRepository:
         transport_policy_override: str | None | _Unset = _UNSET,
         usage_sections: str | _Unset = _UNSET,
         account_assignment_scope_enabled: bool | _Unset = _UNSET,
+        source_assignment_scope_enabled: bool | _Unset = _UNSET,
         expires_at: datetime | None | _Unset = _UNSET,
         is_active: bool | _Unset = _UNSET,
         key_hash: str | _Unset = _UNSET,
@@ -350,6 +360,9 @@ class ApiKeysRepository:
         if account_assignment_scope_enabled is not _UNSET:
             assert isinstance(account_assignment_scope_enabled, bool)
             row.account_assignment_scope_enabled = account_assignment_scope_enabled
+        if source_assignment_scope_enabled is not _UNSET:
+            assert isinstance(source_assignment_scope_enabled, bool)
+            row.source_assignment_scope_enabled = source_assignment_scope_enabled
         if expires_at is not _UNSET:
             assert expires_at is None or isinstance(expires_at, datetime)
             row.expires_at = expires_at
@@ -440,6 +453,18 @@ class ApiKeysRepository:
         parent = await self._session.get(ApiKey, key_id)
         if parent is not None:
             await self._session.refresh(parent, attribute_names=["account_assignments"])
+
+    async def replace_source_assignments(self, key_id: str, source_ids: list[str], *, commit: bool = True) -> None:
+        await self._session.execute(
+            delete(ApiKeyModelSourceAssignment).where(ApiKeyModelSourceAssignment.api_key_id == key_id)
+        )
+        for source_id in source_ids:
+            self._session.add(ApiKeyModelSourceAssignment(api_key_id=key_id, source_id=source_id))
+        if commit:
+            await self._session.commit()
+        parent = await self._session.get(ApiKey, key_id)
+        if parent is not None:
+            await self._session.refresh(parent, attribute_names=["source_assignments"])
 
     async def increment_limit_usage(
         self,

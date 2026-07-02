@@ -245,6 +245,8 @@ class RequestLogsRepository:
         failure_exception_type: str | None = None,
         upstream_status_code: int | None = None,
         upstream_error_code: str | None = None,
+        model_source_id: str | None = None,
+        model_source_kind: str | None = None,
         bridge_stage: str | None = None,
         request_kind: str = RequestKind.NORMAL.value,
         upstream_proxy_route_mode: str | None = None,
@@ -267,6 +269,8 @@ class RequestLogsRepository:
             resolved_client_ip = client_ip if not isinstance(client_ip, str) or client_ip.strip() else None
             log = RequestLog(
                 account_id=account_id,
+                model_source_id=model_source_id,
+                model_source_kind=model_source_kind,
                 api_key_id=api_key_id,
                 session_id=session_id,
                 request_id=resolved_request_id,

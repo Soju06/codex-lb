@@ -88,6 +88,38 @@ async def _populate_test_registry() -> None:
     await registry.update({"plus": models, "pro": models})
 
 
+async def _create_model_source(
+    async_client,
+    *,
+    name: str,
+    model: str,
+    supports_responses: bool = False,
+) -> str:
+    response = await async_client.post(
+        "/api/model-sources/",
+        json={
+            "name": name,
+            "baseUrl": f"https://{name}.example.invalid/v1",
+            "apiKey": f"token-{name}",
+            "supportsChatCompletions": True,
+            "supportsResponses": supports_responses,
+            "models": [
+                {
+                    "model": model,
+                    "displayName": model,
+                    "contextWindow": 8192,
+                    "maxOutputTokens": 1024,
+                    "supportsStreaming": True,
+                    "supportsTools": True,
+                    "supportsVision": False,
+                }
+            ],
+        },
+    )
+    assert response.status_code == 200
+    return response.json()["id"]
+
+
 @pytest.mark.asyncio
 async def test_v1_models_list(async_client):
     await _populate_test_registry()
@@ -203,6 +235,88 @@ async def test_v1_models_includes_supported_model_and_excludes_unsupported_spark
     ids = {item["id"] for item in resp.json()["data"]}
     assert "gpt-5.3-codex" not in ids
     assert "gpt-5.3-codex-spark" in ids
+
+
+@pytest.mark.asyncio
+async def test_v1_models_filters_openai_compatible_sources_by_api_key_assignment(async_client):
+    first_source_id = await _create_model_source(async_client, name="vllm-first", model="vllm-visible")
+    await _create_model_source(async_client, name="vllm-second", model="vllm-hidden")
+
+    settings = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert settings.status_code == 200
+
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "source-scoped-key",
+            "assignedSourceIds": [first_source_id],
+        },
+    )
+    assert created.status_code == 200
+    assert created.json()["sourceAssignmentScopeEnabled"] is True
+    assert created.json()["assignedSourceIds"] == [first_source_id]
+
+    response = await async_client.get(
+        "/v1/models",
+        headers={"Authorization": f"Bearer {created.json()['key']}"},
+    )
+    assert response.status_code == 200
+    ids = {item["id"] for item in response.json()["data"]}
+
+    assert "vllm-visible" in ids
+    assert "vllm-hidden" not in ids
+
+    deleted = await async_client.delete(f"/api/model-sources/{first_source_id}")
+    assert deleted.status_code == 204
+
+    listed_keys = await async_client.get("/api/api-keys/")
+    assert listed_keys.status_code == 200
+    listed_key = next(row for row in listed_keys.json() if row["id"] == created.json()["id"])
+    assert listed_key["sourceAssignmentScopeEnabled"] is True
+    assert listed_key["assignedSourceIds"] == []
+
+    after_delete = await async_client.get(
+        "/v1/models",
+        headers={"Authorization": f"Bearer {created.json()['key']}"},
+    )
+    assert after_delete.status_code == 200
+    ids_after_delete = {item["id"] for item in after_delete.json()["data"]}
+    assert "vllm-hidden" not in ids_after_delete
+
+
+@pytest.mark.asyncio
+async def test_backend_codex_models_includes_only_responses_capable_source_models(async_client):
+    await _create_model_source(
+        async_client,
+        name="codex-source-responses",
+        model="external-responses-model",
+        supports_responses=True,
+    )
+    await _create_model_source(
+        async_client,
+        name="codex-source-chat",
+        model="external-chat-only-model",
+        supports_responses=False,
+    )
+
+    response = await async_client.get("/backend-api/codex/models")
+    assert response.status_code == 200
+    payload = response.json()
+    slugs = {item["slug"] for item in payload["models"]}
+    data_ids = {item["id"] for item in payload["data"]}
+
+    assert "external-responses-model" in slugs
+    assert "external-responses-model" in data_ids
+    assert "external-chat-only-model" not in slugs
+    assert "external-chat-only-model" not in data_ids
 
 
 @pytest.mark.asyncio

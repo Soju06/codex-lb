@@ -385,6 +385,55 @@ async def test_limited_key_settles_usage_from_crlf_stream(async_client, source_u
 
 
 @pytest.mark.asyncio
+async def test_scoped_key_does_not_route_to_unassigned_source(async_client, source_upstream):
+    await _enable_api_key_auth(async_client)
+    unassigned_hits = 0
+
+    async def unassigned_upstream(_request: web.Request) -> web.Response:
+        nonlocal unassigned_hits
+        unassigned_hits += 1
+        return web.json_response(
+            {
+                "id": "chatcmpl_unassigned",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "unassigned-model",
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": "leak"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            }
+        )
+
+    assigned_source_id = await _create_model_source(
+        async_client,
+        name="assigned-scope",
+        model="assigned-model",
+        base_url=f"http://127.0.0.1:{_free_port()}/v1",
+    )
+    unassigned_base_url = await source_upstream(unassigned_upstream)
+    await _create_model_source(
+        async_client,
+        name="unassigned-scope",
+        model="unassigned-model",
+        base_url=unassigned_base_url,
+    )
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={"name": "scoped-key", "assignedSourceIds": [assigned_source_id]},
+    )
+    assert created.status_code == 200
+    key = created.json()["key"]
+
+    response = await async_client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"model": "unassigned-model", "messages": [{"role": "user", "content": "hi"}]},
+    )
+
+    assert response.status_code != 200
+    assert unassigned_hits == 0
+
+
+@pytest.mark.asyncio
 async def test_buffer_limit_closes_abandoned_upstream_stream(async_client, monkeypatch):
     from starlette.requests import Request
 

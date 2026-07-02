@@ -11,6 +11,7 @@ from sqlalchemy import select
 from app.db.models import ApiKeyUsageReservation, RequestLog
 from app.db.session import SessionLocal
 from app.modules.api_keys.repository import ApiKeysRepository
+from app.modules.api_keys.service import ApiKeysService
 
 pytestmark = pytest.mark.integration
 
@@ -268,6 +269,65 @@ async def test_source_usage_settles_cost_from_source_pricing(async_client, sourc
         assert latest_log is not None
         assert latest_log.model_source_id == source_id
         assert latest_log.cost_usd == pytest.approx(expected_cost_usd)
+
+
+@pytest.mark.asyncio
+async def test_settlement_failure_releases_reservation(async_client, source_upstream, monkeypatch):
+    await _enable_api_key_auth(async_client)
+
+    async def completion(_request: web.Request) -> web.Response:
+        return web.json_response(
+            {
+                "id": "chatcmpl_settle_fail",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "settle-fail-model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+            }
+        )
+
+    base_url = await source_upstream(completion)
+    model = "settle-fail-model"
+    source_id = await _create_model_source(async_client, name="settle-fail", model=model, base_url=base_url)
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "settle-fail-key",
+            "assignedSourceIds": [source_id],
+            "limits": [
+                {"limitType": "total_tokens", "limitWindow": "weekly", "maxValue": 1_000},
+            ],
+        },
+    )
+    assert created.status_code == 200
+    key = created.json()["key"]
+
+    async def broken_finalize(self, reservation_id, **kwargs):
+        raise RuntimeError("settlement boom")
+
+    monkeypatch.setattr(ApiKeysService, "finalize_usage_reservation", broken_finalize)
+
+    response = await async_client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"model": model, "messages": [{"role": "user", "content": "hi"}]},
+    )
+
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "usage_settlement_failed"
+
+    async with SessionLocal() as session:
+        result = await session.execute(
+            select(ApiKeyUsageReservation).where(ApiKeyUsageReservation.status == "reserved")
+        )
+        assert result.scalars().all() == []
 
 
 @pytest.mark.asyncio

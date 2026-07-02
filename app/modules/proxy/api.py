@@ -4535,6 +4535,14 @@ async def _settle_source_reservation(
             model,
             exc_info=True,
         )
+        try:
+            await _release_reservation(reservation)
+        except Exception:
+            logger.warning(
+                "failed to release source reservation after settlement failure reservation_id=%s",
+                reservation.reservation_id,
+                exc_info=True,
+            )
         return False
 
 

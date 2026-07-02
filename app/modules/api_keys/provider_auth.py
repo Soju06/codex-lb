@@ -27,7 +27,6 @@ the existing dependency and only adds one provider-scope check on top of it.
 
 from __future__ import annotations
 
-from functools import partial
 from typing import Any
 
 from fastapi import Depends, HTTPException

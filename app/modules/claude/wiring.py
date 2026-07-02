@@ -8,7 +8,7 @@ dependency factory used at startup and by tests.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from app.core.clients.anthropic.chat import AiohttpClaudeChatTransport, build_claude_chat_client
 from app.core.config.settings import get_settings
@@ -22,9 +22,6 @@ from app.modules.proxy.repo_bundle import ProxyRepositories
 from app.modules.proxy.sticky_repository import StickySessionsRepository
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.repository import UsageRepository
-
-if TYPE_CHECKING:
-    import aiohttp
 
 
 async def _proxy_repo_context_async():
@@ -120,15 +117,15 @@ class _LazyAccountsRepository:
     """
 
     async def update_rate_limit_cache(self, *args: Any, **kwargs: Any) -> bool:  # type: ignore[no-untyped-def]
-        from app.modules.accounts.repository import AccountsRepository
         from app.db.session import get_background_session
+        from app.modules.accounts.repository import AccountsRepository
 
         async with get_background_session() as session:
             return await AccountsRepository(session).update_rate_limit_cache(*args, **kwargs)
 
     async def update_last_used_at(self, *args: Any, **kwargs: Any) -> bool:  # type: ignore[no-untyped-def]
-        from app.modules.accounts.repository import AccountsRepository
         from app.db.session import get_background_session
+        from app.modules.accounts.repository import AccountsRepository
 
         async with get_background_session() as session:
             return await AccountsRepository(session).update_last_used_at(*args, **kwargs)
@@ -138,8 +135,8 @@ class _LazyRequestLogsRepository:
     """Stub request-log repository used only to satisfy type signatures."""
 
     async def add_log(self, **kwargs: Any) -> Any:  # type: ignore[no-untyped-def]
-        from app.modules.request_logs.repository import RequestLogsRepository
         from app.db.session import get_background_session
+        from app.modules.request_logs.repository import RequestLogsRepository
 
         async with get_background_session() as session:
             return await RequestLogsRepository(session).add_log(**kwargs)

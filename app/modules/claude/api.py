@@ -23,6 +23,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse, StreamingResponse
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth.dependencies import (
     require_dashboard_write_access,
@@ -36,12 +37,11 @@ from app.core.clients.anthropic.errors import (
 )
 from app.db.session import get_session
 from app.modules.api_keys.provider_auth import api_key_validator_with_provider
-from app.modules.claude.auth_manager import ClaudeAuthManager, ClaudeAccountAlreadyExists, ClaudeAccountNotFound
+from app.modules.claude.auth_manager import ClaudeAccountAlreadyExists, ClaudeAuthManager
 from app.modules.claude.models_catalog import list_claude_models
 from app.modules.claude.repository import SqlClaudeAccountRepository
 from app.modules.claude.schemas import (
     AddClaudeAccountRequest,
-    ClaudeAccountResponse,
     DisableClaudeAccountRequest,
 )
 from app.modules.claude.service import (
@@ -49,7 +49,6 @@ from app.modules.claude.service import (
     NoClaudeAccounts,
     ProviderScopeMismatch,
 )
-from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
 

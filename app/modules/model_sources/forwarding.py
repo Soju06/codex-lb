@@ -248,7 +248,24 @@ def _source_headers(
     }
     if source.api_key_encrypted is not None:
         active_encryptor = encryptor or TokenEncryptor()
-        headers["Authorization"] = f"Bearer {active_encryptor.decrypt(source.api_key_encrypted)}"
+        try:
+            secret = active_encryptor.decrypt(source.api_key_encrypted)
+        except Exception as exc:
+            # A rotated encryption key file or corrupt DB value must surface
+            # as a forwarding error (with reservation release at the routes),
+            # not a bare 500.
+            raise ModelSourceForwardingError(
+                status_code=502,
+                payload={
+                    "error": {
+                        "message": "OpenAI-compatible model source credentials could not be decrypted",
+                        "type": "upstream_error",
+                        "code": "model_source_credentials_error",
+                    }
+                },
+                upstream_status_code=None,
+            ) from exc
+        headers["Authorization"] = f"Bearer {secret}"
     return headers
 
 

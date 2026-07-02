@@ -466,6 +466,96 @@ async def test_cancelled_buffered_stream_releases_reservation(async_client, monk
 
 
 @pytest.mark.asyncio
+async def test_opportunistic_key_routes_to_source_without_account_pool(async_client, source_upstream):
+    await _enable_api_key_auth(async_client)
+
+    async def completion(_request: web.Request) -> web.Response:
+        return web.json_response(
+            {
+                "id": "chatcmpl_opportunistic",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "opportunistic-model",
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            }
+        )
+
+    base_url = await source_upstream(completion)
+    model = "opportunistic-model"
+    source_id = await _create_model_source(async_client, name="opportunistic", model=model, base_url=base_url)
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "opportunistic-source-key",
+            "assignedSourceIds": [source_id],
+            "trafficClass": "opportunistic",
+        },
+    )
+    assert created.status_code == 200
+    key = created.json()["key"]
+
+    # No subscription accounts exist, so opportunistic admission would deny
+    # with 429 if it (incorrectly) gated the account-free source path.
+    response = await async_client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"model": model, "messages": [{"role": "user", "content": "hi"}]},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["id"] == "chatcmpl_opportunistic"
+
+
+@pytest.mark.asyncio
+async def test_source_credential_decrypt_failure_maps_to_error_and_releases_reservation(
+    async_client, source_upstream, monkeypatch
+):
+    await _enable_api_key_auth(async_client)
+
+    async def completion(_request: web.Request) -> web.Response:
+        return web.json_response({"unreachable": True})
+
+    base_url = await source_upstream(completion)
+    model = "credential-fail-model"
+    source_id = await _create_model_source(async_client, name="credential-fail", model=model, base_url=base_url)
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "credential-fail-key",
+            "assignedSourceIds": [source_id],
+            "limits": [
+                {"limitType": "total_tokens", "limitWindow": "weekly", "maxValue": 1_000},
+            ],
+        },
+    )
+    assert created.status_code == 200
+    key = created.json()["key"]
+
+    from app.core.crypto import TokenEncryptor
+
+    def broken_decrypt(self, value):
+        raise ValueError("decryption boom")
+
+    monkeypatch.setattr(TokenEncryptor, "decrypt", broken_decrypt)
+
+    response = await async_client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"model": model, "messages": [{"role": "user", "content": "hi"}]},
+    )
+
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "model_source_credentials_error"
+
+    async with SessionLocal() as session:
+        result = await session.execute(
+            select(ApiKeyUsageReservation).where(ApiKeyUsageReservation.status == "reserved")
+        )
+        assert result.scalars().all() == []
+
+
+@pytest.mark.asyncio
 async def test_scoped_key_does_not_route_to_unassigned_source(async_client, source_upstream):
     await _enable_api_key_auth(async_client)
     unassigned_hits = 0

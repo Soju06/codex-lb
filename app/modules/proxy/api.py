@@ -555,14 +555,9 @@ async def responses(
     validate_model_access(api_key, responses_payload.model)
     source = await _select_responses_model_source(responses_payload.model, api_key)
     if source is not None:
-        admission_denial = await _opportunistic_admission_denial(
-            request,
-            context,
-            api_key,
-            model=responses_payload.model,
-        )
-        if admission_denial is not None:
-            return admission_denial
+        # Opportunistic admission gates subscription *account* capacity;
+        # source-routed requests use no account, so a closed/empty pool must
+        # not reject them.
         responses_payload.stream = True
         rate_limit_headers = await _rate_limit_headers_for_request(context, api_key)
         return await _source_responses_response(
@@ -657,14 +652,9 @@ async def v1_responses(
     validate_model_access(api_key, responses_payload.model)
     source = await _select_responses_model_source(responses_payload.model, api_key)
     if source is not None:
-        admission_denial = await _opportunistic_admission_denial(
-            request,
-            context,
-            api_key,
-            model=responses_payload.model,
-        )
-        if admission_denial is not None:
-            return admission_denial
+        # Opportunistic admission gates subscription *account* capacity;
+        # source-routed requests use no account, so a closed/empty pool must
+        # not reject them.
         rate_limit_headers = await _rate_limit_headers_for_request(context, api_key)
         return await _source_responses_response(
             request,
@@ -2502,19 +2492,25 @@ async def v1_chat_completions(
         error = openai_validation_error(exc)
         return _logged_error_json_response(request, 400, error, headers=rate_limit_headers)
     apply_api_key_enforcement(responses_payload, api_key)
-    admission_denial = await _opportunistic_admission_denial(request, context, api_key, model=responses_payload.model)
-    if admission_denial is not None:
-        return admission_denial
+    source = (
+        await _select_chat_model_source(responses_payload.model, api_key)
+        if not responses_shaped_payload and payload.messages is not None
+        else None
+    )
+    if source is None:
+        # Opportunistic admission gates subscription *account* capacity;
+        # source-routed requests use no account, so a closed/empty pool must
+        # not reject them.
+        admission_denial = await _opportunistic_admission_denial(
+            request, context, api_key, model=responses_payload.model
+        )
+        if admission_denial is not None:
+            return admission_denial
     reservation = await _enforce_request_limits(
         api_key,
         request_model=responses_payload.model,
         request_service_tier=responses_payload.service_tier,
         request_usage_budget=estimate_api_key_request_usage(responses_payload),
-    )
-    source = (
-        await _select_chat_model_source(responses_payload.model, api_key)
-        if not responses_shaped_payload and payload.messages is not None
-        else None
     )
     if source is not None:
         return await _source_chat_completion_response(

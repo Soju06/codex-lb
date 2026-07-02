@@ -318,6 +318,10 @@ async def test_backend_codex_models_includes_only_responses_capable_source_model
     assert "external-chat-only-model" not in slugs
     assert "external-chat-only-model" not in data_ids
 
+    source_entry = next(item for item in payload["models"] if item["slug"] == "external-responses-model")
+    assert "source_id" not in source_entry
+    assert "source_kind" not in source_entry
+
 
 @pytest.mark.asyncio
 async def test_backend_codex_models_returns_format1(async_client):

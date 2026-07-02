@@ -30,8 +30,9 @@ def _to_upstream_model(source: ModelSource, source_model: ModelSourceModel) -> U
     if source_model.max_output_tokens is not None:
         raw["max_output_tokens"] = source_model.max_output_tokens
     raw["supports_streaming"] = source_model.supports_streaming
-    raw["source_kind"] = source.kind
-    raw["source_id"] = source.id
+    # source_kind/source_id stay on the UpstreamModel fields only: raw is
+    # copied into client-visible payloads (codex models "extra"), and internal
+    # source identifiers must not leak to proxy clients.
     raw["model_provider"] = "codex-lb"
 
     input_modalities = ("text", "image") if source_model.supports_vision else ("text",)

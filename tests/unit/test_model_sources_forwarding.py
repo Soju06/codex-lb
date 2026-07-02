@@ -53,6 +53,24 @@ def test_stream_usage_parser_bounds_buffer_without_frame_boundaries() -> None:
     assert len(parser._buffer) <= SourceStreamUsageParser._MAX_BUFFER_CHARS
 
 
+def test_chat_stream_usage_parser_rejects_negative_tokens() -> None:
+    holder = SourceUsageHolder()
+    parser = SourceStreamUsageParser(holder, response_shape="chat")
+
+    parser.feed(b'data: {"usage":{"prompt_tokens":-5,"completion_tokens":3}}\n\n')
+
+    assert holder.usage is None
+
+
+def test_responses_stream_usage_parser_rejects_negative_tokens() -> None:
+    holder = SourceUsageHolder()
+    parser = SourceStreamUsageParser(holder, response_shape="responses")
+
+    parser.feed(b'data: {"type":"response.completed","response":{"usage":{"input_tokens":4,"output_tokens":-1}}}\n\n')
+
+    assert holder.usage is None
+
+
 def test_responses_stream_usage_parser_handles_split_sse_frame() -> None:
     holder = SourceUsageHolder()
     parser = SourceStreamUsageParser(holder, response_shape="responses")

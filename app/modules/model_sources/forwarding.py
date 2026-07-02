@@ -92,6 +92,8 @@ async def forward_chat_completion(
                         payload=_error_payload(data),
                         upstream_status_code=response.status,
                     )
+                if data is None:
+                    raise _invalid_upstream_response_error(response.status)
                 return SourceChatCompletion(
                     payload=data,
                     usage=_usage_from_chat_payload(data),
@@ -142,6 +144,8 @@ async def forward_responses(
                         payload=_error_payload(data),
                         upstream_status_code=response.status,
                     )
+                if data is None:
+                    raise _invalid_upstream_response_error(response.status)
                 return SourceResponsesCompletion(
                     payload=data,
                     usage=_usage_from_responses_payload(data),
@@ -252,17 +256,31 @@ def _source_timeout_seconds(source: ModelSource) -> float:
     return float(source.timeout_seconds or _DEFAULT_SOURCE_TIMEOUT_SECONDS)
 
 
-async def _response_json(response: aiohttp.ClientResponse) -> dict[str, JsonValue]:
+async def _response_json(response: aiohttp.ClientResponse) -> dict[str, JsonValue] | None:
+    """Parsed JSON object body, or ``None`` when the body is not valid JSON."""
     try:
         data = await response.json(content_type=None)
     except Exception:
-        text = await response.text()
-        return {"error": {"message": text[:500], "type": "upstream_error", "code": "invalid_upstream_response"}}
+        return None
     return data if isinstance(data, dict) else {"data": data}
 
 
-def _error_payload(data: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
-    error = data.get("error")
+def _invalid_upstream_response_error(response_status: int) -> ModelSourceForwardingError:
+    return ModelSourceForwardingError(
+        status_code=502,
+        payload={
+            "error": {
+                "message": "OpenAI-compatible model source returned a non-JSON response",
+                "type": "upstream_error",
+                "code": "invalid_upstream_response",
+            }
+        },
+        upstream_status_code=response_status,
+    )
+
+
+def _error_payload(data: Mapping[str, JsonValue] | None) -> dict[str, JsonValue]:
+    error = data.get("error") if data is not None else None
     if is_json_mapping(error):
         return {"error": dict(error)}
     return {
@@ -293,6 +311,10 @@ def _usage_from_mapping(usage: Mapping[str, JsonValue]) -> SourceUsage | None:
     completion_tokens = usage.get("completion_tokens")
     if not isinstance(prompt_tokens, int) or not isinstance(completion_tokens, int):
         return None
+    if prompt_tokens < 0 or completion_tokens < 0:
+        # Fail closed: negative counts from a misbehaving source would reduce
+        # API-key limit counters or record negative cost at settlement.
+        return None
     cached_tokens = 0
     details = usage.get("prompt_tokens_details")
     if is_json_mapping(details):
@@ -309,6 +331,10 @@ def _usage_from_responses_mapping(usage: Mapping[str, JsonValue]) -> SourceUsage
     input_tokens = usage.get("input_tokens")
     output_tokens = usage.get("output_tokens")
     if not isinstance(input_tokens, int) or not isinstance(output_tokens, int):
+        return None
+    if input_tokens < 0 or output_tokens < 0:
+        # Fail closed: negative counts from a misbehaving source would reduce
+        # API-key limit counters or record negative cost at settlement.
         return None
     cached_tokens = 0
     details = usage.get("input_tokens_details")

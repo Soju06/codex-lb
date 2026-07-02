@@ -2941,6 +2941,13 @@ async def _buffered_limited_source_chat_stream_response(
                 error_message="source stream buffer limit exceeded",
             )
             return _logged_error_json_response(request, 502, error, headers=rate_limit_headers)
+    except asyncio.CancelledError:
+        # Starlette cancels this task when the downstream client disconnects;
+        # CancelledError is a BaseException, so without this branch the
+        # reservation would stay charged until stale-reservation cleanup.
+        await _aclose_stream(stream)
+        await _release_reservation(reservation)
+        raise
     except ModelSourceForwardingError as exc:
         await _release_reservation(reservation)
         await _log_source_chat_completion(
@@ -3043,6 +3050,15 @@ async def _source_chat_stream_with_settlement(
     try:
         async for chunk in stream:
             yield chunk
+    except (asyncio.CancelledError, GeneratorExit):
+        # Client disconnect surfaces as CancelledError (task cancellation) or
+        # GeneratorExit (generator aclose); both bypass ``except Exception``
+        # and would leave the reservation charged until stale cleanup.
+        status = "error"
+        error_code = "client_disconnected"
+        error_message = "client disconnected before stream completed"
+        await _release_reservation(reservation)
+        raise
     except ModelSourceForwardingError as exc:
         status = "error"
         error_code = _source_error_code(exc.payload)

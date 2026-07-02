@@ -385,6 +385,87 @@ async def test_limited_key_settles_usage_from_crlf_stream(async_client, source_u
 
 
 @pytest.mark.asyncio
+async def test_source_invalid_json_2xx_maps_to_error_response(async_client, source_upstream):
+    async def html_response(_request: web.Request) -> web.Response:
+        return web.Response(status=200, text="<html>gateway page</html>", content_type="text/html")
+
+    base_url = await source_upstream(html_response)
+    model = "source-invalid-json-model"
+    await _create_model_source(async_client, name="invalid-json", model=model, base_url=base_url)
+
+    response = await async_client.post(
+        "/v1/chat/completions",
+        json={"model": model, "messages": [{"role": "user", "content": "hi"}]},
+    )
+
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "invalid_upstream_response"
+
+
+@pytest.mark.asyncio
+async def test_cancelled_buffered_stream_releases_reservation(async_client, monkeypatch):
+    import asyncio
+
+    from starlette.requests import Request
+
+    import app.modules.proxy.api as proxy_api
+    from app.db.models import ModelSource
+    from app.modules.model_sources.forwarding import SourceUsageHolder
+
+    released: list[object] = []
+    stream_closed = False
+
+    async def record_release(reservation: object) -> None:
+        released.append(reservation)
+
+    monkeypatch.setattr(proxy_api, "_release_reservation", record_release)
+
+    async def cancelled_stream() -> AsyncIterator[bytes]:
+        nonlocal stream_closed
+        try:
+            yield b"data: partial\n\n"
+            raise asyncio.CancelledError()
+        finally:
+            stream_closed = True
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/v1/chat/completions",
+            "headers": [],
+            "client": ("127.0.0.1", 1234),
+            "query_string": b"",
+        }
+    )
+    source = ModelSource(
+        id="src_cancelled",
+        name="cancelled",
+        kind="openai_compatible",
+        base_url="http://127.0.0.1:9/v1",
+        is_enabled=True,
+        supports_chat_completions=True,
+        supports_responses=False,
+    )
+    reservation = object()
+
+    with pytest.raises(asyncio.CancelledError):
+        await proxy_api._buffered_limited_source_chat_stream_response(
+            request,
+            source=source,
+            api_key=None,
+            model="cancelled-model",
+            reservation=reservation,  # type: ignore[arg-type]
+            stream=cancelled_stream(),
+            usage_holder=SourceUsageHolder(),
+            rate_limit_headers={},
+        )
+
+    assert released == [reservation]
+    assert stream_closed is True
+
+
+@pytest.mark.asyncio
 async def test_scoped_key_does_not_route_to_unassigned_source(async_client, source_upstream):
     await _enable_api_key_auth(async_client)
     unassigned_hits = 0

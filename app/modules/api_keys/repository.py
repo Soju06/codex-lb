@@ -315,6 +315,7 @@ class ApiKeysRepository:
         is_active: bool | _Unset = _UNSET,
         key_hash: str | _Unset = _UNSET,
         key_prefix: str | _Unset = _UNSET,
+        provider_scope: str | _Unset = _UNSET,
         commit: bool = True,
     ) -> ApiKey | None:
         row = await self.get_by_id(key_id)
@@ -362,6 +363,9 @@ class ApiKeysRepository:
         if key_prefix is not _UNSET:
             assert isinstance(key_prefix, str)
             row.key_prefix = key_prefix
+        if provider_scope is not _UNSET:
+            assert isinstance(provider_scope, str)
+            row.provider_scope = provider_scope
         if commit:
             await self._session.commit()
         return await self.get_by_id(key_id)

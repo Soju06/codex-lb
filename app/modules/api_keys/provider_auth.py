@@ -44,14 +44,21 @@ def _provider_scope_mismatch(provider: str) -> HTTPException:
 def _enforce_provider_scope(api_key: Any, provider: str) -> Any:
     """Reject keys whose ``provider_scope`` does not include ``provider``.
 
-    ``provider_scope`` is stored as a comma-separated string per the Phase 1
-    schema; we split on ``,`` so the legacy ``"codex"`` value, the dual
-    ``"codex,claude"`` value, and the new ``"claude"`` value are all
-    unambiguous. An empty / missing scope is treated as no authorization
-    rather than universal access.
+    ``provider_scope`` may surface in two equivalent shapes:
+
+    * a comma-separated string per the Phase 1 DB schema (e.g. ``"codex"``,
+      ``"codex,claude"``); or
+    * a sorted ``list[str]`` per the Phase 11 service-layer shape.
+
+    An empty / missing scope is treated as no authorization rather than
+    universal access.
     """
-    scope = (getattr(api_key, "provider_scope", "") or "")
-    if provider not in scope.split(","):
+    scope = getattr(api_key, "provider_scope", None) or ""
+    if isinstance(scope, (list, tuple, set, frozenset)):
+        parts = [str(part).strip() for part in scope if str(part).strip()]
+    else:
+        parts = [part.strip() for part in str(scope).split(",") if part.strip()]
+    if provider not in parts:
         raise _provider_scope_mismatch(provider)
     return api_key
 

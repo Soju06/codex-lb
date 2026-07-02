@@ -136,6 +136,7 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
         is_active: bool | _Unset = _UNSET,
         key_hash: str | _Unset = _UNSET,
         key_prefix: str | _Unset = _UNSET,
+        provider_scope: str | _Unset = _UNSET,
         commit: bool = True,
     ) -> ApiKey | None:
         del commit
@@ -157,6 +158,7 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
             "is_active": is_active,
             "key_hash": key_hash,
             "key_prefix": key_prefix,
+            "provider_scope": provider_scope,
         }.items():
             if value is _UNSET:
                 continue

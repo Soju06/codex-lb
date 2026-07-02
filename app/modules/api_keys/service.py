@@ -91,6 +91,7 @@ class ApiKeysRepositoryProtocol(Protocol):
         is_active: bool | _Unset = ...,
         key_hash: str | _Unset = ...,
         key_prefix: str | _Unset = ...,
+        provider_scope: str | _Unset = ...,
         commit: bool = True,
     ) -> ApiKey | None: ...
 
@@ -274,6 +275,7 @@ class ApiKeyCreateData:
     expires_at: datetime | None = None
     assigned_account_ids: list[str] | None = None
     limits: list[LimitRuleInput] = field(default_factory=list)
+    provider_scope: list[str] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -305,6 +307,8 @@ class ApiKeyUpdateData:
     limits: list[LimitRuleInput] | None = None
     limits_set: bool = False
     reset_usage: bool = False
+    provider_scope: list[str] | None = None
+    provider_scope_set: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -329,7 +333,7 @@ class ApiKeyData:
     account_assignment_scope_enabled: bool = False
     assigned_account_ids: list[str] = field(default_factory=list)
     pooled_credits: "PooledCreditData | None" = None
-    provider_scope: str = "codex"
+    provider_scope: list[str] = field(default_factory=lambda: ["codex"])
 
 
 @dataclass(frozen=True, slots=True)
@@ -446,6 +450,7 @@ class ApiKeysService:
         traffic_class = _normalize_traffic_class(payload.traffic_class)
         transport_policy_override = _normalize_transport_policy_override(payload.transport_policy_override)
         usage_sections = _normalize_usage_sections(payload.usage_sections)
+        provider_scope_csv = _normalize_provider_scope_csv(payload.provider_scope)
         _validate_model_enforcement(enforced_model=enforced_model, allowed_models=normalized_allowed_models)
         row = ApiKey(
             id=str(__import__("uuid").uuid4()),
@@ -465,6 +470,7 @@ class ApiKeysService:
             is_active=True,
             created_at=now,
             last_used_at=None,
+            provider_scope=provider_scope_csv,
         )
         try:
             created = await self._repository.create(row, commit=False)
@@ -587,6 +593,10 @@ class ApiKeysService:
         if payload.usage_sections_set:
             usage_sections = _normalize_usage_sections(payload.usage_sections)
 
+        provider_scope_update: str | _Unset = _UNSET
+        if payload.provider_scope_set:
+            provider_scope_update = _normalize_provider_scope_csv(payload.provider_scope)
+
         if payload.allowed_models_set or payload.enforced_model_set:
             effective_allowed_models = (
                 allowed_models if payload.allowed_models_set else _deserialize_allowed_models(existing.allowed_models)
@@ -634,6 +644,7 @@ class ApiKeysService:
                 account_assignment_scope_enabled=account_assignment_scope_enabled,
                 expires_at=expires_at if payload.expires_at_set else _UNSET,
                 is_active=(payload.is_active if payload.is_active_set and payload.is_active is not None else _UNSET),
+                provider_scope=provider_scope_update,
                 commit=False,
             )
             if row is None:
@@ -665,6 +676,7 @@ class ApiKeysService:
             or payload.usage_sections_set
             or payload.expires_at_set
             or payload.is_active_set
+            or payload.provider_scope_set
         ):
             row = await self._repository.get_by_id(key_id)
             if row is None:
@@ -1350,6 +1362,39 @@ def _normalize_transport_policy_override(value: str | None) -> str | None:
     raise ApiKeyValidationError(f"Unsupported transport policy override '{normalized}'. Expected one of: {options}")
 
 
+_ALLOWED_PROVIDER_SCOPE = frozenset({"codex", "claude"})
+_DEFAULT_PROVIDER_SCOPE_CSV = "codex"
+
+
+def _normalize_provider_scope_csv(value: list[str] | None) -> str:
+    """Map a caller-friendly ``list[str]`` provider scope to its DB CSV form.
+
+    ``None`` (field omitted) defaults to ``["codex"]`` -> ``"codex"``. The
+    CSV is sorted so the round-trip with ``_deserialize_provider_scope`` is
+    stable.
+    """
+    if value is None:
+        return _DEFAULT_PROVIDER_SCOPE_CSV
+    if not value:
+        raise ApiKeyValidationError("providerScope must contain at least one provider")
+    bad = set(value) - _ALLOWED_PROVIDER_SCOPE
+    if bad:
+        raise ApiKeyValidationError(f"Unknown providers in providerScope: {sorted(bad)}")
+    return ",".join(sorted(set(value)))
+
+
+def _deserialize_provider_scope(value: str | None) -> list[str]:
+    """Map the DB CSV string back to a stable sorted ``list[str]``.
+
+    An empty / missing value is normalized to ``["codex"]`` so the field is
+    always present in ``ApiKeyData.provider_scope``.
+    """
+    if not value:
+        return ["codex"]
+    parts = [s.strip() for s in value.split(",") if s.strip()]
+    return sorted(set(parts)) or ["codex"]
+
+
 def _normalize_transport_policy_override_lenient(value: str | None) -> str | None:
     if value is None:
         return None
@@ -1572,6 +1617,7 @@ def _to_created_data(data: ApiKeyData, key: str) -> ApiKeyCreatedData:
         account_assignment_scope_enabled=data.account_assignment_scope_enabled,
         assigned_account_ids=data.assigned_account_ids,
         key=key,
+        provider_scope=list(data.provider_scope),
     )
 
 
@@ -1606,7 +1652,7 @@ def _to_api_key_data(
         account_assignment_scope_enabled=getattr(row, "account_assignment_scope_enabled", False),
         assigned_account_ids=[assignment.account_id for assignment in account_assignments],
         pooled_credits=pooled_credits,
-        provider_scope=getattr(row, "provider_scope", None) or "codex",
+        provider_scope=_deserialize_provider_scope(getattr(row, "provider_scope", None)),
     )
 
 

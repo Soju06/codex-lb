@@ -2,9 +2,35 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from app.modules.shared.schemas import DashboardModel
+
+
+_ALLOWED_PROVIDER_SCOPE = frozenset({"codex", "claude"})
+_DEFAULT_PROVIDER_SCOPE: list[str] = ["codex"]
+
+
+def _scope_to_db(scope: list[str]) -> str:
+    return ",".join(sorted(set(scope)))
+
+
+def _scope_from_db(value: str | None) -> list[str]:
+    if not value:
+        return list(_DEFAULT_PROVIDER_SCOPE)
+    parts = [s.strip() for s in value.split(",") if s.strip()]
+    return sorted(set(parts)) or list(_DEFAULT_PROVIDER_SCOPE)
+
+
+def _validate_provider_scope(value: list[str] | None) -> list[str] | None:
+    if value is None:
+        return value
+    if not value:
+        raise ValueError("providerScope must contain at least one provider")
+    bad = set(value) - _ALLOWED_PROVIDER_SCOPE
+    if bad:
+        raise ValueError(f"Unknown providers in providerScope: {sorted(bad)}")
+    return sorted(set(value))
 
 
 class LimitRuleCreate(DashboardModel):
@@ -38,6 +64,12 @@ class ApiKeyCreateRequest(DashboardModel):
     expires_at: datetime | None = None
     assigned_account_ids: list[str] | None = None
     limits: list[LimitRuleCreate] | None = None
+    provider_scope: list[str] | None = None
+
+    @field_validator("provider_scope")
+    @classmethod
+    def _check_provider_scope(cls, value: list[str] | None) -> list[str] | None:
+        return _validate_provider_scope(value)
 
 
 class ApiKeyUpdateRequest(DashboardModel):
@@ -56,6 +88,12 @@ class ApiKeyUpdateRequest(DashboardModel):
     assigned_account_ids: list[str] | None = None
     limits: list[LimitRuleCreate] | None = None
     reset_usage: bool | None = None
+    provider_scope: list[str] | None = None
+
+    @field_validator("provider_scope")
+    @classmethod
+    def _check_provider_scope(cls, value: list[str] | None) -> list[str] | None:
+        return _validate_provider_scope(value)
 
 
 class ApiKeyUsageSummaryResponse(DashboardModel):
@@ -88,6 +126,7 @@ class ApiKeyResponse(DashboardModel):
     pooled_remaining_percent_primary: float | None = None
     pooled_remaining_percent_secondary: float | None = None
     pooled_capacity_credits_primary: float = 0.0
+    provider_scope: list[str] = Field(default_factory=lambda: list(_DEFAULT_PROVIDER_SCOPE))
 
 
 class ApiKeyCreateResponse(ApiKeyResponse):

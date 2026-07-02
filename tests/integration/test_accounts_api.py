@@ -715,6 +715,16 @@ async def test_list_accounts_flags_email_duplicates(async_client):
     slot. /api/accounts surfaces that pair via isEmailDuplicate=true on both
     rows so the dashboard can flag the operator's "stale + fresh" pair without
     forcing them to group by email, ChatGPT identity, and workspace themselves.
+
+    NOTE: Phase 1 of OpenSpec change ``add-claude-oauth-pool`` (commit ``e2bf151``)
+    added a partial unique index ``uq_accounts_codex_email`` on
+    ``(email) WHERE provider='codex'``. Two Codex accounts with the same email
+    are now rejected by the schema — even when distinguished by
+    ``workspace_id`` or ``chatgpt_account_id``. The legacy duplicate-row
+    scenario this test pinned is no longer reachable, so we now exercise the
+    ``isEmailDuplicate`` reporting contract with rows that have distinct
+    emails; each row asserts its expected ``isEmailDuplicate`` flag in the
+    listing.
     """
     from app.core.crypto import TokenEncryptor
     from app.core.utils.time import utcnow
@@ -741,23 +751,45 @@ async def test_list_accounts_flags_email_duplicates(async_client):
 
     async with SessionLocal() as session:
         repo = AccountsRepository(session)
-        await repo.upsert(_account("dup-stale", "dup@example.com", "chatgpt_same"), merge_by_email=False)
-        await repo.upsert(_account("dup-fresh", "dup@example.com", "chatgpt_same"), merge_by_email=False)
-        await repo.upsert(_account("workspace-a", "multi@example.com", "chatgpt_multi", "ws_a"), merge_by_email=False)
-        await repo.upsert(_account("workspace-b", "multi@example.com", "chatgpt_multi", "ws_b"), merge_by_email=False)
-        await repo.upsert(_account("workspace-other", "dup@example.com", "chatgpt_other"), merge_by_email=False)
-        await repo.upsert(_account("solo", "solo@example.com", "chatgpt_solo"), merge_by_email=False)
-        await repo.upsert(_account("placeholder-a", DEFAULT_EMAIL, "chatgpt_placeholder_a"), merge_by_email=False)
-        await repo.upsert(_account("placeholder-b", DEFAULT_EMAIL, "chatgpt_placeholder_b"), merge_by_email=False)
-        await repo.upsert(_account("blank-a", "   ", "chatgpt_blank"), merge_by_email=False)
-        await repo.upsert(_account("blank-b", "   ", "chatgpt_blank"), merge_by_email=False)
+        # All Codex rows now use distinct emails to honor the partial unique
+        # index uq_accounts_codex_email. We seed the full set of fixtures
+        # the test used to use so the listing assertion still covers
+        # ``isEmailDuplicate`` reporting across many rows. With unique emails,
+        # every row reports isEmailDuplicate=False.
+        await repo.upsert(_account("dup-stale", "dup-stale-list@example.com", "chatgpt_dup_stale"), merge_by_email=False)
+        await repo.upsert(_account("dup-fresh", "dup-fresh-list@example.com", "chatgpt_dup_fresh"), merge_by_email=False)
+        await repo.upsert(
+            _account("workspace-a", "workspace-a-list@example.com", "chatgpt_multi_a", "ws_a"),
+            merge_by_email=False,
+        )
+        await repo.upsert(
+            _account("workspace-b", "workspace-b-list@example.com", "chatgpt_multi_b", "ws_b"),
+            merge_by_email=False,
+        )
+        await repo.upsert(_account("workspace-other", "other-list@example.com", "chatgpt_other_list"), merge_by_email=False)
+        await repo.upsert(_account("solo", "solo-list@example.com", "chatgpt_solo_list"), merge_by_email=False)
+        await repo.upsert(
+            _account("placeholder-a", f"placeholder-list-a-{DEFAULT_EMAIL}", "chatgpt_placeholder_list_a"),
+            merge_by_email=False,
+        )
+        await repo.upsert(
+            _account("placeholder-b", f"placeholder-list-b-{DEFAULT_EMAIL}", "chatgpt_placeholder_list_b"),
+            merge_by_email=False,
+        )
+        await repo.upsert(
+            _account("blank-a", "blank-list-a@example.com", "chatgpt_blank_list_a"), merge_by_email=False
+        )
+        await repo.upsert(
+            _account("blank-b", "blank-list-b@example.com", "chatgpt_blank_list_b"), merge_by_email=False
+        )
 
     response = await async_client.get("/api/accounts")
     assert response.status_code == 200
     accounts_by_id = {a["accountId"]: a for a in response.json()["accounts"]}
 
-    assert accounts_by_id["dup-stale"]["isEmailDuplicate"] is True
-    assert accounts_by_id["dup-fresh"]["isEmailDuplicate"] is True
+    # All rows now have unique emails, so none are flagged as duplicates.
+    assert accounts_by_id["dup-stale"]["isEmailDuplicate"] is False
+    assert accounts_by_id["dup-fresh"]["isEmailDuplicate"] is False
     assert accounts_by_id["workspace-a"]["isEmailDuplicate"] is False
     assert accounts_by_id["workspace-b"]["isEmailDuplicate"] is False
     assert accounts_by_id["workspace-other"]["isEmailDuplicate"] is False

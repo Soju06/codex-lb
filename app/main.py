@@ -47,6 +47,8 @@ from app.modules.accounts import api as accounts_api
 from app.modules.api_keys import api as api_keys_api
 from app.modules.api_keys.reset_scheduler import build_api_key_limit_reset_scheduler
 from app.modules.audit import api as audit_api
+from app.modules.automations import api as automations_api
+from app.modules.automations.scheduler import build_automations_scheduler
 from app.modules.conversation_archive import api as conversation_archive_api
 from app.modules.dashboard import api as dashboard_api
 from app.modules.dashboard_auth import api as dashboard_auth_api
@@ -153,6 +155,7 @@ async def lifespan(app: FastAPI):
     sticky_session_cleanup_scheduler = build_sticky_session_cleanup_scheduler()
     quota_planner_scheduler = build_quota_planner_scheduler()
     auth_guardian_scheduler = build_auth_guardian_scheduler()
+    automations_scheduler = build_automations_scheduler()
     rate_limit_reset_credits_scheduler = build_rate_limit_reset_credits_scheduler()
     await usage_scheduler.start()
     await api_key_limit_reset_scheduler.start()
@@ -160,6 +163,7 @@ async def lifespan(app: FastAPI):
     await sticky_session_cleanup_scheduler.start()
     await quota_planner_scheduler.start()
     await auth_guardian_scheduler.start()
+    await automations_scheduler.start()
     await rate_limit_reset_credits_scheduler.start()
     if settings.metrics_enabled and PROMETHEUS_AVAILABLE:
         import uvicorn
@@ -317,6 +321,7 @@ async def lifespan(app: FastAPI):
         await cache_poller.stop()
         await quota_planner_scheduler.stop()
         await auth_guardian_scheduler.stop()
+        await automations_scheduler.stop()
         await sticky_session_cleanup_scheduler.stop()
         await model_scheduler.stop()
         await api_key_limit_reset_scheduler.stop()
@@ -405,6 +410,7 @@ def create_app() -> FastAPI:
     app.include_router(settings_api.router)
     app.include_router(firewall_api.router)
     app.include_router(sticky_sessions_api.router)
+    app.include_router(automations_api.router)
     app.include_router(api_keys_api.router)
     app.include_router(health_api.router)
 

@@ -16,6 +16,8 @@ from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import ApiKeysService
 from app.modules.audit.repository import AuditRepository
 from app.modules.audit.service import AuditLogsService
+from app.modules.automations.repository import AutomationsRepository
+from app.modules.automations.service import AutomationsService
 from app.modules.dashboard.repository import DashboardRepository
 from app.modules.dashboard.service import DashboardService
 from app.modules.dashboard_auth.repository import DashboardAuthRepository
@@ -135,6 +137,14 @@ class ReportsContext:
     session: AsyncSession
     repository: ReportsRepository
     service: ReportsService
+
+
+@dataclass(slots=True)
+class AutomationsContext:
+    session: AsyncSession
+    repository: AutomationsRepository
+    accounts_repository: AccountsRepository
+    service: AutomationsService
 
 
 def get_accounts_context(
@@ -306,3 +316,18 @@ def get_reports_context(
     repository = ReportsRepository(session)
     service = ReportsService(repository)
     return ReportsContext(session=session, repository=repository, service=service)
+
+
+def get_automations_context(
+    session: AsyncSession = Depends(get_session),
+) -> AutomationsContext:
+    repository = AutomationsRepository(session)
+    accounts_repository = AccountsRepository(session)
+    request_logs_repository = RequestLogsRepository(session)
+    service = AutomationsService(repository, accounts_repository, request_logs_repository)
+    return AutomationsContext(
+        session=session,
+        repository=repository,
+        accounts_repository=accounts_repository,
+        service=service,
+    )

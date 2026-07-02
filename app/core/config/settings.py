@@ -213,6 +213,8 @@ class Settings(BaseSettings):
     sticky_session_cleanup_interval_seconds: int = Field(default=300, gt=0)
     quota_planner_scheduler_enabled: bool = True
     quota_planner_tick_seconds: int = Field(default=300, gt=0)
+    automations_scheduler_enabled: bool = True
+    automations_scheduler_interval_seconds: int = Field(default=30, gt=0)
     encryption_key_file: Path = DEFAULT_ENCRYPTION_KEY_FILE
     database_migrations_fail_fast: bool = True
     log_proxy_request_shape: bool = False

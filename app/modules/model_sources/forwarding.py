@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator, Mapping
+from contextlib import AsyncExitStack
 from dataclasses import dataclass
 
 import aiohttp
@@ -75,26 +76,29 @@ async def forward_chat_completion(
     *,
     encryptor: TokenEncryptor | None = None,
 ) -> SourceChatCompletion:
-    async with lease_http_session() as session:
-        timeout = aiohttp.ClientTimeout(total=_source_timeout_seconds(source))
-        async with session.post(
-            _source_url(source, "/chat/completions"),
-            headers=_source_headers(source, encryptor=encryptor),
-            json=payload,
-            timeout=timeout,
-        ) as response:
-            data = await _response_json(response)
-            if response.status >= 400:
-                raise ModelSourceForwardingError(
-                    status_code=response.status,
-                    payload=_error_payload(data),
+    try:
+        async with lease_http_session() as session:
+            timeout = aiohttp.ClientTimeout(total=_source_timeout_seconds(source))
+            async with session.post(
+                _source_url(source, "/chat/completions"),
+                headers=_source_headers(source, encryptor=encryptor),
+                json=payload,
+                timeout=timeout,
+            ) as response:
+                data = await _response_json(response)
+                if response.status >= 400:
+                    raise ModelSourceForwardingError(
+                        status_code=response.status,
+                        payload=_error_payload(data),
+                        upstream_status_code=response.status,
+                    )
+                return SourceChatCompletion(
+                    payload=data,
+                    usage=_usage_from_chat_payload(data),
                     upstream_status_code=response.status,
                 )
-            return SourceChatCompletion(
-                payload=data,
-                usage=_usage_from_chat_payload(data),
-                upstream_status_code=response.status,
-            )
+    except (aiohttp.ClientError, TimeoutError) as exc:
+        raise _unreachable_error(exc) from exc
 
 
 async def stream_chat_completion(
@@ -105,28 +109,15 @@ async def stream_chat_completion(
 ) -> SourceChatStream:
     usage_holder = SourceUsageHolder()
     usage_parser = SourceStreamUsageParser(usage_holder, response_shape="chat")
+    stack, response = await _open_source_stream(source, "/chat/completions", payload, encryptor=encryptor)
 
     async def body() -> AsyncIterator[bytes]:
-        timeout = aiohttp.ClientTimeout(total=_source_timeout_seconds(source))
-        async with lease_http_session() as session:
-            async with session.post(
-                _source_url(source, "/chat/completions"),
-                headers=_source_headers(source, encryptor=encryptor),
-                json=payload,
-                timeout=timeout,
-            ) as response:
-                if response.status >= 400:
-                    data = await _response_json(response)
-                    raise ModelSourceForwardingError(
-                        status_code=response.status,
-                        payload=_error_payload(data),
-                        upstream_status_code=response.status,
-                    )
-                async for chunk in response.content.iter_chunked(4096):
-                    usage_parser.feed(chunk)
-                    yield chunk
+        async with stack:
+            async for chunk in response.content.iter_chunked(4096):
+                usage_parser.feed(chunk)
+                yield chunk
 
-    return SourceChatStream(body=body(), usage_holder=usage_holder, upstream_status_code=200)
+    return SourceChatStream(body=body(), usage_holder=usage_holder, upstream_status_code=response.status)
 
 
 async def forward_responses(
@@ -135,26 +126,29 @@ async def forward_responses(
     *,
     encryptor: TokenEncryptor | None = None,
 ) -> SourceResponsesCompletion:
-    async with lease_http_session() as session:
-        timeout = aiohttp.ClientTimeout(total=_source_timeout_seconds(source))
-        async with session.post(
-            _source_url(source, "/responses"),
-            headers=_source_headers(source, encryptor=encryptor),
-            json=payload,
-            timeout=timeout,
-        ) as response:
-            data = await _response_json(response)
-            if response.status >= 400:
-                raise ModelSourceForwardingError(
-                    status_code=response.status,
-                    payload=_error_payload(data),
+    try:
+        async with lease_http_session() as session:
+            timeout = aiohttp.ClientTimeout(total=_source_timeout_seconds(source))
+            async with session.post(
+                _source_url(source, "/responses"),
+                headers=_source_headers(source, encryptor=encryptor),
+                json=payload,
+                timeout=timeout,
+            ) as response:
+                data = await _response_json(response)
+                if response.status >= 400:
+                    raise ModelSourceForwardingError(
+                        status_code=response.status,
+                        payload=_error_payload(data),
+                        upstream_status_code=response.status,
+                    )
+                return SourceResponsesCompletion(
+                    payload=data,
+                    usage=_usage_from_responses_payload(data),
                     upstream_status_code=response.status,
                 )
-            return SourceResponsesCompletion(
-                payload=data,
-                usage=_usage_from_responses_payload(data),
-                upstream_status_code=response.status,
-            )
+    except (aiohttp.ClientError, TimeoutError) as exc:
+        raise _unreachable_error(exc) from exc
 
 
 async def stream_responses(
@@ -165,36 +159,89 @@ async def stream_responses(
 ) -> SourceResponsesStream:
     usage_holder = SourceUsageHolder()
     usage_parser = SourceStreamUsageParser(usage_holder, response_shape="responses")
+    stack, response = await _open_source_stream(source, "/responses", payload, encryptor=encryptor)
 
     async def body() -> AsyncIterator[bytes]:
+        async with stack:
+            async for chunk in response.content.iter_chunked(4096):
+                usage_parser.feed(chunk)
+                yield chunk
+
+    return SourceResponsesStream(body=body(), usage_holder=usage_holder, upstream_status_code=response.status)
+
+
+async def _open_source_stream(
+    source: ModelSource,
+    path: str,
+    payload: dict[str, JsonValue],
+    *,
+    encryptor: TokenEncryptor | None,
+) -> tuple[AsyncExitStack, aiohttp.ClientResponse]:
+    """Open the upstream request eagerly so errors surface before headers.
+
+    Streaming callers wrap the returned response in a ``StreamingResponse``;
+    anything raised after that point arrives after the 200 status line has
+    been sent. Opening the request here lets upstream 4xx/5xx and connection
+    failures map to a proper OpenAI error response instead of a truncated
+    stream. The returned exit stack owns the session lease and response and
+    must be closed by the stream body.
+    """
+    stack = AsyncExitStack()
+    try:
+        session = await stack.enter_async_context(lease_http_session())
         timeout = aiohttp.ClientTimeout(total=_source_timeout_seconds(source))
-        async with lease_http_session() as session:
-            async with session.post(
-                _source_url(source, "/responses"),
-                headers=_source_headers(source, encryptor=encryptor),
+        response = await stack.enter_async_context(
+            session.post(
+                _source_url(source, path),
+                headers=_source_headers(source, encryptor=encryptor, stream=True),
                 json=payload,
                 timeout=timeout,
-            ) as response:
-                if response.status >= 400:
-                    data = await _response_json(response)
-                    raise ModelSourceForwardingError(
-                        status_code=response.status,
-                        payload=_error_payload(data),
-                        upstream_status_code=response.status,
-                    )
-                async for chunk in response.content.iter_chunked(4096):
-                    usage_parser.feed(chunk)
-                    yield chunk
+            )
+        )
+        if response.status >= 400:
+            data = await _response_json(response)
+            raise ModelSourceForwardingError(
+                status_code=response.status,
+                payload=_error_payload(data),
+                upstream_status_code=response.status,
+            )
+        return stack, response
+    except (aiohttp.ClientError, TimeoutError) as exc:
+        await stack.aclose()
+        raise _unreachable_error(exc) from exc
+    except BaseException:
+        await stack.aclose()
+        raise
 
-    return SourceResponsesStream(body=body(), usage_holder=usage_holder, upstream_status_code=200)
+
+def _unreachable_error(exc: Exception) -> ModelSourceForwardingError:
+    return ModelSourceForwardingError(
+        status_code=502,
+        payload={
+            "error": {
+                "message": f"OpenAI-compatible model source request failed: {exc.__class__.__name__}",
+                "type": "upstream_error",
+                "code": "model_source_unreachable",
+            }
+        },
+        upstream_status_code=None,
+    )
 
 
 def _source_url(source: ModelSource, path: str) -> str:
     return f"{source.base_url.rstrip('/')}{path}"
 
 
-def _source_headers(source: ModelSource, *, encryptor: TokenEncryptor | None) -> dict[str, str]:
-    headers = {"Accept": "application/json", "Content-Type": "application/json"}
+def _source_headers(
+    source: ModelSource,
+    *,
+    encryptor: TokenEncryptor | None,
+    stream: bool = False,
+) -> dict[str, str]:
+    headers = {
+        "Accept": "text/event-stream" if stream else "application/json",
+        "Content-Type": "application/json",
+    }
     if source.api_key_encrypted is not None:
         active_encryptor = encryptor or TokenEncryptor()
         headers["Authorization"] = f"Bearer {active_encryptor.decrypt(source.api_key_encrypted)}"

@@ -385,6 +385,60 @@ async def test_limited_key_settles_usage_from_crlf_stream(async_client, source_u
 
 
 @pytest.mark.asyncio
+async def test_buffer_limit_closes_abandoned_upstream_stream(async_client, monkeypatch):
+    from starlette.requests import Request
+
+    import app.modules.proxy.api as proxy_api
+    from app.db.models import ModelSource
+    from app.modules.model_sources.forwarding import SourceUsageHolder
+
+    closed = False
+
+    async def big_stream() -> AsyncIterator[bytes]:
+        nonlocal closed
+        try:
+            while True:
+                yield b"x" * 1024
+        finally:
+            closed = True
+
+    monkeypatch.setattr(proxy_api, "_SOURCE_LIMITED_STREAM_BUFFER_BYTES", 4096)
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/v1/chat/completions",
+            "headers": [],
+            "client": ("127.0.0.1", 1234),
+            "query_string": b"",
+        }
+    )
+    source = ModelSource(
+        id="src_buffer_limit",
+        name="buffer-limit",
+        kind="openai_compatible",
+        base_url="http://127.0.0.1:9/v1",
+        is_enabled=True,
+        supports_chat_completions=True,
+        supports_responses=False,
+    )
+
+    response = await proxy_api._buffered_limited_source_chat_stream_response(
+        request,
+        source=source,
+        api_key=None,
+        model="buffer-limit-model",
+        reservation=None,
+        stream=big_stream(),
+        usage_holder=SourceUsageHolder(),
+        rate_limit_headers={},
+    )
+
+    assert response.status_code == 502
+    assert closed is True
+
+
+@pytest.mark.asyncio
 async def test_source_stream_success_passes_through_sse(async_client, source_upstream):
     frames = (
         b'data: {"id":"chatcmpl_1","object":"chat.completion.chunk","choices":'

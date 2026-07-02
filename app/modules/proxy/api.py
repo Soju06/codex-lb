@@ -2912,27 +2912,35 @@ async def _buffered_limited_source_chat_stream_response(
 ) -> Response:
     chunks: list[bytes] = []
     total_bytes = 0
+    buffer_limit_exceeded = False
     try:
         async for chunk in stream:
             total_bytes += len(chunk)
             if total_bytes > _SOURCE_LIMITED_STREAM_BUFFER_BYTES:
-                await _release_reservation(reservation)
-                error = openai_error(
-                    "source_stream_buffer_limit_exceeded",
-                    "OpenAI-compatible model source stream exceeded the limited-key accounting buffer",
-                    error_type="server_error",
-                )
-                await _log_source_chat_completion(
-                    request,
-                    source=source,
-                    api_key=api_key,
-                    model=model,
-                    status="error",
-                    error_code="source_stream_buffer_limit_exceeded",
-                    error_message="source stream buffer limit exceeded",
-                )
-                return _logged_error_json_response(request, 502, error, headers=rate_limit_headers)
+                buffer_limit_exceeded = True
+                break
             chunks.append(chunk)
+        if buffer_limit_exceeded:
+            # Returning while the generator is suspended at a yield would keep
+            # the leased upstream session/response open until GC finalizes the
+            # abandoned generator; close it deterministically.
+            await _aclose_stream(stream)
+            await _release_reservation(reservation)
+            error = openai_error(
+                "source_stream_buffer_limit_exceeded",
+                "OpenAI-compatible model source stream exceeded the limited-key accounting buffer",
+                error_type="server_error",
+            )
+            await _log_source_chat_completion(
+                request,
+                source=source,
+                api_key=api_key,
+                model=model,
+                status="error",
+                error_code="source_stream_buffer_limit_exceeded",
+                error_message="source stream buffer limit exceeded",
+            )
+            return _logged_error_json_response(request, 502, error, headers=rate_limit_headers)
     except ModelSourceForwardingError as exc:
         await _release_reservation(reservation)
         await _log_source_chat_completion(
@@ -4602,6 +4610,12 @@ async def _log_source_chat_completion(
             status,
             exc_info=True,
         )
+
+
+async def _aclose_stream(stream: AsyncIterator[bytes]) -> None:
+    aclose = getattr(stream, "aclose", None)
+    if aclose is not None:
+        await aclose()
 
 
 def _api_key_has_usage_limits(api_key: ApiKeyData | None) -> bool:

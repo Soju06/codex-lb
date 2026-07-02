@@ -16,6 +16,7 @@ const apiKeysSectionMock = vi.fn();
 const firewallSectionMock = vi.fn();
 const quotaPlannerSectionMock = vi.fn();
 const stickySessionsSectionMock = vi.fn();
+const modelSourcesSettingsMock = vi.fn();
 
 vi.mock("@/features/settings/hooks/use-settings", () => ({
   useSettings: () => useSettingsMock(),
@@ -91,6 +92,13 @@ vi.mock("@/features/sticky-sessions/components/sticky-sessions-section", () => (
   StickySessionsSection: (props: unknown) => {
     stickySessionsSectionMock(props);
     return <div>Sticky Sessions Section</div>;
+  },
+}));
+
+vi.mock("@/features/model-sources/components/model-sources-settings", () => ({
+  ModelSourcesSettings: (props: unknown) => {
+    modelSourcesSettingsMock(props);
+    return <div>Model Sources Settings</div>;
   },
 }));
 

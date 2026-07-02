@@ -347,6 +347,66 @@ describe("ApiKeyEditDialog", () => {
     expect(payload.assignedAccountIds).toEqual([]);
   });
 
+  it("keeps a deny-all source scope when editing an unrelated field", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+
+    renderWithProviders(
+      <ApiKeyEditDialog
+        open
+        busy={false}
+        apiKey={createApiKey({
+          sourceAssignmentScopeEnabled: true,
+          assignedSourceIds: [],
+        })}
+        onOpenChange={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    const nameInput = screen.getByLabelText("Name");
+    await user.clear(nameInput);
+    await user.type(nameInput, "Renamed key");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+    });
+
+    const payload = onSubmit.mock.calls[0][0];
+    expect(payload.name).toBe("Renamed key");
+    expect("assignedSourceIds" in payload).toBe(false);
+  });
+
+  it("submits an empty source list when explicitly removing a deny-all source scope", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+
+    renderWithProviders(
+      <ApiKeyEditDialog
+        open
+        busy={false}
+        apiKey={createApiKey({
+          sourceAssignmentScopeEnabled: true,
+          assignedSourceIds: [],
+        })}
+        onOpenChange={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("checkbox", { name: "Remove source restriction (allow all sources)" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+    });
+
+    expect(onSubmit.mock.calls[0][0].assignedSourceIds).toEqual([]);
+  });
+
   it("submits the codex /model checkbox value", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn().mockResolvedValue(undefined);

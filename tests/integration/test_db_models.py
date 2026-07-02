@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 from sqlalchemy import select
-from sqlalchemy.exc import StatementError
+from sqlalchemy.exc import IntegrityError, StatementError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.crypto import TokenEncryptor
@@ -29,16 +29,24 @@ def _make_account(account_id: str, email: str, status: AccountStatus) -> Account
 
 
 @pytest.mark.asyncio
-async def test_duplicate_emails_allowed(db_setup):
+async def test_duplicate_emails_rejected_for_codex(db_setup):
+    """Phase 1 of OpenSpec change ``add-claude-oauth-pool`` added a partial unique
+    index ``uq_accounts_codex_email`` on ``(email) WHERE provider='codex'`` (see
+    ``openspec/changes/add-claude-oauth-pool/specs/account-routing/spec.md``
+    "Two Codex accounts with the same email are rejected", and commit ``e2bf151``
+    that introduced the index). This test pins that NEW behavior: the second
+    Codex insert with a duplicate email must raise IntegrityError. The previous
+    "duplicate emails allowed" assertion is no longer valid.
+    """
+
     async with SessionLocal() as session:
-        session.add(_make_account("acc1", "dup@example.com", AccountStatus.ACTIVE))
+        session.add(_make_account("acc1", "dup-codex@example.com", AccountStatus.ACTIVE))
         await session.commit()
 
-        session.add(_make_account("acc2", "dup@example.com", AccountStatus.ACTIVE))
-        await session.commit()
-
-        rows = await session.execute(select(Account).where(Account.email == "dup@example.com"))
-        assert len(list(rows.scalars().all())) == 2
+        session.add(_make_account("acc2", "dup-codex@example.com", AccountStatus.ACTIVE))
+        with pytest.raises(IntegrityError):
+            await session.commit()
+        await session.rollback()
 
 
 @pytest.mark.asyncio

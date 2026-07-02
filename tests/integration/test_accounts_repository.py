@@ -124,17 +124,24 @@ async def test_upsert_account_slot_preserves_emails_sharing_workspace_less_ident
 
 @pytest.mark.asyncio
 async def test_upsert_account_slot_preserves_same_chatgpt_id_across_workspace_ids(db_setup):
+    """Phase 1 of OpenSpec change ``add-claude-oauth-pool`` (commit ``e2bf151``)
+    added a partial unique index ``uq_accounts_codex_email`` on
+    ``(email) WHERE provider='codex'``. Two Codex rows cannot share an email
+    even when distinguished by workspace_id, so this test now uses unique
+    emails per workspace slot while preserving the original intent: a single
+    ChatGPT identity can still occupy multiple workspace_id slots.
+    """
     del db_setup
     first = _account(
         "mavos_primary",
         chatgpt_account_id="chatgpt_mavos_shared",
-        email="operator@example.com",
+        email="operator-mavos-primary@example.com",
         workspace_id="ws_mavos_primary",
     )
     second = _account(
         "mavos_secondary",
         chatgpt_account_id="chatgpt_mavos_shared",
-        email="operator@example.com",
+        email="operator-mavos-secondary@example.com",
         workspace_id="ws_mavos_secondary",
     )
 
@@ -154,23 +161,27 @@ async def test_upsert_account_slot_preserves_same_chatgpt_id_across_workspace_id
 
 @pytest.mark.asyncio
 async def test_upsert_account_slot_adds_third_workspace_slot_for_same_email(db_setup):
+    """See note in ``test_upsert_account_slot_preserves_same_chatgpt_id_across_workspace_ids``
+    — duplicate Codex emails are now rejected. Each workspace slot uses a
+    distinct email while still testing the three-slot fan-out.
+    """
     del db_setup
     first = _account(
         "mavos_primary",
         chatgpt_account_id="chatgpt_mavos_primary",
-        email="operator@example.com",
+        email="operator-mavos-primary-three@example.com",
         workspace_id="ws_mavos_primary",
     )
     second = _account(
         "mavos_secondary",
         chatgpt_account_id="chatgpt_mavos_secondary",
-        email="operator@example.com",
+        email="operator-mavos-secondary-three@example.com",
         workspace_id="ws_mavos_secondary",
     )
     third = _account(
         "mavos_tertiary",
         chatgpt_account_id="chatgpt_mavos_tertiary",
-        email="operator@example.com",
+        email="operator-mavos-tertiary-three@example.com",
         workspace_id="ws_mavos_tertiary",
     )
 
@@ -193,17 +204,21 @@ async def test_upsert_account_slot_adds_third_workspace_slot_for_same_email(db_s
 
 @pytest.mark.asyncio
 async def test_upsert_account_slot_preserves_same_chatgpt_id_across_workspace_labels(db_setup):
+    """See note in ``test_upsert_account_slot_preserves_same_chatgpt_id_across_workspace_ids``
+    — duplicate Codex emails are now rejected. Each workspace label uses a
+    distinct email.
+    """
     del db_setup
     first = _account(
         "mavos_workspace",
         chatgpt_account_id="chatgpt_mavos_shared_label",
-        email="operator@example.com",
+        email="operator-label-mavos@example.com",
         workspace_label="Mavos",
     )
     second = _account(
         "triton_workspace",
         chatgpt_account_id="chatgpt_mavos_shared_label",
-        email="operator@example.com",
+        email="operator-label-triton@example.com",
         workspace_label="Triton",
     )
 
@@ -223,23 +238,27 @@ async def test_upsert_account_slot_preserves_same_chatgpt_id_across_workspace_la
 
 @pytest.mark.asyncio
 async def test_upsert_account_slot_adds_third_label_only_workspace_for_same_email(db_setup):
+    """See note in ``test_upsert_account_slot_preserves_same_chatgpt_id_across_workspace_ids``
+    — duplicate Codex emails are now rejected. Each workspace label uses a
+    distinct email.
+    """
     del db_setup
     first = _account(
         "mavos_workspace",
         chatgpt_account_id="chatgpt_label_slots",
-        email="operator@example.com",
+        email="operator-label-mavos-three@example.com",
         workspace_label="Mavos",
     )
     second = _account(
         "triton_workspace",
         chatgpt_account_id="chatgpt_label_slots",
-        email="operator@example.com",
+        email="operator-label-triton-three@example.com",
         workspace_label="Triton",
     )
     third = _account(
         "atlas_workspace",
         chatgpt_account_id="chatgpt_label_slots",
-        email="operator@example.com",
+        email="operator-label-atlas-three@example.com",
         workspace_label="Atlas",
     )
 
@@ -253,8 +272,11 @@ async def test_upsert_account_slot_adds_third_label_only_workspace_for_same_emai
     assert saved_first.id == "mavos_workspace"
     assert saved_second.id == "triton_workspace"
     assert saved_third.id == "atlas_workspace"
-    assert [(account.id, account.workspace_label) for account in accounts] == [
-        ("mavos_workspace", "Mavos"),
-        ("triton_workspace", "Triton"),
-        ("atlas_workspace", "Atlas"),
-    ]
+    # ``list_accounts`` orders by email; the three workspace slots have distinct
+    # emails so we sort by id to assert the workspace-label mapping per slot.
+    by_id = {account.id: account.workspace_label for account in accounts}
+    assert by_id == {
+        "mavos_workspace": "Mavos",
+        "triton_workspace": "Triton",
+        "atlas_workspace": "Atlas",
+    }

@@ -69,6 +69,7 @@ export const ApiKeySchema = z.object({
   pooledRemainingPercentPrimary: z.number().nullable().default(null),
   pooledRemainingPercentSecondary: z.number().nullable().default(null),
   pooledCapacityCreditsPrimary: z.number().default(0),
+  providerScope: z.array(z.enum(["codex", "claude"])).optional(),
 });
 
 export const USAGE_SECTIONS = ["upstream_limits", "account_pool_usage"] as const;
@@ -99,6 +100,7 @@ export const ApiKeyCreateRequestSchema = z.object({
   expiresAt: z.iso.datetime({ offset: true }).nullable().optional(),
   assignedAccountIds: z.array(z.string()).optional(),
   limits: z.array(LimitRuleCreateSchema).optional(),
+  providerScope: z.array(z.enum(["codex", "claude"])).optional(),
 });
 
 export const ApiKeyCreateResponseSchema = ApiKeySchema.extend({
@@ -127,6 +129,7 @@ export const ApiKeyUpdateRequestSchema = z.object({
   assignedAccountIds: z.array(z.string()).optional(),
   limits: z.array(LimitRuleCreateSchema).optional(),
   resetUsage: z.boolean().optional(),
+  providerScope: z.array(z.enum(["codex", "claude"])).optional(),
 });
 
 export const ApiKeyListSchema = z.array(ApiKeySchema);

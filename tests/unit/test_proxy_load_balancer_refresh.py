@@ -1801,8 +1801,9 @@ async def test_select_account_does_not_open_repo_before_runtime_lock(monkeypatch
         service_tier: str | None = None,
         additional_limit_name: str | None = None,
         account_ids: Collection[str] | None = None,
+        provider: str | None = None,
     ):
-        del model, service_tier, additional_limit_name, account_ids
+        del model, service_tier, additional_limit_name, account_ids, provider
         return load_balancer_module._SelectionInputs(
             accounts=[account],
             latest_primary={account.id: primary_entry},
@@ -2055,6 +2056,7 @@ async def test_select_account_reloads_inputs_after_version_conflict(monkeypatch)
         service_tier: str | None = None,
         additional_limit_name: str | None = None,
         account_ids: Collection[str] | None = None,
+        provider: str | None = None,
     ):
         nonlocal load_calls
         load_calls += 1
@@ -2063,6 +2065,7 @@ async def test_select_account_reloads_inputs_after_version_conflict(monkeypatch)
             service_tier=service_tier,
             additional_limit_name=additional_limit_name,
             account_ids=account_ids,
+            provider=provider,
         )
 
     original_select_account = load_balancer_module.select_account
@@ -2121,13 +2124,26 @@ async def test_select_account_does_not_hold_runtime_lock_during_conflict_reload(
     release_reload = asyncio.Event()
     load_calls = 0
 
-    async def blocking_load_selection_inputs(*, model: str | None, additional_limit_name: str | None = None):
+    async def blocking_load_selection_inputs(
+        *,
+        model: str | None,
+        service_tier: str | None = None,
+        additional_limit_name: str | None = None,
+        account_ids: Collection[str] | None = None,
+        provider: str | None = None,
+    ):
         nonlocal load_calls
         load_calls += 1
         if load_calls == 2:
             reload_started.set()
             await release_reload.wait()
-        return await original_load_selection_inputs(model=model, additional_limit_name=additional_limit_name)
+        return await original_load_selection_inputs(
+            model=model,
+            service_tier=service_tier,
+            additional_limit_name=additional_limit_name,
+            account_ids=account_ids,
+            provider=provider,
+        )
 
     original_select_account = load_balancer_module.select_account
     first_call = True
@@ -2197,6 +2213,7 @@ async def test_select_account_sticky_reloads_inputs_after_stale_selected_persist
         service_tier: str | None = None,
         additional_limit_name: str | None = None,
         account_ids: Collection[str] | None = None,
+        provider: str | None = None,
     ):
         nonlocal load_calls
         load_calls += 1
@@ -2205,6 +2222,7 @@ async def test_select_account_sticky_reloads_inputs_after_stale_selected_persist
             service_tier=service_tier,
             additional_limit_name=additional_limit_name,
             account_ids=account_ids,
+            provider=provider,
         )
 
     async def pinned_account_id(
@@ -2283,6 +2301,7 @@ async def test_select_account_sticky_does_not_return_stale_selection_at_retry_ca
         service_tier: str | None = None,
         additional_limit_name: str | None = None,
         account_ids: Collection[str] | None = None,
+        provider: str | None = None,
     ):
         nonlocal load_calls
         load_calls += 1
@@ -2291,6 +2310,7 @@ async def test_select_account_sticky_does_not_return_stale_selection_at_retry_ca
             service_tier=service_tier,
             additional_limit_name=additional_limit_name,
             account_ids=account_ids,
+            provider=provider,
         )
 
     async def pinned_account_id(

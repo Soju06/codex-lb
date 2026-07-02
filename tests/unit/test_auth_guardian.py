@@ -4,7 +4,7 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import cast
 
@@ -13,6 +13,8 @@ import pytest
 from app.core.auth import guardian as guardian_module
 from app.core.auth.guardian import AuthGuardianScheduler, build_auth_guardian_scheduler, select_auth_guardian_candidates
 from app.core.auth.refresh import RefreshError
+from app.core.clients.anthropic.errors import ClaudeUpstreamError
+from app.core.clients.anthropic.oauth import ClaudeRefreshResult
 from app.core.config import settings as settings_module
 from app.db.models import Account, AccountStatus
 from app.modules.accounts.auth_manager import AuthManager
@@ -428,6 +430,359 @@ async def test_auth_guardian_waits_for_refresh_before_cancelled_candidate_exits(
 
 async def _noop_sleep() -> None:
     return None
+
+
+# ---------------------------------------------------------------------------
+# Claude refresh-pass test fixtures
+# ---------------------------------------------------------------------------
+
+
+def _claude_account(
+    account_id: str,
+    *,
+    expires_at: datetime | None,
+    status: AccountStatus = AccountStatus.ACTIVE,
+    refresh_token: bytes = b"rt",
+) -> Account:
+    """Build a Claude-flavored :class:`Account` row with the columns the
+    guardian's Claude pass actually inspects. The remaining Codex-flavored
+    columns are populated with the bare-minimum defaults so the model can be
+    constructed without a database session.
+    """
+    now = datetime(2026, 1, 2, 12, 0, 0, tzinfo=timezone.utc).replace(tzinfo=None)
+    return Account(
+        id=account_id,
+        chatgpt_account_id=f"workspace-{account_id}",
+        email=f"{account_id}@example.com",
+        alias=None,
+        plan_type="claude_subscription",
+        access_token_encrypted=b"access",
+        refresh_token_encrypted=b"refresh",
+        id_token_encrypted=b"id",
+        last_refresh=now,
+        status=status,
+        deactivation_reason=None,
+        provider="claude",
+        claude_account_uuid=f"uuid-{account_id}",
+        claude_refresh_token_encrypted=refresh_token,
+        claude_access_token_encrypted=b"access-claude",
+        claude_access_token_expires_at=expires_at,
+    )
+
+
+class _ClaudeAuthManager:
+    """Stand-in for :class:`ClaudeAuthManager` covering the surface the
+    auth guardian's Claude pass actually calls:
+
+    - ``find_accounts_due_for_rotation(skew_seconds=...)``
+    - ``rotate_claude_access_token(account)``
+
+    Test-side state: ``due_accounts`` controls which accounts ``find_*``
+    returns (filtered by ``expires_at <= now + skew_seconds``); ``rotate_responses``
+    maps account_id -> sentinel. Sentinels:
+
+    - ``"ok"`` (default): rotate succeeds, returns a synthetic
+      ``ClaudeRefreshResult``.
+    - ``"invalid_grant"``: rotate returns ``None`` (mirrors the real
+      auth manager's behavior when ``invalid_grant`` deactivates the row).
+    - an ``Exception`` instance: rotate raises it.
+    - a ``ClaudeRefreshResult`` instance: returned verbatim.
+    """
+
+    #: Sentinel for "rotate returns ``None`` (invalid_grant → deactivated)".
+    INVALID_GRANT = "invalid_grant"
+
+    def __init__(
+        self,
+        due_accounts: list[Account] | None = None,
+        rotate_responses: dict[str, object] | None = None,
+        *,
+        now: datetime | None = None,
+    ) -> None:
+        self.due_accounts = list(due_accounts or [])
+        self.rotate_responses = dict(rotate_responses or {})
+        self.rotate_calls: list[str] = []
+        self.find_calls: list[int] = []
+        self.lock_holders: list[str] = []
+        self._now = now or datetime.now(timezone.utc).replace(tzinfo=None)
+
+    async def find_accounts_due_for_rotation(self, *, skew_seconds: int) -> list[Account]:
+        self.find_calls.append(skew_seconds)
+        cutoff = self._now + timedelta(seconds=skew_seconds)
+        # Mirror production: filter to accounts whose access token expires
+        # within the skew window. Tests that pass ALL accounts as "due" must
+        # also seed them with ``expires_at`` inside the window — otherwise
+        # they will be filtered out here, which is the correct production
+        # behavior the test is meant to exercise.
+        return [
+            account
+            for account in self.due_accounts
+            if account.claude_access_token_expires_at is not None and account.claude_access_token_expires_at <= cutoff
+        ]
+
+    async def rotate_claude_access_token(self, account: Account) -> ClaudeRefreshResult | None:
+        self.rotate_calls.append(account.id)
+        response = self.rotate_responses.get(account.id, "ok")
+        if isinstance(response, BaseException):
+            raise response
+        if response == self.INVALID_GRANT:
+            return None
+        if isinstance(response, ClaudeRefreshResult):
+            return response
+        return ClaudeRefreshResult(
+            access_token=f"AT-{account.id}",
+            refresh_token=f"RT-{account.id}",
+            expires_in=3600,
+        )
+
+
+async def _run_claude_pass(
+    scheduler: AuthGuardianScheduler,
+    claude_manager: _ClaudeAuthManager,
+    *,
+    skew_seconds: int = 600,
+) -> None:
+    """Helper that drives the Claude refresh pass through a small entrypoint
+    rather than the full Codex ``_refresh_once`` so the tests can target only
+    the Claude code path. The entrypoint is the same method the scheduler
+    uses internally; tests then read the ``claude_manager`` to assert
+    behavior.
+    """
+    await scheduler._run_claude_refresh_pass(
+        claude_manager,  # type: ignore[arg-type]
+        skew_seconds=skew_seconds,
+    )
+
+
+@pytest.mark.asyncio
+async def test_tick_refreshes_claude_accounts_expiring_within_skew(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    due = _claude_account("claude-due", expires_at=now + timedelta(seconds=120))
+    not_due = _claude_account("claude-fresh", expires_at=now + timedelta(hours=1))
+    claude_manager = _ClaudeAuthManager(due_accounts=[due, not_due])
+    scheduler = AuthGuardianScheduler(
+        interval_seconds=21600,
+        enabled=True,
+        max_age_seconds=12 * 3600,
+        batch_size=10,
+        concurrency=1,
+        jitter_seconds=0.0,
+        leader_election_factory=lambda: _Leader(),
+        repo_factory=_null_repo_factory,
+        auth_manager_factory=lambda _repo: _AuthManager([]),
+        sleep=lambda _delay: _noop_sleep(),
+        now=lambda: now,
+    )
+
+    with caplog.at_level(logging.INFO, logger="app.core.auth.guardian"):
+        await _run_claude_pass(scheduler, claude_manager, skew_seconds=600)
+
+    assert claude_manager.find_calls == [600]
+    assert claude_manager.rotate_calls == ["claude-due"]
+    # The spec mandates a structured ``claude.refresh.success`` log line
+    # carrying the account_id; assert against the ``event`` extra attr.
+    success_records = [
+        record for record in caplog.records if getattr(record, "event", None) == "claude.refresh.success"
+    ]
+    assert [getattr(record, "account_id", None) for record in success_records] == ["claude-due"]
+
+
+@pytest.mark.asyncio
+async def test_claude_rotation_invalid_grant_disables_account_and_continues_with_others(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    invalid_grant = _claude_account("claude-invalid", expires_at=now + timedelta(seconds=120))
+    rotates_ok = _claude_account("claude-ok", expires_at=now + timedelta(seconds=120))
+    untouched = _claude_account("claude-fresh", expires_at=now + timedelta(hours=1))
+    claude_manager = _ClaudeAuthManager(
+        due_accounts=[invalid_grant, rotates_ok],
+        rotate_responses={
+            # Per the auth manager contract, invalid_grant is handled inside
+            # ``rotate_claude_access_token`` which then returns ``None`` and
+            # deactivates the row. The guardian sees a normal ``None`` return.
+            "claude-invalid": _ClaudeAuthManager.INVALID_GRANT,
+        },
+    )
+    scheduler = AuthGuardianScheduler(
+        interval_seconds=21600,
+        enabled=True,
+        max_age_seconds=12 * 3600,
+        batch_size=10,
+        concurrency=1,
+        jitter_seconds=0.0,
+        leader_election_factory=lambda: _Leader(),
+        repo_factory=_null_repo_factory,
+        auth_manager_factory=lambda _repo: _AuthManager([]),
+        sleep=lambda _delay: _noop_sleep(),
+        now=lambda: now,
+    )
+
+    with caplog.at_level(logging.INFO, logger="app.core.auth.guardian"):
+        await _run_claude_pass(scheduler, claude_manager, skew_seconds=600)
+
+    assert claude_manager.rotate_calls == ["claude-invalid", "claude-ok"]
+    assert untouched.status == AccountStatus.ACTIVE
+    # Structured log lines: invalid_grant path emits ``claude.refresh.disabled``;
+    # the surviving account emits ``claude.refresh.success``.
+    events = {getattr(record, "event", None): getattr(record, "account_id", None) for record in caplog.records}
+    assert events.get("claude.refresh.success") == "claude-ok"
+    assert events.get("claude.refresh.disabled") == "claude-invalid"
+    assert (
+        events.get("claude.refresh.disabled")
+        and getattr(
+            next(r for r in caplog.records if getattr(r, "event", None) == "claude.refresh.disabled"),
+            "reason",
+            None,
+        )
+        == "invalid_grant"
+    )
+
+
+@pytest.mark.asyncio
+async def test_claude_rotation_upstream_error_does_not_disable_account() -> None:
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    flaky = _claude_account("claude-flaky", expires_at=now + timedelta(seconds=120))
+    claude_manager = _ClaudeAuthManager(
+        due_accounts=[flaky],
+        rotate_responses={"claude-flaky": ClaudeUpstreamError("upstream 502")},
+    )
+    scheduler = AuthGuardianScheduler(
+        interval_seconds=21600,
+        enabled=True,
+        max_age_seconds=12 * 3600,
+        batch_size=10,
+        concurrency=1,
+        jitter_seconds=0.0,
+        leader_election_factory=lambda: _Leader(),
+        repo_factory=_null_repo_factory,
+        auth_manager_factory=lambda _repo: _AuthManager([]),
+        sleep=lambda _delay: _noop_sleep(),
+        now=lambda: now,
+    )
+
+    # First tick: upstream error. Account must remain ACTIVE; backoff is recorded.
+    await _run_claude_pass(scheduler, claude_manager, skew_seconds=600)
+
+    assert claude_manager.rotate_calls == ["claude-flaky"]
+    assert flaky.status == AccountStatus.ACTIVE
+    assert flaky.deactivation_reason is None
+    assert scheduler._in_backoff("claude-flaky") is True
+
+    # Reset the rotate-call log so we can prove the second tick still attempts
+    # the account (singleflight is keyed on account_id; rotating the fake
+    # response would mask the assertion).
+    claude_manager.rotate_responses["claude-flaky"] = ClaudeRefreshResult(
+        access_token="AT2",
+        refresh_token="RT2",
+        expires_in=3600,
+    )
+
+    # Expire the backoff so the next tick actually re-attempts the account.
+    scheduler._failures["claude-flaky"].retry_after_monotonic = 0.0  # type: ignore[attr-defined]
+
+    await _run_claude_pass(scheduler, claude_manager, skew_seconds=600)
+
+    assert claude_manager.rotate_calls == ["claude-flaky", "claude-flaky"]
+    assert flaky.status == AccountStatus.ACTIVE
+
+
+@pytest.mark.asyncio
+async def test_claude_refresh_acquires_per_account_lock() -> None:
+    """Two concurrent guardian ticks calling rotate for the same account must
+    coalesce through ``ClaudeAuthManager``'s singleflight lock so only ONE
+    OAuth call is issued per refresh cycle.
+    """
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    target = _claude_account("claude-lock", expires_at=now + timedelta(seconds=120))
+    start_barrier = asyncio.Event()
+    release_barrier = asyncio.Event()
+    inflight: dict[str, asyncio.Task[ClaudeRefreshResult]] = {}
+    inflight_lock = asyncio.Lock()
+
+    class _LockedClaudeAuthManager:
+        """Stand-in that mimics the per-account singleflight semantics of
+        the real :class:`ClaudeAuthManager`. Two concurrent
+        ``rotate_claude_access_token`` calls for the same ``account_id``
+        MUST coalesce onto the same in-flight task so only ONE
+        ``rotate_calls`` increment is observed.
+        """
+
+        def __init__(self) -> None:
+            self.rotate_calls = 0
+            self.find_calls = 0
+
+        async def find_accounts_due_for_rotation(self, *, skew_seconds: int) -> list[Account]:
+            del skew_seconds
+            self.find_calls += 1
+            return [target]
+
+        async def _singleflight_run(self, key: str, factory) -> ClaudeRefreshResult:
+            async with inflight_lock:
+                task = inflight.get(key)
+                if task is None or task.done():
+                    task = asyncio.create_task(factory())
+                    inflight[key] = task
+
+                    def _clear(_t: asyncio.Task[ClaudeRefreshResult]) -> None:
+                        inflight.pop(key, None)
+
+                    task.add_done_callback(_clear)
+            return await asyncio.shield(task)
+
+        async def rotate_claude_access_token(self, account: Account) -> ClaudeRefreshResult:
+            async def _factory() -> ClaudeRefreshResult:
+                # The factory body counts as the OAuth call.
+                self.rotate_calls += 1
+                start_barrier.set()
+                await release_barrier.wait()
+                return ClaudeRefreshResult(
+                    access_token="AT",
+                    refresh_token="RT",
+                    expires_in=3600,
+                )
+
+            return await self._singleflight_run(account.id, _factory)
+
+    claude_manager = _LockedClaudeAuthManager()
+    scheduler = AuthGuardianScheduler(
+        interval_seconds=21600,
+        enabled=True,
+        max_age_seconds=12 * 3600,
+        batch_size=10,
+        concurrency=1,
+        jitter_seconds=0.0,
+        leader_election_factory=lambda: _Leader(),
+        repo_factory=_null_repo_factory,
+        auth_manager_factory=lambda _repo: _AuthManager([]),
+        sleep=lambda _delay: _noop_sleep(),
+        now=lambda: now,
+    )
+
+    first = asyncio.create_task(_run_claude_pass(scheduler, claude_manager, skew_seconds=600))
+    second = asyncio.create_task(_run_claude_pass(scheduler, claude_manager, skew_seconds=600))
+
+    await asyncio.wait_for(start_barrier.wait(), timeout=1)
+    # Give the second task a chance to enter the singleflight and observe the
+    # in-flight task before we release it.
+    await asyncio.sleep(0)
+    release_barrier.set()
+
+    await asyncio.gather(first, second)
+
+    assert claude_manager.find_calls == 2
+    assert claude_manager.rotate_calls == 1
+
+
+@asynccontextmanager
+async def _null_repo_factory() -> AsyncIterator[_Repo]:
+    """Empty repo factory for tests that target only the Claude pass — the
+    Codex ``_refresh_once`` path requires a populated repo, but tests that
+    invoke ``_run_claude_refresh_pass`` directly skip the Codex pass.
+    """
+    yield _Repo([])
 
 
 def _settings(

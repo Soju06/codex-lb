@@ -11,6 +11,7 @@
     "dashboard": "仪表盘",
     "reports": "报表",
     "accounts": "账户",
+    "claudeAccounts": "Claude 账户",
     "apis": "API",
     "settings": "设置",
     "openMenu": "打开菜单",
@@ -376,6 +377,80 @@
         "configured": "TOTP 已配置",
         "disabled": "TOTP 已禁用"
       }
+    }
+  },
+  "claude": {
+    "navLabel": "Claude 账户",
+    "tabTitle": "Claude 账户",
+    "addButton": "添加 Claude 账户",
+    "addDialog": {
+      "title": "添加 Claude 账户",
+      "description": "粘贴来自 Claude Max/Pro/Team 订阅的 OAuth 访问令牌与刷新令牌。",
+      "fields": {
+        "claudeAccountUuid": "Claude 账户 UUID",
+        "claudeAccountUuidPlaceholder": "来自 Anthropic 的账户 UUID",
+        "accessToken": "访问令牌",
+        "refreshToken": "刷新令牌",
+        "expiresInSeconds": "访问令牌有效期（秒）",
+        "scopes": "OAuth 权限范围（逗号分隔）",
+        "scopesPlaceholder": "user:profile, user:inference",
+        "userEmail": "用户邮箱（可选）",
+        "userOrganizationUuid": "组织 UUID（可选）"
+      },
+      "submit": "添加账户",
+      "validation": {
+        "required": "必填项",
+        "positiveInteger": "必须为正整数"
+      }
+    },
+    "actions": {
+      "disable": "禁用",
+      "enable": "启用",
+      "disableTitle": "禁用 Claude 账户",
+      "disableDescription": "该账户将从轮换中被移除，直至再次启用。",
+      "disableReasonLabel": "原因（可选）",
+      "disableReasonPlaceholder": "manual",
+      "disableConfirm": "禁用"
+    },
+    "table": {
+      "email": "邮箱",
+      "uuid": "UUID",
+      "status": "状态",
+      "lastUsedAt": "最近使用",
+      "expiresAt": "令牌到期",
+      "createdAt": "创建时间",
+      "actions": "操作"
+    },
+    "statusLabels": {
+      "active": "已启用",
+      "deactivated": "已停用",
+      "rate_limited": "速率受限",
+      "unknown": "未知"
+    },
+    "emptyState": {
+      "title": "尚无 Claude 账户",
+      "description": "添加 Claude Max/Pro/Team OAuth 订阅后，即可开始通过 Anthropic 路由流量。"
+    },
+    "usageCard": {
+      "title": "速率限制快照",
+      "requestsRemaining": "剩余请求数",
+      "inputTokensRemaining": "剩余输入令牌",
+      "outputTokensRemaining": "剩余输出令牌",
+      "status": "状态",
+      "statusUnknown": "未知",
+      "todayTokens": "今日令牌总数",
+      "todayTokensUnavailable": "今日总数暂不可用"
+    },
+    "errors": {
+      "load": "加载 Claude 账户失败",
+      "disable": "禁用 Claude 账户失败",
+      "enable": "启用 Claude 账户失败",
+      "add": "添加 Claude 账户失败"
+    },
+    "toasts": {
+      "added": "Claude 账户已添加",
+      "disabled": "Claude 账户已禁用",
+      "enabled": "Claude 账户已启用"
     }
   }
 }

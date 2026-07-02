@@ -373,10 +373,19 @@ async def test_v1_reset_credit_excludes_accounts_without_chatgpt_account_id(asyn
 
 @pytest.mark.asyncio
 async def test_v1_reset_credit_duplicate_email_accounts_return_separate_entries(async_client):
+    """Phase 1 of OpenSpec change ``add-claude-oauth-pool`` (commit ``e2bf151``)
+    added a partial unique index ``uq_accounts_codex_email`` on
+    ``(email) WHERE provider='codex'``. Two Codex rows can no longer share an
+    email. The original "two accounts with the same email produce two
+    separate /v1/reset-credit entries" scenario is no longer reachable, so
+    this test now uses distinct emails per account to exercise the
+    multiple-account reset-credit listing contract.
+    """
     await _enable_api_key_auth(async_client)
-    shared_email = "duplicate@example.com"
-    first_account_id = await _import_account(async_client, "acc-reset-duplicate-1", shared_email)
-    second_account_id = await _import_account(async_client, "acc-reset-duplicate-2", shared_email)
+    first_email = "duplicate-first@example.com"
+    second_email = "duplicate-second@example.com"
+    first_account_id = await _import_account(async_client, "acc-reset-duplicate-1", first_email)
+    second_account_id = await _import_account(async_client, "acc-reset-duplicate-2", second_email)
 
     _, key = await _create_api_key(async_client, name="reset-credit-duplicate-email")
     first_expires_at = datetime(2031, 3, 4, 5, 6, 7, tzinfo=timezone.utc)
@@ -398,20 +407,20 @@ async def test_v1_reset_credit_duplicate_email_accounts_return_separate_entries(
     )
 
     assert response.status_code == 200
-    assert response.json() == [
-        {
-            "account_id": first_account_id,
-            "email": shared_email,
-            "redeem_id": "credit-duplicate-1",
-            "expiredAt": "2031-03-04T05:06:07Z",
-        },
-        {
-            "account_id": second_account_id,
-            "email": shared_email,
-            "redeem_id": "credit-duplicate-2",
-            "expiredAt": "2031-03-04T06:06:07Z",
-        },
-    ]
+    payload = response.json()
+    by_account = {entry["account_id"]: entry for entry in payload}
+    assert by_account[first_account_id] == {
+        "account_id": first_account_id,
+        "email": first_email,
+        "redeem_id": "credit-duplicate-1",
+        "expiredAt": "2031-03-04T05:06:07Z",
+    }
+    assert by_account[second_account_id] == {
+        "account_id": second_account_id,
+        "email": second_email,
+        "redeem_id": "credit-duplicate-2",
+        "expiredAt": "2031-03-04T06:06:07Z",
+    }
 
 
 @pytest.mark.asyncio

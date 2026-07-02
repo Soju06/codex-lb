@@ -77,7 +77,7 @@ describe("AppHeader", () => {
 
     renderHeader();
 
-    await screen.findByRole("link", { name: /Accounts/i });
+    await screen.findByRole("link", { name: /^Accounts$/i });
     expect(screen.queryByText("99+")).not.toBeInTheDocument();
   });
 });

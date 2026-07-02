@@ -7,6 +7,7 @@ from enum import Enum
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
@@ -66,6 +67,28 @@ class RequestKind(str, Enum):
 
 class Account(Base):
     __tablename__ = "accounts"
+    __table_args__ = (
+        CheckConstraint("provider IN ('codex', 'claude')", name="ck_accounts_provider"),
+        CheckConstraint(
+            "((provider = 'claude') AND (claude_refresh_token_encrypted IS NOT NULL)) "
+            "OR ((provider != 'claude') AND (claude_refresh_token_encrypted IS NULL))",
+            name="ck_accounts_claude_rt_required",
+        ),
+        Index(
+            "uq_accounts_claude_uuid",
+            "claude_account_uuid",
+            unique=True,
+            sqlite_where=text("provider = 'claude'"),
+            postgresql_where=text("provider = 'claude'"),
+        ),
+        Index(
+            "uq_accounts_codex_email",
+            "email",
+            unique=True,
+            sqlite_where=text("provider = 'codex'"),
+            postgresql_where=text("provider = 'codex'"),
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
     chatgpt_account_id: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -74,7 +97,12 @@ class Account(Base):
         default=new_codex_installation_id,
         nullable=False,
     )
-    email: Mapped[str] = mapped_column(String, nullable=False)
+    email: Mapped[str | None] = mapped_column(String, nullable=True)
+    provider: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        server_default=text("'codex'"),
+    )
     alias: Mapped[str | None] = mapped_column(String, nullable=True)
     workspace_id: Mapped[str | None] = mapped_column(String, nullable=True)
     workspace_label: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -93,6 +121,24 @@ class Account(Base):
 
     last_refresh: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+    # Claude OAuth pool columns — see openspec/changes/add-claude-oauth-pool/specs/claude-oauth-pool/spec.md
+    claude_account_uuid: Mapped[str | None] = mapped_column(Text, nullable=True)
+    claude_refresh_token_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    claude_access_token_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    claude_access_token_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    claude_scopes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    claude_user_email: Mapped[str | None] = mapped_column(Text, nullable=True)
+    claude_user_organization_uuid: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Anthropic rate-limit cache — see openspec/changes/add-claude-oauth-pool/specs/claude-oauth-pool/spec.md
+    rate_limit_requests_remaining: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    rate_limit_requests_reset_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    rate_limit_input_tokens_remaining: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    rate_limit_input_tokens_reset_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    rate_limit_output_tokens_remaining: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    rate_limit_output_tokens_reset_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    rate_limit_status: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     status: Mapped[AccountStatus] = mapped_column(
         SqlEnum(
@@ -232,6 +278,8 @@ class RequestLog(Base):
     upstream_proxy_endpoint_id: Mapped[str | None] = mapped_column(String, nullable=True)
     upstream_proxy_fallback_used: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     upstream_proxy_fail_closed_reason: Mapped[str | None] = mapped_column(String, nullable=True)
+    # Provider discriminator ('codex' | 'claude') — see openspec/changes/add-claude-oauth-pool.
+    provider: Mapped[str | None] = mapped_column(Text, nullable=True)
     account: Mapped[Account | None] = relationship(
         "Account",
         back_populates="request_logs",
@@ -670,6 +718,11 @@ class ApiKey(Base):
         nullable=False,
         default="upstream_limits,account_pool_usage",
         server_default="upstream_limits,account_pool_usage",
+    )
+    provider_scope: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        server_default=text("'codex'"),
     )
     expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)

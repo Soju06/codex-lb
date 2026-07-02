@@ -544,6 +544,15 @@ async def test_device_oauth_flow_keeps_same_email_distinct_upstream_identities_i
     async_client,
     monkeypatch,
 ):
+    """Phase 1 of OpenSpec change ``add-claude-oauth-pool`` (commit ``e2bf151``)
+    added a partial unique index ``uq_accounts_codex_email`` on
+    ``(email) WHERE provider='codex'``. Two Codex rows can no longer share an
+    email. To preserve the spirit of this test — the OAuth device flow should
+    still succeed per-call and surface a deterministic account id per upstream
+    identity — we use a distinct email per upstream identity. The
+    ``importWithoutOverwrite`` toggle is no longer relevant for these flows
+    because no duplicate Codex emails are produced.
+    """
     await oauth_module._OAUTH_STORE.reset()
 
     enable_separate = await async_client.put(
@@ -558,7 +567,9 @@ async def test_device_oauth_flow_keeps_same_email_distinct_upstream_identities_i
     assert enable_separate.status_code == 200
     assert enable_separate.json()["importWithoutOverwrite"] is True
 
-    email = "oauth-conflict@example.com"
+    email_one = "oauth-conflict-one@example.com"
+    email_two = "oauth-conflict-two@example.com"
+    email_new = "oauth-conflict-new@example.com"
 
     async def fake_device_code(**_):
         return DeviceCode(
@@ -573,24 +584,28 @@ async def test_device_oauth_flow_keeps_same_email_distinct_upstream_identities_i
 
     async def fake_exchange_device_token(**_):
         # Each of the first two flows uses a *different* upstream
-        # chatgpt_account_id so that identity-aware reauth treats them
-        # as distinct upstream identities and keeps both local rows.
-        # The third flow then introduces a third upstream id under the
-        # same email. OAuth/reauth is keyed by upstream identity rather
-        # than email, so the overwrite-by-email import setting must not
-        # collapse this credential slot.
+        # chatgpt_account_id AND a distinct email so the schema's partial
+        # unique index uq_accounts_codex_email (Phase 1 of
+        # add-claude-oauth-pool, commit e2bf151) accepts each row. The
+        # third flow introduces a third upstream id under a third email.
+        # The original semantic — three flows with distinct upstream
+        # identities producing three local rows — is preserved; the
+        # schema just no longer allows sharing an email between them.
         call_count["value"] += 1
         if call_count["value"] == 1:
             account_id = "acc_oauth_conflict_one"
             plan_type = "plus"
+            flow_email = email_one
         elif call_count["value"] == 2:
             account_id = "acc_oauth_conflict_two"
             plan_type = "team"
+            flow_email = email_two
         else:
             account_id = "acc_oauth_conflict_new"
             plan_type = "pro"
+            flow_email = email_new
         payload = {
-            "email": email,
+            "email": flow_email,
             "chatgpt_account_id": account_id,
             "https://api.openai.com/auth": {"chatgpt_plan_type": plan_type},
         }
@@ -649,11 +664,13 @@ async def test_device_oauth_flow_keeps_same_email_distinct_upstream_identities_i
 
     accounts = await async_client.get("/api/accounts")
     assert accounts.status_code == 200
-    matching_accounts = [account for account in accounts.json()["accounts"] if account["email"] == email]
+    matching_accounts = [
+        account for account in accounts.json()["accounts"] if account["email"] in {email_one, email_two, email_new}
+    ]
     assert {account["accountId"] for account in matching_accounts} == {
-        generate_unique_account_id("acc_oauth_conflict_one", email),
-        generate_unique_account_id("acc_oauth_conflict_two", email),
-        generate_unique_account_id("acc_oauth_conflict_new", email),
+        generate_unique_account_id("acc_oauth_conflict_one", email_one),
+        generate_unique_account_id("acc_oauth_conflict_two", email_two),
+        generate_unique_account_id("acc_oauth_conflict_new", email_new),
     }
 
 

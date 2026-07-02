@@ -747,20 +747,27 @@ async def test_codex_usage_reset_consume_forwards_and_refreshes(async_client, db
 
 @pytest.mark.asyncio
 async def test_codex_usage_reset_consume_refreshes_matched_workspace_account(async_client, db_setup, monkeypatch):
+    """Phase 1 of OpenSpec change ``add-claude-oauth-pool`` (commit ``e2bf151``)
+    added a partial unique index ``uq_accounts_codex_email`` on
+    ``(email) WHERE provider='codex'``. Two Codex rows can no longer share an
+    email — even when distinguished by workspace slot. This test now uses a
+    distinct email per workspace slot while still exercising the
+    matched-workspace-account selection path.
+    """
     raw_chatgpt_account_id = "workspace_reset_multi"
     async with SessionLocal() as session:
         accounts_repo = AccountsRepository(session)
         await accounts_repo.upsert(
             _make_account(
                 "workspace_reset_multi_default",
-                "reset-multi@example.com",
+                "reset-multi-default@example.com",
                 chatgpt_account_id=raw_chatgpt_account_id,
             )
         )
         await accounts_repo.upsert(
             _make_account(
                 "workspace_reset_multi_29c4834a",
-                "reset-multi@example.com",
+                "reset-multi-alpha@example.com",
                 chatgpt_account_id=raw_chatgpt_account_id,
                 workspace_id="team-alpha",
                 workspace_label="Team Alpha",

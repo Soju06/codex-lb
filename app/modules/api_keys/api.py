@@ -83,6 +83,7 @@ def _to_response(row: ApiKeyData) -> ApiKeyResponse:
             row.pooled_credits.remaining_percent_secondary if row.pooled_credits else None
         ),
         pooled_capacity_credits_primary=(row.pooled_credits.capacity_credits_primary if row.pooled_credits else 0.0),
+        provider_scope=list(row.provider_scope),
     )
 
 
@@ -144,6 +145,7 @@ async def create_api_key(
                 expires_at=payload.expires_at,
                 assigned_account_ids=payload.assigned_account_ids,
                 limits=limit_inputs,
+                provider_scope=payload.provider_scope,
             )
         )
     except ApiKeyValidationError as exc:
@@ -209,6 +211,8 @@ async def update_api_key(
         limits=limit_inputs,
         limits_set=limits_set,
         reset_usage=bool(payload.reset_usage),
+        provider_scope=payload.provider_scope,
+        provider_scope_set="provider_scope" in fields,
     )
     try:
         row = await context.service.update_key(key_id, update)

@@ -214,12 +214,25 @@ export function post<T>(
   return request("POST", url, schema, options);
 }
 
+export function patch(
+  url: string,
+  schema: null,
+  options?: RequestOptions,
+): Promise<void>;
 export function patch<T>(
   url: string,
   schema: ZodType<T>,
   options?: RequestOptions,
-): Promise<T> {
-  return request("PATCH", url, schema, options);
+): Promise<T>;
+export function patch<T>(
+  url: string,
+  schemaOrOptions?: ZodType<T> | null | RequestOptions,
+  maybeOptions?: RequestOptions,
+): Promise<T | void> {
+  if (schemaOrOptions instanceof z.ZodType) {
+    return request("PATCH", url, schemaOrOptions, maybeOptions);
+  }
+  return request("PATCH", url, null, schemaOrOptions as RequestOptions | undefined);
 }
 
 export function put<T>(

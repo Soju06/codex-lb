@@ -213,6 +213,23 @@ if PROMETHEUS_AVAILABLE:
         ["kind"],
         registry=REGISTRY,
     )
+    codex_lb_claude_requests_total = Counter(
+        "codex_lb_claude_requests_total",
+        "Total Claude proxy requests",
+        labelnames=["status"],
+        registry=REGISTRY,
+    )
+    codex_lb_claude_refresh_total = Counter(
+        "codex_lb_claude_refresh_total",
+        "Claude access-token refresh attempts",
+        labelnames=["result"],
+        registry=REGISTRY,
+    )
+    codex_lb_claude_accounts_active = Gauge(
+        "codex_lb_claude_accounts_active",
+        "Active Claude accounts in the pool",
+        registry=REGISTRY,
+    )
 
     def make_scrape_registry() -> CollectorRegistryLike:
         if MULTIPROCESS_MODE:
@@ -260,6 +277,9 @@ else:
     account_lease_released_total: CounterLike | None = None
     account_lease_stale_reclaimed_total: CounterLike | None = None
     account_cap_rejections_total: CounterLike | None = None
+    codex_lb_claude_requests_total: CounterLike | None = None
+    codex_lb_claude_refresh_total: CounterLike | None = None
+    codex_lb_claude_accounts_active: GaugeLike | None = None
 
     def make_scrape_registry() -> None:
         return None
@@ -278,6 +298,9 @@ __all__ = [
     "account_lease_released_total",
     "account_lease_stale_reclaimed_total",
     "accounts_total",
+    "codex_lb_claude_accounts_active",
+    "codex_lb_claude_refresh_total",
+    "codex_lb_claude_requests_total",
     "bridge_instance_mismatch_total",
     "bridge_forward_latency_seconds",
     "bridge_durable_recover_total",

@@ -16,6 +16,7 @@ const NAV_ITEMS = [
   { to: "/dashboard", labelKey: "nav.dashboard" },
   { to: "/reports", labelKey: "nav.reports" },
   { to: "/accounts", labelKey: "nav.accounts" },
+  { to: "/claude-accounts", labelKey: "nav.claudeAccounts" },
   { to: "/apis", labelKey: "nav.apis" },
   { to: "/settings", labelKey: "nav.settings" },
 ] as const;

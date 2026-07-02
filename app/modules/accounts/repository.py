@@ -493,6 +493,71 @@ class AccountsRepository:
             await self._session.commit()
             return result.scalar_one_or_none() is not None
 
+    async def update_rate_limit_cache(
+        self,
+        account_id: str,
+        fields: dict[str, object] | None = None,
+        **kwargs: object,
+    ) -> bool:
+        """Persist a partial update of the seven Anthropic rate-limit cache columns.
+
+        Phase 9 (Task 9.0) of the Claude OAuth pool:
+        ``openspec/changes/add-claude-oauth-pool/specs/account-routing/spec.md``
+        — *Claude rate-limit cooldown mirrors Codex cooldown*.
+
+        Only the columns whose value is present in ``fields`` are written; the
+        other rate-limit columns are left untouched. Passing an empty mapping
+        is a no-op (no SQL UPDATE is issued) so the cooldown helper in the
+        load balancer can safely forward the parsed dict without a separate
+        "is anything present" guard.
+
+        Two call styles are supported:
+
+        - ``update_rate_limit_cache(account_id, {"rate_limit_requests_remaining": 42})``
+          — the production call site in
+          ``app/modules/proxy/load_balancer.py::record_claude_rate_limit_response``
+          forwards the parsed dict positionally.
+        - ``update_rate_limit_cache(
+              account_id,
+              rate_limit_requests_remaining=42,
+              rate_limit_status="allowed",
+          )`` — keyword form, useful in tests and ad-hoc callers.
+
+        The signature accepts both shapes so the contract documented in the
+        OpenSpec plan ("only updates non-None values") holds regardless of
+        how callers marshal their arguments.
+        """
+        merged: dict[str, object] = {}
+        if fields:
+            merged.update(fields)
+        merged.update(kwargs)
+        # Drop None values so the partial-update contract is preserved
+        # regardless of which call style the caller used.
+        values: dict[str, object] = {key: value for key, value in merged.items() if value is not None}
+        # Only the seven Anthropic rate-limit cache columns are writable
+        # through this helper. Other keys are silently ignored to keep the
+        # repo narrow — anything else (status, reset_at, blocked_at, etc.)
+        # must go through the dedicated ``update_status`` path.
+        allowed_columns = {
+            "rate_limit_requests_remaining",
+            "rate_limit_requests_reset_at",
+            "rate_limit_input_tokens_remaining",
+            "rate_limit_input_tokens_reset_at",
+            "rate_limit_output_tokens_remaining",
+            "rate_limit_output_tokens_reset_at",
+            "rate_limit_status",
+        }
+        values = {key: value for key, value in values.items() if key in allowed_columns}
+        if not values:
+            return False
+
+        async with sqlite_writer_section():
+            result = await self._session.execute(
+                update(Account).where(Account.id == account_id).values(**values).returning(Account.id)
+            )
+            await self._session.commit()
+            return result.scalar_one_or_none() is not None
+
     async def update_security_work_authorized(self, account_id: str, enabled: bool) -> bool:
         async with sqlite_writer_section():
             result = await self._session.execute(

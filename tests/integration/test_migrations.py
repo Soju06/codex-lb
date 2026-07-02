@@ -5,6 +5,7 @@ from collections.abc import Callable
 import pytest
 from anyio import to_thread
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.core.auth import DEFAULT_PLAN
@@ -317,6 +318,18 @@ async def test_postgresql_startup_migration_auto_remap_legacy_head(db_setup):
 
 @pytest.mark.asyncio
 async def test_run_startup_migrations_drops_accounts_email_unique_with_non_cascade_fks(tmp_path):
+    """Phase 1 of OpenSpec change ``add-claude-oauth-pool`` (commit ``e2bf151``)
+    added a partial unique index ``uq_accounts_codex_email`` on
+    ``(email) WHERE provider='codex'``. The migration now enforces the new
+    contract on legacy databases: the old ``UNIQUE`` on ``email`` is dropped
+    AND the new partial unique index is applied, so subsequent inserts of
+    Codex rows with the same email are rejected by the schema. The post-
+    migration insert at the end of the test now asserts this new behavior —
+    a duplicate Codex email raises ``IntegrityError`` — instead of the old
+    "second insert succeeds" assertion. The other invariants this test
+    exercises (legacy data round-trip, FK action preservation, sticky-session
+    rebuild) are unchanged.
+    """
     db_path = tmp_path / "legacy-no-cascade.db"
     db_url = f"sqlite+aiosqlite:///{db_path}"
     engine = create_async_engine(db_url)
@@ -601,6 +614,7 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
                     """
                 )
             )
+            await session.commit()
             sticky_same_key_count = (
                 await session.execute(text("SELECT COUNT(*) FROM sticky_sessions WHERE key='sticky_1'"))
             ).scalar_one()
@@ -653,22 +667,27 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
             api_key_index_names = {str(row[1]) for row in api_key_index_rows if len(row) > 1}
             assert "idx_api_keys_name" in api_key_index_names
 
-            await session.execute(
-                text(
-                    """
-                    INSERT INTO accounts (
-                        id, chatgpt_account_id, codex_installation_id, email, plan_type,
-                        access_token_encrypted, refresh_token_encrypted, id_token_encrypted,
-                        last_refresh, created_at, status, deactivation_reason, reset_at
+            # Phase 1 of add-claude-oauth-pool adds a partial unique index
+            # ``uq_accounts_codex_email`` on ``(email) WHERE provider='codex'``.
+            # A second Codex row with the same email is now rejected.
+            with pytest.raises(IntegrityError):
+                await session.execute(
+                    text(
+                        """
+                        INSERT INTO accounts (
+                            id, chatgpt_account_id, codex_installation_id, email, plan_type,
+                            access_token_encrypted, refresh_token_encrypted, id_token_encrypted,
+                            last_refresh, created_at, status, deactivation_reason, reset_at
+                        )
+                        VALUES (
+                            'acc_legacy_2', 'chatgpt_legacy_2', 'legacy-installation-2', 'legacy@example.com', 'team',
+                            x'11', x'12', x'13',
+                            '2026-01-01 00:00:00', '2026-01-01 00:00:00', 'active', NULL, NULL
+                        )
+                        """
                     )
-                    VALUES (
-                        'acc_legacy_2', 'chatgpt_legacy_2', 'legacy-installation-2', 'legacy@example.com', 'team',
-                        x'11', x'12', x'13',
-                        '2026-01-01 00:00:00', '2026-01-01 00:00:00', 'active', NULL, NULL
-                    )
-                    """
                 )
-            )
+            await session.rollback()
             usage_count = (
                 await session.execute(text("SELECT COUNT(*) FROM usage_history WHERE account_id='acc_legacy'"))
             ).scalar_one()

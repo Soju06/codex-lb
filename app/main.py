@@ -47,6 +47,7 @@ from app.modules.accounts import api as accounts_api
 from app.modules.api_keys import api as api_keys_api
 from app.modules.api_keys.reset_scheduler import build_api_key_limit_reset_scheduler
 from app.modules.audit import api as audit_api
+from app.modules.claude import api as claude_api
 from app.modules.conversation_archive import api as conversation_archive_api
 from app.modules.dashboard import api as dashboard_api
 from app.modules.dashboard_auth import api as dashboard_auth_api
@@ -147,6 +148,9 @@ async def lifespan(app: FastAPI):
     bridge_durable_schema_ready = await _ensure_bridge_durable_schema_ready(settings)
     if bridge_durable_schema_ready:
         startup_module.mark_bridge_durable_schema_ready()
+    from app.modules.claude.wiring import build_claude_proxy_service
+
+    app.state.claude_proxy_service = build_claude_proxy_service()
     usage_scheduler = build_usage_refresh_scheduler()
     api_key_limit_reset_scheduler = build_api_key_limit_reset_scheduler()
     model_scheduler = build_model_refresh_scheduler()
@@ -168,7 +172,36 @@ async def lifespan(app: FastAPI):
         prometheus_module = import_module("prometheus_client")
         make_asgi_app = getattr(prometheus_module, "make_asgi_app")
         metrics_app = make_asgi_app(registry=scrape_registry)
-        config = uvicorn.Config(metrics_app, host="0.0.0.0", port=settings.metrics_port, log_level="warning")
+
+        # Wrap the metrics ASGI app so each scrape refreshes the
+        # ``codex_lb_claude_accounts_active`` gauge from the canonical
+        # ``ClaudeAccountRepository.count_active()`` value. The gauge
+        # otherwise only reflects activity at module-import time.
+        from app.db.session import get_background_session
+        from app.modules.claude.repository import SqlClaudeAccountRepository
+        from app.modules.claude.service import (
+            refresh_claude_accounts_active_gauge,
+        )
+
+        async def _refresh_claude_pool_gauge() -> None:
+            try:
+                async with get_background_session() as session:
+                    repo = SqlClaudeAccountRepository(session)
+                    await refresh_claude_accounts_active_gauge(repo)
+            except Exception:
+                # Observability must NEVER crash the /metrics endpoint.
+                logger.warning("claude.metrics.gauge_refresh_failed", exc_info=True)
+
+        async def _metrics_with_gauge_refresh(scope, receive, send):  # type: ignore[no-untyped-def]
+            await _refresh_claude_pool_gauge()
+            await metrics_app(scope, receive, send)
+
+        config = uvicorn.Config(
+            _metrics_with_gauge_refresh,
+            host="0.0.0.0",
+            port=settings.metrics_port,
+            log_level="warning",
+        )
         metrics_server = uvicorn.Server(config)
 
         async def _serve_metrics(srv: _MetricsServer) -> None:
@@ -407,6 +440,12 @@ def create_app() -> FastAPI:
     app.include_router(sticky_sessions_api.router)
     app.include_router(api_keys_api.router)
     app.include_router(health_api.router)
+    # Claude OAuth pool: /claude/v1/* proxy routes and /api/claude/* admin
+    # routes. Both are registered separately because their auth models are
+    # intentionally different (proxy routes use a provider-scoped API key
+    # dependency; admin routes use the dashboard session dependency).
+    app.include_router(claude_api.router)
+    app.include_router(claude_api.admin_router)
 
     static_dir = Path(__file__).parent / "static"
     index_html = static_dir / "index.html"

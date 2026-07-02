@@ -11,6 +11,7 @@
     "dashboard": "Dashboard",
     "reports": "Reports",
     "accounts": "Accounts",
+    "claudeAccounts": "Claude Accounts",
     "apis": "APIs",
     "settings": "Settings",
     "openMenu": "Open menu",
@@ -376,6 +377,80 @@
         "configured": "TOTP configured",
         "disabled": "TOTP disabled"
       }
+    }
+  },
+  "claude": {
+    "navLabel": "Claude Accounts",
+    "tabTitle": "Claude Accounts",
+    "addButton": "Add Claude account",
+    "addDialog": {
+      "title": "Add Claude account",
+      "description": "Paste OAuth access and refresh tokens from a Claude Max/Pro/Team subscription.",
+      "fields": {
+        "claudeAccountUuid": "Claude account UUID",
+        "claudeAccountUuidPlaceholder": "Account UUID from Anthropic",
+        "accessToken": "Access token",
+        "refreshToken": "Refresh token",
+        "expiresInSeconds": "Access token lifetime (seconds)",
+        "scopes": "OAuth scopes (comma-separated)",
+        "scopesPlaceholder": "user:profile, user:inference",
+        "userEmail": "User email (optional)",
+        "userOrganizationUuid": "Organization UUID (optional)"
+      },
+      "submit": "Add account",
+      "validation": {
+        "required": "Required field",
+        "positiveInteger": "Must be a positive integer"
+      }
+    },
+    "actions": {
+      "disable": "Disable",
+      "enable": "Enable",
+      "disableTitle": "Disable Claude account",
+      "disableDescription": "The account will be removed from rotation until re-enabled.",
+      "disableReasonLabel": "Reason (optional)",
+      "disableReasonPlaceholder": "manual",
+      "disableConfirm": "Disable"
+    },
+    "table": {
+      "email": "Email",
+      "uuid": "UUID",
+      "status": "Status",
+      "lastUsedAt": "Last used",
+      "expiresAt": "Token expires",
+      "createdAt": "Created",
+      "actions": "Actions"
+    },
+    "statusLabels": {
+      "active": "Active",
+      "deactivated": "Deactivated",
+      "rate_limited": "Rate limited",
+      "unknown": "Unknown"
+    },
+    "emptyState": {
+      "title": "No Claude accounts yet",
+      "description": "Add a Claude Max/Pro/Team OAuth subscription to start routing traffic through Anthropic."
+    },
+    "usageCard": {
+      "title": "Rate-limit snapshot",
+      "requestsRemaining": "Requests remaining",
+      "inputTokensRemaining": "Input tokens remaining",
+      "outputTokensRemaining": "Output tokens remaining",
+      "status": "Status",
+      "statusUnknown": "Unknown",
+      "todayTokens": "Today's tokens",
+      "todayTokensUnavailable": "Today's total is unavailable"
+    },
+    "errors": {
+      "load": "Failed to load Claude accounts",
+      "disable": "Failed to disable Claude account",
+      "enable": "Failed to enable Claude account",
+      "add": "Failed to add Claude account"
+    },
+    "toasts": {
+      "added": "Claude account added",
+      "disabled": "Claude account disabled",
+      "enabled": "Claude account enabled"
     }
   }
 }

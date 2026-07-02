@@ -8,7 +8,7 @@ from uuid import uuid4
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import text
+from sqlalchemy import inspect, text
 
 TEST_DB_DIR = Path(tempfile.mkdtemp(prefix="codex-lb-tests-"))
 TEST_DB_PATH = TEST_DB_DIR / "codex-lb.db"
@@ -41,10 +41,49 @@ def _drop_test_migration_tables(sync_conn) -> None:
     sync_conn.execute(text("DROP TABLE IF EXISTS schema_migrations"))
 
 
+# Partial unique indexes added in Phase 1 of add-claude-oauth-pool via Alembic
+# migrations. ``Base.metadata.create_all`` will emit them when the matching
+# ``Index(..., sqlite_where=...)`` declaration exists on the model, but we
+# backfill them here as a fixture-local guarantee so the test DB always mirrors
+# the production schema even if a future refactor drops the declarative index.
+# CHECK constraints are likewise added because ``create_all`` does not raise
+# when they exist as ``CheckConstraint(...)`` declarations but the dialect
+# still relies on Alembic for some CHECK variants.
+_PHASE1_PARTIAL_UNIQUE_INDEXES = (
+    ("uq_accounts_claude_uuid", "accounts", ["claude_account_uuid"], "provider = 'claude'"),
+    ("uq_accounts_codex_email", "accounts", ["email"], "provider = 'codex'"),
+)
+
+
+def _ensure_test_db_schema_matches_alembic(sync_conn) -> None:
+    """Idempotently add Phase 1+ schema invariants that ``Base.metadata.create_all``
+    may not emit for every dialect.
+
+    Skipped on non-SQLite dialects where Alembic already drives the schema.
+    SQLite tests need these because Alembic is not invoked for the fast-path
+    fixture.
+    """
+    dialect = sync_conn.dialect.name
+    if dialect != "sqlite":
+        return
+
+    inspector = inspect(sync_conn)
+    if not inspector.has_table("accounts"):
+        return
+
+    existing_indexes = {index["name"] for index in inspector.get_indexes("accounts") if index.get("name")}
+    for index_name, table_name, columns, predicate in _PHASE1_PARTIAL_UNIQUE_INDEXES:
+        if index_name in existing_indexes:
+            continue
+        column_list = ", ".join(columns)
+        sync_conn.execute(text(f"CREATE UNIQUE INDEX {index_name} ON {table_name} ({column_list}) WHERE {predicate}"))
+
+
 def _recreate_test_schema(sync_conn) -> None:
     _drop_test_migration_tables(sync_conn)
     Base.metadata.drop_all(sync_conn)
     Base.metadata.create_all(sync_conn)
+    _ensure_test_db_schema_matches_alembic(sync_conn)
 
 
 def _reset_test_database(sync_conn) -> None:

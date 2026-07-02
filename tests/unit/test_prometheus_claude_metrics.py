@@ -172,9 +172,7 @@ def _load_prometheus_module(
 def test_claude_metrics_registered_when_prometheus_available(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    prom = _load_prometheus_module(
-        monkeypatch, prometheus_client_module=_fake_prometheus_client_module()
-    )
+    prom = _load_prometheus_module(monkeypatch, prometheus_client_module=_fake_prometheus_client_module())
 
     assert prom.PROMETHEUS_AVAILABLE is True
 
@@ -206,9 +204,7 @@ def test_claude_metrics_absent_when_prometheus_unavailable(
 def test_claude_metrics_exposed_via_all(monkeypatch: pytest.MonkeyPatch) -> None:
     """The three new metrics MUST be re-exported in ``__all__`` so callers
     can ``from app.core.metrics.prometheus import codex_lb_claude_*``."""
-    prom = _load_prometheus_module(
-        monkeypatch, prometheus_client_module=_fake_prometheus_client_module()
-    )
+    prom = _load_prometheus_module(monkeypatch, prometheus_client_module=_fake_prometheus_client_module())
 
     for symbol in (
         "codex_lb_claude_requests_total",
@@ -235,9 +231,7 @@ async def test_rotate_claude_access_token_success_increments_refresh_total(
     from app.core.clients.anthropic.oauth import ClaudeRefreshResult
     from app.core.crypto import TokenEncryptor
 
-    _load_prometheus_module(
-        monkeypatch, prometheus_client_module=_fake_prometheus_client_module()
-    )
+    _load_prometheus_module(monkeypatch, prometheus_client_module=_fake_prometheus_client_module())
     # Re-import auth_manager so it picks up the registered metrics module.
     sys.modules.pop("app.modules.claude.auth_manager", None)
     auth_manager_module = importlib.import_module("app.modules.claude.auth_manager")
@@ -303,8 +297,7 @@ async def test_rotate_claude_access_token_success_increments_refresh_total(
                 claude_account_uuid=account_id.removeprefix("claude-"),
                 claude_access_token_encrypted=encryptor.encrypt("AT"),
                 claude_refresh_token_encrypted=encryptor.encrypt("RT"),
-                claude_access_token_expires_at=datetime.now(timezone.utc)
-                + timedelta(hours=1),
+                claude_access_token_expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
             )
             self.persisted[account.id] = {
                 "id": account.id,
@@ -316,9 +309,7 @@ async def test_rotate_claude_access_token_success_increments_refresh_total(
 
     class _FakeOAuthClient:
         def __init__(self) -> None:
-            self.next_result = ClaudeRefreshResult(
-                access_token="AT2", refresh_token="RT2", expires_in=3600
-            )
+            self.next_result = ClaudeRefreshResult(access_token="AT2", refresh_token="RT2", expires_in=3600)
 
         async def refresh(self, refresh_token: str) -> ClaudeRefreshResult:
             return self.next_result
@@ -357,9 +348,7 @@ async def test_rotate_claude_access_token_invalid_grant_increments_refresh_total
 
     from app.core.clients.anthropic.errors import ClaudeAuthError
 
-    _load_prometheus_module(
-        monkeypatch, prometheus_client_module=_fake_prometheus_client_module()
-    )
+    _load_prometheus_module(monkeypatch, prometheus_client_module=_fake_prometheus_client_module())
     # Re-import auth_manager so it picks up the registered metrics module.
     sys.modules.pop("app.modules.claude.auth_manager", None)
     auth_manager_module = importlib.import_module("app.modules.claude.auth_manager")
@@ -422,8 +411,7 @@ async def test_rotate_claude_access_token_invalid_grant_increments_refresh_total
                 claude_account_uuid=account_id.removeprefix("claude-"),
                 claude_access_token_encrypted=enc.encrypt("AT"),
                 claude_refresh_token_encrypted=enc.encrypt("RT"),
-                claude_access_token_expires_at=datetime.now(timezone.utc)
-                + timedelta(hours=1),
+                claude_access_token_expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
             )
             self.persisted[account.id] = {
                 "id": account.id,
@@ -619,6 +607,7 @@ async def test_429_increments_requests_total_rate_limited(
     )
 
     headers = {"anthropic-ratelimit-status": "rejected"}
+
     # Patch the chat side-effect to attach headers per the spec scenario.
     async def _send(*, access_token, request_body):
         raise ClaudeRateLimited("anthropic 429", headers=headers)
@@ -735,9 +724,7 @@ async def test_active_gauge_set_from_repository_count_active(
     client, and asserts the helper sets the value to whatever the repository
     returns.
     """
-    _load_prometheus_module(
-        monkeypatch, prometheus_client_module=_fake_prometheus_client_module()
-    )
+    _load_prometheus_module(monkeypatch, prometheus_client_module=_fake_prometheus_client_module())
 
     # Pop Claude service modules so re-import below binds metric symbols to
     # the freshly-loaded prometheus module (other test files in the suite

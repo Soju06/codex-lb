@@ -105,15 +105,11 @@ class _ChatLike(Protocol):
 class _AuthLike(Protocol):
     async def get_access_token(self, account: Account) -> str: ...
 
-    async def rotate_claude_access_token(
-        self, account: Account, *, force: bool = False
-    ) -> Any: ...
+    async def rotate_claude_access_token(self, account: Account, *, force: bool = False) -> Any: ...
 
 
 class _AccountsRepoLike(Protocol):
-    async def update_rate_limit_cache(
-        self, account_id: str, fields: dict[str, object]
-    ) -> bool: ...
+    async def update_rate_limit_cache(self, account_id: str, fields: dict[str, object]) -> bool: ...
 
     async def update_last_used_at(self, account_id: str, *, at: datetime) -> bool: ...
 
@@ -252,9 +248,7 @@ class ClaudeProxyService:
         iterator: AsyncIterator[StreamChunk] | None = None
 
         while True:
-            iterator = await self._chat.stream_messages(
-                access_token=access_token, request_body=body_in
-            )
+            iterator = await self._chat.stream_messages(access_token=access_token, request_body=body_in)
             try:
                 async for chunk in iterator:
                     if chunk.kind == "headers":
@@ -275,9 +269,7 @@ class ClaudeProxyService:
                     self._record_request_metric("auth_error")
                     raise
                 retries += 1
-                rotated = await self._auth.rotate_claude_access_token(
-                    account, force=True
-                )
+                rotated = await self._auth.rotate_claude_access_token(account, force=True)
                 if rotated is None:
                     # invalid_grant path — account is now DEACTIVATED; abort.
                     self._record_request_metric("auth_error")
@@ -319,11 +311,9 @@ class ClaudeProxyService:
         We split defensively so a missing/empty scope is treated as no
         authorization rather than as universal access.
         """
-        scope = (api_key.provider_scope or "")
+        scope = api_key.provider_scope or ""
         if "claude" not in scope.split(","):
-            raise ProviderScopeMismatch(
-                "API key is not authorized for the claude provider"
-            )
+            raise ProviderScopeMismatch("API key is not authorized for the claude provider")
 
     async def _select_account(self) -> Account:
         """Pick a Claude account from the load balancer."""
@@ -334,9 +324,7 @@ class ClaudeProxyService:
         return account
 
     @staticmethod
-    def _coerce_request_body(
-        request_body: Mapping[str, Any]
-    ) -> Mapping[str, Any]:
+    def _coerce_request_body(request_body: Mapping[str, Any]) -> Mapping[str, Any]:
         """Return the request body unchanged.
 
         The chat client signature is ``Mapping[str, Any]``; we deliberately
@@ -359,24 +347,18 @@ class ClaudeProxyService:
         method does not duplicate that machinery.
         """
         try:
-            return await self._chat.send_messages(
-                access_token=access_token, request_body=request_body
-            )
+            return await self._chat.send_messages(access_token=access_token, request_body=request_body)
         except ClaudeAuthError:
             # Force-refresh via the auth manager, which serializes concurrent
             # refreshes behind the per-account singleflight. If the rotation
             # was aborted by invalid_grant, the account is now DEACTIVATED
             # and rotation returns None — propagate the original 401.
-            rotated = await self._auth.rotate_claude_access_token(
-                account, force=True
-            )
+            rotated = await self._auth.rotate_claude_access_token(account, force=True)
             if rotated is None:
                 raise
             access_token = await self._auth.get_access_token(account)
             try:
-                return await self._chat.send_messages(
-                    access_token=access_token, request_body=request_body
-                )
+                return await self._chat.send_messages(access_token=access_token, request_body=request_body)
             except ClaudeAuthError:
                 await self._lb.record_error(account)
                 raise

@@ -14,12 +14,10 @@ per CLAUDE.md / ADR-0001 / the OpenSpec design.
 
 from __future__ import annotations
 
-import asyncio
 import time
 from collections.abc import AsyncIterator, Collection
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -97,9 +95,7 @@ class _StubAccountsRepository:
     async def update_status_if_current(self, *args: Any, **kwargs: Any) -> bool:
         return True
 
-    async def update_rate_limit_cache(
-        self, account_id: str, fields: dict[str, object]
-    ) -> bool:
+    async def update_rate_limit_cache(self, account_id: str, fields: dict[str, object]) -> bool:
         """Narrow helper used by the Claude cooldown branch in T8.2.
 
         Captures the parsed fields for the assertion in tests. This method
@@ -172,9 +168,7 @@ async def _repo_factory(
     )
 
 
-def _seed_pool(*account_ids_provider: tuple[str, str]) -> tuple[
-    _StubAccountsRepository, _StubUsageRepository
-]:
+def _seed_pool(*account_ids_provider: tuple[str, str]) -> tuple[_StubAccountsRepository, _StubUsageRepository]:
     """Build a stub repo seeded with ``(account_id, provider)`` tuples."""
     accounts = [_make_account(aid, provider=provider) for aid, provider in account_ids_provider]
     return _StubAccountsRepository(accounts), _StubUsageRepository()
@@ -299,9 +293,7 @@ async def test_claude_429_sets_cooldown_and_persists_rate_limit_headers() -> Non
     balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo))
 
     reset_iso = "2030-01-01T12:00:00Z"
-    expected_reset_epoch = int(
-        datetime(2030, 1, 1, 12, 0, 0, tzinfo=timezone.utc).timestamp()
-    )
+    expected_reset_epoch = int(datetime(2030, 1, 1, 12, 0, 0, tzinfo=timezone.utc).timestamp())
     headers = {
         "anthropic-ratelimit-requests-remaining": "0",
         "anthropic-ratelimit-requests-reset": reset_iso,

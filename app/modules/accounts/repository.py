@@ -553,10 +553,7 @@ class AccountsRepository:
 
         async with sqlite_writer_section():
             result = await self._session.execute(
-                update(Account)
-                .where(Account.id == account_id)
-                .values(**values)
-                .returning(Account.id)
+                update(Account).where(Account.id == account_id).values(**values).returning(Account.id)
             )
             await self._session.commit()
             return result.scalar_one_or_none() is not None

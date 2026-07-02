@@ -6,7 +6,6 @@ from pydantic import Field, field_validator
 
 from app.modules.shared.schemas import DashboardModel
 
-
 _ALLOWED_PROVIDER_SCOPE = frozenset({"codex", "claude"})
 _DEFAULT_PROVIDER_SCOPE: list[str] = ["codex"]
 

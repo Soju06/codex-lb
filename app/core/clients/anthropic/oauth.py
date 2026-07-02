@@ -52,9 +52,7 @@ class ClaudeOAuthTransport(Protocol):
     elsewhere in the codebase.
     """
 
-    async def post(
-        self, url: str, *, json: Mapping[str, Any], headers: Mapping[str, str]
-    ) -> Any: ...
+    async def post(self, url: str, *, json: Mapping[str, Any], headers: Mapping[str, str]) -> Any: ...
 
 
 # Verified constants from notes.md §1.
@@ -85,9 +83,7 @@ class ClaudeOAuthClient:
         self._transport = transport
         self._settings = settings
         self._token_endpoint = (
-            token_endpoint
-            or getattr(settings, "claude_oauth_token_endpoint")
-            or ANTHROPIC_OAUTH_DEFAULT_TOKEN_ENDPOINT
+            token_endpoint or getattr(settings, "claude_oauth_token_endpoint") or ANTHROPIC_OAUTH_DEFAULT_TOKEN_ENDPOINT
         )
         self._client_id = client_id or ANTHROPIC_OAUTH_CLIENT_ID
 

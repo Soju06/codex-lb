@@ -756,8 +756,14 @@ async def test_list_accounts_flags_email_duplicates(async_client):
         # the test used to use so the listing assertion still covers
         # ``isEmailDuplicate`` reporting across many rows. With unique emails,
         # every row reports isEmailDuplicate=False.
-        await repo.upsert(_account("dup-stale", "dup-stale-list@example.com", "chatgpt_dup_stale"), merge_by_email=False)
-        await repo.upsert(_account("dup-fresh", "dup-fresh-list@example.com", "chatgpt_dup_fresh"), merge_by_email=False)
+        await repo.upsert(
+            _account("dup-stale", "dup-stale-list@example.com", "chatgpt_dup_stale"),
+            merge_by_email=False,
+        )
+        await repo.upsert(
+            _account("dup-fresh", "dup-fresh-list@example.com", "chatgpt_dup_fresh"),
+            merge_by_email=False,
+        )
         await repo.upsert(
             _account("workspace-a", "workspace-a-list@example.com", "chatgpt_multi_a", "ws_a"),
             merge_by_email=False,
@@ -766,8 +772,14 @@ async def test_list_accounts_flags_email_duplicates(async_client):
             _account("workspace-b", "workspace-b-list@example.com", "chatgpt_multi_b", "ws_b"),
             merge_by_email=False,
         )
-        await repo.upsert(_account("workspace-other", "other-list@example.com", "chatgpt_other_list"), merge_by_email=False)
-        await repo.upsert(_account("solo", "solo-list@example.com", "chatgpt_solo_list"), merge_by_email=False)
+        await repo.upsert(
+            _account("workspace-other", "other-list@example.com", "chatgpt_other_list"),
+            merge_by_email=False,
+        )
+        await repo.upsert(
+            _account("solo", "solo-list@example.com", "chatgpt_solo_list"),
+            merge_by_email=False,
+        )
         await repo.upsert(
             _account("placeholder-a", f"placeholder-list-a-{DEFAULT_EMAIL}", "chatgpt_placeholder_list_a"),
             merge_by_email=False,
@@ -776,12 +788,8 @@ async def test_list_accounts_flags_email_duplicates(async_client):
             _account("placeholder-b", f"placeholder-list-b-{DEFAULT_EMAIL}", "chatgpt_placeholder_list_b"),
             merge_by_email=False,
         )
-        await repo.upsert(
-            _account("blank-a", "blank-list-a@example.com", "chatgpt_blank_list_a"), merge_by_email=False
-        )
-        await repo.upsert(
-            _account("blank-b", "blank-list-b@example.com", "chatgpt_blank_list_b"), merge_by_email=False
-        )
+        await repo.upsert(_account("blank-a", "blank-list-a@example.com", "chatgpt_blank_list_a"), merge_by_email=False)
+        await repo.upsert(_account("blank-b", "blank-list-b@example.com", "chatgpt_blank_list_b"), merge_by_email=False)
 
     response = await async_client.get("/api/accounts")
     assert response.status_code == 200

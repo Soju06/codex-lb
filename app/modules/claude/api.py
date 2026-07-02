@@ -165,14 +165,14 @@ async def claude_post_messages(
                     extra={"request_id": request_id},
                     exc_info=True,
                 )
-                yield b"event: error\ndata: {\"error\":\"claude_upstream_auth_error\"}\n\n"
+                yield b'event: error\ndata: {"error":"claude_upstream_auth_error"}\n\n'
             except ClaudeRateLimited:
                 logger.warning(
                     "claude.stream.upstream_rate_limited",
                     extra={"request_id": request_id},
                     exc_info=True,
                 )
-                yield b"event: error\ndata: {\"error\":\"claude_rate_limited\"}\n\n"
+                yield b'event: error\ndata: {"error":"claude_rate_limited"}\n\n'
 
         return StreamingResponse(
             _gen(),

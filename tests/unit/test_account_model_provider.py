@@ -86,11 +86,7 @@ def test_account_has_claude_columns() -> None:
 def test_claude_account_uuid_partial_unique_index() -> None:
     table = Account.__table__
     indexes = [idx for idx in table.indexes if isinstance(idx, Index)]
-    partial = [
-        idx
-        for idx in indexes
-        if idx.unique and any(col.name == "claude_account_uuid" for col in idx.columns)
-    ]
+    partial = [idx for idx in indexes if idx.unique and any(col.name == "claude_account_uuid" for col in idx.columns)]
     assert partial, "expected a partial unique index on claude_account_uuid"
     idx = partial[0]
     assert idx.name == "uq_accounts_claude_uuid"
@@ -108,11 +104,7 @@ def test_account_email_is_nullable() -> None:
 def test_account_has_claude_refresh_token_check_constraint() -> None:
     table = Account.__table__
     check_constraints = [c for c in table.constraints if isinstance(c, CheckConstraint)]
-    rt_checks = [
-        c
-        for c in check_constraints
-        if "claude_refresh_token_encrypted" in str(c.sqltext).lower()
-    ]
+    rt_checks = [c for c in check_constraints if "claude_refresh_token_encrypted" in str(c.sqltext).lower()]
     assert rt_checks, "expected a CHECK constraint referencing claude_refresh_token_encrypted"
     # The constraint name must be stable so the alembic migration can drop it.
     assert any(c.name == "ck_accounts_claude_rt_required" for c in rt_checks)
@@ -197,11 +189,7 @@ async def test_claude_account_without_refresh_token_is_rejected(
 def test_accounts_codex_email_partial_unique_index() -> None:
     table = Account.__table__
     indexes = [idx for idx in table.indexes if isinstance(idx, Index)]
-    partial = [
-        idx
-        for idx in indexes
-        if idx.unique and any(col.name == "email" for col in idx.columns)
-    ]
+    partial = [idx for idx in indexes if idx.unique and any(col.name == "email" for col in idx.columns)]
     assert partial, "expected a partial unique index on email"
     codex_email_index = next(
         (idx for idx in partial if idx.name == "uq_accounts_codex_email"),

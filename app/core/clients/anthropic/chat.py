@@ -33,9 +33,8 @@ from __future__ import annotations
 
 import json
 import re
-from typing import TYPE_CHECKING
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Literal, Mapping, Protocol
+from typing import TYPE_CHECKING, Any, AsyncIterator, Literal, Mapping, Protocol
 
 from app.core.clients.anthropic.errors import (
     ClaudeAPIError,
@@ -88,13 +87,9 @@ class ClaudeChatTransport(Protocol):
     and ``close`` (release the underlying aiohttp connection).
     """
 
-    async def post(
-        self, url: str, *, json: Mapping[str, Any], headers: Mapping[str, str]
-    ) -> Any: ...
+    async def post(self, url: str, *, json: Mapping[str, Any], headers: Mapping[str, str]) -> Any: ...
 
-    async def post_stream(
-        self, url: str, *, json: Mapping[str, Any], headers: Mapping[str, str]
-    ) -> Any: ...
+    async def post_stream(self, url: str, *, json: Mapping[str, Any], headers: Mapping[str, str]) -> Any: ...
 
 
 class ClaudeChatClient:
@@ -285,8 +280,7 @@ def _extract_body(resp: Any) -> Any:
             if loop and loop.is_running():
                 # Should not happen in our call sites; raise so the bug is loud.
                 raise ClaudeAPIError(
-                    "ClaudeChatClient encountered an async json() method; "
-                    "transports must pre-resolve bodies"
+                    "ClaudeChatClient encountered an async json() method; transports must pre-resolve bodies"
                 )
             return loop.run_until_complete(data) if loop else data
         return data
@@ -576,18 +570,14 @@ class AiohttpClaudeChatTransport:
     def __init__(self, session: "aiohttp.ClientSession") -> None:
         self._session = session
 
-    async def post(
-        self, url: str, *, json: Mapping[str, Any], headers: Mapping[str, str]
-    ) -> Any:
+    async def post(self, url: str, *, json: Mapping[str, Any], headers: Mapping[str, str]) -> Any:
         return await self._session.post(
             url,
             json=dict(json),
             headers=dict(headers),
         )
 
-    async def post_stream(
-        self, url: str, *, json: Mapping[str, Any], headers: Mapping[str, str]
-    ) -> Any:
+    async def post_stream(self, url: str, *, json: Mapping[str, Any], headers: Mapping[str, str]) -> Any:
         # ``Connection: close`` keeps the streaming flow aligned with the
         # chat-client's ``resp.close()`` shutdown path; the shared
         # connection pool will pick the next request up cleanly.

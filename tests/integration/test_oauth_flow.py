@@ -570,7 +570,6 @@ async def test_device_oauth_flow_keeps_same_email_distinct_upstream_identities_i
     email_one = "oauth-conflict-one@example.com"
     email_two = "oauth-conflict-two@example.com"
     email_new = "oauth-conflict-new@example.com"
-    email = email_one
 
     async def fake_device_code(**_):
         return DeviceCode(
@@ -666,9 +665,7 @@ async def test_device_oauth_flow_keeps_same_email_distinct_upstream_identities_i
     accounts = await async_client.get("/api/accounts")
     assert accounts.status_code == 200
     matching_accounts = [
-        account
-        for account in accounts.json()["accounts"]
-        if account["email"] in {email_one, email_two, email_new}
+        account for account in accounts.json()["accounts"] if account["email"] in {email_one, email_two, email_new}
     ]
     assert {account["accountId"] for account in matching_accounts} == {
         generate_unique_account_id("acc_oauth_conflict_one", email_one),

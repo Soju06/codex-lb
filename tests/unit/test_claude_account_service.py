@@ -76,8 +76,7 @@ class _FakeRepo:
 
     async def exists_by_claude_uuid(self, claude_uuid: str) -> bool:
         return self.exists_uuid or any(
-            row.get("claude_account_uuid") == claude_uuid
-            and row.get("provider") == "claude"
+            row.get("claude_account_uuid") == claude_uuid and row.get("provider") == "claude"
             for row in self.persisted.values()
         )
 
@@ -136,9 +135,7 @@ class _FakeRepo:
         self.list_accounts_calls += 1
         return []
 
-    async def find_due_for_rotation(
-        self, *, skew_seconds: int, now: datetime
-    ) -> list[Account]:
+    async def find_due_for_rotation(self, *, skew_seconds: int, now: datetime) -> list[Account]:
         self.find_due_calls.append(skew_seconds)
         return []
 
@@ -157,8 +154,7 @@ class _FakeRepo:
             claude_account_uuid=account_id.removeprefix("claude-"),
             claude_access_token_encrypted=encryptor.encrypt("AT"),
             claude_refresh_token_encrypted=encryptor.encrypt("RT"),
-            claude_access_token_expires_at=datetime.now(timezone.utc)
-            + timedelta(hours=1),
+            claude_access_token_expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
         )
         # Mirror enough state into the fake repo so update_tokens/deactivate can
         # operate against it.
@@ -265,9 +261,7 @@ async def test_add_claude_account_persists_encrypted_tokens(
 
 
 @pytest.mark.asyncio
-async def test_add_claude_account_sets_expiry_with_skew(
-    fake_repo: _FakeRepo, fake_encryptor: _FakeEncryptor
-) -> None:
+async def test_add_claude_account_sets_expiry_with_skew(fake_repo: _FakeRepo, fake_encryptor: _FakeEncryptor) -> None:
     """Expiry equals ``now + expires_in - skew`` (default 600s)."""
     manager = ClaudeAuthManager(repo=fake_repo, encryptor=fake_encryptor, skew_seconds=600)
 
@@ -293,9 +287,7 @@ async def test_add_claude_account_sets_expiry_with_skew(
 
 
 @pytest.mark.asyncio
-async def test_add_claude_account_rejects_duplicate_uuid(
-    fake_repo: _FakeRepo, fake_encryptor: _FakeEncryptor
-) -> None:
+async def test_add_claude_account_rejects_duplicate_uuid(fake_repo: _FakeRepo, fake_encryptor: _FakeEncryptor) -> None:
     fake_repo.exists_uuid = True
     manager = ClaudeAuthManager(repo=fake_repo, encryptor=fake_encryptor)
 
@@ -362,9 +354,7 @@ class _RefreshFactory:
         encryptor: _FakeEncryptor,
         oauth_client: _FakeOAuthClient,
     ) -> ClaudeAuthManager:
-        self.manager = ClaudeAuthManager(
-            repo=repo, encryptor=encryptor, oauth_client=oauth_client
-        )
+        self.manager = ClaudeAuthManager(repo=repo, encryptor=encryptor, oauth_client=oauth_client)
 
 
 @pytest.mark.asyncio
@@ -373,12 +363,8 @@ async def test_rotate_claude_access_token_persists_new_tokens(
 ) -> None:
     account = fake_repo.seed(account_id="claude-abc-123")
     oauth = _FakeOAuthClient()
-    oauth.next_result = ClaudeRefreshResult(
-        access_token="AT2", refresh_token="RT2", expires_in=3600
-    )
-    manager = ClaudeAuthManager(
-        repo=fake_repo, encryptor=fake_encryptor, oauth_client=oauth
-    )
+    oauth.next_result = ClaudeRefreshResult(access_token="AT2", refresh_token="RT2", expires_in=3600)
+    manager = ClaudeAuthManager(repo=fake_repo, encryptor=fake_encryptor, oauth_client=oauth)
 
     result = await manager.rotate_claude_access_token(account)
 
@@ -390,9 +376,7 @@ async def test_rotate_claude_access_token_persists_new_tokens(
     assert fake_encryptor.decrypt(persisted["claude_refresh_token_encrypted"]) == "RT2"
     assert fake_encryptor.decrypt(persisted["claude_access_token_encrypted"]) == "AT2"
     # Original RT must not survive.
-    assert (
-        fake_encryptor.decrypt(persisted["claude_refresh_token_encrypted"]) != "RT"
-    )
+    assert fake_encryptor.decrypt(persisted["claude_refresh_token_encrypted"]) != "RT"
 
 
 @pytest.mark.asyncio
@@ -405,12 +389,8 @@ async def test_rotate_with_missing_refresh_token_drops_existing(
     account = fake_repo.seed(account_id="claude-abc-123")
     original_rt = account.claude_refresh_token_encrypted
     oauth = _FakeOAuthClient()
-    oauth.next_result = ClaudeRefreshResult(
-        access_token="AT2", refresh_token=None, expires_in=3600
-    )
-    manager = ClaudeAuthManager(
-        repo=fake_repo, encryptor=fake_encryptor, oauth_client=oauth
-    )
+    oauth.next_result = ClaudeRefreshResult(access_token="AT2", refresh_token=None, expires_in=3600)
+    manager = ClaudeAuthManager(repo=fake_repo, encryptor=fake_encryptor, oauth_client=oauth)
 
     result = await manager.rotate_claude_access_token(account)
 
@@ -419,23 +399,17 @@ async def test_rotate_with_missing_refresh_token_drops_existing(
     # Stored refresh token should now be None — the old value was discarded.
     assert persisted["claude_refresh_token_encrypted"] is None
     # Original encrypted bytes did not survive (repo recorded a None update).
-    assert (
-        fake_repo.update_tokens_calls[-1]["refresh_token_encrypted"] is None
-    )
+    assert fake_repo.update_tokens_calls[-1]["refresh_token_encrypted"] is None
     # Original reference also gone.
     assert persisted["claude_refresh_token_encrypted"] != original_rt
 
 
 @pytest.mark.asyncio
-async def test_rotate_invalid_grant_disables_account(
-    fake_repo: _FakeRepo, fake_encryptor: _FakeEncryptor
-) -> None:
+async def test_rotate_invalid_grant_disables_account(fake_repo: _FakeRepo, fake_encryptor: _FakeEncryptor) -> None:
     account = fake_repo.seed(account_id="claude-abc-123")
     oauth = _FakeOAuthClient()
     oauth.next_error = ClaudeAuthError("invalid_grant")
-    manager = ClaudeAuthManager(
-        repo=fake_repo, encryptor=fake_encryptor, oauth_client=oauth
-    )
+    manager = ClaudeAuthManager(repo=fake_repo, encryptor=fake_encryptor, oauth_client=oauth)
 
     result = await manager.rotate_claude_access_token(account)
 
@@ -462,9 +436,7 @@ async def test_rotate_upstream_error_raises_and_does_not_disable(
     account = fake_repo.seed(account_id="claude-abc-123")
     oauth = _FakeOAuthClient()
     oauth.next_error = ClaudeUpstreamError("upstream 503")
-    manager = ClaudeAuthManager(
-        repo=fake_repo, encryptor=fake_encryptor, oauth_client=oauth
-    )
+    manager = ClaudeAuthManager(repo=fake_repo, encryptor=fake_encryptor, oauth_client=oauth)
 
     with pytest.raises(ClaudeUpstreamError):
         await manager.rotate_claude_access_token(account)
@@ -495,13 +467,13 @@ async def test_rotate_concurrent_calls_coalesce_to_single_oauth_request(
             self.refresh_calls.append(refresh_token)
             started.set()
             await release.wait()
-            return ClaudeRefreshResult(
-                access_token="AT2", refresh_token="RT2", expires_in=3600
-            )
+            return ClaudeRefreshResult(access_token="AT2", refresh_token="RT2", expires_in=3600)
 
     oauth = _SlowOAuth()
     manager = ClaudeAuthManager(
-        repo=fake_repo, encryptor=fake_encryptor, oauth_client=oauth  # type: ignore[arg-type]
+        repo=fake_repo,
+        encryptor=fake_encryptor,
+        oauth_client=oauth,  # type: ignore[arg-type]
     )
 
     task_a = asyncio.create_task(manager.rotate_claude_access_token(account))
@@ -554,7 +526,9 @@ async def test_rotate_different_accounts_run_independently(
 
     oauth = _OA()
     manager = ClaudeAuthManager(
-        repo=fake_repo, encryptor=fake_encryptor, oauth_client=oauth  # type: ignore[arg-type]
+        repo=fake_repo,
+        encryptor=fake_encryptor,
+        oauth_client=oauth,  # type: ignore[arg-type]
     )
 
     # Kick both — they should run concurrently despite the release barrier.
@@ -576,18 +550,12 @@ async def test_rotate_different_accounts_run_independently(
 
     assert len(oauth.calls) == 2
     # Both new refresh tokens persisted; rows reflect their own account ids.
-    assert fake_encryptor.decrypt(
-        fake_repo.persisted[account_a.id]["claude_refresh_token_encrypted"]
-    ).startswith("RT-")
-    assert fake_encryptor.decrypt(
-        fake_repo.persisted[account_b.id]["claude_refresh_token_encrypted"]
-    ).startswith("RT-")
+    assert fake_encryptor.decrypt(fake_repo.persisted[account_a.id]["claude_refresh_token_encrypted"]).startswith("RT-")
+    assert fake_encryptor.decrypt(fake_repo.persisted[account_b.id]["claude_refresh_token_encrypted"]).startswith("RT-")
 
 
 @pytest.mark.asyncio
-async def test_rotate_force_skips_nonexpired_check(
-    fake_repo: _FakeRepo, fake_encryptor: _FakeEncryptor
-) -> None:
+async def test_rotate_force_skips_nonexpired_check(fake_repo: _FakeRepo, fake_encryptor: _FakeEncryptor) -> None:
     """``force=True`` always invokes the OAuth refresh, even for fresh tokens.
     A ``force=False`` call on a not-yet-due account is currently treated as
     'refresh anyway' (the manager does not own the skew check — the
@@ -595,12 +563,8 @@ async def test_rotate_force_skips_nonexpired_check(
     callers out."""
     account = fake_repo.seed(account_id="claude-abc-123")
     oauth = _FakeOAuthClient()
-    oauth.next_result = ClaudeRefreshResult(
-        access_token="AT2", refresh_token="RT2", expires_in=3600
-    )
-    manager = ClaudeAuthManager(
-        repo=fake_repo, encryptor=fake_encryptor, oauth_client=oauth
-    )
+    oauth.next_result = ClaudeRefreshResult(access_token="AT2", refresh_token="RT2", expires_in=3600)
+    manager = ClaudeAuthManager(repo=fake_repo, encryptor=fake_encryptor, oauth_client=oauth)
 
     result = await manager.rotate_claude_access_token(account, force=True)
 
@@ -614,9 +578,7 @@ async def test_rotate_force_skips_nonexpired_check(
 
 
 @pytest.mark.asyncio
-async def test_disable_claude_account_sets_fields(
-    fake_repo: _FakeRepo, fake_encryptor: _FakeEncryptor
-) -> None:
+async def test_disable_claude_account_sets_fields(fake_repo: _FakeRepo, fake_encryptor: _FakeEncryptor) -> None:
     account = fake_repo.seed(account_id="claude-abc-123")
     manager = ClaudeAuthManager(repo=fake_repo, encryptor=fake_encryptor)
 
@@ -630,9 +592,7 @@ async def test_disable_claude_account_sets_fields(
 
 
 @pytest.mark.asyncio
-async def test_enable_claude_account_restores_fields(
-    fake_repo: _FakeRepo, fake_encryptor: _FakeEncryptor
-) -> None:
+async def test_enable_claude_account_restores_fields(fake_repo: _FakeRepo, fake_encryptor: _FakeEncryptor) -> None:
     account = fake_repo.seed(account_id="claude-abc-123", disabled=True)
     manager = ClaudeAuthManager(repo=fake_repo, encryptor=fake_encryptor)
 
@@ -646,9 +606,7 @@ async def test_enable_claude_account_restores_fields(
 
 
 @pytest.mark.asyncio
-async def test_disable_claude_account_is_idempotent(
-    fake_repo: _FakeRepo, fake_encryptor: _FakeEncryptor
-) -> None:
+async def test_disable_claude_account_is_idempotent(fake_repo: _FakeRepo, fake_encryptor: _FakeEncryptor) -> None:
     account = fake_repo.seed(account_id="claude-abc-123")
     manager = ClaudeAuthManager(repo=fake_repo, encryptor=fake_encryptor)
 
@@ -688,9 +646,7 @@ async def test_add_with_real_token_encryptor_never_persists_plaintext() -> None:
     plaintext tokens MUST NOT show up in the persisted row dict."""
     key = Fernet.generate_key()
     repo = _FakeRepo()
-    manager = ClaudeAuthManager(
-        repo=repo, encryptor=TokenEncryptor(key=key)
-    )
+    manager = ClaudeAuthManager(repo=repo, encryptor=TokenEncryptor(key=key))
 
     account_id = await manager.add_claude_account(
         claude_account_uuid="real-enc-1",

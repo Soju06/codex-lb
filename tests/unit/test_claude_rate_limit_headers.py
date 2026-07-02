@@ -90,9 +90,7 @@ def test_z_suffix_in_reset_value_accepted_as_utc() -> None:
 
     parsed = parse_anthropic_rate_limit_headers(headers)
 
-    assert parsed["rate_limit_requests_reset_at"] == datetime(
-        2026, 7, 1, 12, 0, 0, tzinfo=timezone.utc
-    )
+    assert parsed["rate_limit_requests_reset_at"] == datetime(2026, 7, 1, 12, 0, 0, tzinfo=timezone.utc)
 
 
 def test_explicit_offset_in_reset_value_accepted() -> None:
@@ -101,22 +99,16 @@ def test_explicit_offset_in_reset_value_accepted() -> None:
 
     parsed = parse_anthropic_rate_limit_headers(headers)
 
-    assert parsed["rate_limit_requests_reset_at"] == datetime(
-        2026, 7, 1, 12, 0, 0, tzinfo=timezone.utc
-    )
+    assert parsed["rate_limit_requests_reset_at"] == datetime(2026, 7, 1, 12, 0, 0, tzinfo=timezone.utc)
 
 
 def test_relative_form_reset_value_is_dropped() -> None:
     # notes.md §4 explicitly states relative form ("in 5m") is never emitted.
     # The parser must drop, not guess.
-    parsed = parse_anthropic_rate_limit_headers(
-        {"anthropic-ratelimit-requests-reset": "in 5m"}
-    )
+    parsed = parse_anthropic_rate_limit_headers({"anthropic-ratelimit-requests-reset": "in 5m"})
     assert "rate_limit_requests_reset_at" not in parsed
 
 
 def test_malformed_integer_remaining_is_dropped() -> None:
-    parsed = parse_anthropic_rate_limit_headers(
-        {"anthropic-ratelimit-requests-remaining": "not-a-number"}
-    )
+    parsed = parse_anthropic_rate_limit_headers({"anthropic-ratelimit-requests-remaining": "not-a-number"})
     assert "rate_limit_requests_remaining" not in parsed

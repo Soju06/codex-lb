@@ -190,9 +190,7 @@ async def lifespan(app: FastAPI):
                     await refresh_claude_accounts_active_gauge(repo)
             except Exception:
                 # Observability must NEVER crash the /metrics endpoint.
-                logger.warning(
-                    "claude.metrics.gauge_refresh_failed", exc_info=True
-                )
+                logger.warning("claude.metrics.gauge_refresh_failed", exc_info=True)
 
         async def _metrics_with_gauge_refresh(scope, receive, send):  # type: ignore[no-untyped-def]
             await _refresh_claude_pool_gauge()

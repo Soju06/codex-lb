@@ -412,9 +412,7 @@ async def test_import_keeps_same_email_different_workspaces_separate(async_clien
 
     accounts_response = await async_client.get("/api/accounts")
     workspace_accounts = [
-        entry
-        for entry in accounts_response.json()["accounts"]
-        if entry["email"] in {email_ws_one, email_ws_two}
+        entry for entry in accounts_response.json()["accounts"] if entry["email"] in {email_ws_one, email_ws_two}
     ]
     assert len(workspace_accounts) == 2
     assert {entry["workspaceId"] for entry in workspace_accounts} == {"ws_one", "ws_two"}

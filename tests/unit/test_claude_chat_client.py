@@ -183,18 +183,14 @@ async def test_send_messages_returns_upstream_body_and_headers_verbatim(
         "anthropic-ratelimit-status": "allowed",
         "request-id": "req_abc",
     }
-    transport = _FakeTransport(
-        _NonStreamingResponse(status=200, body=upstream_body, headers=upstream_headers)
-    )
+    transport = _FakeTransport(_NonStreamingResponse(status=200, body=upstream_body, headers=upstream_headers))
     client = ClaudeChatClient(
         transport=transport,  # type: ignore[arg-type]
         settings=settings,
         base_url="https://api.anthropic.com",
     )
 
-    out_body, out_headers = await client.send_messages(
-        access_token="AT", request_body=body_in
-    )
+    out_body, out_headers = await client.send_messages(access_token="AT", request_body=body_in)
 
     assert out_body == upstream_body
     assert out_headers["anthropic-ratelimit-status"] == "allowed"
@@ -211,9 +207,7 @@ async def test_send_messages_returns_upstream_body_and_headers_verbatim(
 async def test_send_messages_authorization_header_is_bearer_token(
     settings: SimpleNamespace,
 ) -> None:
-    transport = _FakeTransport(
-        _NonStreamingResponse(status=200, body={"id": "msg"}, headers={})
-    )
+    transport = _FakeTransport(_NonStreamingResponse(status=200, body={"id": "msg"}, headers={}))
     client = ClaudeChatClient(
         transport=transport,  # type: ignore[arg-type]
         settings=settings,
@@ -237,9 +231,7 @@ async def test_send_messages_authorization_header_is_bearer_token(
 async def test_send_messages_401_raises_claude_auth_error(
     settings: SimpleNamespace,
 ) -> None:
-    transport = _FakeTransport(
-        _NonStreamingResponse(status=401, body={"error": "unauthorized"})
-    )
+    transport = _FakeTransport(_NonStreamingResponse(status=401, body={"error": "unauthorized"}))
     client = ClaudeChatClient(
         transport=transport,  # type: ignore[arg-type]
         settings=settings,
@@ -289,9 +281,7 @@ async def test_send_messages_500_raises_claude_api_error(
 async def test_send_messages_accepts_extra_headers_override(
     settings: SimpleNamespace,
 ) -> None:
-    transport = _FakeTransport(
-        _NonStreamingResponse(status=200, body={"id": "msg"}, headers={})
-    )
+    transport = _FakeTransport(_NonStreamingResponse(status=200, body={"id": "msg"}, headers={}))
     client = ClaudeChatClient(
         transport=transport,  # type: ignore[arg-type]
         settings=settings,
@@ -312,9 +302,7 @@ async def test_send_messages_passthrough_invariant_request_body_is_identity(
         "model": "claude-opus-4-8",
         "messages": [{"role": "user", "content": "hi"}],
     }
-    transport = _FakeTransport(
-        _NonStreamingResponse(status=200, body={"id": "msg"}, headers={})
-    )
+    transport = _FakeTransport(_NonStreamingResponse(status=200, body={"id": "msg"}, headers={}))
     client = ClaudeChatClient(
         transport=transport,  # type: ignore[arg-type]
         settings=settings,
@@ -335,12 +323,11 @@ async def test_stream_messages_yields_sse_bytes_verbatim(
     settings: SimpleNamespace,
 ) -> None:
     sse_chunks = [
-        b"event: message_start\r\ndata: {\"type\":\"message_start\"}\r\n\r\n",
+        b'event: message_start\r\ndata: {"type":"message_start"}\r\n\r\n',
         b"event: content_block_delta\r\n"
-        b"data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\r\n\r\n",
-        b"event: message_delta\r\n"
-        b"data: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":3,\"output_tokens\":5}}\r\n\r\n",
-        b"event: message_stop\r\ndata: {\"type\":\"message_stop\"}\r\n\r\n",
+        b'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hello"}}\r\n\r\n',
+        b'event: message_delta\r\ndata: {"type":"message_delta","usage":{"input_tokens":3,"output_tokens":5}}\r\n\r\n',
+        b'event: message_stop\r\ndata: {"type":"message_stop"}\r\n\r\n',
     ]
     response = _StreamingResponse(status=200, chunks=sse_chunks, headers={})
     transport = _FakeStreamingTransport(response)
@@ -351,9 +338,7 @@ async def test_stream_messages_yields_sse_bytes_verbatim(
     )
 
     chunks: list[StreamChunk] = []
-    async for chunk in await client.stream_messages(
-        access_token="AT", request_body={"stream": True}
-    ):
+    async for chunk in await client.stream_messages(access_token="AT", request_body={"stream": True}):
         chunks.append(chunk)
 
     sse_bytes = b"".join(c.data for c in chunks if c.kind == "sse")
@@ -376,10 +361,9 @@ async def test_stream_messages_closes_response_on_completion(
     settings: SimpleNamespace,
 ) -> None:
     sse_chunks = [
-        b"event: message_start\r\ndata: {\"type\":\"message_start\"}\r\n\r\n",
-        b"event: message_delta\r\n"
-        b"data: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}\r\n\r\n",
-        b"event: message_stop\r\ndata: {\"type\":\"message_stop\"}\r\n\r\n",
+        b'event: message_start\r\ndata: {"type":"message_start"}\r\n\r\n',
+        b'event: message_delta\r\ndata: {"type":"message_delta","usage":{"input_tokens":1,"output_tokens":2}}\r\n\r\n',
+        b'event: message_stop\r\ndata: {"type":"message_stop"}\r\n\r\n',
     ]
     response = _StreamingResponse(status=200, chunks=sse_chunks, headers={})
     transport = _FakeStreamingTransport(response)
@@ -390,9 +374,7 @@ async def test_stream_messages_closes_response_on_completion(
     )
 
     chunks: list[StreamChunk] = []
-    async for chunk in await client.stream_messages(
-        access_token="AT", request_body={"stream": True}
-    ):
+    async for chunk in await client.stream_messages(access_token="AT", request_body={"stream": True}):
         chunks.append(chunk)
 
     assert response.closed is True
@@ -410,9 +392,7 @@ async def test_stream_messages_401_raises_claude_auth_error(
     )
 
     with pytest.raises(ClaudeAuthError):
-        async for _ in await client.stream_messages(
-            access_token="AT", request_body={"stream": True}
-        ):
+        async for _ in await client.stream_messages(access_token="AT", request_body={"stream": True}):
             pass
 
 
@@ -420,10 +400,9 @@ async def test_stream_messages_emits_headers_chunk_when_present(
     settings: SimpleNamespace,
 ) -> None:
     sse_chunks = [
-        b"event: message_start\r\ndata: {\"type\":\"message_start\"}\r\n\r\n",
-        b"event: message_delta\r\n"
-        b"data: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}\r\n\r\n",
-        b"event: message_stop\r\ndata: {\"type\":\"message_stop\"}\r\n\r\n",
+        b'event: message_start\r\ndata: {"type":"message_start"}\r\n\r\n',
+        b'event: message_delta\r\ndata: {"type":"message_delta","usage":{"input_tokens":1,"output_tokens":2}}\r\n\r\n',
+        b'event: message_stop\r\ndata: {"type":"message_stop"}\r\n\r\n',
     ]
     response_headers = {
         "anthropic-ratelimit-requests-remaining": "17",
@@ -438,9 +417,7 @@ async def test_stream_messages_emits_headers_chunk_when_present(
     )
 
     chunks: list[StreamChunk] = []
-    async for chunk in await client.stream_messages(
-        access_token="AT", request_body={"stream": True}
-    ):
+    async for chunk in await client.stream_messages(access_token="AT", request_body={"stream": True}):
         chunks.append(chunk)
 
     headers_chunks = [c for c in chunks if c.kind == "headers"]
@@ -454,8 +431,8 @@ async def test_stream_messages_no_message_delta_yields_no_usage_chunk(
     settings: SimpleNamespace,
 ) -> None:
     sse_chunks = [
-        b"event: message_start\r\ndata: {\"type\":\"message_start\"}\r\n\r\n",
-        b"event: message_stop\r\ndata: {\"type\":\"message_stop\"}\r\n\r\n",
+        b'event: message_start\r\ndata: {"type":"message_start"}\r\n\r\n',
+        b'event: message_stop\r\ndata: {"type":"message_stop"}\r\n\r\n',
     ]
     response = _StreamingResponse(status=200, chunks=sse_chunks, headers={})
     transport = _FakeStreamingTransport(response)
@@ -466,9 +443,7 @@ async def test_stream_messages_no_message_delta_yields_no_usage_chunk(
     )
 
     chunks: list[StreamChunk] = []
-    async for chunk in await client.stream_messages(
-        access_token="AT", request_body={"stream": True}
-    ):
+    async for chunk in await client.stream_messages(access_token="AT", request_body={"stream": True}):
         chunks.append(chunk)
 
     assert [c for c in chunks if c.kind == "usage"] == []
@@ -483,12 +458,11 @@ async def test_stream_messages_closes_response_on_consumer_break(
     # test pins the documented contract: calling ``aclose`` on the iterator
     # releases the underlying aiohttp response.
     sse_chunks = [
-        b"event: message_start\r\ndata: {\"type\":\"message_start\"}\r\n\r\n",
+        b'event: message_start\r\ndata: {"type":"message_start"}\r\n\r\n',
         b"event: content_block_delta\r\n"
-        b"data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"x\"}}\r\n\r\n",
-        b"event: message_delta\r\n"
-        b"data: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}\r\n\r\n",
-        b"event: message_stop\r\ndata: {\"type\":\"message_stop\"}\r\n\r\n",
+        b'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"x"}}\r\n\r\n',
+        b'event: message_delta\r\ndata: {"type":"message_delta","usage":{"input_tokens":1,"output_tokens":1}}\r\n\r\n',
+        b'event: message_stop\r\ndata: {"type":"message_stop"}\r\n\r\n',
     ]
     response = _StreamingResponse(status=200, chunks=sse_chunks, headers={})
     transport = _FakeStreamingTransport(response)
@@ -498,9 +472,7 @@ async def test_stream_messages_closes_response_on_consumer_break(
         base_url="https://api.anthropic.com",
     )
 
-    iterator = await client.stream_messages(
-        access_token="AT", request_body={"stream": True}
-    )
+    iterator = await client.stream_messages(access_token="AT", request_body={"stream": True})
     seen = 0
     async for chunk in iterator:
         seen += 1

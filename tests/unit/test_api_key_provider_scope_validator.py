@@ -27,7 +27,6 @@ from app.modules.api_keys.provider_auth import (
     api_key_validator_with_provider,
 )
 
-
 pytestmark = pytest.mark.unit
 
 

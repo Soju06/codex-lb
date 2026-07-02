@@ -22,11 +22,13 @@ from __future__ import annotations
 
 from typing import Any
 
-KNOWN_CLAUDE_MODELS: frozenset[str] = frozenset({
-    "claude-opus-4-8",
-    "claude-sonnet-4-6",
-    "claude-haiku-4-5-20251001",
-})
+KNOWN_CLAUDE_MODELS: frozenset[str] = frozenset(
+    {
+        "claude-opus-4-8",
+        "claude-sonnet-4-6",
+        "claude-haiku-4-5-20251001",
+    }
+)
 
 
 def list_claude_models() -> dict[str, Any]:

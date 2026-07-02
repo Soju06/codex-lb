@@ -20,16 +20,15 @@ passthrough*.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, AsyncIterator, Mapping
+from typing import Any, Mapping
 
 import pytest
 
-from app.core.clients.anthropic.errors import ClaudeAuthError, ClaudeRateLimited
 from app.core.clients.anthropic.chat import StreamChunk
+from app.core.clients.anthropic.errors import ClaudeAuthError, ClaudeRateLimited
 from app.db.models import Account, AccountStatus
 from app.modules.claude.auth_manager import (
     ClaudeAuthManager,
-    ClaudeAccountNotFound,
 )
 from app.modules.claude.service import (
     ClaudeProxyService,
@@ -65,9 +64,7 @@ class _FakeChatClient:
         access_token: str,
         request_body: Mapping[str, Any],
     ) -> tuple[dict[str, Any], dict[str, str]]:
-        self.send_messages_calls.append(
-            {"access_token": access_token, "request_body": request_body}
-        )
+        self.send_messages_calls.append({"access_token": access_token, "request_body": request_body})
         if self.send_messages_side_effect is not None:
             value = self.send_messages_side_effect.pop(0)
             if isinstance(value, BaseException):
@@ -81,17 +78,13 @@ class _FakeChatClient:
         access_token: str,
         request_body: Mapping[str, Any],
     ) -> Any:
-        self.stream_messages_call.append(
-            {"access_token": access_token, "request_body": request_body}
-        )
+        self.stream_messages_call.append({"access_token": access_token, "request_body": request_body})
         if isinstance(self.stream_messages_return, BaseException):
             raise self.stream_messages_return
         # ``stream_messages_return`` may be either a flat list of chunks
         # (single stream) OR a list of lists (sequence of streams; tests
         # for mid-stream retry consume one per call).
-        if self.stream_messages_return and isinstance(
-            self.stream_messages_return[0], list
-        ):
+        if self.stream_messages_return and isinstance(self.stream_messages_return[0], list):
             next_batch = self.stream_messages_return.pop(0)
         else:
             next_batch = list(self.stream_messages_return)
@@ -154,9 +147,7 @@ class _FakeLoadBalancer:
         sticky_key: str | None = None,
         traffic_class: Any = None,
     ) -> Any:
-        self.select_calls.append(
-            {"provider": provider, "sticky_key": sticky_key, "traffic_class": traffic_class}
-        )
+        self.select_calls.append({"provider": provider, "sticky_key": sticky_key, "traffic_class": traffic_class})
         assert self.choose is not None
         selection = self.choose(
             provider=provider,
@@ -201,9 +192,7 @@ class _FakeAccountsRepo:
         self.rate_limit_cache_writes: list[dict[str, Any]] = []
         self.last_used_at_updates: list[str] = []
 
-    async def update_rate_limit_cache(
-        self, account_id: str, fields: dict[str, object]
-    ) -> bool:
+    async def update_rate_limit_cache(self, account_id: str, fields: dict[str, object]) -> bool:
         self.rate_limit_cache_writes.append({"account_id": account_id, "fields": dict(fields)})
         return True
 
@@ -322,9 +311,7 @@ def proxy_service(deps: _Deps) -> ClaudeProxyService:
 # ---------------------------------------------------------------------------
 
 
-async def test_happy_path_returns_body_and_headers(
-    proxy_service: ClaudeProxyService, deps: _Deps
-) -> None:
+async def test_happy_path_returns_body_and_headers(proxy_service: ClaudeProxyService, deps: _Deps) -> None:
     account = _make_account()
     deps.lb.choose = lambda **_: account
     body_in = {
@@ -347,9 +334,7 @@ async def test_happy_path_returns_body_and_headers(
     assert out_headers["anthropic-ratelimit-status"] == "allowed"
 
 
-async def test_happy_path_writes_request_log_row(
-    proxy_service: ClaudeProxyService, deps: _Deps
-) -> None:
+async def test_happy_path_writes_request_log_row(proxy_service: ClaudeProxyService, deps: _Deps) -> None:
     account = _make_account()
     deps.lb.choose = lambda **_: account
     deps.chat.send_messages_return = (
@@ -382,9 +367,7 @@ async def test_happy_path_writes_request_log_row(
     assert row["status"] == "success"
 
 
-async def test_happy_path_persists_rate_limit_cache(
-    proxy_service: ClaudeProxyService, deps: _Deps
-) -> None:
+async def test_happy_path_persists_rate_limit_cache(proxy_service: ClaudeProxyService, deps: _Deps) -> None:
     account = _make_account()
     deps.lb.choose = lambda **_: account
     deps.chat.send_messages_return = (
@@ -408,9 +391,7 @@ async def test_happy_path_persists_rate_limit_cache(
     assert write["fields"]["rate_limit_status"] == "allowed"
 
 
-async def test_provider_scope_mismatch_raises(
-    proxy_service: ClaudeProxyService, deps: _Deps
-) -> None:
+async def test_provider_scope_mismatch_raises(proxy_service: ClaudeProxyService, deps: _Deps) -> None:
     deps.lb.choose = lambda **_: _make_account()
     with pytest.raises(ProviderScopeMismatch):
         await proxy_service.stream_or_complete_messages(
@@ -422,9 +403,7 @@ async def test_provider_scope_mismatch_raises(
     assert deps.chat.send_messages_calls == []
 
 
-async def test_empty_pool_raises_no_claude_accounts(
-    proxy_service: ClaudeProxyService, deps: _Deps
-) -> None:
+async def test_empty_pool_raises_no_claude_accounts(proxy_service: ClaudeProxyService, deps: _Deps) -> None:
     deps.lb.choose = lambda **_: None
     with pytest.raises(NoClaudeAccounts):
         await proxy_service.stream_or_complete_messages(
@@ -434,9 +413,7 @@ async def test_empty_pool_raises_no_claude_accounts(
         )
 
 
-async def test_request_body_passed_verbatim_no_copy(
-    proxy_service: ClaudeProxyService, deps: _Deps
-) -> None:
+async def test_request_body_passed_verbatim_no_copy(proxy_service: ClaudeProxyService, deps: _Deps) -> None:
     """Identity invariant: the request body object is forwarded unchanged.
 
     The chat client MUST receive the exact dict the caller passed in — no
@@ -467,18 +444,14 @@ async def test_request_body_passed_verbatim_no_copy(
 # ---------------------------------------------------------------------------
 
 
-async def test_first_401_triggers_rotate_and_retry(
-    proxy_service: ClaudeProxyService, deps: _Deps
-) -> None:
+async def test_first_401_triggers_rotate_and_retry(proxy_service: ClaudeProxyService, deps: _Deps) -> None:
     account = _make_account()
     deps.lb.choose = lambda **_: account
     deps.chat.send_messages_side_effect = [
         ClaudeAuthError("anthropic 401"),
         ({"id": "msg_01"}, {}),
     ]
-    deps.auth.rotate_return = _FakeRefreshResult(
-        access_token="AT2", refresh_token="RT2", expires_in=3600
-    )
+    deps.auth.rotate_return = _FakeRefreshResult(access_token="AT2", refresh_token="RT2", expires_in=3600)
 
     out_body, _headers = await proxy_service.stream_or_complete_messages(
         request_body={"model": "claude-opus-4-8"},
@@ -503,9 +476,7 @@ async def test_two_consecutive_401s_propagate_and_mark_account_unhealthy(
         ClaudeAuthError("anthropic 401"),
         ClaudeAuthError("anthropic 401"),
     ]
-    deps.auth.rotate_return = _FakeRefreshResult(
-        access_token="AT2", refresh_token="RT2", expires_in=3600
-    )
+    deps.auth.rotate_return = _FakeRefreshResult(access_token="AT2", refresh_token="RT2", expires_in=3600)
 
     with pytest.raises(ClaudeAuthError):
         await proxy_service.stream_or_complete_messages(
@@ -518,9 +489,7 @@ async def test_two_consecutive_401s_propagate_and_mark_account_unhealthy(
     assert len(deps.auth.rotate_calls) == 1
     assert len(deps.chat.send_messages_calls) == 2
     # Account was marked unhealthy via the load balancer helper.
-    assert any(
-        call["account_id"] == account.id for call in deps.lb.record_health_calls
-    )
+    assert any(call["account_id"] == account.id for call in deps.lb.record_health_calls)
 
 
 # ---------------------------------------------------------------------------
@@ -528,9 +497,7 @@ async def test_two_consecutive_401s_propagate_and_mark_account_unhealthy(
 # ---------------------------------------------------------------------------
 
 
-async def test_429_sets_cooldown_and_re_raises(
-    proxy_service: ClaudeProxyService, deps: _Deps
-) -> None:
+async def test_429_sets_cooldown_and_re_raises(proxy_service: ClaudeProxyService, deps: _Deps) -> None:
     account = _make_account()
     deps.lb.choose = lambda **_: account
     headers = {
@@ -570,15 +537,13 @@ async def test_429_sets_cooldown_and_re_raises(
 # ---------------------------------------------------------------------------
 
 
-async def test_streaming_passes_sse_bytes_through_verbatim(
-    proxy_service: ClaudeProxyService, deps: _Deps
-) -> None:
+async def test_streaming_passes_sse_bytes_through_verbatim(proxy_service: ClaudeProxyService, deps: _Deps) -> None:
     account = _make_account()
     deps.lb.choose = lambda **_: account
     sse_chunks = [
-        b"event: message_start\r\ndata: {\"type\":\"message_start\"}\r\n\r\n",
-        b"event: content_block_delta\r\ndata: {\"delta\":{\"text\":\"hi\"}}\r\n\r\n",
-        b"event: message_stop\r\ndata: {\"type\":\"message_stop\"}\r\n\r\n",
+        b'event: message_start\r\ndata: {"type":"message_start"}\r\n\r\n',
+        b'event: content_block_delta\r\ndata: {"delta":{"text":"hi"}}\r\n\r\n',
+        b'event: message_stop\r\ndata: {"type":"message_stop"}\r\n\r\n',
     ]
     deps.chat.stream_messages_return = [
         StreamChunk(kind="headers", data={"anthropic-ratelimit-status": "allowed"}),
@@ -612,9 +577,7 @@ async def test_streaming_passes_sse_bytes_through_verbatim(
     assert len(deps.repo.rate_limit_cache_writes) == 1
 
 
-async def test_streaming_mid_stream_401_rotates_and_continues(
-    proxy_service: ClaudeProxyService, deps: _Deps
-) -> None:
+async def test_streaming_mid_stream_401_rotates_and_continues(proxy_service: ClaudeProxyService, deps: _Deps) -> None:
     """Mid-stream 401 triggers one rotate-then-retry; final events flush.
 
     The proxy service must NOT write two log rows; the retry stream's
@@ -622,9 +585,7 @@ async def test_streaming_mid_stream_401_rotates_and_continues(
     """
     account = _make_account()
     deps.lb.choose = lambda **_: account
-    deps.auth.rotate_return = _FakeRefreshResult(
-        access_token="AT2", refresh_token="RT2", expires_in=3600
-    )
+    deps.auth.rotate_return = _FakeRefreshResult(access_token="AT2", refresh_token="RT2", expires_in=3600)
 
     # First stream: 1 header + 2 sse, then mid-stream 401.
     first_chunks = [
@@ -639,7 +600,7 @@ async def test_streaming_mid_stream_401_rotates_and_continues(
         StreamChunk(kind="headers", data={"anthropic-ratelimit-status": "allowed"}),
         StreamChunk(
             kind="sse",
-            data=b"event: message_delta\r\ndata: {\"usage\":{\"input_tokens\":7,\"output_tokens\":11}}\r\n\r\n",
+            data=b'event: message_delta\r\ndata: {"usage":{"input_tokens":7,"output_tokens":11}}\r\n\r\n',
         ),
         StreamChunk(kind="sse", data=b"event: message_stop\r\ndata: {}\r\n\r\n"),
         StreamChunk(kind="usage", data={"input_tokens": 7, "output_tokens": 11}),
@@ -665,9 +626,7 @@ async def test_streaming_mid_stream_401_rotates_and_continues(
     assert row["output_tokens"] == 11
 
 
-async def test_streaming_two_consecutive_401s_propagate(
-    proxy_service: ClaudeProxyService, deps: _Deps
-) -> None:
+async def test_streaming_two_consecutive_401s_propagate(proxy_service: ClaudeProxyService, deps: _Deps) -> None:
     """Mid-stream 401, retry, mid-stream 401 again → ClaudeAuthError.
 
     The account is marked unhealthy via the load balancer helper before the
@@ -675,9 +634,7 @@ async def test_streaming_two_consecutive_401s_propagate(
     """
     account = _make_account()
     deps.lb.choose = lambda **_: account
-    deps.auth.rotate_return = _FakeRefreshResult(
-        access_token="AT2", refresh_token="RT2", expires_in=3600
-    )
+    deps.auth.rotate_return = _FakeRefreshResult(access_token="AT2", refresh_token="RT2", expires_in=3600)
 
     # Both streams raise mid-stream 401 after yielding a couple of events.
     chunks_with_401 = [
@@ -698,9 +655,6 @@ async def test_streaming_two_consecutive_401s_propagate(
     # Two stream attempts; one rotate; account marked unhealthy.
     assert len(deps.chat.stream_messages_call) == 2
     assert len(deps.auth.rotate_calls) == 1
-    assert any(
-        call["account_id"] == account.id
-        for call in deps.lb.record_health_calls
-    )
+    assert any(call["account_id"] == account.id for call in deps.lb.record_health_calls)
     # No log row written on the error path.
     assert deps.logs.rows == []

@@ -102,7 +102,7 @@ async def test_get_api_key_returns_provider_scope_even_when_db_stored_single(asy
     assert create.status_code == 200
     key_id = create.json()["id"]
 
-    fetched = await async_client.get(f"/api/api-keys/")
+    fetched = await async_client.get("/api/api-keys/")
     assert fetched.status_code == 200
     rows = fetched.json()
     assert any(row["id"] == key_id and row["providerScope"] == ["claude"] for row in rows)
@@ -145,9 +145,7 @@ async def test_claude_only_api_key_reaches_claude_handler(async_client, monkeypa
     from app.db.session import SessionLocal
 
     async with SessionLocal() as session:
-        await session.execute(
-            update(DashboardSettings).values(api_key_auth_enabled=True)
-        )
+        await session.execute(update(DashboardSettings).values(api_key_auth_enabled=True))
         await session.commit()
 
     # Invalidate the cached settings so the change takes effect.

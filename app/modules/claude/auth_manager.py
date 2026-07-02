@@ -160,11 +160,7 @@ class ClaudeAuthManager:
         self._repo = repo
         self._encryptor = encryptor or TokenEncryptor()
         self._oauth_client = oauth_client
-        self._skew_seconds = (
-            skew_seconds
-            if skew_seconds is not None
-            else self._resolve_skew_seconds()
-        )
+        self._skew_seconds = skew_seconds if skew_seconds is not None else self._resolve_skew_seconds()
 
     @staticmethod
     def _resolve_skew_seconds() -> int:
@@ -200,9 +196,7 @@ class ClaudeAuthManager:
             raise ClaudeAccountAlreadyExists(claude_account_uuid)
 
         now = datetime.now(timezone.utc)
-        expires_at = now + timedelta(seconds=expires_in_seconds) - timedelta(
-            seconds=self._skew_seconds
-        )
+        expires_at = now + timedelta(seconds=expires_in_seconds) - timedelta(seconds=self._skew_seconds)
 
         row: dict[str, object] = {
             "id": f"claude-{claude_account_uuid}",
@@ -232,26 +226,18 @@ class ClaudeAuthManager:
 
     # ---------------------------------------------------- find_due_rotation
 
-    async def find_accounts_due_for_rotation(
-        self, *, skew_seconds: int | None = None
-    ) -> list[Account]:
+    async def find_accounts_due_for_rotation(self, *, skew_seconds: int | None = None) -> list[Account]:
         """List Claude accounts whose access token expires within the skew
         window. Used by the auth guardian scheduler in Phase 7.
         """
         effective_skew = skew_seconds if skew_seconds is not None else self._skew_seconds
-        return await self._repo.find_due_for_rotation(
-            skew_seconds=effective_skew, now=datetime.now(timezone.utc)
-        )
+        return await self._repo.find_due_for_rotation(skew_seconds=effective_skew, now=datetime.now(timezone.utc))
 
     # ----------------------------------------------------------- lifecycle
 
-    async def disable_claude_account(
-        self, account: Account, *, reason: str | None = None
-    ) -> bool:
+    async def disable_claude_account(self, account: Account, *, reason: str | None = None) -> bool:
         """Disable an account. Idempotent: returns False if the row is missing."""
-        return await self._repo.deactivate(
-            account.id, reason=(reason or "manual_disable")
-        )
+        return await self._repo.deactivate(account.id, reason=(reason or "manual_disable"))
 
     async def enable_claude_account(self, account: Account) -> bool:
         """Re-enable a disabled account. Idempotent no-op when already active."""
@@ -270,9 +256,7 @@ class ClaudeAuthManager:
         """
         token_bytes = account.claude_access_token_encrypted
         if token_bytes is None:
-            raise ClaudeAuthError(
-                f"no access token stored for account '{account.id}'"
-            )
+            raise ClaudeAuthError(f"no access token stored for account '{account.id}'")
         return self._encryptor.decrypt(token_bytes)
 
     async def rotate_claude_access_token(
@@ -317,9 +301,7 @@ class ClaudeAuthManager:
         )
         return result
 
-    async def _run_refresh(
-        self, account: Account, refresh_token_bytes: bytes
-    ) -> ClaudeRefreshResult:
+    async def _run_refresh(self, account: Account, refresh_token_bytes: bytes) -> ClaudeRefreshResult:
         """Inner body of :meth:`rotate_claude_access_token`.
 
         Decrypts the refresh token, calls the OAuth client, handles the
@@ -344,9 +326,7 @@ class ClaudeAuthManager:
         self._record_metric("success")
         return result
 
-    async def _deactivate_for_invalid_grant(
-        self, account: Account, error: ClaudeAuthError
-    ) -> None:
+    async def _deactivate_for_invalid_grant(self, account: Account, error: ClaudeAuthError) -> None:
         """Mark the account DEACTIVATED for ``invalid_grant`` and emit the
         structured log required by the spec.
         """
@@ -361,9 +341,7 @@ class ClaudeAuthManager:
         )
         await self._repo.deactivate(account.id, reason=reason)
 
-    async def _persist_rotated_credentials(
-        self, account: Account, result: ClaudeRefreshResult
-    ) -> None:
+    async def _persist_rotated_credentials(self, account: Account, result: ClaudeRefreshResult) -> None:
         """Persist rotated credentials for the given ``account``.
 
         Unconditional rotation: when ``result.refresh_token`` is ``None``
@@ -373,9 +351,7 @@ class ClaudeAuthManager:
         it.
         """
         new_access = self._encryptor.encrypt(result.access_token)
-        expires_at = datetime.now(timezone.utc) + timedelta(
-            seconds=result.expires_in - self._skew_seconds
-        )
+        expires_at = datetime.now(timezone.utc) + timedelta(seconds=result.expires_in - self._skew_seconds)
         new_refresh: bytes | None = None
         if result.refresh_token is not None:
             new_refresh = self._encryptor.encrypt(result.refresh_token)

@@ -23,7 +23,6 @@ import pytest
 
 from app.core.clients.anthropic.chat import StreamChunk
 
-
 pytestmark = pytest.mark.integration
 
 
@@ -58,9 +57,7 @@ class _StubProxyService:
         api_key: Any,
         request_id: str,
     ) -> tuple[dict[str, Any], dict[str, str]]:
-        self.non_stream_calls.append(
-            {"body": request_body, "request_id": request_id}
-        )
+        self.non_stream_calls.append({"body": request_body, "request_id": request_id})
         body = {"id": "msg_passed", "model": request_body.get("model")}
         headers = {
             "anthropic-ratelimit-requests-remaining": "42",
@@ -86,11 +83,11 @@ class _StubProxyService:
             )
             yield StreamChunk(
                 kind="sse",
-                data=b"event: message_start\r\ndata: {\"type\":\"message_start\"}\r\n\r\n",
+                data=b'event: message_start\r\ndata: {"type":"message_start"}\r\n\r\n',
             )
             yield StreamChunk(
                 kind="sse",
-                data=b"event: message_stop\r\ndata: {\"type\":\"message_stop\"}\r\n\r\n",
+                data=b'event: message_stop\r\ndata: {"type":"message_stop"}\r\n\r\n',
             )
             yield StreamChunk(
                 kind="usage",
@@ -172,6 +169,7 @@ async def test_post_messages_non_streaming_passes_body_and_headers(
     async_client, stubbed_claude_service, override_claude_key
 ):
     from types import SimpleNamespace
+
     override_claude_key["key"] = SimpleNamespace(
         id="key-1",
         provider_scope="codex,claude",
@@ -205,6 +203,7 @@ async def test_post_messages_streaming_returns_text_event_stream(
     async_client, stubbed_claude_service, override_claude_key
 ):
     from types import SimpleNamespace
+
     override_claude_key["key"] = SimpleNamespace(id="key-1", provider_scope="claude")
 
     body = {
@@ -233,18 +232,14 @@ async def test_post_messages_streaming_returns_text_event_stream(
 
 
 @pytest.mark.asyncio
-async def test_get_claude_accounts_returns_empty_when_no_rows(
-    async_client, stubbed_claude_service
-):
+async def test_get_claude_accounts_returns_empty_when_no_rows(async_client, stubbed_claude_service):
     response = await async_client.get("/api/claude/accounts")
     assert response.status_code == 200
     assert response.json() == []
 
 
 @pytest.mark.asyncio
-async def test_post_claude_accounts_returns_201_and_does_not_leak_tokens(
-    async_client, stubbed_claude_service
-):
+async def test_post_claude_accounts_returns_201_and_does_not_leak_tokens(async_client, stubbed_claude_service):
     payload = {
         "claudeAccountUuid": "acc-uuid-post",
         "accessToken": "sk-ant-oat01-PLAINTEXT-AT",
@@ -284,9 +279,7 @@ async def test_post_claude_accounts_returns_201_and_does_not_leak_tokens(
 
 
 @pytest.mark.asyncio
-async def test_patch_disable_then_enable_toggles_status(
-    async_client, stubbed_claude_service
-):
+async def test_patch_disable_then_enable_toggles_status(async_client, stubbed_claude_service):
     add = await async_client.post(
         "/api/claude/accounts",
         json={
@@ -312,9 +305,7 @@ async def test_patch_disable_then_enable_toggles_status(
     # status field flows through the camel serializer
     assert row["status"] in {"deactivated"}
 
-    enable = await async_client.patch(
-        f"/api/claude/accounts/{account_id}/enable"
-    )
+    enable = await async_client.patch(f"/api/claude/accounts/{account_id}/enable")
     assert enable.status_code == 204
 
     after_enable = await async_client.get("/api/claude/accounts")
@@ -329,10 +320,9 @@ async def test_patch_disable_then_enable_toggles_status(
 
 
 @pytest.mark.asyncio
-async def test_messages_rejects_codex_only_key(
-    async_client, stubbed_claude_service, override_claude_key
-):
+async def test_messages_rejects_codex_only_key(async_client, stubbed_claude_service, override_claude_key):
     from types import SimpleNamespace
+
     override_claude_key["key"] = SimpleNamespace(
         id="key-codex-only",
         provider_scope="codex",

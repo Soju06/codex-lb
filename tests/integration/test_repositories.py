@@ -10,21 +10,13 @@ from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
 from app.db.models import (
     Account,
-    AccountLimitWarmup,
     AccountStatus,
-    AdditionalUsageHistory,
-    ApiKey,
-    ApiKeyAccountAssignment,
-    HttpBridgeSessionRecord,
     RequestLog,
-    StickySession,
-    StickySessionKind,
     UsageHistory,
 )
 from app.db.session import SessionLocal
 from app.modules.accounts import repository as accounts_repository_module
 from app.modules.accounts.repository import (
-    AccountIdentityConflictError,
     AccountsRepository,
     _slot_lock_key,
     _slot_lock_keys,
@@ -150,9 +142,7 @@ async def test_accounts_upsert_with_merge_enabled_raises_conflict_on_ambiguous_e
         assert saved.plan_type == "team"
 
         rows = list(
-            (await session.execute(select(Account).where(Account.email == "dup-merge@example.com")))
-            .scalars()
-            .all()
+            (await session.execute(select(Account).where(Account.email == "dup-merge@example.com"))).scalars().all()
         )
         assert len(rows) == 1
         assert rows[0].id == "acc_same"
@@ -673,12 +663,16 @@ async def test_accounts_upsert_merge_by_chatgpt_identity_does_not_clear_workspac
     async with SessionLocal() as session:
         repo = AccountsRepository(session)
 
-        workspace = _make_account_with_chatgpt_id("acc_workspace", "workspace-reauth-ws@example.com", "chatgpt_workspace_less")
+        workspace = _make_account_with_chatgpt_id(
+            "acc_workspace", "workspace-reauth-ws@example.com", "chatgpt_workspace_less"
+        )
         workspace.workspace_id = "ws_business"
         workspace.workspace_label = "Business"
         await repo.upsert(workspace, merge_by_email=False)
 
-        reauth = _make_account_with_chatgpt_id("acc_reauth", "workspace-reauth-none@example.com", "chatgpt_workspace_less")
+        reauth = _make_account_with_chatgpt_id(
+            "acc_reauth", "workspace-reauth-none@example.com", "chatgpt_workspace_less"
+        )
         reauth.workspace_id = None
         reauth.workspace_label = None
         saved = await repo.upsert(reauth, merge_by_email=False, merge_by_chatgpt_identity=True)
@@ -737,12 +731,16 @@ async def test_accounts_upsert_merge_by_chatgpt_identity_workspace_less_reauth_u
         unknown.created_at = utcnow() - timedelta(days=30)
         await repo.upsert(unknown, merge_by_email=False)
 
-        workspace = _make_account_with_chatgpt_id("acc_workspace", "workspace-reauth-unk@example.com", "chatgpt_unknown_reauth")
+        workspace = _make_account_with_chatgpt_id(
+            "acc_workspace", "workspace-reauth-unk@example.com", "chatgpt_unknown_reauth"
+        )
         workspace.workspace_id = "ws_business"
         workspace.created_at = utcnow() - timedelta(days=10)
         await repo.upsert(workspace, merge_by_email=False)
 
-        reauth = _make_account_with_chatgpt_id("acc_reauth", "reauth-target-unknown@example.com", "chatgpt_unknown_reauth")
+        reauth = _make_account_with_chatgpt_id(
+            "acc_reauth", "reauth-target-unknown@example.com", "chatgpt_unknown_reauth"
+        )
         reauth.plan_type = "team"
         saved = await repo.upsert(reauth, merge_by_email=False, merge_by_chatgpt_identity=True)
 
@@ -774,7 +772,9 @@ async def test_accounts_upsert_merge_by_chatgpt_identity_prefers_matching_worksp
         unknown.created_at = utcnow() - timedelta(days=30)
         await repo.upsert(unknown, merge_by_email=False)
 
-        workspace = _make_account_with_chatgpt_id("acc_workspace", "workspace-pref@example.com", "chatgpt_workspace_reauth")
+        workspace = _make_account_with_chatgpt_id(
+            "acc_workspace", "workspace-pref@example.com", "chatgpt_workspace_reauth"
+        )
         workspace.workspace_id = "ws_business"
         workspace.created_at = utcnow() - timedelta(days=10)
         await repo.upsert(workspace, merge_by_email=False)

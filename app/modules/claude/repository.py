@@ -73,9 +73,7 @@ class ClaudeAccountRepository(Protocol):
     async def list_accounts(self) -> list[Account]:
         """Return all ``provider='claude'`` rows."""
 
-    async def find_due_for_rotation(
-        self, *, skew_seconds: int, now: datetime
-    ) -> list[Account]:
+    async def find_due_for_rotation(self, *, skew_seconds: int, now: datetime) -> list[Account]:
         """Return Claude accounts whose access token expires within the skew
         window (i.e. ``claude_access_token_expires_at <= now + skew_seconds``).
         Used by the auth guardian scheduler in Phase 7."""
@@ -165,14 +163,10 @@ class SqlClaudeAccountRepository:
         return result.scalar_one_or_none() is not None
 
     async def list_accounts(self) -> list[Account]:
-        result = await self._session.execute(
-            select(Account).where(Account.provider == "claude").order_by(Account.id)
-        )
+        result = await self._session.execute(select(Account).where(Account.provider == "claude").order_by(Account.id))
         return list(result.scalars().all())
 
-    async def find_due_for_rotation(
-        self, *, skew_seconds: int, now: datetime
-    ) -> list[Account]:
+    async def find_due_for_rotation(self, *, skew_seconds: int, now: datetime) -> list[Account]:
         from datetime import timedelta
 
         cutoff = now + timedelta(seconds=skew_seconds)

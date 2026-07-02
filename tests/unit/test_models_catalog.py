@@ -21,19 +21,21 @@ def test_known_claude_models_ids_start_with_claude_prefix() -> None:
 
 
 def test_known_claude_models_does_not_contain_deprecated_ids() -> None:
-    deprecated = frozenset({
-        "claude-1",
-        "claude-1.3",
-        "claude-2.0",
-        "claude-instant-1",
-        "claude-3-opus-20240229",
-        "claude-3-sonnet-20240229",
-        "claude-3-haiku-20240307",
-        "claude-3-5-sonnet-20240620",
-        "claude-3-5-sonnet-20241022",
-        "claude-3-5-haiku-20241022",
-        "claude-3-7-sonnet-20250219",
-    })
+    deprecated = frozenset(
+        {
+            "claude-1",
+            "claude-1.3",
+            "claude-2.0",
+            "claude-instant-1",
+            "claude-3-opus-20240229",
+            "claude-3-sonnet-20240229",
+            "claude-3-haiku-20240307",
+            "claude-3-5-sonnet-20240620",
+            "claude-3-5-sonnet-20241022",
+            "claude-3-5-haiku-20241022",
+            "claude-3-7-sonnet-20250219",
+        }
+    )
     assert deprecated.isdisjoint(KNOWN_CLAUDE_MODELS), (
         f"deprecated ids present: {sorted(deprecated & KNOWN_CLAUDE_MODELS)}"
     )

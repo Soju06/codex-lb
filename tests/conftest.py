@@ -76,11 +76,7 @@ def _ensure_test_db_schema_matches_alembic(sync_conn) -> None:
         if index_name in existing_indexes:
             continue
         column_list = ", ".join(columns)
-        sync_conn.execute(
-            text(
-                f"CREATE UNIQUE INDEX {index_name} ON {table_name} ({column_list}) WHERE {predicate}"
-            )
-        )
+        sync_conn.execute(text(f"CREATE UNIQUE INDEX {index_name} ON {table_name} ({column_list}) WHERE {predicate}"))
 
 
 def _recreate_test_schema(sync_conn) -> None:

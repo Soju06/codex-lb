@@ -126,26 +126,18 @@ class Account(Base):
     claude_account_uuid: Mapped[str | None] = mapped_column(Text, nullable=True)
     claude_refresh_token_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     claude_access_token_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
-    claude_access_token_expires_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    claude_access_token_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     claude_scopes: Mapped[str | None] = mapped_column(Text, nullable=True)
     claude_user_email: Mapped[str | None] = mapped_column(Text, nullable=True)
     claude_user_organization_uuid: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Anthropic rate-limit cache — see openspec/changes/add-claude-oauth-pool/specs/claude-oauth-pool/spec.md
     rate_limit_requests_remaining: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    rate_limit_requests_reset_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    rate_limit_requests_reset_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     rate_limit_input_tokens_remaining: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    rate_limit_input_tokens_reset_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    rate_limit_input_tokens_reset_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     rate_limit_output_tokens_remaining: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    rate_limit_output_tokens_reset_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    rate_limit_output_tokens_reset_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     rate_limit_status: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     status: Mapped[AccountStatus] = mapped_column(

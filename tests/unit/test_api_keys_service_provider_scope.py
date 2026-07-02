@@ -12,9 +12,7 @@ from SQLAlchemy.
 
 from __future__ import annotations
 
-import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
 from types import SimpleNamespace
 from typing import Any
 
@@ -22,11 +20,10 @@ import pytest
 
 from app.modules.api_keys.repository import _UNSET
 from app.modules.api_keys.service import (
-    ApiKeysService,
     ApiKeyCreateData,
+    ApiKeysService,
     ApiKeyUpdateData,
 )
-
 
 pytestmark = pytest.mark.unit
 

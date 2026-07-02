@@ -8,8 +8,9 @@ import pytest
 from aiohttp import web
 from sqlalchemy import select
 
-from app.db.models import ApiKeyUsageReservation
+from app.db.models import ApiKeyUsageReservation, RequestLog
 from app.db.session import SessionLocal
+from app.modules.api_keys.repository import ApiKeysRepository
 
 pytestmark = pytest.mark.integration
 
@@ -26,7 +27,24 @@ async def _create_model_source(
     name: str,
     model: str,
     base_url: str,
+    input_per_1m: float | None = None,
+    cached_input_per_1m: float | None = None,
+    output_per_1m: float | None = None,
 ) -> str:
+    model_entry: dict[str, object] = {
+        "model": model,
+        "displayName": model,
+        "contextWindow": 8192,
+        "maxOutputTokens": 1024,
+        "supportsStreaming": True,
+        "supportsTools": True,
+    }
+    if input_per_1m is not None:
+        model_entry["inputPer1M"] = input_per_1m
+    if cached_input_per_1m is not None:
+        model_entry["cachedInputPer1M"] = cached_input_per_1m
+    if output_per_1m is not None:
+        model_entry["outputPer1M"] = output_per_1m
     response = await async_client.post(
         "/api/model-sources/",
         json={
@@ -35,16 +53,7 @@ async def _create_model_source(
             "apiKey": f"token-{name}",
             "supportsChatCompletions": True,
             "supportsResponses": False,
-            "models": [
-                {
-                    "model": model,
-                    "displayName": model,
-                    "contextWindow": 8192,
-                    "maxOutputTokens": 1024,
-                    "supportsStreaming": True,
-                    "supportsTools": True,
-                }
-            ],
+            "models": [model_entry],
         },
     )
     assert response.status_code == 200
@@ -152,6 +161,81 @@ async def test_source_unreachable_returns_error_envelope_and_releases_reservatio
             select(ApiKeyUsageReservation).where(ApiKeyUsageReservation.status == "reserved")
         )
         assert result.scalars().all() == []
+
+
+@pytest.mark.asyncio
+async def test_source_usage_settles_cost_from_source_pricing(async_client, source_upstream):
+    await _enable_api_key_auth(async_client)
+
+    async def completion(_request: web.Request) -> web.Response:
+        return web.json_response(
+            {
+                "id": "chatcmpl_priced",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "priced-model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 1_000,
+                    "completion_tokens": 500,
+                    "total_tokens": 1_500,
+                    "prompt_tokens_details": {"cached_tokens": 200},
+                },
+            }
+        )
+
+    base_url = await source_upstream(completion)
+    model = "priced-model"
+    source_id = await _create_model_source(
+        async_client,
+        name="priced",
+        model=model,
+        base_url=base_url,
+        input_per_1m=2.0,
+        cached_input_per_1m=1.0,
+        output_per_1m=10.0,
+    )
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "priced-source-key",
+            "assignedSourceIds": [source_id],
+            "limits": [
+                {"limitType": "cost_usd", "limitWindow": "weekly", "maxValue": 1_000_000},
+            ],
+        },
+    )
+    assert created.status_code == 200
+    key = created.json()["key"]
+    key_id = created.json()["id"]
+
+    response = await async_client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"model": model, "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert response.status_code == 200
+
+    # billable input 800 @ $2/1M + cached 200 @ $1/1M + output 500 @ $10/1M
+    expected_cost_usd = 0.0068
+    expected_microdollars = 6_800
+
+    async with SessionLocal() as session:
+        limits = await ApiKeysRepository(session).get_limits_by_key(key_id)
+        assert len(limits) == 1
+        assert limits[0].current_value == expected_microdollars
+
+        result = await session.execute(select(RequestLog).order_by(RequestLog.requested_at.desc()))
+        latest_log = result.scalars().first()
+        assert latest_log is not None
+        assert latest_log.model_source_id == source_id
+        assert latest_log.cost_usd == pytest.approx(expected_cost_usd)
 
 
 @pytest.mark.asyncio

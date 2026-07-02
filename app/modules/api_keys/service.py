@@ -114,9 +114,7 @@ class ApiKeysRepositoryProtocol(Protocol):
     async def replace_account_assignments(
         self, key_id: str, account_ids: list[str], *, commit: bool = True
     ) -> None: ...
-    async def replace_source_assignments(
-        self, key_id: str, source_ids: list[str], *, commit: bool = True
-    ) -> None: ...
+    async def replace_source_assignments(self, key_id: str, source_ids: list[str], *, commit: bool = True) -> None: ...
 
     async def increment_limit_usage(
         self,
@@ -877,6 +875,7 @@ class ApiKeysService:
         output_tokens: int,
         cached_input_tokens: int = 0,
         service_tier: str | None = None,
+        cost_microdollars: int | None = None,
     ) -> None:
         for attempt in range(_SQLITE_BUSY_RETRY_ATTEMPTS):
             try:
@@ -888,6 +887,7 @@ class ApiKeysService:
                     cached_input_tokens=cached_input_tokens,
                     service_tier=service_tier,
                     status="finalized",
+                    cost_microdollars_override=cost_microdollars,
                 )
                 return
             except OperationalError as exc:
@@ -938,6 +938,7 @@ class ApiKeysService:
         cached_input_tokens: int | None,
         service_tier: str | None,
         status: str,
+        cost_microdollars_override: int | None = None,
     ) -> None:
         async with sqlite_writer_section():
             reservation = await self._repository.get_usage_reservation(reservation_id)
@@ -956,12 +957,16 @@ class ApiKeysService:
             effective_input_tokens = input_tokens or 0
             effective_output_tokens = output_tokens or 0
             effective_cached_input_tokens = cached_input_tokens or 0
-            cost_microdollars = _calculate_cost_microdollars(
-                model,
-                effective_input_tokens,
-                effective_output_tokens,
-                effective_cached_input_tokens,
-                service_tier,
+            cost_microdollars = (
+                cost_microdollars_override
+                if cost_microdollars_override is not None
+                else _calculate_cost_microdollars(
+                    model,
+                    effective_input_tokens,
+                    effective_output_tokens,
+                    effective_cached_input_tokens,
+                    service_tier,
+                )
             )
 
             try:

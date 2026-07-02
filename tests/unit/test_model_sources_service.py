@@ -6,7 +6,7 @@ import pytest
 
 from app.db.models import ModelSource
 from app.modules.model_sources.schemas import ModelSourceCreateRequest, ModelSourceModelInput, ModelSourceUpdateRequest
-from app.modules.model_sources.service import ModelSourceValidationError, ModelSourcesService
+from app.modules.model_sources.service import ModelSourcesService, ModelSourceValidationError
 
 
 class _FakeEncryptor:

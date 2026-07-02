@@ -261,9 +261,7 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
 
     async def replace_source_assignments(self, key_id: str, source_ids: list[str], *, commit: bool = True) -> None:
         del commit
-        assignments = [
-            ApiKeyModelSourceAssignment(api_key_id=key_id, source_id=source_id) for source_id in source_ids
-        ]
+        assignments = [ApiKeyModelSourceAssignment(api_key_id=key_id, source_id=source_id) for source_id in source_ids]
         self._source_assignments[key_id] = assignments
         row = self.rows.get(key_id)
         if row is not None:

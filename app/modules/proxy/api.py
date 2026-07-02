@@ -121,7 +121,7 @@ from app.modules.api_keys.service import (
 )
 from app.modules.firewall.repository import FirewallRepository
 from app.modules.firewall.service import FirewallRepositoryPort, FirewallService
-from app.modules.model_sources.catalog import source_models_to_upstream_models
+from app.modules.model_sources.catalog import source_model_cost_usd, source_models_to_upstream_models
 from app.modules.model_sources.forwarding import (
     ModelSourceForwardingError,
     SourceUsage,
@@ -2742,7 +2742,7 @@ async def _source_responses_response(
         )
         return _logged_error_json_response(request, 502, error, headers=rate_limit_headers)
 
-    settled = await _settle_source_reservation(reservation, model=payload.model, usage=result.usage)
+    settled = await _settle_source_reservation(reservation, source=source, model=payload.model, usage=result.usage)
     if not settled:
         await _log_source_chat_completion(
             request,
@@ -2869,7 +2869,7 @@ async def _source_chat_completion_response(
         )
         return _logged_error_json_response(request, 502, error, headers=rate_limit_headers)
 
-    settled = await _settle_source_reservation(reservation, model=model, usage=result.usage)
+    settled = await _settle_source_reservation(reservation, source=source, model=model, usage=result.usage)
     if not settled:
         await _log_source_chat_completion(
             request,
@@ -2982,7 +2982,7 @@ async def _buffered_limited_source_chat_stream_response(
         )
         return _logged_error_json_response(request, 502, error, headers=rate_limit_headers)
 
-    settled = await _settle_source_reservation(reservation, model=model, usage=usage_holder.usage)
+    settled = await _settle_source_reservation(reservation, source=source, model=model, usage=usage_holder.usage)
     if not settled:
         await _log_source_chat_completion(
             request,
@@ -3048,7 +3048,7 @@ async def _source_chat_stream_with_settlement(
         await _release_reservation(reservation)
         raise
     else:
-        settled = await _settle_source_reservation(reservation, model=model, usage=usage_holder.usage)
+        settled = await _settle_source_reservation(reservation, source=source, model=model, usage=usage_holder.usage)
         if not settled:
             status = "error"
             error_code = "usage_settlement_failed"
@@ -4505,6 +4505,7 @@ async def _finalize_image_reservation(
 async def _settle_source_reservation(
     reservation: ApiKeyUsageReservationData | None,
     *,
+    source: ModelSource,
     model: str,
     usage: SourceUsage | None,
 ) -> bool:
@@ -4514,6 +4515,7 @@ async def _settle_source_reservation(
         if usage is None:
             await _release_reservation(reservation)
             return True
+        cost_usd = _source_usage_cost_usd(source, model, usage)
         async with get_background_session() as session:
             service = ApiKeysService(ApiKeysRepository(session))
             await service.finalize_usage_reservation(
@@ -4523,6 +4525,7 @@ async def _settle_source_reservation(
                 output_tokens=usage.output_tokens,
                 cached_input_tokens=usage.cached_input_tokens,
                 service_tier=None,
+                cost_microdollars=int(cost_usd * 1_000_000) if cost_usd is not None else None,
             )
         return True
     except Exception:
@@ -4533,6 +4536,18 @@ async def _settle_source_reservation(
             exc_info=True,
         )
         return False
+
+
+def _source_usage_cost_usd(source: ModelSource, model: str, usage: SourceUsage | None) -> float | None:
+    if usage is None:
+        return None
+    return source_model_cost_usd(
+        source,
+        model,
+        input_tokens=usage.input_tokens,
+        output_tokens=usage.output_tokens,
+        cached_input_tokens=usage.cached_input_tokens,
+    )
 
 
 async def _log_source_chat_completion(
@@ -4559,6 +4574,7 @@ async def _log_source_chat_completion(
                 input_tokens=usage.input_tokens if usage is not None else None,
                 output_tokens=usage.output_tokens if usage is not None else None,
                 cached_input_tokens=usage.cached_input_tokens if usage is not None else None,
+                cost_usd=_source_usage_cost_usd(source, model, usage),
                 latency_ms=None,
                 status=status,
                 error_code=error_code,

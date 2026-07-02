@@ -247,6 +247,7 @@ class RequestLogsRepository:
         upstream_error_code: str | None = None,
         model_source_id: str | None = None,
         model_source_kind: str | None = None,
+        cost_usd: float | None = None,
         bridge_stage: str | None = None,
         request_kind: str = RequestKind.NORMAL.value,
         upstream_proxy_route_mode: str | None = None,
@@ -310,7 +311,9 @@ class RequestLogsRepository:
                 upstream_proxy_fail_closed_reason=upstream_proxy_fail_closed_reason,
                 requested_at=requested_at or utcnow(),
             )
-            log.cost_usd = calculated_cost_from_log(typing_cast(RequestLogLike, log))
+            log.cost_usd = (
+                cost_usd if cost_usd is not None else calculated_cost_from_log(typing_cast(RequestLogLike, log))
+            )
             self._session.add(log)
             try:
                 await self._session.commit()

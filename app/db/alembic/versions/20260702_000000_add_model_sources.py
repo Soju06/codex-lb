@@ -30,13 +30,13 @@ def _columns(connection: Connection, table_name: str) -> set[str]:
 def _indexes(connection: Connection, table_name: str) -> set[str]:
     if not _has_table(connection, table_name):
         return set()
-    return {index["name"] for index in sa.inspect(connection).get_indexes(table_name) if index.get("name")}
+    return {name for index in sa.inspect(connection).get_indexes(table_name) if (name := index.get("name"))}
 
 
 def _foreign_keys(connection: Connection, table_name: str) -> set[str]:
     if not _has_table(connection, table_name):
         return set()
-    return {fk["name"] for fk in sa.inspect(connection).get_foreign_keys(table_name) if fk.get("name")}
+    return {name for fk in sa.inspect(connection).get_foreign_keys(table_name) if (name := fk.get("name"))}
 
 
 def _create_index_if_missing(

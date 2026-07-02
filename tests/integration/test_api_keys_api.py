@@ -1052,6 +1052,75 @@ async def test_source_routed_chat_completion_settles_api_key_usage(async_client,
 
 
 @pytest.mark.asyncio
+async def test_source_routed_chat_completion_applies_api_key_enforcement(async_client, monkeypatch):
+    enable = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert enable.status_code == 200
+
+    model = "vllm-chat-enforced"
+    source_id = await _create_model_source(async_client, name="vllm-enforced", model=model)
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "source-enforced-key",
+            "assignedSourceIds": [source_id],
+            "enforcedReasoningEffort": "high",
+            "enforcedServiceTier": "priority",
+        },
+    )
+    assert created.status_code == 200
+    key = created.json()["key"]
+    observed: dict[str, object] = {}
+
+    async def fake_forward(source, payload):
+        observed["payload"] = dict(payload)
+        return SourceChatCompletion(
+            payload={
+                "id": "chatcmpl_source_enforced",
+                "object": "chat.completion",
+                "created": 1,
+                "model": model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+            usage=SourceUsage(input_tokens=1, output_tokens=1, cached_input_tokens=0),
+            upstream_status_code=200,
+        )
+
+    monkeypatch.setattr(proxy_api, "forward_chat_completion", fake_forward)
+
+    response = await async_client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {key}"},
+        json={
+            "model": model,
+            "messages": [{"role": "user", "content": "hi"}],
+            "service_tier": "flex",
+            "reasoning_effort": "low",
+        },
+    )
+
+    assert response.status_code == 200
+    forwarded_payload = observed["payload"]
+    assert isinstance(forwarded_payload, dict)
+    assert forwarded_payload["reasoning_effort"] == "high"
+    assert forwarded_payload["service_tier"] == "priority"
+
+
+@pytest.mark.asyncio
 async def test_backend_codex_responses_routes_responses_capable_model_source(async_client, monkeypatch):
     model = "external-codex-responses"
     source_id = await _create_model_source(

@@ -159,6 +159,30 @@ def apply_api_key_enforcement(
             )
 
 
+def apply_api_key_enforcement_to_chat_payload(
+    payload: dict[str, JsonValue],
+    api_key: ApiKeyData | None,
+) -> None:
+    """Mirror :func:`apply_api_key_enforcement` onto a chat-completions wire payload.
+
+    Source-routed chat requests forward the original chat-shaped payload
+    instead of the converted ``ResponsesRequest``, so enforced fields must be
+    applied to the outbound dict as well or the upstream receives the
+    caller's values while accounting uses the enforced ones.
+    """
+    if api_key is None:
+        return
+
+    if api_key.enforced_reasoning_effort is not None:
+        payload["reasoning_effort"] = api_key.enforced_reasoning_effort
+
+    if api_key.enforced_service_tier is not None:
+        if api_key.enforced_service_tier in _UPSTREAM_OMIT_SERVICE_TIERS:
+            payload.pop("service_tier", None)
+        else:
+            payload["service_tier"] = api_key.enforced_service_tier
+
+
 def resolve_model_alias(model: str | None) -> str | None:
     alias = _resolve_model_alias_parts(model)
     if alias is None:

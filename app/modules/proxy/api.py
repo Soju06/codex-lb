@@ -147,6 +147,7 @@ from app.modules.proxy.helpers import _rate_limit_details
 from app.modules.proxy.http_bridge_forwarding import parse_forwarded_request
 from app.modules.proxy.request_policy import (
     apply_api_key_enforcement,
+    apply_api_key_enforcement_to_chat_payload,
     enforce_strict_function_tools_format,
     enforce_strict_text_format,
     normalize_responses_request_payload,
@@ -2784,6 +2785,7 @@ async def _source_chat_completion_response(
     source_payload = payload.model_dump(mode="json", exclude_none=True)
     source_payload["model"] = model
     source_payload["stream"] = bool(payload.stream)
+    apply_api_key_enforcement_to_chat_payload(source_payload, api_key)
 
     if payload.stream:
         stream_options = source_payload.get("stream_options")

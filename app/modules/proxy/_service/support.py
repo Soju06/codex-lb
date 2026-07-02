@@ -43,7 +43,12 @@ _ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS = 10.0
 _ACCOUNT_SELECTION_RETRY_HINT_RE = re.compile(r"try again in\s+([0-9]+(?:\.[0-9]+)?)s", re.IGNORECASE)
 
 
-def _account_selection_recovery_sleep_seconds_from_message(message: str | None) -> float | None:
+def _account_selection_recovery_sleep_seconds_from_message(
+    message: str | None,
+    *,
+    error_code: str | None = None,
+    suppress_uncoded_local_selector_hint: bool = False,
+) -> float | None:
     message = (message or "").strip()
     if not message:
         return None
@@ -55,6 +60,10 @@ def _account_selection_recovery_sleep_seconds_from_message(message: str | None) 
         or "no accounts with a plan" in lowered
         or "no accounts with available additional quota" in lowered
         or "no fresh additional quota data" in lowered
+        or (
+            (error_code == "no_accounts" or (suppress_uncoded_local_selector_hint and error_code is None))
+            and lowered.startswith("rate limit exceeded. try again in")
+        )
     ):
         return None
 
@@ -76,7 +85,11 @@ def _account_selection_recovery_sleep_seconds_from_message(message: str | None) 
 
 
 def _account_selection_recovery_sleep_seconds(selection: AccountSelection) -> float | None:
-    return _account_selection_recovery_sleep_seconds_from_message(selection.error_message)
+    return _account_selection_recovery_sleep_seconds_from_message(
+        selection.error_message,
+        error_code=selection.error_code,
+        suppress_uncoded_local_selector_hint=selection.account is None,
+    )
 
 
 def _account_capacity_wait_payload(

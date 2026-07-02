@@ -85,11 +85,31 @@ def test_websocket_archive_request_context_clears_unmatched_frame_request_id():
 def test_account_selection_recovery_sleep_uses_retry_hint_with_bounds():
     selection = AccountSelection(
         account=None,
-        error_message="Rate limit exceeded. Try again in 9999s",
+        error_message="Account capacity temporarily unavailable. Try again in 9999s",
         error_code="no_accounts",
     )
 
     assert _account_selection_recovery_sleep_seconds(selection) == 300.0
+
+
+def test_account_selection_recovery_sleep_ignores_local_rate_limit_retry_hint():
+    selection = AccountSelection(
+        account=None,
+        error_message="Rate limit exceeded. Try again in 120s",
+        error_code="no_accounts",
+    )
+
+    assert _account_selection_recovery_sleep_seconds(selection) is None
+
+
+def test_account_selection_recovery_sleep_ignores_uncoded_local_rate_limit_retry_hint():
+    selection = AccountSelection(
+        account=None,
+        error_message="Rate limit exceeded. Try again in 120s",
+        error_code=None,
+    )
+
+    assert _account_selection_recovery_sleep_seconds(selection) is None
 
 
 def test_account_selection_recovery_sleep_treats_workspace_spend_cap_as_recoverable():
@@ -170,7 +190,7 @@ async def test_account_selection_recovery_sleep_clamps_to_remaining_budget(monke
     waited = await _sleep_for_account_selection_recovery(
         AccountSelection(
             account=None,
-            error_message="Rate limit exceeded. Try again in 120s",
+            error_message="Account capacity temporarily unavailable. Try again in 120s",
             error_code="no_accounts",
         ),
         request_id="req_budget_clamp",
@@ -194,7 +214,7 @@ async def test_account_selection_recovery_sleep_refuses_exhausted_budget(monkeyp
     waited = await _sleep_for_account_selection_recovery(
         AccountSelection(
             account=None,
-            error_message="Rate limit exceeded. Try again in 120s",
+            error_message="Account capacity temporarily unavailable. Try again in 120s",
             error_code="no_accounts",
         ),
         request_id="req_budget_exhausted",

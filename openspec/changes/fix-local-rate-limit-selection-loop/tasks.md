@@ -1,0 +1,4 @@
+- [x] Ignore the local balancer `Rate limit exceeded. Try again in ...` selector message in account-capacity recovery.
+- [x] Keep generic retry hints recoverable and bounded.
+- [x] Run targeted backend tests and lint.
+- [x] Validate the OpenSpec change.

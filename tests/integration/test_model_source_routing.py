@@ -271,6 +271,60 @@ async def test_source_usage_settles_cost_from_source_pricing(async_client, sourc
 
 
 @pytest.mark.asyncio
+async def test_limited_key_settles_usage_from_crlf_stream(async_client, source_upstream):
+    await _enable_api_key_auth(async_client)
+    frames = (
+        b'data: {"id":"chatcmpl_crlf","object":"chat.completion.chunk","choices":'
+        b'[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}\r\n\r\n'
+        b'data: {"id":"chatcmpl_crlf","object":"chat.completion.chunk","choices":[],'
+        b'"usage":{"prompt_tokens":9,"completion_tokens":6,"total_tokens":15}}\r\n\r\n'
+        b"data: [DONE]\r\n\r\n"
+    )
+
+    async def stream_handler(request: web.Request) -> web.StreamResponse:
+        response = web.StreamResponse(status=200, headers={"Content-Type": "text/event-stream"})
+        await response.prepare(request)
+        await response.write(frames)
+        await response.write_eof()
+        return response
+
+    base_url = await source_upstream(stream_handler)
+    model = "source-crlf-model"
+    source_id = await _create_model_source(async_client, name="crlf", model=model, base_url=base_url)
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "crlf-source-key",
+            "assignedSourceIds": [source_id],
+            "limits": [
+                {"limitType": "total_tokens", "limitWindow": "weekly", "maxValue": 1_000},
+            ],
+        },
+    )
+    assert created.status_code == 200
+    key = created.json()["key"]
+    key_id = created.json()["id"]
+
+    async with async_client.stream(
+        "POST",
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {key}"},
+        json={
+            "model": model,
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": True,
+        },
+    ) as response:
+        assert response.status_code == 200
+        _ = b"".join([chunk async for chunk in response.aiter_bytes()])
+
+    async with SessionLocal() as session:
+        limits = await ApiKeysRepository(session).get_limits_by_key(key_id)
+        assert len(limits) == 1
+        assert limits[0].current_value == 15
+
+
+@pytest.mark.asyncio
 async def test_source_stream_success_passes_through_sse(async_client, source_upstream):
     frames = (
         b'data: {"id":"chatcmpl_1","object":"chat.completion.chunk","choices":'

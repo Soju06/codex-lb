@@ -323,16 +323,26 @@ def _usage_from_responses_mapping(usage: Mapping[str, JsonValue]) -> SourceUsage
 
 
 class SourceStreamUsageParser:
+    # A single SSE frame carrying usage is tiny; anything past this cap means
+    # the upstream is not producing frame boundaries we recognize, and the
+    # parser must not buffer the whole stream in memory.
+    _MAX_BUFFER_CHARS = 1_048_576
+
     def __init__(self, usage_holder: SourceUsageHolder, *, response_shape: str) -> None:
         self._usage_holder = usage_holder
         self._response_shape = response_shape
         self._buffer = ""
 
     def feed(self, chunk: bytes) -> None:
-        self._buffer += chunk.decode("utf-8", errors="ignore")
+        # SSE permits CRLF (and bare CR) line endings; normalize so frame
+        # detection below only has to handle "\n\n".
+        text = chunk.decode("utf-8", errors="ignore").replace("\r\n", "\n").replace("\r", "\n")
+        self._buffer += text
         while "\n\n" in self._buffer:
             frame, self._buffer = self._buffer.split("\n\n", 1)
             self._capture_frame(frame)
+        if len(self._buffer) > self._MAX_BUFFER_CHARS:
+            self._buffer = self._buffer[-self._MAX_BUFFER_CHARS :]
 
     def _capture_frame(self, frame: str) -> None:
         for line in frame.splitlines():

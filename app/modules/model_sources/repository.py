@@ -120,6 +120,9 @@ class ModelSourcesRepository:
             await self._session.commit()
             await self._session.refresh(source, attribute_names=["models"])
 
+    async def refresh_models(self, source: ModelSource) -> None:
+        await self._session.refresh(source, attribute_names=["models"])
+
     async def commit(self) -> None:
         await self._session.commit()
 

@@ -164,6 +164,38 @@ async def test_source_unreachable_returns_error_envelope_and_releases_reservatio
 
 
 @pytest.mark.asyncio
+async def test_patch_model_source_returns_updated_model_list(async_client):
+    source_id = await _create_model_source(
+        async_client,
+        name="patchable",
+        model="old-model",
+        base_url="http://127.0.0.1:9/v1",
+    )
+
+    response = await async_client.patch(
+        f"/api/model-sources/{source_id}",
+        json={
+            "models": [
+                {
+                    "model": "new-model",
+                    "displayName": "new-model",
+                    "supportsStreaming": True,
+                    "supportsTools": False,
+                }
+            ]
+        },
+    )
+
+    assert response.status_code == 200
+    assert [entry["model"] for entry in response.json()["models"]] == ["new-model"]
+
+    listed = await async_client.get("/api/model-sources/")
+    assert listed.status_code == 200
+    listed_source = next(row for row in listed.json()["sources"] if row["id"] == source_id)
+    assert [entry["model"] for entry in listed_source["models"]] == ["new-model"]
+
+
+@pytest.mark.asyncio
 async def test_source_usage_settles_cost_from_source_pricing(async_client, source_upstream):
     await _enable_api_key_auth(async_client)
 

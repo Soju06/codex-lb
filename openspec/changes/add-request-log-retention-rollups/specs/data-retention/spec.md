@@ -64,3 +64,19 @@ continuity requests.
 - **GIVEN** a raw request log has been pruned after being rolled into a daily aggregate
 - **WHEN** a later request tries to resolve that pruned `previous_response_id`
 - **THEN** the continuity lookup does not use the aggregate row as owner proof
+
+### Requirement: Reports read aggregate history after pruning
+
+Report summary, daily, model, account, active-account, and comparison coverage
+queries SHALL combine recent raw `request_logs` rows with older
+`request_log_daily_aggregates` rows so pruning raw history does not remove
+historical report totals.
+
+#### Scenario: Pruned report history remains visible
+
+- **GIVEN** old raw request logs have been rolled into daily aggregate rows and deleted
+- **AND** newer raw request logs remain in `request_logs`
+- **WHEN** an operator views reports over a range spanning both periods
+- **THEN** report totals include both the aggregate rows and the raw rows
+- **AND** model and account breakdowns include the aggregate rows
+- **AND** comparison coverage can use aggregate history as evidence of prior activity

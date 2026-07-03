@@ -7,7 +7,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.crypto import TokenEncryptor
-from app.db.models import Account, AccountStatus, Base, RequestLog
+from app.db.models import Account, AccountStatus, Base, RequestLog, RequestLogDailyAggregate
 from app.modules.reports.repository import DailyReportRangeTooLargeError, ReportsRepository
 
 pytestmark = pytest.mark.unit
@@ -40,6 +40,52 @@ def _make_account(account_id: str, email: str) -> Account:
         last_refresh=datetime.now(timezone.utc).replace(tzinfo=None),
         status=AccountStatus.ACTIVE,
         deactivation_reason=None,
+    )
+
+
+def _make_daily_aggregate(
+    *,
+    aggregate_key: str,
+    bucket_date: date,
+    account_id: str | None = "acc_reports_rollup",
+    model: str = "gpt-5.1",
+    status: str = "success",
+    request_count: int = 1,
+    error_count: int = 0,
+    input_tokens: int = 10,
+    output_tokens: int = 4,
+    cached_input_tokens: int = 2,
+    cost_usd: float = 0.25,
+) -> RequestLogDailyAggregate:
+    return RequestLogDailyAggregate(
+        aggregate_key=aggregate_key,
+        bucket_date=bucket_date,
+        api_key_id="api_key_reports_rollup",
+        account_id=account_id,
+        model=model,
+        status=status,
+        error_code="rate_limit_exceeded" if error_count else None,
+        request_kind="normal",
+        service_tier="priority",
+        requested_service_tier="priority",
+        actual_service_tier="priority",
+        transport="websocket",
+        upstream_transport="websocket",
+        source="codex",
+        useragent_group="CodexCLI",
+        plan_type="plus",
+        is_deleted=False,
+        request_count=request_count,
+        error_count=error_count,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cached_input_tokens=cached_input_tokens,
+        reasoning_tokens=0,
+        cost_usd=cost_usd,
+        latency_ms_sum=0,
+        latency_ms_count=0,
+        latency_first_token_ms_sum=0,
+        latency_first_token_ms_count=0,
     )
 
 
@@ -148,6 +194,93 @@ async def test_aggregate_daily_rows_supports_ranges_longer_than_sqlite_compound_
     assert rows[0].cost_usd == 0.25
     assert rows[1].requests == 1
     assert rows[1].cost_usd == 0.1
+
+
+@pytest.mark.asyncio
+async def test_report_aggregates_include_daily_rollups_and_recent_raw_rows(
+    async_session: AsyncSession,
+) -> None:
+    repo = ReportsRepository(async_session)
+    async_session.add(_make_account("acc_reports_rollup", "reports-rollup@example.com"))
+    async_session.add(_make_account("acc_reports_recent", "reports-recent@example.com"))
+    async_session.add_all(
+        [
+            _make_daily_aggregate(
+                aggregate_key="reports-rollup-old-success",
+                bucket_date=date(2026, 5, 31),
+                account_id="acc_reports_rollup",
+                model="gpt-5.1",
+                request_count=3,
+                error_count=0,
+                input_tokens=30,
+                output_tokens=12,
+                cached_input_tokens=6,
+                cost_usd=0.75,
+            ),
+            _make_daily_aggregate(
+                aggregate_key="reports-rollup-old-error",
+                bucket_date=date(2026, 6, 1),
+                account_id=None,
+                model="gpt-5.2",
+                status="error",
+                request_count=2,
+                error_count=2,
+                input_tokens=8,
+                output_tokens=1,
+                cached_input_tokens=0,
+                cost_usd=0.2,
+            ),
+            RequestLog(
+                account_id="acc_reports_recent",
+                request_id="report-recent-raw",
+                requested_at=datetime(2026, 6, 2, 12, 0, tzinfo=timezone.utc).replace(tzinfo=None),
+                model="gpt-5.1",
+                status="success",
+                input_tokens=5,
+                output_tokens=5,
+                cached_input_tokens=1,
+                cost_usd=0.1,
+                request_kind="normal",
+                source="codex",
+            ),
+        ]
+    )
+    await async_session.commit()
+
+    start_at = datetime(2026, 5, 31, tzinfo=timezone.utc).replace(tzinfo=None)
+    end_at = datetime(2026, 6, 3, tzinfo=timezone.utc).replace(tzinfo=None)
+
+    summary = await repo.aggregate_summary(start_at, end_at)
+    daily_rows = await repo.aggregate_daily_rows(date(2026, 5, 31), date(2026, 6, 2), timezone.utc)
+    model_rows = await repo.aggregate_by_model(start_at, end_at)
+    account_rows = await repo.aggregate_by_account(start_at, end_at)
+    active_accounts = await repo.count_active_accounts(start_at, end_at)
+    earliest = await repo.earliest_report_activity_at()
+
+    assert summary.total_requests == 6
+    assert summary.total_errors == 2
+    assert summary.total_input_tokens == 43
+    assert summary.total_output_tokens == 18
+    assert summary.total_cached_tokens == 7
+    assert summary.total_cost_usd == pytest.approx(1.05)
+    assert summary.active_accounts == 2
+
+    assert [(row.date, row.requests, row.error_count) for row in daily_rows] == [
+        ("2026-05-31", 3, 0),
+        ("2026-06-01", 2, 2),
+        ("2026-06-02", 1, 0),
+    ]
+    assert [(row.model, row.cost_usd) for row in model_rows] == [
+        ("gpt-5.1", pytest.approx(0.85)),
+        ("gpt-5.2", pytest.approx(0.2)),
+    ]
+    assert [(row.account_id, row.request_count) for row in account_rows] == [
+        ("acc_reports_rollup", 3),
+        (None, 2),
+        ("acc_reports_recent", 1),
+    ]
+    assert active_accounts == 2
+    assert earliest == datetime(2026, 5, 31)
 
 
 @pytest.mark.asyncio

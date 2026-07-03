@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import timedelta
+from datetime import date, timedelta
 
 import pytest
 from sqlalchemy import select
@@ -17,6 +17,7 @@ from app.db.models import (
     ApiKeyAccountAssignment,
     HttpBridgeSessionRecord,
     RequestLog,
+    RequestLogDailyAggregate,
     StickySession,
     StickySessionKind,
     UsageHistory,
@@ -28,6 +29,7 @@ from app.modules.accounts.repository import (
     _slot_lock_key,
     _slot_lock_keys,
 )
+from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.repository import UsageRepository
 
@@ -47,6 +49,262 @@ def _make_account(account_id: str, email: str) -> Account:
         status=AccountStatus.ACTIVE,
         deactivation_reason=None,
     )
+
+
+def _make_request_log_daily_aggregate(
+    aggregate_key: str,
+    *,
+    bucket_date: date = date(2026, 5, 1),
+    api_key_id: str | None = None,
+    account_id: str | None = None,
+    request_kind: str = "real",
+    is_deleted: bool = False,
+    request_count: int = 1,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    cached_input_tokens: int = 0,
+    reasoning_tokens: int = 0,
+    cost_usd: float = 0.0,
+) -> RequestLogDailyAggregate:
+    return RequestLogDailyAggregate(
+        aggregate_key=aggregate_key,
+        bucket_date=bucket_date,
+        api_key_id=api_key_id,
+        account_id=account_id,
+        model="gpt-5.1",
+        status="success",
+        error_code=None,
+        request_kind=request_kind,
+        service_tier=None,
+        requested_service_tier=None,
+        actual_service_tier=None,
+        transport=None,
+        upstream_transport=None,
+        source=None,
+        useragent_group=None,
+        plan_type=None,
+        is_deleted=is_deleted,
+        request_count=request_count,
+        error_count=0,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cached_input_tokens=cached_input_tokens,
+        reasoning_tokens=reasoning_tokens,
+        cost_usd=cost_usd,
+        latency_ms_sum=0,
+        latency_ms_count=0,
+        latency_first_token_ms_sum=0,
+        latency_first_token_ms_count=0,
+    )
+
+
+@pytest.mark.asyncio
+async def test_api_key_usage_summary_includes_request_log_rollups(db_setup):
+    async with SessionLocal() as session:
+        logs_repo = RequestLogsRepository(session)
+        api_keys_repo = ApiKeysRepository(session)
+        session.add(_make_account("acc_api_rollup", "api-rollup@example.com"))
+        await session.commit()
+        raw_log = await logs_repo.add_log(
+            account_id="acc_api_rollup",
+            request_id="req_api_rollup_raw",
+            model="gpt-5.1",
+            input_tokens=10,
+            output_tokens=None,
+            reasoning_tokens=5,
+            cached_input_tokens=3,
+            latency_ms=50,
+            status="success",
+            error_code=None,
+            api_key_id="key-api-rollup",
+        )
+        raw_log.cost_usd = 0.2
+        warmup_log = await logs_repo.add_log(
+            account_id="acc_api_rollup",
+            request_id="req_api_rollup_warmup",
+            model="gpt-5.1",
+            input_tokens=999,
+            output_tokens=999,
+            cached_input_tokens=999,
+            latency_ms=50,
+            status="success",
+            error_code=None,
+            api_key_id="key-api-rollup",
+            request_kind="warmup",
+        )
+        warmup_log.cost_usd = 9.99
+        session.add(
+            _make_request_log_daily_aggregate(
+                "api-rollup-normal",
+                api_key_id="key-api-rollup",
+                account_id="acc_api_rollup",
+                request_count=2,
+                input_tokens=100,
+                output_tokens=40,
+                cached_input_tokens=90,
+                reasoning_tokens=7,
+                cost_usd=1.3,
+            )
+        )
+        session.add(
+            _make_request_log_daily_aggregate(
+                "api-rollup-warmup",
+                api_key_id="key-api-rollup",
+                account_id="acc_api_rollup",
+                request_kind="limit_warmup",
+                request_count=5,
+                input_tokens=999,
+                output_tokens=999,
+                cached_input_tokens=999,
+                cost_usd=9.99,
+            )
+        )
+        await session.commit()
+
+        by_key = await api_keys_repo.list_usage_summary_by_key()
+        single = await api_keys_repo.get_usage_summary_by_key_id("key-api-rollup")
+
+        assert by_key["key-api-rollup"] == single
+        assert single.request_count == 3
+        assert single.total_tokens == 155
+        assert single.cached_input_tokens == 93
+        assert single.total_cost_usd == pytest.approx(1.5, abs=1e-6)
+
+
+@pytest.mark.asyncio
+async def test_account_request_usage_summary_includes_request_log_rollups(db_setup):
+    async with SessionLocal() as session:
+        account = _make_account("acc_account_rollup", "account-rollup@example.com")
+        session.add(account)
+        await session.commit()
+
+        logs_repo = RequestLogsRepository(session)
+        accounts_repo = AccountsRepository(session)
+        raw_log = await logs_repo.add_log(
+            account_id=account.id,
+            request_id="req_account_rollup_raw",
+            model="gpt-5.1",
+            input_tokens=20,
+            output_tokens=4,
+            cached_input_tokens=6,
+            latency_ms=50,
+            status="success",
+            error_code=None,
+            api_key_id="key-account-rollup",
+        )
+        raw_log.cost_usd = 0.3
+        session.add(
+            _make_request_log_daily_aggregate(
+                "account-rollup-normal",
+                api_key_id="key-account-rollup",
+                account_id=account.id,
+                request_count=2,
+                input_tokens=100,
+                output_tokens=30,
+                cached_input_tokens=70,
+                cost_usd=2.2,
+            )
+        )
+        session.add(
+            _make_request_log_daily_aggregate(
+                "account-rollup-deleted",
+                api_key_id="key-account-rollup",
+                account_id=account.id,
+                is_deleted=True,
+                request_count=5,
+                input_tokens=999,
+                output_tokens=999,
+                cached_input_tokens=999,
+                cost_usd=9.99,
+            )
+        )
+        session.add(
+            _make_request_log_daily_aggregate(
+                "account-rollup-warmup",
+                api_key_id="key-account-rollup",
+                account_id=account.id,
+                request_kind="warmup",
+                request_count=5,
+                input_tokens=999,
+                output_tokens=999,
+                cached_input_tokens=999,
+                cost_usd=9.99,
+            )
+        )
+        await session.commit()
+
+        usage = await accounts_repo.list_request_usage_summary_by_account([account.id])
+        summary = usage[account.id]
+
+        assert summary.request_count == 3
+        assert summary.total_tokens == 154
+        assert summary.cached_input_tokens == 76
+        assert summary.total_cost_usd == pytest.approx(2.5, abs=1e-6)
+
+
+@pytest.mark.asyncio
+async def test_account_delete_soft_deletes_request_log_rollups(db_setup):
+    async with SessionLocal() as session:
+        account = _make_account("acc_soft_delete_rollup", "soft-delete-rollup@example.com")
+        session.add(account)
+        session.add(
+            _make_request_log_daily_aggregate(
+                "soft-delete-rollup",
+                api_key_id="key-soft-delete-rollup",
+                account_id=account.id,
+                request_count=2,
+                input_tokens=100,
+                output_tokens=30,
+                cached_input_tokens=70,
+                cost_usd=2.2,
+            )
+        )
+        await session.commit()
+
+        deleted = await AccountsRepository(session).delete(account.id, delete_history=False)
+
+        assert deleted is True
+        rollup = (
+            await session.execute(
+                select(RequestLogDailyAggregate).where(
+                    RequestLogDailyAggregate.aggregate_key == "soft-delete-rollup"
+                )
+            )
+        ).scalar_one()
+        assert rollup.account_id is None
+        assert rollup.is_deleted is True
+
+
+@pytest.mark.asyncio
+async def test_account_delete_hard_deletes_request_log_rollups(db_setup):
+    async with SessionLocal() as session:
+        account = _make_account("acc_hard_delete_rollup", "hard-delete-rollup@example.com")
+        session.add(account)
+        session.add(
+            _make_request_log_daily_aggregate(
+                "hard-delete-rollup",
+                api_key_id="key-hard-delete-rollup",
+                account_id=account.id,
+                request_count=2,
+                input_tokens=100,
+                output_tokens=30,
+                cached_input_tokens=70,
+                cost_usd=2.2,
+            )
+        )
+        await session.commit()
+
+        deleted = await AccountsRepository(session).delete(account.id, delete_history=True)
+
+        assert deleted is True
+        rollup_count = (
+            await session.execute(
+                select(RequestLogDailyAggregate).where(
+                    RequestLogDailyAggregate.aggregate_key == "hard-delete-rollup"
+                )
+            )
+        ).scalar_one_or_none()
+        assert rollup_count is None
 
 
 @pytest.mark.asyncio

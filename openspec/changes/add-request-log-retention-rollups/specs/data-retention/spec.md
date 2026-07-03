@@ -80,3 +80,50 @@ historical report totals.
 - **THEN** report totals include both the aggregate rows and the raw rows
 - **AND** model and account breakdowns include the aggregate rows
 - **AND** comparison coverage can use aggregate history as evidence of prior activity
+
+### Requirement: Dashboard lifetime usage reads aggregate history after pruning
+
+Dashboard lifetime usage summaries that intentionally span all retained history
+SHALL combine recent raw `request_logs` rows with older
+`request_log_daily_aggregates` rows. API-key lifetime usage summaries MUST
+include aggregate rows for the same API key. Account request-usage summaries
+MUST include aggregate rows for the same account only when the aggregate row is
+not marked deleted.
+
+#### Scenario: API-key lifetime usage includes aggregate history
+
+- **GIVEN** old API-key request logs have been rolled into daily aggregate rows and deleted
+- **AND** newer raw request logs remain for the same API key
+- **WHEN** an operator views API-key lifetime usage
+- **THEN** the request, token, cached-token, and cost totals include both the aggregate rows and the raw rows
+- **AND** warmup aggregate rows are excluded from the usage totals
+
+#### Scenario: Account request usage includes non-deleted aggregate history
+
+- **GIVEN** old account request logs have been rolled into daily aggregate rows and deleted
+- **AND** newer raw request logs remain for the same account
+- **WHEN** an operator views account request usage
+- **THEN** the request, token, cached-token, and cost totals include both the non-deleted aggregate rows and the raw rows
+- **AND** aggregate rows marked deleted or warmup are excluded from account request usage
+
+### Requirement: Account deletion applies to aggregate history
+
+Account deletion SHALL apply the same history semantics to
+`request_log_daily_aggregates` rows as it applies to raw `request_logs` rows.
+When account history is preserved, aggregate rows for the deleted account MUST
+be disassociated from the account and marked deleted. When account history is
+hard-deleted, aggregate rows for that account MUST be deleted.
+
+#### Scenario: Soft delete preserves aggregate totals without account attribution
+
+- **GIVEN** aggregate rows exist for an account
+- **WHEN** the account is deleted without deleting history
+- **THEN** those aggregate rows remain
+- **AND** their account id is cleared
+- **AND** they are marked deleted
+
+#### Scenario: Hard delete removes aggregate rows
+
+- **GIVEN** aggregate rows exist for an account
+- **WHEN** the account is deleted with history deletion enabled
+- **THEN** those aggregate rows are deleted

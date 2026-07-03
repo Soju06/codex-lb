@@ -21,6 +21,7 @@ from app.db.models import (
     DashboardSettings,
     HttpBridgeSessionRecord,
     RequestLog,
+    RequestLogDailyAggregate,
     StickySession,
     UsageHistory,
 )
@@ -38,6 +39,39 @@ class AccountRequestUsageSummary:
     total_tokens: int
     cached_input_tokens: int
     total_cost_usd: float
+
+
+@dataclass(slots=True)
+class _AccountUsageSummaryParts:
+    request_count: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cached_input_tokens: int = 0
+    total_cost_usd: float = 0.0
+
+    def add(
+        self,
+        *,
+        request_count: int | None,
+        input_tokens: int | None,
+        output_tokens: int | None,
+        cached_input_tokens: int | None,
+        total_cost_usd: float | None,
+    ) -> None:
+        self.request_count += int(request_count or 0)
+        self.input_tokens += int(input_tokens or 0)
+        self.output_tokens += int(output_tokens or 0)
+        self.cached_input_tokens += int(cached_input_tokens or 0)
+        self.total_cost_usd += float(total_cost_usd or 0.0)
+
+    def to_summary(self) -> AccountRequestUsageSummary:
+        cached_sum = max(0, min(self.cached_input_tokens, self.input_tokens))
+        return AccountRequestUsageSummary(
+            request_count=self.request_count,
+            total_tokens=self.input_tokens + self.output_tokens,
+            cached_input_tokens=cached_sum,
+            total_cost_usd=round(self.total_cost_usd, 6),
+        )
 
 
 class AccountIdentityConflictError(Exception):
@@ -71,7 +105,7 @@ class AccountsRepository:
         self,
         account_ids: list[str] | None = None,
     ) -> dict[str, AccountRequestUsageSummary]:
-        summaries: dict[str, AccountRequestUsageSummary] = {}
+        parts_by_account: dict[str, _AccountUsageSummaryParts] = {}
         output_tokens_expr = func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)
         conditions: list = [
             RequestLog.request_kind.not_in(("warmup", "limit_warmup")),
@@ -118,19 +152,53 @@ class AccountsRepository:
         ) in result.all():
             if not account_id:
                 continue
-            input_sum = int(input_tokens or 0)
-            output_sum = int(output_tokens or 0)
-            cached_sum = int(cached_input_tokens or 0)
-            cached_sum = max(0, min(cached_sum, input_sum))
-            return_row = AccountRequestUsageSummary(
-                request_count=int(request_count or 0),
-                total_tokens=input_sum + output_sum,
-                cached_input_tokens=cached_sum,
-                total_cost_usd=round(float(total_cost_usd or 0.0), 6),
+            parts_by_account.setdefault(account_id, _AccountUsageSummaryParts()).add(
+                request_count=request_count,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cached_input_tokens=cached_input_tokens,
+                total_cost_usd=total_cost_usd,
             )
-            summaries[account_id] = return_row
 
-        return summaries
+        rollup_conditions: list = [
+            RequestLogDailyAggregate.request_kind.not_in(("warmup", "limit_warmup")),
+            RequestLogDailyAggregate.is_deleted.is_(False),
+            RequestLogDailyAggregate.account_id.is_not(None),
+        ]
+        if account_ids:
+            rollup_conditions.append(RequestLogDailyAggregate.account_id.in_(account_ids))
+        rollup_stmt = (
+            select(
+                RequestLogDailyAggregate.account_id,
+                func.coalesce(func.sum(RequestLogDailyAggregate.request_count), 0).label("request_count"),
+                func.coalesce(func.sum(RequestLogDailyAggregate.input_tokens), 0).label("input_tokens"),
+                func.coalesce(func.sum(RequestLogDailyAggregate.output_tokens), 0).label("output_tokens"),
+                func.coalesce(func.sum(RequestLogDailyAggregate.cached_input_tokens), 0).label("cached_input_tokens"),
+                func.coalesce(func.sum(RequestLogDailyAggregate.cost_usd), 0.0).label("total_cost_usd"),
+            )
+            .where(*rollup_conditions)
+            .group_by(RequestLogDailyAggregate.account_id)
+        )
+        rollup_result = await self._session.execute(rollup_stmt)
+        for (
+            account_id,
+            request_count,
+            input_tokens,
+            output_tokens,
+            cached_input_tokens,
+            total_cost_usd,
+        ) in rollup_result.all():
+            if not account_id:
+                continue
+            parts_by_account.setdefault(account_id, _AccountUsageSummaryParts()).add(
+                request_count=request_count,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cached_input_tokens=cached_input_tokens,
+                total_cost_usd=total_cost_usd,
+            )
+
+        return {account_id: parts.to_summary() for account_id, parts in parts_by_account.items()}
 
     async def exists_active_chatgpt_account_id(self, chatgpt_account_id: str) -> bool:
         return await self.get_active_by_chatgpt_account_id(chatgpt_account_id) is not None
@@ -583,11 +651,19 @@ class AccountsRepository:
             await self._session.execute(delete(UsageHistory).where(UsageHistory.account_id == account_id))
             if delete_history:
                 await self._session.execute(delete(RequestLog).where(RequestLog.account_id == account_id))
+                await self._session.execute(
+                    delete(RequestLogDailyAggregate).where(RequestLogDailyAggregate.account_id == account_id)
+                )
             else:
                 await self._session.execute(
                     update(RequestLog)
                     .where(RequestLog.account_id == account_id)
                     .values(account_id=None, deleted_at=utcnow()),
+                )
+                await self._session.execute(
+                    update(RequestLogDailyAggregate)
+                    .where(RequestLogDailyAggregate.account_id == account_id)
+                    .values(account_id=None, is_deleted=True),
                 )
             await self._session.execute(delete(StickySession).where(StickySession.account_id == account_id))
             result = await self._session.execute(delete(Account).where(Account.id == account_id).returning(Account.id))

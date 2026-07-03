@@ -21,6 +21,7 @@ from app.db.models import (
     LimitType,
     LimitWindow,
     RequestLog,
+    RequestLogDailyAggregate,
 )
 from app.db.session import sqlite_writer_section
 from app.modules.api_keys.limit_windows import advance_limit_reset
@@ -59,6 +60,39 @@ class ApiKeyUsageSummary:
     total_tokens: int
     cached_input_tokens: int
     total_cost_usd: float
+
+
+@dataclass(slots=True)
+class _UsageSummaryParts:
+    request_count: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cached_input_tokens: int = 0
+    total_cost_usd: float = 0.0
+
+    def add(
+        self,
+        *,
+        request_count: int | None,
+        input_tokens: int | None,
+        output_tokens: int | None,
+        cached_input_tokens: int | None,
+        total_cost_usd: float | None,
+    ) -> None:
+        self.request_count += int(request_count or 0)
+        self.input_tokens += int(input_tokens or 0)
+        self.output_tokens += int(output_tokens or 0)
+        self.cached_input_tokens += int(cached_input_tokens or 0)
+        self.total_cost_usd += float(total_cost_usd or 0.0)
+
+    def to_summary(self) -> ApiKeyUsageSummary:
+        cached_sum = max(0, min(self.cached_input_tokens, self.input_tokens))
+        return ApiKeyUsageSummary(
+            request_count=self.request_count,
+            total_tokens=self.input_tokens + self.output_tokens,
+            cached_input_tokens=cached_sum,
+            total_cost_usd=round(self.total_cost_usd, 6),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,6 +171,10 @@ class ApiKeysRepository:
     def _exclude_warmup_clause():
         return RequestLog.request_kind.not_in(("warmup", "limit_warmup"))
 
+    @staticmethod
+    def _exclude_warmup_rollup_clause():
+        return RequestLogDailyAggregate.request_kind.not_in(("warmup", "limit_warmup"))
+
     def _select_api_key(self):
         return (
             select(ApiKey)
@@ -188,7 +226,7 @@ class ApiKeysRepository:
         return list(result.scalars().all())
 
     async def list_usage_summary_by_key(self) -> dict[str, ApiKeyUsageSummary]:
-        stmt = (
+        raw_stmt = (
             select(
                 RequestLog.api_key_id,
                 func.count(RequestLog.id).label("request_count"),
@@ -203,8 +241,8 @@ class ApiKeysRepository:
             .where(RequestLog.api_key_id.is_not(None), self._exclude_warmup_clause())
             .group_by(RequestLog.api_key_id)
         )
-        result = await self._session.execute(stmt)
-        summaries: dict[str, ApiKeyUsageSummary] = {}
+        raw_result = await self._session.execute(raw_stmt)
+        parts_by_key: dict[str, _UsageSummaryParts] = {}
         for (
             api_key_id,
             request_count,
@@ -212,25 +250,53 @@ class ApiKeysRepository:
             output_tokens,
             cached_input_tokens,
             total_cost_usd,
-        ) in result.all():
+        ) in raw_result.all():
             if not api_key_id:
                 continue
-            input_sum = int(input_tokens or 0)
-            output_sum = int(output_tokens or 0)
-            cached_sum = int(cached_input_tokens or 0)
-            cached_sum = max(0, min(cached_sum, input_sum))
-            summaries[api_key_id] = ApiKeyUsageSummary(
-                request_count=int(request_count or 0),
-                total_tokens=input_sum + output_sum,
-                cached_input_tokens=cached_sum,
-                total_cost_usd=round(float(total_cost_usd or 0.0), 6),
+            parts_by_key.setdefault(api_key_id, _UsageSummaryParts()).add(
+                request_count=request_count,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cached_input_tokens=cached_input_tokens,
+                total_cost_usd=total_cost_usd,
             )
 
-        return summaries
+        rollup_stmt = (
+            select(
+                RequestLogDailyAggregate.api_key_id,
+                func.coalesce(func.sum(RequestLogDailyAggregate.request_count), 0).label("request_count"),
+                func.coalesce(func.sum(RequestLogDailyAggregate.input_tokens), 0).label("input_tokens"),
+                func.coalesce(func.sum(RequestLogDailyAggregate.output_tokens), 0).label("output_tokens"),
+                func.coalesce(func.sum(RequestLogDailyAggregate.cached_input_tokens), 0).label("cached_input_tokens"),
+                func.coalesce(func.sum(RequestLogDailyAggregate.cost_usd), 0.0).label("total_cost_usd"),
+            )
+            .where(RequestLogDailyAggregate.api_key_id.is_not(None), self._exclude_warmup_rollup_clause())
+            .group_by(RequestLogDailyAggregate.api_key_id)
+        )
+        rollup_result = await self._session.execute(rollup_stmt)
+        for (
+            api_key_id,
+            request_count,
+            input_tokens,
+            output_tokens,
+            cached_input_tokens,
+            total_cost_usd,
+        ) in rollup_result.all():
+            if not api_key_id:
+                continue
+            parts_by_key.setdefault(api_key_id, _UsageSummaryParts()).add(
+                request_count=request_count,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cached_input_tokens=cached_input_tokens,
+                total_cost_usd=total_cost_usd,
+            )
+
+        return {api_key_id: parts.to_summary() for api_key_id, parts in parts_by_key.items()}
 
     async def get_usage_summary_by_key_id(self, key_id: str) -> ApiKeyUsageSummary:
         """Return aggregate usage totals for a single API key (zeroes if no logs)."""
-        stmt = select(
+        raw_stmt = select(
             func.count(RequestLog.id).label("request_count"),
             func.coalesce(func.sum(RequestLog.input_tokens), 0).label("input_tokens"),
             func.coalesce(
@@ -243,18 +309,28 @@ class ApiKeysRepository:
             RequestLog.api_key_id == key_id,
             self._exclude_warmup_clause(),
         )
-        result = await self._session.execute(stmt)
-        row = result.one()
-        input_sum = int(row.input_tokens or 0)
-        output_sum = int(row.output_tokens or 0)
-        cached_sum = int(row.cached_input_tokens or 0)
-        cached_sum = max(0, min(cached_sum, input_sum))
-        return ApiKeyUsageSummary(
-            request_count=int(row.request_count or 0),
-            total_tokens=input_sum + output_sum,
-            cached_input_tokens=cached_sum,
-            total_cost_usd=round(float(row.total_cost_usd or 0.0), 6),
+        rollup_stmt = select(
+            func.coalesce(func.sum(RequestLogDailyAggregate.request_count), 0).label("request_count"),
+            func.coalesce(func.sum(RequestLogDailyAggregate.input_tokens), 0).label("input_tokens"),
+            func.coalesce(func.sum(RequestLogDailyAggregate.output_tokens), 0).label("output_tokens"),
+            func.coalesce(func.sum(RequestLogDailyAggregate.cached_input_tokens), 0).label("cached_input_tokens"),
+            func.coalesce(func.sum(RequestLogDailyAggregate.cost_usd), 0.0).label("total_cost_usd"),
+        ).where(
+            RequestLogDailyAggregate.api_key_id == key_id,
+            self._exclude_warmup_rollup_clause(),
         )
+        parts = _UsageSummaryParts()
+        for stmt in (raw_stmt, rollup_stmt):
+            result = await self._session.execute(stmt)
+            row = result.one()
+            parts.add(
+                request_count=row.request_count,
+                input_tokens=row.input_tokens,
+                output_tokens=row.output_tokens,
+                cached_input_tokens=row.cached_input_tokens,
+                total_cost_usd=row.total_cost_usd,
+            )
+        return parts.to_summary()
 
     async def update(
         self,

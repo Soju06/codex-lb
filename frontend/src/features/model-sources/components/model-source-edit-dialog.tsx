@@ -19,6 +19,7 @@ import {
   modelInputsFromForm,
   modelSourceDraftReducer,
   modelSourceFormSchema,
+  rawMetadataByModel,
   type ModelSourceFormValues,
 } from "@/features/model-sources/components/model-source-form";
 import type {
@@ -59,7 +60,7 @@ function ModelSourceEditForm({ source, busy, onSubmit, onClose }: ModelSourceEdi
       baseUrl: values.baseUrl,
       supportsChatCompletions: draft.supportsChatCompletions,
       supportsResponses: draft.supportsResponses,
-      models: modelInputsFromForm(values, draft),
+      models: modelInputsFromForm(values, draft, rawMetadataByModel(source)),
     };
     // The stored key is never returned, so a blank field means "keep it";
     // only a typed value updates the credential.

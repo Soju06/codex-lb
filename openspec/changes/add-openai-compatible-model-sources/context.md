@@ -61,10 +61,23 @@ unless the model's `raw_metadata_json` opts in with
 `"supports_reasoning": true`. An API key's enforced reasoning effort is still
 applied after sanitization (explicit operator policy wins).
 
-Note: if the inference server itself enables thinking by default (e.g. vLLM
-`--reasoning-parser` with a Qwen3 chat template), output can still be routed
-to `message.reasoning` server-side; that must be disabled in the server's own
-config (`chat_template_kwargs: {"enable_thinking": false}` or equivalent).
+Reasoning is a per-model capability, not something the proxy disables: a
+model that genuinely has a thinking mode is marked with the "Reasoning"
+capability toggle in the source dialogs (stored as
+`"supports_reasoning": true` in the model's `raw_metadata_json`). For opted-in
+models the proxy forwards client reasoning fields untouched and advertises
+`supports_reasoning: true` in `/v1/models`; for everything else the metadata
+stays `false` and no reasoning fields reach the upstream, so no
+`message.reasoning` should appear.
+
+The proxy never remaps `message.reasoning`/`message.content` — source
+responses pass through byte-for-byte in both stream and non-stream modes. If
+the upstream returns `content: null` with everything in `reasoning` (e.g. the
+whole budget spent in the thinking phase, `finish_reason: "length"`), the
+reasoning→final-answer boundary is being missed **server-side**: check that
+the inference server uses the correct reasoning parser / chat template for the
+model (e.g. vLLM `--reasoning-parser` matching the Qwen3 `</think>` format)
+and that the model actually emits a final segment after thinking.
 
 ## Pricing semantics
 

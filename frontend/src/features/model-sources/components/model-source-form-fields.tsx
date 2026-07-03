@@ -22,6 +22,7 @@ const CAPABILITY_TOGGLES = [
   ["supportsStreaming", "Streaming"] as const,
   ["supportsTools", "Tools"] as const,
   ["supportsVision", "Vision"] as const,
+  ["supportsReasoning", "Reasoning"] as const,
 ];
 
 export function ModelSourceFormFields({

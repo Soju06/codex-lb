@@ -98,6 +98,51 @@ describe("ModelSourceEditDialog", () => {
     });
   });
 
+  it("toggles reasoning support via raw metadata while keeping other keys", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const source = createModelSource();
+    source.models[0].rawMetadataJson = '{"custom_key": "kept"}';
+
+    renderWithProviders(
+      <ModelSourceEditDialog
+        open
+        busy={false}
+        source={source}
+        onOpenChange={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    expect(screen.getByRole("checkbox", { name: "Reasoning" })).not.toBeChecked();
+    await user.click(screen.getByRole("checkbox", { name: "Reasoning" }));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+    });
+
+    const rawMetadata = JSON.parse(onSubmit.mock.calls[0][1].models[0].rawMetadataJson);
+    expect(rawMetadata).toEqual({ custom_key: "kept", supports_reasoning: true });
+  });
+
+  it("prefills the reasoning toggle from raw metadata", () => {
+    const source = createModelSource();
+    source.models[0].rawMetadataJson = '{"supports_reasoning": true}';
+
+    renderWithProviders(
+      <ModelSourceEditDialog
+        open
+        busy={false}
+        source={source}
+        onOpenChange={vi.fn()}
+        onSubmit={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+
+    expect(screen.getByRole("checkbox", { name: "Reasoning" })).toBeChecked();
+  });
+
   it("sends the api key only when the field is filled", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn().mockResolvedValue(undefined);

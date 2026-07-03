@@ -613,6 +613,30 @@ async def test_source_chat_payload_drops_empty_tools_and_reasoning_toggles(async
 
 
 @pytest.mark.asyncio
+async def test_v1_models_metadata_reflects_reasoning_optin(async_client):
+    await _create_model_source(
+        async_client,
+        name="reasoning-metadata",
+        model="reasoning-metadata-model",
+        base_url="http://127.0.0.1:9/v1",
+        raw_metadata_json='{"supports_reasoning": true}',
+    )
+    await _create_model_source(
+        async_client,
+        name="plain-metadata",
+        model="plain-metadata-model",
+        base_url="http://127.0.0.1:9/v1",
+    )
+
+    response = await async_client.get("/v1/models")
+    assert response.status_code == 200
+    by_id = {item["id"]: item for item in response.json()["data"]}
+
+    assert by_id["reasoning-metadata-model"]["supports_reasoning"] is True
+    assert by_id["plain-metadata-model"]["supports_reasoning"] is False
+
+
+@pytest.mark.asyncio
 async def test_source_chat_payload_keeps_reasoning_toggles_for_optin_model(async_client, source_upstream):
     captured: dict[str, object] = {}
 

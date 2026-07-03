@@ -1,0 +1,124 @@
+import { screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { describe, expect, it, vi } from "vitest";
+
+import { renderWithProviders } from "@/test/utils";
+import type { ModelSource } from "@/features/model-sources/schemas";
+
+import { ModelSourceEditDialog } from "./model-source-edit-dialog";
+
+function createModelSource(overrides: Partial<ModelSource> = {}): ModelSource {
+  return {
+    id: "src_1",
+    name: "vllm-local",
+    kind: "openai_compatible",
+    baseUrl: "http://127.0.0.1:8000/v1",
+    isEnabled: true,
+    healthStatus: "unknown",
+    supportsChatCompletions: true,
+    supportsResponses: false,
+    timeoutSeconds: null,
+    maxConcurrency: null,
+    createdAt: "2026-07-03T00:00:00Z",
+    updatedAt: "2026-07-03T00:00:00Z",
+    models: [
+      {
+        id: 1,
+        sourceId: "src_1",
+        model: "Qwen/Qwen3.6-27B-FP8",
+        displayName: "Qwen/Qwen3.6-27B-FP8",
+        contextWindow: 32768,
+        maxOutputTokens: 4096,
+        supportsStreaming: true,
+        supportsTools: true,
+        supportsVision: false,
+        inputPer1M: 0.5,
+        cachedInputPer1M: null,
+        outputPer1M: 1.5,
+        rawMetadataJson: null,
+        isEnabled: true,
+        createdAt: "2026-07-03T00:00:00Z",
+        updatedAt: "2026-07-03T00:00:00Z",
+      },
+    ],
+    ...overrides,
+  };
+}
+
+describe("ModelSourceEditDialog", () => {
+  it("prefills existing fields including pricing and models", () => {
+    renderWithProviders(
+      <ModelSourceEditDialog
+        open
+        busy={false}
+        source={createModelSource()}
+        onOpenChange={vi.fn()}
+        onSubmit={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+
+    expect(screen.getByLabelText("Name")).toHaveValue("vllm-local");
+    expect(screen.getByLabelText("Base URL")).toHaveValue("http://127.0.0.1:8000/v1");
+    expect(screen.getByDisplayValue("Qwen/Qwen3.6-27B-FP8")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("0.5")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("1.5")).toBeInTheDocument();
+  });
+
+  it("submits edited pricing and omits blank api key", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+
+    renderWithProviders(
+      <ModelSourceEditDialog
+        open
+        busy={false}
+        source={createModelSource()}
+        onOpenChange={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    const outputPrice = screen.getByDisplayValue("1.5");
+    await user.clear(outputPrice);
+    await user.type(outputPrice, "2.25");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+    });
+
+    const [sourceId, payload] = onSubmit.mock.calls[0];
+    expect(sourceId).toBe("src_1");
+    expect("apiKey" in payload).toBe(false);
+    expect(payload.models).toHaveLength(1);
+    expect(payload.models[0]).toMatchObject({
+      model: "Qwen/Qwen3.6-27B-FP8",
+      inputPer1M: 0.5,
+      outputPer1M: 2.25,
+    });
+  });
+
+  it("sends the api key only when the field is filled", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+
+    renderWithProviders(
+      <ModelSourceEditDialog
+        open
+        busy={false}
+        source={createModelSource()}
+        onOpenChange={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.type(screen.getByLabelText("Upstream API key"), "sk-new-token");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+    });
+
+    expect(onSubmit.mock.calls[0][1].apiKey).toBe("sk-new-token");
+  });
+});

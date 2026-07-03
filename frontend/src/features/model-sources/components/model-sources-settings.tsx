@@ -1,4 +1,4 @@
-import { Database, Plus, Trash2 } from "lucide-react";
+import { Database, Pencil, Plus, Trash2 } from "lucide-react";
 
 import { AlertMessage } from "@/components/alert-message";
 import { ConfirmDialog } from "@/components/confirm-dialog";
@@ -6,13 +6,25 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { ModelSourceCreateDialog } from "@/features/model-sources/components/model-source-create-dialog";
+import { ModelSourceEditDialog } from "@/features/model-sources/components/model-source-edit-dialog";
 import { useModelSources } from "@/features/model-sources/hooks/use-model-sources";
 import type {
   ModelSource,
   ModelSourceCreateRequest,
+  ModelSourceUpdateRequest,
 } from "@/features/model-sources/schemas";
 import { useDialogState } from "@/hooks/use-dialog-state";
 import { getErrorMessageOrNull } from "@/utils/errors";
+
+function modelPriceLabel(source: ModelSource): string | null {
+  const priced = source.models.find(
+    (model) => model.inputPer1M !== null || model.outputPer1M !== null,
+  );
+  if (!priced) return null;
+  const input = priced.inputPer1M ?? 0;
+  const output = priced.outputPer1M ?? 0;
+  return `$${input}/$${output} per 1M`;
+}
 
 export type ModelSourcesSettingsProps = {
   disabled?: boolean;
@@ -33,6 +45,7 @@ export function ModelSourcesSettings({ disabled = false }: ModelSourcesSettingsP
     deleteMutation,
   } = useModelSources();
   const createDialog = useDialogState();
+  const editDialog = useDialogState<ModelSource>();
   const deleteDialog = useDialogState<ModelSource>();
   const sources = modelSourcesQuery.data?.sources ?? [];
   const busy =
@@ -49,6 +62,10 @@ export function ModelSourcesSettings({ disabled = false }: ModelSourcesSettingsP
 
   const createSource = async (payload: ModelSourceCreateRequest) => {
     await createMutation.mutateAsync(payload);
+  };
+
+  const updateSource = async (sourceId: string, payload: ModelSourceUpdateRequest) => {
+    await updateMutation.mutateAsync({ sourceId, payload });
   };
 
   return (
@@ -95,12 +112,15 @@ export function ModelSourcesSettings({ disabled = false }: ModelSourcesSettingsP
                     ))}
                   </div>
                   <div className="truncate text-xs text-muted-foreground">{source.baseUrl}</div>
-                  <div className="flex flex-wrap gap-1 pt-1">
+                  <div className="flex flex-wrap items-center gap-1 pt-1">
                     {source.models.map((model) => (
                       <Badge key={model.id} variant={model.isEnabled ? "outline" : "secondary"}>
                         {model.model}
                       </Badge>
                     ))}
+                    {modelPriceLabel(source) ? (
+                      <Badge variant="secondary">{modelPriceLabel(source)}</Badge>
+                    ) : null}
                   </div>
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
@@ -115,6 +135,16 @@ export function ModelSourcesSettings({ disabled = false }: ModelSourcesSettingsP
                       })
                     }
                   />
+                  <Button
+                    type="button"
+                    size="icon-sm"
+                    variant="ghost"
+                    disabled={busy}
+                    onClick={() => editDialog.show(source)}
+                  >
+                    <Pencil className="size-4" />
+                    <span className="sr-only">Edit {source.name}</span>
+                  </Button>
                   <Button
                     type="button"
                     size="icon-sm"
@@ -141,6 +171,14 @@ export function ModelSourcesSettings({ disabled = false }: ModelSourcesSettingsP
         busy={createMutation.isPending}
         onOpenChange={createDialog.onOpenChange}
         onSubmit={createSource}
+      />
+
+      <ModelSourceEditDialog
+        open={editDialog.open}
+        busy={updateMutation.isPending}
+        source={editDialog.data}
+        onOpenChange={editDialog.onOpenChange}
+        onSubmit={updateSource}
       />
 
       <ConfirmDialog

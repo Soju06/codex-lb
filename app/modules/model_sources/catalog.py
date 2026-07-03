@@ -60,6 +60,23 @@ def _to_upstream_model(source: ModelSource, source_model: ModelSourceModel) -> U
     )
 
 
+def source_model_supports_reasoning(source: ModelSource, model: str) -> bool:
+    """Whether the source model opted into reasoning via raw catalog metadata.
+
+    Source catalog entries have no first-class reasoning flag; a model that
+    genuinely supports reasoning can opt in with ``"supports_reasoning": true``
+    in ``raw_metadata_json``. Everything else is treated as non-reasoning so
+    client-sent reasoning toggles are stripped before forwarding.
+    """
+    entry = next(
+        (candidate for candidate in source.models if candidate.model == model and candidate.is_enabled),
+        None,
+    )
+    if entry is None:
+        return False
+    return _raw_metadata(entry).get("supports_reasoning") is True
+
+
 def source_model_cost_usd(
     source: ModelSource,
     model: str,

@@ -159,6 +159,40 @@ def apply_api_key_enforcement(
             )
 
 
+# Non-standard reasoning toggles some OpenAI-compatible clients attach
+# (OpenRouter/SGLang style). Forwarding them to a source whose model does not
+# support reasoning flips the upstream into reasoning-extraction mode: the
+# answer lands in ``message.reasoning`` instead of ``message.content``.
+_SOURCE_REASONING_TOGGLE_KEYS: tuple[str, ...] = (
+    "include_reasoning",
+    "separate_reasoning",
+    "stream_reasoning",
+    "reasoning",
+    "reasoning_effort",
+)
+
+
+def sanitize_source_chat_payload(
+    payload: dict[str, JsonValue],
+    *,
+    allow_reasoning: bool,
+) -> None:
+    """Clean a chat-completions wire payload before forwarding to a source.
+
+    ``ChatCompletionsRequest`` allows extra fields and defaults ``tools`` to an
+    empty list, so an unfiltered ``model_dump`` forwards ``"tools": []`` and any
+    client-side reasoning toggles verbatim.
+    """
+    tools = payload.get("tools")
+    if isinstance(tools, list) and not tools:
+        payload.pop("tools", None)
+        payload.pop("tool_choice", None)
+        payload.pop("parallel_tool_calls", None)
+    if not allow_reasoning:
+        for key in _SOURCE_REASONING_TOGGLE_KEYS:
+            payload.pop(key, None)
+
+
 def apply_api_key_enforcement_to_chat_payload(
     payload: dict[str, JsonValue],
     api_key: ApiKeyData | None,

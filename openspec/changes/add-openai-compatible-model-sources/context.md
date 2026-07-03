@@ -47,6 +47,25 @@ backend interprets an empty list as disabling scoping.
 Both are forward-looking configuration surface; treat them as inert until a
 follow-up change wires enforcement.
 
+## Outbound chat payload sanitization
+
+`ChatCompletionsRequest` allows extra fields and defaults `tools` to `[]`, so
+an unfiltered dump forwarded `"tools": []` and client-side reasoning toggles
+(`include_reasoning`, `separate_reasoning`, `stream_reasoning`, `reasoning`,
+`reasoning_effort` — OpenRouter/SGLang style) verbatim to sources. Against a
+vLLM Qwen deployment this flipped the upstream into reasoning-extraction mode:
+the whole answer landed in `message.reasoning` with `content: null` and
+`finish_reason: "length"`. Source-routed chat now omits empty tool arrays
+(plus `tool_choice`/`parallel_tool_calls`) and strips the reasoning toggles
+unless the model's `raw_metadata_json` opts in with
+`"supports_reasoning": true`. An API key's enforced reasoning effort is still
+applied after sanitization (explicit operator policy wins).
+
+Note: if the inference server itself enables thinking by default (e.g. vLLM
+`--reasoning-parser` with a Qwen3 chat template), output can still be routed
+to `message.reasoning` server-side; that must be disabled in the server's own
+config (`chat_template_kwargs: {"enable_thinking": false}` or equivalent).
+
 ## Pricing semantics
 
 Per-model pricing (`input_per_1m`, `cached_input_per_1m`, `output_per_1m`,

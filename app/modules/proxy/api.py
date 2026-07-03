@@ -121,7 +121,11 @@ from app.modules.api_keys.service import (
 )
 from app.modules.firewall.repository import FirewallRepository
 from app.modules.firewall.service import FirewallRepositoryPort, FirewallService
-from app.modules.model_sources.catalog import source_model_cost_usd, source_models_to_upstream_models
+from app.modules.model_sources.catalog import (
+    source_model_cost_usd,
+    source_model_supports_reasoning,
+    source_models_to_upstream_models,
+)
 from app.modules.model_sources.forwarding import (
     ModelSourceForwardingError,
     SourceUsage,
@@ -154,6 +158,7 @@ from app.modules.proxy.request_policy import (
     openai_client_payload_error,
     openai_validation_error,
     resolve_model_alias,
+    sanitize_source_chat_payload,
     strip_terminal_compaction_trigger_input,
     validate_model_access,
 )
@@ -2781,6 +2786,10 @@ async def _source_chat_completion_response(
     source_payload = payload.model_dump(mode="json", exclude_none=True)
     source_payload["model"] = model
     source_payload["stream"] = bool(payload.stream)
+    sanitize_source_chat_payload(
+        source_payload,
+        allow_reasoning=source_model_supports_reasoning(source, model),
+    )
     apply_api_key_enforcement_to_chat_payload(source_payload, api_key)
 
     if payload.stream:

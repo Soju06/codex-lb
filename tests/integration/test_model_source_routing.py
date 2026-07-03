@@ -31,6 +31,7 @@ async def _create_model_source(
     input_per_1m: float | None = None,
     cached_input_per_1m: float | None = None,
     output_per_1m: float | None = None,
+    raw_metadata_json: str | None = None,
 ) -> str:
     model_entry: dict[str, object] = {
         "model": model,
@@ -40,6 +41,8 @@ async def _create_model_source(
         "supportsStreaming": True,
         "supportsTools": True,
     }
+    if raw_metadata_json is not None:
+        model_entry["rawMetadataJson"] = raw_metadata_json
     if input_per_1m is not None:
         model_entry["inputPer1M"] = input_per_1m
     if cached_input_per_1m is not None:
@@ -553,6 +556,94 @@ async def test_source_credential_decrypt_failure_maps_to_error_and_releases_rese
             select(ApiKeyUsageReservation).where(ApiKeyUsageReservation.status == "reserved")
         )
         assert result.scalars().all() == []
+
+
+def _chat_completion_body(model: str) -> dict[str, object]:
+    return {
+        "id": "chatcmpl_sanitized",
+        "object": "chat.completion",
+        "created": 1,
+        "model": model,
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "4"}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7},
+    }
+
+
+@pytest.mark.asyncio
+async def test_source_chat_payload_drops_empty_tools_and_reasoning_toggles(async_client, source_upstream):
+    captured: dict[str, object] = {}
+
+    async def capture(request: web.Request) -> web.Response:
+        captured.update(await request.json())
+        return web.json_response(_chat_completion_body("sanitized-model"))
+
+    base_url = await source_upstream(capture)
+    model = "sanitized-model"
+    await _create_model_source(async_client, name="sanitized", model=model, base_url=base_url)
+
+    response = await async_client.post(
+        "/v1/chat/completions",
+        json={
+            "model": model,
+            "messages": [{"role": "user", "content": "Kiek yra 2+2?"}],
+            "tools": [],
+            "tool_choice": "none",
+            "include_reasoning": True,
+            "separate_reasoning": True,
+            "stream_reasoning": True,
+            "reasoning_effort": "low",
+            "max_tokens": 200,
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["model"] == model
+    assert captured["max_tokens"] == 200
+    for key in (
+        "tools",
+        "tool_choice",
+        "parallel_tool_calls",
+        "include_reasoning",
+        "separate_reasoning",
+        "stream_reasoning",
+        "reasoning",
+        "reasoning_effort",
+    ):
+        assert key not in captured
+
+
+@pytest.mark.asyncio
+async def test_source_chat_payload_keeps_reasoning_toggles_for_optin_model(async_client, source_upstream):
+    captured: dict[str, object] = {}
+
+    async def capture(request: web.Request) -> web.Response:
+        captured.update(await request.json())
+        return web.json_response(_chat_completion_body("reasoning-model"))
+
+    base_url = await source_upstream(capture)
+    model = "reasoning-model"
+    await _create_model_source(
+        async_client,
+        name="reasoning-optin",
+        model=model,
+        base_url=base_url,
+        raw_metadata_json='{"supports_reasoning": true}',
+    )
+
+    response = await async_client.post(
+        "/v1/chat/completions",
+        json={
+            "model": model,
+            "messages": [{"role": "user", "content": "hi"}],
+            "include_reasoning": True,
+            "reasoning_effort": "high",
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["include_reasoning"] is True
+    assert captured["reasoning_effort"] == "high"
+    assert "tools" not in captured
 
 
 @pytest.mark.asyncio

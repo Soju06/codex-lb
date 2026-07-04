@@ -254,7 +254,7 @@ async def test_rotate_claude_access_token_success_increments_refresh_total(
             return False
 
         async def insert(self, row: dict[str, object]):
-            self.persisted[row["id"]] = row
+            self.persisted[row["id"]] = row  # ty:ignore[invalid-assignment]
             return type("R", (), {"id": row["id"], "claude_account_uuid": row["claude_account_uuid"]})()
 
         async def get_by_id(self, account_id: str):  # pragma: no cover - unused here
@@ -316,10 +316,17 @@ async def test_rotate_claude_access_token_success_increments_refresh_total(
 
     repo = _FakeRepo()
     account = repo.seed()
+    # ``scoped_repo_factory`` routes writes through the in-memory ``_FakeRepo``
+    # instead of ``SqlClaudeAccountRepository`` (which would need a real DB
+    # session). The session yielded by the default ``get_background_session``
+    # is irrelevant on this path because the test's write target is the
+    # ``_FakeRepo``; the real write codepath is exercised in
+    # ``tests/unit/test_claude_account_service.py``.
     manager = ClaudeAuthManager(
-        repo=repo,  # type: ignore[arg-type]
-        encryptor=_FakeEncryptor(),
+        repo=repo,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+        encryptor=_FakeEncryptor(),  # ty:ignore[invalid-argument-type]
         oauth_client=_FakeOAuthClient(),
+        scoped_repo_factory=lambda _session: repo,  # type: ignore[arg-type,return-value]  # ty:ignore[invalid-argument-type]
     )
 
     # Re-resolve the metrics symbol so we read the value from the loaded module.
@@ -328,10 +335,10 @@ async def test_rotate_claude_access_token_success_increments_refresh_total(
     refresh = prom.codex_lb_claude_refresh_total
     assert refresh is not None
 
-    result = await manager.rotate_claude_access_token(account)
+    result = await manager.rotate_claude_access_token(account)  # ty:ignore[invalid-argument-type]
     assert result is not None
 
-    success_sample = refresh.samples[(("result", "success"),)]
+    success_sample = refresh.samples[(("result", "success"),)]  # ty:ignore[unresolved-attribute]
     assert success_sample.value == 1.0
 
     clear_claude_refresh_singleflight_state()
@@ -426,19 +433,20 @@ async def test_rotate_claude_access_token_invalid_grant_increments_refresh_total
     repo = _FakeRepo()
     account = repo.seed()
     manager = ClaudeAuthManager(
-        repo=repo,  # type: ignore[arg-type]
-        encryptor=_FakeEncryptor(),
+        repo=repo,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+        encryptor=_FakeEncryptor(),  # ty:ignore[invalid-argument-type]
         oauth_client=_FakeOAuthClient(),
+        scoped_repo_factory=lambda _session: repo,  # type: ignore[arg-type,return-value]  # ty:ignore[invalid-argument-type]
     )
 
-    result = await manager.rotate_claude_access_token(account)
+    result = await manager.rotate_claude_access_token(account)  # ty:ignore[invalid-argument-type]
     assert result is None  # invalid_grant → deactivated, returns None
 
     from app.core.metrics import prometheus as prom
 
     refresh = prom.codex_lb_claude_refresh_total
     assert refresh is not None
-    invalid_sample = refresh.samples[(("result", "invalid_grant"),)]
+    invalid_sample = refresh.samples[(("result", "invalid_grant"),)]  # ty:ignore[unresolved-attribute]
     assert invalid_sample.value == 1.0
 
     clear_claude_refresh_singleflight_state()
@@ -488,7 +496,7 @@ async def test_two_consecutive_401s_increment_requests_total_auth_error(
         async def get_access_token(self, account):
             return "AT"
 
-        async def rotate_claude_access_token(self, account, *, force=False):
+        async def rotate_claude_access_token(self, account):
             self.rotate_calls += 1
             return type("R", (), {"access_token": "AT2", "refresh_token": "RT2", "expires_in": 3600})()
 
@@ -517,8 +525,8 @@ async def test_two_consecutive_401s_increment_requests_total_auth_error(
             return None
 
     service = ClaudeProxyService(
-        load_balancer=_LB(),
-        chat=_Chat(),
+        load_balancer=_LB(),  # ty:ignore[invalid-argument-type]
+        chat=_Chat(),  # ty:ignore[invalid-argument-type]
         auth_manager=_Auth(),
         accounts_repository=_Repo(),
         request_log_repository=_Logs(),
@@ -527,7 +535,7 @@ async def test_two_consecutive_401s_increment_requests_total_auth_error(
     with pytest.raises(ClaudeAuthError):
         await service.stream_or_complete_messages(
             request_body={"model": "claude-opus-4-8"},
-            api_key=type("K", (), {"provider_scope": "claude"})(),
+            api_key=type("K", (), {"provider_scope": "claude"})(),  # ty:ignore[invalid-argument-type]
             request_id="r-double-401",
         )
 
@@ -535,7 +543,7 @@ async def test_two_consecutive_401s_increment_requests_total_auth_error(
 
     requests_total = prom.codex_lb_claude_requests_total
     assert requests_total is not None
-    auth_error_sample = requests_total.samples[(("status", "auth_error"),)]
+    auth_error_sample = requests_total.samples[(("status", "auth_error"),)]  # ty:ignore[unresolved-attribute]
     assert auth_error_sample.value == 1.0
 
 
@@ -571,7 +579,7 @@ async def test_429_increments_requests_total_rate_limited(
         async def get_access_token(self, account):
             return "AT"
 
-        async def rotate_claude_access_token(self, account, *, force=False):
+        async def rotate_claude_access_token(self, account):
             return None
 
     class _LB:
@@ -599,8 +607,8 @@ async def test_429_increments_requests_total_rate_limited(
             return None
 
     service = ClaudeProxyService(
-        load_balancer=_LB(),
-        chat=_Chat(),
+        load_balancer=_LB(),  # ty:ignore[invalid-argument-type]
+        chat=_Chat(),  # ty:ignore[invalid-argument-type]
         auth_manager=_Auth(),
         accounts_repository=_Repo(),
         request_log_repository=_Logs(),
@@ -612,12 +620,12 @@ async def test_429_increments_requests_total_rate_limited(
     async def _send(*, access_token, request_body):
         raise ClaudeRateLimited("anthropic 429", headers=headers)
 
-    service._chat.send_messages = _send  # type: ignore[attr-defined]
+    service._chat.send_messages = _send  # type: ignore[attr-defined]  # ty:ignore[invalid-assignment]
 
     with pytest.raises(ClaudeRateLimited):
         await service.stream_or_complete_messages(
             request_body={"model": "claude-opus-4-8"},
-            api_key=type("K", (), {"provider_scope": "claude"})(),
+            api_key=type("K", (), {"provider_scope": "claude"})(),  # ty:ignore[invalid-argument-type]
             request_id="r-429",
         )
 
@@ -625,7 +633,7 @@ async def test_429_increments_requests_total_rate_limited(
 
     requests_total = prom.codex_lb_claude_requests_total
     assert requests_total is not None
-    rl_sample = requests_total.samples[(("status", "rate_limited"),)]
+    rl_sample = requests_total.samples[(("status", "rate_limited"),)]  # ty:ignore[unresolved-attribute]
     assert rl_sample.value == 1.0
 
 
@@ -660,7 +668,7 @@ async def test_successful_request_increments_requests_total_success(
         async def get_access_token(self, account):
             return "AT"
 
-        async def rotate_claude_access_token(self, account, *, force=False):
+        async def rotate_claude_access_token(self, account):
             return None
 
     class _LB:
@@ -685,8 +693,8 @@ async def test_successful_request_increments_requests_total_success(
             return None
 
     service = ClaudeProxyService(
-        load_balancer=_LB(),
-        chat=_Chat(),
+        load_balancer=_LB(),  # ty:ignore[invalid-argument-type]
+        chat=_Chat(),  # ty:ignore[invalid-argument-type]
         auth_manager=_Auth(),
         accounts_repository=_Repo(),
         request_log_repository=_Logs(),
@@ -694,7 +702,7 @@ async def test_successful_request_increments_requests_total_success(
 
     await service.stream_or_complete_messages(
         request_body={"model": "claude-opus-4-8"},
-        api_key=type("K", (), {"provider_scope": "claude"})(),
+        api_key=type("K", (), {"provider_scope": "claude"})(),  # ty:ignore[invalid-argument-type]
         request_id="r-ok",
     )
 
@@ -702,7 +710,7 @@ async def test_successful_request_increments_requests_total_success(
 
     requests_total = prom.codex_lb_claude_requests_total
     assert requests_total is not None
-    success_sample = requests_total.samples[(("status", "success"),)]
+    success_sample = requests_total.samples[(("status", "success"),)]  # ty:ignore[unresolved-attribute]
     assert success_sample.value == 1.0
 
 
@@ -762,7 +770,7 @@ async def test_active_gauge_set_from_repository_count_active(
     updated = await service_module.refresh_claude_accounts_active_gauge(repo)
 
     assert updated == 7
-    assert gauge.root.value == 7.0
+    assert gauge.root.value == 7.0  # ty:ignore[unresolved-attribute]
     assert repo.calls == 1
 
 

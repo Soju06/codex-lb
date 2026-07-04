@@ -34,7 +34,7 @@ def _minimal_payload(**overrides: object) -> dict[str, object]:
 
 
 def test_add_request_accepts_happy_path() -> None:
-    req = AddClaudeAccountRequest(**_minimal_payload())  # type: ignore[arg-type]
+    req = AddClaudeAccountRequest(**_minimal_payload())  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
 
     assert req.claude_account_uuid == "abc-123"
     assert req.access_token == "AT"
@@ -51,7 +51,7 @@ def test_add_request_accepts_all_optional_fields() -> None:
             scopes=["user:profile", "user:inference"],
             userEmail="user@example.com",
             userOrganizationUuid="org-uuid-1",
-        )  # type: ignore[arg-type]
+        )  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
     )
 
     assert req.scopes == ["user:inference", "user:profile"]  # sorted, deduplicated
@@ -64,7 +64,7 @@ def test_add_request_rejects_missing_refresh_token() -> None:
     del payload["refreshToken"]
 
     with pytest.raises(ValidationError) as exc_info:
-        AddClaudeAccountRequest(**payload)  # type: ignore[arg-type]
+        AddClaudeAccountRequest(**payload)  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
 
     errors = exc_info.value.errors()
     assert any(err["loc"] == ("refreshToken",) for err in errors), errors
@@ -72,7 +72,7 @@ def test_add_request_rejects_missing_refresh_token() -> None:
 
 def test_add_request_rejects_blank_uuid() -> None:
     with pytest.raises(ValidationError) as exc_info:
-        AddClaudeAccountRequest(**_minimal_payload(claudeAccountUuid="   "))  # type: ignore[arg-type]
+        AddClaudeAccountRequest(**_minimal_payload(claudeAccountUuid="   "))  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
 
     errors = exc_info.value.errors()
     assert any("claudeAccountUuid" in err["loc"] for err in errors), errors
@@ -80,10 +80,10 @@ def test_add_request_rejects_blank_uuid() -> None:
 
 def test_add_request_rejects_zero_or_negative_expires() -> None:
     with pytest.raises(ValidationError):
-        AddClaudeAccountRequest(**_minimal_payload(expiresInSeconds=0))  # type: ignore[arg-type]
+        AddClaudeAccountRequest(**_minimal_payload(expiresInSeconds=0))  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
 
     with pytest.raises(ValidationError):
-        AddClaudeAccountRequest(**_minimal_payload(expiresInSeconds=-3600))  # type: ignore[arg-type]
+        AddClaudeAccountRequest(**_minimal_payload(expiresInSeconds=-3600))  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
 
 
 def test_add_request_rejects_absurd_expires() -> None:
@@ -91,14 +91,14 @@ def test_add_request_rejects_absurd_expires() -> None:
     thirty_one_days = 86400 * 31
 
     with pytest.raises(ValidationError):
-        AddClaudeAccountRequest(**_minimal_payload(expiresInSeconds=thirty_one_days))  # type: ignore[arg-type]
+        AddClaudeAccountRequest(**_minimal_payload(expiresInSeconds=thirty_one_days))  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
 
 
 def test_add_request_deduplicates_and_sorts_scopes() -> None:
     req = AddClaudeAccountRequest(
         **_minimal_payload(
             scopes=["user:inference", "user:profile", "user:inference", "  user:profile  "],
-        )  # type: ignore[arg-type]
+        )  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
     )
 
     assert req.scopes == ["user:inference", "user:profile"]
@@ -124,7 +124,7 @@ def test_response_does_not_leak_plaintext_tokens() -> None:
         "createdAt": "2026-07-01T12:00:00Z",
     }
 
-    response = ClaudeAccountResponse(**payload)
+    response = ClaudeAccountResponse(**payload)  # ty:ignore[invalid-argument-type]
 
     # Field-level: the schema MUST NOT advertise token fields at all.
     fields = set(ClaudeAccountResponse.model_fields.keys())
@@ -163,7 +163,7 @@ def test_list_response_contains_only_sanitized_accounts() -> None:
         ]
     }
 
-    response = ListClaudeAccountsResponse(**payload)
+    response = ListClaudeAccountsResponse(**payload)  # ty:ignore[invalid-argument-type]
     serialized = response.model_dump_json()
 
     assert "AT" not in serialized

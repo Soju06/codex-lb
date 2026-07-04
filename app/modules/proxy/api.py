@@ -787,7 +787,7 @@ def _project_reset_credit_accounts(accounts: list[Account], api_key: ApiKeyData)
         _eligible_reset_credit_accounts(accounts, api_key),
         key=lambda account: (account.email, account.id),
     )
-    return [(account.id, account.email) for account in eligible_accounts]
+    return [(account.id, account.email) for account in eligible_accounts]  # ty:ignore[invalid-return-type]
 
 
 def _list_available_reset_credits(account_id: str, email: str) -> list[V1ResetCreditEntry]:

@@ -79,7 +79,7 @@ test-postgres:
 	  PYTHONFAULTHANDLER=1 \
 	  uv run pytest $(PYTEST_ARGS) $(POSTGRES_PYTEST_TARGETS)
 
-.PHONY: migration-check migration-check-postgres
+.PHONY: migration-check migration-check-postgres i18n-check
 migration-check:
 	uv sync --dev --frozen
 	TMP_DB="$$(mktemp -u /tmp/codex-lb-ci-migrate-XXXXXX.db)"; \
@@ -87,6 +87,9 @@ migration-check:
 	trap 'rm -f "$${TMP_DB}"' EXIT; \
 	uv run codex-lb-db --db-url "$${DB_URL}" upgrade head; \
 	uv run codex-lb-db --db-url "$${DB_URL}" check
+
+i18n-check:
+	./scripts/check_i18n_parity.sh
 
 migration-check-postgres:
 	uv sync --dev --frozen

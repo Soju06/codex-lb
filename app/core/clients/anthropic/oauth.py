@@ -37,11 +37,17 @@ class ClaudeRefreshResult:
     (defensive case). Anthropic always rotates per ``notes.md`` §3; callers
     should treat a ``None`` value as a signal to flag the account for
     re-authorization rather than silently preserve a possibly-stale token.
+
+    ``raw_body`` carries the raw response body bytes so callers can include
+    a body excerpt in structured logs (per the spec's
+    ``claude.refresh.refresh_token_missing`` requirement). ``None`` when the
+    transport did not produce a readable body.
     """
 
     access_token: str
     refresh_token: str | None
     expires_in: int
+    raw_body: bytes | None = None
 
 
 class ClaudeOAuthTransport(Protocol):
@@ -105,9 +111,10 @@ class ClaudeOAuthClient:
 
         status = int(getattr(resp, "status", 200))
         body = await _extract_json(resp)
+        raw_body = await _extract_raw_body(resp)
 
         if status == 200:
-            return _parse_success_body(body)
+            return _parse_success_body(body, raw_body=raw_body)
 
         if status == 400 and isinstance(body, dict) and body.get("error") == "invalid_grant":
             raise ClaudeAuthError(f"invalid_grant: {body!r}")
@@ -118,11 +125,14 @@ class ClaudeOAuthClient:
         raise ClaudeAPIError(f"refresh failed {status}: {body!r}")
 
 
-def _parse_success_body(body: Any) -> ClaudeRefreshResult:
+def _parse_success_body(body: Any, *, raw_body: bytes | None = None) -> ClaudeRefreshResult:
     """Extract fields from a 200 refresh response.
 
     Raises :class:`ClaudeAPIError` on a malformed body so callers do not get
     a ``KeyError`` / ``TypeError`` they have to remember to handle.
+    ``raw_body`` is forwarded into the :class:`ClaudeRefreshResult` so the
+    auth manager can include the original message body in structured logs
+    (per spec: ``claude.refresh.refresh_token_missing``).
     """
     if not isinstance(body, dict):
         raise ClaudeAPIError(f"malformed refresh response: {body!r}")
@@ -141,6 +151,7 @@ def _parse_success_body(body: Any) -> ClaudeRefreshResult:
         access_token=access_token,
         refresh_token=refresh_token,
         expires_in=expires_in,
+        raw_body=raw_body,
     )
 
 
@@ -162,3 +173,28 @@ async def _extract_json(resp: Any) -> Any:
     if isinstance(body, (dict, list)):
         return body
     raise ClaudeAPIError(f"unexpected response type: {type(resp).__name__}")
+
+
+async def _extract_raw_body(resp: Any) -> bytes | None:
+    """Return the raw response body bytes if available, else ``None``.
+
+    Tries (in order) the aiohttp ``read()`` coroutine, a ``raw_body`` /
+    ``raw`` attribute exposed by tests, and the ``body`` attribute when it
+    is already bytes. Returns ``None`` if no raw body is reachable so the
+    caller can still log a structured ``claude.refresh.refresh_token_missing``
+    event without an excerpt when the transport does not expose one.
+    """
+    read_method = getattr(resp, "read", None)
+    if callable(read_method):
+        data = read_method()
+        if hasattr(data, "__await__"):
+            data = await data
+        if isinstance(data, (bytes, bytearray)):
+            return bytes(data)
+    raw = getattr(resp, "raw_body", None) or getattr(resp, "raw", None)
+    if isinstance(raw, (bytes, bytearray)):
+        return bytes(raw)
+    body_attr = getattr(resp, "body", None)
+    if isinstance(body_attr, (bytes, bytearray)):
+        return bytes(body_attr)
+    return None

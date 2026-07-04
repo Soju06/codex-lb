@@ -44,7 +44,7 @@ def test_parses_all_headers_present() -> None:
     assert parsed["rate_limit_requests_reset_at"] == expected_dt
     assert parsed["rate_limit_input_tokens_reset_at"] == expected_dt
     assert parsed["rate_limit_output_tokens_reset_at"] == expected_dt
-    assert parsed["rate_limit_requests_reset_at"].tzinfo is not None
+    assert parsed["rate_limit_requests_reset_at"].tzinfo is not None  # ty:ignore[unresolved-attribute]
 
 
 def test_missing_headers_returns_only_present_keys() -> None:

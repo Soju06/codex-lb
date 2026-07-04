@@ -418,6 +418,121 @@ def test_http_downstream_transport_policy_migration_round_trips_with_default_nul
         engine.dispose()
 
 
+def test_claude_schema_migration_round_trips_cleanly(tmp_path: Path) -> None:
+    """The two Claude schema migrations MUST round-trip cleanly.
+
+    Covers `database-migrations/spec.md` *Migration up/down/up reversibility*:
+    ``upgrade(head) → downgrade(base) → upgrade(head)`` must succeed without
+    raising and the resulting schema must match a single forward ``upgrade head``.
+    """
+    db_path = tmp_path / "claude-roundtrip.db"
+    url = _db_url(db_path)
+    parent_revision = "20260630_020000_merge_warmup_threshold_and_main_heads"
+    head_revision = "20260701_010000_enforce_claude_rt_and_codex_email_invariants"
+
+    config = _build_alembic_config(url)
+
+    # First forward pass.
+    command.upgrade(config, head_revision)
+
+    def _claude_columns_present(connection: Connection) -> set[str]:
+        inspector = inspect(connection)
+        return {column["name"] for column in inspector.get_columns("accounts") if column.get("name") is not None}
+
+    def _claude_indexes_present(connection: Connection) -> set[str]:
+        inspector = inspect(connection)
+        return {index["name"] for index in inspector.get_indexes("accounts") if index.get("name") is not None}  # ty:ignore[invalid-return-type]
+
+    def _claude_check_constraints(connection: Connection) -> set[str]:
+        dialect = connection.dialect.name
+        if dialect == "sqlite":
+            rows = connection.execute(
+                text("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'accounts'")
+            ).fetchone()
+            if rows is None:
+                return set()
+            # SQLite exposes CHECK constraints via the table's CREATE TABLE SQL.
+            create_sql = connection.execute(
+                text("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'accounts'")
+            ).scalar_one()
+            names: set[str] = set()
+            # Parse CHECK constraint names from CREATE TABLE sql.
+            for token in ("ck_accounts_claude_rt_required", "ck_accounts_provider"):
+                if token in (create_sql or ""):
+                    names.add(token)
+            return names
+        # Postgres: query information_schema.
+        rows = connection.execute(
+            text(
+                "SELECT constraint_name FROM information_schema.check_constraints "
+                "WHERE constraint_name IN "
+                "('ck_accounts_claude_rt_required', 'ck_accounts_provider')"
+            )
+        ).fetchall()
+        return {str(row[0]) for row in rows}
+
+    engine = create_engine(to_sync_database_url(url))
+    try:
+        with engine.connect() as connection:
+            head_columns = _claude_columns_present(connection)
+            head_indexes = _claude_indexes_present(connection)
+            assert "provider" in head_columns
+            assert "claude_account_uuid" in head_columns
+            assert "claude_refresh_token_encrypted" in head_columns
+            assert "claude_access_token_encrypted" in head_columns
+            assert "claude_access_token_expires_at" in head_columns
+            assert "claude_scopes" in head_columns
+            assert "claude_user_email" in head_columns
+            assert "claude_user_organization_uuid" in head_columns
+            assert "rate_limit_requests_remaining" in head_columns
+            assert "rate_limit_status" in head_columns
+            assert "uq_accounts_claude_uuid" in head_indexes
+            assert "uq_accounts_codex_email" in head_indexes
+            assert "ck_accounts_claude_rt_required" in _claude_check_constraints(connection)
+            assert "ck_accounts_provider" in _claude_check_constraints(connection)
+
+        # Downgrade back to the pre-Claude parent revision. This exercises both
+        # `20260701_010000.downgrade()` (drops ck_accounts_claude_rt_required,
+        # uq_accounts_codex_email) and `20260701_000000.downgrade()` (drops
+        # ck_accounts_provider, uq_accounts_claude_uuid, the new columns,
+        # restores email NOT NULL).
+        command.downgrade(config, parent_revision)
+
+        with engine.connect() as connection:
+            base_columns = _claude_columns_present(connection)
+            base_indexes = _claude_indexes_present(connection)
+            assert "provider" not in base_columns
+            assert "claude_account_uuid" not in base_columns
+            assert "claude_refresh_token_encrypted" not in base_columns
+            assert "claude_access_token_encrypted" not in base_columns
+            assert "claude_access_token_expires_at" not in base_columns
+            assert "claude_scopes" not in base_columns
+            assert "claude_user_email" not in base_columns
+            assert "claude_user_organization_uuid" not in base_columns
+            assert "rate_limit_requests_remaining" not in base_columns
+            assert "rate_limit_status" not in base_columns
+            assert "uq_accounts_claude_uuid" not in base_indexes
+            assert "uq_accounts_codex_email" not in base_indexes
+            assert "ck_accounts_claude_rt_required" not in _claude_check_constraints(connection)
+            assert "ck_accounts_provider" not in _claude_check_constraints(connection)
+
+        # Re-upgrade to head; the schema must match the first forward pass.
+        command.upgrade(config, head_revision)
+
+        with engine.connect() as connection:
+            second_head_columns = _claude_columns_present(connection)
+            second_head_indexes = _claude_indexes_present(connection)
+            assert second_head_columns == head_columns
+            assert second_head_indexes == head_indexes
+            assert "ck_accounts_claude_rt_required" in _claude_check_constraints(connection)
+            assert "ck_accounts_provider" in _claude_check_constraints(connection)
+
+        # Final revision is the recorded head.
+        assert inspect_migration_state(url).current_revision == head_revision
+    finally:
+        engine.dispose()
+
+
 def test_base_revision_does_not_depend_on_live_metadata(tmp_path: Path, monkeypatch) -> None:
     db_path = tmp_path / "base.db"
     url = _db_url(db_path)

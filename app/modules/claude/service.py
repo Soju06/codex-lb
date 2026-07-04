@@ -105,7 +105,7 @@ class _ChatLike(Protocol):
 class _AuthLike(Protocol):
     async def get_access_token(self, account: Account) -> str: ...
 
-    async def rotate_claude_access_token(self, account: Account, *, force: bool = False) -> Any: ...
+    async def rotate_claude_access_token(self, account: Account) -> Any: ...
 
 
 class _AccountsRepoLike(Protocol):
@@ -184,7 +184,12 @@ class ClaudeProxyService:
         self._authorize_provider_scope(api_key)
         account = await self._select_account()
         access_token = await self._auth.get_access_token(account)
-        body_in = self._coerce_request_body(request_body)
+        # Passthrough: the chat client signature is ``Mapping[str, Any]`` and
+        # we deliberately do NOT shallow-copy — the body bytes are forwarded
+        # to Anthropic and back to the client with no transformation. The
+        # identity-preservation contract is asserted in
+        # ``tests/unit/test_claude_proxy_service.py::test_request_body_passed_verbatim_no_copy``.
+        body_in = request_body
 
         try:
             body, headers = await self._send_with_retry(
@@ -240,7 +245,8 @@ class ClaudeProxyService:
         self._authorize_provider_scope(api_key)
         account = await self._select_account()
         access_token = await self._auth.get_access_token(account)
-        body_in = self._coerce_request_body(request_body)
+        # Passthrough — see ``stream_or_complete_messages`` for the rationale.
+        body_in = request_body
 
         retries = 0
         rate_limit_headers: dict[str, str] | None = None
@@ -269,9 +275,10 @@ class ClaudeProxyService:
                     self._record_request_metric("auth_error")
                     raise
                 retries += 1
-                rotated = await self._auth.rotate_claude_access_token(account, force=True)
+                rotated = await self._auth.rotate_claude_access_token(account)
                 if rotated is None:
-                    # invalid_grant path — account is now DEACTIVATED; abort.
+                    # invalid_grant or refresh_token_missing — account is now
+                    # DEACTIVATED; abort.
                     self._record_request_metric("auth_error")
                     raise
                 access_token = await self._auth.get_access_token(account)
@@ -323,17 +330,6 @@ class ClaudeProxyService:
             raise NoClaudeAccounts("no Claude accounts available in the pool")
         return account
 
-    @staticmethod
-    def _coerce_request_body(request_body: Mapping[str, Any]) -> Mapping[str, Any]:
-        """Return the request body unchanged.
-
-        The chat client signature is ``Mapping[str, Any]``; we deliberately
-        do NOT shallow-copy because the proxy layer is a passthrough. The
-        identity-preservation contract is asserted in
-        ``tests/unit/test_claude_proxy_service.py::test_request_body_passed_verbatim_no_copy``.
-        """
-        return request_body
-
     async def _send_with_retry(
         self,
         *,
@@ -349,11 +345,13 @@ class ClaudeProxyService:
         try:
             return await self._chat.send_messages(access_token=access_token, request_body=request_body)
         except ClaudeAuthError:
-            # Force-refresh via the auth manager, which serializes concurrent
-            # refreshes behind the per-account singleflight. If the rotation
-            # was aborted by invalid_grant, the account is now DEACTIVATED
-            # and rotation returns None — propagate the original 401.
-            rotated = await self._auth.rotate_claude_access_token(account, force=True)
+            # Refresh via the auth manager, which serializes concurrent
+            # refreshes behind the per-account singleflight (and, on Postgres,
+            # behind a cross-process advisory lock). If the rotation was
+            # aborted by `invalid_grant` or by a missing-refresh-token
+            # response, the account is now DEACTIVATED and rotation returns
+            # `None` — propagate the original 401.
+            rotated = await self._auth.rotate_claude_access_token(account)
             if rotated is None:
                 raise
             access_token = await self._auth.get_access_token(account)

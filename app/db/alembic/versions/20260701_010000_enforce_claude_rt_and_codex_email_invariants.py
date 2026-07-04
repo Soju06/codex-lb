@@ -62,12 +62,19 @@ def upgrade() -> None:
     #    symmetrically. SQLite needs batch_alter_table to add a CHECK; we
     #    use the same shape on both dialects so the SQL is identical
     #    regardless of the underlying engine.
+    #
+    #    The predicate enumerates the two valid pairs explicitly instead of
+    #    using `provider != 'claude'`. Combined with the NOT NULL constraint
+    #    added in the prior revision, this means a row whose provider
+    #    slipped through as NULL (an unrecoverable data-integrity bug) is
+    #    rejected at the database level rather than silently passing the
+    #    constraint via NULL-comparison semantics.
     if "claude_refresh_token_encrypted" in accounts_columns:
         with op.batch_alter_table("accounts") as batch_op:
             batch_op.create_check_constraint(
                 "ck_accounts_claude_rt_required",
                 "((provider = 'claude') AND (claude_refresh_token_encrypted IS NOT NULL)) "
-                "OR ((provider != 'claude') AND (claude_refresh_token_encrypted IS NULL))",
+                "OR ((provider = 'codex') AND (claude_refresh_token_encrypted IS NULL))",
             )
 
     # 2. Partial UNIQUE index on accounts(email) WHERE provider='codex'.

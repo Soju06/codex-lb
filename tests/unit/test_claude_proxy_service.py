@@ -135,7 +135,7 @@ class _FakeLoadBalancer:
     """
 
     def __init__(self) -> None:
-        self.choose: callable | None = None
+        self.choose: callable | None = None  # ty:ignore[invalid-type-form]
         self.select_calls: list[dict[str, Any]] = []
         self.record_calls: list[dict[str, Any]] = []
         self.record_health_calls: list[dict[str, Any]] = []
@@ -232,10 +232,8 @@ class _FakeAuthManager(ClaudeAuthManager):
     async def rotate_claude_access_token(
         self,
         account: Account,
-        *,
-        force: bool = False,
     ) -> Any:
-        self.rotate_calls.append({"account_id": account.id, "force": force})
+        self.rotate_calls.append({"account_id": account.id})
         return self.rotate_return
 
 
@@ -460,9 +458,9 @@ async def test_first_401_triggers_rotate_and_retry(proxy_service: ClaudeProxySer
     )
 
     assert out_body == {"id": "msg_01"}
-    # rotate called once (force=True).
+    # rotate called once on the 401-retry path.
     assert len(deps.auth.rotate_calls) == 1
-    assert deps.auth.rotate_calls[0]["force"] is True
+    assert deps.auth.rotate_calls[0]["account_id"] == account.id
     # chat called twice — first 401, then retry succeeds.
     assert len(deps.chat.send_messages_calls) == 2
 
@@ -593,7 +591,7 @@ async def test_streaming_mid_stream_401_rotates_and_continues(proxy_service: Cla
         StreamChunk(kind="sse", data=b"event: message_start\r\ndata: {}\r\n\r\n"),
         StreamChunk(kind="sse", data=b"event: content_block_delta\r\ndata: {}\r\n\r\n"),
         # Sentinel — the stub raises on this kind during iteration.
-        StreamChunk(kind="raise", data=ClaudeAuthError("anthropic 401 mid-stream")),
+        StreamChunk(kind="raise", data=ClaudeAuthError("anthropic 401 mid-stream")),  # ty:ignore[invalid-argument-type]
     ]
     # Second stream: 1 header + 2 sse + 1 usage. Closes cleanly.
     second_chunks = [
@@ -640,7 +638,7 @@ async def test_streaming_two_consecutive_401s_propagate(proxy_service: ClaudePro
     chunks_with_401 = [
         StreamChunk(kind="headers", data={"anthropic-ratelimit-status": "allowed"}),
         StreamChunk(kind="sse", data=b"event: message_start\r\ndata: {}\r\n\r\n"),
-        StreamChunk(kind="raise", data=ClaudeAuthError("anthropic 401")),
+        StreamChunk(kind="raise", data=ClaudeAuthError("anthropic 401")),  # ty:ignore[invalid-argument-type]
     ]
     deps.chat.stream_messages_return = [chunks_with_401, chunks_with_401]
 

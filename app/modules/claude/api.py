@@ -45,7 +45,6 @@ from app.modules.claude.schemas import (
     DisableClaudeAccountRequest,
 )
 from app.modules.claude.service import (
-    ClaudeProxyService,
     NoClaudeAccounts,
     ProviderScopeMismatch,
 )
@@ -54,6 +53,30 @@ logger = logging.getLogger(__name__)
 
 
 router = APIRouter()
+
+
+async def _safe_aclose_iterator(iterator: Any) -> None:
+    """Best-effort ``aclose()`` for an async iterator returned by the chat client.
+
+    The streaming proxy path MUST release the upstream aiohttp response and
+    any connection-pool resources on every exception class, not just the
+    typed error branches. This helper tolerates iterators that don't implement
+    ``aclose`` (test stubs) and accepts both sync and async ``aclose`` methods
+    — see :meth:`app.core.clients.anthropic.chat.ClaudeChatClient._safe_aclose`
+    for the canonical aiohttp implementation.
+    """
+    aclose = getattr(iterator, "aclose", None)
+    if not callable(aclose):
+        return
+    try:
+        result = aclose()
+    except Exception:  # pragma: no cover - defensive
+        return
+    if hasattr(result, "__await__"):
+        try:
+            await result
+        except Exception:  # pragma: no cover - defensive
+            return
 
 
 # ---------------------------------------------------------------------------
@@ -68,13 +91,16 @@ router = APIRouter()
 _claude_key = api_key_validator_with_provider("claude")
 
 
-def _get_service(request: Request) -> ClaudeProxyService:
-    """Return the :class:`ClaudeProxyService` singleton for the running app.
+def _get_service(request: Request) -> Any:
+    """Return the Claude proxy service for the running app.
 
-    Tests stuff a custom proxy service on ``request.app.state`` so they can
-    drive the routes deterministically without bringing up Anthropic. We
-    accept any object that exposes the two proxy methods (duck typing) so
-    test stubs work without subclassing :class:`ClaudeProxyService`.
+    Production wiring in :mod:`app.main` registers a real
+    :class:`app.modules.claude.service.ClaudeProxyService`; integration
+    tests substitute a structural stub. The duck-typed check below
+    accepts any object that exposes the two proxy methods as callable
+    attributes — broader than ``isinstance`` but strict enough to surface
+    broken wiring with a 503 instead of a confusing ``AttributeError``
+    at request time.
     """
     state = getattr(request.app, "state", None)
     service = getattr(state, "claude_proxy_service", None) if state is not None else None
@@ -83,16 +109,14 @@ def _get_service(request: Request) -> ClaudeProxyService:
             status_code=503,
             detail={"error": "claude_proxy_service_unavailable"},
         )
-    if isinstance(service, ClaudeProxyService):
-        return service
-    # Test stubs — accept any object exposing the proxy surface.
     for required in ("stream_or_complete_messages", "stream_messages"):
-        if not hasattr(service, required):
+        method = getattr(service, required, None)
+        if not callable(method):
             raise HTTPException(
                 status_code=503,
                 detail={"error": "claude_proxy_service_invalid"},
             )
-    return service  # type: ignore[return-value]  # test stubs permitted
+    return service
 
 
 # ---------------------------------------------------------------------------
@@ -103,7 +127,15 @@ def _get_service(request: Request) -> ClaudeProxyService:
 async def _claude_admin_context(
     session: AsyncSession = Depends(get_session),
 ) -> tuple[AsyncSession, SqlClaudeAccountRepository, ClaudeAuthManager]:
-    """Construct the (session, repo, manager) triple for admin endpoints."""
+    """Construct the (session, repo, manager) triple for admin endpoints.
+
+    Note: the admin manager is constructed without an ``oauth_client``, so
+    admin endpoints that attempt to call ``rotate_claude_access_token``
+    will raise ``ClaudeAuthError("no OAuth client configured")``. The
+    admin surface intentionally does NOT bootstrap-rotate a stale access
+    token — operators must re-add the account (POST /api/claude/accounts)
+    or wait for the auth guardian's next pass.
+    """
     repository = SqlClaudeAccountRepository(session)
     manager = ClaudeAuthManager(repo=repository)
     return session, repository, manager
@@ -173,6 +205,14 @@ async def claude_post_messages(
                     exc_info=True,
                 )
                 yield b'event: error\ndata: {"error":"claude_rate_limited"}\n\n'
+            finally:
+                # Release the upstream aiohttp response and connection-pool
+                # resources for EVERY exception class — not just the typed
+                # error branches above. ``BaseException`` (cancelled-error,
+                # transport disconnect, JSON parse error) must NOT leak the
+                # iterator; the ``finally`` block guarantees ``aclose`` runs
+                # whether the loop completes, breaks, or raises.
+                await _safe_aclose_iterator(iterator)
 
         return StreamingResponse(
             _gen(),

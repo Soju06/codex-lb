@@ -197,7 +197,7 @@ class AccountsRepository:
                 await self._acquire_postgresql_identity_lock(f"chatgpt:{account.chatgpt_account_id}")
                 identity_locked = True
             if merge_by_email:
-                await self._acquire_postgresql_merge_lock(account.email)
+                await self._acquire_postgresql_merge_lock(account.email)  # ty:ignore[invalid-argument-type]
             elif not identity_locked:
                 await self._acquire_postgresql_identity_lock(account.id)
 
@@ -246,7 +246,7 @@ class AccountsRepository:
             account.id = await self._next_available_account_id(account.id)
 
         if merge_by_email:
-            existing_by_email = await self._single_account_by_email(account.email)
+            existing_by_email = await self._single_account_by_email(account.email)  # ty:ignore[invalid-argument-type]
             if existing_by_email:
                 _apply_account_updates(existing_by_email, account)
                 await self._session.commit()
@@ -313,11 +313,11 @@ class AccountsRepository:
             account.id = await self._next_available_account_id(account.id)
         elif not preserve_unknown_workspace_duplicates:
             if _workspace_slot_key(account):
-                existing_by_email = await self._single_unknown_workspace_account_by_email(account.email)
+                existing_by_email = await self._single_unknown_workspace_account_by_email(account.email)  # ty:ignore[invalid-argument-type]
             elif preserve_identity_slots and account.chatgpt_account_id:
                 existing_by_email = None
             else:
-                existing_by_email = await self._single_account_by_email(account.email)
+                existing_by_email = await self._single_account_by_email(account.email)  # ty:ignore[invalid-argument-type]
             if existing_by_email and not _can_reuse_email_fallback(existing_by_email, account):
                 existing_by_email = None
             if existing_by_email:

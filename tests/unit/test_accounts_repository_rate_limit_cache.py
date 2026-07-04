@@ -120,11 +120,11 @@ async def test_update_rate_limit_cache_partial_update_does_not_overwrite_other_c
     # Updated field reflects the new value.
     assert row.rate_limit_requests_remaining == 99
     # Other columns untouched. SQLite strips tzinfo on read; compare epoch.
-    assert _as_utc_epoch(row.rate_limit_requests_reset_at) == seeded_epoch
+    assert _as_utc_epoch(row.rate_limit_requests_reset_at) == seeded_epoch  # ty:ignore[invalid-argument-type]
     assert row.rate_limit_input_tokens_remaining == 100
-    assert _as_utc_epoch(row.rate_limit_input_tokens_reset_at) == seeded_epoch
+    assert _as_utc_epoch(row.rate_limit_input_tokens_reset_at) == seeded_epoch  # ty:ignore[invalid-argument-type]
     assert row.rate_limit_output_tokens_remaining == 200
-    assert _as_utc_epoch(row.rate_limit_output_tokens_reset_at) == seeded_epoch
+    assert _as_utc_epoch(row.rate_limit_output_tokens_reset_at) == seeded_epoch  # ty:ignore[invalid-argument-type]
     assert row.rate_limit_status == "allowed"
 
 
@@ -179,9 +179,9 @@ async def test_update_rate_limit_cache_writes_all_columns(db_setup: None) -> Non
     row = await _fetch(account_id)
     assert row is not None
     assert row.rate_limit_requests_remaining == 1
-    assert _as_utc_epoch(row.rate_limit_requests_reset_at) == seeded_epoch
+    assert _as_utc_epoch(row.rate_limit_requests_reset_at) == seeded_epoch  # ty:ignore[invalid-argument-type]
     assert row.rate_limit_input_tokens_remaining == 2
-    assert _as_utc_epoch(row.rate_limit_input_tokens_reset_at) == seeded_epoch
+    assert _as_utc_epoch(row.rate_limit_input_tokens_reset_at) == seeded_epoch  # ty:ignore[invalid-argument-type]
     assert row.rate_limit_output_tokens_remaining == 3
-    assert _as_utc_epoch(row.rate_limit_output_tokens_reset_at) == seeded_epoch
+    assert _as_utc_epoch(row.rate_limit_output_tokens_reset_at) == seeded_epoch  # ty:ignore[invalid-argument-type]
     assert row.rate_limit_status == "rejected"

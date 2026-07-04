@@ -10,7 +10,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Protocol, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 from app.core.auth.refresh import RefreshError
 from app.core.clients.anthropic.errors import ClaudeUpstreamError
@@ -20,6 +20,9 @@ from app.db.session import get_background_session
 from app.modules.accounts.auth_manager import AuthManager
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.proxy.account_cache import get_account_selection_cache
+
+if TYPE_CHECKING:
+    from app.core.clients.anthropic.oauth import ClaudeRefreshResult
 
 logger = logging.getLogger(__name__)
 
@@ -47,9 +50,7 @@ class _ClaudeAuthManagerLike(Protocol):
 
     async def find_accounts_due_for_rotation(self, *, skew_seconds: int) -> list[Account]: ...
 
-    async def rotate_claude_access_token(
-        self, account: Account
-    ) -> object | None: ...  # ClaudeRefreshResult | None at runtime
+    async def rotate_claude_access_token(self, account: Account) -> ClaudeRefreshResult | None: ...
 
 
 _ClaudeAuthManagerFactory = Callable[[], Awaitable[_ClaudeAuthManagerLike]]
@@ -434,7 +435,7 @@ async def _default_claude_auth_manager_factory() -> _ClaudeAuthManagerLike:
             manager = await self._ensure()
             return await manager.find_accounts_due_for_rotation(skew_seconds=skew_seconds)
 
-        async def rotate_claude_access_token(self, account: Account) -> object | None:
+        async def rotate_claude_access_token(self, account: Account) -> "ClaudeRefreshResult | None":
             manager = await self._ensure()
             return await manager.rotate_claude_access_token(account)
 
@@ -471,7 +472,7 @@ def _safe_account_alias(account: Account) -> str:
     alias = (account.alias or "").strip()
     if alias:
         return alias[:64]
-    return _mask_email(account.email)
+    return _mask_email(account.email)  # ty:ignore[invalid-argument-type]
 
 
 def _mask_email(email: str) -> str:

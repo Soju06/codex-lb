@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from datetime import datetime, timezone
+from typing import Any
 
 import pytest
 from sqlalchemy import CheckConstraint, Index
@@ -17,6 +18,26 @@ async def async_session_factory() -> AsyncIterator[async_sessionmaker[AsyncSessi
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # The ``ck_accounts_claude_rt_required`` constraint is migration-owned
+        # (see :class:`Account.__table_args__`), so ``create_all`` does not
+        # emit it on the model side. Add it here via the same
+        # ``batch_alter_table`` path the production migration uses, so the
+        # in-memory DB enforces the invariant the rejection tests assert on.
+        # ``Operations`` needs a sync connection, so wrap in ``run_sync``.
+        from alembic.migration import MigrationContext
+        from alembic.operations import Operations
+
+        def _add_constraint(sync_conn: Any) -> None:
+            ctx = MigrationContext.configure(sync_conn)
+            ops = Operations(ctx)
+            with ops.batch_alter_table("accounts") as batch_op:
+                batch_op.create_check_constraint(
+                    "ck_accounts_claude_rt_required",
+                    "((provider = 'claude') AND (claude_refresh_token_encrypted IS NOT NULL)) "
+                    "OR ((provider = 'codex') AND (claude_refresh_token_encrypted IS NULL))",
+                )
+
+        await conn.run_sync(_add_constraint)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
         yield factory
@@ -32,7 +53,7 @@ def test_account_provider_column_is_not_nullable() -> None:
 
 def test_account_provider_has_check_constraint_constraining_values() -> None:
     table = Account.__table__
-    check_constraints = [c for c in table.constraints if isinstance(c, CheckConstraint)]
+    check_constraints = [c for c in table.constraints if isinstance(c, CheckConstraint)]  # ty:ignore[unresolved-attribute]
     provider_checks = [c for c in check_constraints if "provider" in str(c.sqltext).lower()]
     assert provider_checks, "expected a CHECK constraint referencing 'provider'"
     # The constraint name must be stable so the alembic migration can drop it.
@@ -85,7 +106,7 @@ def test_account_has_claude_columns() -> None:
 
 def test_claude_account_uuid_partial_unique_index() -> None:
     table = Account.__table__
-    indexes = [idx for idx in table.indexes if isinstance(idx, Index)]
+    indexes = [idx for idx in table.indexes if isinstance(idx, Index)]  # ty:ignore[unresolved-attribute]
     partial = [idx for idx in indexes if idx.unique and any(col.name == "claude_account_uuid" for col in idx.columns)]
     assert partial, "expected a partial unique index on claude_account_uuid"
     idx = partial[0]
@@ -101,13 +122,29 @@ def test_account_email_is_nullable() -> None:
     assert column.nullable is True
 
 
-def test_account_has_claude_refresh_token_check_constraint() -> None:
+def test_account_owns_claude_refresh_token_check_via_migration_only() -> None:
+    """The ``ck_accounts_claude_rt_required`` constraint is intentionally NOT
+    declared on the ORM model.
+
+    The model previously declared it as a ``CheckConstraint``, but
+    ``Base.metadata.create_all`` then emitted it on PostgreSQL test fixtures
+    where the migration ``20260701_010000_enforce_claude_rt_and_codex_email_invariants``
+    also tries to emit it — ``DuplicateObject`` on PostgreSQL. Moving the
+    declaration off the model makes the migration chain the sole owner of
+    the constraint (it owns the lifecycle on upgrade / downgrade and on the
+    bootstrap-created-schema reconciliation in
+    ``20260701_020000_reconcile_claude_rt_check_predicate``). The constraint
+    is still enforced at the DB level; the model just no longer
+    double-declares it.
+    """
     table = Account.__table__
-    check_constraints = [c for c in table.constraints if isinstance(c, CheckConstraint)]
+    check_constraints = [c for c in table.constraints if isinstance(c, CheckConstraint)]  # ty:ignore[unresolved-attribute]
     rt_checks = [c for c in check_constraints if "claude_refresh_token_encrypted" in str(c.sqltext).lower()]
-    assert rt_checks, "expected a CHECK constraint referencing claude_refresh_token_encrypted"
-    # The constraint name must be stable so the alembic migration can drop it.
-    assert any(c.name == "ck_accounts_claude_rt_required" for c in rt_checks)
+    assert not rt_checks, (
+        "ck_accounts_claude_rt_required must NOT be declared on the ORM model; "
+        "the migration chain owns it. Found: "
+        f"{[c.name for c in rt_checks]}"
+    )
 
 
 @pytest.mark.asyncio
@@ -188,7 +225,7 @@ async def test_claude_account_without_refresh_token_is_rejected(
 
 def test_accounts_codex_email_partial_unique_index() -> None:
     table = Account.__table__
-    indexes = [idx for idx in table.indexes if isinstance(idx, Index)]
+    indexes = [idx for idx in table.indexes if isinstance(idx, Index)]  # ty:ignore[unresolved-attribute]
     partial = [idx for idx in indexes if idx.unique and any(col.name == "email" for col in idx.columns)]
     assert partial, "expected a partial unique index on email"
     codex_email_index = next(

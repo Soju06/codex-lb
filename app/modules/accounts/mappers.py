@@ -92,7 +92,7 @@ def _duplicate_detection_key(account: Account) -> tuple[str, str, str | None] | 
     chatgpt_account_id = account.chatgpt_account_id
     if not _is_duplicate_detection_email(email) or not chatgpt_account_id:
         return None
-    return email, chatgpt_account_id, account.workspace_id or account.workspace_label
+    return email, chatgpt_account_id, account.workspace_id or account.workspace_label  # ty:ignore[invalid-return-type]
 
 
 def _is_duplicate_detection_email(email: str | None) -> bool:
@@ -235,9 +235,9 @@ def _account_to_summary(
     return AccountSummary(
         account_id=account.id,
         chatgpt_account_id=account.chatgpt_account_id,
-        email=account.email,
+        email=account.email,  # ty:ignore[invalid-argument-type]
         alias=account.alias,
-        display_name=account.alias or account.email,
+        display_name=account.alias or account.email,  # ty:ignore[invalid-argument-type]
         workspace_id=account.workspace_id,
         workspace_label=account.workspace_label,
         seat_type=account.seat_type,

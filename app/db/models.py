@@ -69,11 +69,15 @@ class Account(Base):
     __tablename__ = "accounts"
     __table_args__ = (
         CheckConstraint("provider IN ('codex', 'claude')", name="ck_accounts_provider"),
-        CheckConstraint(
-            "((provider = 'claude') AND (claude_refresh_token_encrypted IS NOT NULL)) "
-            "OR ((provider != 'claude') AND (claude_refresh_token_encrypted IS NULL))",
-            name="ck_accounts_claude_rt_required",
-        ),
+        # ``ck_accounts_claude_rt_required`` is intentionally NOT declared on
+        # the ORM model. Declaring it here would cause ``Base.metadata.create_all``
+        # to emit the constraint on PostgreSQL test fixtures, then the migration
+        # ``20260701_010000_enforce_claude_rt_and_codex_email_invariants``
+        # would re-emit ``ALTER TABLE accounts ADD CONSTRAINT`` and fail with
+        # ``DuplicateObject``. The constraint is owned by the migration chain
+        # (``010000`` adds it, ``010000``'s downgrade drops it, ``020000``
+        # rewrites the predicate to the canonical two-provider form on
+        # bootstrap-created schemas).
         Index(
             "uq_accounts_claude_uuid",
             "claude_account_uuid",

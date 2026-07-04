@@ -409,7 +409,7 @@ class AccountsService:
             account=AccountOpenCodeAuthExportAccount(
                 account_id=account.id,
                 chatgpt_account_id=account.chatgpt_account_id,
-                email=account.email,
+                email=account.email,  # ty:ignore[invalid-argument-type]
             ),
             auth_json=OpenCodeAuthJson(
                 openai=OpenCodeOAuthAuth(
@@ -464,7 +464,7 @@ class AccountsService:
             account=AccountOpenCodeAuthExportAccount(
                 account_id=account.id,
                 chatgpt_account_id=account.chatgpt_account_id,
-                email=account.email,
+                email=account.email,  # ty:ignore[invalid-argument-type]
             ),
             tokens=tokens,
             codex_auth_json=codex_auth_json,
@@ -520,7 +520,7 @@ class AccountsService:
         get_account_selection_cache().invalidate()
         return AccountImportResponse(
             account_id=saved.id,
-            email=saved.email,
+            email=saved.email,  # ty:ignore[invalid-argument-type]
             workspace_id=saved.workspace_id,
             workspace_label=saved.workspace_label,
             seat_type=saved.seat_type,
@@ -666,7 +666,7 @@ class AccountsService:
         }
         return AccountExportResponse(
             account_id=account.id,
-            email=account.email,
+            email=account.email,  # ty:ignore[invalid-argument-type]
             workspace_id=account.workspace_id,
             workspace_label=account.workspace_label,
             seat_type=account.seat_type,

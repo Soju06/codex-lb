@@ -761,8 +761,8 @@ async def test_claude_refresh_acquires_per_account_lock() -> None:
         now=lambda: now,
     )
 
-    first = asyncio.create_task(_run_claude_pass(scheduler, claude_manager, skew_seconds=600))
-    second = asyncio.create_task(_run_claude_pass(scheduler, claude_manager, skew_seconds=600))
+    first = asyncio.create_task(_run_claude_pass(scheduler, claude_manager, skew_seconds=600))  # ty:ignore[invalid-argument-type]
+    second = asyncio.create_task(_run_claude_pass(scheduler, claude_manager, skew_seconds=600))  # ty:ignore[invalid-argument-type]
 
     await asyncio.wait_for(start_barrier.wait(), timeout=1)
     # Give the second task a chance to enter the singleflight and observe the

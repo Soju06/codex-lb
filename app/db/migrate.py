@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import re
 import time
 import warnings
 from contextlib import contextmanager
@@ -199,6 +200,58 @@ def _read_current_revisions_from_connection(connection: Connection) -> tuple[str
         raise
     revisions = {str(row[0]) for row in rows if row and row[0]}
     return tuple(sorted(revisions))
+
+
+# Constraint owned by migration ``20260701_010000_enforce_claude_rt_and_codex_email_invariants``
+# on the ``accounts`` table. When this constraint exists in the live schema but
+# ``alembic_version`` still points at a revision below
+# ``20260701_010000_enforce_claude_rt_and_codex_email_invariants`` (e.g. after
+# ``_remap_legacy_alembic_revisions`` maps a legacy ID to a NEW ID that
+# pre-dates ``010000``), alembic would re-execute ``010000`` on the next
+# ``upgrade head`` and ``ALTER TABLE … ADD CONSTRAINT`` would fail with
+# ``DuplicateObject``. The remap function detects this case and advances the
+# alembic_version stamp past the constraint-adding migration so the re-run is
+# a no-op. The proper fix — making ``010000`` idempotent — would require
+# editing a merged migration, which is outside the project's policy. This is
+# a targeted runtime guard for the specific known-unsafe operation.
+_CLAUDE_RT_CHECK_CONSTRAINT = "ck_accounts_claude_rt_required"
+_CLAUDE_RT_CHECK_MIGRATION = "20260701_010000_enforce_claude_rt_and_codex_email_invariants"
+
+
+def _existing_account_check_constraints(connection: Connection) -> set[str]:
+    """Return named CHECK constraints on ``accounts`` visible to this connection.
+
+    Mirrors the helper logic in
+    ``app/db/alembic/versions/20260701_010000_*.py`` — SQLite parses
+    ``sqlite_master.sql``, Postgres queries ``information_schema.table_constraints``.
+    """
+    inspector = inspect(connection)
+    if not inspector.has_table("accounts"):
+        return set()
+    dialect = connection.dialect.name
+    if dialect == "sqlite":
+        result = connection.execute(
+            text("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = :name"),
+            {"name": "accounts"},
+        ).scalar_one_or_none()
+        if not result:
+            return set()
+        names: set[str] = set()
+        for match in re.finditer(
+            r"CONSTRAINT\s+([A-Za-z_][A-Za-z0-9_]*)\s+CHECK\s*\(",
+            result,
+            re.IGNORECASE,
+        ):
+            names.add(match.group(1))
+        return names
+    rows = connection.execute(
+        text(
+            "SELECT constraint_name FROM information_schema.table_constraints "
+            "WHERE table_name = :table_name AND constraint_type = 'CHECK'"
+        ),
+        {"table_name": "accounts"},
+    ).fetchall()
+    return {str(row[0]) for row in rows}
 
 
 def _read_current_revision_from_connection(connection: Connection) -> str | None:
@@ -449,6 +502,20 @@ def _remap_legacy_alembic_revisions(config: Config) -> tuple[str, ...]:
             and remapped_set & _BRANCHED_ENFORCEMENT_DESCENDANT_REVISIONS
         ):
             remapped_set.discard(_BRANCHED_ENFORCEMENT_REPAIR_ANCESTOR)
+
+        # State-aware advance: if the live schema carries the
+        # ``ck_accounts_claude_rt_required`` constraint (which is owned by
+        # ``20260701_010000_enforce_claude_rt_and_codex_email_invariants``)
+        # but the remap target is below that migration, alembic would
+        # re-execute ``010000`` and ``ADD CONSTRAINT`` would fail with
+        # ``DuplicateObject``. Bump every remap target up to the
+        # constraint-adding migration so the upgrade is a no-op. The remap
+        # target space is constrained to NEW revision IDs that use sortable
+        # ``YYYYMMDD_HHMMSS_`` prefixes, so lexicographic comparison reflects
+        # insertion order; ``max`` picks the most recent of the existing
+        # target and the constraint-adding migration.
+        if _CLAUDE_RT_CHECK_CONSTRAINT in _existing_account_check_constraints(connection):
+            remapped_set = {max(rev, _CLAUDE_RT_CHECK_MIGRATION) for rev in remapped_set}
 
         remapped = tuple(sorted(remapped_set))
         if remapped == current_revisions:

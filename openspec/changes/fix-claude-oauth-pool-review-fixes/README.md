@@ -1,0 +1,1 @@
+Hardens the Claude OAuth pool introduced in `add-claude-oauth-pool` based on the PR-#1 review findings: per-account cross-replica refresh serialization, explicit handling for the "refresh token omitted" case, streaming iterator cleanup on unexpected exceptions, and a round-trip test for the new migrations.

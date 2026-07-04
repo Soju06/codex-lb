@@ -189,7 +189,7 @@ class Settings(BaseSettings):
     claude_messages_path: str = "/v1/messages"
     claude_models_path: str = "/v1/models"
     claude_oauth_refresh_skew_seconds: int = 600
-    claude_oauth_extra_headers: dict[str, str] = Field(default_factory=dict)
+    claude_oauth_extra_headers: Annotated[dict[str, str], NoDecode] = Field(default_factory=dict)
     auth_guardian_enabled: bool = False
     auth_guardian_interval_seconds: int = Field(default=21600, gt=0)
     auth_guardian_max_refresh_age_seconds: int = Field(default=43200, gt=0)
@@ -461,6 +461,50 @@ class Settings(BaseSettings):
         if isinstance(value, dict):
             return _validate_context_window_entries(value)
         raise TypeError("model_context_window_overrides must be a JSON object string or dict")
+
+    @field_validator("claude_oauth_extra_headers", mode="before")
+    @classmethod
+    def _parse_claude_oauth_extra_headers(cls, value: object) -> dict[str, str]:
+        """Parse ``CODEX_LB_CLAUDE_OAUTH_EXTRA_HEADERS`` from a JSON object.
+
+        Accepts:
+        - ``None`` / empty string → empty dict
+        - JSON object string ``{"User-Agent": "codex-lb"}`` → parsed dict
+        - Already-parsed dict → returned unchanged after validation
+
+        Every key MUST be a non-empty string; every value MUST be a string.
+        Non-conforming input raises ``ValueError`` so a misconfigured
+        deployment fails fast at startup instead of silently dropping
+        upstream headers.
+        """
+        if value is None:
+            return {}
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return {}
+            try:
+                parsed = json.loads(stripped)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    'claude_oauth_extra_headers must be a JSON object string (e.g. \'{"User-Agent": "codex-lb"}\')'
+                ) from exc
+            if not isinstance(parsed, dict):
+                raise ValueError("claude_oauth_extra_headers must decode to a JSON object")
+            value = parsed
+        if not isinstance(value, dict):
+            raise ValueError("claude_oauth_extra_headers must be a dict or JSON object string")
+        result: dict[str, str] = {}
+        for key, header_value in value.items():
+            if not isinstance(key, str) or not isinstance(header_value, str):
+                raise ValueError(
+                    f"claude_oauth_extra_headers entries must be string→string; "
+                    f"got {type(key).__name__}→{type(header_value).__name__}"
+                )
+            if not key:
+                raise ValueError("claude_oauth_extra_headers keys must be non-empty strings")
+            result[key] = header_value
+        return result
 
     @field_validator("upstream_compact_timeout_seconds")
     @classmethod

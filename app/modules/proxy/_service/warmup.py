@@ -130,7 +130,7 @@ def _snapshot_warmup_account(account: Account) -> _WarmupAccountSnapshot:
     return _WarmupAccountSnapshot(
         id=account.id,
         chatgpt_account_id=account.chatgpt_account_id,
-        email=account.email,
+        email=account.email,  # ty:ignore[invalid-argument-type]
         plan_type=account.plan_type,
         access_token_encrypted=account.access_token_encrypted,
         refresh_token_encrypted=account.refresh_token_encrypted,

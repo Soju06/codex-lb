@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
 revision = "20260701_000000_add_claude_account_columns"
@@ -45,11 +46,59 @@ def _indexes(connection: Connection, table_name: str) -> set[str]:
     return {str(index["name"]) for index in inspector.get_indexes(table_name) if index.get("name") is not None}
 
 
+def _check_constraints(connection: Connection, table_name: str) -> set[str]:
+    """Return the set of named CHECK constraints declared on ``table_name``.
+
+    SQLite does not expose CHECK constraint names through a clean pragma
+    (the ``pragma_check_constraints`` table-valued function is gated by
+    a SQLite ≥ 3.40 feature flag, which the project's pinned Python build
+    does not always enable). We fall back to parsing the table's
+    ``CREATE TABLE`` SQL stored in ``sqlite_master`` and extracting names
+    of the form ``CONSTRAINT <name> CHECK (...)``. Postgres exposes
+    ``information_schema.table_constraints`` directly so the cross-dialect
+    branch below is cheap.
+    """
+    inspector = sa.inspect(connection)
+    if not inspector.has_table(table_name):
+        return set()
+    dialect = connection.dialect.name
+    if dialect == "sqlite":
+        result = connection.execute(
+            text("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = :name"),
+            {"name": table_name},
+        ).scalar_one_or_none()
+        if not result:
+            return set()
+        names: set[str] = set()
+        import re
+
+        # ``CREATE TABLE foo (..., CONSTRAINT ck_foo CHECK (...))`` — match
+        # each named CHECK constraint. Bare ``CHECK (...)`` clauses without
+        # a ``CONSTRAINT <name>`` wrapper are anonymous and can't be looked
+        # up by name; they don't matter for this migration.
+        for match in re.finditer(
+            r"CONSTRAINT\s+([A-Za-z_][A-Za-z0-9_]*)\s+CHECK\s*\(",
+            result,
+            re.IGNORECASE,
+        ):
+            names.add(match.group(1))
+        return names
+    rows = connection.execute(
+        text(
+            "SELECT constraint_name FROM information_schema.table_constraints "
+            "WHERE table_name = :table_name AND constraint_type = 'CHECK'"
+        ),
+        {"table_name": table_name},
+    ).fetchall()
+    return {str(row[0]) for row in rows}
+
+
 def upgrade() -> None:
     bind = op.get_bind()
     accounts_columns = _columns(bind, "accounts")
     api_keys_columns = _columns(bind, "api_keys")
     request_logs_columns = _columns(bind, "request_logs")
+    accounts_check_constraints = _check_constraints(bind, "accounts")
 
     # 1. Add the new accounts columns as NULLABLE first so the backfill can run
     #    without violating a NOT NULL constraint. The CHECK constraint on
@@ -98,7 +147,17 @@ def upgrade() -> None:
             # Drop NOT NULL on email so Claude accounts without an email claim
             # can persist. The UNIQUE(email) index is intentionally preserved.
             batch_op.alter_column("email", existing_type=sa.Text(), nullable=True)
-            batch_op.create_check_constraint("ck_accounts_provider", "provider IN ('codex', 'claude')")
+            # The ``ck_accounts_provider`` constraint is also defined on the
+            # ORM model (``app/db/models.py::Account.__table_args__``); when the
+            # migration runs against a freshly-bootstrapped schema (i.e. one
+            # created via ``Base.metadata.create_all`` from a ``bootstrap_legacy``
+            # migration run) the constraint already exists and re-emitting
+            # ``ALTER TABLE … ADD CONSTRAINT`` would fail with
+            # ``DuplicateObject``. Guard on the inspector's view of the
+            # current constraints so the migration is idempotent across both
+            # bootstrap-legacy and bare ``upgrade head`` flows.
+            if "ck_accounts_provider" not in accounts_check_constraints:
+                batch_op.create_check_constraint("ck_accounts_provider", "provider IN ('codex', 'claude')")
 
     # 2. Backfill provider='codex' for existing accounts.
     if accounts_columns and "provider" in _columns(bind, "accounts"):

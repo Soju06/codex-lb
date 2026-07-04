@@ -184,9 +184,21 @@ class SqlClaudeAccountRepository:
     async def count_active(self) -> int:
         """Count ``provider='claude'`` rows with ``status = ACTIVE``.
 
-        Mirrors the candidate filter the load balancer uses so the gauge
-        reflects the pool size that can actually serve traffic — a
-        DEACTIVATED row is not counted.
+        Drives the ``codex_lb_claude_accounts_active`` Prometheus gauge.
+
+        Note on semantics vs the load balancer's
+        :func:`app.modules.proxy.load_balancer._selectable_accounts`:
+
+        - ``count_active`` filters by ``status == ACTIVE`` only.
+        - ``_selectable_accounts`` additionally excludes
+          ``REAUTH_REQUIRED`` and ``PAUSED`` statuses.
+
+        The two predicates can drift. ``REAUTH_REQUIRED`` and ``PAUSED``
+        are Codex-side concepts; they are filtered for consistency with
+        the Codex pool but are NOT counted here. If a future change adds
+        a Claude-only "draining" state, this counter MUST be updated to
+        match the load balancer's view so the gauge does not mislead
+        operators.
         """
         from sqlalchemy import func
 

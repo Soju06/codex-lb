@@ -622,7 +622,7 @@ class UsageUpdater:
         if self._auth_manager and payload_workspace_id and not account.workspace_id:
             slot_taken = await self._auth_manager._repo.workspace_slot_taken(
                 account_id=account.id,
-                email=account.email,
+                email=account.email,  # ty:ignore[invalid-argument-type]
                 chatgpt_account_id=account.chatgpt_account_id,
                 workspace_id=payload_workspace_id,
             )

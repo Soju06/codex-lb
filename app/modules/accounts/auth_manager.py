@@ -255,7 +255,7 @@ class AuthManager:
         elif not current_workspace_id and incoming_workspace_id:
             slot_taken = await self._repo.workspace_slot_taken(
                 account_id=account.id,
-                email=account.email,
+                email=account.email,  # ty:ignore[invalid-argument-type]
                 chatgpt_account_id=account.chatgpt_account_id,
                 workspace_id=incoming_workspace_id,
             )

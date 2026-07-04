@@ -108,10 +108,10 @@ def stubbed_claude_service(app_instance):
     both proxy tests and admin tests.
     """
     stub = _StubProxyService()
-    stub.select_account = lambda *_a, **_kw: _StubAccount()  # type: ignore[attr-defined]
-    stub.record_error = lambda *_a, **_kw: None  # type: ignore[attr-defined]
-    stub.get_access_token = lambda _account: "AT"  # type: ignore[attr-defined]
-    stub.rotate_claude_access_token = lambda *_a, **_kw: None  # type: ignore[attr-defined]
+    stub.select_account = lambda *_a, **_kw: _StubAccount()  # type: ignore[attr-defined]  # ty:ignore[unresolved-attribute]
+    stub.record_error = lambda *_a, **_kw: None  # type: ignore[attr-defined]  # ty:ignore[unresolved-attribute]
+    stub.get_access_token = lambda _account: "AT"  # type: ignore[attr-defined]  # ty:ignore[unresolved-attribute]
+    stub.rotate_claude_access_token = lambda *_a, **_kw: None  # type: ignore[attr-defined]  # ty:ignore[unresolved-attribute]
     app_instance.state.claude_proxy_service = stub  # type: ignore[assignment]
     return stub
 
@@ -224,6 +224,83 @@ async def test_post_messages_streaming_returns_text_event_stream(
     assert "event: message_stop" in body_text
     # Internal ``usage``/``headers`` chunks MUST NOT be serialized as SSE.
     assert "input_tokens" not in body_text
+
+
+@pytest.mark.asyncio
+async def test_post_messages_streaming_releases_iterator_on_unexpected_exception(
+    async_client, stubbed_claude_service, override_claude_key
+):
+    """Streaming path MUST release the upstream iterator when the chat
+    client raises a non-typed exception (e.g. transport disconnect).
+
+    Covers the spec requirement *Streaming proxy cleanup on unexpected
+    exceptions*: the ``_gen`` wrapper's ``finally`` block MUST call
+    ``aclose()`` on the underlying ``StreamChunk`` iterator exactly once
+    even when the async-for loop is interrupted by a ``RuntimeError``
+    (or any non-typed exception class). The iterator's ``aclose`` is
+    observable via a wrapper that records invocations.
+
+    The exception MUST propagate to the FastAPI request handler as the
+    original ``RuntimeError`` (NOT a typed HTTP error envelope) so the
+    proxy surfaces transport disconnects without pretending they were
+    one of the documented Claude error classes.
+    """
+    from types import SimpleNamespace
+
+    override_claude_key["key"] = SimpleNamespace(id="key-1", provider_scope="claude")
+
+    aclose_calls: list[None] = []
+
+    class _RecordingIterator:
+        """Async iterator that raises ``RuntimeError`` after the first chunk
+        and records ``aclose()`` invocations.
+        """
+
+        def __init__(self) -> None:
+            self._yielded_header = False
+
+        def __aiter__(self) -> "_RecordingIterator":
+            return self
+
+        async def __anext__(self):
+            if not self._yielded_header:
+                self._yielded_header = True
+                return StreamChunk(
+                    kind="headers",
+                    data={"anthropic-ratelimit-status": "allowed"},
+                )
+            raise RuntimeError("simulated transport disconnect")
+
+        async def aclose(self) -> None:
+            aclose_calls.append(None)
+
+    async def _exploding_stream(
+        *,
+        request_body: dict[str, Any],
+        api_key: Any,
+        request_id: str,
+    ) -> AsyncIterator[StreamChunk]:
+        return _RecordingIterator()
+
+    stubbed_claude_service.stream_messages = _exploding_stream  # type: ignore[method-assign]
+
+    body = {
+        "model": "claude-opus-4-8",
+        "messages": [{"role": "user", "content": "hi"}],
+        "stream": True,
+    }
+    # The route handler propagates the RuntimeError out of the StreamingResponse
+    # body; httpx surfaces this as an exception from ``aiter_bytes``. We catch
+    # the exception explicitly (NOT ``contextlib.suppress(Exception)``) so the
+    # test fails on a non-typed exception that the proxy accidentally swallows.
+    with pytest.raises(RuntimeError, match="simulated transport disconnect"):
+        async with async_client.stream("POST", "/claude/v1/messages", json=body) as response:
+            async for _ in response.aiter_bytes():
+                pass
+
+    # Exactly-once: the iterator's ``aclose`` MUST be invoked once and only
+    # once, regardless of how the generator is torn down.
+    assert aclose_calls == [None], f"expected aclose() to be invoked exactly once; got {len(aclose_calls)} call(s)"
 
 
 # ---------------------------------------------------------------------------

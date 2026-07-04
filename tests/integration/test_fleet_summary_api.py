@@ -3,12 +3,14 @@ from __future__ import annotations
 import asyncio
 import json
 from contextlib import asynccontextmanager
+from datetime import timedelta
 
 import pytest
 
+from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus
+from app.db.models import Account, AccountStatus, RequestKind, RequestLog, StickySession, StickySessionKind
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
@@ -47,6 +49,20 @@ _FORBIDDEN_KEYS = {
     "additionalQuotas",
     "deactivation_reason",
     "deactivationReason",
+    "request_id",
+    "requestId",
+    "archive_request_id",
+    "archiveRequestId",
+    "session_id",
+    "sessionId",
+    "api_key_id",
+    "apiKeyId",
+    "client_ip",
+    "clientIp",
+    "error_message",
+    "errorMessage",
+    "failure_detail",
+    "failureDetail",
 }
 
 
@@ -122,6 +138,73 @@ async def _seed_account_with_windows(
         )
 
 
+async def _seed_request_log(
+    account_id: str,
+    request_id: str,
+    *,
+    requested_at,
+    status: str = "success",
+    error_code: str | None = None,
+    error_message: str | None = None,
+    request_kind: str = RequestKind.NORMAL.value,
+    input_tokens: int = 0,
+    cached_input_tokens: int = 0,
+    output_tokens: int = 0,
+    cost_usd: float = 0.0,
+    source: str | None = "codex",
+    useragent_group: str | None = "codex-local",
+    client_ip: str | None = None,
+    session_id: str | None = None,
+    api_key_id: str | None = None,
+    deleted_at=None,
+) -> None:
+    async with SessionLocal() as session:
+        session.add(
+            RequestLog(
+                account_id=account_id,
+                request_id=request_id,
+                archive_request_id=f"archive-{request_id}",
+                model="gpt-5",
+                request_kind=request_kind,
+                requested_at=requested_at,
+                deleted_at=deleted_at,
+                status=status,
+                error_code=error_code,
+                error_message=error_message,
+                input_tokens=input_tokens,
+                cached_input_tokens=cached_input_tokens,
+                output_tokens=output_tokens,
+                cost_usd=cost_usd,
+                source=source,
+                useragent_group=useragent_group,
+                client_ip=client_ip,
+                session_id=session_id,
+                api_key_id=api_key_id,
+            )
+        )
+        await session.commit()
+
+
+async def _seed_sticky_session(
+    account_id: str,
+    key: str,
+    *,
+    kind: StickySessionKind = StickySessionKind.PROMPT_CACHE,
+    updated_at,
+) -> None:
+    async with SessionLocal() as session:
+        session.add(
+            StickySession(
+                key=key,
+                kind=kind,
+                account_id=account_id,
+                created_at=updated_at,
+                updated_at=updated_at,
+            )
+        )
+        await session.commit()
+
+
 def _assert_no_forbidden_keys(node: object) -> None:
     if isinstance(node, dict):
         for key, value in node.items():
@@ -130,6 +213,10 @@ def _assert_no_forbidden_keys(node: object) -> None:
     elif isinstance(node, list):
         for item in node:
             _assert_no_forbidden_keys(item)
+
+
+def _window(payload: dict, key: str) -> dict:
+    return next(window for window in payload["pressure"]["windows"] if window["key"] == key)
 
 
 @pytest.mark.asyncio
@@ -333,6 +420,268 @@ async def test_fleet_summary_hides_usage_when_global_api_key_quota_privacy_enabl
     assert account["lastRefreshAt"] is None
     assert account["primary"] == {"remainingPercent": None, "resetAt": None, "windowMinutes": None}
     assert account["secondary"] == {"remainingPercent": None, "resetAt": None, "windowMinutes": None}
+
+
+@pytest.mark.asyncio
+async def test_fleet_observability_requires_api_key(async_client, db_setup):
+    response = await async_client.get("/api/fleet/observability")
+
+    assert response.status_code == 401
+    assert "pressure" not in response.text
+    assert "sticky" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_fleet_observability_reports_pressure_and_sticky_without_sensitive_fields(async_client, db_setup):
+    await get_settings_cache().invalidate()
+    plain_key = await _create_api_key("fleet-observability-key")
+    await _seed_account_with_windows(
+        "acc_observe",
+        "observe@example.com",
+        primary_used_percent=10.0,
+        secondary_used_percent=20.0,
+        primary_reset_at=1735862400,
+        secondary_reset_at=1736467200,
+    )
+    now = utcnow()
+    await _seed_request_log(
+        "acc_observe",
+        "req-observe-success",
+        requested_at=now - timedelta(minutes=5),
+        request_kind="prewarm",
+        input_tokens=100,
+        cached_input_tokens=70,
+        output_tokens=10,
+        cost_usd=1.0,
+        client_ip="203.0.113.15",
+        session_id="session-observe-secret",
+        api_key_id="api-key-observe-secret",
+    )
+    await _seed_request_log(
+        "acc_observe",
+        "req-observe-error",
+        requested_at=now - timedelta(minutes=10),
+        status="error",
+        error_code="rate_limit",
+        error_message="secret upstream error body",
+        input_tokens=20,
+        output_tokens=0,
+        cost_usd=0.5,
+        client_ip="203.0.113.16",
+    )
+    await _seed_request_log(
+        "acc_observe",
+        "req-observe-older",
+        requested_at=now - timedelta(minutes=45),
+        input_tokens=40,
+        cached_input_tokens=10,
+        output_tokens=5,
+        cost_usd=0.75,
+        useragent_group="worker",
+    )
+    await _seed_request_log(
+        "acc_observe",
+        "req-observe-warmup",
+        requested_at=now - timedelta(minutes=2),
+        request_kind=RequestKind.WARMUP.value,
+        input_tokens=10_000,
+        cost_usd=99.0,
+    )
+    await _seed_request_log(
+        "acc_observe",
+        "req-observe-deleted",
+        requested_at=now - timedelta(minutes=2),
+        deleted_at=now - timedelta(minutes=1),
+        input_tokens=10_000,
+        cost_usd=99.0,
+    )
+    await _seed_sticky_session(
+        "acc_observe",
+        "sticky-observe-recent-secret",
+        updated_at=now - timedelta(minutes=2),
+    )
+    await _seed_sticky_session(
+        "acc_observe",
+        "sticky-observe-stale-secret",
+        updated_at=now - timedelta(hours=1),
+    )
+    await _seed_sticky_session(
+        "acc_observe",
+        "sticky-observe-thread-secret",
+        kind=StickySessionKind.STICKY_THREAD,
+        updated_at=now - timedelta(hours=2),
+    )
+
+    response = await async_client.get(
+        "/api/fleet/observability",
+        headers={"Authorization": f"Bearer {plain_key}"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    _assert_no_forbidden_keys(payload)
+    assert payload["available"] is True
+    assert payload["source"] == "codex-lb fleet observability"
+    assert payload["generatedAt"] is not None
+    assert payload["pressure"]["available"] is True
+    assert {window["key"] for window in payload["pressure"]["windows"]} == {"30m", "2h"}
+
+    thirty = _window(payload, "30m")
+    assert thirty["requestCount"] == 2
+    assert thirty["errorCount"] == 1
+    assert thirty["inputTokens"] == 120
+    assert thirty["cachedInputTokens"] == 70
+    assert thirty["outputTokens"] == 10
+    assert thirty["costUsd"] == 1.5
+    assert thirty["topErrorCode"] == "rate_limit"
+    assert thirty["byAccount"] == [
+        {
+            "accountId": "acc_observe",
+            "email": "observe@example.com",
+            "label": "observe@example.com",
+            "requestCount": 2,
+            "errorCount": 1,
+            "inputTokens": 120,
+            "cachedInputTokens": 70,
+            "outputTokens": 10,
+            "costUsd": 1.5,
+            "lastSelectedAt": thirty["byAccount"][0]["lastSelectedAt"],
+        }
+    ]
+    assert thirty["byAccount"][0]["lastSelectedAt"] is not None
+    assert {item["requestKind"]: item["requestCount"] for item in thirty["byKind"]} == {
+        "normal": 1,
+        "prewarm": 1,
+    }
+    assert thirty["byClient"][0]["clientGroup"] == "codex-local"
+    assert thirty["byClient"][0]["requestCount"] == 2
+
+    two_hour = _window(payload, "2h")
+    assert two_hour["requestCount"] == 3
+    assert two_hour["errorCount"] == 1
+    assert two_hour["inputTokens"] == 160
+    assert two_hour["cachedInputTokens"] == 80
+    assert two_hour["outputTokens"] == 15
+    assert two_hour["costUsd"] == 2.25
+
+    sticky = payload["sticky"]
+    assert sticky["available"] is True
+    assert sticky["total"] == 3
+    assert sticky["recentCount"] == 2
+    assert sticky["staleCount"] == 1
+    assert sticky["staleThresholdSeconds"] == 1800
+    assert sticky["byAccount"][0]["accountId"] == "acc_observe"
+    assert sticky["byAccount"][0]["total"] == 3
+    assert sticky["byAccount"][0]["recentCount"] == 2
+    assert sticky["byAccount"][0]["staleCount"] == 1
+    assert {kind["name"]: kind["staleCount"] for kind in sticky["byAccount"][0]["kinds"]} == {
+        "prompt_cache": 1,
+        "sticky_thread": 0,
+    }
+
+    raw = json.dumps(payload)
+    assert "req-observe" not in raw
+    assert "archive-req-observe" not in raw
+    assert "session-observe-secret" not in raw
+    assert "api-key-observe-secret" not in raw
+    assert "sticky-observe" not in raw
+    assert "203.0.113" not in raw
+    assert "secret upstream error body" not in raw
+
+
+@pytest.mark.asyncio
+async def test_fleet_observability_respects_account_scoped_api_key(async_client, db_setup):
+    await get_settings_cache().invalidate()
+    await _seed_account_with_windows(
+        "acc_observe_visible",
+        "observe-visible@example.com",
+        primary_used_percent=10.0,
+        secondary_used_percent=20.0,
+        primary_reset_at=1735862400,
+        secondary_reset_at=1736467200,
+    )
+    await _seed_account_with_windows(
+        "acc_observe_hidden",
+        "observe-hidden@example.com",
+        primary_used_percent=30.0,
+        secondary_used_percent=40.0,
+        primary_reset_at=1735862400,
+        secondary_reset_at=1736467200,
+    )
+    now = utcnow()
+    await _seed_request_log("acc_observe_visible", "req-visible", requested_at=now - timedelta(minutes=5))
+    await _seed_request_log("acc_observe_hidden", "req-hidden", requested_at=now - timedelta(minutes=5))
+    await _seed_sticky_session("acc_observe_visible", "sticky-visible", updated_at=now - timedelta(minutes=5))
+    await _seed_sticky_session("acc_observe_hidden", "sticky-hidden", updated_at=now - timedelta(minutes=5))
+    plain_key = await _create_api_key(
+        "fleet-observability-scoped-key",
+        assigned_account_ids=["acc_observe_visible"],
+    )
+
+    response = await async_client.get(
+        "/api/fleet/observability",
+        headers={"Authorization": f"Bearer {plain_key}"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert _window(payload, "30m")["requestCount"] == 1
+    assert _window(payload, "30m")["byAccount"][0]["accountId"] == "acc_observe_visible"
+    assert payload["sticky"]["total"] == 1
+    assert payload["sticky"]["byAccount"][0]["accountId"] == "acc_observe_visible"
+    raw = json.dumps(payload)
+    assert "acc_observe_hidden" not in raw
+    assert "observe-hidden@example.com" not in raw
+    assert "req-hidden" not in raw
+    assert "sticky-hidden" not in raw
+
+
+@pytest.mark.asyncio
+async def test_fleet_observability_hides_usage_when_key_disables_account_pool_usage(async_client, db_setup):
+    await get_settings_cache().invalidate()
+    plain_key = await _create_api_key("fleet-observability-no-usage-key", usage_sections="")
+    await _seed_account_with_windows(
+        "acc_observe_hidden_usage",
+        "observe-hidden-usage@example.com",
+        primary_used_percent=10.0,
+        secondary_used_percent=20.0,
+        primary_reset_at=1735862400,
+        secondary_reset_at=1736467200,
+    )
+    now = utcnow()
+    await _seed_request_log(
+        "acc_observe_hidden_usage",
+        "req-hidden-usage",
+        requested_at=now - timedelta(minutes=5),
+    )
+    await _seed_sticky_session(
+        "acc_observe_hidden_usage",
+        "sticky-hidden-usage",
+        updated_at=now - timedelta(minutes=5),
+    )
+
+    response = await async_client.get(
+        "/api/fleet/observability",
+        headers={"Authorization": f"Bearer {plain_key}"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["available"] is False
+    assert payload["pressure"] == {"available": False, "windows": []}
+    assert payload["sticky"] == {
+        "available": False,
+        "total": 0,
+        "recentCount": 0,
+        "staleCount": 0,
+        "staleThresholdSeconds": None,
+        "truncated": False,
+        "byAccount": [],
+    }
+    raw = json.dumps(payload)
+    assert "observe-hidden-usage@example.com" not in raw
+    assert "req-hidden-usage" not in raw
+    assert "sticky-hidden-usage" not in raw
 
 
 @pytest.mark.asyncio

@@ -14,7 +14,8 @@ from app.dependencies import AccountsContext, get_accounts_context
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.service import ApiKeyData
 from app.modules.fleet.mappers import build_fleet_account_summaries
-from app.modules.fleet.schemas import FleetRefreshResponse, FleetSummaryResponse
+from app.modules.fleet.observability import build_fleet_observability
+from app.modules.fleet.schemas import FleetObservabilityResponse, FleetRefreshResponse, FleetSummaryResponse
 from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
@@ -72,6 +73,20 @@ async def get_fleet_summary(
             include_usage=include_usage,
             persisted_status_by_account_id=persisted_status_by_account_id,
         )
+    )
+
+
+@router.get("/observability", response_model=FleetObservabilityResponse)
+async def get_fleet_observability(
+    context: AccountsContext = Depends(get_accounts_context),
+    api_key: ApiKeyData = Security(validate_usage_api_key),
+) -> FleetObservabilityResponse:
+    """Read-only pressure and sticky-session summary for fleet consumers."""
+
+    return await build_fleet_observability(
+        context.session,
+        visible_account_ids=_visible_account_ids(api_key),
+        include_usage=await _can_view_fleet_usage(api_key),
     )
 
 

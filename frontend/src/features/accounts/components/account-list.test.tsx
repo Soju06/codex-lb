@@ -486,7 +486,7 @@ describe("AccountList", () => {
       "[&::-webkit-scrollbar]:hidden",
       "flex-1",
       "min-h-0",
-      "lg:max-h-none",
+      "max-h-[min(32rem,calc(100dvh-16rem))]",
     );
   });
 

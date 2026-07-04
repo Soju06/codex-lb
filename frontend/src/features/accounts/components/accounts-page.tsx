@@ -160,7 +160,7 @@ export function AccountsPage() {
         >
           <div
             data-testid="accounts-list-panel"
-            className="min-w-0 rounded-xl border bg-card p-3 sm:p-4"
+            className="flex h-full min-h-0 min-w-0 flex-col rounded-xl border bg-card p-3 sm:p-4"
           >
             <AccountList
               accounts={accounts}

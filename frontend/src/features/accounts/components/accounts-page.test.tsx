@@ -173,7 +173,13 @@ describe("AccountsPage", () => {
       "min-w-0",
       "lg:grid-cols-[minmax(18rem,22rem)_minmax(0,1fr)]",
     );
-    expect(screen.getByTestId("accounts-list-panel")).toHaveClass("min-w-0");
+    expect(screen.getByTestId("accounts-list-panel")).toHaveClass(
+      "min-w-0",
+      "flex",
+      "h-full",
+      "min-h-0",
+      "flex-col",
+    );
     expect(screen.getByRole("heading", { name: /very\.long\.account/i })).toHaveClass(
       "min-w-0",
       "truncate",

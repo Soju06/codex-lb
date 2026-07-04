@@ -459,6 +459,37 @@ describe("AccountList", () => {
     expect(scrollRegion).not.toContainElement(addAccountButton);
   });
 
+  it("hides the account list scrollbar while keeping vertical scrolling", () => {
+    render(
+      <AccountList
+        accounts={[
+          {
+            accountId: "acc-1",
+            email: "primary@example.com",
+            displayName: "Primary",
+            planType: "plus",
+            status: "active",
+            limitWarmupEnabled: false,
+            additionalQuotas: [],
+          },
+        ]}
+        selectedAccountId={null}
+        onSelect={() => {}}
+        onOpenImport={() => {}}
+        onOpenOauth={() => {}}
+      />,
+    );
+
+    expect(screen.getByTestId("account-list-scroll-region")).toHaveClass(
+      "overflow-y-auto",
+      "[scrollbar-width:none]",
+      "[&::-webkit-scrollbar]:hidden",
+      "flex-1",
+      "min-h-0",
+      "lg:max-h-none",
+    );
+  });
+
   it("filters re-auth required accounts by status", async () => {
     const user = userEvent.setup();
 

@@ -829,6 +829,59 @@ async def test_source_chat_payload_keeps_reasoning_toggles_for_optin_model(async
 
 
 @pytest.mark.asyncio
+async def test_dashboard_models_endpoint_lists_source_models(async_client):
+    model = "picker-source-model"
+    await _create_model_source(
+        async_client,
+        name="picker",
+        model=model,
+        base_url="http://127.0.0.1:9/v1",
+    )
+
+    response = await async_client.get("/api/models")
+    assert response.status_code == 200
+    ids = [entry["id"] for entry in response.json()["models"]]
+    assert model in ids
+    assert ids.count(model) == 1
+
+
+@pytest.mark.asyncio
+async def test_allowlisted_source_model_routes_through(async_client, source_upstream):
+    await _enable_api_key_auth(async_client)
+
+    async def completion(_request: web.Request) -> web.Response:
+        return web.json_response(_chat_completion_body("allowlisted-model"))
+
+    base_url = await source_upstream(completion)
+    model = "allowlisted-model"
+    source_id = await _create_model_source(async_client, name="allowlisted", model=model, base_url=base_url)
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "allowlisted-key",
+            "assignedSourceIds": [source_id],
+            "allowedModels": [model],
+        },
+    )
+    assert created.status_code == 200
+    key = created.json()["key"]
+
+    allowed = await async_client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"model": model, "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert allowed.status_code == 200
+
+    denied = await async_client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"model": "some-other-model", "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert denied.status_code == 403
+
+
+@pytest.mark.asyncio
 async def test_scoped_key_does_not_route_to_unassigned_source(async_client, source_upstream):
     await _enable_api_key_auth(async_client)
     unassigned_hits = 0

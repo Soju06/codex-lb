@@ -22,6 +22,20 @@ creation.
 - **THEN** the dashboard calls `PATCH /api/model-sources/{sourceId}` with `isEnabled=false`
 - **AND** the source remains listed as disabled
 
+### Requirement: Dashboard model picker includes source models
+
+The dashboard model listing endpoint (`GET /api/models`) SHALL include enabled
+OpenAI-compatible source models alongside subscription registry models so
+API-key model allowlists can reference source models. Duplicate slugs MUST be
+listed once with the subscription entry taking precedence.
+
+#### Scenario: Allowed-models picker offers a source model
+
+- **GIVEN** an enabled OpenAI-compatible source exposes model `local-coder`
+- **WHEN** the dashboard requests `GET /api/models`
+- **THEN** the response includes `local-coder`
+- **AND** an API key allowlisted to `local-coder` can call it through the proxy
+
 ### Requirement: Dashboard API-key forms assign model sources
 
 The API-key create and edit dialogs SHALL allow operators to assign zero or

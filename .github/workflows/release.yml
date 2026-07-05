@@ -289,14 +289,9 @@ jobs:
     # `publish-to-pypi` is intentionally skipped on forks (see job definition
     # above). Without `if: always()` GitHub Actions treats a skipped upstream
     # job as a downstream skip too, which would suppress the release on forks
-    # even though Docker + Helm succeeded. Treat `success` and `skipped` as
-    # pass-through, but still refuse to release on real failures/cancellations.
-    if: |
-      always() &&
-      needs.release-metadata.result == 'success' &&
-      needs.docker-image.result == 'success' &&
-      needs.helm-chart.result == 'success' &&
-      (needs.publish-to-pypi.result == 'success' || needs.publish-to-pypi.result == 'skipped')
+    # even though Docker + Helm succeeded. Run unless any real upstream
+    # failure or cancellation, regardless of publish-to-pypi being skipped.
+    if: always() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
     runs-on: ubuntu-24.04
 
     permissions:

@@ -147,7 +147,7 @@ export function AccountList({
       {helpOpen ? <WindowsOauthHelp /> : null}
 
       <div
-        className="max-h-[min(32rem,calc(100dvh-16rem))] flex-1 min-h-0 space-y-1 overflow-y-auto p-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+        className="max-h-[min(32rem,calc(100dvh-16rem))] flex-1 min-h-0 space-y-1 overflow-y-auto p-1 lg:max-h-none [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
         data-testid="account-list-scroll-region"
       >
         {filtered.length === 0 ? (

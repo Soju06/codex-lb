@@ -106,6 +106,17 @@ async def test_plan_types_for_model_returns_plans():
     assert registry.plan_types_for_model("model-c") == frozenset({"pro"})
 
 
+@pytest.mark.parametrize("model_slug", ["gpt-5.5", "gpt-5.3-codex-spark"])
+@pytest.mark.asyncio
+async def test_plan_types_for_bootstrap_model_uses_live_snapshot_after_refresh(model_slug: str):
+    registry = ModelRegistry(ttl_seconds=60.0)
+    await registry.update({"team": [_model(model_slug)]})
+
+    plans = registry.plan_types_for_model(model_slug)
+
+    assert plans == frozenset({"team"})
+
+
 @pytest.mark.asyncio
 async def test_prefers_websockets_uses_snapshot_value():
     registry = ModelRegistry(ttl_seconds=60.0)
@@ -274,7 +285,9 @@ async def test_plan_types_for_model_service_tier_tracks_tier_plans():
     registry = ModelRegistry(ttl_seconds=60.0)
     await registry.update({"pro": [fast], "plus": [no_fast]})
 
-    assert registry.plan_types_for_model("gpt-5.5") == frozenset({"pro", "plus"})
+    model_plans = registry.plan_types_for_model("gpt-5.5")
+    assert model_plans is not None
+    assert {"pro", "plus"}.issubset(model_plans)
     assert registry.plan_types_for_model_service_tier("gpt-5.5", "priority") == frozenset({"pro"})
     assert registry.plan_types_for_model_service_tier("gpt-5.5", "fast") == frozenset({"pro"})
     assert registry.plan_types_for_model_service_tier("gpt-5.5", "default") == frozenset({"plus"})

@@ -2058,14 +2058,14 @@ async def _build_codex_models_response(api_key: ApiKeyData | None) -> Response:
     entries: list[CodexModelEntry] = []
     data: list[ModelListItem] = []
     for slug, model in models.items():
-        if not model.supported_in_api:
+        if not _is_codex_backend_catalog_model(model):
             continue
         if visibility_allowed_models is None:
-            if not is_public_model(model, allowed_models):
+            if allowed_models is not None and slug not in allowed_models:
                 continue
             entry = _to_codex_model_entry(model)
             entries.append(entry)
-            if entry.visibility == "list":
+            if model.supported_in_api and entry.visibility == "list":
                 data.append(_to_model_list_item(slug, model, created=_model_list_created_at(model)))
             continue
         entry = _to_codex_model_entry(
@@ -2073,7 +2073,7 @@ async def _build_codex_models_response(api_key: ApiKeyData | None) -> Response:
             visibility="list" if slug in visibility_allowed_models else "hide",
         )
         entries.append(entry)
-        if entry.visibility == "list":
+        if model.supported_in_api and entry.visibility == "list":
             data.append(_to_model_list_item(slug, model, created=_model_list_created_at(model)))
     await _release_reservation(reservation)
     return JSONResponse(content=CodexModelsResponse(models=entries, data=data).model_dump(mode="json"))
@@ -2170,6 +2170,12 @@ def _codex_model_visibility_allowed_models(api_key: ApiKeyData | None) -> set[st
     if api_key is None or not api_key.apply_to_codex_model or not api_key.allowed_models:
         return None
     return _allowed_models_for_api_key(api_key)
+
+
+def _is_codex_backend_catalog_model(model: UpstreamModel) -> bool:
+    if model.supported_in_api:
+        return True
+    return model.raw.get("shell_type") == "shell_command"
 
 
 def _to_codex_model_entry(model: UpstreamModel, *, visibility: str | None = None) -> CodexModelEntry:

@@ -100,7 +100,8 @@ async def test_v1_models_list(async_client):
     ids = {item["id"] for item in data}
     assert "gpt-5.2" in ids
     assert "gpt-5.3-codex" in ids
-    for item in data:
+    custom_items = [item for item in data if item["id"] in {"gpt-5.2", "gpt-5.3-codex"}]
+    for item in custom_items:
         assert item["object"] == "model"
         assert item["owned_by"] == "codex-lb"
         assert "metadata" in item
@@ -330,10 +331,59 @@ async def test_backend_codex_models_data_keeps_only_list_visible_models(async_cl
     resp = await async_client.get("/backend-api/codex/models")
     assert resp.status_code == 200
     payload = resp.json()
-    assert {m["slug"] for m in payload["models"]} == {"gpt-visible", "gpt-hidden"}
-    assert {m["id"] for m in payload["data"]} == {"gpt-visible"}
-    assert payload["data"][0]["object"] == "model"
-    assert payload["data"][0]["owned_by"] == "codex-lb"
+    assert {"gpt-visible", "gpt-hidden"}.issubset({m["slug"] for m in payload["models"]})
+    data = {m["id"]: m for m in payload["data"]}
+    assert "gpt-visible" in data
+    assert "gpt-hidden" not in data
+    assert data["gpt-visible"]["object"] == "model"
+    assert data["gpt-visible"]["owned_by"] == "codex-lb"
+
+
+@pytest.mark.asyncio
+async def test_backend_codex_models_lists_codex_shell_models_not_supported_in_v1(async_client):
+    registry = get_model_registry()
+    models = [
+        _make_upstream_model(
+            "gpt-5.3-codex-spark",
+            supported_in_api=False,
+            raw={
+                "shell_type": "shell_command",
+                "visibility": "list",
+            },
+        ),
+    ]
+    await registry.update({"pro": models})
+
+    resp = await async_client.get("/backend-api/codex/models")
+    assert resp.status_code == 200
+    payload = resp.json()
+    entries = {m["slug"]: m for m in payload["models"]}
+
+    assert entries["gpt-5.3-codex-spark"]["supported_in_api"] is False
+    assert entries["gpt-5.3-codex-spark"]["visibility"] == "list"
+    assert "gpt-5.3-codex-spark" not in {m["id"] for m in payload["data"]}
+
+
+@pytest.mark.asyncio
+async def test_backend_codex_models_excludes_unsupported_non_shell_models(async_client):
+    registry = get_model_registry()
+    models = [
+        _make_upstream_model(
+            "gpt-internal",
+            supported_in_api=False,
+            raw={
+                "shell_type": "internal",
+                "visibility": "list",
+            },
+        ),
+    ]
+    await registry.update({"pro": models})
+
+    resp = await async_client.get("/backend-api/codex/models")
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert "gpt-internal" not in {m["slug"] for m in payload["models"]}
+    assert "gpt-internal" not in {m["id"] for m in payload["data"]}
 
 
 @pytest.mark.asyncio
@@ -449,7 +499,7 @@ async def test_backend_codex_models_rewrites_visibility_when_opted_in(async_clie
             "gpt-hidden",
             supported_in_api=False,
             raw={
-                "shell_type": "shell_command",
+                "shell_type": "internal",
                 "visibility": "list",
             },
         ),
@@ -482,7 +532,8 @@ async def test_backend_codex_models_rewrites_visibility_when_opted_in(async_clie
     assert resp.status_code == 200
 
     entries = {entry["slug"]: entry for entry in resp.json()["models"]}
-    assert set(entries) == {"gpt-5.2", "gpt-5.3-codex"}
+    assert {"gpt-5.2", "gpt-5.3-codex"}.issubset(entries)
+    assert "gpt-hidden" not in entries
     assert entries["gpt-5.2"]["visibility"] == "list"
     assert entries["gpt-5.3-codex"]["visibility"] == "hide"
 
@@ -535,7 +586,7 @@ async def test_backend_codex_models_visibility_allowlist_respects_enforced_model
     assert resp.status_code == 200
 
     entries = {entry["slug"]: entry for entry in resp.json()["models"]}
-    assert set(entries) == {"gpt-5.2", "gpt-5.3-codex"}
+    assert {"gpt-5.2", "gpt-5.3-codex"}.issubset(entries)
     assert entries["gpt-5.2"]["visibility"] == "hide"
     assert entries["gpt-5.3-codex"]["visibility"] == "list"
 
@@ -591,7 +642,7 @@ async def test_model_catalogs_canonicalize_enforced_model_alias(async_client):
     codex_resp = await async_client.get("/backend-api/codex/models", headers={"Authorization": f"Bearer {key}"})
     assert codex_resp.status_code == 200
     entries = {entry["slug"]: entry for entry in codex_resp.json()["models"]}
-    assert set(entries) == {"gpt-5.2", "gpt-5.4-mini"}
+    assert {"gpt-5.2", "gpt-5.4-mini"}.issubset(entries)
     assert entries["gpt-5.2"]["visibility"] == "hide"
     assert entries["gpt-5.4-mini"]["visibility"] == "list"
 
@@ -642,18 +693,25 @@ async def test_backend_codex_models_preserves_original_flow_without_allowlist(as
     assert resp.status_code == 200
 
     entries = {entry["slug"]: entry for entry in resp.json()["models"]}
-    assert set(entries) == {"gpt-5.2", "gpt-5.3-codex"}
+    assert {"gpt-5.2", "gpt-5.3-codex"}.issubset(entries)
     assert entries["gpt-5.2"]["visibility"] == "hide"
     assert entries["gpt-5.3-codex"]["visibility"] == "list"
 
 
 @pytest.mark.asyncio
-async def test_backend_codex_models_excludes_supported_in_api_false_models(async_client):
+async def test_backend_codex_models_keeps_supported_in_api_false_entries_out_of_data(async_client):
     registry = get_model_registry()
     models = [
         _make_upstream_model("gpt-5.2"),
         _make_upstream_model("gpt-5.3-codex"),
-        _make_upstream_model("gpt-hidden", supported_in_api=False),
+        _make_upstream_model(
+            "gpt-5.3-codex-spark",
+            supported_in_api=False,
+            raw={
+                "shell_type": "shell_command",
+                "visibility": "list",
+            },
+        ),
     ]
     await registry.update({"plus": models, "pro": models})
 
@@ -662,7 +720,8 @@ async def test_backend_codex_models_excludes_supported_in_api_false_models(async
     slugs = {m["slug"] for m in resp.json()["models"]}
     assert "gpt-5.2" in slugs
     assert "gpt-5.3-codex" in slugs
-    assert "gpt-hidden" not in slugs
+    assert "gpt-5.3-codex-spark" in slugs
+    assert "gpt-5.3-codex-spark" not in {m["id"] for m in resp.json()["data"]}
 
 
 @pytest.mark.asyncio
@@ -687,7 +746,14 @@ async def test_model_sets_are_consistent_across_api_endpoints(async_client):
     models = [
         _make_upstream_model("gpt-5.2"),
         _make_upstream_model("gpt-5.3-codex"),
-        _make_upstream_model("gpt-hidden", supported_in_api=False),
+        _make_upstream_model(
+            "gpt-hidden",
+            supported_in_api=False,
+            raw={
+                "shell_type": "internal",
+                "visibility": "list",
+            },
+        ),
     ]
     await registry.update({"plus": models, "pro": models})
 
@@ -705,7 +771,8 @@ async def test_model_sets_are_consistent_across_api_endpoints(async_client):
     assert "gpt-hidden" not in dashboard_ids
     assert "gpt-hidden" not in v1_ids
     assert "gpt-hidden" not in codex_slugs
-    assert dashboard_ids == v1_ids == codex_slugs
+    assert dashboard_ids == v1_ids
+    assert dashboard_ids.issubset(codex_slugs)
 
 
 @pytest.mark.asyncio

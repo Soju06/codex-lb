@@ -160,18 +160,20 @@ export function AccountsPage() {
         >
           <div
             data-testid="accounts-list-panel"
-            className="min-w-0 rounded-xl border bg-card p-3 sm:p-4"
+            className="relative min-w-0"
           >
-            <AccountList
-              accounts={accounts}
-              selectedAccountId={resolvedSelectedAccountId}
-              onSelect={handleSelectAccount}
-              sortMode={accountSortMode}
-              onSortModeChange={setAccountSortMode}
-              onOpenImport={() => importDialog.show()}
-              onOpenOauth={() => oauthDialog.show()}
-              readOnly={!canWrite}
-            />
+            <div className="flex min-h-0 min-w-0 flex-col overflow-hidden rounded-xl border bg-card p-3 sm:p-4 lg:absolute lg:inset-0">
+              <AccountList
+                accounts={accounts}
+                selectedAccountId={resolvedSelectedAccountId}
+                onSelect={handleSelectAccount}
+                sortMode={accountSortMode}
+                onSortModeChange={setAccountSortMode}
+                onOpenImport={() => importDialog.show()}
+                onOpenOauth={() => oauthDialog.show()}
+                readOnly={!canWrite}
+              />
+            </div>
           </div>
 
           <AccountDetail

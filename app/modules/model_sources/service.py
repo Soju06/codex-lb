@@ -56,6 +56,7 @@ class ModelSourcesService:
             health_status=MODEL_SOURCE_HEALTH_UNKNOWN,
             supports_chat_completions=payload.supports_chat_completions,
             supports_responses=payload.supports_responses,
+            supports_audio_transcriptions=payload.supports_audio_transcriptions,
             timeout_seconds=payload.timeout_seconds,
             max_concurrency=payload.max_concurrency,
             models=model_rows,
@@ -85,6 +86,8 @@ class ModelSourcesService:
             row.supports_chat_completions = payload.supports_chat_completions
         if "supports_responses" in fields and payload.supports_responses is not None:
             row.supports_responses = payload.supports_responses
+        if "supports_audio_transcriptions" in fields and payload.supports_audio_transcriptions is not None:
+            row.supports_audio_transcriptions = payload.supports_audio_transcriptions
         if "timeout_seconds" in fields:
             row.timeout_seconds = payload.timeout_seconds
         if "max_concurrency" in fields:
@@ -218,6 +221,7 @@ def _to_response(row: ModelSource) -> ModelSourceResponse:
         health_status=row.health_status,
         supports_chat_completions=row.supports_chat_completions,
         supports_responses=row.supports_responses,
+        supports_audio_transcriptions=row.supports_audio_transcriptions,
         timeout_seconds=row.timeout_seconds,
         max_concurrency=row.max_concurrency,
         created_at=row.created_at,

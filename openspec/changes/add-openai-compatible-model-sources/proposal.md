@@ -18,7 +18,8 @@ while keeping `model_provider = "codex-lb"`.
   subscription-backed model catalog entries and explicit OpenAI-compatible
   endpoints without turning those endpoints into accounts.
 - Persist OpenAI-compatible sources with encrypted upstream API keys,
-  operator-supplied model metadata, and health/enabled state.
+  operator-supplied model metadata, route capability flags, and health/enabled
+  state.
 - Extend the model catalog so `/v1/models` and eligible Codex model-picker
   catalogs can expose models from both subscription and OpenAI-compatible
   sources while preserving source identity internally.
@@ -27,6 +28,8 @@ while keeping `model_provider = "codex-lb"`.
 - Reuse the existing API-key usage reservation/finalization flow for
   OpenAI-compatible sources when upstream responses provide OpenAI `usage`
   fields.
+- Route OpenAI-compatible audio transcription models through
+  `/v1/audio/transcriptions` when a source explicitly declares that capability.
 
 ## Non-Goals
 

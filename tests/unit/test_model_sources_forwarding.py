@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.modules.model_sources.forwarding import SourceStreamUsageParser, SourceUsageHolder
+from app.modules.model_sources.forwarding import SourceStreamUsageParser, SourceUsageHolder, _usage_from_audio_body
 
 
 def test_chat_stream_usage_parser_handles_split_sse_frame() -> None:
@@ -82,3 +82,23 @@ def test_responses_stream_usage_parser_handles_split_sse_frame() -> None:
     assert holder.usage.input_tokens == 7
     assert holder.usage.output_tokens == 4
     assert holder.usage.cached_input_tokens == 2
+
+
+def test_audio_usage_parser_accepts_total_tokens_only_json() -> None:
+    usage = _usage_from_audio_body(
+        b'{"text":"hello","usage":{"total_tokens":42}}',
+        "application/json; charset=utf-8",
+    )
+
+    assert usage is not None
+    assert usage.input_tokens == 42
+    assert usage.output_tokens == 0
+
+
+def test_audio_usage_parser_ignores_duration_only_usage() -> None:
+    usage = _usage_from_audio_body(
+        b'{"text":"hello","usage":{"type":"duration","seconds":3.5}}',
+        "application/json",
+    )
+
+    assert usage is None

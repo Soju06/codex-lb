@@ -20,6 +20,7 @@ describe("ModelSourceSchema", () => {
       healthStatus: "unknown",
       supportsChatCompletions: true,
       supportsResponses: false,
+      supportsAudioTranscriptions: true,
       timeoutSeconds: null,
       maxConcurrency: null,
       createdAt: ISO,
@@ -47,6 +48,7 @@ describe("ModelSourceSchema", () => {
     });
 
     expect(parsed.id).toBe("src_vllm");
+    expect(parsed.supportsAudioTranscriptions).toBe(true);
     expect(parsed.models[0].model).toBe("local-coder");
   });
 });
@@ -67,9 +69,11 @@ describe("ModelSourceCreateRequestSchema", () => {
       apiKey: "secret",
       supportsChatCompletions: true,
       supportsResponses: true,
+      supportsAudioTranscriptions: true,
       models: [{ model: "deepseek-v4-flash" }],
     });
 
+    expect(parsed.supportsAudioTranscriptions).toBe(true);
     expect(parsed.models[0].model).toBe("deepseek-v4-flash");
   });
 });

@@ -34,7 +34,8 @@
 - [x] 6.1 Route `/v1/chat/completions` requests for source-owned models to the selected OpenAI-compatible source.
 - [x] 6.2 Route `/v1/responses` only when the selected source explicitly supports Responses-compatible requests.
 - [x] 6.3 Route `/backend-api/codex/responses` only when the selected source explicitly supports Responses-compatible requests.
-- [x] 6.4 Preserve subscription routing for Codex-native compaction, file, control-plane, websocket, and Chat Completions-only source paths.
+- [x] 6.4 Route `/v1/audio/transcriptions` to OpenAI-compatible sources that explicitly support audio transcriptions.
+- [x] 6.5 Preserve subscription routing for Codex-native compaction, file, control-plane, websocket, and incompatible source paths.
 
 ## 7. Observability
 
@@ -47,5 +48,6 @@
 - [x] 8.2 Add integration tests for `/v1/models` source filtering by API key.
 - [x] 8.3 Add integration tests for source-routed usage settlement.
 - [x] 8.4 Add integration tests for Codex model-picker source discovery and `/backend-api/codex/responses` source routing.
-- [x] 8.5 Add frontend schema/component tests for model-source management and API-key source assignment.
-- [ ] 8.6 Run targeted tests and `openspec validate --specs` when the CLI is available.
+- [x] 8.5 Add integration tests for source-routed audio transcription multipart forwarding and usage settlement.
+- [x] 8.6 Add frontend schema/component tests for model-source management and API-key source assignment.
+- [ ] 8.7 Run targeted tests and `openspec validate --specs` when the CLI is available.

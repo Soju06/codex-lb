@@ -82,6 +82,31 @@ class ModelSourcesRepository:
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def find_audio_transcriptions_source_for_model(
+        self,
+        model: str,
+        *,
+        allowed_source_ids: set[str] | None = None,
+    ) -> ModelSource | None:
+        stmt = (
+            select(ModelSource)
+            .options(selectinload(ModelSource.models))
+            .join(ModelSourceModel, ModelSourceModel.source_id == ModelSource.id)
+            .where(ModelSource.kind == "openai_compatible")
+            .where(ModelSource.is_enabled.is_(True))
+            .where(ModelSource.supports_audio_transcriptions.is_(True))
+            .where(ModelSourceModel.model == model)
+            .where(ModelSourceModel.is_enabled.is_(True))
+            .order_by(ModelSource.name, ModelSource.id)
+            .limit(1)
+        )
+        if allowed_source_ids is not None:
+            if not allowed_source_ids:
+                return None
+            stmt = stmt.where(ModelSource.id.in_(allowed_source_ids))
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
+
     async def create(self, row: ModelSource, *, commit: bool = True) -> ModelSource:
         self._session.add(row)
         if commit:

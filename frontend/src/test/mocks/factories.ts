@@ -162,6 +162,7 @@ export function createModelSource(
 		healthStatus: "unknown",
 		supportsChatCompletions: true,
 		supportsResponses: false,
+		supportsAudioTranscriptions: false,
 		timeoutSeconds: null,
 		maxConcurrency: null,
 		createdAt: offsetIso(-30),

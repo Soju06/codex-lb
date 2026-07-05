@@ -19,6 +19,7 @@ type ModelSourceFormFieldsProps = {
 const CAPABILITY_TOGGLES = [
   ["supportsChatCompletions", "Chat Completions"] as const,
   ["supportsResponses", "Responses"] as const,
+  ["supportsAudioTranscriptions", "Audio Transcriptions"] as const,
   ["supportsStreaming", "Streaming"] as const,
   ["supportsTools", "Tools"] as const,
   ["supportsVision", "Vision"] as const,

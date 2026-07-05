@@ -17,6 +17,7 @@ function createModelSource(overrides: Partial<ModelSource> = {}): ModelSource {
     healthStatus: "unknown",
     supportsChatCompletions: true,
     supportsResponses: false,
+    supportsAudioTranscriptions: false,
     timeoutSeconds: null,
     maxConcurrency: null,
     createdAt: "2026-07-03T00:00:00Z",
@@ -96,6 +97,7 @@ describe("ModelSourceEditDialog", () => {
       inputPer1M: 0.5,
       outputPer1M: 2.25,
     });
+    expect(payload.supportsAudioTranscriptions).toBe(false);
   });
 
   it("toggles reasoning support via raw metadata while keeping other keys", async () => {

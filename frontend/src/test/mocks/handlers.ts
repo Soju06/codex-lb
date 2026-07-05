@@ -145,6 +145,7 @@ const ModelSourceCreatePayloadSchema = z.looseObject({
   baseUrl: z.string().optional(),
   supportsChatCompletions: z.boolean().optional(),
   supportsResponses: z.boolean().optional(),
+  supportsAudioTranscriptions: z.boolean().optional(),
   models: z
     .array(
       z.looseObject({
@@ -1489,6 +1490,7 @@ export const handlers = [
       baseUrl: payload?.baseUrl ?? "http://localhost:8000/v1",
       supportsChatCompletions: payload?.supportsChatCompletions ?? true,
       supportsResponses: payload?.supportsResponses ?? false,
+      supportsAudioTranscriptions: payload?.supportsAudioTranscriptions ?? false,
       models: (payload?.models ?? [{ model: `model-${sequence}` }]).map(
         (model, index) => ({
           id: index + 1,

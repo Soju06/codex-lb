@@ -36,9 +36,10 @@ source ids.
 
 ### Requirement: Source-routed usage uses API-key reservations
 
-For OpenAI-compatible source-routed requests authenticated by an API key, the
-system MUST reserve API-key usage before forwarding and finalize the reservation
-from the upstream OpenAI-compatible `usage` payload when the request completes.
+The system MUST reserve API-key usage before forwarding an OpenAI-compatible
+source-routed request authenticated by an API key, and MUST finalize the
+reservation from the upstream OpenAI-compatible `usage` payload when the
+request completes.
 The finalized input, output, cached-input, and cost values MUST update the same
 API-key limit and usage-reporting paths used by subscription-backed requests.
 

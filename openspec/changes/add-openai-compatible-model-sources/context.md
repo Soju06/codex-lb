@@ -16,9 +16,10 @@ The resulting SSRF surface is bounded by:
 - Source creation/update is dashboard-admin gated. Only operators with write
   access to the settings UI (or the admin API) can point the proxy at a new
   URL, and those operators already control the host codex-lb runs on.
-- Requests to a source are always `POST <base_url>/chat/completions` or
-  `POST <base_url>/responses` with a JSON body; an attacker cannot choose the
-  method, path suffix, or arbitrary headers.
+- Requests to a source are always fixed-shape POSTs:
+  `<base_url>/chat/completions` or `<base_url>/responses` with a JSON body, or
+  `<base_url>/audio/transcriptions` with multipart form data. An attacker
+  cannot choose the method, path suffix, or arbitrary headers.
 - The stored source API key is only ever attached to requests to that source's
   own `base_url` (`Authorization: Bearer` from the Fernet-encrypted secret).
 
@@ -86,3 +87,9 @@ USD per 1M tokens) feeds API-key cost settlement and request-log `cost_usd`.
 Cached input tokens are billed at the cached rate and subtracted from billable
 input, mirroring subscription pricing. A model entry with no pricing fields
 settles at $0 (unknown cost), same as unknown subscription models.
+
+Audio transcription sources reuse token settlement only when the upstream
+returns token-compatible JSON `usage` (`prompt_tokens`/`completion_tokens`,
+`input_tokens`/`output_tokens`, or `total_tokens`). Duration-only usage is not
+converted into tokens in this change; limited API keys fail closed with
+`usage_unavailable` when no token-compatible usage is present.

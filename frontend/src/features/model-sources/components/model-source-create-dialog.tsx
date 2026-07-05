@@ -53,6 +53,7 @@ export function ModelSourceCreateDialog({
       apiKey: values.apiKey.trim() ? values.apiKey.trim() : undefined,
       supportsChatCompletions: draft.supportsChatCompletions,
       supportsResponses: draft.supportsResponses,
+      supportsAudioTranscriptions: draft.supportsAudioTranscriptions,
       models: modelInputsFromForm(values, draft),
     };
     await onSubmit(payload);

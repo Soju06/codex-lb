@@ -24,6 +24,7 @@ function sourceSubtitle(source: ModelSource): string {
   const protocols = [
     source.supportsChatCompletions ? "chat" : null,
     source.supportsResponses ? "responses" : null,
+    source.supportsAudioTranscriptions ? "audio" : null,
   ].filter(Boolean);
   const count = `${source.models.length} model${source.models.length === 1 ? "" : "s"}`;
   return `${count} · ${protocols.join(", ") || "disabled"}`;

@@ -60,6 +60,7 @@ function ModelSourceEditForm({ source, busy, onSubmit, onClose }: ModelSourceEdi
       baseUrl: values.baseUrl,
       supportsChatCompletions: draft.supportsChatCompletions,
       supportsResponses: draft.supportsResponses,
+      supportsAudioTranscriptions: draft.supportsAudioTranscriptions,
       models: modelInputsFromForm(values, draft, rawMetadataByModel(source)),
     };
     // The stored key is never returned, so a blank field means "keep it";

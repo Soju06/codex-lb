@@ -771,6 +771,12 @@ class ModelSource(Base):
         server_default=false(),
         nullable=False,
     )
+    supports_audio_transcriptions: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=false(),
+        nullable=False,
+    )
     timeout_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
     max_concurrency: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)

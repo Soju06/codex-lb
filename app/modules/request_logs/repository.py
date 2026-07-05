@@ -278,6 +278,7 @@ class RequestLogsRepository:
                 archive_request_id=resolved_archive_request_id,
                 model=model,
                 plan_type=resolved_plan_type,
+                source=source,
                 transport=transport,
                 upstream_transport=upstream_transport,
                 request_kind=request_kind,

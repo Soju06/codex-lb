@@ -4,6 +4,7 @@ import json
 from collections.abc import AsyncIterator, Mapping
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
+from json import JSONDecodeError
 
 import aiohttp
 
@@ -47,6 +48,14 @@ class SourceChatCompletion:
 @dataclass(frozen=True, slots=True)
 class SourceResponsesCompletion:
     payload: dict[str, JsonValue]
+    usage: SourceUsage | None
+    upstream_status_code: int
+
+
+@dataclass(frozen=True, slots=True)
+class SourceAudioTranscription:
+    body: bytes
+    content_type: str | None
     usage: SourceUsage | None
     upstream_status_code: int
 
@@ -155,6 +164,53 @@ async def forward_responses(
         raise _unreachable_error(exc) from exc
 
 
+async def forward_audio_transcription(
+    source: ModelSource,
+    *,
+    audio_bytes: bytes,
+    filename: str,
+    content_type: str | None,
+    fields: list[tuple[str, str]],
+    encryptor: TokenEncryptor | None = None,
+) -> SourceAudioTranscription:
+    normalized_filename = filename.strip() if filename else "audio.wav"
+    normalized_content_type = content_type.strip() if content_type else "application/octet-stream"
+    form = aiohttp.FormData()
+    form.add_field(
+        "file",
+        audio_bytes,
+        filename=normalized_filename,
+        content_type=normalized_content_type,
+    )
+    for key, value in fields:
+        form.add_field(key, value)
+    try:
+        async with lease_http_session() as session:
+            timeout = aiohttp.ClientTimeout(total=_source_timeout_seconds(source))
+            async with session.post(
+                _source_url(source, "/audio/transcriptions"),
+                headers=_source_headers(source, encryptor=encryptor, accept="*/*", content_type=None),
+                data=form,
+                timeout=timeout,
+            ) as response:
+                body = await response.read()
+                response_content_type = response.headers.get("Content-Type")
+                if response.status >= 400:
+                    raise ModelSourceForwardingError(
+                        status_code=response.status,
+                        payload=_error_payload_from_body(body, response_content_type),
+                        upstream_status_code=response.status,
+                    )
+                return SourceAudioTranscription(
+                    body=body,
+                    content_type=response_content_type,
+                    usage=_usage_from_audio_body(body, response_content_type),
+                    upstream_status_code=response.status,
+                )
+    except (aiohttp.ClientError, TimeoutError) as exc:
+        raise _unreachable_error(exc) from exc
+
+
 async def stream_responses(
     source: ModelSource,
     payload: dict[str, JsonValue],
@@ -241,11 +297,14 @@ def _source_headers(
     *,
     encryptor: TokenEncryptor | None,
     stream: bool = False,
+    accept: str | None = None,
+    content_type: str | None = "application/json",
 ) -> dict[str, str]:
     headers = {
-        "Accept": "text/event-stream" if stream else "application/json",
-        "Content-Type": "application/json",
+        "Accept": accept or ("text/event-stream" if stream else "application/json"),
     }
+    if content_type is not None:
+        headers["Content-Type"] = content_type
     if source.api_key_encrypted is not None:
         active_encryptor = encryptor or TokenEncryptor()
         try:
@@ -309,6 +368,23 @@ def _error_payload(data: Mapping[str, JsonValue] | None) -> dict[str, JsonValue]
     }
 
 
+def _error_payload_from_body(body: bytes, content_type: str | None) -> dict[str, JsonValue]:
+    if _is_json_content_type(content_type):
+        try:
+            parsed = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, JSONDecodeError):
+            parsed = None
+        if isinstance(parsed, Mapping):
+            return _error_payload(parsed)
+    return {
+        "error": {
+            "message": "OpenAI-compatible model source returned an error",
+            "type": "upstream_error",
+            "code": "model_source_error",
+        }
+    }
+
+
 def _usage_from_chat_payload(payload: Mapping[str, JsonValue]) -> SourceUsage | None:
     usage = payload.get("usage")
     if not is_json_mapping(usage):
@@ -321,6 +397,21 @@ def _usage_from_responses_payload(payload: Mapping[str, JsonValue]) -> SourceUsa
     if not is_json_mapping(usage):
         return None
     return _usage_from_responses_mapping(usage)
+
+
+def _usage_from_audio_body(body: bytes, content_type: str | None) -> SourceUsage | None:
+    if not _is_json_content_type(content_type):
+        return None
+    try:
+        parsed = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, JSONDecodeError):
+        return None
+    if not is_json_mapping(parsed):
+        return None
+    usage = parsed.get("usage")
+    if not is_json_mapping(usage):
+        return None
+    return _usage_from_mapping(usage) or _usage_from_responses_mapping(usage) or _usage_from_total_tokens_mapping(usage)
 
 
 def _usage_from_mapping(usage: Mapping[str, JsonValue]) -> SourceUsage | None:
@@ -363,6 +454,19 @@ def _usage_from_responses_mapping(usage: Mapping[str, JsonValue]) -> SourceUsage
         output_tokens=output_tokens,
         cached_input_tokens=max(0, min(cached_tokens, input_tokens)),
     )
+
+
+def _usage_from_total_tokens_mapping(usage: Mapping[str, JsonValue]) -> SourceUsage | None:
+    total_tokens = usage.get("total_tokens")
+    if not isinstance(total_tokens, int) or total_tokens < 0:
+        return None
+    return SourceUsage(input_tokens=total_tokens, output_tokens=0)
+
+
+def _is_json_content_type(content_type: str | None) -> bool:
+    if content_type is None:
+        return False
+    return content_type.split(";", 1)[0].strip().lower() in {"application/json", "text/json"}
 
 
 class SourceStreamUsageParser:

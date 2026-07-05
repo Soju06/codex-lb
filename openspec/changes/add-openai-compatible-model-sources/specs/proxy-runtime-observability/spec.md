@@ -11,8 +11,8 @@ material.
 
 #### Scenario: Source-routed request records source metadata
 
-- **WHEN** a `/v1/chat/completions` request is routed to OpenAI-compatible source
-  `src_local`
+- **WHEN** a `/v1/chat/completions` or `/v1/audio/transcriptions` request is
+  routed to OpenAI-compatible source `src_local`
 - **THEN** the request log or equivalent structured diagnostic records source
   kind `openai_compatible` and source id `src_local`
 - **AND** `account_id` remains null unless a subscription account was actually

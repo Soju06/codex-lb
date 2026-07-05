@@ -133,6 +133,9 @@ from app.modules.model_sources.forwarding import (
     forward_chat_completion,
 )
 from app.modules.model_sources.forwarding import (
+    forward_audio_transcription as forward_source_audio_transcription,
+)
+from app.modules.model_sources.forwarding import (
     forward_responses as forward_source_responses,
 )
 from app.modules.model_sources.forwarding import (
@@ -1480,7 +1483,19 @@ async def v1_audio_transcriptions(
     prompt: str | None = Form(None),
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
-) -> JSONResponse:
+) -> Response:
+    source = await _select_audio_transcriptions_model_source(model, api_key)
+    if source is not None:
+        validate_model_access(api_key, model)
+        rate_limit_headers = await _rate_limit_headers_for_request(context, api_key)
+        return await _source_audio_transcription_response(
+            request=request,
+            model=model,
+            file=file,
+            source=source,
+            api_key=api_key,
+            rate_limit_headers=rate_limit_headers,
+        )
     if model != _TRANSCRIPTION_MODEL:
         return _logged_error_json_response(
             request,
@@ -2643,10 +2658,126 @@ async def _select_responses_model_source(model: str, api_key: ApiKeyData | None)
         return source
 
 
+async def _select_audio_transcriptions_model_source(model: str, api_key: ApiKeyData | None) -> ModelSource | None:
+    assigned_source_ids = _allowed_source_ids_for_api_key(api_key)
+    if assigned_source_ids is None and model == _TRANSCRIPTION_MODEL:
+        return None
+    async with get_background_session() as session:
+        source = await ModelSourcesRepository(session).find_audio_transcriptions_source_for_model(
+            model,
+            allowed_source_ids=assigned_source_ids,
+        )
+        detach_session_objects(session)
+        return source
+
+
 def _allowed_source_ids_for_api_key(api_key: ApiKeyData | None) -> set[str] | None:
     if api_key is None or not api_key.source_assignment_scope_enabled:
         return None
     return set(api_key.assigned_source_ids)
+
+
+async def _source_audio_transcription_response(
+    *,
+    request: Request,
+    model: str,
+    file: UploadFile,
+    source: ModelSource,
+    api_key: ApiKeyData | None,
+    rate_limit_headers: Mapping[str, str],
+) -> Response:
+    # Read the downstream form and file before reserving usage: a parse or
+    # upload failure here must not leave the API key's budget held.
+    fields = await _audio_transcription_form_fields(request)
+    audio_bytes = await file.read()
+    reservation = await _enforce_request_limits(
+        api_key,
+        request_model=model,
+        request_service_tier=None,
+    )
+    try:
+        result = await forward_source_audio_transcription(
+            source,
+            audio_bytes=audio_bytes,
+            filename=file.filename or "audio.wav",
+            content_type=file.content_type,
+            fields=fields,
+        )
+    except ModelSourceForwardingError as exc:
+        await _release_reservation(reservation)
+        await _log_source_chat_completion(
+            request,
+            source=source,
+            api_key=api_key,
+            model=model,
+            status="error",
+            error_code=_source_error_code(exc.payload),
+            error_message=_source_error_message(exc.payload),
+            upstream_status_code=exc.upstream_status_code,
+        )
+        return _logged_error_json_response(request, exc.status_code, exc.payload, headers=rate_limit_headers)
+
+    if result.usage is None and _api_key_has_usage_limits(api_key):
+        await _release_reservation(reservation)
+        error = openai_error(
+            "usage_unavailable",
+            "OpenAI-compatible model source transcription response did not include token usage for a limited API key",
+            error_type="server_error",
+        )
+        await _log_source_chat_completion(
+            request,
+            source=source,
+            api_key=api_key,
+            model=model,
+            status="error",
+            error_code="usage_unavailable",
+            error_message="source transcription response missing token usage",
+            upstream_status_code=result.upstream_status_code,
+        )
+        return _logged_error_json_response(request, 502, error, headers=rate_limit_headers)
+
+    settled = await _settle_source_reservation(reservation, source=source, model=model, usage=result.usage)
+    if not settled:
+        await _log_source_chat_completion(
+            request,
+            source=source,
+            api_key=api_key,
+            model=model,
+            status="error",
+            error_code="usage_settlement_failed",
+            error_message="source usage settlement failed",
+            upstream_status_code=result.upstream_status_code,
+        )
+        return _logged_error_json_response(
+            request,
+            502,
+            _source_usage_settlement_failed_error(),
+            headers=rate_limit_headers,
+        )
+    await _log_source_chat_completion(
+        request,
+        source=source,
+        api_key=api_key,
+        model=model,
+        status="success",
+        usage=result.usage,
+        upstream_status_code=result.upstream_status_code,
+    )
+    headers = dict(rate_limit_headers)
+    if result.content_type is not None:
+        headers["content-type"] = result.content_type
+    return Response(content=result.body, status_code=200, headers=headers)
+
+
+async def _audio_transcription_form_fields(request: Request) -> list[tuple[str, str]]:
+    form = await request.form()
+    fields: list[tuple[str, str]] = []
+    for key, value in form.multi_items():
+        if key == "file":
+            continue
+        if isinstance(value, str):
+            fields.append((key, value))
+    return fields
 
 
 async def _source_responses_response(

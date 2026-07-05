@@ -100,8 +100,28 @@ async def test_create_source_encrypts_api_key_without_account_row() -> None:
     assert repo.created is not None
     assert repo.created.api_key_encrypted == b"encrypted:secret"
     assert repo.created.base_url == "http://localhost:8000/v1"
+    assert repo.created.supports_audio_transcriptions is False
     assert repo.created.models[0].model == "local-coder"
     assert created.id.startswith("src_")
+
+
+@pytest.mark.asyncio
+async def test_create_source_persists_audio_transcription_capability() -> None:
+    repo = _FakeRepository()
+    service = ModelSourcesService(repo, encryptor=_FakeEncryptor())  # type: ignore[arg-type]
+
+    created = await service.create_source(
+        ModelSourceCreateRequest(
+            name="ASR",
+            base_url="http://localhost:8000/v1/",
+            supports_audio_transcriptions=True,
+            models=[ModelSourceModelInput(model="whisper-large-v3")],
+        )
+    )
+
+    assert repo.created is not None
+    assert repo.created.supports_audio_transcriptions is True
+    assert created.supports_audio_transcriptions is True
 
 
 @pytest.mark.asyncio

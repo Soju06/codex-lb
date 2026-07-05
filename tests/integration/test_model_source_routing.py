@@ -32,6 +32,7 @@ async def _create_model_source(
     cached_input_per_1m: float | None = None,
     output_per_1m: float | None = None,
     raw_metadata_json: str | None = None,
+    supports_audio_transcriptions: bool = False,
 ) -> str:
     model_entry: dict[str, object] = {
         "model": model,
@@ -57,6 +58,7 @@ async def _create_model_source(
             "apiKey": f"token-{name}",
             "supportsChatCompletions": True,
             "supportsResponses": False,
+            "supportsAudioTranscriptions": supports_audio_transcriptions,
             "models": [model_entry],
         },
     )
@@ -99,6 +101,162 @@ async def source_upstream() -> AsyncIterator[Callable[[_UpstreamHandler], Awaita
 
     for runner in runners:
         await runner.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_source_audio_transcription_routes_multipart_and_settles_usage(async_client, source_upstream):
+    await _enable_api_key_auth(async_client)
+    captured: dict[str, object] = {}
+
+    async def transcribe(request: web.Request) -> web.Response:
+        captured["path"] = request.path
+        captured["authorization"] = request.headers.get("authorization")
+        reader = await request.multipart()
+        fields: dict[str, list[str]] = {}
+        while part := await reader.next():
+            if part.filename:
+                captured["filename"] = part.filename
+                captured["file_bytes"] = await part.read()
+                captured["file_content_type"] = part.headers.get("Content-Type")
+                continue
+            if part.name is not None:
+                fields.setdefault(part.name, []).append(await part.text())
+        captured["fields"] = fields
+        return web.json_response(
+            {
+                "text": "hello from source asr",
+                "usage": {
+                    "prompt_tokens": 37,
+                    "completion_tokens": 0,
+                    "total_tokens": 37,
+                },
+            }
+        )
+
+    base_url = await source_upstream(transcribe)
+    model = "whisper-large-v3"
+    source_id = await _create_model_source(
+        async_client,
+        name="asr",
+        model=model,
+        base_url=base_url,
+        input_per_1m=3.0,
+        supports_audio_transcriptions=True,
+    )
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "asr-source-key",
+            "assignedSourceIds": [source_id],
+            "limits": [
+                {"limitType": "total_tokens", "limitWindow": "weekly", "maxValue": 1_000},
+            ],
+        },
+    )
+    assert created.status_code == 200
+    key = created.json()["key"]
+
+    response = await async_client.post(
+        "/v1/audio/transcriptions",
+        headers={"Authorization": f"Bearer {key}"},
+        data={"model": model, "prompt": "domain words", "response_format": "json"},
+        files={"file": ("sample.wav", b"\x01\x02\x03", "audio/wav")},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["text"] == "hello from source asr"
+    assert captured["path"] == "/v1/audio/transcriptions"
+    assert captured["authorization"] == "Bearer token-asr"
+    assert captured["filename"] == "sample.wav"
+    assert captured["file_bytes"] == b"\x01\x02\x03"
+    assert captured["file_content_type"] == "audio/wav"
+    assert captured["fields"] == {
+        "model": [model],
+        "prompt": ["domain words"],
+        "response_format": ["json"],
+    }
+
+    async with SessionLocal() as session:
+        result = await session.execute(select(RequestLog).where(RequestLog.model == model))
+        log = result.scalar_one()
+        assert log.account_id is None
+        assert log.model_source_id == source_id
+        assert log.source == "model_source"
+        assert log.input_tokens == 37
+        assert log.output_tokens == 0
+        assert log.status == "success"
+
+
+@pytest.mark.asyncio
+async def test_source_audio_transcription_text_response_passes_through(async_client, source_upstream):
+    async def transcribe_text(_request: web.Request) -> web.Response:
+        return web.Response(status=200, text="hello plain text", content_type="text/plain")
+
+    base_url = await source_upstream(transcribe_text)
+    model = "whisper-text"
+    await _create_model_source(
+        async_client,
+        name="asr-text",
+        model=model,
+        base_url=base_url,
+        supports_audio_transcriptions=True,
+    )
+
+    response = await async_client.post(
+        "/v1/audio/transcriptions",
+        data={"model": model, "response_format": "text"},
+        files={"file": ("sample.wav", b"\x01\x02", "audio/wav")},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/plain")
+    assert response.text == "hello plain text"
+
+
+@pytest.mark.asyncio
+async def test_source_audio_transcription_without_usage_fails_closed_for_limited_key(async_client, source_upstream):
+    await _enable_api_key_auth(async_client)
+
+    async def transcribe_no_usage(_request: web.Request) -> web.Response:
+        return web.json_response({"text": "no usage here"})
+
+    base_url = await source_upstream(transcribe_no_usage)
+    model = "whisper-no-usage"
+    source_id = await _create_model_source(
+        async_client,
+        name="asr-no-usage",
+        model=model,
+        base_url=base_url,
+        supports_audio_transcriptions=True,
+    )
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "asr-limited-key",
+            "assignedSourceIds": [source_id],
+            "limits": [
+                {"limitType": "total_tokens", "limitWindow": "weekly", "maxValue": 1_000},
+            ],
+        },
+    )
+    assert created.status_code == 200
+    key = created.json()["key"]
+
+    response = await async_client.post(
+        "/v1/audio/transcriptions",
+        headers={"Authorization": f"Bearer {key}"},
+        data={"model": model},
+        files={"file": ("sample.wav", b"\x01\x02", "audio/wav")},
+    )
+
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "usage_unavailable"
+
+    async with SessionLocal() as session:
+        result = await session.execute(
+            select(ApiKeyUsageReservation).where(ApiKeyUsageReservation.status == "reserved")
+        )
+        assert result.scalars().all() == []
 
 
 @pytest.mark.asyncio

@@ -6,7 +6,8 @@ OpenAI-compatible model sources SHALL be eligible for public OpenAI-compatible
 routes only when the source declares support for the route shape. Chat
 Completions-compatible sources MAY serve `/v1/chat/completions`.
 Responses-compatible sources MAY serve `/v1/responses` and
-`/backend-api/codex/responses`. Codex-native compaction, file upload,
+`/backend-api/codex/responses`. Audio-transcriptions-compatible sources MAY
+serve `/v1/audio/transcriptions`. Codex-native compaction, file upload,
 control-plane, and websocket bridge paths MUST remain subscription-backed unless
 a later requirement explicitly defines OpenAI-compatible source behavior for
 those paths.
@@ -33,6 +34,23 @@ those paths.
 - **WHEN** a client calls `POST /backend-api/codex/responses` with model `local-coder`
 - **THEN** the request is not routed to that source
 - **AND** subscription-backed Codex routing rules continue to apply
+
+#### Scenario: Audio transcription routes to OpenAI-compatible source
+
+- **GIVEN** an enabled OpenAI-compatible source declares audio transcriptions support
+- **AND** it exposes model `whisper-large-v3`
+- **WHEN** the client calls `POST /v1/audio/transcriptions` with multipart
+  field `model=whisper-large-v3`
+- **THEN** the proxy forwards the multipart request to the source's
+  `/audio/transcriptions` endpoint
+- **AND** the request uses the source's upstream API key
+
+#### Scenario: Non-source transcription model keeps subscription validation
+
+- **GIVEN** no audio-transcriptions-compatible source exposes model `gpt-4o-mini`
+- **WHEN** the client calls `POST /v1/audio/transcriptions` with
+  `model=gpt-4o-mini`
+- **THEN** the proxy returns the existing unsupported transcription model error
 
 ### Requirement: Source-routed chat payloads are sanitized before forwarding
 
@@ -72,3 +90,28 @@ outbound body:
   `"supports_reasoning": true`
 - **WHEN** a client sends `include_reasoning: true`
 - **THEN** the forwarded body preserves the client's reasoning fields
+
+### Requirement: Source-routed audio transcriptions preserve OpenAI-compatible multipart semantics
+
+Source-routed `/v1/audio/transcriptions` requests SHALL forward the inbound
+audio file and non-file multipart fields to the selected source's
+`/audio/transcriptions` endpoint. The proxy MUST use the stored source API key
+for upstream authorization and MUST NOT forward the downstream client's
+authorization credential. JSON and non-JSON successful upstream response bodies
+SHALL be returned to the client with the upstream content type when present.
+
+#### Scenario: Text transcription response passes through
+
+- **GIVEN** an enabled OpenAI-compatible source exposes model `whisper-large-v3`
+- **AND** the client requests `response_format=text`
+- **WHEN** the source returns a plain text response
+- **THEN** the proxy returns that response body without requiring JSON parsing
+
+#### Scenario: Limited key requires token usage
+
+- **GIVEN** an API key has token or cost limits
+- **AND** a source-routed audio transcription response has no token-compatible
+  usage fields
+- **WHEN** the upstream source returns a successful transcription response
+- **THEN** the proxy releases the reservation
+- **AND** returns `usage_unavailable` instead of allowing unaccounted limited-key usage

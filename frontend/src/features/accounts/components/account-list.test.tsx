@@ -487,7 +487,6 @@ describe("AccountList", () => {
       "flex-1",
       "min-h-0",
       "max-h-[min(32rem,calc(100dvh-16rem))]",
-      "lg:max-h-none",
     );
   });
 

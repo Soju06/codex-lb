@@ -99,3 +99,17 @@ route, so a `total_tokens`-limited key is unaffected by ASR (0 tokens) while a
 (`prompt_tokens`/`completion_tokens`, `input_tokens`/`output_tokens`, or
 `total_tokens`); limited API keys still fail closed with `usage_unavailable`
 only when neither a duration cost nor token usage is available.
+
+Two operational notes on duration billing:
+
+- The response must actually carry a duration. Strictly OpenAI-shaped servers
+  only include `duration` with `response_format=verbose_json` (plain `json`
+  and `text` omit it), so a duration-priced model called with those formats by
+  a limited key fails closed with `usage_unavailable`. Many Whisper-compatible
+  servers include `duration` in every JSON response, which works as-is.
+- Cost limits reserve before the upstream responds, and the real audio cost is
+  only known at settlement, so a single long file can finish past the
+  `cost_usd` cap. The overshoot is bounded to that one request: once
+  `current_value >= max_value` the next request is rejected before
+  forwarding. This matches the general usage-reservation semantics; a strict
+  prepaid cap would need pre-forward duration probing as a separate change.

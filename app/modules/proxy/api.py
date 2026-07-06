@@ -2135,15 +2135,13 @@ async def _build_codex_models_response(api_key: ApiKeyData | None) -> Response:
     for slug, model in models.items():
         if not _is_codex_backend_catalog_model(model):
             continue
-        if not model.supported_in_api:
-            continue
         if visibility_allowed_models is None:
             if allowed_models is not None and slug not in allowed_models:
                 continue
             entry = _to_codex_model_entry(model)
             entries.append(entry)
             seen_slugs.add(slug)
-            if entry.visibility == "list":
+            if model.supported_in_api and entry.visibility == "list":
                 data.append(_to_model_list_item(slug, model, created=_model_list_created_at(model)))
             continue
         entry = _to_codex_model_entry(
@@ -2152,7 +2150,7 @@ async def _build_codex_models_response(api_key: ApiKeyData | None) -> Response:
         )
         entries.append(entry)
         seen_slugs.add(slug)
-        if entry.visibility == "list":
+        if model.supported_in_api and entry.visibility == "list":
             data.append(_to_model_list_item(slug, model, created=_model_list_created_at(model)))
     for model in source_models:
         if model.slug in seen_slugs:
@@ -2163,7 +2161,7 @@ async def _build_codex_models_response(api_key: ApiKeyData | None) -> Response:
             entry = _to_codex_model_entry(model)
             entries.append(entry)
             seen_slugs.add(model.slug)
-            if entry.visibility == "list":
+            if model.supported_in_api and entry.visibility == "list":
                 data.append(_to_model_list_item(model.slug, model, created=_model_list_created_at(model)))
             continue
         entry = _to_codex_model_entry(
@@ -2172,7 +2170,7 @@ async def _build_codex_models_response(api_key: ApiKeyData | None) -> Response:
         )
         entries.append(entry)
         seen_slugs.add(model.slug)
-        if entry.visibility == "list":
+        if model.supported_in_api and entry.visibility == "list":
             data.append(_to_model_list_item(model.slug, model, created=_model_list_created_at(model)))
     await _release_reservation(reservation)
     return JSONResponse(content=CodexModelsResponse(models=entries, data=data).model_dump(mode="json"))

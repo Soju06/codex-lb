@@ -88,8 +88,14 @@ Cached input tokens are billed at the cached rate and subtracted from billable
 input, mirroring subscription pricing. A model entry with no pricing fields
 settles at $0 (unknown cost), same as unknown subscription models.
 
-Audio transcription sources reuse token settlement only when the upstream
-returns token-compatible JSON `usage` (`prompt_tokens`/`completion_tokens`,
-`input_tokens`/`output_tokens`, or `total_tokens`). Duration-only usage is not
-converted into tokens in this change; limited API keys fail closed with
-`usage_unavailable` when no token-compatible usage is present.
+Audio transcription sources bill by duration when the source model declares an
+`audio_per_minute` rate: the proxy reads the transcription's audio length
+(top-level `duration` seconds, or a `usage.seconds`/`usage.duration` fallback)
+and settles `duration_minutes * audio_per_minute` as cost with zero tokens.
+Duration billing takes precedence over token pricing on the transcription
+route, so a `total_tokens`-limited key is unaffected by ASR (0 tokens) while a
+`cost_usd`-limited key is charged the per-minute cost. When the model has no
+`audio_per_minute` rate, settlement falls back to token-compatible JSON `usage`
+(`prompt_tokens`/`completion_tokens`, `input_tokens`/`output_tokens`, or
+`total_tokens`); limited API keys still fail closed with `usage_unavailable`
+only when neither a duration cost nor token usage is available.

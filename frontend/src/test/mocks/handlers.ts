@@ -1505,6 +1505,7 @@ export const handlers = [
           inputPer1M: null,
           cachedInputPer1M: null,
           outputPer1M: null,
+          audioPerMinute: null,
           rawMetadataJson: null,
           isEnabled: true,
           createdAt: now,

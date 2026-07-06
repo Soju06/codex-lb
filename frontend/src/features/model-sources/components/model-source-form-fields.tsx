@@ -150,6 +150,25 @@ export function ModelSourceFormFields({
         </div>
       </div>
 
+      <div className="space-y-2">
+        <div className="text-sm font-medium">Audio pricing (USD per minute)</div>
+        <p className="text-xs text-muted-foreground">
+          For audio-transcription models billed by duration. Takes precedence over token pricing on
+          the transcription route.
+        </p>
+        <div className="grid gap-3 sm:grid-cols-3">
+          <div className="space-y-1">
+            <label className="text-xs text-muted-foreground">Per minute</label>
+            <Input
+              value={draft.audioPerMinute}
+              onChange={(event) => updateDraft({ audioPerMinute: event.target.value })}
+              placeholder="0.00"
+              inputMode="decimal"
+            />
+          </div>
+        </div>
+      </div>
+
       <div className="grid gap-2 sm:grid-cols-2">
         {CAPABILITY_TOGGLES.map(([key, label]) => (
           <label key={key} className="flex items-center gap-2 rounded-md border p-2 text-sm">

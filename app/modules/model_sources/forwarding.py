@@ -57,6 +57,7 @@ class SourceAudioTranscription:
     body: bytes
     content_type: str | None
     usage: SourceUsage | None
+    audio_seconds: float | None
     upstream_status_code: int
 
 
@@ -205,6 +206,7 @@ async def forward_audio_transcription(
                     body=body,
                     content_type=response_content_type,
                     usage=_usage_from_audio_body(body, response_content_type),
+                    audio_seconds=_audio_seconds_from_body(body, response_content_type),
                     upstream_status_code=response.status,
                 )
     except (aiohttp.ClientError, TimeoutError) as exc:
@@ -376,13 +378,24 @@ def _error_payload_from_body(body: bytes, content_type: str | None) -> dict[str,
             parsed = None
         if isinstance(parsed, Mapping):
             return _error_payload(parsed)
+    upstream_message = _text_error_message(body)
     return {
         "error": {
-            "message": "OpenAI-compatible model source returned an error",
+            "message": upstream_message or "OpenAI-compatible model source returned an error",
             "type": "upstream_error",
             "code": "model_source_error",
         }
     }
+
+
+def _text_error_message(body: bytes) -> str | None:
+    try:
+        text = body.decode("utf-8").strip()
+    except UnicodeDecodeError:
+        return None
+    if not text:
+        return None
+    return text[:1000]
 
 
 def _usage_from_chat_payload(payload: Mapping[str, JsonValue]) -> SourceUsage | None:
@@ -412,6 +425,35 @@ def _usage_from_audio_body(body: bytes, content_type: str | None) -> SourceUsage
     if not is_json_mapping(usage):
         return None
     return _usage_from_mapping(usage) or _usage_from_responses_mapping(usage) or _usage_from_total_tokens_mapping(usage)
+
+
+def _audio_seconds_from_body(body: bytes, content_type: str | None) -> float | None:
+    """Extract transcribed audio length in seconds from a JSON transcription body.
+
+    Recognizes the top-level ``duration`` field emitted by OpenAI
+    ``verbose_json`` and most Whisper-compatible servers, and a
+    ``usage.seconds`` / ``usage.duration`` fallback. Non-positive or
+    non-numeric values yield ``None`` so duration billing fails closed.
+    """
+    if not _is_json_content_type(content_type):
+        return None
+    try:
+        parsed = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, JSONDecodeError):
+        return None
+    if not is_json_mapping(parsed):
+        return None
+    candidate = parsed.get("duration")
+    if candidate is None:
+        usage = parsed.get("usage")
+        if is_json_mapping(usage):
+            candidate = usage.get("seconds")
+            if candidate is None:
+                candidate = usage.get("duration")
+    if isinstance(candidate, bool) or not isinstance(candidate, (int, float)):
+        return None
+    seconds = float(candidate)
+    return seconds if seconds > 0 else None
 
 
 def _usage_from_mapping(usage: Mapping[str, JsonValue]) -> SourceUsage | None:

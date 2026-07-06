@@ -30,6 +30,7 @@ export type ModelSourceDraft = {
   inputPer1M: string;
   cachedInputPer1M: string;
   outputPer1M: string;
+  audioPerMinute: string;
 };
 
 export const initialModelSourceDraft: ModelSourceDraft = {
@@ -45,6 +46,7 @@ export const initialModelSourceDraft: ModelSourceDraft = {
   inputPer1M: "",
   cachedInputPer1M: "",
   outputPer1M: "",
+  audioPerMinute: "",
 };
 
 export function modelSourceDraftReducer(
@@ -105,6 +107,7 @@ export function modelInputsFromForm(
   const inputPer1M = parseNonNegativeFloat(draft.inputPer1M);
   const cachedInputPer1M = parseNonNegativeFloat(draft.cachedInputPer1M);
   const outputPer1M = parseNonNegativeFloat(draft.outputPer1M);
+  const audioPerMinute = parseNonNegativeFloat(draft.audioPerMinute);
   return values.models
     .split(/[\n,]/)
     .map((model) => model.trim())
@@ -120,6 +123,7 @@ export function modelInputsFromForm(
       inputPer1M: inputPer1M ?? null,
       cachedInputPer1M: cachedInputPer1M ?? null,
       outputPer1M: outputPer1M ?? null,
+      audioPerMinute: audioPerMinute ?? null,
       rawMetadataJson: mergeReasoningFlag(existingRawMetadata[model], draft.supportsReasoning),
       isEnabled: true,
     }));
@@ -161,6 +165,7 @@ export function draftFromSource(source: ModelSource): ModelSourceDraft {
     inputPer1M: numberToInput(firstModel?.inputPer1M),
     cachedInputPer1M: numberToInput(firstModel?.cachedInputPer1M),
     outputPer1M: numberToInput(firstModel?.outputPer1M),
+    audioPerMinute: numberToInput(firstModel?.audioPerMinute),
   };
 }
 

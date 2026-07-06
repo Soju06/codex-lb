@@ -111,6 +111,23 @@ def source_model_cost_usd(
     )
 
 
+def source_model_audio_cost_usd(source: ModelSource, model: str, audio_seconds: float) -> float | None:
+    """Price transcribed audio against the source model's per-minute rate.
+
+    Returns ``None`` when the model has no ``audio_per_minute`` rate so the
+    caller can fall back to token pricing (or fail closed for limited keys).
+    """
+    entry = next(
+        (candidate for candidate in source.models if candidate.model == model and candidate.is_enabled),
+        None,
+    )
+    if entry is None or entry.audio_per_minute is None:
+        return None
+    if audio_seconds <= 0:
+        return 0.0
+    return (audio_seconds / 60.0) * entry.audio_per_minute
+
+
 def _raw_metadata(source_model: ModelSourceModel) -> dict[str, JsonValue]:
     if source_model.raw_metadata_json is None:
         return {}

@@ -50,4 +50,5 @@
 - [x] 8.4 Add integration tests for Codex model-picker source discovery and `/backend-api/codex/responses` source routing.
 - [x] 8.5 Add integration tests for source-routed audio transcription multipart forwarding and usage settlement.
 - [x] 8.6 Add frontend schema/component tests for model-source management and API-key source assignment.
+- [x] 8.8 Add tests for duration-based audio billing (per-minute rate, cost settlement, zero-token limit interaction).
 - [ ] 8.7 Run targeted tests and `openspec validate --specs` when the CLI is available.

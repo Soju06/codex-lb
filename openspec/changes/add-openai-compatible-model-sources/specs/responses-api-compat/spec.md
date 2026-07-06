@@ -112,6 +112,35 @@ SHALL be returned to the client with the upstream content type when present.
 - **GIVEN** an API key has token or cost limits
 - **AND** a source-routed audio transcription response has no token-compatible
   usage fields
+- **AND** the source model declares no per-minute audio rate
 - **WHEN** the upstream source returns a successful transcription response
 - **THEN** the proxy releases the reservation
 - **AND** returns `usage_unavailable` instead of allowing unaccounted limited-key usage
+
+### Requirement: Audio transcription sources MAY bill by duration
+
+The proxy SHALL support per-minute audio billing for source models that
+declare an `audio_per_minute` rate. When the rate is set and a source-routed
+`/v1/audio/transcriptions` response carries a positive audio duration
+(top-level `duration` seconds, or a `usage.seconds`/`usage.duration` fallback),
+the proxy MUST settle cost as `duration_minutes * audio_per_minute` with zero
+tokens, and MUST record that cost on the request log and against the API key's
+`cost_usd` limit. Duration billing MUST take precedence over token pricing on
+the transcription route. A model with no `audio_per_minute` rate MUST fall back
+to token-usage settlement.
+
+#### Scenario: Duration-priced model settles cost from audio length
+
+- **GIVEN** an audio-transcriptions source model with `audio_per_minute = 0.30`
+- **AND** an API key with a `cost_usd` limit
+- **WHEN** a transcription response reports `duration = 120` seconds and no token usage
+- **THEN** the API-key reservation is finalized with 0 tokens and $0.60 cost
+- **AND** the request log records `cost_usd = 0.60`
+
+#### Scenario: Duration billing does not require token usage for limited keys
+
+- **GIVEN** an audio-transcriptions source model with an `audio_per_minute` rate
+- **AND** an API key with token or cost limits
+- **WHEN** a transcription response carries a positive duration but no token usage
+- **THEN** the request succeeds and settles from duration
+- **AND** the proxy does not return `usage_unavailable`

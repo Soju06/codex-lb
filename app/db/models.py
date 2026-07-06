@@ -820,6 +820,7 @@ class ModelSourceModel(Base):
     input_per_1m: Mapped[float | None] = mapped_column(Float, nullable=True)
     cached_input_per_1m: Mapped[float | None] = mapped_column(Float, nullable=True)
     output_per_1m: Mapped[float | None] = mapped_column(Float, nullable=True)
+    audio_per_minute: Mapped[float | None] = mapped_column(Float, nullable=True)
     raw_metadata_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true(), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)

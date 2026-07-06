@@ -31,6 +31,7 @@ async def _create_model_source(
     input_per_1m: float | None = None,
     cached_input_per_1m: float | None = None,
     output_per_1m: float | None = None,
+    audio_per_minute: float | None = None,
     raw_metadata_json: str | None = None,
     supports_audio_transcriptions: bool = False,
 ) -> str:
@@ -50,6 +51,8 @@ async def _create_model_source(
         model_entry["cachedInputPer1M"] = cached_input_per_1m
     if output_per_1m is not None:
         model_entry["outputPer1M"] = output_per_1m
+    if audio_per_minute is not None:
+        model_entry["audioPerMinute"] = audio_per_minute
     response = await async_client.post(
         "/api/model-sources/",
         json={
@@ -184,6 +187,60 @@ async def test_source_audio_transcription_routes_multipart_and_settles_usage(asy
         assert log.source == "model_source"
         assert log.input_tokens == 37
         assert log.output_tokens == 0
+        assert log.status == "success"
+
+
+@pytest.mark.asyncio
+async def test_source_audio_transcription_bills_by_duration(async_client, source_upstream):
+    await _enable_api_key_auth(async_client)
+
+    async def transcribe(_request: web.Request) -> web.Response:
+        # No token usage, only a duration — the duration-priced path must settle cost.
+        return web.json_response({"text": "labas", "duration": 120.0})
+
+    base_url = await source_upstream(transcribe)
+    model = "whisper-duration"
+    source_id = await _create_model_source(
+        async_client,
+        name="asr-duration",
+        model=model,
+        base_url=base_url,
+        supports_audio_transcriptions=True,
+        audio_per_minute=0.30,
+    )
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "asr-cost-key",
+            "assignedSourceIds": [source_id],
+            "limits": [
+                {"limitType": "cost_usd", "limitWindow": "weekly", "maxValue": 1_000_000},
+            ],
+        },
+    )
+    assert created.status_code == 200
+    key = created.json()["key"]
+    key_id = created.json()["id"]
+
+    response = await async_client.post(
+        "/v1/audio/transcriptions",
+        headers={"Authorization": f"Bearer {key}"},
+        data={"model": model},
+        files={"file": ("sample.wav", b"\x01\x02", "audio/wav")},
+    )
+    assert response.status_code == 200
+
+    # 120s == 2 min @ $0.30/min == $0.60 == 600_000 microdollars
+    async with SessionLocal() as session:
+        limits = await ApiKeysRepository(session).get_limits_by_key(key_id)
+        assert len(limits) == 1
+        assert limits[0].current_value == 600_000
+
+        result = await session.execute(select(RequestLog).where(RequestLog.model == model))
+        log = result.scalar_one()
+        assert log.input_tokens == 0
+        assert log.output_tokens == 0
+        assert log.cost_usd == pytest.approx(0.60)
         assert log.status == "success"
 
 

@@ -36,6 +36,7 @@ function createModelSource(overrides: Partial<ModelSource> = {}): ModelSource {
         inputPer1M: 0.5,
         cachedInputPer1M: null,
         outputPer1M: 1.5,
+        audioPerMinute: null,
         rawMetadataJson: null,
         isEnabled: true,
         createdAt: "2026-07-03T00:00:00Z",
@@ -98,6 +99,34 @@ describe("ModelSourceEditDialog", () => {
       outputPer1M: 2.25,
     });
     expect(payload.supportsAudioTranscriptions).toBe(false);
+  });
+
+  it("prefills and submits the audio per-minute rate", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const source = createModelSource();
+    source.models[0].audioPerMinute = 0.3;
+
+    renderWithProviders(
+      <ModelSourceEditDialog
+        open
+        busy={false}
+        source={source}
+        onOpenChange={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    const audioPrice = screen.getByDisplayValue("0.3");
+    await user.clear(audioPrice);
+    await user.type(audioPrice, "0.45");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+    });
+
+    expect(onSubmit.mock.calls[0][1].models[0].audioPerMinute).toBe(0.45);
   });
 
   it("toggles reasoning support via raw metadata while keeping other keys", async () => {

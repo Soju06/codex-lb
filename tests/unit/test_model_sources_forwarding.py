@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-from app.modules.model_sources.forwarding import SourceStreamUsageParser, SourceUsageHolder, _usage_from_audio_body
+from app.modules.model_sources.forwarding import (
+    SourceStreamUsageParser,
+    SourceUsageHolder,
+    _audio_seconds_from_body,
+    _error_payload_from_body,
+    _usage_from_audio_body,
+)
 
 
 def test_chat_stream_usage_parser_handles_split_sse_frame() -> None:
@@ -102,3 +108,25 @@ def test_audio_usage_parser_ignores_duration_only_usage() -> None:
     )
 
     assert usage is None
+
+
+def test_audio_seconds_from_top_level_duration() -> None:
+    assert _audio_seconds_from_body(b'{"text":"hi","duration":30.464}', "application/json") == 30.464
+
+
+def test_audio_seconds_from_usage_seconds_fallback() -> None:
+    assert _audio_seconds_from_body(b'{"text":"hi","usage":{"seconds":12.5}}', "application/json") == 12.5
+
+
+def test_audio_seconds_ignores_nonpositive_and_nonjson() -> None:
+    assert _audio_seconds_from_body(b'{"duration":0}', "application/json") is None
+    assert _audio_seconds_from_body(b'{"duration":-4}', "application/json") is None
+    assert _audio_seconds_from_body(b"plain text", "text/plain") is None
+    assert _audio_seconds_from_body(b'{"duration":true}', "application/json") is None
+
+
+def test_audio_error_payload_preserves_text_body() -> None:
+    payload = _error_payload_from_body(b"missing required field: file", "text/plain; charset=utf-8")
+
+    assert payload["error"]["code"] == "model_source_error"
+    assert payload["error"]["message"] == "missing required field: file"

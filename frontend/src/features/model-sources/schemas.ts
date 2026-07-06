@@ -13,6 +13,7 @@ export const ModelSourceModelSchema = z.object({
   inputPer1M: z.number().nullable().default(null),
   cachedInputPer1M: z.number().nullable().default(null),
   outputPer1M: z.number().nullable().default(null),
+  audioPerMinute: z.number().nullable().default(null),
   rawMetadataJson: z.string().nullable().default(null),
   isEnabled: z.boolean().default(true),
   createdAt: z.iso.datetime({ offset: true }),
@@ -51,6 +52,7 @@ export const ModelSourceModelInputSchema = z.object({
   inputPer1M: z.number().nonnegative().nullable().optional(),
   cachedInputPer1M: z.number().nonnegative().nullable().optional(),
   outputPer1M: z.number().nonnegative().nullable().optional(),
+  audioPerMinute: z.number().nonnegative().nullable().optional(),
   rawMetadataJson: z.string().nullable().optional(),
   isEnabled: z.boolean().optional(),
 });

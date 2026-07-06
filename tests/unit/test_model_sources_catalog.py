@@ -2,9 +2,50 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from app.core.openai.model_registry import MODEL_SOURCE_KIND_OPENAI_COMPATIBLE
 from app.db.models import ModelSource, ModelSourceModel
-from app.modules.model_sources.catalog import source_models_to_upstream_models
+from app.modules.model_sources.catalog import (
+    source_model_audio_cost_usd,
+    source_models_to_upstream_models,
+)
+
+
+def _audio_source(audio_per_minute: float | None) -> ModelSource:
+    return ModelSource(
+        id="src_asr",
+        name="ASR",
+        kind=MODEL_SOURCE_KIND_OPENAI_COMPATIBLE,
+        base_url="http://127.0.0.1:8000/v1",
+        is_enabled=True,
+        supports_chat_completions=False,
+        supports_responses=False,
+        supports_audio_transcriptions=True,
+        models=[
+            ModelSourceModel(
+                model="whisper-large-v3",
+                is_enabled=True,
+                audio_per_minute=audio_per_minute,
+            )
+        ],
+    )
+
+
+def test_source_model_audio_cost_usd_bills_by_minute() -> None:
+    source = _audio_source(0.006)
+    # 90 seconds == 1.5 minutes @ $0.006/min == $0.009
+    assert source_model_audio_cost_usd(source, "whisper-large-v3", 90.0) == pytest.approx(0.009)
+
+
+def test_source_model_audio_cost_usd_none_without_rate() -> None:
+    source = _audio_source(None)
+    assert source_model_audio_cost_usd(source, "whisper-large-v3", 90.0) is None
+
+
+def test_source_model_audio_cost_usd_zero_for_nonpositive_duration() -> None:
+    source = _audio_source(0.006)
+    assert source_model_audio_cost_usd(source, "whisper-large-v3", 0.0) == 0.0
 
 
 def test_source_models_to_upstream_models_preserves_source_identity() -> None:

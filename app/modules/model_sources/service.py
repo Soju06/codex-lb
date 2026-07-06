@@ -174,6 +174,7 @@ def _model_inputs_to_rows(models: list[ModelSourceModelInput]) -> list[ModelSour
                 input_per_1m=item.input_per_1m,
                 cached_input_per_1m=item.cached_input_per_1m,
                 output_per_1m=item.output_per_1m,
+                audio_per_minute=item.audio_per_minute,
                 raw_metadata_json=_validate_raw_metadata_json(item.raw_metadata_json),
                 is_enabled=item.is_enabled,
             )
@@ -204,6 +205,7 @@ def _to_model_response(row: ModelSourceModel) -> ModelSourceModelResponse:
         input_per_1m=row.input_per_1m,
         cached_input_per_1m=row.cached_input_per_1m,
         output_per_1m=row.output_per_1m,
+        audio_per_minute=row.audio_per_minute,
         raw_metadata_json=row.raw_metadata_json,
         is_enabled=row.is_enabled,
         created_at=row.created_at,

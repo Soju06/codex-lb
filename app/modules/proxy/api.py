@@ -122,6 +122,7 @@ from app.modules.api_keys.service import (
 from app.modules.firewall.repository import FirewallRepository
 from app.modules.firewall.service import FirewallRepositoryPort, FirewallService
 from app.modules.model_sources.catalog import (
+    source_model_audio_cost_usd,
     source_model_cost_usd,
     source_model_supports_reasoning,
     source_models_to_upstream_models,
@@ -2717,26 +2718,47 @@ async def _source_audio_transcription_response(
         )
         return _logged_error_json_response(request, exc.status_code, exc.payload, headers=rate_limit_headers)
 
-    if result.usage is None and _api_key_has_usage_limits(api_key):
-        await _release_reservation(reservation)
-        error = openai_error(
-            "usage_unavailable",
-            "OpenAI-compatible model source transcription response did not include token usage for a limited API key",
-            error_type="server_error",
-        )
-        await _log_source_chat_completion(
-            request,
-            source=source,
-            api_key=api_key,
-            model=model,
-            status="error",
-            error_code="usage_unavailable",
-            error_message="source transcription response missing token usage",
-            upstream_status_code=result.upstream_status_code,
-        )
-        return _logged_error_json_response(request, 502, error, headers=rate_limit_headers)
+    # ASR billing prefers audio duration: when the source model has a
+    # per-minute rate and the response carries a duration, settle cost from
+    # the duration with zero tokens. Only when there is no usable duration
+    # cost do we fall back to token usage (and fail closed for limited keys
+    # if neither is available).
+    audio_cost_usd = (
+        source_model_audio_cost_usd(source, model, result.audio_seconds) if result.audio_seconds is not None else None
+    )
+    if audio_cost_usd is not None:
+        settle_usage: SourceUsage | None = SourceUsage(input_tokens=0, output_tokens=0)
+        cost_override: float | None = audio_cost_usd
+    else:
+        settle_usage = result.usage
+        cost_override = None
+        if result.usage is None and _api_key_has_usage_limits(api_key):
+            await _release_reservation(reservation)
+            error = openai_error(
+                "usage_unavailable",
+                "OpenAI-compatible model source transcription response did not include token usage "
+                "or a usable duration for a limited API key",
+                error_type="server_error",
+            )
+            await _log_source_chat_completion(
+                request,
+                source=source,
+                api_key=api_key,
+                model=model,
+                status="error",
+                error_code="usage_unavailable",
+                error_message="source transcription response missing token usage and duration cost",
+                upstream_status_code=result.upstream_status_code,
+            )
+            return _logged_error_json_response(request, 502, error, headers=rate_limit_headers)
 
-    settled = await _settle_source_reservation(reservation, source=source, model=model, usage=result.usage)
+    settled = await _settle_source_reservation(
+        reservation,
+        source=source,
+        model=model,
+        usage=settle_usage,
+        cost_usd_override=cost_override,
+    )
     if not settled:
         await _log_source_chat_completion(
             request,
@@ -2760,7 +2782,8 @@ async def _source_audio_transcription_response(
         api_key=api_key,
         model=model,
         status="success",
-        usage=result.usage,
+        usage=settle_usage,
+        cost_usd_override=cost_override,
         upstream_status_code=result.upstream_status_code,
     )
     headers = dict(rate_limit_headers)
@@ -4672,6 +4695,7 @@ async def _settle_source_reservation(
     source: ModelSource,
     model: str,
     usage: SourceUsage | None,
+    cost_usd_override: float | None = None,
 ) -> bool:
     if reservation is None:
         return True
@@ -4679,7 +4703,7 @@ async def _settle_source_reservation(
         if usage is None:
             await _release_reservation(reservation)
             return True
-        cost_usd = _source_usage_cost_usd(source, model, usage)
+        cost_usd = cost_usd_override if cost_usd_override is not None else _source_usage_cost_usd(source, model, usage)
         async with get_background_session() as session:
             service = ApiKeysService(ApiKeysRepository(session))
             await service.finalize_usage_reservation(
@@ -4730,6 +4754,7 @@ async def _log_source_chat_completion(
     model: str,
     status: str,
     usage: SourceUsage | None = None,
+    cost_usd_override: float | None = None,
     error_code: str | None = None,
     error_message: str | None = None,
     upstream_status_code: int | None = None,
@@ -4746,7 +4771,9 @@ async def _log_source_chat_completion(
                 input_tokens=usage.input_tokens if usage is not None else None,
                 output_tokens=usage.output_tokens if usage is not None else None,
                 cached_input_tokens=usage.cached_input_tokens if usage is not None else None,
-                cost_usd=_source_usage_cost_usd(source, model, usage),
+                cost_usd=(
+                    cost_usd_override if cost_usd_override is not None else _source_usage_cost_usd(source, model, usage)
+                ),
                 latency_ms=None,
                 status=status,
                 error_code=error_code,
@@ -5697,7 +5724,11 @@ def _parse_error_envelope(payload: JsonValue | OpenAIErrorEnvelope) -> OpenAIErr
 def _openai_invalid_transcription_model_error(model: str) -> OpenAIErrorEnvelope:
     error = openai_error(
         "invalid_request_error",
-        f"Unsupported transcription model '{model}'. Only '{_TRANSCRIPTION_MODEL}' is supported.",
+        (
+            f"Unsupported transcription model '{model}'. Use '{_TRANSCRIPTION_MODEL}' for the subscription-backed "
+            "transcription route, or configure an enabled OpenAI-compatible model source with Audio Transcriptions "
+            "support for this model."
+        ),
         error_type="invalid_request_error",
     )
     error["error"]["param"] = "model"

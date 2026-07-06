@@ -18,6 +18,7 @@ class ModelSourceModelInput(DashboardModel):
     input_per_1m: float | None = Field(default=None, ge=0)
     cached_input_per_1m: float | None = Field(default=None, ge=0)
     output_per_1m: float | None = Field(default=None, ge=0)
+    audio_per_minute: float | None = Field(default=None, ge=0)
     raw_metadata_json: str | None = None
     is_enabled: bool = True
 

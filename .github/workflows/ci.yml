@@ -289,7 +289,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39
+        uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3
         with:
           python-version: "3.13"
           enable-cache: true
@@ -310,7 +310,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39
+        uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3
         with:
           python-version: "3.13"
           enable-cache: true
@@ -364,7 +364,7 @@ jobs:
 
       - name: Set up uv
         if: needs.changes.outputs.backend == 'true'
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39
+        uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3
         with:
           python-version: "3.13"
           enable-cache: true
@@ -426,7 +426,7 @@ jobs:
 
       - name: Set up uv
         if: needs.changes.outputs.backend == 'true'
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39
+        uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3
         with:
           python-version: "3.13"
           enable-cache: true
@@ -448,7 +448,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39
+        uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3
         with:
           python-version: "3.13"
           enable-cache: true
@@ -483,7 +483,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39
+        uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3
         with:
           python-version: "3.13"
           enable-cache: true
@@ -519,7 +519,7 @@ jobs:
             bun-1.3.14-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39
+        uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3
         with:
           python-version: "3.13"
           enable-cache: true

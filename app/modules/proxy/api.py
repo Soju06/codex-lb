@@ -2664,6 +2664,7 @@ async def _select_chat_model_source(
     require_streaming: bool = False,
 ) -> tuple[ModelSource, str] | None:
     assigned_source_ids = _allowed_source_ids_for_api_key(api_key)
+    exact_allowed_models = set(api_key.allowed_models) if api_key and api_key.allowed_models else None
     candidates = [candidate for candidate in (raw_model, model) if candidate]
     if not candidates:
         return None
@@ -2672,6 +2673,8 @@ async def _select_chat_model_source(
     async with get_background_session() as session:
         repository = ModelSourcesRepository(session)
         for candidate in deduped_candidates:
+            if exact_allowed_models is not None and candidate not in exact_allowed_models:
+                continue
             subscription_model = registry_models.get(candidate)
             if assigned_source_ids is None and subscription_model is not None:
                 continue

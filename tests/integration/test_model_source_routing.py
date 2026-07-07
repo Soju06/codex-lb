@@ -10,10 +10,11 @@ from aiohttp import web
 from aiohttp.multipart import BodyPartReader
 from sqlalchemy import select
 
+from app.core.utils.time import utcnow
 from app.db.models import ApiKeyUsageReservation, RequestLog
 from app.db.session import SessionLocal
 from app.modules.api_keys.repository import ApiKeysRepository
-from app.modules.api_keys.service import ApiKeysService, ApiKeyUsageReservationData
+from app.modules.api_keys.service import ApiKeyData, ApiKeysService, ApiKeyUsageReservationData
 
 pytestmark = pytest.mark.integration
 
@@ -1098,6 +1099,62 @@ async def test_source_chat_prefers_raw_alias_like_model_slug(async_client, sourc
     assert response.status_code == 200
     assert captured["model"] == model
     assert response.json()["model"] == model
+
+
+@pytest.mark.asyncio
+async def test_source_chat_raw_alias_lookup_requires_exact_allowlist(async_client):
+    import app.modules.proxy.api as proxy_api
+
+    model = "gpt-5-high"
+    await _create_model_source(
+        async_client,
+        name="alias-like-allowlist-source",
+        model=model,
+        base_url="http://127.0.0.1:9/v1",
+    )
+    canonical_only_key = ApiKeyData(
+        id="key_canonical_only",
+        name="canonical only",
+        key_prefix="sk-test-canonical",
+        allowed_models=["gpt-5"],
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+    exact_key = ApiKeyData(
+        id="key_exact_alias",
+        name="exact alias",
+        key_prefix="sk-test-exact",
+        allowed_models=[model],
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+
+    canonical_selection = await proxy_api._select_chat_model_source(
+        "gpt-5",
+        canonical_only_key,
+        raw_model=model,
+    )
+    exact_selection = await proxy_api._select_chat_model_source(
+        "gpt-5",
+        exact_key,
+        raw_model=model,
+    )
+
+    assert canonical_selection is None
+    assert exact_selection is not None
+    source, selected_model = exact_selection
+    assert source.name == "alias-like-allowlist-source"
+    assert selected_model == model
 
 
 @pytest.mark.asyncio

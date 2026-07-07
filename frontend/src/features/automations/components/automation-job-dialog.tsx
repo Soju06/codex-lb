@@ -192,6 +192,7 @@ function getAutomationJobDialogFormKey(editingJob: AutomationJob | null, timeFor
     editingJob.model,
     editingJob.reasoningEffort ?? null,
     editingJob.prompt,
+    editingJob.accountScopeAll,
     editingJob.accountIds,
   ]);
 }
@@ -404,7 +405,13 @@ function AutomationJobDialogForm({
 
     try {
       if (editingJob) {
-        const targetPatch = automationAccountTargetsChanged(editingJob.accountIds, accountIds) ? { accountIds } : {};
+        const nextAccountScopeAll = accountIds.length === 0;
+        const currentAccountScopeAll = editingJob.accountScopeAll ?? editingJob.accountIds.length === 0;
+        const targetPatch =
+          automationAccountTargetsChanged(editingJob.accountIds, accountIds) ||
+          currentAccountScopeAll !== nextAccountScopeAll
+            ? { accountIds }
+            : {};
         const updatePayload: AutomationUpdateRequest =
           reasoningEffortTouched ||
           shouldPersistReasoningEffortOnUpdate ||

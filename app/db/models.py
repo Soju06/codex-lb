@@ -1003,6 +1003,7 @@ class AutomationJob(Base):
         default=False,
         server_default=false(),
     )
+    account_scope_all: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=true())
     model: Mapped[str] = mapped_column(String, nullable=False)
     reasoning_effort: Mapped[str | None] = mapped_column(String(16), nullable=True)
     prompt: Mapped[str] = mapped_column(Text, nullable=False, default="ping", server_default=text("'ping'"))
@@ -1125,6 +1126,7 @@ class AutomationRunCycleAccount(Base):
         primary_key=True,
     )
     account_id: Mapped[str] = mapped_column(String, primary_key=True)
+    slot_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
     position: Mapped[int] = mapped_column(Integer, nullable=False)
     scheduled_for: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)

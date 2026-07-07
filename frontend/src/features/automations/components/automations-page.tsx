@@ -223,6 +223,10 @@ export function AutomationsPage() {
     }
     return index;
   }, [accountsQuery.data]);
+  const automationModels = useMemo(
+    () => models.filter((entry) => !entry.sourceOnly),
+    [models],
+  );
 
   const jobsAccountOptions = useMemo(
     () => {
@@ -249,7 +253,7 @@ export function AutomationsPage() {
   const jobsModelOptions = useMemo(
     () => {
       const unique = [...new Set([
-        ...models.map((entry) => entry.id.trim()),
+        ...automationModels.map((entry) => entry.id.trim()),
         ...(jobOptionsQuery.data?.models ?? []).map((entry) => entry.trim()),
       ])]
         .filter((entry) => entry.length > 0)
@@ -259,7 +263,7 @@ export function AutomationsPage() {
         label: entry,
       }));
     },
-    [models, jobOptionsQuery.data?.models],
+    [automationModels, jobOptionsQuery.data?.models],
   );
 
   const jobsStatusOptions = useMemo(
@@ -309,7 +313,7 @@ export function AutomationsPage() {
   const runsModelOptions = useMemo(
     () => {
       const unique = [...new Set([
-        ...models.map((entry) => entry.id.trim()),
+        ...automationModels.map((entry) => entry.id.trim()),
         ...(runOptionsQuery.data?.models ?? []).map((entry) => entry.trim()),
       ])]
         .filter((entry) => entry.length > 0)
@@ -319,7 +323,7 @@ export function AutomationsPage() {
         label: entry,
       }));
     },
-    [models, runOptionsQuery.data?.models],
+    [automationModels, runOptionsQuery.data?.models],
   );
 
   const runsStatusOptions = useMemo(
@@ -485,7 +489,7 @@ export function AutomationsPage() {
                   <TableBody>
                     {jobs.map((job) => {
                       const nextRun = job.nextRunAt ? formatTimeLong(job.nextRunAt) : null;
-                      const accountSummary = formatAccountsSummary(job.accountIds, accountDisplayIndex);
+                      const accountSummary = formatAccountsSummary(job.accountIds, accountDisplayIndex, job.accountScopeAll);
                       const scheduleSummary = formatScheduleSummary(
                         job.schedule.days,
                         job.schedule.time,
@@ -842,7 +846,7 @@ export function AutomationsPage() {
         open={createDialog.open}
         busy={busy}
         editingJob={editingJob}
-        models={models}
+        models={automationModels}
         modelsLoading={modelsLoading}
         onOpenChange={(open) => {
           createDialog.onOpenChange(open);

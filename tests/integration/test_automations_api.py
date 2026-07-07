@@ -324,7 +324,9 @@ async def test_automations_patch_model_rejects_retained_unsupported_reasoning_ef
         },
     )
     assert create_response.status_code == 200
-    automation_id = create_response.json()["id"]
+    create_payload = create_response.json()
+    assert create_payload["accountScopeAll"] is False
+    automation_id = create_payload["id"]
 
     invalid_update = await async_client.patch(
         f"/api/automations/{automation_id}",
@@ -1748,6 +1750,11 @@ async def test_automations_due_run_spreads_accounts_with_threshold(db_setup, mon
         assert all(0 <= offset <= 11 * 60 for offset in offsets)
         assert 0 in offsets
         assert len(set(offsets)) == len(offsets)
+        cycle = await automations_repository.get_run_cycle(cycle_key=f"scheduled:{job.id}:{due_slot.isoformat()}")
+        assert cycle is not None
+        assert {entry.slot_key for entry in cycle.accounts} == {
+            _scheduled_slot_key(job.id, account_id=entry.account_id, due_slot=due_slot) for entry in cycle.accounts
+        }
 
 
 @pytest.mark.asyncio
@@ -4921,6 +4928,182 @@ async def test_automations_runs_page_groups_scheduled_cycle_after_all_accounts_f
 
 
 @pytest.mark.asyncio
+async def test_scheduled_cycle_status_filter_uses_current_account_eligibility(async_client):
+    accounts = await _create_accounts("auto-cycle-filter-eligible-a", "auto-cycle-filter-eligible-b")
+    now = utcnow().replace(second=0, microsecond=0) - timedelta(hours=1)
+
+    async with SessionLocal() as session:
+        automations_repository = AutomationsRepository(session)
+        job = await automations_repository.create_job(
+            name="Cycle filter eligibility",
+            enabled=True,
+            include_paused_accounts=False,
+            schedule_type="daily",
+            schedule_time=now.strftime("%H:%M"),
+            schedule_timezone="UTC",
+            schedule_days=["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+            schedule_threshold_minutes=0,
+            model="gpt-5.3-codex",
+            reasoning_effort=None,
+            prompt="ping",
+            account_ids=[account.id for account in accounts],
+        )
+        cycle = await automations_repository.create_run_cycle(
+            cycle_key=f"scheduled:{job.id}:{now.isoformat()}",
+            job_id=job.id,
+            trigger="scheduled",
+            cycle_expected_accounts=2,
+            cycle_window_end=now + timedelta(minutes=5),
+            accounts=[
+                (accounts[0].id, now),
+                (accounts[1].id, now + timedelta(minutes=1)),
+            ],
+        )
+        success_run = await automations_repository.claim_run(
+            job_id=job.id,
+            trigger="scheduled",
+            slot_key=_scheduled_slot_key(job.id, account_id=accounts[0].id, due_slot=now),
+            cycle_key=cycle.cycle_key,
+            cycle_expected_accounts=cycle.cycle_expected_accounts,
+            cycle_window_end=cycle.cycle_window_end,
+            scheduled_for=now,
+            started_at=now,
+            account_id=accounts[0].id,
+        )
+        assert success_run is not None
+        await automations_repository.complete_run(
+            success_run.id,
+            status="success",
+            finished_at=now + timedelta(seconds=5),
+            account_id=accounts[0].id,
+            error_code=None,
+            error_message=None,
+            attempt_count=1,
+        )
+
+    await _set_account_status(accounts[1].id, AccountStatus.RATE_LIMITED)
+
+    grouped_response = await async_client.get(
+        "/api/automations/runs",
+        params={"automationId": job.id, "trigger": "scheduled", "limit": 25, "offset": 0},
+    )
+    assert grouped_response.status_code == 200
+    grouped_payload = grouped_response.json()
+    assert grouped_payload["total"] == 1
+    assert grouped_payload["items"][0]["effectiveStatus"] == "success"
+    assert grouped_payload["items"][0]["totalAccounts"] == 1
+    assert grouped_payload["items"][0]["pendingAccounts"] == 0
+
+    success_response = await async_client.get(
+        "/api/automations/runs",
+        params={
+            "automationId": job.id,
+            "trigger": "scheduled",
+            "status": "success",
+            "limit": 25,
+            "offset": 0,
+        },
+    )
+    assert success_response.status_code == 200
+    success_payload = success_response.json()
+    assert success_payload["total"] == 1
+    assert success_payload["items"][0]["effectiveStatus"] == "success"
+
+    running_response = await async_client.get(
+        "/api/automations/runs",
+        params={
+            "automationId": job.id,
+            "trigger": "scheduled",
+            "status": "running",
+            "limit": 25,
+            "offset": 0,
+        },
+    )
+    assert running_response.status_code == 200
+    assert running_response.json()["total"] == 0
+
+
+@pytest.mark.asyncio
+async def test_scheduled_cycle_status_filter_matches_completed_slots_by_slot_key(async_client):
+    accounts = await _create_accounts("auto-cycle-slot-filter-a", "auto-cycle-slot-filter-b")
+    now = utcnow().replace(second=0, microsecond=0) - timedelta(hours=1)
+
+    async with SessionLocal() as session:
+        automations_repository = AutomationsRepository(session)
+        job = await automations_repository.create_job(
+            name="Cycle slot-key filter",
+            enabled=True,
+            include_paused_accounts=False,
+            schedule_type="daily",
+            schedule_time=now.strftime("%H:%M"),
+            schedule_timezone="UTC",
+            schedule_days=["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+            schedule_threshold_minutes=0,
+            model="gpt-5.3-codex",
+            reasoning_effort=None,
+            prompt="ping",
+            account_ids=[account.id for account in accounts],
+        )
+        cycle = await automations_repository.create_run_cycle(
+            cycle_key=f"scheduled:{job.id}:{now.isoformat()}",
+            job_id=job.id,
+            trigger="scheduled",
+            cycle_expected_accounts=2,
+            cycle_window_end=now + timedelta(minutes=5),
+            accounts=[
+                (accounts[0].id, now),
+                (accounts[1].id, now + timedelta(minutes=1)),
+            ],
+        )
+        first_slot_run = await automations_repository.claim_run(
+            job_id=job.id,
+            trigger="scheduled",
+            slot_key=_scheduled_slot_key(job.id, account_id=accounts[0].id, due_slot=now),
+            cycle_key=cycle.cycle_key,
+            cycle_expected_accounts=cycle.cycle_expected_accounts,
+            cycle_window_end=cycle.cycle_window_end,
+            scheduled_for=now,
+            started_at=now,
+            account_id=accounts[0].id,
+        )
+        assert first_slot_run is not None
+        await automations_repository.complete_run(
+            first_slot_run.id,
+            status="success",
+            finished_at=now + timedelta(seconds=5),
+            account_id=accounts[1].id,
+            error_code=None,
+            error_message=None,
+            attempt_count=1,
+        )
+
+    grouped_response = await async_client.get(
+        "/api/automations/runs",
+        params={"automationId": job.id, "trigger": "scheduled", "limit": 25, "offset": 0},
+    )
+    assert grouped_response.status_code == 200
+    grouped_payload = grouped_response.json()
+    assert grouped_payload["total"] == 1
+    assert grouped_payload["items"][0]["effectiveStatus"] == "partial"
+    assert grouped_payload["items"][0]["totalAccounts"] == 2
+    assert grouped_payload["items"][0]["completedAccounts"] == 1
+    assert grouped_payload["items"][0]["pendingAccounts"] == 1
+
+    success_response = await async_client.get(
+        "/api/automations/runs",
+        params={
+            "automationId": job.id,
+            "trigger": "scheduled",
+            "status": "success",
+            "limit": 25,
+            "offset": 0,
+        },
+    )
+    assert success_response.status_code == 200
+    assert success_response.json()["total"] == 0
+
+
+@pytest.mark.asyncio
 async def test_grouped_runs_and_last_run_use_cycle_finished_at_and_error_summary(async_client):
     accounts = await _create_accounts("auto-cycle-summary-a", "auto-cycle-summary-b")
     now = datetime(2026, 4, 22, 12, 0, 0)
@@ -5165,6 +5348,49 @@ async def test_automations_manual_cycle_without_eligible_accounts_keeps_zero_tot
     assert details_payload["completedAccounts"] == 0
     assert details_payload["pendingAccounts"] == 0
     assert details_payload["accounts"] == []
+
+
+@pytest.mark.asyncio
+async def test_automations_deleted_explicit_account_does_not_broaden_to_all_accounts(async_client, monkeypatch):
+    accounts = await _create_accounts("auto-explicit-deleted-a", "auto-explicit-deleted-b")
+    called_chatgpt_account_ids: list[str | None] = []
+
+    async def _fake_compact(*_args, **kwargs):
+        called_chatgpt_account_ids.append(kwargs.get("account_id"))
+        return SimpleNamespace()
+
+    monkeypatch.setattr("app.modules.automations.service.core_compact_responses", _fake_compact)
+
+    create_response = await async_client.post(
+        "/api/automations",
+        json={
+            "name": "Deleted explicit account scope",
+            "enabled": True,
+            "schedule": {
+                "type": "daily",
+                "time": "05:00",
+                "timezone": "UTC",
+                "days": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+            },
+            "model": "gpt-5.3-codex",
+            "prompt": "ping",
+            "accountIds": [accounts[0].id],
+        },
+    )
+    assert create_response.status_code == 200
+    automation_id = create_response.json()["id"]
+
+    async with SessionLocal() as session:
+        accounts_repository = AccountsRepository(session)
+        deleted = await accounts_repository.delete(accounts[0].id)
+        assert deleted is True
+
+    run_response = await async_client.post(f"/api/automations/{automation_id}/run-now")
+    assert run_response.status_code == 202
+    run_payload = run_response.json()
+    assert run_payload["status"] == "failed"
+    assert run_payload["errorCode"] == "no_available_accounts"
+    assert called_chatgpt_account_ids == []
 
 
 @pytest.mark.asyncio

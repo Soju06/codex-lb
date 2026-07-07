@@ -78,8 +78,19 @@ export function resolveAccountDisplay(accountId: string | null, displayIndex: Ma
   return buildUnknownAccountDisplay(accountId);
 }
 
-export function formatAccountsSummary(accountIds: string[], displayIndex: Map<string, AccountDisplayEntry>): AccountDisplay {
+export function formatAccountsSummary(
+  accountIds: string[],
+  displayIndex: Map<string, AccountDisplayEntry>,
+  accountScopeAll = true,
+): AccountDisplay {
   if (accountIds.length === 0) {
+    if (!accountScopeAll) {
+      return {
+        primary: "No selected accounts",
+        secondary: "Selected accounts are unavailable",
+        title: "No selected accounts",
+      };
+    }
     return {
       primary: "All accounts",
       secondary: "Uses every available account",

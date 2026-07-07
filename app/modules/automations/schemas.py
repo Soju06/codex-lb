@@ -103,6 +103,7 @@ class AutomationJobResponse(DashboardModel):
     name: str
     enabled: bool
     include_paused_accounts: bool = False
+    account_scope_all: bool = Field(default=True, alias="accountScopeAll")
     schedule: AutomationScheduleResponse
     model: str
     reasoning_effort: str | None = None

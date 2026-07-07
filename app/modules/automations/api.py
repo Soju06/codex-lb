@@ -266,6 +266,7 @@ def _to_job_response(job: AutomationJobData) -> AutomationJobResponse:
         name=job.name,
         enabled=job.enabled,
         include_paused_accounts=job.include_paused_accounts,
+        accountScopeAll=job.account_scope_all,
         schedule=AutomationScheduleResponse(
             type=_schedule_type_literal(job.schedule.type),
             time=job.schedule.time,

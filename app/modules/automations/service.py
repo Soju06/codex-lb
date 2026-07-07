@@ -150,6 +150,7 @@ class AutomationJobData:
     name: str
     enabled: bool
     include_paused_accounts: bool
+    account_scope_all: bool
     schedule: AutomationScheduleData
     model: str
     reasoning_effort: str | None
@@ -710,48 +711,36 @@ class AutomationsService:
             account_ids=account_ids,
             threshold_minutes=threshold,
         )
-        cycle = await self._repository.create_run_cycle(
+        if not dispatch_plan:
+            initial_runs = [(f"manual:{job.id}:{cycle_id}:none", now, None)]
+        else:
+            initial_runs = [
+                (
+                    _manual_slot_key(job.id, cycle_id, account_id),
+                    scheduled_for,
+                    account_id,
+                )
+                for account_id, scheduled_for in dispatch_plan
+            ]
+        cycle, claims = await self._repository.create_run_cycle_with_runs(
             cycle_key=cycle_key,
             job_id=job.id,
             trigger=AUTOMATION_RUN_TRIGGER_MANUAL,
             cycle_expected_accounts=len(dispatch_plan),
             cycle_window_end=cycle_window_end,
             accounts=dispatch_plan,
+            runs=initial_runs,
+            started_at=now,
             include_paused_accounts=job.include_paused_accounts,
         )
         if not cycle.accounts:
-            slot_key = f"manual:{job.id}:{cycle_id}:none"
-            claim = await self._repository.claim_run(
-                job_id=job.id,
-                trigger=AUTOMATION_RUN_TRIGGER_MANUAL,
-                slot_key=slot_key,
-                cycle_key=cycle_key,
-                cycle_expected_accounts=cycle.cycle_expected_accounts,
-                cycle_window_end=cycle.cycle_window_end,
-                scheduled_for=now,
-                started_at=now,
-            )
-            if claim is None:
+            if not claims:
                 raise RuntimeError("Failed to claim manual automation run")
-            return await self._execute_claimed_run(job, claim)
+            return await self._execute_claimed_run(job, claims[0])
 
         representative_claim: AutomationRunRecord | None = None
         has_delayed_dispatches = any(cycle_account.scheduled_for > now for cycle_account in cycle.accounts)
-        for cycle_account in cycle.accounts:
-            slot_key = _manual_slot_key(job.id, cycle_id, cycle_account.account_id)
-            claim = await self._repository.claim_run(
-                job_id=job.id,
-                trigger=AUTOMATION_RUN_TRIGGER_MANUAL,
-                slot_key=slot_key,
-                cycle_key=cycle_key,
-                cycle_expected_accounts=cycle.cycle_expected_accounts,
-                cycle_window_end=cycle.cycle_window_end,
-                scheduled_for=cycle_account.scheduled_for,
-                started_at=now,
-                account_id=cycle_account.account_id,
-            )
-            if claim is None:
-                continue
+        for claim in claims:
             if representative_claim is None or not has_delayed_dispatches:
                 representative_claim = claim
         if representative_claim is not None:
@@ -1910,6 +1899,7 @@ class AutomationsService:
             name=job.name,
             enabled=job.enabled,
             include_paused_accounts=job.include_paused_accounts,
+            account_scope_all=job.account_scope_all,
             schedule=AutomationScheduleData(
                 type=job.schedule_type,
                 time=job.schedule_time,
@@ -1932,12 +1922,12 @@ class AutomationsService:
         await self._reactivate_accounts_if_reset_elapsed(accounts, now_utc=now_utc)
         accounts_by_id = {account.id: account for account in accounts}
         candidate_accounts: list[Account]
-        if account_ids:
+        if job.account_scope_all:
+            candidate_accounts = accounts
+        else:
             candidate_accounts = [
                 accounts_by_id[account_id] for account_id in account_ids if account_id in accounts_by_id
             ]
-        else:
-            candidate_accounts = accounts
         return [
             account.id
             for account in candidate_accounts

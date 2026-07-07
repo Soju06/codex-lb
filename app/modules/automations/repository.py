@@ -66,6 +66,7 @@ class AutomationJobRecord:
     schedule_days: list[str]
     schedule_threshold_minutes: int
     include_paused_accounts: bool
+    account_scope_all: bool
     model: str
     reasoning_effort: str | None
     prompt: str
@@ -77,6 +78,7 @@ class AutomationJobRecord:
 @dataclass(frozen=True, slots=True)
 class AutomationRunCycleAccountRecord:
     account_id: str
+    slot_key: str | None
     position: int
     scheduled_for: datetime
 
@@ -290,6 +292,7 @@ class AutomationsRepository:
             schedule_days=_serialize_schedule_days(schedule_days),
             schedule_threshold_minutes=schedule_threshold_minutes,
             include_paused_accounts=include_paused_accounts,
+            account_scope_all=not bool(account_ids),
             model=model,
             reasoning_effort=reasoning_effort,
             prompt=prompt,
@@ -356,6 +359,7 @@ class AutomationsRepository:
                 link.account_id for link in sorted(job.account_links, key=lambda link: link.position)
             ]
             next_account_ids = list(account_ids)
+            job.account_scope_all = not bool(next_account_ids)
             if current_account_ids != next_account_ids:
                 job.updated_at = utcnow()
                 await self._session.execute(delete(AutomationJobAccount).where(AutomationJobAccount.job_id == job.id))
@@ -635,10 +639,17 @@ class AutomationsRepository:
             cycle_window_end=cycle_window_end,
             include_paused_accounts=include_paused_accounts,
         )
+        due_slot = _parse_scheduled_cycle_due_slot(cycle_key, job_id=job_id) if trigger == "scheduled" else None
         cycle.cycle_accounts = [
             AutomationRunCycleAccount(
                 cycle_key=cycle_key,
                 account_id=account_id,
+                slot_key=_cycle_account_slot_key(
+                    job_id=job_id,
+                    trigger=trigger,
+                    account_id=account_id,
+                    due_slot=due_slot,
+                ),
                 position=index,
                 scheduled_for=scheduled_for,
             )
@@ -653,6 +664,76 @@ class AutomationsRepository:
         if stored_cycle is None:
             raise LookupError(f"Automation run cycle not found: {cycle_key}")
         return stored_cycle
+
+    async def create_run_cycle_with_runs(
+        self,
+        *,
+        cycle_key: str,
+        job_id: str,
+        trigger: str,
+        cycle_expected_accounts: int,
+        cycle_window_end: datetime | None,
+        accounts: Sequence[tuple[str, datetime]],
+        runs: Sequence[tuple[str, datetime, str | None]],
+        started_at: datetime,
+        include_paused_accounts: bool = False,
+    ) -> tuple[AutomationRunCycleRecord, list[AutomationRunRecord]]:
+        model, reasoning_effort, prompt = await self._get_job_snapshot(job_id)
+        cycle = AutomationRunCycle(
+            cycle_key=cycle_key,
+            job_id=job_id,
+            trigger=trigger,
+            cycle_expected_accounts=cycle_expected_accounts,
+            cycle_window_end=cycle_window_end,
+            include_paused_accounts=include_paused_accounts,
+        )
+        due_slot = _parse_scheduled_cycle_due_slot(cycle_key, job_id=job_id) if trigger == "scheduled" else None
+        cycle.cycle_accounts = [
+            AutomationRunCycleAccount(
+                cycle_key=cycle_key,
+                account_id=account_id,
+                slot_key=_cycle_account_slot_key(
+                    job_id=job_id,
+                    trigger=trigger,
+                    account_id=account_id,
+                    due_slot=due_slot,
+                ),
+                position=index,
+                scheduled_for=scheduled_for,
+            )
+            for index, (account_id, scheduled_for) in enumerate(accounts)
+        ]
+        claimed_runs = [
+            AutomationRun(
+                id=f"run_{uuid4().hex}",
+                job_id=job_id,
+                trigger=trigger,
+                slot_key=slot_key,
+                cycle_key=cycle_key,
+                cycle_expected_accounts=cycle_expected_accounts,
+                cycle_window_end=cycle_window_end,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                prompt=prompt,
+                scheduled_for=scheduled_for,
+                started_at=started_at,
+                status="running",
+                account_id=account_id,
+                attempt_count=0,
+            )
+            for slot_key, scheduled_for, account_id in runs
+        ]
+        self._session.add(cycle)
+        self._session.add_all(claimed_runs)
+        try:
+            await self._session.commit()
+        except IntegrityError:
+            await self._session.rollback()
+            raise
+        stored_cycle = await self.get_run_cycle(cycle_key=cycle_key)
+        if stored_cycle is None:
+            raise LookupError(f"Automation run cycle not found: {cycle_key}")
+        return stored_cycle, [self._run_from_model(run) for run in claimed_runs]
 
     async def complete_run(
         self,
@@ -1083,6 +1164,44 @@ class AutomationsRepository:
         )
         cycle_runs = cycle_runs_stmt.subquery()
 
+        snapshot_accounts_stmt = (
+            select(
+                AutomationRunCycleAccount.cycle_key.label("cycle_key"),
+                func.count(func.distinct(AutomationRunCycleAccount.account_id)).label("included_accounts"),
+            )
+            .join(candidate_cycles, candidate_cycles.c.cycle_key == AutomationRunCycleAccount.cycle_key)
+            .join(AutomationRunCycle, AutomationRunCycle.cycle_key == AutomationRunCycleAccount.cycle_key)
+            .outerjoin(Account, Account.id == AutomationRunCycleAccount.account_id)
+            .outerjoin(
+                AutomationRun,
+                and_(
+                    AutomationRun.cycle_key == AutomationRunCycleAccount.cycle_key,
+                    or_(
+                        and_(
+                            AutomationRunCycleAccount.slot_key.is_not(None),
+                            AutomationRun.slot_key == AutomationRunCycleAccount.slot_key,
+                        ),
+                        and_(
+                            AutomationRunCycleAccount.slot_key.is_(None),
+                            AutomationRun.account_id == AutomationRunCycleAccount.account_id,
+                        ),
+                    ),
+                ),
+            )
+            .where(
+                or_(
+                    AutomationRun.id.is_not(None),
+                    Account.status == AccountStatus.ACTIVE,
+                    and_(
+                        Account.status == AccountStatus.PAUSED,
+                        AutomationRunCycle.include_paused_accounts.is_(True),
+                    ),
+                )
+            )
+            .group_by(AutomationRunCycleAccount.cycle_key)
+        )
+        snapshot_accounts = snapshot_accounts_stmt.subquery()
+
         ranked_stmt = select(
             filtered_runs.c.run_id,
             filtered_runs.c.cycle_key,
@@ -1162,25 +1281,35 @@ class AutomationsRepository:
                     (cycle_agg.c.has_manual_trigger == 1, cycle_agg.c.manual_cycle_started_at),
                     else_=cycle_agg.c.non_manual_cycle_started_at,
                 ).label("cycle_started_at"),
+                cycle_agg.c.has_manual_trigger,
                 ranked.c.fallback_status,
                 cycle_agg.c.completed_accounts,
                 cycle_agg.c.success_count,
                 cycle_agg.c.failed_count,
                 cycle_agg.c.partial_count,
                 cycle_agg.c.running_count,
-                case(
-                    (cycle_agg.c.has_manual_trigger == 1, cycle_agg.c.visible_accounts),
-                    else_=cycle_agg.c.snapshot_expected_accounts,
-                ).label("expected_accounts"),
+                cycle_agg.c.visible_accounts.label("expected_accounts"),
                 cycle_agg.c.window_end,
+                snapshot_accounts.c.included_accounts,
             )
             .join(cycle_agg, cycle_agg.c.cycle_key == ranked.c.cycle_key)
+            .outerjoin(snapshot_accounts, snapshot_accounts.c.cycle_key == ranked.c.cycle_key)
             .where(ranked.c.cycle_rank == 1)
         )
         cycle_rows = cycle_rows_stmt.subquery()
 
+        expected_accounts_expr = case(
+            (cycle_rows.c.has_manual_trigger == 1, cycle_rows.c.expected_accounts),
+            (
+                func.coalesce(cycle_rows.c.included_accounts, cycle_rows.c.expected_accounts)
+                > cycle_rows.c.expected_accounts,
+                func.coalesce(cycle_rows.c.included_accounts, cycle_rows.c.expected_accounts),
+            ),
+            else_=cycle_rows.c.expected_accounts,
+        )
+
         effective_total_expr = case(
-            (cycle_rows.c.expected_accounts > cycle_rows.c.completed_accounts, cycle_rows.c.expected_accounts),
+            (expected_accounts_expr > cycle_rows.c.completed_accounts, expected_accounts_expr),
             else_=cycle_rows.c.completed_accounts,
         )
         pending_expr = effective_total_expr - cycle_rows.c.completed_accounts
@@ -1318,6 +1447,44 @@ class AutomationsRepository:
             )
             cycle_runs = cycle_runs_stmt.subquery()
 
+            snapshot_accounts_stmt = (
+                select(
+                    AutomationRunCycleAccount.cycle_key.label("cycle_key"),
+                    func.count(func.distinct(AutomationRunCycleAccount.account_id)).label("included_accounts"),
+                )
+                .join(candidate_cycles, candidate_cycles.c.cycle_key == AutomationRunCycleAccount.cycle_key)
+                .join(AutomationRunCycle, AutomationRunCycle.cycle_key == AutomationRunCycleAccount.cycle_key)
+                .outerjoin(Account, Account.id == AutomationRunCycleAccount.account_id)
+                .outerjoin(
+                    AutomationRun,
+                    and_(
+                        AutomationRun.cycle_key == AutomationRunCycleAccount.cycle_key,
+                        or_(
+                            and_(
+                                AutomationRunCycleAccount.slot_key.is_not(None),
+                                AutomationRun.slot_key == AutomationRunCycleAccount.slot_key,
+                            ),
+                            and_(
+                                AutomationRunCycleAccount.slot_key.is_(None),
+                                AutomationRun.account_id == AutomationRunCycleAccount.account_id,
+                            ),
+                        ),
+                    ),
+                )
+                .where(
+                    or_(
+                        AutomationRun.id.is_not(None),
+                        Account.status == AccountStatus.ACTIVE,
+                        and_(
+                            Account.status == AccountStatus.PAUSED,
+                            AutomationRunCycle.include_paused_accounts.is_(True),
+                        ),
+                    )
+                )
+                .group_by(AutomationRunCycleAccount.cycle_key)
+            )
+            snapshot_accounts = snapshot_accounts_stmt.subquery()
+
             ranked_stmt = select(
                 filtered_runs.c.run_id,
                 filtered_runs.c.cycle_key,
@@ -1386,25 +1553,34 @@ class AutomationsRepository:
             cycle_rows_stmt = (
                 select(
                     ranked.c.cycle_key,
+                    cycle_agg.c.has_manual_trigger,
                     ranked.c.fallback_status,
                     cycle_agg.c.completed_accounts,
                     cycle_agg.c.success_count,
                     cycle_agg.c.failed_count,
                     cycle_agg.c.partial_count,
                     cycle_agg.c.running_count,
-                    case(
-                        (cycle_agg.c.has_manual_trigger == 1, cycle_agg.c.visible_accounts),
-                        else_=cycle_agg.c.snapshot_expected_accounts,
-                    ).label("expected_accounts"),
+                    cycle_agg.c.visible_accounts.label("expected_accounts"),
                     cycle_agg.c.window_end,
+                    snapshot_accounts.c.included_accounts,
                 )
                 .join(cycle_agg, cycle_agg.c.cycle_key == ranked.c.cycle_key)
+                .outerjoin(snapshot_accounts, snapshot_accounts.c.cycle_key == ranked.c.cycle_key)
                 .where(ranked.c.cycle_rank == 1)
             )
             cycle_rows = cycle_rows_stmt.subquery()
 
+            expected_accounts_expr = case(
+                (cycle_rows.c.has_manual_trigger == 1, cycle_rows.c.expected_accounts),
+                (
+                    func.coalesce(cycle_rows.c.included_accounts, cycle_rows.c.expected_accounts)
+                    > cycle_rows.c.expected_accounts,
+                    func.coalesce(cycle_rows.c.included_accounts, cycle_rows.c.expected_accounts),
+                ),
+                else_=cycle_rows.c.expected_accounts,
+            )
             effective_total_expr = case(
-                (cycle_rows.c.expected_accounts > cycle_rows.c.completed_accounts, cycle_rows.c.expected_accounts),
+                (expected_accounts_expr > cycle_rows.c.completed_accounts, expected_accounts_expr),
                 else_=cycle_rows.c.completed_accounts,
             )
             pending_expr = effective_total_expr - cycle_rows.c.completed_accounts
@@ -1607,6 +1783,7 @@ class AutomationsRepository:
             schedule_days=_parse_schedule_days(job.schedule_days),
             schedule_threshold_minutes=job.schedule_threshold_minutes,
             include_paused_accounts=job.include_paused_accounts,
+            account_scope_all=job.account_scope_all,
             model=job.model,
             reasoning_effort=job.reasoning_effort,
             prompt=job.prompt,
@@ -1658,6 +1835,7 @@ class AutomationsRepository:
             accounts=[
                 AutomationRunCycleAccountRecord(
                     account_id=entry.account_id,
+                    slot_key=entry.slot_key,
                     position=entry.position,
                     scheduled_for=entry.scheduled_for,
                 )
@@ -1693,11 +1871,11 @@ class AutomationsRepository:
             matching_account_links = select(AutomationJobAccount.job_id).where(
                 AutomationJobAccount.account_id.in_(normalized_accounts)
             )
-            job_has_no_account_links = ~exists(select(1).where(AutomationJobAccount.job_id == AutomationJob.id))
+            job_has_all_account_scope = AutomationJob.account_scope_all.is_(True)
             conditions.append(
                 or_(
                     AutomationJob.id.in_(matching_account_links),
-                    job_has_no_account_links,
+                    job_has_all_account_scope,
                 )
             )
         normalized_models = [value.strip() for value in (models or []) if value and value.strip()]
@@ -1809,6 +1987,14 @@ def _scheduled_slot_key(job_id: str, *, account_id: str, due_slot: datetime) -> 
     seed = f"{job_id}:{due_slot.isoformat()}:{account_id}"
     digest = sha1(seed.encode("utf-8")).hexdigest()[:20]
     return f"scheduled:{job_id}:{digest}"
+
+
+def _cycle_account_slot_key(*, job_id: str, trigger: str, account_id: str, due_slot: datetime | None) -> str | None:
+    if trigger != "scheduled":
+        return None
+    if due_slot is None:
+        return None
+    return _scheduled_slot_key(job_id, account_id=account_id, due_slot=due_slot)
 
 
 def _parse_scheduled_cycle_due_slot(cycle_key: str, *, job_id: str) -> datetime | None:

@@ -56,6 +56,7 @@ async def list_models() -> dict:
         {
             "id": slug,
             "name": model.display_name or slug,
+            "sourceOnly": False,
             "supportedReasoningEfforts": list(
                 dict.fromkeys(
                     effort
@@ -78,5 +79,11 @@ async def list_models() -> dict:
         if source_model.slug in seen_slugs:
             continue
         seen_slugs.add(source_model.slug)
-        models.append({"id": source_model.slug, "name": source_model.display_name or source_model.slug})
+        models.append(
+            {
+                "id": source_model.slug,
+                "name": source_model.display_name or source_model.slug,
+                "sourceOnly": True,
+            }
+        )
     return {"models": models}

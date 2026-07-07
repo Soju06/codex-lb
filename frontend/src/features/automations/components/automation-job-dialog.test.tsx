@@ -50,6 +50,7 @@ describe("AutomationJobDialog", () => {
           {
             id: "gpt-4o-mini",
             name: "GPT 4o Mini",
+            sourceOnly: false,
             supportedReasoningEfforts: [],
             defaultReasoningEffort: null,
           },
@@ -100,6 +101,7 @@ describe("AutomationJobDialog", () => {
       model: "gpt-4o-mini",
       reasoningEffort: "low",
       prompt: "ping",
+      accountScopeAll: false,
       accountIds: ["acc_primary"],
       nextRunAt: "2026-04-23T05:00:00Z",
       lastRun: null,
@@ -114,6 +116,7 @@ describe("AutomationJobDialog", () => {
           {
             id: "gpt-4o-mini",
             name: "GPT 4o Mini",
+            sourceOnly: false,
             supportedReasoningEfforts: [],
             defaultReasoningEffort: null,
           },
@@ -180,6 +183,7 @@ describe("AutomationJobDialog", () => {
       model: "gpt-5.4",
       reasoningEffort: "minimal",
       prompt: "ping",
+      accountScopeAll: false,
       accountIds: ["acc_primary"],
       nextRunAt: "2026-04-23T05:00:00Z",
       lastRun: null,
@@ -194,6 +198,7 @@ describe("AutomationJobDialog", () => {
           {
             id: "gpt-5.3",
             name: "GPT 5.3",
+            sourceOnly: false,
             supportedReasoningEfforts: ["low", "medium", "high"],
             defaultReasoningEffort: "medium",
           },
@@ -258,6 +263,7 @@ describe("AutomationJobDialog", () => {
       model: "gpt-5.4",
       reasoningEffort: "medium",
       prompt: "old prompt",
+      accountScopeAll: false,
       accountIds: ["acc_primary"],
       nextRunAt: "2026-04-23T05:00:00Z",
       lastRun: null,
@@ -266,6 +272,7 @@ describe("AutomationJobDialog", () => {
       {
         id: "gpt-5.4",
         name: "GPT 5.4",
+        sourceOnly: false,
         supportedReasoningEfforts: ["low", "medium", "high"],
         defaultReasoningEffort: "medium",
       },
@@ -328,6 +335,7 @@ describe("AutomationJobDialog", () => {
           {
             id: "gpt-5.4",
             name: "GPT 5.4",
+            sourceOnly: false,
             supportedReasoningEfforts: ["low", "medium", "high"],
             defaultReasoningEffort: "medium",
           },

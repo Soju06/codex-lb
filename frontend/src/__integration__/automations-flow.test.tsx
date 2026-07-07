@@ -1,9 +1,11 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { HttpResponse, http } from "msw";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import App from "@/App";
 import { AutomationsPage } from "@/features/automations/components/automations-page";
+import { server } from "@/test/mocks/server";
 import { renderWithProviders } from "@/test/utils";
 
 function getJobRow(jobName: string): HTMLElement {
@@ -113,5 +115,29 @@ describe("automations page integration", () => {
 		const row = getJobRow("All accounts job");
 		expect(within(row).getByText("All accounts")).toBeInTheDocument();
 		expect(screen.queryByText("No accounts available. Add at least one account.")).not.toBeInTheDocument();
+	});
+
+	it("hides source-only models from the automation model picker", async () => {
+		server.use(
+			http.get("/api/models", () =>
+				HttpResponse.json({
+					models: [
+						{ id: "gpt-5.4", name: "GPT 5.4", sourceOnly: false },
+						{ id: "openai-compatible/source-model", name: "Source model", sourceOnly: true },
+					],
+				}),
+			),
+		);
+		const user = userEvent.setup({ delay: null });
+		renderWithProviders(<AutomationsPage />);
+
+		expect(await screen.findByRole("heading", { name: "Automations" })).toBeInTheDocument();
+		await user.click(screen.getByRole("button", { name: "Add automation" }));
+		const createDialog = await screen.findByRole("dialog", { name: "Add automation" });
+		await user.click(within(createDialog).getByLabelText("Model"));
+
+		const listbox = await screen.findByRole("listbox");
+		expect(within(listbox).getByText("gpt-5.4")).toBeInTheDocument();
+		expect(within(listbox).queryByText("openai-compatible/source-model")).not.toBeInTheDocument();
 	});
 });

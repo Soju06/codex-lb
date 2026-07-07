@@ -51,6 +51,7 @@ export const AutomationJobSchema = z.object({
   model: z.string().min(1),
   reasoningEffort: AutomationReasoningEffortSchema.nullable().optional(),
   prompt: z.string().min(1),
+  accountScopeAll: z.boolean().default(true),
   accountIds: z.array(z.string().min(1)).default([]),
   nextRunAt: z.string().datetime({ offset: true }).nullable(),
   lastRun: AutomationRunSchema.nullable(),

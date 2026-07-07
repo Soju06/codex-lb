@@ -569,7 +569,11 @@ async def responses(
         return _logged_error_json_response(request, 400, error)
     source = None
     if compact_trigger_input is None and not extract_input_file_ids(responses_payload.input):
-        source = await _select_responses_model_source(responses_payload.model, api_key)
+        source = await _select_responses_model_source(
+            responses_payload.model,
+            api_key,
+            require_streaming=True,
+        )
     if source is not None:
         # Opportunistic admission gates subscription *account* capacity;
         # source-routed requests use no account, so a closed/empty pool must
@@ -672,7 +676,11 @@ async def v1_responses(
     source = (
         None
         if extract_input_file_ids(responses_payload.input)
-        else await _select_responses_model_source(responses_payload.model, api_key)
+        else await _select_responses_model_source(
+            responses_payload.model,
+            api_key,
+            require_streaming=responses_payload.stream is True,
+        )
     )
     if source is not None:
         # Opportunistic admission gates subscription *account* capacity;
@@ -2654,7 +2662,12 @@ async def _select_chat_model_source(model: str, api_key: ApiKeyData | None) -> M
         return source
 
 
-async def _select_responses_model_source(model: str, api_key: ApiKeyData | None) -> ModelSource | None:
+async def _select_responses_model_source(
+    model: str,
+    api_key: ApiKeyData | None,
+    *,
+    require_streaming: bool = False,
+) -> ModelSource | None:
     assigned_source_ids = _allowed_source_ids_for_api_key(api_key)
     subscription_model = get_model_registry().get_models_with_fallback().get(model)
     if assigned_source_ids is None and subscription_model is not None:
@@ -2663,6 +2676,7 @@ async def _select_responses_model_source(model: str, api_key: ApiKeyData | None)
         source = await ModelSourcesRepository(session).find_responses_source_for_model(
             model,
             allowed_source_ids=assigned_source_ids,
+            require_streaming=require_streaming,
         )
         # ``close_session`` rolls back the read transaction, which would
         # expire the loaded row; detach it so the forwarding path can read

@@ -35,6 +35,8 @@ async def _create_model_source(
     output_per_1m: float | None = None,
     audio_per_minute: float | None = None,
     raw_metadata_json: str | None = None,
+    supports_responses: bool = False,
+    supports_streaming: bool = True,
     supports_audio_transcriptions: bool = False,
 ) -> str:
     model_entry: dict[str, object] = {
@@ -42,7 +44,7 @@ async def _create_model_source(
         "displayName": model,
         "contextWindow": 8192,
         "maxOutputTokens": 1024,
-        "supportsStreaming": True,
+        "supportsStreaming": supports_streaming,
         "supportsTools": True,
     }
     if raw_metadata_json is not None:
@@ -62,7 +64,7 @@ async def _create_model_source(
             "baseUrl": base_url,
             "apiKey": f"token-{name}",
             "supportsChatCompletions": True,
-            "supportsResponses": False,
+            "supportsResponses": supports_responses,
             "supportsAudioTranscriptions": supports_audio_transcriptions,
             "models": [model_entry],
         },
@@ -418,6 +420,29 @@ async def test_patch_model_source_returns_updated_model_list(async_client):
     assert listed.status_code == 200
     listed_source = next(row for row in listed.json()["sources"] if row["id"] == source_id)
     assert [entry["model"] for entry in listed_source["models"]] == ["new-model"]
+
+
+@pytest.mark.asyncio
+async def test_responses_source_selector_can_require_streaming(async_client):
+    from app.modules.model_sources.repository import ModelSourcesRepository
+
+    model = "responses-non-streaming-model"
+    await _create_model_source(
+        async_client,
+        name="responses-non-streaming",
+        model=model,
+        base_url="http://127.0.0.1:9/v1",
+        supports_responses=True,
+        supports_streaming=False,
+    )
+
+    async with SessionLocal() as session:
+        repo = ModelSourcesRepository(session)
+        non_streaming = await repo.find_responses_source_for_model(model)
+        streaming = await repo.find_responses_source_for_model(model, require_streaming=True)
+
+    assert non_streaming is not None
+    assert streaming is None
 
 
 @pytest.mark.asyncio

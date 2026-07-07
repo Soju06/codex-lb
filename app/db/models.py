@@ -191,7 +191,6 @@ class RequestLog(Base):
     )
     model_source_id: Mapped[str | None] = mapped_column(
         String,
-        ForeignKey("model_sources.id", ondelete="SET NULL"),
         nullable=True,
     )
     model_source_kind: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -247,6 +246,7 @@ class RequestLog(Base):
     model_source: Mapped["ModelSource | None"] = relationship(
         "ModelSource",
         back_populates="request_logs",
+        primaryjoin="foreign(RequestLog.model_source_id) == ModelSource.id",
     )
 
 
@@ -801,6 +801,8 @@ class ModelSource(Base):
     request_logs: Mapped[list["RequestLog"]] = relationship(
         "RequestLog",
         back_populates="model_source",
+        primaryjoin="ModelSource.id == foreign(RequestLog.model_source_id)",
+        viewonly=True,
     )
 
 

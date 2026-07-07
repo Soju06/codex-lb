@@ -101,6 +101,51 @@ describe("ModelSourceEditDialog", () => {
     expect(payload.supportsAudioTranscriptions).toBe(false);
   });
 
+  it("preserves disabled model rows during edits", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const source = createModelSource({
+      models: [
+        {
+          ...createModelSource().models[0],
+          model: "enabled-model",
+          displayName: "enabled-model",
+          isEnabled: true,
+        },
+        {
+          ...createModelSource().models[0],
+          id: 2,
+          model: "disabled-model",
+          displayName: "disabled-model",
+          isEnabled: false,
+        },
+      ],
+    });
+
+    renderWithProviders(
+      <ModelSourceEditDialog
+        open
+        busy={false}
+        source={source}
+        onOpenChange={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+    });
+
+    expect(onSubmit.mock.calls[0][1].models).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ model: "enabled-model", isEnabled: true }),
+        expect.objectContaining({ model: "disabled-model", isEnabled: false }),
+      ]),
+    );
+  });
+
   it("prefills and submits the audio per-minute rate", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn().mockResolvedValue(undefined);

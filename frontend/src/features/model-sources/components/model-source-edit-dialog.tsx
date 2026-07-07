@@ -15,6 +15,7 @@ import { Form } from "@/components/ui/form";
 import { ModelSourceFormFields } from "@/features/model-sources/components/model-source-form-fields";
 import {
   draftFromSource,
+  enabledByModel,
   modelIdsToInput,
   modelInputsFromForm,
   modelSourceDraftReducer,
@@ -61,7 +62,7 @@ function ModelSourceEditForm({ source, busy, onSubmit, onClose }: ModelSourceEdi
       supportsChatCompletions: draft.supportsChatCompletions,
       supportsResponses: draft.supportsResponses,
       supportsAudioTranscriptions: draft.supportsAudioTranscriptions,
-      models: modelInputsFromForm(values, draft, rawMetadataByModel(source)),
+      models: modelInputsFromForm(values, draft, rawMetadataByModel(source), enabledByModel(source)),
     };
     // The stored key is never returned, so a blank field means "keep it";
     // only a typed value updates the credential.

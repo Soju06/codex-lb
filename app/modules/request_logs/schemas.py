@@ -25,6 +25,8 @@ class RequestLogEntry(DashboardModel):
     request_kind: str = "normal"
     model: str
     source: str | None = None
+    model_source_id: str | None = None
+    model_source_kind: str | None = None
     useragent: str | None = None
     useragent_group: str | None = None
     client_ip: str | None = None

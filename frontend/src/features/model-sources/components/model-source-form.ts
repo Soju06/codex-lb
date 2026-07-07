@@ -101,6 +101,7 @@ export function modelInputsFromForm(
   values: ModelSourceFormValues,
   draft: ModelSourceDraft,
   existingRawMetadata: Record<string, string | null> = {},
+  existingEnabledByModel: Record<string, boolean> = {},
 ): ModelSourceModelInput[] {
   const contextWindow = parsePositiveInt(draft.contextWindow);
   const maxOutputTokens = parsePositiveInt(draft.maxOutputTokens);
@@ -125,7 +126,7 @@ export function modelInputsFromForm(
       outputPer1M: outputPer1M ?? null,
       audioPerMinute: audioPerMinute ?? null,
       rawMetadataJson: mergeReasoningFlag(existingRawMetadata[model], draft.supportsReasoning),
-      isEnabled: true,
+      isEnabled: existingEnabledByModel[model] ?? true,
     }));
 }
 
@@ -175,4 +176,8 @@ export function modelIdsToInput(source: ModelSource): string {
 
 export function rawMetadataByModel(source: ModelSource): Record<string, string | null> {
   return Object.fromEntries(source.models.map((model) => [model.model, model.rawMetadataJson]));
+}
+
+export function enabledByModel(source: ModelSource): Record<string, boolean> {
+  return Object.fromEntries(source.models.map((model) => [model.model, model.isEnabled]));
 }

@@ -124,13 +124,6 @@ def upgrade() -> None:
     if request_log_columns and "model_source_id" not in request_log_columns:
         with op.batch_alter_table("request_logs") as batch_op:
             batch_op.add_column(sa.Column("model_source_id", sa.String(), nullable=True))
-            batch_op.create_foreign_key(
-                "fk_request_logs_model_source_id_model_sources",
-                "model_sources",
-                ["model_source_id"],
-                ["id"],
-                ondelete="SET NULL",
-            )
     request_log_columns = _columns(bind, "request_logs")
     if request_log_columns and "model_source_kind" not in request_log_columns:
         with op.batch_alter_table("request_logs") as batch_op:
@@ -168,8 +161,6 @@ def downgrade() -> None:
     request_log_columns = _columns(bind, "request_logs")
     if "model_source_id" in request_log_columns:
         with op.batch_alter_table("request_logs") as batch_op:
-            if "fk_request_logs_model_source_id_model_sources" in _foreign_keys(bind, "request_logs"):
-                batch_op.drop_constraint("fk_request_logs_model_source_id_model_sources", type_="foreignkey")
             batch_op.drop_column("model_source_id")
 
     if _has_table(bind, "api_key_model_sources"):

@@ -195,6 +195,8 @@ async def test_device_oauth_flow_creates_account(async_client, monkeypatch):
 async def test_starting_new_device_flow_cancels_previous_pending_poll(async_client, monkeypatch):
     await oauth_module._OAUTH_STORE.reset()
     issued = 0
+    first_poll_started = asyncio.Event()
+    first_poll_cancelled = asyncio.Event()
 
     async def fake_device_code(**_):
         nonlocal issued
@@ -207,16 +209,23 @@ async def test_starting_new_device_flow_cancels_previous_pending_poll(async_clie
             expires_in_seconds=300,
         )
 
-    async def fake_exchange_device_token(**_):
-        await asyncio.sleep(300)
-        raise AssertionError("device token polling should be cancelled by the test")
+    async def fake_exchange_device_token(*, device_auth_id: str, **_):
+        if device_auth_id == "dev_1":
+            first_poll_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                first_poll_cancelled.set()
+                raise
+        await asyncio.Event().wait()
+        raise AssertionError("device token polling should not complete in this test")
 
     monkeypatch.setattr(oauth_module, "request_device_code", fake_device_code)
     monkeypatch.setattr(oauth_module, "exchange_device_token", fake_exchange_device_token)
 
     first = await async_client.post("/api/oauth/start", json={"forceMethod": "device"})
     assert first.status_code == 200
-    await asyncio.sleep(0)
+    await asyncio.wait_for(first_poll_started.wait(), timeout=1)
     async with oauth_module._OAUTH_STORE.lock:
         first_flow_id = first.json()["flowId"]
         first_flow = oauth_module._OAUTH_STORE.get_flow_locked(first_flow_id)
@@ -237,8 +246,8 @@ async def test_starting_new_device_flow_cancels_previous_pending_poll(async_clie
         ]
         assert [flow.flow_id for flow in pending_device_flows] == [second_flow_id]
         assert oauth_module._OAUTH_STORE.get_flow_locked(first_flow_id) is None
-    with pytest.raises(asyncio.CancelledError):
-        await asyncio.wait_for(first_task, timeout=1)
+    await asyncio.wait_for(first_poll_cancelled.wait(), timeout=1)
+    assert first_task.cancelled()
 
     await oauth_module._OAUTH_STORE.reset()
 

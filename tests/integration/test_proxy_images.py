@@ -55,6 +55,19 @@ async def _import_account(async_client, account_id: str, email: str) -> None:
     assert response.status_code == 200
 
 
+async def _enable_api_key_auth(async_client) -> None:
+    response = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert response.status_code == 200
+
+
 def _sse(payload: dict[str, object]) -> str:
     return f"data: {json.dumps(payload)}\n\n"
 
@@ -167,6 +180,22 @@ async def test_images_generations_quota_rejection_records_route_observability(as
         "images_route_complete route=generations model=gpt-image-2 stream=false status=429 outcome=rate_limited"
         in caplog.text
     )
+
+
+@pytest.mark.asyncio
+async def test_images_generations_auth_rejection_records_route_observability(async_client, caplog):
+    await _enable_api_key_auth(async_client)
+
+    with caplog.at_level(logging.WARNING, logger="app.modules.proxy.api"):
+        response = await async_client.post(
+            "/v1/images/generations",
+            json={"model": "gpt-image-2", "prompt": "a red circle"},
+        )
+
+    assert response.status_code == 401
+    message = "images_route_complete route=generations model=gpt-image-2 stream=false status=401 outcome=auth_error"
+    assert message in caplog.text
+    assert caplog.text.count(message) == 1
 
 
 @pytest.mark.asyncio
@@ -675,6 +704,23 @@ async def test_images_edits_missing_image_records_route_observability(async_clie
     assert response.status_code == 400
     body = response.json()
     assert body["error"]["param"] == "image"
+    assert (
+        "images_route_complete route=edits model=gpt-image-2 stream=false status=400 outcome=invalid_request"
+        in caplog.text
+    )
+
+
+@pytest.mark.asyncio
+async def test_images_edits_validation_error_records_supplied_model(async_client, caplog):
+    image_bytes = b"\x89PNG\r\n\x1a\n"
+    with caplog.at_level(logging.WARNING, logger="app.modules.proxy.api"):
+        response = await async_client.post(
+            "/v1/images/edits",
+            data={"model": "gpt-image-2"},
+            files={"image": ("source.png", image_bytes, "image/png")},
+        )
+
+    assert response.status_code == 400
     assert (
         "images_route_complete route=edits model=gpt-image-2 stream=false status=400 outcome=invalid_request"
         in caplog.text

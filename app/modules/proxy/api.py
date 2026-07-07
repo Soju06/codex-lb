@@ -1722,7 +1722,7 @@ async def _proxy_images_generation_request(
             model=effective_model,
             stream=stream_requested,
             status=400,
-            outcome="invalid_model",
+            outcome="invalid_request",
             started_at=started_at,
         )
         return _logged_error_json_response(
@@ -1785,16 +1785,6 @@ async def _proxy_images_generation_request(
             stream=stream_requested,
             status=429,
             outcome="rate_limited",
-            started_at=started_at,
-        )
-        raise
-    except ProxyAuthError:
-        record_images_route_observability(
-            route=route,
-            model=public_model,
-            stream=stream_requested,
-            status=401,
-            outcome="auth_error",
             started_at=started_at,
         )
         raise
@@ -2037,7 +2027,7 @@ async def _proxy_images_edit_request(
             model=effective_model,
             stream=stream_requested,
             status=400,
-            outcome="invalid_model",
+            outcome="invalid_request",
             started_at=started_at,
         )
         return _logged_error_json_response(
@@ -2097,16 +2087,6 @@ async def _proxy_images_edit_request(
             stream=stream_requested,
             status=429,
             outcome="rate_limited",
-            started_at=started_at,
-        )
-        raise
-    except ProxyAuthError:
-        record_images_route_observability(
-            route=route,
-            model=public_model,
-            stream=stream_requested,
-            status=401,
-            outcome="auth_error",
             started_at=started_at,
         )
         raise

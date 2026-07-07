@@ -2758,6 +2758,9 @@ async def _select_responses_model_source(
 
 async def _select_audio_transcriptions_model_source(model: str, api_key: ApiKeyData | None) -> ModelSource | None:
     assigned_source_ids = _allowed_source_ids_for_api_key(api_key)
+    exact_allowed_models = _exact_source_allowed_models_for_api_key(api_key)
+    if exact_allowed_models is not None and model not in exact_allowed_models:
+        return None
     if assigned_source_ids is None and model == _TRANSCRIPTION_MODEL:
         return None
     async with get_background_session() as session:

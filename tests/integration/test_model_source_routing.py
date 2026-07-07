@@ -326,6 +326,48 @@ async def test_source_audio_transcription_without_usage_fails_closed_for_limited
 
 
 @pytest.mark.asyncio
+async def test_source_audio_transcription_raw_alias_lookup_requires_exact_allowlist(async_client, source_upstream):
+    await _enable_api_key_auth(async_client)
+    called = False
+
+    async def transcribe(_request: web.Request) -> web.Response:
+        nonlocal called
+        called = True
+        return web.json_response({"text": "should not route"})
+
+    base_url = await source_upstream(transcribe)
+    source_model = "gpt-5-high"
+    source_id = await _create_model_source(
+        async_client,
+        name="asr-alias",
+        model=source_model,
+        base_url=base_url,
+        supports_audio_transcriptions=True,
+    )
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "asr-alias-key",
+            "assignedSourceIds": [source_id],
+            "allowedModels": ["gpt-5"],
+        },
+    )
+    assert created.status_code == 200
+    key = created.json()["key"]
+
+    response = await async_client.post(
+        "/v1/audio/transcriptions",
+        headers={"Authorization": f"Bearer {key}"},
+        data={"model": source_model},
+        files={"file": ("sample.wav", b"\x01\x02", "audio/wav")},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_request_error"
+    assert called is False
+
+
+@pytest.mark.asyncio
 async def test_source_stream_upstream_error_maps_to_error_response(async_client, source_upstream):
     async def unauthorized(_request: web.Request) -> web.Response:
         return web.json_response(

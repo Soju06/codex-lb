@@ -1259,6 +1259,48 @@ async def test_backend_codex_responses_file_pinned_payload_skips_model_source(as
 
 
 @pytest.mark.asyncio
+async def test_v1_responses_file_pinned_payload_skips_model_source(async_client, monkeypatch):
+    model = "external-v1-responses-file-pin"
+    await _create_model_source(
+        async_client,
+        name="v1-responses-file-pin",
+        model=model,
+        supports_responses=True,
+    )
+    observed: dict[str, object] = {}
+
+    async def fail_source(*args, **kwargs):
+        del args, kwargs
+        pytest.fail("file-pinned /v1/responses must use subscription routing")
+
+    async def fake_stream_responses(request, payload, context, api_key, **kwargs):
+        del request, context, api_key, kwargs
+        observed["model"] = payload.model
+        return JSONResponse({"ok": True})
+
+    monkeypatch.setattr(proxy_api, "stream_source_responses", fail_source)
+    monkeypatch.setattr(proxy_api, "_stream_responses", fake_stream_responses)
+
+    response = await async_client.post(
+        "/v1/responses",
+        json={
+            "model": model,
+            "input": [
+                {
+                    "role": "user",
+                    "content": [{"type": "input_file", "file_id": "file_pinned_v1"}],
+                }
+            ],
+            "stream": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+    assert observed["model"] == model
+
+
+@pytest.mark.asyncio
 async def test_api_key_usage_summary_cost_respects_service_tier(async_client, monkeypatch):
     enable = await async_client.put(
         "/api/settings",

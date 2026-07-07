@@ -35,6 +35,22 @@ those paths.
 - **THEN** the request is not routed to that source
 - **AND** subscription-backed Codex routing rules continue to apply
 
+#### Scenario: Compaction request is not source-routed
+
+- **GIVEN** an enabled Responses-compatible source exposes model `deepseek-v4-flash`
+- **AND** a client calls `POST /backend-api/codex/responses` for that model whose
+  input contains a `compaction_trigger` item
+- **THEN** the request is not forwarded to the external source
+- **AND** it follows the subscription-backed Codex compaction path instead
+
+#### Scenario: File-referencing request is not source-routed
+
+- **GIVEN** an enabled Responses-compatible source exposes model `deepseek-v4-flash`
+- **AND** a client calls `/backend-api/codex/responses` or `/v1/responses` for that
+  model whose input references an uploaded `input_file`/`input_image` `file_id`
+- **THEN** the request is not forwarded to the external source
+- **AND** it follows the subscription path so the account-scoped file pin is honored
+
 #### Scenario: Audio transcription routes to OpenAI-compatible source
 
 - **GIVEN** an enabled OpenAI-compatible source declares audio transcriptions support

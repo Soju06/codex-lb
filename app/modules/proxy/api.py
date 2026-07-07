@@ -666,7 +666,14 @@ async def v1_responses(
         return _logged_error_json_response(request, 400, error)
     apply_api_key_enforcement(responses_payload, api_key)
     validate_model_access(api_key, responses_payload.model)
-    source = await _select_responses_model_source(responses_payload.model, api_key)
+    # File-referencing Responses requests pin to the subscription account that
+    # registered the upload; that account-scoped invariant applies to /v1
+    # streams too, so such requests must not be source-routed.
+    source = (
+        None
+        if extract_input_file_ids(responses_payload.input)
+        else await _select_responses_model_source(responses_payload.model, api_key)
+    )
     if source is not None:
         # Opportunistic admission gates subscription *account* capacity;
         # source-routed requests use no account, so a closed/empty pool must

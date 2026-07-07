@@ -46,6 +46,11 @@ vi.mock("@/features/settings/hooks/use-settings", () => ({
       error: null,
       mutateAsync: vi.fn(),
     },
+    testEndpointMutation: {
+      isPending: false,
+      error: null,
+      mutateAsync: vi.fn(),
+    },
   })),
 }));
 

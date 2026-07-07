@@ -27,7 +27,7 @@ export function useModelSources() {
       toast.success("Model source created");
       void queryClient.invalidateQueries({ queryKey: ["model-sources", "list"] });
       void queryClient.invalidateQueries({ queryKey: ["api-keys", "list"] });
-      void queryClient.invalidateQueries({ queryKey: ["api-keys", "models"] });
+      void queryClient.invalidateQueries({ queryKey: ["models"] });
     },
     onError: (error: Error) => {
       toast.error(error.message || "Failed to create model source");
@@ -41,7 +41,7 @@ export function useModelSources() {
       toast.success("Model source updated");
       void queryClient.invalidateQueries({ queryKey: ["model-sources", "list"] });
       void queryClient.invalidateQueries({ queryKey: ["api-keys", "list"] });
-      void queryClient.invalidateQueries({ queryKey: ["api-keys", "models"] });
+      void queryClient.invalidateQueries({ queryKey: ["models"] });
     },
     onError: (error: Error) => {
       toast.error(error.message || "Failed to update model source");
@@ -54,7 +54,7 @@ export function useModelSources() {
       toast.success("Model source deleted");
       void queryClient.invalidateQueries({ queryKey: ["model-sources", "list"] });
       void queryClient.invalidateQueries({ queryKey: ["api-keys", "list"] });
-      void queryClient.invalidateQueries({ queryKey: ["api-keys", "models"] });
+      void queryClient.invalidateQueries({ queryKey: ["models"] });
     },
     onError: (error: Error) => {
       toast.error(error.message || "Failed to delete model source");

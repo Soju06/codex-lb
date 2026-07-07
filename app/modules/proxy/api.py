@@ -4750,13 +4750,14 @@ async def _settle_source_reservation(
 def _source_usage_cost_usd(source: ModelSource, model: str, usage: SourceUsage | None) -> float | None:
     if usage is None:
         return None
-    return source_model_cost_usd(
+    cost_usd = source_model_cost_usd(
         source,
         model,
         input_tokens=usage.input_tokens,
         output_tokens=usage.output_tokens,
         cached_input_tokens=usage.cached_input_tokens,
     )
+    return 0.0 if cost_usd is None else cost_usd
 
 
 async def _log_source_chat_completion(

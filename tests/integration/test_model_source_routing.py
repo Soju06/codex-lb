@@ -496,6 +496,72 @@ async def test_source_usage_settles_cost_from_source_pricing(async_client, sourc
 
 
 @pytest.mark.asyncio
+async def test_unpriced_source_usage_settles_zero_cost_for_priced_slug(async_client, source_upstream):
+    await _enable_api_key_auth(async_client)
+
+    async def completion(_request: web.Request) -> web.Response:
+        return web.json_response(
+            {
+                "id": "chatcmpl_unpriced",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "gpt-5.2",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 1_000,
+                    "completion_tokens": 500,
+                    "total_tokens": 1_500,
+                },
+            }
+        )
+
+    base_url = await source_upstream(completion)
+    source_id = await _create_model_source(
+        async_client,
+        name="unpriced",
+        model="gpt-5.2",
+        base_url=base_url,
+    )
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "unpriced-source-key",
+            "assignedSourceIds": [source_id],
+            "limits": [
+                {"limitType": "cost_usd", "limitWindow": "weekly", "maxValue": 1_000_000},
+            ],
+        },
+    )
+    assert created.status_code == 200
+    key = created.json()["key"]
+    key_id = created.json()["id"]
+
+    response = await async_client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"model": "gpt-5.2", "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert response.status_code == 200
+
+    async with SessionLocal() as session:
+        limits = await ApiKeysRepository(session).get_limits_by_key(key_id)
+        assert len(limits) == 1
+        assert limits[0].current_value == 0
+
+        result = await session.execute(select(RequestLog).order_by(RequestLog.requested_at.desc()))
+        latest_log = result.scalars().first()
+        assert latest_log is not None
+        assert latest_log.model_source_id == source_id
+        assert latest_log.cost_usd == 0.0
+
+
+@pytest.mark.asyncio
 async def test_settlement_failure_releases_reservation(async_client, source_upstream, monkeypatch):
     await _enable_api_key_auth(async_client)
 

@@ -313,7 +313,11 @@ class RequestLogsRepository:
                 requested_at=requested_at or utcnow(),
             )
             log.cost_usd = (
-                cost_usd if cost_usd is not None else calculated_cost_from_log(typing_cast(RequestLogLike, log))
+                cost_usd
+                if cost_usd is not None
+                else 0.0
+                if model_source_id is not None
+                else calculated_cost_from_log(typing_cast(RequestLogLike, log))
             )
             self._session.add(log)
             try:

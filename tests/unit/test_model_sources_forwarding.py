@@ -2,13 +2,27 @@ from __future__ import annotations
 
 from typing import cast
 
+from app.core.crypto import TokenEncryptor
+from app.core.types import JsonValue
+from app.db.models import ModelSource
 from app.modules.model_sources.forwarding import (
     SourceStreamUsageParser,
     SourceUsageHolder,
     _audio_seconds_from_body,
     _error_payload_from_body,
+    _redact_source_error_payload,
     _usage_from_audio_body,
 )
+
+
+class _FakeEncryptor:
+    def decrypt(self, token: bytes) -> str:
+        assert token == b"encrypted-source-key"
+        return "source-secret-token"
+
+
+def _fake_encryptor() -> TokenEncryptor:
+    return cast(TokenEncryptor, _FakeEncryptor())
 
 
 def test_chat_stream_usage_parser_handles_split_sse_frame() -> None:
@@ -134,3 +148,27 @@ def test_audio_error_payload_preserves_text_body() -> None:
 
     assert error["code"] == "model_source_error"
     assert error["message"] == "missing required field: file"
+
+
+def test_source_error_payload_redacts_configured_api_key() -> None:
+    source = ModelSource(
+        id="src_redact",
+        name="Redact",
+        kind="openai_compatible",
+        base_url="http://127.0.0.1:8000/v1",
+        api_key_encrypted=b"encrypted-source-key",
+    )
+    payload: dict[str, JsonValue] = {
+        "error": {
+            "message": "upstream echoed Authorization: Bearer source-secret-token",
+            "details": ["source-secret-token", {"header": "Bearer source-secret-token"}],
+            "code": "bad_request",
+        }
+    }
+
+    redacted = _redact_source_error_payload(payload, source, encryptor=_fake_encryptor())
+    error = cast(dict[str, object], redacted["error"])
+
+    assert "source-secret-token" not in str(redacted)
+    assert error["message"] == "upstream echoed Authorization: Bearer [REDACTED]"
+    assert error["details"] == ["[REDACTED]", {"header": "Bearer [REDACTED]"}]

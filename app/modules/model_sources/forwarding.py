@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator, Mapping
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from json import JSONDecodeError
+from typing import cast
 
 import aiohttp
 
@@ -99,7 +100,11 @@ async def forward_chat_completion(
                 if response.status >= 400:
                     raise ModelSourceForwardingError(
                         status_code=response.status,
-                        payload=_error_payload(data),
+                        payload=_redact_source_error_payload(
+                            _error_payload(data),
+                            source,
+                            encryptor=encryptor,
+                        ),
                         upstream_status_code=response.status,
                     )
                 if data is None:
@@ -151,7 +156,11 @@ async def forward_responses(
                 if response.status >= 400:
                     raise ModelSourceForwardingError(
                         status_code=response.status,
-                        payload=_error_payload(data),
+                        payload=_redact_source_error_payload(
+                            _error_payload(data),
+                            source,
+                            encryptor=encryptor,
+                        ),
                         upstream_status_code=response.status,
                     )
                 if data is None:
@@ -199,7 +208,11 @@ async def forward_audio_transcription(
                 if response.status >= 400:
                     raise ModelSourceForwardingError(
                         status_code=response.status,
-                        payload=_error_payload_from_body(body, response_content_type),
+                        payload=_redact_source_error_payload(
+                            _error_payload_from_body(body, response_content_type),
+                            source,
+                            encryptor=encryptor,
+                        ),
                         upstream_status_code=response.status,
                     )
                 return SourceAudioTranscription(
@@ -264,7 +277,11 @@ async def _open_source_stream(
             data = await _response_json(response)
             raise ModelSourceForwardingError(
                 status_code=response.status,
-                payload=_error_payload(data),
+                payload=_redact_source_error_payload(
+                    _error_payload(data),
+                    source,
+                    encryptor=encryptor,
+                ),
                 upstream_status_code=response.status,
             )
         return stack, response
@@ -308,26 +325,57 @@ def _source_headers(
     if content_type is not None:
         headers["Content-Type"] = content_type
     if source.api_key_encrypted is not None:
-        active_encryptor = encryptor or TokenEncryptor()
-        try:
-            secret = active_encryptor.decrypt(source.api_key_encrypted)
-        except Exception as exc:
-            # A rotated encryption key file or corrupt DB value must surface
-            # as a forwarding error (with reservation release at the routes),
-            # not a bare 500.
-            raise ModelSourceForwardingError(
-                status_code=502,
-                payload={
-                    "error": {
-                        "message": "OpenAI-compatible model source credentials could not be decrypted",
-                        "type": "upstream_error",
-                        "code": "model_source_credentials_error",
-                    }
-                },
-                upstream_status_code=None,
-            ) from exc
+        secret = _source_api_key_secret(source, encryptor=encryptor)
         headers["Authorization"] = f"Bearer {secret}"
     return headers
+
+
+def _source_api_key_secret(source: ModelSource, *, encryptor: TokenEncryptor | None) -> str:
+    if source.api_key_encrypted is None:
+        return ""
+    active_encryptor = encryptor or TokenEncryptor()
+    try:
+        return active_encryptor.decrypt(source.api_key_encrypted)
+    except Exception as exc:
+        # A rotated encryption key file or corrupt DB value must surface as a
+        # forwarding error (with reservation release at the routes), not a bare 500.
+        raise ModelSourceForwardingError(
+            status_code=502,
+            payload={
+                "error": {
+                    "message": "OpenAI-compatible model source credentials could not be decrypted",
+                    "type": "upstream_error",
+                    "code": "model_source_credentials_error",
+                }
+            },
+            upstream_status_code=None,
+        ) from exc
+
+
+def _redact_source_error_payload(
+    payload: dict[str, JsonValue],
+    source: ModelSource,
+    *,
+    encryptor: TokenEncryptor | None,
+) -> dict[str, JsonValue]:
+    if source.api_key_encrypted is None:
+        return payload
+    secret = _source_api_key_secret(source, encryptor=encryptor)
+    if not secret:
+        return payload
+    redacted = _redact_json_value(payload, secret)
+    return cast(dict[str, JsonValue], redacted) if isinstance(redacted, Mapping) else payload
+
+
+def _redact_json_value(value: JsonValue, secret: str) -> JsonValue:
+    if isinstance(value, str):
+        return value.replace(secret, "[REDACTED]")
+    if isinstance(value, list):
+        return [_redact_json_value(item, secret) for item in value]
+    if isinstance(value, Mapping):
+        mapping = cast(Mapping[str, JsonValue], value)
+        return {key: _redact_json_value(item, secret) for key, item in mapping.items()}
+    return value
 
 
 def _source_timeout_seconds(source: ModelSource) -> float:

@@ -7,17 +7,12 @@ mapping, and request/response shape.
 
 from __future__ import annotations
 
-import base64
-import json
 from datetime import datetime, timezone
-from types import SimpleNamespace
-from typing import Any
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.modules.claude.auth_manager import ClaudeAccountAlreadyExists
 from app.modules.claude.oauth import api as api_module
 from app.modules.claude.oauth.api import router
 from app.modules.claude.oauth.schemas import (

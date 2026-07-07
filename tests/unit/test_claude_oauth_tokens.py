@@ -18,8 +18,8 @@ import pytest
 from app.modules.claude.oauth.tokens import (
     ClaudeOauthClaims,
     ClaudeOauthIdTokenError,
-    generate_pkce_pair,
     decode_id_token,
+    generate_pkce_pair,
 )
 
 pytestmark = pytest.mark.unit

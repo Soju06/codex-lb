@@ -46,7 +46,7 @@ def _default_put_body() -> dict[str, Any]:
             180,
             "openai_cache_affinity_max_age_seconds",
         ),
-        ("dashboardSessionTtlSeconds", 31536000, "dashboard_session_ttl_seconds"),
+        ("dashboardSessionTtlSeconds", 604800, "dashboard_session_ttl_seconds"),
         (
             "httpResponsesSessionBridgePromptCacheIdleTtlSeconds",
             1800,

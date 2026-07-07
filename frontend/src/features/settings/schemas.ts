@@ -83,7 +83,7 @@ export const DashboardSettingsSchema = z
       .int()
       .min(3600)
       .optional()
-      .default(43200),
+      .default(31536000),
     stickyReallocationBudgetThresholdPct: z.number().min(0).max(100).optional(),
     stickyReallocationPrimaryBudgetThresholdPct: z.number().min(0).max(100).optional(),
     stickyReallocationSecondaryBudgetThresholdPct: z.number().min(0).max(100).optional(),

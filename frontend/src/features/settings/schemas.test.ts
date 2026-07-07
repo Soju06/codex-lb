@@ -88,6 +88,7 @@ describe("DashboardSettingsSchema", () => {
     expect(parsed.routingStrategy).toBe("usage_weighted");
     expect(parsed.singleAccountId).toBeNull();
     expect(parsed.openaiCacheAffinityMaxAgeSeconds).toBe(300);
+    expect(parsed.dashboardSessionTtlSeconds).toBe(31536000);
     expect(parsed.limitWarmupEnabled).toBe(false);
     expect(parsed.limitWarmupWindows).toBe("both");
     expect(parsed.limitWarmupModel).toBe("auto");

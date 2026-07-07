@@ -25,6 +25,8 @@ from sqlalchemy import (
 from sqlalchemy import Enum as SqlEnum
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
+from app.core.auth.dashboard_session_ttl import DEFAULT_DASHBOARD_SESSION_TTL_SECONDS
+
 
 class Base(DeclarativeBase):
     pass
@@ -469,8 +471,8 @@ class DashboardSettings(Base):
     )
     dashboard_session_ttl_seconds: Mapped[int] = mapped_column(
         Integer,
-        default=43200,
-        server_default=text("43200"),
+        default=DEFAULT_DASHBOARD_SESSION_TTL_SECONDS,
+        server_default=text(str(DEFAULT_DASHBOARD_SESSION_TTL_SECONDS)),
         nullable=False,
     )
     import_without_overwrite: Mapped[bool] = mapped_column(

@@ -594,6 +594,46 @@ jobs:
           severity: CRITICAL,HIGH
           ignore-unfixed: true
 
+  publish-test-image:
+    name: Publish test image (push to main only)
+    runs-on: ubuntu-24.04
+    needs: docker
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
+    env:
+      DOCKER_CACHE_SCOPE: codex-lb-main
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5
+
+      - name: Log in to GHCR
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push :main image
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          load: false
+          tags: |
+            ghcr.io/${{ github.repository }}:main
+            ghcr.io/${{ github.repository }}:sha-${{ github.sha }}
+          cache-from: type=gha,scope=${{ env.DOCKER_CACHE_SCOPE }}
+          cache-to: type=gha,mode=max,scope=${{ env.DOCKER_CACHE_SCOPE }}
+
   helm-lint:
     name: Helm lint + template + kubeconform
     runs-on: ubuntu-24.04
@@ -711,6 +751,7 @@ jobs:
       - migration-check-postgres
       - package
       - docker
+      - publish-test-image
       - helm-lint
       - helm-smoke-kind
 

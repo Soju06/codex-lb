@@ -7,9 +7,7 @@
 #   CODEX_LB_DATABASE_URL=postgresql+asyncpg://user:password@host:5432/codexlb
 services:
   server:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: ${CODEX_LB_IMAGE:-ghcr.io/andrewmalov/codex-lb:latest}
     env_file:
       - .env.local
     ports:

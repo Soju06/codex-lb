@@ -1,0 +1,87 @@
+name: Deploy test
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "GHCR image tag to deploy (default: main)"
+        required: false
+        default: main
+
+concurrency:
+  group: deploy-test
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    name: Deploy to test server
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      DEPLOY_HOST: 193.149.18.210
+      DEPLOY_USER: root
+      SERVER_DIR: /srv/codex-lb
+      IMAGE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.image_tag || 'main' }}
+      IMAGE_REF: ghcr.io/${{ github.repository }}:${{ env.IMAGE_TAG }}
+      # Optional: required only if the GHCR package is private.
+      # Leave unset on the repo to assume the package is public.
+      GHCR_USER: ${{ secrets.GHCR_USER }}
+      GHCR_PACKAGES_READ_TOKEN: ${{ secrets.GHCR_PACKAGES_READ_TOKEN }}
+
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2
+        with:
+          host: ${{ env.DEPLOY_HOST }}
+          username: ${{ env.DEPLOY_USER }}
+          key: ${{ secrets.TEST_SSH_KEY }}
+          command_timeout: 8m
+          envs: GHCR_USER,GHCR_PACKAGES_READ_TOKEN
+          script: |
+            set -euo pipefail
+
+            # Optional GHCR login for private packages. Skip entirely if
+            # the secrets are unset (package is public) so a public
+            # package needs zero configuration.
+            if [[ -n "${GHCR_USER:-}" && -n "${GHCR_PACKAGES_READ_TOKEN:-}" ]]; then
+              echo "==> Logging in to GHCR as ${GHCR_USER}"
+              echo "${GHCR_PACKAGES_READ_TOKEN}" \
+                | docker login ghcr.io -u "${GHCR_USER}" --password-stdin
+            else
+              echo "==> Skipping GHCR login (no secrets configured; assuming public package)"
+            fi
+
+            cd "${SERVER_DIR}"
+
+            echo "==> Pulling ${IMAGE_REF}"
+            CODEX_LB_IMAGE="${IMAGE_REF}" \
+              docker compose -f docker-compose.prod.yml pull server
+
+            echo "==> Recreating server container"
+            CODEX_LB_IMAGE="${IMAGE_REF}" \
+              docker compose -f docker-compose.prod.yml up -d --remove-orphans server
+
+            echo "==> Waiting for /health/ready (up to 60s)"
+            for i in $(seq 1 60); do
+              if curl -fsS http://127.0.0.1:2455/health/ready >/dev/null; then
+                echo "ready after ${i}s"
+                curl -fsS http://127.0.0.1:2455/health/ready
+                echo
+                exit 0
+              fi
+              sleep 1
+            done
+
+            echo "==> Healthcheck failed; dumping last 200 log lines" >&2
+            docker compose -f docker-compose.prod.yml logs --tail=200 server >&2 || true
+            exit 1

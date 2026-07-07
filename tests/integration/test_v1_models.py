@@ -338,6 +338,65 @@ async def test_v1_models_filters_source_models_by_exact_allowlist(async_client):
 
 
 @pytest.mark.asyncio
+async def test_backend_codex_models_filters_source_models_by_exact_allowlist(async_client):
+    await _create_model_source(
+        async_client,
+        name="codex-alias-source",
+        model="gpt-5-high",
+        supports_responses=True,
+    )
+    await _create_model_source(
+        async_client,
+        name="codex-plain-source",
+        model="plain-source-model",
+        supports_responses=True,
+    )
+
+    settings = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert settings.status_code == 200
+
+    alias_key = await async_client.post(
+        "/api/api-keys/",
+        json={"name": "codex exact source alias key", "allowedModels": ["gpt-5-high"]},
+    )
+    assert alias_key.status_code == 200
+    alias_response = await async_client.get(
+        "/backend-api/codex/models",
+        headers={"Authorization": f"Bearer {alias_key.json()['key']}"},
+    )
+    assert alias_response.status_code == 200
+    alias_slugs = {item["slug"] for item in alias_response.json()["models"]}
+    alias_data_ids = {item["id"] for item in alias_response.json()["data"]}
+    assert "gpt-5-high" in alias_slugs
+    assert "gpt-5-high" in alias_data_ids
+    assert "plain-source-model" not in alias_slugs
+    assert "plain-source-model" not in alias_data_ids
+
+    canonical_key = await async_client.post(
+        "/api/api-keys/",
+        json={"name": "codex canonical source alias key", "allowedModels": ["gpt-5"]},
+    )
+    assert canonical_key.status_code == 200
+    canonical_response = await async_client.get(
+        "/backend-api/codex/models",
+        headers={"Authorization": f"Bearer {canonical_key.json()['key']}"},
+    )
+    assert canonical_response.status_code == 200
+    canonical_slugs = {item["slug"] for item in canonical_response.json()["models"]}
+    canonical_data_ids = {item["id"] for item in canonical_response.json()["data"]}
+    assert "gpt-5-high" not in canonical_slugs
+    assert "gpt-5-high" not in canonical_data_ids
+
+
+@pytest.mark.asyncio
 async def test_backend_codex_models_includes_only_responses_capable_source_models(async_client):
     await _create_model_source(
         async_client,

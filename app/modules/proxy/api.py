@@ -2151,6 +2151,7 @@ async def _build_codex_models_response(api_key: ApiKeyData | None) -> Response:
     )
 
     allowed_models = _allowed_models_for_api_key(api_key)
+    exact_source_allowed_models = _exact_source_allowed_models_for_api_key(api_key)
     visibility_allowed_models = _codex_model_visibility_allowed_models(api_key)
 
     registry = get_model_registry()
@@ -2192,7 +2193,10 @@ async def _build_codex_models_response(api_key: ApiKeyData | None) -> Response:
         if model.slug in seen_slugs:
             continue
         if visibility_allowed_models is None:
-            if not is_public_model(model, allowed_models):
+            if exact_source_allowed_models is not None:
+                if model.slug not in exact_source_allowed_models:
+                    continue
+            elif not is_public_model(model, allowed_models):
                 continue
             entry = _to_codex_model_entry(model)
             entries.append(entry)
@@ -2202,7 +2206,9 @@ async def _build_codex_models_response(api_key: ApiKeyData | None) -> Response:
             continue
         entry = _to_codex_model_entry(
             model,
-            visibility="list" if model.slug in visibility_allowed_models else "hide",
+            visibility=(
+                "list" if exact_source_allowed_models is None or model.slug in exact_source_allowed_models else "hide"
+            ),
         )
         entries.append(entry)
         seen_slugs.add(model.slug)

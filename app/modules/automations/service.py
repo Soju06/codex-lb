@@ -1752,7 +1752,7 @@ class AutomationsService:
 
     async def _normalize_create_input(self, payload: AutomationJobCreateInput) -> AutomationJobCreateInput:
         name = _normalize_non_empty(payload.name, field_label="name", code="invalid_name")
-        model = _normalize_non_empty(payload.model, field_label="model", code="invalid_model")
+        model = _normalize_chatgpt_model(payload.model)
         schedule_type = _normalize_schedule_type(payload.schedule_type)
         schedule_time = normalize_schedule_time(payload.schedule_time)
         schedule_timezone = validate_timezone(payload.schedule_timezone)
@@ -1792,7 +1792,7 @@ class AutomationsService:
         if payload.model is None:
             model = None
         else:
-            model = _normalize_non_empty(payload.model, field_label="model", code="invalid_model")
+            model = _normalize_chatgpt_model(payload.model)
         model_for_reasoning = model if model is not None else existing.model
         if payload.reasoning_effort_set:
             reasoning_effort = _normalize_reasoning_effort(payload.reasoning_effort, model_slug=model_for_reasoning)
@@ -2149,6 +2149,17 @@ def _normalize_reasoning_effort(value: str | None, *, model_slug: str) -> str | 
         raise AutomationValidationError(
             f"Reasoning effort '{normalized}' is not supported by model '{model_slug}'",
             code="invalid_reasoning_effort",
+        )
+    return normalized
+
+
+def _normalize_chatgpt_model(value: str) -> str:
+    normalized = _normalize_non_empty(value, field_label="model", code="invalid_model")
+    models = get_model_registry().get_models_with_fallback()
+    if normalized not in models:
+        raise AutomationValidationError(
+            f"Automation model '{normalized}' is not available for ChatGPT account routing",
+            code="invalid_model",
         )
     return normalized
 

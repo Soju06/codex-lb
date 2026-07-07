@@ -10,6 +10,7 @@ from app.modules.automations.service import (
     AutomationsService,
     AutomationValidationError,
     _AutomationRunCycleSummary,
+    _normalize_chatgpt_model,
     _normalize_reasoning_effort,
     _pick_dispatch_offsets_seconds,
     _resolve_effective_status,
@@ -128,6 +129,30 @@ def test_normalize_reasoning_effort_rejects_models_with_no_supported_levels(
 
     with pytest.raises(AutomationValidationError, match="not supported"):
         _normalize_reasoning_effort("low", model_slug="gpt-4o-mini")
+
+
+def test_normalize_chatgpt_model_accepts_registry_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _FakeRegistry:
+        @staticmethod
+        def get_models_with_fallback() -> dict[str, object]:
+            return {"gpt-5.3-codex": object()}
+
+    monkeypatch.setattr("app.modules.automations.service.get_model_registry", lambda: _FakeRegistry())
+
+    assert _normalize_chatgpt_model(" gpt-5.3-codex ") == "gpt-5.3-codex"
+
+
+def test_normalize_chatgpt_model_rejects_source_only_alias(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _FakeRegistry:
+        @staticmethod
+        def get_models_with_fallback() -> dict[str, object]:
+            return {"gpt-5.3-codex": object()}
+
+    monkeypatch.setattr("app.modules.automations.service.get_model_registry", lambda: _FakeRegistry())
+
+    with pytest.raises(AutomationValidationError, match="not available for ChatGPT account routing") as exc_info:
+        _normalize_chatgpt_model("openai-compatible/custom-model")
+    assert exc_info.value.code == "invalid_model"
 
 
 def test_compute_next_run_utc_accepts_server_default_timezone(monkeypatch: pytest.MonkeyPatch) -> None:

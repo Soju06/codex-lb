@@ -232,12 +232,14 @@ def _account_to_summary(
         credits_balance=credits_balance,
         allow_missing_runtime_reset_recovery=allow_missing_runtime_reset_recovery,
     )
+    # Provider-aware: claude accounts store the real email in claude_user_email.
+    _effective_email = account.email or account.claude_user_email or ""
     return AccountSummary(
         account_id=account.id,
         chatgpt_account_id=account.chatgpt_account_id,
-        email=account.email,  # ty:ignore[invalid-argument-type]
+        email=_effective_email,
         alias=account.alias,
-        display_name=account.alias or account.email,  # ty:ignore[invalid-argument-type]
+        display_name=account.alias or _effective_email,
         workspace_id=account.workspace_id,
         workspace_label=account.workspace_label,
         seat_type=account.seat_type,

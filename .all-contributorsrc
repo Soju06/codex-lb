@@ -869,6 +869,16 @@
         "code",
         "test"
       ]
+    },
+    {
+      "login": "0xSolarPunk",
+      "name": "anime girl",
+      "avatar_url": "https://avatars.githubusercontent.com/u/151763538?v=4",
+      "profile": "https://github.com/0xSolarPunk",
+      "contributions": [
+        "code",
+        "test"
+      ]
     }
   ],
   "contributorsPerLine": 7,

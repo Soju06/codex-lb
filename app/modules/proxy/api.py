@@ -560,6 +560,7 @@ async def responses(
         error = openai_validation_error(exc)
         return _logged_error_json_response(request, 400, error)
 
+    raw_source_model = _effective_optional_model_for_api_key(api_key, responses_payload.model)
     apply_api_key_enforcement(responses_payload, api_key)
     validate_model_access(api_key, responses_payload.model)
     try:
@@ -569,11 +570,15 @@ async def responses(
         return _logged_error_json_response(request, 400, error)
     source = None
     if compact_trigger_input is None and not extract_input_file_ids(responses_payload.input):
-        source = await _select_responses_model_source(
+        source_selection = await _select_responses_model_source(
             responses_payload.model,
             api_key,
+            raw_model=raw_source_model,
             require_streaming=True,
         )
+        if source_selection is not None:
+            source, selected_model = source_selection
+            responses_payload.model = selected_model
     if source is not None:
         # Opportunistic admission gates subscription *account* capacity;
         # source-routed requests use no account, so a closed/empty pool must
@@ -668,20 +673,25 @@ async def v1_responses(
     except ValidationError as exc:
         error = openai_validation_error(exc)
         return _logged_error_json_response(request, 400, error)
+    raw_source_model = _effective_optional_model_for_api_key(api_key, responses_payload.model)
     apply_api_key_enforcement(responses_payload, api_key)
     validate_model_access(api_key, responses_payload.model)
     # File-referencing Responses requests pin to the subscription account that
     # registered the upload; that account-scoped invariant applies to /v1
     # streams too, so such requests must not be source-routed.
-    source = (
+    source_selection = (
         None
         if extract_input_file_ids(responses_payload.input)
         else await _select_responses_model_source(
             responses_payload.model,
             api_key,
+            raw_model=raw_source_model,
             require_streaming=responses_payload.stream is True,
         )
     )
+    source = source_selection[0] if source_selection is not None else None
+    if source_selection is not None:
+        responses_payload.model = source_selection[1]
     if source is not None:
         # Opportunistic admission gates subscription *account* capacity;
         # source-routed requests use no account, so a closed/empty pool must
@@ -2698,23 +2708,38 @@ async def _select_responses_model_source(
     model: str,
     api_key: ApiKeyData | None,
     *,
+    raw_model: str | None = None,
     require_streaming: bool = False,
-) -> ModelSource | None:
+) -> tuple[ModelSource, str] | None:
     assigned_source_ids = _allowed_source_ids_for_api_key(api_key)
-    subscription_model = get_model_registry().get_models_with_fallback().get(model)
-    if assigned_source_ids is None and subscription_model is not None:
+    exact_allowed_models = set(api_key.allowed_models) if api_key and api_key.allowed_models else None
+    candidates = [candidate for candidate in (raw_model, model) if candidate]
+    if not candidates:
         return None
+    deduped_candidates = list(dict.fromkeys(candidates))
+    registry_models = get_model_registry().get_models_with_fallback()
     async with get_background_session() as session:
-        source = await ModelSourcesRepository(session).find_responses_source_for_model(
-            model,
-            allowed_source_ids=assigned_source_ids,
-            require_streaming=require_streaming,
-        )
+        repository = ModelSourcesRepository(session)
+        for candidate in deduped_candidates:
+            if exact_allowed_models is not None and candidate not in exact_allowed_models:
+                continue
+            subscription_model = registry_models.get(candidate)
+            if assigned_source_ids is None and subscription_model is not None:
+                continue
+            source = await repository.find_responses_source_for_model(
+                candidate,
+                allowed_source_ids=assigned_source_ids,
+                require_streaming=require_streaming,
+            )
+            if source is not None:
+                break
+        else:
+            source = None
         # ``close_session`` rolls back the read transaction, which would
         # expire the loaded row; detach it so the forwarding path can read
         # its attributes after this session boundary.
         detach_session_objects(session)
-        return source
+        return (source, candidate) if source is not None else None
 
 
 async def _select_audio_transcriptions_model_source(model: str, api_key: ApiKeyData | None) -> ModelSource | None:

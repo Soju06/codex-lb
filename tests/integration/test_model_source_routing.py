@@ -447,6 +447,63 @@ async def test_responses_source_selector_can_require_streaming(async_client):
 
 
 @pytest.mark.asyncio
+async def test_responses_source_raw_alias_lookup_requires_exact_allowlist(async_client):
+    import app.modules.proxy.api as proxy_api
+
+    model = "gpt-5-high"
+    await _create_model_source(
+        async_client,
+        name="responses-alias-like-allowlist-source",
+        model=model,
+        base_url="http://127.0.0.1:9/v1",
+        supports_responses=True,
+    )
+    canonical_only_key = ApiKeyData(
+        id="key_responses_canonical_only",
+        name="responses canonical only",
+        key_prefix="sk-test-resp-canonical",
+        allowed_models=["gpt-5"],
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+    exact_key = ApiKeyData(
+        id="key_responses_exact_alias",
+        name="responses exact alias",
+        key_prefix="sk-test-resp-exact",
+        allowed_models=[model],
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+
+    canonical_selection = await proxy_api._select_responses_model_source(
+        "gpt-5",
+        canonical_only_key,
+        raw_model=model,
+    )
+    exact_selection = await proxy_api._select_responses_model_source(
+        "gpt-5",
+        exact_key,
+        raw_model=model,
+    )
+
+    assert canonical_selection is None
+    assert exact_selection is not None
+    source, selected_model = exact_selection
+    assert source.name == "responses-alias-like-allowlist-source"
+    assert selected_model == model
+
+
+@pytest.mark.asyncio
 async def test_chat_source_selector_can_require_streaming(async_client):
     from app.modules.model_sources.repository import ModelSourcesRepository
 

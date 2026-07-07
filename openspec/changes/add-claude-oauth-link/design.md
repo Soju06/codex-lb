@@ -170,7 +170,7 @@ Key invariants:
 
 | Method | Path                              | Body                       | Response                          | Errors |
 |--------|-----------------------------------|----------------------------|-----------------------------------|--------|
-| POST   | `/api/claude/oauth/start`         | `{}`                       | `{flow_id, authorization_url, expires_in_seconds, callback_instructions, redirect_uri}` | 502 |
+| POST   | `/api/claude/oauth/start`         | `{}`                       | `{flow_id, authorization_url, state_token, expires_in_seconds, callback_instructions, redirect_uri}` | 502 |
 | GET    | `/api/claude/oauth/status?flowId=`| (query)                    | `{flow_id, status, error_message?, error_code?, account_id?, started_at, finished_at?}` | — |
 | POST   | `/api/claude/oauth/callback`      | `{flow_id, code, state}`   | `{status: "success", account: ClaudeAccountResponse}` | 400 / 404 / 409 / 410 / 502 |
 
@@ -237,8 +237,11 @@ POST to the token endpoint body and never logged.
 
 - `state_token = secrets.token_urlsafe(32)` — 256 bits of entropy.
 - Stored alongside the flow in the in-memory state store.
-- Returned to the dashboard via `GET /api/claude/oauth/status` so the dialog can
-  pre-fill the field on paste.
+- Returned to the dashboard inside the `/start` response payload (under
+  `stateToken`) so the dialog can submit it unchanged on the `/callback`. The
+  dashboard session IS the trust boundary — the operator already had to
+  authenticate to reach the dialog. The `/status` endpoint continues to NOT
+  echo the state token to any external caller (the spec delta pins this).
 - The pasted `state` is compared with the stored value; mismatch → 400 `state_mismatch`.
 
 ## Token exchange

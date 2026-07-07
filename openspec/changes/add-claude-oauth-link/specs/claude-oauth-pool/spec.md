@@ -9,6 +9,7 @@ This delta extends the `claude-oauth-pool` capability (introduced by change `add
 The system SHALL expose `POST /api/claude/oauth/start`, `GET /api/claude/oauth/status`, and `POST /api/claude/oauth/callback` to add a Claude account through an authorization-code flow with PKCE and copy-paste code entry. The system SHALL:
 
 - Generate an authorization URL with `response_type=code`, `code_challenge` (method `S256`), and a server-generated `state` token.
+- Return the `state` token in the `/start` response payload (under a `stateToken` field) so the dashboard dialog can submit it unchanged on the `/callback` request. The token is exposed only to authenticated dashboard sessions — the dashboard session IS the trust boundary. The `/status` endpoint continues to NOT echo the state token.
 - Require the user to paste the authorization `code` and the matching `state` back into `POST /api/claude/oauth/callback` to complete the flow.
 - Exchange the code at the Anthropic OAuth token endpoint using the stored PKCE `code_verifier`, the configured `redirect_uri`, and the configured `client_id`.
 - Parse the `id_token` from the token response. If `id_token` is missing or does not contain `claude_account_uuid`, the system SHALL reject the request with HTTP 400 and `error_code` `id_token_missing` or `id_token_claims_incomplete`, and SHALL direct the operator to use the manual paste endpoint.

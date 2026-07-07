@@ -5,7 +5,7 @@ import contextlib
 import logging
 import math
 import time
-from collections.abc import Awaitable, Callable, Collection
+from collections.abc import Awaitable, Callable, Collection, Hashable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Mapping, Protocol, cast
@@ -28,9 +28,13 @@ from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, UsageHistory
 from app.db.session import get_background_session
 from app.modules.accounts.auth_manager import AccountsRepositoryPort, AuthManager
+from app.modules.accounts.background_repository import BackgroundAccountsRepository
+from app.modules.accounts.repository import AccountsRepository as SessionAccountsRepository
 from app.modules.proxy.account_cache import get_account_selection_cache, mark_account_routing_unavailable
 from app.modules.usage.additional_quota_keys import canonicalize_additional_quota_key
+from app.modules.usage.background_repository import BackgroundAdditionalUsageRepository, BackgroundUsageRepository
 from app.modules.usage.repository import AdditionalUsageRepository
+from app.modules.usage.repository import UsageRepository as SessionUsageRepository
 
 logger = logging.getLogger(__name__)
 
@@ -150,12 +154,12 @@ _usage_refresh_auth_cooldowns: dict[str, float] = {}
 
 class _UsageRefreshSingleflight:
     def __init__(self) -> None:
-        self._inflight: dict[str, asyncio.Task[AccountRefreshResult]] = {}
+        self._inflight: dict[Hashable, asyncio.Task[AccountRefreshResult]] = {}
         self._lock = asyncio.Lock()
 
     async def run(
         self,
-        account_id: str,
+        account_id: Hashable,
         factory: Callable[[], Awaitable[AccountRefreshResult]],
         *,
         join_existing: bool = True,
@@ -194,7 +198,7 @@ class _UsageRefreshSingleflight:
 
     def _clear_if_current(
         self,
-        key: str,
+        key: Hashable,
         task: asyncio.Task[AccountRefreshResult],
     ) -> None:
         current = self._inflight.get(key)
@@ -223,24 +227,37 @@ class _UsageRefreshSingleflight:
 _USAGE_REFRESH_SINGLEFLIGHT = _UsageRefreshSingleflight()
 
 
+def _usage_refresh_singleflight_key(
+    account_id: str,
+    *,
+    own_singleflight_session: bool = False,
+) -> str | tuple[str, str]:
+    return ("owned-session", account_id) if own_singleflight_session else account_id
+
+
 class UsageUpdater:
     def __init__(
         self,
         usage_repo: UsageRepositoryPort,
         accounts_repo: AccountsRepositoryPort | None = None,
         additional_usage_repo: AdditionalUsageRepositoryPort | AdditionalUsageRepository | None = None,
+        *,
+        auth_manager: AuthManager | None = None,
     ) -> None:
         self._usage_repo = usage_repo
         self._accounts_repo = accounts_repo
         self._additional_usage_repo = additional_usage_repo
-        self._accounts_repo = accounts_repo
         self._encryptor = TokenEncryptor()
-        self._auth_manager = AuthManager(accounts_repo) if accounts_repo else None
+        self._auth_manager = (
+            auth_manager if auth_manager is not None else AuthManager(accounts_repo) if accounts_repo else None
+        )
 
     async def refresh_accounts(
         self,
         accounts: list[Account],
         latest_usage: Mapping[str, UsageHistory],
+        *,
+        own_singleflight_sessions: bool = False,
     ) -> bool:
         """Refresh usage for all accounts. Returns True if usage rows were written."""
         settings = get_settings()
@@ -286,15 +303,33 @@ class UsageUpdater:
             # within the request-scoped session to avoid PK collisions and
             # flush-time warnings (SAWarning: Session.add during flush).
             try:
+                if own_singleflight_sessions:
+
+                    async def refresh_factory(account_id: str = account.id) -> AccountRefreshResult:
+                        return await self._refresh_account_if_stale_with_owned_session(
+                            account_id,
+                            interval_seconds=interval,
+                        )
+
+                else:
+
+                    async def refresh_factory(account: Account = account) -> AccountRefreshResult:
+                        return await self._refresh_account_if_stale(
+                            account,
+                            usage_account_id=account.chatgpt_account_id,
+                            interval_seconds=interval,
+                        )
+
                 result = await _USAGE_REFRESH_SINGLEFLIGHT.run(
-                    account.id,
-                    lambda account=account: self._refresh_account_if_stale(
-                        account,
-                        usage_account_id=account.chatgpt_account_id,
-                        interval_seconds=interval,
+                    _usage_refresh_singleflight_key(
+                        account.id,
+                        own_singleflight_session=own_singleflight_sessions,
                     ),
+                    refresh_factory,
+                    join_existing=not own_singleflight_sessions,
                 )
-                await self._sync_account_from_repo(account)
+                if not own_singleflight_sessions:
+                    await self._sync_account_from_repo(account)
                 refreshed = refreshed or result.usage_written
                 # Only cache when the upstream fetch actually succeeded.
                 # Transient errors (401 retry failure, 5xx, etc.) must not
@@ -314,10 +349,16 @@ class UsageUpdater:
                 continue
         return refreshed
 
-    async def force_refresh(self, account: Account) -> bool:
+    async def force_refresh(
+        self,
+        account: Account,
+        *,
+        ignore_refresh_disabled: bool = False,
+        access_token_override: str | None = None,
+    ) -> bool:
         """Refresh one account regardless of cached/fresh usage rows."""
         settings = get_settings()
-        if not settings.usage_refresh_enabled:
+        if not settings.usage_refresh_enabled and not ignore_refresh_disabled:
             return False
         if account.status in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
             return False
@@ -327,6 +368,7 @@ class UsageUpdater:
                 lambda: self._refresh_account(
                     account,
                     usage_account_id=account.chatgpt_account_id,
+                    access_token_override=access_token_override,
                 ),
                 join_existing=False,
             )
@@ -372,13 +414,45 @@ class UsageUpdater:
             return None
         return await self._usage_repo.latest_entry_for_account(account.id, window="monthly")
 
+    async def _refresh_account_if_stale_with_owned_session(
+        self,
+        account_id: str,
+        *,
+        interval_seconds: int,
+    ) -> AccountRefreshResult:
+        @contextlib.asynccontextmanager
+        async def refresh_repo_factory():
+            async with get_background_session() as refresh_session:
+                yield SessionAccountsRepository(refresh_session)
+
+        async with get_background_session() as session:
+            accounts_repo = SessionAccountsRepository(session)
+            usage_repo = SessionUsageRepository(session)
+            additional_usage_repo = AdditionalUsageRepository(session)
+            account = await accounts_repo.get_by_id(account_id)
+            if account is None:
+                return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
+            if account.status in (AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
+                return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
+            return await UsageUpdater(
+                usage_repo,
+                accounts_repo,
+                additional_usage_repo,
+                auth_manager=AuthManager(accounts_repo, refresh_repo_factory=refresh_repo_factory),
+            )._refresh_account_if_stale(
+                account,
+                usage_account_id=account.chatgpt_account_id,
+                interval_seconds=interval_seconds,
+            )
+
     async def _refresh_account(
         self,
         account: Account,
         *,
         usage_account_id: str | None,
+        access_token_override: str | None = None,
     ) -> AccountRefreshResult:
-        access_token = self._encryptor.decrypt(account.access_token_encrypted)
+        access_token = access_token_override or self._encryptor.decrypt(account.access_token_encrypted)
         payload: UsagePayload | None = None
         try:
             route = await _resolve_upstream_route_for_account(account, operation="usage_refresh")
@@ -399,6 +473,9 @@ class UsageUpdater:
         except UsageFetchError as exc:
             if _should_deactivate_for_usage_error(exc):
                 await self._deactivate_for_client_error(account, exc)
+                return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
+            if access_token_override is not None:
+                _mark_usage_refresh_auth_cooldown(account.id, exc.status_code)
                 return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
             if exc.status_code != 401 or not self._auth_manager:
                 _mark_usage_refresh_auth_cooldown(account.id, exc.status_code)
@@ -737,6 +814,16 @@ class UsageUpdater:
         account.deactivation_reason = stored.deactivation_reason
         account.reset_at = stored.reset_at
         account.blocked_at = stored.blocked_at
+
+
+def build_background_usage_updater() -> UsageUpdater:
+    accounts_repo = BackgroundAccountsRepository()
+    return UsageUpdater(
+        BackgroundUsageRepository(),
+        accounts_repo=accounts_repo,
+        additional_usage_repo=BackgroundAdditionalUsageRepository(),
+        auth_manager=AuthManager(accounts_repo),
+    )
 
 
 def _credits_snapshot(payload: UsagePayload) -> tuple[bool | None, bool | None, float | None]:

@@ -21,7 +21,9 @@ import {
   createDashboardSettings,
   createDefaultAccounts,
   createDefaultApiKeys,
+  createDefaultModelSources,
   createDefaultRequestLogs,
+  createModelSource,
   createOauthCompleteResponse,
   createOauthStartResponse,
   createOauthStatusResponse,
@@ -34,6 +36,7 @@ import {
   createRequestLogsResponse,
   type DashboardAuthSession,
   type DashboardSettings,
+  type ModelSource,
   type QuotaPlannerDecision,
   type QuotaPlannerForecast,
   type QuotaPlannerSettings,
@@ -55,6 +58,7 @@ const ApiKeyCreatePayloadSchema = z.looseObject({
   trafficClass: z.enum(TRAFFIC_CLASSES).optional(),
   transportPolicyOverride: z.enum(["smart", "always_http", "always_websocket"]).nullable().optional(),
   assignedAccountIds: z.array(z.string()).optional(),
+  assignedSourceIds: z.array(z.string()).optional(),
 });
 
 const FirewallIpCreatePayloadSchema = z.looseObject({
@@ -68,6 +72,7 @@ const ApiKeyUpdatePayloadSchema = z.looseObject({
   transportPolicyOverride: z.enum(["smart", "always_http", "always_websocket"]).nullable().optional(),
   isActive: z.boolean().optional(),
   assignedAccountIds: z.array(z.string()).optional(),
+  assignedSourceIds: z.array(z.string()).optional(),
   resetUsage: z.boolean().optional(),
   limits: z
     .array(
@@ -133,6 +138,31 @@ const SettingsPayloadSchema = z.looseObject({
   apiKeyAuthEnabled: z.boolean().optional(),
   limitWarmupStaggeredIdleEnabled: z.boolean().optional(),
   hideUpstreamQuotaFromApiKeys: z.boolean().optional(),
+});
+
+const ModelSourceCreatePayloadSchema = z.looseObject({
+  name: z.string().optional(),
+  baseUrl: z.string().optional(),
+  supportsChatCompletions: z.boolean().optional(),
+  supportsResponses: z.boolean().optional(),
+  supportsAudioTranscriptions: z.boolean().optional(),
+  models: z
+    .array(
+      z.looseObject({
+        model: z.string(),
+        displayName: z.string().nullable().optional(),
+        contextWindow: z.number().nullable().optional(),
+        maxOutputTokens: z.number().nullable().optional(),
+        supportsStreaming: z.boolean().optional(),
+        supportsTools: z.boolean().optional(),
+        supportsVision: z.boolean().optional(),
+      }),
+    )
+    .optional(),
+});
+
+const ModelSourceUpdatePayloadSchema = z.looseObject({
+  isEnabled: z.boolean().optional(),
 });
 
 const QuotaPlannerSettingsPayloadSchema = z.looseObject({
@@ -269,6 +299,7 @@ type MockState = {
       attemptCount: number;
     }>
   >;
+  modelSources: ModelSource[];
   firewallEntries: Array<{ ipAddress: string; createdAt: string }>;
   stickySessions: Array<{
     key: string;
@@ -294,6 +325,7 @@ function createInitialState(): MockState {
     apiKeys: createDefaultApiKeys(),
     automations: [],
     automationRuns: {},
+    modelSources: createDefaultModelSources(),
     firewallEntries: [],
     stickySessions: [],
   };
@@ -892,6 +924,45 @@ export const handlers = [
       );
     }
     return HttpResponse.json(createAccountTrends(accountId));
+  }),
+
+  http.get("/api/accounts/:accountId/usage-reset-credits", ({ params }) => {
+    const accountId = String(params.accountId);
+    const account = findAccount(accountId);
+    if (!account) {
+      return HttpResponse.json(
+        { error: { code: "account_not_found", message: "Account not found" } },
+        { status: 404 },
+      );
+    }
+    return HttpResponse.json({
+      accountId,
+      rateLimitResetCredits: { availableCount: 3 },
+    });
+  }),
+
+  http.post("/api/accounts/:accountId/usage-reset-credits/consume", ({ params }) => {
+    const accountId = String(params.accountId);
+    const account = findAccount(accountId);
+    if (!account) {
+      return HttpResponse.json(
+        { error: { code: "account_not_found", message: "Account not found" } },
+        { status: 404 },
+      );
+    }
+    return HttpResponse.json({
+      status: "reset",
+      accountId,
+      code: "reset",
+      windowsReset: 2,
+      usageWritten: true,
+      primaryUsedPercentBefore: 99,
+      primaryUsedPercentAfter: 1,
+      secondaryUsedPercentBefore: 80,
+      secondaryUsedPercentAfter: 0,
+      accountStatusBefore: account.status,
+      accountStatusAfter: account.status,
+    });
   }),
 
   http.post("/api/accounts/:accountId/probe", ({ params }) => {
@@ -1932,6 +2003,90 @@ export const handlers = [
     });
   }),
 
+  http.get("/api/model-sources/", () => {
+    return HttpResponse.json({ sources: state.modelSources });
+  }),
+
+  http.post("/api/model-sources/", async ({ request }) => {
+    const payload = await parseJsonBody(request, ModelSourceCreatePayloadSchema);
+    const sequence = state.modelSources.length + 1;
+    const sourceId = `src_mock_${sequence}`;
+    const now = new Date().toISOString();
+    const source = createModelSource({
+      id: sourceId,
+      name: payload?.name ?? `Model source ${sequence}`,
+      baseUrl: payload?.baseUrl ?? "http://localhost:8000/v1",
+      supportsChatCompletions: payload?.supportsChatCompletions ?? true,
+      supportsResponses: payload?.supportsResponses ?? false,
+      supportsAudioTranscriptions: payload?.supportsAudioTranscriptions ?? false,
+      models: (payload?.models ?? [{ model: `model-${sequence}` }]).map(
+        (model, index) => ({
+          id: index + 1,
+          sourceId,
+          model: model.model,
+          displayName: model.displayName ?? model.model,
+          contextWindow: model.contextWindow ?? null,
+          maxOutputTokens: model.maxOutputTokens ?? null,
+          supportsStreaming: model.supportsStreaming ?? true,
+          supportsTools: model.supportsTools ?? false,
+          supportsVision: model.supportsVision ?? false,
+          inputPer1M: null,
+          cachedInputPer1M: null,
+          outputPer1M: null,
+          audioPerMinute: null,
+          rawMetadataJson: null,
+          isEnabled: true,
+          createdAt: now,
+          updatedAt: now,
+        }),
+      ),
+    });
+    state.modelSources = [...state.modelSources, source];
+    return HttpResponse.json(source);
+  }),
+
+  http.patch("/api/model-sources/:sourceId", async ({ params, request }) => {
+    const sourceId = String(params.sourceId);
+    const existing = state.modelSources.find((source) => source.id === sourceId);
+    if (!existing) {
+      return HttpResponse.json(
+        { error: { code: "not_found", message: "Model source not found" } },
+        { status: 404 },
+      );
+    }
+    const payload = await parseJsonBody(request, ModelSourceUpdatePayloadSchema);
+    const updated = createModelSource({
+      ...existing,
+      ...(payload?.isEnabled !== undefined ? { isEnabled: payload.isEnabled } : {}),
+      updatedAt: new Date().toISOString(),
+    });
+    state.modelSources = state.modelSources.map((source) =>
+      source.id === sourceId ? updated : source,
+    );
+    return HttpResponse.json(updated);
+  }),
+
+  http.delete("/api/model-sources/:sourceId", ({ params }) => {
+    const sourceId = String(params.sourceId);
+    const exists = state.modelSources.some((source) => source.id === sourceId);
+    if (!exists) {
+      return HttpResponse.json(
+        { error: { code: "not_found", message: "Model source not found" } },
+        { status: 404 },
+      );
+    }
+    state.modelSources = state.modelSources.filter(
+      (source) => source.id !== sourceId,
+    );
+    state.apiKeys = state.apiKeys.map((apiKey) =>
+      createApiKey({
+        ...apiKey,
+        assignedSourceIds: apiKey.assignedSourceIds.filter((id) => id !== sourceId),
+      }),
+    );
+    return new HttpResponse(null, { status: 204 });
+  }),
+
   http.get("/api/api-keys/", () => {
     return HttpResponse.json(state.apiKeys);
   }),
@@ -1945,7 +2100,10 @@ export const handlers = [
         name: payload?.name ?? `API Key ${sequence}`,
         accountAssignmentScopeEnabled:
           (payload?.assignedAccountIds?.length ?? 0) > 0,
+        sourceAssignmentScopeEnabled:
+          (payload?.assignedSourceIds?.length ?? 0) > 0,
         assignedAccountIds: payload?.assignedAccountIds ?? [],
+        assignedSourceIds: payload?.assignedSourceIds ?? [],
         trafficClass: payload?.trafficClass ?? "foreground",
       }),
       key: `sk-test-generated-${sequence}`,
@@ -1986,6 +2144,13 @@ export const handlers = [
         : {}),
       ...(payload.assignedAccountIds !== undefined
         ? { assignedAccountIds: payload.assignedAccountIds }
+        : {}),
+      ...(payload.assignedSourceIds !== undefined
+        ? {
+            sourceAssignmentScopeEnabled:
+              payload.assignedSourceIds.length > 0,
+            assignedSourceIds: payload.assignedSourceIds,
+          }
         : {}),
     };
 

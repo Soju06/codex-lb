@@ -53,7 +53,9 @@ def _to_response(row: ApiKeyData) -> ApiKeyResponse:
         expires_at=row.expires_at,
         is_active=row.is_active,
         account_assignment_scope_enabled=row.account_assignment_scope_enabled,
+        source_assignment_scope_enabled=row.source_assignment_scope_enabled,
         assigned_account_ids=row.assigned_account_ids,
+        assigned_source_ids=row.assigned_source_ids,
         created_at=row.created_at,
         last_used_at=row.last_used_at,
         limits=[
@@ -143,6 +145,7 @@ async def create_api_key(
                 ),
                 expires_at=payload.expires_at,
                 assigned_account_ids=payload.assigned_account_ids,
+                assigned_source_ids=payload.assigned_source_ids,
                 limits=limit_inputs,
             )
         )
@@ -206,6 +209,8 @@ async def update_api_key(
         is_active_set="is_active" in fields,
         assigned_account_ids=payload.assigned_account_ids,
         assigned_account_ids_set="assigned_account_ids" in fields,
+        assigned_source_ids=payload.assigned_source_ids,
+        assigned_source_ids_set="assigned_source_ids" in fields,
         limits=limit_inputs,
         limits_set=limits_set,
         reset_usage=bool(payload.reset_usage),

@@ -338,6 +338,154 @@ async def test_redeem_replaces_stale_cached_snapshot_when_fresh_fetch_has_no_ava
 
 
 @pytest.mark.asyncio
+async def test_redeem_retries_same_request_id_when_fresh_fetch_has_no_available_credit() -> None:
+    store = RateLimitResetCreditsStore()
+    await store.set("acc_1", _snapshot([_credit("cached")], available_count=1))
+
+    captured: dict[str, Any] = {}
+
+    async def consume_fn(
+        access_token: str,
+        account_id: str | None,
+        credit_id: str,
+        **kwargs: Any,
+    ) -> ConsumeResetCreditResponse:
+        captured.update(
+            {
+                "access_token": access_token,
+                "account_id": account_id,
+                "credit_id": credit_id,
+                "redeem_request_id": kwargs.get("redeem_request_id"),
+            }
+        )
+        return ConsumeResetCreditResponse.model_validate(
+            {
+                "code": "already_redeemed",
+                "credit": {"id": credit_id, "status": "redeemed", "redeemed_at": "2026-06-13T13:12:31Z"},
+                "windows_reset": 0,
+            }
+        )
+
+    result = await _redeem_soonest_reset_credit(
+        account=_account(),
+        store=store,
+        encryptor=StubEncryptor(),
+        fetch_fn=_static_fetch_fn(_response([], available_count=0)),
+        consume_fn=consume_fn,
+        redeem_request_id="retry-id",
+    )
+
+    assert captured == {
+        "access_token": "decrypted-access-token",
+        "account_id": "workspace-1",
+        "credit_id": "cached",
+        "redeem_request_id": "retry-id",
+    }
+    assert result.response.code == "already_redeemed"
+    assert result.available_count_before == 0
+    assert result.available_count_after == 0
+    assert store.get("acc_1") is None
+
+
+@pytest.mark.asyncio
+async def test_redeem_retries_same_request_id_after_local_credit_vanishes() -> None:
+    store = RateLimitResetCreditsStore()
+    await store.remember_redeem_request("acc_1", "retry-id", "vanished")
+    await store.set("acc_1", _snapshot([], available_count=0))
+
+    captured: dict[str, Any] = {}
+
+    async def consume_fn(
+        access_token: str,
+        account_id: str | None,
+        credit_id: str,
+        **kwargs: Any,
+    ) -> ConsumeResetCreditResponse:
+        captured.update(
+            {
+                "access_token": access_token,
+                "account_id": account_id,
+                "credit_id": credit_id,
+                "redeem_request_id": kwargs.get("redeem_request_id"),
+            }
+        )
+        return ConsumeResetCreditResponse.model_validate(
+            {
+                "code": "already_redeemed",
+                "credit": {"id": credit_id, "status": "redeemed", "redeemed_at": "2026-06-13T13:12:31Z"},
+                "windows_reset": 0,
+            }
+        )
+
+    result = await _redeem_soonest_reset_credit(
+        account=_account(),
+        store=store,
+        encryptor=StubEncryptor(),
+        fetch_fn=_static_fetch_fn(_response([], available_count=0)),
+        consume_fn=consume_fn,
+        redeem_request_id="retry-id",
+    )
+
+    assert captured == {
+        "access_token": "decrypted-access-token",
+        "account_id": "workspace-1",
+        "credit_id": "vanished",
+        "redeem_request_id": "retry-id",
+    }
+    assert result.response.code == "already_redeemed"
+    assert store.get("acc_1") is None
+
+
+@pytest.mark.asyncio
+async def test_redeem_retries_same_request_id_preserves_original_credit_when_another_is_available() -> None:
+    store = RateLimitResetCreditsStore()
+    await store.remember_redeem_request("acc_1", "retry-id", "original")
+    await store.set("acc_1", _snapshot([_credit("new-cached")], available_count=1))
+
+    captured: dict[str, Any] = {}
+
+    async def consume_fn(
+        access_token: str,
+        account_id: str | None,
+        credit_id: str,
+        **kwargs: Any,
+    ) -> ConsumeResetCreditResponse:
+        captured.update(
+            {
+                "access_token": access_token,
+                "account_id": account_id,
+                "credit_id": credit_id,
+                "redeem_request_id": kwargs.get("redeem_request_id"),
+            }
+        )
+        return ConsumeResetCreditResponse.model_validate(
+            {
+                "code": "already_redeemed",
+                "credit": {"id": credit_id, "status": "redeemed", "redeemed_at": "2026-06-13T13:12:31Z"},
+                "windows_reset": 0,
+            }
+        )
+
+    result = await _redeem_soonest_reset_credit(
+        account=_account(),
+        store=store,
+        encryptor=StubEncryptor(),
+        fetch_fn=_static_fetch_fn(_response([_credit("new-fresh")], available_count=1)),
+        consume_fn=consume_fn,
+        redeem_request_id="retry-id",
+    )
+
+    assert captured == {
+        "access_token": "decrypted-access-token",
+        "account_id": "workspace-1",
+        "credit_id": "original",
+        "redeem_request_id": "retry-id",
+    }
+    assert result.response.code == "already_redeemed"
+    assert store.get_redeem_request_credit_id("acc_1", "retry-id") == "original"
+
+
+@pytest.mark.asyncio
 async def test_redeem_consumes_fresh_available_credit_when_cached_credit_disappears_upstream() -> None:
     store = RateLimitResetCreditsStore()
     await store.set("acc_1", _snapshot([_credit("stale")], available_count=1))

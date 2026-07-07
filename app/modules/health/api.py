@@ -130,14 +130,28 @@ async def internal_drain_status(request: Request) -> HealthCheckResponse:
 
     import app.core.shutdown as shutdown_state
 
-    return HealthCheckResponse(
-        status="ok",
-        checks={
-            "draining": str(shutdown_state.is_draining()).lower(),
-            "bridge_drain_active": str(shutdown_state.is_bridge_drain_active()).lower(),
-            "in_flight": str(shutdown_state.get_in_flight()),
-        },
-    )
+    checks = {
+        "draining": str(shutdown_state.is_draining()).lower(),
+        "bridge_drain_active": str(shutdown_state.is_bridge_drain_active()).lower(),
+        "in_flight": str(shutdown_state.get_in_flight()),
+    }
+
+    app = getattr(request, "app", None)
+    app_state = getattr(app, "state", None)
+    proxy_service = getattr(app_state, "proxy_service", None)
+    if proxy_service is not None and hasattr(proxy_service, "http_bridge_activity_snapshot_nowait"):
+        try:
+            bridge_activity = proxy_service.http_bridge_activity_snapshot_nowait()
+            checks.update(
+                {
+                    key: str(value).lower() if isinstance(value, bool) else str(value)
+                    for key, value in bridge_activity.items()
+                }
+            )
+        except Exception as exc:
+            checks["http_bridge_activity_error"] = type(exc).__name__
+
+    return HealthCheckResponse(status="ok", checks=checks)
 
 
 def _bridge_readiness_failure_detail(bridge_ring: BridgeRingInfo) -> str | None:

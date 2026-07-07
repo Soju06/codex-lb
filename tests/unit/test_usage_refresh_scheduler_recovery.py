@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, cast
 
@@ -718,3 +720,122 @@ async def test_reconcile_recoverable_account_statuses_keeps_rate_limited_when_re
     assert account.status == AccountStatus.RATE_LIMITED
     assert account.reset_at == past_reset
     assert account.blocked_at == blocked_at
+
+
+@pytest.mark.asyncio
+async def test_refresh_once_closes_read_session_before_usage_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
+    account = _make_account("acc_scheduler", status=AccountStatus.ACTIVE)
+    session_closed = False
+    fetch_started = asyncio.Event()
+    release_fetch = asyncio.Event()
+
+    class _Leader:
+        async def try_acquire(self) -> bool:
+            return True
+
+    class _UsageRepo:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def latest_by_account(self, window: str | None = None) -> dict[str, UsageHistory]:
+            return {}
+
+    class _AccountsRepo:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def list_accounts(self, *, refresh_existing: bool = False) -> list[Account]:
+            return [account]
+
+    class _Updater:
+        async def refresh_accounts(
+            self,
+            accounts: list[Account],
+            latest_usage: dict[str, UsageHistory],
+        ) -> bool:
+            assert accounts == [account]
+            assert latest_usage == {}
+            assert session_closed is True
+            fetch_started.set()
+            await release_fetch.wait()
+            return False
+
+    class _Session:
+        def expunge_all(self) -> None:
+            return None
+
+    @asynccontextmanager
+    async def _background_session():
+        nonlocal session_closed
+        session_closed = False
+        try:
+            yield _Session()
+        finally:
+            session_closed = True
+
+    monkeypatch.setattr(refresh_scheduler_module, "_get_leader_election", lambda: _Leader())
+    monkeypatch.setattr(refresh_scheduler_module, "get_background_session", _background_session)
+    monkeypatch.setattr(refresh_scheduler_module, "UsageRepository", _UsageRepo)
+    monkeypatch.setattr(refresh_scheduler_module, "AccountsRepository", _AccountsRepo)
+    monkeypatch.setattr(refresh_scheduler_module, "build_background_usage_updater", lambda: _Updater())
+
+    scheduler = refresh_scheduler_module.UsageRefreshScheduler(interval_seconds=60, enabled=True)
+    refresh_task = asyncio.create_task(scheduler._refresh_once())
+    await fetch_started.wait()
+
+    assert session_closed is True
+    release_fetch.set()
+    assert await refresh_task == 60.0
+
+
+@pytest.mark.asyncio
+async def test_refresh_once_cancellation_closes_read_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    session_closed = asyncio.Event()
+    listed_accounts = asyncio.Event()
+    release_list_accounts = asyncio.Event()
+
+    class _Leader:
+        async def try_acquire(self) -> bool:
+            return True
+
+    class _UsageRepo:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def latest_by_account(self, window: str | None = None) -> dict[str, UsageHistory]:
+            return {}
+
+    class _AccountsRepo:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def list_accounts(self, *, refresh_existing: bool = False) -> list[Account]:
+            listed_accounts.set()
+            await release_list_accounts.wait()
+            return []
+
+    class _Session:
+        def expunge_all(self) -> None:
+            return None
+
+    @asynccontextmanager
+    async def _background_session():
+        try:
+            yield _Session()
+        finally:
+            session_closed.set()
+
+    monkeypatch.setattr(refresh_scheduler_module, "_get_leader_election", lambda: _Leader())
+    monkeypatch.setattr(refresh_scheduler_module, "get_background_session", _background_session)
+    monkeypatch.setattr(refresh_scheduler_module, "UsageRepository", _UsageRepo)
+    monkeypatch.setattr(refresh_scheduler_module, "AccountsRepository", _AccountsRepo)
+
+    scheduler = refresh_scheduler_module.UsageRefreshScheduler(interval_seconds=60, enabled=True)
+    task = asyncio.create_task(scheduler._refresh_once())
+    await listed_accounts.wait()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    await asyncio.wait_for(session_closed.wait(), timeout=1)

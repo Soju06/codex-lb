@@ -8,6 +8,10 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.core.auth import DEFAULT_PLAN
+from app.core.auth.dashboard_session_ttl import (
+    DEFAULT_DASHBOARD_SESSION_TTL_SECONDS,
+    REMOTE_DASHBOARD_SESSION_TTL_SECONDS,
+)
 from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
@@ -813,6 +817,60 @@ async def test_dashboard_settings_default_flip_migration_updates_pristine_fresh_
             ).one()
             assert row[0] in (True, 1)
             assert row[1] in (True, 1)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("initial_ttl_seconds", "expected_ttl_seconds"),
+    [
+        (REMOTE_DASHBOARD_SESSION_TTL_SECONDS, DEFAULT_DASHBOARD_SESSION_TTL_SECONDS),
+        (7200, 7200),
+    ],
+)
+async def test_dashboard_session_ttl_migration_updates_only_legacy_default(
+    tmp_path,
+    initial_ttl_seconds: int,
+    expected_ttl_seconds: int,
+):
+    db_url = f"sqlite+aiosqlite:///{tmp_path / f'dashboard-session-ttl-{initial_ttl_seconds}.sqlite'}"
+    parent_revision = "20260701_000000_add_weekly_pace_smoothing_minutes"
+    target_revision = "20260705_000000_harden_dashboard_session_ttl"
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=True))
+
+    engine = create_async_engine(db_url, future=True)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with session_factory() as session:
+            await session.execute(
+                text(
+                    """
+                    UPDATE dashboard_settings
+                    SET dashboard_session_ttl_seconds = :initial_ttl_seconds
+                    WHERE id = 1
+                    """
+                ),
+                {"initial_ttl_seconds": initial_ttl_seconds},
+            )
+            await session.commit()
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, target_revision, bootstrap_legacy=False))
+
+        async with session_factory() as session:
+            ttl_seconds = (
+                await session.execute(
+                    text(
+                        """
+                        SELECT dashboard_session_ttl_seconds
+                        FROM dashboard_settings
+                        WHERE id = 1
+                        """
+                    )
+                )
+            ).scalar_one()
+            assert ttl_seconds == expected_ttl_seconds
     finally:
         await engine.dispose()
 

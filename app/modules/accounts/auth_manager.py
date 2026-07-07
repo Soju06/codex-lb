@@ -369,8 +369,14 @@ def _chatgpt_account_id_from_id_token(id_token: str) -> str | None:
     return auth_claims.chatgpt_account_id or claims.chatgpt_account_id
 
 
-def _refresh_singleflight_key(encryptor: TokenEncryptor, account: Account) -> _RefreshSingleflightKey:
-    return (account.id, _refresh_token_material_fingerprint(encryptor, account.refresh_token_encrypted))
+def _refresh_singleflight_key(
+    encryptor: TokenEncryptor,
+    account: Account,
+) -> _RefreshSingleflightKey:
+    return (
+        account.id,
+        _refresh_token_material_fingerprint(encryptor, account.refresh_token_encrypted),
+    )
 
 
 def _refresh_token_material_changed(

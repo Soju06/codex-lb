@@ -78,8 +78,8 @@ export function AccountActions({
   return (
     <div className="space-y-3 border-t pt-4">
       {!showOperatorRecoveryAction ? (
-        <div className="flex flex-wrap items-center gap-3 rounded-md border bg-muted/30 p-3">
-          <div className="flex min-w-36 items-center gap-2 text-sm font-medium">
+        <div className="flex flex-col gap-2 rounded-md border bg-muted/30 p-3 sm:flex-row sm:items-center sm:gap-3">
+          <div className="flex min-w-0 items-center gap-2 text-sm font-medium sm:min-w-36">
             <Route className="h-4 w-4 text-muted-foreground" />
             Routing policy
           </div>
@@ -96,7 +96,7 @@ export function AccountActions({
             <SelectTrigger
               aria-label="Routing policy"
               size="sm"
-              className="h-8 min-w-32 flex-1 text-xs"
+              className="h-8 w-full min-w-0 text-xs sm:min-w-32 sm:flex-1"
             >
               <SelectValue />
             </SelectTrigger>
@@ -111,7 +111,7 @@ export function AccountActions({
 
       <label
         htmlFor={`security-work-authorized-${account.accountId}`}
-        className="flex items-center justify-between gap-3 rounded-md border px-3 py-2"
+        className="flex min-w-0 items-center justify-between gap-3 rounded-md border px-3 py-2"
       >
         <span className="flex min-w-0 items-center gap-2 text-xs font-medium">
           <ShieldCheck className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
@@ -119,6 +119,7 @@ export function AccountActions({
         </span>
         <Switch
           id={`security-work-authorized-${account.accountId}`}
+          className="shrink-0"
           checked={account.securityWorkAuthorized ?? false}
           disabled={busy || readOnly}
           onCheckedChange={(checked) =>

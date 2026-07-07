@@ -3,6 +3,7 @@ import { XIcon } from "lucide-react"
 import { Dialog as SheetPrimitive } from "radix-ui"
 
 import { cn } from "@/lib/utils"
+import { useFloatingLayerDismissGuard } from "@/components/ui/use-floating-layer-dismiss-guard"
 
 function Sheet({ ...props }: React.ComponentProps<typeof SheetPrimitive.Root>) {
   return <SheetPrimitive.Root data-slot="sheet" {...props} />
@@ -47,16 +48,35 @@ function SheetContent({
   children,
   side = "right",
   showCloseButton = true,
+  onFocusOutside,
+  onInteractOutside,
+  onPointerDownOutside,
   ...props
 }: React.ComponentProps<typeof SheetPrimitive.Content> & {
   side?: "top" | "right" | "bottom" | "left"
   showCloseButton?: boolean
 }) {
+  // Keep the sheet open when an outside interaction is really the user
+  // dismissing a nested floating layer (Select / DropdownMenu / Popover).
+  const guardDismiss = useFloatingLayerDismissGuard()
+
   return (
     <SheetPortal>
       <SheetOverlay />
       <SheetPrimitive.Content
         data-slot="sheet-content"
+        onFocusOutside={(event) => {
+          onFocusOutside?.(event)
+          guardDismiss(event)
+        }}
+        onInteractOutside={(event) => {
+          onInteractOutside?.(event)
+          guardDismiss(event)
+        }}
+        onPointerDownOutside={(event) => {
+          onPointerDownOutside?.(event)
+          guardDismiss(event)
+        }}
         className={cn(
           "bg-background data-[state=open]:animate-in data-[state=closed]:animate-out fixed z-50 flex flex-col gap-4 shadow-lg transition ease-in-out overscroll-contain data-[state=closed]:duration-300 data-[state=open]:duration-500",
           side === "right" &&

@@ -23,6 +23,16 @@
       ]
     },
     {
+      "login": "codemoo",
+      "name": "Hwanmoo Yong",
+      "avatar_url": "https://avatars.githubusercontent.com/u/16550088?v=4",
+      "profile": "https://github.com/codemoo",
+      "contributions": [
+        "code",
+        "test"
+      ]
+    },
+    {
       "login": "JKamsker",
       "name": "Jonas Kamsker",
       "avatar_url": "https://avatars.githubusercontent.com/u/11245306?v=4",
@@ -828,6 +838,65 @@
       "contributions": [
         "code",
         "test"
+      ]
+    },
+    {
+      "login": "qdzsh",
+      "name": "Quang Do",
+      "avatar_url": "https://avatars.githubusercontent.com/u/287790998?v=4",
+      "profile": "https://github.com/qdzsh",
+      "contributions": [
+        "code",
+        "test"
+      ]
+    },
+    {
+      "login": "alzeiby",
+      "name": "Abdullah Alzeiby",
+      "avatar_url": "https://avatars.githubusercontent.com/u/183951656?v=4",
+      "profile": "https://github.com/alzeiby",
+      "contributions": [
+        "code",
+        "test"
+      ]
+    },
+    {
+      "login": "zvladru",
+      "name": "zvladru",
+      "avatar_url": "https://avatars.githubusercontent.com/u/30793959?v=4",
+      "profile": "https://github.com/zvladru",
+      "contributions": [
+        "code",
+        "test"
+      ]
+    },
+    {
+      "login": "0xSolarPunk",
+      "name": "anime girl",
+      "avatar_url": "https://avatars.githubusercontent.com/u/151763538?v=4",
+      "profile": "https://github.com/0xSolarPunk",
+      "contributions": [
+        "code",
+        "test"
+      ]
+    },
+    {
+      "login": "evaldass",
+      "name": "evaldass",
+      "avatar_url": "https://avatars.githubusercontent.com/u/10763305?v=4",
+      "profile": "https://github.com/evaldass",
+      "contributions": [
+        "code",
+        "test"
+      ]
+    },
+    {
+      "login": "claude",
+      "name": "Claude",
+      "avatar_url": "https://avatars.githubusercontent.com/u/81847?v=4",
+      "profile": "https://github.com/claude",
+      "contributions": [
+        "code"
       ]
     }
   ],

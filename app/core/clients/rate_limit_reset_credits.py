@@ -173,6 +173,7 @@ async def consume_reset_credit(
     account_id: str | None,
     credit_id: str,
     *,
+    redeem_request_id: str | None = None,
     base_url: str | None = None,
     timeout_seconds: float | None = None,
     max_retries: int | None = None,
@@ -193,8 +194,8 @@ async def consume_reset_credit(
         account_id,
         extra={"Content-Type": "application/json"},
     )
-    redeem_request_id = str(uuid.uuid4())
-    body = {"credit_id": credit_id, "redeem_request_id": redeem_request_id}
+    effective_redeem_request_id = redeem_request_id or str(uuid.uuid4())
+    body = {"credit_id": credit_id, "redeem_request_id": effective_redeem_request_id}
     retry_options = _retry_options(retries + 1)
     require_route_or_direct_egress_opt_in(
         route=route,

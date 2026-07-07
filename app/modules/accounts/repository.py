@@ -68,6 +68,15 @@ class AccountsRepository:
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
 
+    async def list_accounts_by_ids(self, account_ids: list[str], *, refresh_existing: bool = False) -> list[Account]:
+        if not account_ids:
+            return []
+        stmt = select(Account).where(Account.id.in_(account_ids)).order_by(Account.email)
+        if refresh_existing:
+            stmt = stmt.execution_options(populate_existing=True)
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
+
     async def list_request_usage_summary_by_account(
         self,
         account_ids: list[str] | None = None,

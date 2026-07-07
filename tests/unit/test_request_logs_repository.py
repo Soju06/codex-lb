@@ -7,7 +7,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.exc import ResourceClosedError
 
-from app.db.models import RequestLog
+from app.db.models import ModelSource, RequestLog
 from app.db.session import SessionLocal
 from app.modules.request_logs.repository import RequestLogsRepository
 
@@ -63,6 +63,38 @@ async def test_add_log_persists_request_kind(db_setup) -> None:
         persisted = await session.scalar(select(RequestLog).where(RequestLog.id == saved.id))
         assert persisted is not None
         assert persisted.request_kind == "warmup"
+
+
+@pytest.mark.asyncio
+async def test_add_log_does_not_recalculate_unpriced_model_source_cost(db_setup) -> None:
+    del db_setup
+    async with SessionLocal() as session:
+        session.add(
+            ModelSource(
+                id="source_unpriced",
+                name="source unpriced",
+                base_url="https://source-unpriced.example.invalid/v1",
+            )
+        )
+        await session.commit()
+        repo = RequestLogsRepository(session)
+
+        saved = await repo.add_log(
+            account_id=None,
+            model_source_id="source_unpriced",
+            request_id="req_source_unpriced",
+            model="gpt-5.2",
+            input_tokens=10_000,
+            output_tokens=5_000,
+            latency_ms=1,
+            status="success",
+            error_code=None,
+            cost_usd=None,
+        )
+
+        persisted = await session.scalar(select(RequestLog).where(RequestLog.id == saved.id))
+        assert persisted is not None
+        assert persisted.cost_usd == 0.0
 
 
 @pytest.mark.asyncio

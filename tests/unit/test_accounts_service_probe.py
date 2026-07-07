@@ -139,7 +139,7 @@ async def test_probe_account_captures_before_after_snapshot(monkeypatch):
     assert service._usage_updater is not None
     force_refresh_mock = service._usage_updater.force_refresh
     assert isinstance(force_refresh_mock, AsyncMock)
-    force_refresh_mock.assert_awaited_once_with(account)
+    force_refresh_mock.assert_awaited_once_with(account, ignore_refresh_disabled=True)
 
 
 @pytest.mark.asyncio

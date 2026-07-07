@@ -6,6 +6,7 @@ import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import datetime, timezone
 from json import JSONDecodeError
 from typing import Any, Final, Literal, cast
@@ -46,6 +47,10 @@ from app.core.clients.rate_limit_reset_credits import (
     ResetCreditItem,
     consume_reset_credit,
 )
+from app.core.clients.usage import (
+    ConsumeRateLimitResetCreditResponse as UpstreamConsumeRateLimitResetCreditResponse,
+)
+from app.core.clients.usage import UsageFetchError, consume_rate_limit_reset_credit
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
@@ -56,7 +61,7 @@ from app.core.errors import (
     openai_error,
     response_failed_event,
 )
-from app.core.exceptions import ProxyAuthError, ProxyRateLimitError
+from app.core.exceptions import ProxyAuthError, ProxyRateLimitError, ProxyUpstreamError
 from app.core.metrics.prometheus import PROMETHEUS_AVAILABLE, bridge_public_contract_error_total
 from app.core.middleware.api_firewall import _parse_trusted_proxy_networks, resolve_connection_client_ip
 from app.core.openai.chat_requests import ChatCompletionsRequest
@@ -81,7 +86,7 @@ from app.core.openai.models import (
     OpenAIErrorEnvelope as OpenAIErrorEnvelopeModel,
 )
 from app.core.openai.parsing import parse_response_payload
-from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
+from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest, extract_input_file_ids
 from app.core.openai.v1_requests import V1ResponsesCompactRequest, V1ResponsesRequest
 from app.core.request_locality import resolve_request_client_host
 from app.core.resilience.overload import is_local_overload_error_code, merge_retry_after_headers
@@ -89,7 +94,7 @@ from app.core.runtime_logging import log_error_response
 from app.core.types import JsonValue
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError, resolve_upstream_route
 from app.core.utils.json_guards import is_json_mapping
-from app.core.utils.request_id import get_request_id
+from app.core.utils.request_id import ensure_request_id, get_request_id
 from app.core.utils.sse import (
     CODEX_KEEPALIVE_FRAME,
     SSE_KEEPALIVE_FRAME,
@@ -97,8 +102,8 @@ from app.core.utils.sse import (
     inject_sse_keepalives,
     parse_sse_data_json,
 )
-from app.db.models import Account, AccountStatus
-from app.db.session import get_background_session
+from app.db.models import Account, AccountStatus, ModelSource
+from app.db.session import detach_session_objects, get_background_session
 from app.dependencies import ProxyContext, get_proxy_context, get_proxy_websocket_context
 from app.modules.accounts.auth_manager import AuthManager
 from app.modules.accounts.repository import AccountsRepository
@@ -116,6 +121,31 @@ from app.modules.api_keys.service import (
 )
 from app.modules.firewall.repository import FirewallRepository
 from app.modules.firewall.service import FirewallRepositoryPort, FirewallService
+from app.modules.model_sources.catalog import (
+    source_model_audio_cost_usd,
+    source_model_cost_usd,
+    source_model_supports_reasoning,
+    source_models_to_upstream_models,
+)
+from app.modules.model_sources.forwarding import (
+    ModelSourceForwardingError,
+    SourceUsage,
+    SourceUsageHolder,
+    forward_chat_completion,
+)
+from app.modules.model_sources.forwarding import (
+    forward_audio_transcription as forward_source_audio_transcription,
+)
+from app.modules.model_sources.forwarding import (
+    forward_responses as forward_source_responses,
+)
+from app.modules.model_sources.forwarding import (
+    stream_chat_completion as stream_source_chat_completion,
+)
+from app.modules.model_sources.forwarding import (
+    stream_responses as stream_source_responses,
+)
+from app.modules.model_sources.repository import ModelSourcesRepository
 from app.modules.proxy import affinity as proxy_affinity_module
 from app.modules.proxy import images_service as images_service_module
 from app.modules.proxy import service as proxy_service_module
@@ -125,12 +155,14 @@ from app.modules.proxy.helpers import _rate_limit_details
 from app.modules.proxy.http_bridge_forwarding import parse_forwarded_request
 from app.modules.proxy.request_policy import (
     apply_api_key_enforcement,
+    apply_api_key_enforcement_to_chat_payload,
     enforce_strict_function_tools_format,
     enforce_strict_text_format,
     normalize_responses_request_payload,
     openai_client_payload_error,
     openai_validation_error,
     resolve_model_alias,
+    sanitize_source_chat_payload,
     strip_terminal_compaction_trigger_input,
     validate_model_access,
 )
@@ -138,6 +170,8 @@ from app.modules.proxy.schemas import (
     AccountPoolUsageResponse,
     CodexModelEntry,
     CodexModelsResponse,
+    ConsumeRateLimitResetCreditRequest,
+    ConsumeRateLimitResetCreditResponse,
     FileCreateRequest,
     ModelListItem,
     ModelListResponse,
@@ -157,11 +191,13 @@ from app.modules.proxy.schemas import (
 )
 from app.modules.proxy.types import (
     CreditStatusDetailsData,
+    RateLimitResetCreditsData,
     RateLimitStatusPayloadData,
     RateLimitWindowSnapshotData,
 )
 from app.modules.rate_limit_reset_credits.api import serialize_reset_credit_redeem
 from app.modules.rate_limit_reset_credits.store import get_rate_limit_reset_credits_store
+from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.mappers import usage_history_to_window_row
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 from app.modules.usage.updater import UsageUpdater
@@ -189,6 +225,7 @@ _PUBLIC_RESPONSE_STREAM_TERMINAL_TYPES = frozenset(
     {"response.completed", "response.incomplete", "response.failed", "error"}
 )
 _PUBLIC_RESPONSES_PRE_CREATED_BUFFER_LIMIT = 64
+_SOURCE_LIMITED_STREAM_BUFFER_BYTES = 16 * 1024 * 1024
 
 
 class _V1ResetCreditFreshCredentials:
@@ -523,6 +560,39 @@ async def responses(
         error = openai_validation_error(exc)
         return _logged_error_json_response(request, 400, error)
 
+    raw_source_model = _effective_optional_model_for_api_key(api_key, responses_payload.model)
+    apply_api_key_enforcement(responses_payload, api_key)
+    validate_model_access(api_key, responses_payload.model)
+    try:
+        compact_trigger_input = strip_terminal_compaction_trigger_input(responses_payload)
+    except ClientPayloadError as exc:
+        error = openai_client_payload_error(exc)
+        return _logged_error_json_response(request, 400, error)
+    source = None
+    if compact_trigger_input is None and not extract_input_file_ids(responses_payload.input):
+        source_selection = await _select_responses_model_source(
+            responses_payload.model,
+            api_key,
+            raw_model=raw_source_model,
+            require_streaming=True,
+        )
+        if source_selection is not None:
+            source, selected_model = source_selection
+            responses_payload.model = selected_model
+    if source is not None:
+        # Opportunistic admission gates subscription *account* capacity;
+        # source-routed requests use no account, so a closed/empty pool must
+        # not reject them.
+        responses_payload.stream = True
+        rate_limit_headers = await _rate_limit_headers_for_request(context, api_key)
+        return await _source_responses_response(
+            request,
+            responses_payload,
+            source=source,
+            api_key=api_key,
+            rate_limit_headers=rate_limit_headers,
+        )
+
     return await _stream_responses(
         request,
         responses_payload,
@@ -603,6 +673,37 @@ async def v1_responses(
     except ValidationError as exc:
         error = openai_validation_error(exc)
         return _logged_error_json_response(request, 400, error)
+    raw_source_model = _effective_optional_model_for_api_key(api_key, responses_payload.model)
+    apply_api_key_enforcement(responses_payload, api_key)
+    validate_model_access(api_key, responses_payload.model)
+    # File-referencing Responses requests pin to the subscription account that
+    # registered the upload; that account-scoped invariant applies to /v1
+    # streams too, so such requests must not be source-routed.
+    source_selection = (
+        None
+        if extract_input_file_ids(responses_payload.input)
+        else await _select_responses_model_source(
+            responses_payload.model,
+            api_key,
+            raw_model=raw_source_model,
+            require_streaming=responses_payload.stream is True,
+        )
+    )
+    source = source_selection[0] if source_selection is not None else None
+    if source_selection is not None:
+        responses_payload.model = source_selection[1]
+    if source is not None:
+        # Opportunistic admission gates subscription *account* capacity;
+        # source-routed requests use no account, so a closed/empty pool must
+        # not reject them.
+        rate_limit_headers = await _rate_limit_headers_for_request(context, api_key)
+        return await _source_responses_response(
+            request,
+            responses_payload,
+            source=source,
+            api_key=api_key,
+            rate_limit_headers=rate_limit_headers,
+        )
     if responses_payload.stream:
         return await _stream_responses(
             request,
@@ -1206,6 +1307,24 @@ def _codex_usage_credit_snapshot(
     )
 
 
+def _codex_usage_reset_credits_from_request(request: Request) -> RateLimitResetCreditsData | None:
+    usage_payload = getattr(request.state, "codex_usage_identity_payload", None)
+    summary = getattr(usage_payload, "rate_limit_reset_credits", None)
+    if summary is None:
+        return None
+    return RateLimitResetCreditsData(available_count=max(0, int(summary.available_count or 0)))
+
+
+def _attach_codex_usage_reset_credits(
+    payload: RateLimitStatusPayloadData,
+    request: Request,
+) -> RateLimitStatusPayloadData:
+    reset_credits = _codex_usage_reset_credits_from_request(request)
+    if reset_credits is None:
+        return payload
+    return replace(payload, rate_limit_reset_credits=reset_credits)
+
+
 async def _build_aggregate_credit_limits(session: AsyncSession) -> dict[str, V1UsageLimitResponse]:
     usage_repository = UsageRepository(session)
     primary_latest = await usage_repository.latest_by_account(window="primary")
@@ -1397,7 +1516,19 @@ async def v1_audio_transcriptions(
     prompt: str | None = Form(None),
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
-) -> JSONResponse:
+) -> Response:
+    source = await _select_audio_transcriptions_model_source(model, api_key)
+    if source is not None:
+        validate_model_access(api_key, model)
+        rate_limit_headers = await _rate_limit_headers_for_request(context, api_key)
+        return await _source_audio_transcription_response(
+            request=request,
+            model=model,
+            file=file,
+            source=source,
+            api_key=api_key,
+            rate_limit_headers=rate_limit_headers,
+        )
     if model != _TRANSCRIPTION_MODEL:
         return _logged_error_json_response(
             request,
@@ -2020,26 +2151,34 @@ async def _build_codex_models_response(api_key: ApiKeyData | None) -> Response:
     )
 
     allowed_models = _allowed_models_for_api_key(api_key)
+    exact_source_allowed_models = _exact_source_allowed_models_for_api_key(api_key)
     visibility_allowed_models = _codex_model_visibility_allowed_models(api_key)
 
     registry = get_model_registry()
     models = registry.get_models_with_fallback()
+    source_models = [
+        model
+        for model in await _list_enabled_source_catalog_models(api_key, require_responses=True)
+        if model.raw.get("supports_streaming") is True
+    ]
 
-    if not models:
+    if not models and not source_models:
         await _release_reservation(reservation)
         return JSONResponse(content=CodexModelsResponse(models=[], data=[]).model_dump(mode="json"))
 
     entries: list[CodexModelEntry] = []
     data: list[ModelListItem] = []
+    seen_slugs: set[str] = set()
     for slug, model in models.items():
-        if not model.supported_in_api:
+        if not _is_codex_backend_catalog_model(model):
             continue
         if visibility_allowed_models is None:
-            if not is_public_model(model, allowed_models):
+            if allowed_models is not None and slug not in allowed_models:
                 continue
             entry = _to_codex_model_entry(model)
             entries.append(entry)
-            if entry.visibility == "list":
+            seen_slugs.add(slug)
+            if model.supported_in_api and entry.visibility == "list":
                 data.append(_to_model_list_item(slug, model, created=_model_list_created_at(model)))
             continue
         entry = _to_codex_model_entry(
@@ -2047,8 +2186,34 @@ async def _build_codex_models_response(api_key: ApiKeyData | None) -> Response:
             visibility="list" if slug in visibility_allowed_models else "hide",
         )
         entries.append(entry)
-        if entry.visibility == "list":
+        seen_slugs.add(slug)
+        if model.supported_in_api and entry.visibility == "list":
             data.append(_to_model_list_item(slug, model, created=_model_list_created_at(model)))
+    for model in source_models:
+        if model.slug in seen_slugs:
+            continue
+        if visibility_allowed_models is None:
+            if exact_source_allowed_models is not None:
+                if model.slug not in exact_source_allowed_models:
+                    continue
+            elif not is_public_model(model, allowed_models):
+                continue
+            entry = _to_codex_model_entry(model)
+            entries.append(entry)
+            seen_slugs.add(model.slug)
+            if model.supported_in_api and entry.visibility == "list":
+                data.append(_to_model_list_item(model.slug, model, created=_model_list_created_at(model)))
+            continue
+        entry = _to_codex_model_entry(
+            model,
+            visibility=(
+                "list" if exact_source_allowed_models is None or model.slug in exact_source_allowed_models else "hide"
+            ),
+        )
+        entries.append(entry)
+        seen_slugs.add(model.slug)
+        if model.supported_in_api and entry.visibility == "list":
+            data.append(_to_model_list_item(model.slug, model, created=_model_list_created_at(model)))
     await _release_reservation(reservation)
     return JSONResponse(content=CodexModelsResponse(models=entries, data=data).model_dump(mode="json"))
 
@@ -2061,22 +2226,55 @@ async def _build_models_response(api_key: ApiKeyData | None) -> Response:
     )
 
     allowed_models = _allowed_models_for_api_key(api_key)
+    exact_source_allowed_models = _exact_source_allowed_models_for_api_key(api_key)
     created = int(time.time())
 
     registry = get_model_registry()
     models = registry.get_models_with_fallback()
+    source_models = await _list_enabled_source_catalog_models(api_key)
 
-    if not models:
+    if not models and not source_models:
         await _release_reservation(reservation)
         return JSONResponse(content=_dump_v1_models_response(ModelListResponse(data=[])))
 
     items: list[ModelListItem] = []
+    seen_slugs: set[str] = set()
     for slug, model in models.items():
         if not is_public_model(model, allowed_models):
             continue
         items.append(_to_model_list_item(slug, model, created=created))
+        seen_slugs.add(slug)
+    for model in source_models:
+        if model.slug in seen_slugs:
+            continue
+        if exact_source_allowed_models is not None:
+            if model.slug not in exact_source_allowed_models:
+                continue
+        elif not is_public_model(model, allowed_models):
+            continue
+        items.append(_to_model_list_item(model.slug, model, created=created))
+        seen_slugs.add(model.slug)
     await _release_reservation(reservation)
     return JSONResponse(content=_dump_v1_models_response(ModelListResponse(data=items)))
+
+
+async def _list_enabled_source_catalog_models(
+    api_key: ApiKeyData | None,
+    *,
+    require_responses: bool = False,
+) -> list[UpstreamModel]:
+    async with get_background_session() as session:
+        sources = await ModelSourcesRepository(session).list_enabled_sources()
+        # ``close_session`` rolls back the read transaction, which would
+        # expire the loaded rows; detach them so their attributes stay
+        # readable after this session boundary.
+        detach_session_objects(session)
+    if require_responses:
+        sources = [source for source in sources if source.supports_responses]
+    assigned_source_ids = _allowed_source_ids_for_api_key(api_key)
+    if assigned_source_ids is not None:
+        sources = [source for source in sources if source.id in assigned_source_ids]
+    return source_models_to_upstream_models(sources)
 
 
 def _dump_v1_models_response(response: ModelListResponse) -> dict[str, JsonValue]:
@@ -2095,6 +2293,16 @@ def _allowed_models_for_api_key(api_key: ApiKeyData | None) -> set[str] | None:
     allowed_models = _canonical_model_set(api_key.allowed_models) if api_key and api_key.allowed_models else None
     if api_key and api_key.enforced_model:
         forced = {_canonical_model_slug(api_key.enforced_model)}
+        return forced if allowed_models is None else (allowed_models & forced)
+    return allowed_models
+
+
+def _exact_source_allowed_models_for_api_key(api_key: ApiKeyData | None) -> set[str] | None:
+    if api_key is None:
+        return None
+    allowed_models = set(api_key.allowed_models) if api_key.allowed_models else None
+    if api_key.enforced_model:
+        forced = {api_key.enforced_model}
         return forced if allowed_models is None else (allowed_models & forced)
     return allowed_models
 
@@ -2144,6 +2352,12 @@ def _codex_model_visibility_allowed_models(api_key: ApiKeyData | None) -> set[st
     if api_key is None or not api_key.apply_to_codex_model or not api_key.allowed_models:
         return None
     return _allowed_models_for_api_key(api_key)
+
+
+def _is_codex_backend_catalog_model(model: UpstreamModel) -> bool:
+    if model.supported_in_api:
+        return True
+    return model.raw.get("shell_type") == "shell_command"
 
 
 def _to_codex_model_entry(model: UpstreamModel, *, visibility: str | None = None) -> CodexModelEntry:
@@ -2220,10 +2434,15 @@ def _v1_input_context_window(model: UpstreamModel) -> int:
 
 
 def _v1_max_output_tokens(model: UpstreamModel) -> int | None:
+    raw_value = model.raw.get("max_output_tokens")
+    if isinstance(raw_value, int):
+        return raw_value
     return _V1_MAX_OUTPUT_TOKEN_OVERRIDES.get(model.slug)
 
 
 def _v1_model_capabilities(model: UpstreamModel) -> dict[str, JsonValue]:
+    supports_streaming_raw = model.raw.get("supports_streaming")
+    supports_streaming = supports_streaming_raw if isinstance(supports_streaming_raw, bool) else True
     return {
         "context_length": _v1_input_context_window(model),
         "max_output_tokens": _v1_max_output_tokens(model),
@@ -2231,15 +2450,19 @@ def _v1_model_capabilities(model: UpstreamModel) -> dict[str, JsonValue]:
         "supports_images": _v1_supports_vision(model),
         "supportsImages": _v1_supports_vision(model),
         "supports_vision": _v1_supports_vision(model),
-        "supports_tool_use": True,
-        "supports_streaming": True,
+        "supports_tool_use": model.supports_parallel_tool_calls,
+        "supports_streaming": supports_streaming,
         "input_modalities": list(model.input_modalities),
         "output_modalities": ["text"],
     }
 
 
 def _v1_supports_reasoning(model: UpstreamModel) -> bool:
-    return bool(model.supported_reasoning_levels) or model.supports_reasoning_summaries
+    if bool(model.supported_reasoning_levels) or model.supports_reasoning_summaries:
+        return True
+    # OpenAI-compatible source models advertise no reasoning levels; their
+    # catalog entries opt in via raw metadata so /v1/models reflects reality.
+    return model.raw.get("supports_reasoning") is True
 
 
 def _v1_supports_vision(model: UpstreamModel) -> bool:
@@ -2348,15 +2571,43 @@ async def v1_chat_completions(
         error = openai_validation_error(exc)
         return _logged_error_json_response(request, 400, error, headers=rate_limit_headers)
     apply_api_key_enforcement(responses_payload, api_key)
-    admission_denial = await _opportunistic_admission_denial(request, context, api_key, model=responses_payload.model)
-    if admission_denial is not None:
-        return admission_denial
+    source_selection = (
+        await _select_chat_model_source(
+            responses_payload.model,
+            api_key,
+            raw_model=effective_model,
+            require_streaming=payload.stream is True,
+        )
+        if not responses_shaped_payload and payload.messages is not None
+        else None
+    )
+    source = source_selection[0] if source_selection is not None else None
+    request_model = source_selection[1] if source_selection is not None else responses_payload.model
+    if source is None:
+        # Opportunistic admission gates subscription *account* capacity;
+        # source-routed requests use no account, so a closed/empty pool must
+        # not reject them.
+        admission_denial = await _opportunistic_admission_denial(
+            request, context, api_key, model=responses_payload.model
+        )
+        if admission_denial is not None:
+            return admission_denial
     reservation = await _enforce_request_limits(
         api_key,
-        request_model=responses_payload.model,
+        request_model=request_model,
         request_service_tier=responses_payload.service_tier,
         request_usage_budget=estimate_api_key_request_usage(responses_payload),
     )
+    if source is not None:
+        return await _source_chat_completion_response(
+            request,
+            payload,
+            source=source,
+            model=request_model,
+            api_key=api_key,
+            reservation=reservation,
+            rate_limit_headers=rate_limit_headers,
+        )
     responses_payload.stream = True
     stream = context.service.stream_responses(
         responses_payload,
@@ -2433,6 +2684,691 @@ async def v1_chat_completions(
         status_code=200,
         headers=rate_limit_headers,
     )
+
+
+async def _select_chat_model_source(
+    model: str,
+    api_key: ApiKeyData | None,
+    *,
+    raw_model: str | None = None,
+    require_streaming: bool = False,
+) -> tuple[ModelSource, str] | None:
+    assigned_source_ids = _allowed_source_ids_for_api_key(api_key)
+    exact_allowed_models = set(api_key.allowed_models) if api_key and api_key.allowed_models else None
+    candidates = [candidate for candidate in (raw_model, model) if candidate]
+    if not candidates:
+        return None
+    deduped_candidates = list(dict.fromkeys(candidates))
+    registry_models = get_model_registry().get_models_with_fallback()
+    async with get_background_session() as session:
+        repository = ModelSourcesRepository(session)
+        for candidate in deduped_candidates:
+            if exact_allowed_models is not None and candidate not in exact_allowed_models:
+                continue
+            subscription_model = registry_models.get(candidate)
+            if assigned_source_ids is None and subscription_model is not None:
+                continue
+            source = await repository.find_chat_source_for_model(
+                candidate,
+                allowed_source_ids=assigned_source_ids,
+                require_streaming=require_streaming,
+            )
+            if source is not None:
+                break
+        else:
+            source = None
+        # ``close_session`` rolls back the read transaction, which would
+        # expire the loaded row; detach it so the forwarding path can read
+        # its attributes after this session boundary.
+        detach_session_objects(session)
+        return (source, candidate) if source is not None else None
+
+
+async def _select_responses_model_source(
+    model: str,
+    api_key: ApiKeyData | None,
+    *,
+    raw_model: str | None = None,
+    require_streaming: bool = False,
+) -> tuple[ModelSource, str] | None:
+    assigned_source_ids = _allowed_source_ids_for_api_key(api_key)
+    exact_allowed_models = set(api_key.allowed_models) if api_key and api_key.allowed_models else None
+    candidates = [candidate for candidate in (raw_model, model) if candidate]
+    if not candidates:
+        return None
+    deduped_candidates = list(dict.fromkeys(candidates))
+    registry_models = get_model_registry().get_models_with_fallback()
+    async with get_background_session() as session:
+        repository = ModelSourcesRepository(session)
+        for candidate in deduped_candidates:
+            if exact_allowed_models is not None and candidate not in exact_allowed_models:
+                continue
+            subscription_model = registry_models.get(candidate)
+            if assigned_source_ids is None and subscription_model is not None:
+                continue
+            source = await repository.find_responses_source_for_model(
+                candidate,
+                allowed_source_ids=assigned_source_ids,
+                require_streaming=require_streaming,
+            )
+            if source is not None:
+                break
+        else:
+            source = None
+        # ``close_session`` rolls back the read transaction, which would
+        # expire the loaded row; detach it so the forwarding path can read
+        # its attributes after this session boundary.
+        detach_session_objects(session)
+        return (source, candidate) if source is not None else None
+
+
+async def _select_audio_transcriptions_model_source(model: str, api_key: ApiKeyData | None) -> ModelSource | None:
+    assigned_source_ids = _allowed_source_ids_for_api_key(api_key)
+    exact_allowed_models = _exact_source_allowed_models_for_api_key(api_key)
+    if exact_allowed_models is not None and model not in exact_allowed_models:
+        return None
+    if assigned_source_ids is None and model == _TRANSCRIPTION_MODEL:
+        return None
+    async with get_background_session() as session:
+        source = await ModelSourcesRepository(session).find_audio_transcriptions_source_for_model(
+            model,
+            allowed_source_ids=assigned_source_ids,
+        )
+        detach_session_objects(session)
+        return source
+
+
+def _allowed_source_ids_for_api_key(api_key: ApiKeyData | None) -> set[str] | None:
+    if api_key is None or not api_key.source_assignment_scope_enabled:
+        return None
+    return set(api_key.assigned_source_ids)
+
+
+async def _source_audio_transcription_response(
+    *,
+    request: Request,
+    model: str,
+    file: UploadFile,
+    source: ModelSource,
+    api_key: ApiKeyData | None,
+    rate_limit_headers: Mapping[str, str],
+) -> Response:
+    # Read the downstream form and file before reserving usage: a parse or
+    # upload failure here must not leave the API key's budget held.
+    fields = await _audio_transcription_form_fields(request)
+    audio_bytes = await file.read()
+    reservation = await _enforce_request_limits(
+        api_key,
+        request_model=model,
+        request_service_tier=None,
+    )
+    try:
+        result = await forward_source_audio_transcription(
+            source,
+            audio_bytes=audio_bytes,
+            filename=file.filename or "audio.wav",
+            content_type=file.content_type,
+            fields=fields,
+        )
+    except ModelSourceForwardingError as exc:
+        await _release_reservation(reservation)
+        await _log_source_chat_completion(
+            request,
+            source=source,
+            api_key=api_key,
+            model=model,
+            status="error",
+            error_code=_source_error_code(exc.payload),
+            error_message=_source_error_message(exc.payload),
+            upstream_status_code=exc.upstream_status_code,
+        )
+        return _logged_error_json_response(request, exc.status_code, exc.payload, headers=rate_limit_headers)
+
+    # ASR billing prefers audio duration: when the source model has a
+    # per-minute rate and the response carries a duration, settle cost from
+    # the duration with zero tokens. Only when there is no usable duration
+    # cost do we fall back to token usage (and fail closed for limited keys
+    # if neither is available).
+    audio_cost_usd = (
+        source_model_audio_cost_usd(source, model, result.audio_seconds) if result.audio_seconds is not None else None
+    )
+    if audio_cost_usd is not None:
+        settle_usage: SourceUsage | None = SourceUsage(input_tokens=0, output_tokens=0)
+        cost_override: float | None = audio_cost_usd
+    else:
+        settle_usage = result.usage
+        cost_override = None
+        if result.usage is None and _reservation_requires_usage(reservation):
+            await _release_reservation(reservation)
+            error = openai_error(
+                "usage_unavailable",
+                "OpenAI-compatible model source transcription response did not include token usage "
+                "or a usable duration for a limited API key",
+                error_type="server_error",
+            )
+            await _log_source_chat_completion(
+                request,
+                source=source,
+                api_key=api_key,
+                model=model,
+                status="error",
+                error_code="usage_unavailable",
+                error_message="source transcription response missing token usage and duration cost",
+                upstream_status_code=result.upstream_status_code,
+            )
+            return _logged_error_json_response(request, 502, error, headers=rate_limit_headers)
+
+    settled = await _settle_source_reservation(
+        reservation,
+        source=source,
+        model=model,
+        usage=settle_usage,
+        cost_usd_override=cost_override,
+    )
+    if not settled:
+        await _log_source_chat_completion(
+            request,
+            source=source,
+            api_key=api_key,
+            model=model,
+            status="error",
+            error_code="usage_settlement_failed",
+            error_message="source usage settlement failed",
+            upstream_status_code=result.upstream_status_code,
+        )
+        return _logged_error_json_response(
+            request,
+            502,
+            _source_usage_settlement_failed_error(),
+            headers=rate_limit_headers,
+        )
+    await _log_source_chat_completion(
+        request,
+        source=source,
+        api_key=api_key,
+        model=model,
+        status="success",
+        usage=settle_usage,
+        cost_usd_override=cost_override,
+        upstream_status_code=result.upstream_status_code,
+    )
+    headers = dict(rate_limit_headers)
+    if result.content_type is not None:
+        headers["content-type"] = result.content_type
+    return Response(content=result.body, status_code=200, headers=headers)
+
+
+async def _audio_transcription_form_fields(request: Request) -> list[tuple[str, str]]:
+    form = await request.form()
+    fields: list[tuple[str, str]] = []
+    for key, value in form.multi_items():
+        if key == "file":
+            continue
+        if isinstance(value, str):
+            fields.append((key, value))
+    return fields
+
+
+async def _source_responses_response(
+    request: Request,
+    payload: ResponsesRequest,
+    *,
+    source: ModelSource,
+    api_key: ApiKeyData | None,
+    rate_limit_headers: Mapping[str, str],
+) -> Response:
+    reservation = await _enforce_request_limits(
+        api_key,
+        request_model=payload.model,
+        request_service_tier=payload.service_tier,
+        request_usage_budget=estimate_api_key_request_usage(payload),
+    )
+    source_payload = payload.model_dump(mode="json", exclude_none=True)
+    source_payload["stream"] = bool(payload.stream)
+
+    if payload.stream:
+        try:
+            stream = await stream_source_responses(source, source_payload)
+        except ModelSourceForwardingError as exc:
+            await _release_reservation(reservation)
+            await _log_source_chat_completion(
+                request,
+                source=source,
+                api_key=api_key,
+                model=payload.model,
+                status="error",
+                error_code=_source_error_code(exc.payload),
+                error_message=_source_error_message(exc.payload),
+                upstream_status_code=exc.upstream_status_code,
+            )
+            return _logged_error_json_response(request, exc.status_code, exc.payload, headers=rate_limit_headers)
+        if _reservation_requires_usage(reservation):
+            return await _buffered_limited_source_chat_stream_response(
+                request,
+                source=source,
+                api_key=api_key,
+                model=payload.model,
+                reservation=reservation,
+                stream=stream.body,
+                usage_holder=stream.usage_holder,
+                rate_limit_headers=rate_limit_headers,
+            )
+        body = _source_chat_stream_with_settlement(
+            stream.body,
+            usage_holder=stream.usage_holder,
+            request=request,
+            source=source,
+            api_key=api_key,
+            model=payload.model,
+            reservation=reservation,
+        )
+        return StreamingResponse(
+            body,
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache, no-transform",
+                "X-Accel-Buffering": "no",
+                **rate_limit_headers,
+            },
+        )
+
+    try:
+        result = await forward_source_responses(source, source_payload)
+    except ModelSourceForwardingError as exc:
+        await _release_reservation(reservation)
+        await _log_source_chat_completion(
+            request,
+            source=source,
+            api_key=api_key,
+            model=payload.model,
+            status="error",
+            error_code=_source_error_code(exc.payload),
+            error_message=_source_error_message(exc.payload),
+            upstream_status_code=exc.upstream_status_code,
+        )
+        return _logged_error_json_response(request, exc.status_code, exc.payload, headers=rate_limit_headers)
+
+    if result.usage is None and _reservation_requires_usage(reservation):
+        await _release_reservation(reservation)
+        error = openai_error(
+            "usage_unavailable",
+            "OpenAI-compatible model source response did not include usage for a limited API key",
+            error_type="server_error",
+        )
+        await _log_source_chat_completion(
+            request,
+            source=source,
+            api_key=api_key,
+            model=payload.model,
+            status="error",
+            error_code="usage_unavailable",
+            error_message="source response missing usage",
+            upstream_status_code=result.upstream_status_code,
+        )
+        return _logged_error_json_response(request, 502, error, headers=rate_limit_headers)
+
+    settled = await _settle_source_reservation(reservation, source=source, model=payload.model, usage=result.usage)
+    if not settled:
+        await _log_source_chat_completion(
+            request,
+            source=source,
+            api_key=api_key,
+            model=payload.model,
+            status="error",
+            error_code="usage_settlement_failed",
+            error_message="source usage settlement failed",
+            upstream_status_code=result.upstream_status_code,
+        )
+        return _logged_error_json_response(
+            request,
+            502,
+            _source_usage_settlement_failed_error(),
+            headers=rate_limit_headers,
+        )
+    await _log_source_chat_completion(
+        request,
+        source=source,
+        api_key=api_key,
+        model=payload.model,
+        status="success",
+        usage=result.usage,
+        upstream_status_code=result.upstream_status_code,
+    )
+    return JSONResponse(content=result.payload, status_code=200, headers=rate_limit_headers)
+
+
+async def _source_chat_completion_response(
+    request: Request,
+    payload: ChatCompletionsRequest,
+    *,
+    source: ModelSource,
+    model: str,
+    api_key: ApiKeyData | None,
+    reservation: ApiKeyUsageReservationData | None,
+    rate_limit_headers: Mapping[str, str],
+) -> Response:
+    source_payload = payload.model_dump(mode="json", exclude_none=True)
+    source_payload["model"] = model
+    source_payload["stream"] = bool(payload.stream)
+    apply_api_key_enforcement_to_chat_payload(source_payload, api_key)
+    sanitize_source_chat_payload(
+        source_payload,
+        allow_reasoning=source_model_supports_reasoning(source, model),
+    )
+
+    if payload.stream:
+        stream_options = source_payload.get("stream_options")
+        if isinstance(stream_options, dict):
+            stream_options["include_usage"] = True
+        else:
+            source_payload["stream_options"] = {"include_usage": True}
+        try:
+            stream = await stream_source_chat_completion(source, source_payload)
+        except ModelSourceForwardingError as exc:
+            await _release_reservation(reservation)
+            await _log_source_chat_completion(
+                request,
+                source=source,
+                api_key=api_key,
+                model=model,
+                status="error",
+                error_code=_source_error_code(exc.payload),
+                error_message=_source_error_message(exc.payload),
+                upstream_status_code=exc.upstream_status_code,
+            )
+            return _logged_error_json_response(request, exc.status_code, exc.payload, headers=rate_limit_headers)
+        if _reservation_requires_usage(reservation):
+            return await _buffered_limited_source_chat_stream_response(
+                request,
+                source=source,
+                api_key=api_key,
+                model=model,
+                reservation=reservation,
+                stream=stream.body,
+                usage_holder=stream.usage_holder,
+                rate_limit_headers=rate_limit_headers,
+            )
+        body = _source_chat_stream_with_settlement(
+            stream.body,
+            usage_holder=stream.usage_holder,
+            request=request,
+            source=source,
+            api_key=api_key,
+            model=model,
+            reservation=reservation,
+        )
+        return StreamingResponse(
+            body,
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", **rate_limit_headers},
+        )
+
+    try:
+        result = await forward_chat_completion(source, source_payload)
+    except ModelSourceForwardingError as exc:
+        await _release_reservation(reservation)
+        await _log_source_chat_completion(
+            request,
+            source=source,
+            api_key=api_key,
+            model=model,
+            status="error",
+            error_code=_source_error_code(exc.payload),
+            error_message=_source_error_message(exc.payload),
+            upstream_status_code=exc.upstream_status_code,
+        )
+        return _logged_error_json_response(request, exc.status_code, exc.payload, headers=rate_limit_headers)
+
+    if result.usage is None and _reservation_requires_usage(reservation):
+        await _release_reservation(reservation)
+        error = openai_error(
+            "usage_unavailable",
+            "OpenAI-compatible model source response did not include usage for a limited API key",
+            error_type="server_error",
+        )
+        await _log_source_chat_completion(
+            request,
+            source=source,
+            api_key=api_key,
+            model=model,
+            status="error",
+            error_code="usage_unavailable",
+            error_message="source response missing usage",
+            upstream_status_code=result.upstream_status_code,
+        )
+        return _logged_error_json_response(request, 502, error, headers=rate_limit_headers)
+
+    settled = await _settle_source_reservation(reservation, source=source, model=model, usage=result.usage)
+    if not settled:
+        await _log_source_chat_completion(
+            request,
+            source=source,
+            api_key=api_key,
+            model=model,
+            status="error",
+            error_code="usage_settlement_failed",
+            error_message="source usage settlement failed",
+            upstream_status_code=result.upstream_status_code,
+        )
+        return _logged_error_json_response(
+            request,
+            502,
+            _source_usage_settlement_failed_error(),
+            headers=rate_limit_headers,
+        )
+    await _log_source_chat_completion(
+        request,
+        source=source,
+        api_key=api_key,
+        model=model,
+        status="success",
+        usage=result.usage,
+        upstream_status_code=result.upstream_status_code,
+    )
+    return JSONResponse(content=result.payload, status_code=200, headers=rate_limit_headers)
+
+
+async def _buffered_limited_source_chat_stream_response(
+    request: Request,
+    *,
+    source: ModelSource,
+    api_key: ApiKeyData | None,
+    model: str,
+    reservation: ApiKeyUsageReservationData | None,
+    stream: AsyncIterator[bytes],
+    usage_holder: SourceUsageHolder,
+    rate_limit_headers: Mapping[str, str],
+) -> Response:
+    chunks: list[bytes] = []
+    total_bytes = 0
+    buffer_limit_exceeded = False
+    try:
+        async for chunk in stream:
+            total_bytes += len(chunk)
+            if total_bytes > _SOURCE_LIMITED_STREAM_BUFFER_BYTES:
+                buffer_limit_exceeded = True
+                break
+            chunks.append(chunk)
+        if buffer_limit_exceeded:
+            # Returning while the generator is suspended at a yield would keep
+            # the leased upstream session/response open until GC finalizes the
+            # abandoned generator; close it deterministically.
+            await _aclose_stream(stream)
+            await _release_reservation(reservation)
+            error = openai_error(
+                "source_stream_buffer_limit_exceeded",
+                "OpenAI-compatible model source stream exceeded the limited-key accounting buffer",
+                error_type="server_error",
+            )
+            await _log_source_chat_completion(
+                request,
+                source=source,
+                api_key=api_key,
+                model=model,
+                status="error",
+                error_code="source_stream_buffer_limit_exceeded",
+                error_message="source stream buffer limit exceeded",
+            )
+            return _logged_error_json_response(request, 502, error, headers=rate_limit_headers)
+    except asyncio.CancelledError:
+        # Starlette cancels this task when the downstream client disconnects;
+        # CancelledError is a BaseException, so without this branch the
+        # reservation would stay charged until stale-reservation cleanup.
+        await _aclose_stream(stream)
+        await _release_reservation(reservation)
+        raise
+    except ModelSourceForwardingError as exc:
+        await _release_reservation(reservation)
+        await _log_source_chat_completion(
+            request,
+            source=source,
+            api_key=api_key,
+            model=model,
+            status="error",
+            error_code=_source_error_code(exc.payload),
+            error_message=_source_error_message(exc.payload),
+            upstream_status_code=exc.upstream_status_code,
+        )
+        return _logged_error_json_response(request, exc.status_code, exc.payload, headers=rate_limit_headers)
+    except Exception as exc:
+        await _release_reservation(reservation)
+        error = openai_error(
+            "model_source_stream_error",
+            "OpenAI-compatible model source stream failed",
+            error_type="server_error",
+        )
+        await _log_source_chat_completion(
+            request,
+            source=source,
+            api_key=api_key,
+            model=model,
+            status="error",
+            error_code="model_source_stream_error",
+            error_message=exc.__class__.__name__,
+        )
+        return _logged_error_json_response(request, 502, error, headers=rate_limit_headers)
+
+    if usage_holder.usage is None:
+        await _release_reservation(reservation)
+        error = openai_error(
+            "usage_unavailable",
+            "OpenAI-compatible model source stream did not include usage for a limited API key",
+            error_type="server_error",
+        )
+        await _log_source_chat_completion(
+            request,
+            source=source,
+            api_key=api_key,
+            model=model,
+            status="error",
+            error_code="usage_unavailable",
+            error_message="source stream missing usage",
+        )
+        return _logged_error_json_response(request, 502, error, headers=rate_limit_headers)
+
+    settled = await _settle_source_reservation(reservation, source=source, model=model, usage=usage_holder.usage)
+    if not settled:
+        await _log_source_chat_completion(
+            request,
+            source=source,
+            api_key=api_key,
+            model=model,
+            status="error",
+            error_code="usage_settlement_failed",
+            error_message="source usage settlement failed",
+        )
+        return _logged_error_json_response(
+            request,
+            502,
+            _source_usage_settlement_failed_error(),
+            headers=rate_limit_headers,
+        )
+    await _log_source_chat_completion(
+        request,
+        source=source,
+        api_key=api_key,
+        model=model,
+        status="success",
+        usage=usage_holder.usage,
+    )
+
+    async def body() -> AsyncIterator[bytes]:
+        for chunk in chunks:
+            yield chunk
+
+    return StreamingResponse(
+        body(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", **rate_limit_headers},
+    )
+
+
+async def _source_chat_stream_with_settlement(
+    stream: AsyncIterator[bytes],
+    *,
+    usage_holder: SourceUsageHolder,
+    request: Request,
+    source: ModelSource,
+    api_key: ApiKeyData | None,
+    model: str,
+    reservation: ApiKeyUsageReservationData | None,
+) -> AsyncIterator[bytes]:
+    status = "success"
+    error_code: str | None = None
+    error_message: str | None = None
+    try:
+        async for chunk in stream:
+            yield chunk
+    except (asyncio.CancelledError, GeneratorExit):
+        # Client disconnect surfaces as CancelledError (task cancellation) or
+        # GeneratorExit (generator aclose); both bypass ``except Exception``
+        # and would leave the reservation charged until stale cleanup.
+        status = "error"
+        error_code = "client_disconnected"
+        error_message = "client disconnected before stream completed"
+        await _aclose_stream(stream)
+        await _release_reservation(reservation)
+        raise
+    except ModelSourceForwardingError as exc:
+        status = "error"
+        error_code = _source_error_code(exc.payload)
+        error_message = _source_error_message(exc.payload)
+        await _release_reservation(reservation)
+        raise
+    except Exception as exc:
+        status = "error"
+        error_code = "model_source_stream_error"
+        error_message = exc.__class__.__name__
+        await _release_reservation(reservation)
+        raise
+    else:
+        settled = await _settle_source_reservation(reservation, source=source, model=model, usage=usage_holder.usage)
+        if not settled:
+            status = "error"
+            error_code = "usage_settlement_failed"
+            error_message = "source usage settlement failed"
+        if usage_holder.usage is None and _reservation_requires_usage(reservation):
+            status = "error"
+            error_code = "usage_unavailable"
+            error_message = "source stream missing usage"
+            logger.warning(
+                "source stream completed without usage for limited API key source_id=%s key_id=%s model=%s",
+                source.id,
+                api_key.id if api_key else None,
+                model,
+            )
+    finally:
+        await _log_source_chat_completion(
+            request,
+            source=source,
+            api_key=api_key,
+            model=model,
+            status=status,
+            usage=usage_holder.usage,
+            error_code=error_code,
+            error_message=error_message,
+            upstream_status_code=None,
+        )
 
 
 async def _stream_responses(
@@ -2997,15 +3933,114 @@ async def _transcribe_request(
 @usage_router.get("/api/codex/usage", response_model=RateLimitStatusPayload)
 @usage_router.get("/api/codex/usage/", response_model=RateLimitStatusPayload, include_in_schema=False)
 async def codex_usage(
+    request: Request,
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Depends(validate_codex_usage_identity),
 ) -> RateLimitStatusPayload:
     payload = (
         await _build_codex_usage_payload_for_api_key(api_key)
         if api_key is not None
-        else await context.service.get_rate_limit_payload()
+        else _attach_codex_usage_reset_credits(await context.service.get_rate_limit_payload(), request)
     )
     return RateLimitStatusPayload.from_data(payload)
+
+
+@usage_router.post(
+    "/api/codex/rate-limit-reset-credits/consume",
+    response_model=ConsumeRateLimitResetCreditResponse,
+)
+@usage_router.post(
+    "/api/codex/rate-limit-reset-credits/consume/",
+    response_model=ConsumeRateLimitResetCreditResponse,
+    include_in_schema=False,
+)
+async def codex_consume_rate_limit_reset_credit(
+    request: Request,
+    payload: ConsumeRateLimitResetCreditRequest = Body(...),
+    api_key: ApiKeyData | None = Depends(validate_codex_usage_identity),
+) -> ConsumeRateLimitResetCreditResponse | JSONResponse:
+    if api_key is not None:
+        raise ProxyAuthError("ChatGPT authentication required for usage limit reset credits")
+    redeem_request_id = payload.redeem_request_id.strip()
+    if not redeem_request_id:
+        return _logged_error_json_response(
+            request,
+            400,
+            openai_error(
+                "invalid_request_error",
+                "redeem_request_id must not be empty",
+                error_type="invalid_request_error",
+            ),
+        )
+
+    upstream_response = await _consume_rate_limit_reset_credit_for_request(
+        request,
+        redeem_request_id=redeem_request_id,
+    )
+    account_id = _request_state_str(request, "codex_usage_identity_account_id")
+    if account_id is not None:
+        await get_rate_limit_reset_credits_store().invalidate(account_id)
+    if upstream_response.code in {"reset", "already_redeemed"}:
+        await _force_refresh_codex_usage_identity_account(request)
+    return ConsumeRateLimitResetCreditResponse.model_validate(upstream_response.model_dump())
+
+
+async def _consume_rate_limit_reset_credit_for_request(
+    request: Request,
+    *,
+    redeem_request_id: str,
+) -> UpstreamConsumeRateLimitResetCreditResponse:
+    access_token = _request_state_str(request, "codex_usage_identity_access_token")
+    chatgpt_account_id = _request_state_str(request, "codex_usage_identity_chatgpt_account_id")
+    if access_token is None or chatgpt_account_id is None:
+        raise ProxyAuthError("ChatGPT authentication required for usage limit reset credits")
+    route = getattr(request.state, "codex_usage_identity_route", None)
+    try:
+        return await consume_rate_limit_reset_credit(
+            access_token=access_token,
+            account_id=chatgpt_account_id,
+            redeem_request_id=redeem_request_id,
+            route=route,
+            allow_direct_egress=route is None,
+        )
+    except UsageFetchError as exc:
+        if exc.status_code == 429:
+            raise ProxyRateLimitError(exc.message) from exc
+        if exc.status_code in (401, 403):
+            raise ProxyAuthError("Invalid ChatGPT token or chatgpt-account-id") from exc
+        raise ProxyUpstreamError("Unable to consume ChatGPT usage reset at this time") from exc
+
+
+async def _force_refresh_codex_usage_identity_account(request: Request) -> None:
+    account_id = _request_state_str(request, "codex_usage_identity_account_id")
+    if account_id is None:
+        return
+    access_token = _request_state_str(request, "codex_usage_identity_access_token")
+    async with get_background_session() as session:
+        accounts_repo = AccountsRepository(session)
+        account = await accounts_repo.get_by_id(account_id)
+        if account is None:
+            return
+        updater = UsageUpdater(
+            UsageRepository(session),
+            accounts_repo,
+            AdditionalUsageRepository(session),
+        )
+        usage_written = await updater.force_refresh(
+            account,
+            ignore_refresh_disabled=True,
+            access_token_override=access_token,
+        )
+        if usage_written:
+            get_account_selection_cache().invalidate()
+
+
+def _request_state_str(request: Request, name: str) -> str | None:
+    value = getattr(request.state, name, None)
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None
 
 
 async def _prepend_first(first: str | None, stream: AsyncIterator[str]) -> AsyncIterator[str]:
@@ -3759,6 +4794,147 @@ async def _finalize_image_reservation(
             model,
             exc_info=True,
         )
+
+
+async def _settle_source_reservation(
+    reservation: ApiKeyUsageReservationData | None,
+    *,
+    source: ModelSource,
+    model: str,
+    usage: SourceUsage | None,
+    cost_usd_override: float | None = None,
+) -> bool:
+    if reservation is None:
+        return True
+    try:
+        if usage is None:
+            await _release_reservation(reservation)
+            return True
+        cost_usd = cost_usd_override if cost_usd_override is not None else _source_usage_cost_usd(source, model, usage)
+        async with get_background_session() as session:
+            service = ApiKeysService(ApiKeysRepository(session))
+            await service.finalize_usage_reservation(
+                reservation.reservation_id,
+                model=model,
+                input_tokens=usage.input_tokens,
+                output_tokens=usage.output_tokens,
+                cached_input_tokens=usage.cached_input_tokens,
+                service_tier=None,
+                cost_microdollars=int(cost_usd * 1_000_000) if cost_usd is not None else None,
+            )
+        return True
+    except Exception:
+        logger.warning(
+            "failed to settle source reservation reservation_id=%s model=%s",
+            reservation.reservation_id,
+            model,
+            exc_info=True,
+        )
+        try:
+            await _release_reservation(reservation)
+        except Exception:
+            logger.warning(
+                "failed to release source reservation after settlement failure reservation_id=%s",
+                reservation.reservation_id,
+                exc_info=True,
+            )
+        return False
+
+
+def _source_usage_cost_usd(source: ModelSource, model: str, usage: SourceUsage | None) -> float | None:
+    if usage is None:
+        return None
+    cost_usd = source_model_cost_usd(
+        source,
+        model,
+        input_tokens=usage.input_tokens,
+        output_tokens=usage.output_tokens,
+        cached_input_tokens=usage.cached_input_tokens,
+    )
+    return 0.0 if cost_usd is None else cost_usd
+
+
+async def _log_source_chat_completion(
+    request: Request,
+    *,
+    source: ModelSource,
+    api_key: ApiKeyData | None,
+    model: str,
+    status: str,
+    usage: SourceUsage | None = None,
+    cost_usd_override: float | None = None,
+    error_code: str | None = None,
+    error_message: str | None = None,
+    upstream_status_code: int | None = None,
+) -> None:
+    try:
+        async with get_background_session() as session:
+            await RequestLogsRepository(session).add_log(
+                account_id=None,
+                model_source_id=source.id,
+                model_source_kind=source.kind,
+                api_key_id=api_key.id if api_key is not None else None,
+                request_id=ensure_request_id(),
+                model=model,
+                input_tokens=usage.input_tokens if usage is not None else None,
+                output_tokens=usage.output_tokens if usage is not None else None,
+                cached_input_tokens=usage.cached_input_tokens if usage is not None else None,
+                cost_usd=(
+                    cost_usd_override if cost_usd_override is not None else _source_usage_cost_usd(source, model, usage)
+                ),
+                latency_ms=None,
+                status=status,
+                error_code=error_code,
+                error_message=error_message,
+                upstream_status_code=upstream_status_code,
+                transport="http",
+                upstream_transport="openai_compatible_http",
+                source="model_source",
+                useragent=request.headers.get("user-agent"),
+                client_ip=resolve_request_client_host(request),
+            )
+    except Exception:
+        logger.warning(
+            "failed to write source request log source_id=%s model=%s status=%s",
+            source.id,
+            model,
+            status,
+            exc_info=True,
+        )
+
+
+async def _aclose_stream(stream: AsyncIterator[bytes]) -> None:
+    aclose = getattr(stream, "aclose", None)
+    if aclose is not None:
+        await aclose()
+
+
+def _reservation_requires_usage(reservation: ApiKeyUsageReservationData | None) -> bool:
+    return bool(reservation and reservation.has_applicable_limits)
+
+
+def _source_usage_settlement_failed_error() -> OpenAIErrorEnvelope:
+    return openai_error(
+        "usage_settlement_failed",
+        "OpenAI-compatible model source usage could not be settled",
+        error_type="server_error",
+    )
+
+
+def _source_error_code(payload: Mapping[str, JsonValue]) -> str | None:
+    error = payload.get("error")
+    if not isinstance(error, Mapping):
+        return None
+    code = error.get("code")
+    return code if isinstance(code, str) else None
+
+
+def _source_error_message(payload: Mapping[str, JsonValue]) -> str | None:
+    error = payload.get("error")
+    if not isinstance(error, Mapping):
+        return None
+    message = error.get("message")
+    return message if isinstance(message, str) else None
 
 
 def _effective_model_for_api_key(api_key: ApiKeyData | None, requested_model: str) -> str:
@@ -4656,7 +5832,11 @@ def _parse_error_envelope(payload: JsonValue | OpenAIErrorEnvelope) -> OpenAIErr
 def _openai_invalid_transcription_model_error(model: str) -> OpenAIErrorEnvelope:
     error = openai_error(
         "invalid_request_error",
-        f"Unsupported transcription model '{model}'. Only '{_TRANSCRIPTION_MODEL}' is supported.",
+        (
+            f"Unsupported transcription model '{model}'. Use '{_TRANSCRIPTION_MODEL}' for the subscription-backed "
+            "transcription route, or configure an enabled OpenAI-compatible model source with Audio Transcriptions "
+            "support for this model."
+        ),
         error_type="invalid_request_error",
     )
     error["error"]["param"] = "model"

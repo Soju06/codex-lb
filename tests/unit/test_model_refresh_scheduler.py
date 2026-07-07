@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 from datetime import datetime
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import aiohttp
@@ -150,7 +152,9 @@ async def test_fetch_with_failover_refreshes_http_client_after_transport_error(
 
     result = await scheduler_module._fetch_with_failover([account], encryptor, MagicMock())
 
-    assert result == expected_models
+    assert result is not None
+    assert result.models == expected_models
+    assert result.account_models == {account.id: (account.plan_type, expected_models)}
     refresh_http_client.assert_awaited_once()
     assert fetch_models_for_plan.await_count == 2
     assert encryptor.decrypt.call_count == 2
@@ -223,7 +227,9 @@ async def test_fetch_with_failover_refreshes_http_client_after_token_refresh_tra
 
     result = await scheduler_module._fetch_with_failover([account], encryptor, MagicMock())
 
-    assert result == expected_models
+    assert result is not None
+    assert result.models == expected_models
+    assert result.account_models == {account.id: (account.plan_type, expected_models)}
     refresh_http_client.assert_awaited_once()
     assert ensure_fresh_calls == 2
     fetch_models_for_plan.assert_awaited_once()
@@ -256,3 +262,159 @@ async def test_fetch_with_failover_attempts_transport_recovery_once_when_retry_f
     refresh_http_client.assert_awaited_once()
     assert fetch_models_for_plan.await_count == 3
     assert encryptor.decrypt.call_count == 3
+
+
+@pytest.mark.asyncio
+async def test_fetch_with_failover_unions_same_plan_tiers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    accounts = [_account("account-1"), _account("account-2")]
+    encryptor = MagicMock()
+    encryptor.decrypt.return_value = "access-token"
+    first_models = [_model("gpt-5.4")]
+    first_models[0].raw["service_tiers"] = [{"slug": "default"}]
+    second_models = [_model("gpt-5.4")]
+    second_models[0].raw["service_tiers"] = [{"slug": "fast"}]
+    second_models[0].raw["additional_speed_tiers"] = ["fast"]
+
+    fetch_models_for_plan = AsyncMock(side_effect=[first_models, second_models])
+
+    monkeypatch.setattr(scheduler_module, "AuthManager", _StubAuthManager)
+    monkeypatch.setattr(scheduler_module, "fetch_models_for_plan", fetch_models_for_plan)
+
+    result = await scheduler_module._fetch_with_failover(accounts, encryptor, MagicMock())
+
+    assert result is not None
+    assert [model.slug for model in result.models] == ["gpt-5.4"]
+    assert result.account_models == {
+        accounts[0].id: (accounts[0].plan_type, first_models),
+        accounts[1].id: (accounts[1].plan_type, second_models),
+    }
+    service_tiers = result.models[0].raw["service_tiers"]
+    assert isinstance(service_tiers, list)
+    assert {tier.get("slug") for tier in service_tiers if isinstance(tier, dict)} == {"default", "fast"}
+    assert result.models[0].raw["additional_speed_tiers"] == ["fast"]
+    assert fetch_models_for_plan.await_count == 2
+    assert [call.args[1] for call in fetch_models_for_plan.await_args_list] == [
+        "chatgpt-account-1",
+        "chatgpt-account-2",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_fetch_with_failover_excludes_same_plan_private_model_slug(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    accounts = [_account("account-1"), _account("account-2")]
+    encryptor = MagicMock()
+    encryptor.decrypt.return_value = "access-token"
+    first_models = [_model("gpt-5.4"), _model("private-alpha")]
+    second_models = [_model("gpt-5.4")]
+
+    fetch_models_for_plan = AsyncMock(side_effect=[first_models, second_models])
+
+    monkeypatch.setattr(scheduler_module, "AuthManager", _StubAuthManager)
+    monkeypatch.setattr(scheduler_module, "fetch_models_for_plan", fetch_models_for_plan)
+
+    result = await scheduler_module._fetch_with_failover(accounts, encryptor, MagicMock())
+
+    assert result is not None
+    assert [model.slug for model in result.models] == ["gpt-5.4"]
+    assert fetch_models_for_plan.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_fetch_with_failover_does_not_warn_after_successful_auth_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    account = _account()
+    encryptor = MagicMock()
+    encryptor.decrypt.return_value = "access-token"
+    expected_models = [_model("gpt-5.4")]
+
+    fetch_models_for_plan = AsyncMock(
+        side_effect=[
+            scheduler_module.ModelFetchError(401, "expired token"),
+            expected_models,
+        ]
+    )
+
+    monkeypatch.setattr(scheduler_module, "AuthManager", _StubAuthManager)
+    monkeypatch.setattr(scheduler_module, "fetch_models_for_plan", fetch_models_for_plan)
+
+    with caplog.at_level(logging.WARNING, logger=scheduler_module.logger.name):
+        result = await scheduler_module._fetch_with_failover([account], encryptor, MagicMock())
+
+    assert result is not None
+    assert result.models == expected_models
+    assert result.account_models == {account.id: (account.plan_type, expected_models)}
+    assert fetch_models_for_plan.await_count == 2
+    assert "Model fetch failed" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_refresh_once_closes_account_read_session_before_fetch_models(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account = _account()
+    session_closed = False
+
+    class _Leader:
+        async def try_acquire(self) -> bool:
+            return True
+
+    class _Session:
+        def expunge_all(self) -> None:
+            return None
+
+    @contextlib.asynccontextmanager
+    async def _background_session():
+        nonlocal session_closed
+        session_closed = False
+        try:
+            yield _Session()
+        finally:
+            session_closed = True
+
+    class _AccountsRepo:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def list_accounts(self) -> list[Account]:
+            return [account]
+
+    class _AuthManager:
+        def __init__(self, _repo: object) -> None:
+            pass
+
+        async def ensure_fresh(self, account: Account, *, force: bool = False) -> Account:
+            return account
+
+    class _Registry:
+        async def update(self, *args: Any, **kwargs: Any) -> None:
+            return None
+
+        def get_snapshot(self) -> SimpleNamespace:
+            return SimpleNamespace(models={"gpt-5.4": object()})
+
+    async def _fetch_models_for_plan(access_token: str, account_id: str | None, **kwargs: Any) -> list[UpstreamModel]:
+        assert session_closed is True
+        return [_model("gpt-5.4")]
+
+    monkeypatch.setattr(scheduler_module, "_get_leader_election", lambda: _Leader())
+    monkeypatch.setattr(scheduler_module, "get_background_session", _background_session)
+    monkeypatch.setattr(scheduler_module, "AccountsRepository", _AccountsRepo)
+    monkeypatch.setattr(scheduler_module, "AuthManager", _AuthManager)
+    monkeypatch.setattr(scheduler_module, "fetch_models_for_plan", _fetch_models_for_plan)
+    monkeypatch.setattr(scheduler_module, "get_model_registry", lambda: _Registry())
+    monkeypatch.setattr(
+        scheduler_module,
+        "get_account_selection_cache",
+        lambda: SimpleNamespace(invalidate=lambda: None),
+    )
+    monkeypatch.setattr(scheduler_module, "TokenEncryptor", lambda: SimpleNamespace(decrypt=lambda _value: "access"))
+    monkeypatch.setattr(scheduler_module, "_resolve_upstream_route_for_account", AsyncMock(return_value=None))
+
+    scheduler = scheduler_module.ModelRefreshScheduler(interval_seconds=60, enabled=True)
+    await scheduler._refresh_once()

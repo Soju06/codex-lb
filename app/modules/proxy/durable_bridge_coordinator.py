@@ -8,6 +8,7 @@ from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import HttpBridgeSessionState
+from app.db.session import close_session
 from app.modules.proxy.durable_bridge_repository import (
     DurableBridgeRepository,
     DurableBridgeSessionSnapshot,
@@ -262,7 +263,7 @@ class DurableBridgeSessionCoordinator:
         try:
             yield session
         finally:
-            await session.close()
+            await close_session(session)
 
 
 def _to_lookup(snapshot: DurableBridgeSessionSnapshot) -> DurableBridgeLookup:

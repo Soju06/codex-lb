@@ -758,7 +758,7 @@ def test_compact_strips_tool_fields():
     dumped = request.to_payload()
     assert "tools" not in dumped
     assert "tool_choice" not in dumped
-    assert "parallel_tool_calls" not in dumped
+    assert dumped["parallel_tool_calls"] is False
     assert "text" not in dumped
 
 
@@ -1213,7 +1213,7 @@ def test_v1_compact_strips_tool_fields():
     dumped = request.to_payload()
     assert "tools" not in dumped
     assert "tool_choice" not in dumped
-    assert "parallel_tool_calls" not in dumped
+    assert dumped["parallel_tool_calls"] is False
 
 
 def test_v1_compact_messages_convert():

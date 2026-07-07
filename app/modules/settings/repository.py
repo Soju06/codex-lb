@@ -3,6 +3,7 @@ from __future__ import annotations
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.auth.dashboard_session_ttl import DEFAULT_DASHBOARD_SESSION_TTL_SECONDS
 from app.core.config.settings import get_settings
 from app.db.models import DashboardSettings
 
@@ -32,7 +33,7 @@ class SettingsRepository:
             relative_availability_top_k=5,
             single_account_id=None,
             openai_cache_affinity_max_age_seconds=get_settings().openai_cache_affinity_max_age_seconds,
-            dashboard_session_ttl_seconds=43200,
+            dashboard_session_ttl_seconds=DEFAULT_DASHBOARD_SESSION_TTL_SECONDS,
             warmup_model=get_settings().warmup_model,
             import_without_overwrite=True,
             totp_required_on_login=False,
@@ -56,6 +57,7 @@ class SettingsRepository:
             limit_warmup_exhausted_threshold_percent=99.0,
             limit_warmup_min_available_percent=100.0,
             weekly_pace_working_days="0,1,2,3,4,5,6",
+            weekly_pace_smoothing_minutes=30,
             limit_warmup_staggered_idle_enabled=False,
         )
         self._session.add(row)
@@ -105,6 +107,7 @@ class SettingsRepository:
         limit_warmup_exhausted_threshold_percent: float | None = None,
         limit_warmup_min_available_percent: float | None = None,
         weekly_pace_working_days: str | None = None,
+        weekly_pace_smoothing_minutes: int | None = None,
         guest_access_enabled: bool | None = None,
         limit_warmup_staggered_idle_enabled: bool | None = None,
     ) -> DashboardSettings:
@@ -176,6 +179,8 @@ class SettingsRepository:
             settings.limit_warmup_min_available_percent = limit_warmup_min_available_percent
         if weekly_pace_working_days is not None:
             settings.weekly_pace_working_days = weekly_pace_working_days
+        if weekly_pace_smoothing_minutes is not None:
+            settings.weekly_pace_smoothing_minutes = weekly_pace_smoothing_minutes
         if guest_access_enabled is not None:
             settings.guest_access_enabled = guest_access_enabled
         if limit_warmup_staggered_idle_enabled is not None:

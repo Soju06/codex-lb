@@ -102,12 +102,14 @@ async def test_consume_active_account_returns_success_with_mocked_upstream(async
         access_token: str,
         account_id: str | None,
         credit_id: str,
+        redeem_request_id: str | None = None,
         **kwargs: Any,
     ) -> ConsumeResetCreditResponse:
         captured.update(
             {
                 "consume_account_id": account_id,
                 "consume_credit_id": credit_id,
+                "redeem_request_id": redeem_request_id,
                 "consume_had_token": bool(access_token),
             }
         )
@@ -138,7 +140,10 @@ async def test_consume_active_account_returns_success_with_mocked_upstream(async
 
     await get_rate_limit_reset_credits_store().set(account_id, _snapshot([_credit("credit-1")]))
 
-    response = await async_client.post(f"/api/accounts/{account_id}/rate-limit-reset-credits/consume")
+    response = await async_client.post(
+        f"/api/accounts/{account_id}/rate-limit-reset-credits/consume",
+        json={"redeemRequestId": " dashboard-retry-id "},
+    )
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["code"] == "reset"
@@ -150,6 +155,7 @@ async def test_consume_active_account_returns_success_with_mocked_upstream(async
     assert captured["fetch_had_token"] is True
     assert captured["consume_account_id"] == "acc_reset_active"
     assert captured["consume_credit_id"] == "credit-1"
+    assert captured["redeem_request_id"] == "dashboard-retry-id"
     assert captured["consume_had_token"] is True
 
 

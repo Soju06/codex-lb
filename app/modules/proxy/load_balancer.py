@@ -40,6 +40,7 @@ from app.core.config.settings_cache import get_settings_cache
 from app.core.metrics.prometheus import (
     PROMETHEUS_AVAILABLE,
     account_cap_rejections_total,
+    account_inflight_leases,
     account_lease_acquired_total,
     account_lease_released_total,
     account_lease_stale_reclaimed_total,
@@ -236,6 +237,7 @@ class LoadBalancer:
         runtime.last_selected_at = time.time()
         runtime.version += 1
         _record_account_lease_acquired(kind)
+        _record_account_inflight_leases(account_id, runtime)
         return lease
 
     def _account_lease_allowed_locked(self, account_id: str, *, kind: AccountLeaseKind) -> bool:
@@ -260,6 +262,7 @@ class LoadBalancer:
         runtime.leased_tokens = max(0.0, runtime.leased_tokens - current.estimated_tokens)
         runtime.version += 1
         _record_account_lease_released(current.kind, reason)
+        _record_account_inflight_leases(current.account_id, runtime)
         if reason == "stale":
             _record_account_lease_stale_reclaimed(current.kind)
             logger.warning(
@@ -297,6 +300,7 @@ class LoadBalancer:
         relative_availability_power: float = 2.0,
         relative_availability_top_k: int = 5,
         model: str | None = None,
+        service_tier: str | None = None,
         additional_limit_name: str | None = None,
         account_ids: Collection[str] | None = None,
         exclude_account_ids: Collection[str] | None = None,
@@ -314,6 +318,7 @@ class LoadBalancer:
         async def load_selection_inputs() -> _SelectionInputs:
             selection_inputs = await self._load_selection_inputs(
                 model=model,
+                service_tier=service_tier,
                 additional_limit_name=additional_limit_name,
                 account_ids=scoped_account_ids,
             )
@@ -424,9 +429,9 @@ class LoadBalancer:
                     )
                     selection_states = _filter_states_for_account_caps(states, lease_kind=lease_kind)
                     if not selection_states and states:
-                        result = SelectionResult(None, "No available accounts")
-                        error_message = result.error_message
                         selection_error_code = _account_cap_error_code(lease_kind)
+                        error_message = _account_cap_error_message(lease_kind)
+                        result = SelectionResult(None, error_message)
                         logger.warning(
                             "Account cap exhausted during selection lease_kind=%s reason=%s candidates=%s",
                             lease_kind,
@@ -616,8 +621,8 @@ class LoadBalancer:
                     states if hard_sticky else _filter_states_for_account_caps(states, lease_kind=lease_kind)
                 )
                 if not selection_states and states:
-                    result = SelectionResult(None, "No available accounts")
                     selection_error_code = _account_cap_error_code(lease_kind)
+                    result = SelectionResult(None, _account_cap_error_message(lease_kind))
                     logger.warning(
                         "Account cap exhausted during sticky selection lease_kind=%s reason=%s candidates=%s",
                         lease_kind,
@@ -680,8 +685,8 @@ class LoadBalancer:
                             if lease_kind is not None:
                                 if not self._account_lease_allowed_locked(selected.id, kind=lease_kind):
                                     selected_snapshot = None
-                                    error_message = "No available accounts"
                                     selection_error_code = _account_cap_error_code(lease_kind)
+                                    error_message = _account_cap_error_message(lease_kind)
                                 else:
                                     selected_lease = self._acquire_account_lease_locked(
                                         selected.id,
@@ -774,6 +779,7 @@ class LoadBalancer:
         self,
         *,
         model: str | None,
+        service_tier: str | None = None,
         additional_limit_name: str | None = None,
         account_ids: Collection[str] | None = None,
     ) -> _SelectionInputs:
@@ -788,6 +794,7 @@ class LoadBalancer:
         )
         cache_key = (
             model,
+            service_tier,
             additional_limit_name,
             additional_quota_routing_policies_cache_key,
             None if account_ids is None else tuple(sorted(set(account_ids))),
@@ -826,7 +833,7 @@ class LoadBalancer:
                 accounts = [account for account in accounts if account.id in allowed_account_ids]
             pre_model_filter_accounts = accounts
             if model and _mapped_model_has_registry_entry(model):
-                accounts = _filter_accounts_for_model(pre_model_filter_accounts, model)
+                accounts = _filter_accounts_for_model(pre_model_filter_accounts, model, service_tier=service_tier)
             if model and not accounts:
                 if not all_accounts:
                     selection_inputs = _SelectionInputs(
@@ -1728,6 +1735,20 @@ def _account_cap_error_code(lease_kind: AccountLeaseKind | None) -> str | None:
     return None
 
 
+def _account_cap_error_message(lease_kind: AccountLeaseKind | None) -> str:
+    settings = get_settings()
+    if lease_kind == "response_create":
+        cap = int(getattr(settings, "proxy_account_response_create_limit", 0))
+        return f"Account response-create capacity is exhausted; per-account limit is {cap}"
+    if lease_kind == "stream":
+        cap = int(getattr(settings, "proxy_account_stream_limit", 0))
+        return (
+            f"Account stream capacity is exhausted; per-account limit is {cap}. "
+            "Increase CODEX_LB_PROXY_ACCOUNT_STREAM_LIMIT or wait for active streams to finish."
+        )
+    return "Account capacity is exhausted"
+
+
 def _record_account_lease_acquired(kind: AccountLeaseKind) -> None:
     if PROMETHEUS_AVAILABLE and account_lease_acquired_total is not None:
         account_lease_acquired_total.labels(kind=kind).inc()
@@ -1741,6 +1762,14 @@ def _record_account_lease_released(kind: AccountLeaseKind, reason: str) -> None:
 def _record_account_lease_stale_reclaimed(kind: AccountLeaseKind) -> None:
     if PROMETHEUS_AVAILABLE and account_lease_stale_reclaimed_total is not None:
         account_lease_stale_reclaimed_total.labels(kind=kind).inc()
+
+
+def _record_account_inflight_leases(account_id: str, runtime: RuntimeState) -> None:
+    if PROMETHEUS_AVAILABLE and account_inflight_leases is not None:
+        account_inflight_leases.labels(account_id=account_id, kind="response_create").set(
+            runtime.inflight_response_creates
+        )
+        account_inflight_leases.labels(account_id=account_id, kind="stream").set(runtime.inflight_streams)
 
 
 def _record_account_cap_rejection(kind: AccountLeaseKind | None) -> None:
@@ -2177,8 +2206,22 @@ def _usage_refresh_interval_seconds() -> int:
     return int(getattr(settings, "usage_refresh_interval_seconds", _DEFAULT_USAGE_REFRESH_INTERVAL_SECONDS))
 
 
-def _filter_accounts_for_model(accounts: list[Account], model: str) -> list[Account]:
-    allowed_plans = get_model_registry().plan_types_for_model(model)
+def _filter_accounts_for_model(
+    accounts: list[Account],
+    model: str,
+    *,
+    service_tier: str | None = None,
+) -> list[Account]:
+    registry = get_model_registry()
+    normalized_service_tier = service_tier.strip().lower() if service_tier is not None else None
+    effective_service_tier = None if normalized_service_tier in {"auto", "default"} else service_tier
+    if effective_service_tier is not None:
+        allowed_account_ids = registry.account_ids_for_model_service_tier(model, effective_service_tier)
+        if allowed_account_ids is not None:
+            return [account for account in accounts if account.id in allowed_account_ids]
+        allowed_plans = registry.plan_types_for_model_service_tier(model, effective_service_tier)
+    else:
+        allowed_plans = registry.plan_types_for_model(model)
     if allowed_plans is None:
         return accounts
     return [a for a in accounts if account_plan_matches_allowed(a.plan_type, allowed_plans)]

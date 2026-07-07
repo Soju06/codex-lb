@@ -18,6 +18,15 @@ const AccountRequestUsageSchema = z.object({
   totalCostUsd: z.number().nonnegative(),
 });
 
+export const AccountUsageResetCreditsSchema = z.object({
+  availableCount: z.number().int().nonnegative(),
+});
+
+export const AccountUsageResetCreditsResponseSchema = z.object({
+  accountId: z.string(),
+  rateLimitResetCredits: AccountUsageResetCreditsSchema,
+});
+
 const AccountTokenStatusSchema = z.object({
   expiresAt: z.iso.datetime({ offset: true }).nullable().optional(),
   state: z.string().nullable().optional(),
@@ -207,6 +216,24 @@ export const AccountProbeResponseSchema = z.object({
   accountStatusAfter: z.string(),
 });
 
+export const AccountUsageResetConsumeRequestSchema = z.object({
+  redeemRequestId: z.string().trim().min(1).optional(),
+});
+
+export const AccountUsageResetConsumeResponseSchema = z.object({
+  status: z.string(),
+  accountId: z.string(),
+  code: z.string(),
+  windowsReset: z.number().int().nonnegative(),
+  usageWritten: z.boolean(),
+  primaryUsedPercentBefore: z.number().nullable(),
+  primaryUsedPercentAfter: z.number().nullable(),
+  secondaryUsedPercentBefore: z.number().nullable(),
+  secondaryUsedPercentAfter: z.number().nullable(),
+  accountStatusBefore: z.string(),
+  accountStatusAfter: z.string(),
+});
+
 const AccountRoutingPolicySchema = z.enum(["normal", "burn_first", "preserve"]);
 
 export const AccountAliasRequestSchema = z.object({
@@ -325,7 +352,19 @@ export type AccountAdditionalWindow = z.infer<
 export type AccountAdditionalQuota = z.infer<
   typeof AccountAdditionalQuotaSchema
 >;
+export type AccountUsageResetCredits = z.infer<
+  typeof AccountUsageResetCreditsSchema
+>;
+export type AccountUsageResetCreditsResponse = z.infer<
+  typeof AccountUsageResetCreditsResponseSchema
+>;
 export type AccountProbeResponse = z.infer<typeof AccountProbeResponseSchema>;
+export type AccountUsageResetConsumeRequest = z.infer<
+  typeof AccountUsageResetConsumeRequestSchema
+>;
+export type AccountUsageResetConsumeResponse = z.infer<
+  typeof AccountUsageResetConsumeResponseSchema
+>;
 export type AccountTrendsResponse = z.infer<typeof AccountTrendsResponseSchema>;
 export type OpenCodeAuthJson = z.infer<typeof OpenCodeAuthJsonSchema>;
 export type CodexAuthJson = z.infer<typeof CodexAuthJsonSchema>;

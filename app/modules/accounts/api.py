@@ -9,7 +9,14 @@ from app.core.auth.dependencies import (
     validate_dashboard_session,
 )
 from app.core.auth.refresh import RefreshError
-from app.core.exceptions import DashboardBadRequestError, DashboardConflictError, DashboardNotFoundError
+from app.core.clients.usage import UsageFetchError
+from app.core.exceptions import (
+    DashboardBadRequestError,
+    DashboardConflictError,
+    DashboardNotFoundError,
+    DashboardUpstreamError,
+)
+from app.core.upstream_proxy import UpstreamProxyRouteError
 from app.dependencies import AccountsContext, get_accounts_context
 from app.modules.accounts.repository import AccountIdentityConflictError
 from app.modules.accounts.schemas import (
@@ -32,8 +39,17 @@ from app.modules.accounts.schemas import (
     AccountTrendsResponse,
     AccountUpdateRequest,
     AccountUpdateResponse,
+    AccountUsageResetConsumeRequest,
+    AccountUsageResetConsumeResponse,
+    AccountUsageResetCreditsResponse,
 )
-from app.modules.accounts.service import AccountNotProbableError, AccountStateTransitionError, InvalidAuthJsonError
+from app.modules.accounts.service import (
+    AccountNotProbableError,
+    AccountStateTransitionError,
+    AccountUsageResetConsumeUnavailableError,
+    AccountUsageResetCreditsUnavailableError,
+    InvalidAuthJsonError,
+)
 
 router = APIRouter(
     prefix="/api/accounts",
@@ -58,6 +74,70 @@ async def get_account_trends(
     result = await context.service.get_account_trends(account_id)
     if not result:
         raise DashboardNotFoundError("Account not found", code="account_not_found")
+    return result
+
+
+@router.get("/{account_id}/usage-reset-credits", response_model=AccountUsageResetCreditsResponse)
+async def get_account_usage_reset_credits(
+    account_id: str,
+    context: AccountsContext = Depends(get_accounts_context),
+) -> AccountUsageResetCreditsResponse:
+    try:
+        result = await context.service.get_usage_reset_credits(account_id)
+    except AccountUsageResetCreditsUnavailableError as exc:
+        raise DashboardConflictError(str(exc), code="account_usage_reset_credits_unavailable") from exc
+    except UpstreamProxyRouteError as exc:
+        raise DashboardUpstreamError(
+            f"Unable to resolve upstream proxy route for usage reset credits: {exc.reason}",
+            code="upstream_proxy_unavailable",
+        ) from exc
+    except UsageFetchError as exc:
+        raise DashboardUpstreamError(
+            f"Usage reset credits fetch failed: {exc.message}",
+            code="usage_reset_credits_fetch_failed",
+        ) from exc
+    if not result:
+        raise DashboardNotFoundError("Account not found", code="account_not_found")
+    return result
+
+
+@router.post("/{account_id}/usage-reset-credits/consume", response_model=AccountUsageResetConsumeResponse)
+async def consume_account_usage_reset_credit(
+    request: Request,
+    account_id: str,
+    payload: AccountUsageResetConsumeRequest | None = None,
+    _write_access=Depends(require_dashboard_write_access),
+    context: AccountsContext = Depends(get_accounts_context),
+) -> AccountUsageResetConsumeResponse:
+    try:
+        result = await context.service.consume_usage_reset_credit(
+            account_id,
+            redeem_request_id=payload.redeem_request_id if payload is not None else None,
+        )
+    except AccountUsageResetConsumeUnavailableError as exc:
+        raise DashboardConflictError(str(exc), code="account_usage_reset_consume_unavailable") from exc
+    except UpstreamProxyRouteError as exc:
+        raise DashboardUpstreamError(
+            f"Unable to resolve upstream proxy route for usage reset: {exc.reason}",
+            code="upstream_proxy_unavailable",
+        ) from exc
+    except UsageFetchError as exc:
+        raise DashboardUpstreamError(
+            f"Usage reset consume failed: {exc.message}",
+            code="usage_reset_consume_failed",
+        ) from exc
+    if result is None:
+        raise DashboardNotFoundError("Account not found", code="account_not_found")
+    AuditService.log_async(
+        "account_usage_reset_consumed",
+        actor_ip=request.client.host if request.client else None,
+        details={
+            "account_id": result.account_id,
+            "code": result.code,
+            "windows_reset": result.windows_reset,
+            "usage_written": result.usage_written,
+        },
+    )
     return result
 
 

@@ -42,6 +42,7 @@ from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteErr
 from app.db.models import Account, AccountStatus
 from app.dependencies import AccountsContext, get_accounts_context
 from app.modules.accounts.auth_manager import AuthManager
+from app.modules.accounts.schemas import AccountUsageResetConsumeRequest
 from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.rate_limit_reset_credits.store import (
     RateLimitResetCreditsStore,
@@ -131,6 +132,7 @@ async def get_rate_limit_reset_credits(
 async def consume_rate_limit_reset_credit(
     request: Request,
     account_id: str,
+    payload: AccountUsageResetConsumeRequest | None = None,
     _write_access=Depends(require_dashboard_write_access),
     context: AccountsContext = Depends(get_accounts_context),
 ) -> ConsumeResetCreditResponseSchema:
@@ -149,6 +151,7 @@ async def consume_rate_limit_reset_credit(
             auth_manager=context.service._auth_manager,
             refresh_usage=_build_refresh_usage_callback(context),
             resolve_route=_resolve_reset_credit_route,
+            redeem_request_id=payload.redeem_request_id if payload is not None else None,
         )
     except RefreshError as exc:
         if exc.is_permanent:
@@ -188,6 +191,7 @@ async def _redeem_soonest_reset_credit(
     auth_manager: AuthManager | None = None,
     refresh_usage: RefreshUsageFn | None = None,
     resolve_route: ResolveRouteFn | None = None,
+    redeem_request_id: str | None = None,
 ) -> _RedeemResetCreditOutcome:
     _assert_account_can_redeem_reset_credit(account)
     effective_fetch_fn = fetch_fn or fetch_reset_credits
@@ -203,6 +207,7 @@ async def _redeem_soonest_reset_credit(
             auth_manager=auth_manager,
             refresh_usage=refresh_usage,
             resolve_route=resolve_route,
+            redeem_request_id=redeem_request_id,
         )
 
 
@@ -241,6 +246,7 @@ async def _redeem_soonest_reset_credit_locked(
     auth_manager: AuthManager | None,
     refresh_usage: RefreshUsageFn | None,
     resolve_route: ResolveRouteFn | None,
+    redeem_request_id: str | None,
 ) -> _RedeemResetCreditOutcome:
     redeem_account = account
     if auth_manager is not None:
@@ -248,7 +254,10 @@ async def _redeem_soonest_reset_credit_locked(
 
     cached_snapshot = store.get(account.id)
     cached_credit = _select_soonest_available_credit(cached_snapshot)
-    if cached_credit is None:
+    pending_credit_id = (
+        store.get_redeem_request_credit_id(account.id, redeem_request_id) if redeem_request_id is not None else None
+    )
+    if cached_credit is None and pending_credit_id is None:
         raise DashboardConflictError("No available reset credit", code="no_available_reset_credit")
 
     access_token = encryptor.decrypt(redeem_account.access_token_encrypted)
@@ -267,15 +276,25 @@ async def _redeem_soonest_reset_credit_locked(
         raise _translate_fetch_error(exc) from exc
 
     credit = _select_soonest_available_credit_from_response(credits_response)
-    if credit is None:
+    if pending_credit_id is not None:
+        credit_id = pending_credit_id
+    elif credit is None:
         await store.set(account.id, build_snapshot(credits_response))
-        raise DashboardConflictError("No available reset credit", code="no_available_reset_credit")
+        if cached_credit is None or redeem_request_id is None:
+            raise DashboardConflictError("No available reset credit", code="no_available_reset_credit")
+        credit_id = cached_credit.id
+        await store.remember_redeem_request(account.id, redeem_request_id, credit_id)
+    else:
+        credit_id = credit.id
+        if redeem_request_id is not None:
+            await store.remember_redeem_request(account.id, redeem_request_id, credit_id)
 
     try:
         result = await effective_consume_fn(
             access_token,
             redeem_account.chatgpt_account_id,
-            credit.id,
+            credit_id,
+            redeem_request_id=redeem_request_id,
             route=route,
             allow_direct_egress=route is None,
         )

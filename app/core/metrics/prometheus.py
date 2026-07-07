@@ -207,6 +207,13 @@ if PROMETHEUS_AVAILABLE:
         ["kind"],
         registry=REGISTRY,
     )
+    account_inflight_leases = Gauge(
+        "codex_lb_account_inflight_leases",
+        "Current in-process account pressure leases by account and kind",
+        ["account_id", "kind"],
+        registry=REGISTRY,
+        **_gauge_kwargs,
+    )
     account_cap_rejections_total = Counter(
         "codex_lb_account_cap_rejections_total",
         "Total account-local cap rejections by kind",
@@ -259,6 +266,7 @@ else:
     account_lease_acquired_total: CounterLike | None = None
     account_lease_released_total: CounterLike | None = None
     account_lease_stale_reclaimed_total: CounterLike | None = None
+    account_inflight_leases: GaugeLike | None = None
     account_cap_rejections_total: CounterLike | None = None
 
     def make_scrape_registry() -> None:
@@ -274,6 +282,7 @@ __all__ = [
     "REGISTRY",
     "active_connections",
     "account_cap_rejections_total",
+    "account_inflight_leases",
     "account_lease_acquired_total",
     "account_lease_released_total",
     "account_lease_stale_reclaimed_total",

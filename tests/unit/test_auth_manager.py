@@ -545,6 +545,78 @@ async def test_ensure_fresh_singleflights_refresh_admission_for_same_account(mon
 
 
 @pytest.mark.asyncio
+async def test_ensure_fresh_singleflight_coalesces_owned_and_nonowned_sessions(monkeypatch):
+    started = asyncio.Event()
+    release = asyncio.Event()
+    refresh_calls = 0
+    scope_state = {"opened": False, "closed": False}
+
+    async def _fake_refresh(_: str, **_kwargs: object) -> TokenRefreshResult:
+        nonlocal refresh_calls
+        refresh_calls += 1
+        started.set()
+        await release.wait()
+        return TokenRefreshResult(
+            access_token="new-access",
+            refresh_token="new-refresh",
+            id_token="new-id",
+            account_id="acc_sf_owner",
+            plan_type="plus",
+            email=None,
+        )
+
+    @asynccontextmanager
+    async def _refresh_scope() -> AsyncIterator[AccountsRepositoryPort]:
+        scope_state["opened"] = True
+        try:
+            yield cast(AccountsRepositoryPort, owned_repo)
+        finally:
+            scope_state["closed"] = True
+
+    monkeypatch.setattr(auth_manager_module, "refresh_access_token", _fake_refresh)
+
+    encryptor = TokenEncryptor()
+    stale_refresh = utcnow().replace(year=utcnow().year - 1)
+    account_payload = dict(
+        id="acc_sf_owner",
+        email="user@example.com",
+        plan_type="plus",
+        access_token_encrypted=encryptor.encrypt("access-old"),
+        refresh_token_encrypted=encryptor.encrypt("refresh-old"),
+        id_token_encrypted=encryptor.encrypt("id-old"),
+        last_refresh=stale_refresh,
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
+    )
+    request_account = Account(**account_payload)
+    owned_account = Account(**account_payload)
+    request_repo = _DummyRepo()
+    owned_repo = _DummyRepo()
+
+    nonowned_manager = AuthManager(cast(AccountsRepositoryPort, request_repo))
+    owned_manager = AuthManager(
+        cast(AccountsRepositoryPort, request_repo),
+        refresh_repo_factory=_refresh_scope,
+    )
+
+    nonowned_task = asyncio.create_task(nonowned_manager.ensure_fresh(request_account, force=True))
+    await started.wait()
+    owned_task = asyncio.create_task(owned_manager.ensure_fresh(owned_account, force=True))
+    await asyncio.sleep(0.01)
+
+    assert not owned_task.done()
+
+    release.set()
+    await asyncio.gather(nonowned_task, owned_task)
+
+    assert refresh_calls == 1
+    assert request_repo.tokens_payload is not None
+    assert request_repo.tokens_payload["account_id"] == "acc_sf_owner"
+    assert owned_repo.tokens_payload is None
+    assert scope_state == {"opened": False, "closed": False}
+
+
+@pytest.mark.asyncio
 async def test_ensure_fresh_reuses_recent_failure_without_reissuing_refresh(monkeypatch):
     refresh_calls = 0
 

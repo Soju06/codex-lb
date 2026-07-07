@@ -215,7 +215,10 @@ def _http_bridge_account_capacity_wait_seconds(exc: ProxyResponseError) -> float
     code, message = _proxy_error_code_message(exc)
     if code in {"account_response_create_cap", "account_stream_cap", "capacity_exhausted_active_sessions"}:
         return None
-    return _account_selection_recovery_sleep_seconds_from_message(message)
+    return _account_selection_recovery_sleep_seconds_from_message(
+        message,
+        error_code=code,
+    )
 
 
 def _http_bridge_capacity_wait_plan(
@@ -661,6 +664,7 @@ class _HTTPBridgeStreamingMixin:
                     affinity=affinity,
                     api_key=api_key,
                     request_model=effective_payload.model,
+                    request_service_tier=request_state.requested_service_tier,
                     idle_ttl_seconds=_effective_http_bridge_idle_ttl_seconds(
                         affinity=affinity,
                         idle_ttl_seconds=idle_ttl_seconds,
@@ -826,6 +830,7 @@ class _HTTPBridgeStreamingMixin:
                             affinity=affinity,
                             api_key=api_key,
                             request_model=effective_payload.model,
+                            request_service_tier=request_state.requested_service_tier,
                             idle_ttl_seconds=_effective_http_bridge_idle_ttl_seconds(
                                 affinity=affinity,
                                 idle_ttl_seconds=idle_ttl_seconds,
@@ -1309,6 +1314,7 @@ class _HTTPBridgeStreamingMixin:
                         affinity=affinity,
                         api_key=api_key,
                         request_model=retry_payload.model,
+                        request_service_tier=request_state.requested_service_tier,
                         idle_ttl_seconds=_effective_http_bridge_idle_ttl_seconds(
                             affinity=affinity,
                             idle_ttl_seconds=idle_ttl_seconds,

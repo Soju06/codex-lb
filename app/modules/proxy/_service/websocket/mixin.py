@@ -390,6 +390,7 @@ from app.modules.proxy._service.websocket.helpers import (
     _websocket_event_error_param,
     _websocket_event_error_type,
     _websocket_full_resend_conflicts_with_visible_pending,
+    _websocket_input_items_are_self_contained_fresh_replay,
     _websocket_precreated_auth_error_code,
     _websocket_precreated_retry_error_code,
     _websocket_receive_timeout_for_pending_requests,
@@ -1389,6 +1390,7 @@ class _WebSocketMixin:
         request_state.useragent_group = useragent_group
         request_state.client_ip = client_ip
         request_state.expose_stale_previous_response_classifier = codex_session_affinity
+        original_full_resend_input: JsonValue | None = None
         if session_anchor is not None:
             request_state.proxy_injected_previous_response_id = True
             request_state.input_item_count = original_input_item_count or request_state.input_item_count
@@ -1401,7 +1403,20 @@ class _WebSocketMixin:
                     request_state=request_state,
                     transport=_REQUEST_TRANSPORT_WEBSOCKET,
                 )
-            request_state.fresh_upstream_request_is_retry_safe = request_state.fresh_upstream_request_text is not None
+                original_full_resend_input = (
+                    original_full_resend_payload.get("input")
+                    if isinstance(original_full_resend_payload, dict)
+                    else original_full_resend_payload.input
+                )
+            request_state.fresh_upstream_request_is_retry_safe = bool(
+                request_state.fresh_upstream_request_text is not None
+                and isinstance(original_full_resend_input, list)
+                and _websocket_input_items_are_self_contained_fresh_replay(
+                    cast(list[JsonValue], original_full_resend_input)
+                )
+            )
+            if not request_state.fresh_upstream_request_is_retry_safe:
+                request_state.fresh_upstream_request_text = None
             _facade().logger.info(
                 "websocket_session_anchor_injected request_id=%s response_id=%s original_items=%s trimmed_to=%s",
                 request_state.request_id,
@@ -1707,6 +1722,7 @@ class _WebSocketMixin:
                     prefer_earlier_reset_window=prefer_earlier_reset_window,
                     routing_strategy=routing_strategy,
                     model=model,
+                    service_tier=request_state.requested_service_tier,
                     exclude_account_ids=exclude_account_ids,
                     preferred_account_id=preferred_account_id,
                     require_security_work_authorized=require_security_work_authorized,

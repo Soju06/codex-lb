@@ -2541,11 +2541,18 @@ async def v1_chat_completions(
         error = openai_validation_error(exc)
         return _logged_error_json_response(request, 400, error, headers=rate_limit_headers)
     apply_api_key_enforcement(responses_payload, api_key)
-    source = (
-        await _select_chat_model_source(responses_payload.model, api_key, require_streaming=payload.stream is True)
+    source_selection = (
+        await _select_chat_model_source(
+            responses_payload.model,
+            api_key,
+            raw_model=effective_model,
+            require_streaming=payload.stream is True,
+        )
         if not responses_shaped_payload and payload.messages is not None
         else None
     )
+    source = source_selection[0] if source_selection is not None else None
+    request_model = source_selection[1] if source_selection is not None else responses_payload.model
     if source is None:
         # Opportunistic admission gates subscription *account* capacity;
         # source-routed requests use no account, so a closed/empty pool must
@@ -2557,7 +2564,7 @@ async def v1_chat_completions(
             return admission_denial
     reservation = await _enforce_request_limits(
         api_key,
-        request_model=responses_payload.model,
+        request_model=request_model,
         request_service_tier=responses_payload.service_tier,
         request_usage_budget=estimate_api_key_request_usage(responses_payload),
     )
@@ -2566,7 +2573,7 @@ async def v1_chat_completions(
             request,
             payload,
             source=source,
-            model=responses_payload.model,
+            model=request_model,
             api_key=api_key,
             reservation=reservation,
             rate_limit_headers=rate_limit_headers,
@@ -2653,23 +2660,35 @@ async def _select_chat_model_source(
     model: str,
     api_key: ApiKeyData | None,
     *,
+    raw_model: str | None = None,
     require_streaming: bool = False,
-) -> ModelSource | None:
+) -> tuple[ModelSource, str] | None:
     assigned_source_ids = _allowed_source_ids_for_api_key(api_key)
-    subscription_model = get_model_registry().get_models_with_fallback().get(model)
-    if assigned_source_ids is None and subscription_model is not None:
+    candidates = [candidate for candidate in (raw_model, model) if candidate]
+    if not candidates:
         return None
+    deduped_candidates = list(dict.fromkeys(candidates))
+    registry_models = get_model_registry().get_models_with_fallback()
     async with get_background_session() as session:
-        source = await ModelSourcesRepository(session).find_chat_source_for_model(
-            model,
-            allowed_source_ids=assigned_source_ids,
-            require_streaming=require_streaming,
-        )
+        repository = ModelSourcesRepository(session)
+        for candidate in deduped_candidates:
+            subscription_model = registry_models.get(candidate)
+            if assigned_source_ids is None and subscription_model is not None:
+                continue
+            source = await repository.find_chat_source_for_model(
+                candidate,
+                allowed_source_ids=assigned_source_ids,
+                require_streaming=require_streaming,
+            )
+            if source is not None:
+                break
+        else:
+            source = None
         # ``close_session`` rolls back the read transaction, which would
         # expire the loaded row; detach it so the forwarding path can read
         # its attributes after this session boundary.
         detach_session_objects(session)
-        return source
+        return (source, candidate) if source is not None else None
 
 
 async def _select_responses_model_source(

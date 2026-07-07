@@ -1074,6 +1074,33 @@ async def test_source_chat_without_usage_ignores_limits_for_other_models(async_c
 
 
 @pytest.mark.asyncio
+async def test_source_chat_prefers_raw_alias_like_model_slug(async_client, source_upstream):
+    captured: dict[str, object] = {}
+
+    async def capture(request: web.Request) -> web.Response:
+        captured.update(await request.json())
+        return web.json_response(_chat_completion_body("gpt-5-high"))
+
+    base_url = await source_upstream(capture)
+    model = "gpt-5-high"
+    await _create_model_source(
+        async_client,
+        name="alias-like-source",
+        model=model,
+        base_url=base_url,
+    )
+
+    response = await async_client.post(
+        "/v1/chat/completions",
+        json={"model": model, "messages": [{"role": "user", "content": "hi"}]},
+    )
+
+    assert response.status_code == 200
+    assert captured["model"] == model
+    assert response.json()["model"] == model
+
+
+@pytest.mark.asyncio
 async def test_v1_models_metadata_reflects_reasoning_optin(async_client):
     await _create_model_source(
         async_client,

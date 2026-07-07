@@ -160,9 +160,9 @@ export function AccountsPage() {
         >
           <div
             data-testid="accounts-list-panel"
-            className="relative min-w-0"
+            className="min-w-0 min-h-0"
           >
-            <div className="flex min-h-0 min-w-0 flex-col overflow-hidden rounded-xl border bg-card p-3 sm:p-4 lg:absolute lg:inset-0">
+            <div className="flex min-h-0 min-w-0 flex-col rounded-xl border bg-card p-3 sm:p-4">
               <AccountList
                 accounts={accounts}
                 selectedAccountId={resolvedSelectedAccountId}

@@ -173,11 +173,43 @@ describe("AccountsPage", () => {
       "min-w-0",
       "lg:grid-cols-[minmax(18rem,22rem)_minmax(0,1fr)]",
     );
-    expect(screen.getByTestId("accounts-list-panel")).toHaveClass("min-w-0");
+    expect(screen.getByTestId("accounts-list-panel")).toHaveClass("min-w-0", "min-h-0");
     expect(screen.getByRole("heading", { name: /very\.long\.account/i })).toHaveClass(
       "min-w-0",
       "truncate",
     );
+  });
+
+  it("keeps helper instructions accessible when no accounts exist", async () => {
+    const user = userEvent.setup();
+
+    mockedUseAccounts.mockReturnValue({
+      accountsQuery: {
+        data: [],
+        error: null,
+        refetch: vi.fn(),
+      },
+      importMutation: idleMutation(),
+      pauseMutation: idleMutation(),
+      resumeMutation: idleMutation(),
+      probeMutation: idleMutation(),
+      usageResetMutation: idleMutation(),
+      deleteMutation: idleMutation(),
+      exportAuthMutation: idleMutation(),
+      setAliasMutation: idleMutation(),
+      limitWarmupMutation: idleMutation(),
+      routingPolicyMutation: idleMutation(),
+      updateMutation: idleMutation(),
+    } as unknown as ReturnType<typeof useAccounts>);
+
+    render(
+      <MemoryRouter>
+        <AccountsPage />
+      </MemoryRouter>,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Need help?" }));
+    expect(screen.getByText("Windows OAuth Help")).toBeInTheDocument();
   });
 
   it("confirms before resetting selected account usage", async () => {

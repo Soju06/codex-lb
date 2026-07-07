@@ -25,7 +25,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -38,6 +38,9 @@ from app.core.metrics.prometheus import codex_lb_claude_refresh_total
 from app.db.models import Account, AccountStatus
 from app.db.session import get_background_session
 from app.modules.claude.repository import ClaudeAccountRepository, SqlClaudeAccountRepository
+
+if TYPE_CHECKING:
+    from app.modules.claude.oauth.tokens import ClaudeOauthClaims
 
 logger = logging.getLogger(__name__)
 
@@ -297,6 +300,35 @@ class ClaudeAuthManager:
         }
         created = await self._repo.insert(row)
         return created.id
+
+    async def add_claude_account_from_oauth(
+        self,
+        *,
+        access_token: str,
+        refresh_token: str,
+        expires_in: int,
+        id_token_claims: "ClaudeOauthClaims",
+    ) -> str:
+        """OAuth-driven variant of :meth:`add_claude_account`.
+
+        Same encryption + insert path; the only difference is that
+        ``claude_account_uuid``, ``scopes``, ``user_email``, and
+        ``user_organization_uuid`` are sourced from a typed
+        :class:`app.modules.claude.oauth.tokens.ClaudeOauthClaims` instead
+        of raw request body strings.
+
+        Raises :class:`ClaudeAccountAlreadyExists` when the UUID is already
+        present in the pool.
+        """
+        return await self.add_claude_account(
+            claude_account_uuid=id_token_claims.claude_account_uuid,
+            access_token=access_token,
+            refresh_token=refresh_token,
+            expires_in_seconds=expires_in,
+            scopes=id_token_claims.scopes,
+            user_email=id_token_claims.user_email,
+            user_organization_uuid=id_token_claims.user_organization_uuid,
+        )
 
     # ---------------------------------------------------- find_due_rotation
 

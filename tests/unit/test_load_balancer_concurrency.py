@@ -136,6 +136,24 @@ def _usage_row_with_percent(
     return row
 
 
+class _FakeGaugeChild:
+    def __init__(self, values: dict[tuple[str, str], float], account_id: str, kind: str) -> None:
+        self._values = values
+        self._account_id = account_id
+        self._kind = kind
+
+    def set(self, value: float) -> None:
+        self._values[(self._account_id, self._kind)] = value
+
+
+class _FakeAccountInflightGauge:
+    def __init__(self) -> None:
+        self.values: dict[tuple[str, str], float] = {}
+
+    def labels(self, *, account_id: str, kind: str) -> _FakeGaugeChild:
+        return _FakeGaugeChild(self.values, account_id, kind)
+
+
 @pytest.mark.asyncio
 async def test_select_account_100_concurrent_calls_avoid_serial_persist_latency(
     monkeypatch: pytest.MonkeyPatch,
@@ -242,6 +260,35 @@ async def test_stale_reclaim_still_recovers_old_response_create_lease(
 
     assert replacement_lease is not None
     assert await balancer.account_pressure_snapshot(account.id) == (1, 0, 0.0)
+
+
+@pytest.mark.asyncio
+async def test_account_inflight_lease_metric_tracks_acquire_and_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account = _make_account("acc-inflight-metric")
+    balancer = LoadBalancer(lambda: _repo_factory(_StubAccountsRepository([account]), _StubUsageRepository({}, {})))
+    gauge = _FakeAccountInflightGauge()
+    monkeypatch.setattr(load_balancer_module, "PROMETHEUS_AVAILABLE", True)
+    monkeypatch.setattr(load_balancer_module, "account_inflight_leases", gauge)
+
+    stream_lease = await balancer.acquire_account_lease(account.id, kind="stream")
+    assert stream_lease is not None
+    assert gauge.values[(account.id, "response_create")] == 0
+    assert gauge.values[(account.id, "stream")] == 1
+
+    response_create_lease = await balancer.acquire_account_lease(account.id, kind="response_create")
+    assert response_create_lease is not None
+    assert gauge.values[(account.id, "response_create")] == 1
+    assert gauge.values[(account.id, "stream")] == 1
+
+    await balancer.release_account_lease(stream_lease)
+    assert gauge.values[(account.id, "response_create")] == 1
+    assert gauge.values[(account.id, "stream")] == 0
+
+    await balancer.release_account_lease(response_create_lease)
+    assert gauge.values[(account.id, "response_create")] == 0
+    assert gauge.values[(account.id, "stream")] == 0
 
 
 @pytest.mark.asyncio

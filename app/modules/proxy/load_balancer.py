@@ -40,6 +40,7 @@ from app.core.config.settings_cache import get_settings_cache
 from app.core.metrics.prometheus import (
     PROMETHEUS_AVAILABLE,
     account_cap_rejections_total,
+    account_inflight_leases,
     account_lease_acquired_total,
     account_lease_released_total,
     account_lease_stale_reclaimed_total,
@@ -236,6 +237,7 @@ class LoadBalancer:
         runtime.last_selected_at = time.time()
         runtime.version += 1
         _record_account_lease_acquired(kind)
+        _record_account_inflight_leases(account_id, runtime)
         return lease
 
     def _account_lease_allowed_locked(self, account_id: str, *, kind: AccountLeaseKind) -> bool:
@@ -260,6 +262,7 @@ class LoadBalancer:
         runtime.leased_tokens = max(0.0, runtime.leased_tokens - current.estimated_tokens)
         runtime.version += 1
         _record_account_lease_released(current.kind, reason)
+        _record_account_inflight_leases(current.account_id, runtime)
         if reason == "stale":
             _record_account_lease_stale_reclaimed(current.kind)
             logger.warning(
@@ -1759,6 +1762,14 @@ def _record_account_lease_released(kind: AccountLeaseKind, reason: str) -> None:
 def _record_account_lease_stale_reclaimed(kind: AccountLeaseKind) -> None:
     if PROMETHEUS_AVAILABLE and account_lease_stale_reclaimed_total is not None:
         account_lease_stale_reclaimed_total.labels(kind=kind).inc()
+
+
+def _record_account_inflight_leases(account_id: str, runtime: RuntimeState) -> None:
+    if PROMETHEUS_AVAILABLE and account_inflight_leases is not None:
+        account_inflight_leases.labels(account_id=account_id, kind="response_create").set(
+            runtime.inflight_response_creates
+        )
+        account_inflight_leases.labels(account_id=account_id, kind="stream").set(runtime.inflight_streams)
 
 
 def _record_account_cap_rejection(kind: AccountLeaseKind | None) -> None:

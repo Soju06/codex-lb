@@ -101,7 +101,19 @@ async def _create_model_source(
     name: str,
     model: str,
     supports_responses: bool = False,
+    raw_metadata_json: str | None = None,
 ) -> str:
+    model_entry = {
+        "model": model,
+        "displayName": model,
+        "contextWindow": 8192,
+        "maxOutputTokens": 1024,
+        "supportsStreaming": True,
+        "supportsTools": True,
+    }
+    if raw_metadata_json is not None:
+        model_entry["rawMetadataJson"] = raw_metadata_json
+
     response = await async_client.post(
         "/api/model-sources/",
         json={
@@ -110,16 +122,7 @@ async def _create_model_source(
             "apiKey": f"token-{name}",
             "supportsChatCompletions": True,
             "supportsResponses": supports_responses,
-            "models": [
-                {
-                    "model": model,
-                    "displayName": model,
-                    "contextWindow": 8192,
-                    "maxOutputTokens": 1024,
-                    "supportsStreaming": True,
-                    "supportsTools": True,
-                }
-            ],
+            "models": [model_entry],
         },
     )
     assert response.status_code == 200
@@ -1066,7 +1069,12 @@ async def test_source_routed_chat_completion_applies_api_key_enforcement(async_c
     assert enable.status_code == 200
 
     model = "vllm-chat-enforced"
-    source_id = await _create_model_source(async_client, name="vllm-enforced", model=model)
+    source_id = await _create_model_source(
+        async_client,
+        name="vllm-enforced",
+        model=model,
+        raw_metadata_json='{"supports_reasoning": true}',
+    )
     created = await async_client.post(
         "/api/api-keys/",
         json={

@@ -432,6 +432,8 @@ class UsageUpdater:
             account = await accounts_repo.get_by_id(account_id)
             if account is None:
                 return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
+            if account.status in (AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
+                return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
             return await UsageUpdater(
                 usage_repo,
                 accounts_repo,

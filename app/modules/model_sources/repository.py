@@ -37,6 +37,7 @@ class ModelSourcesRepository:
         model: str,
         *,
         allowed_source_ids: set[str] | None = None,
+        require_streaming: bool = False,
     ) -> ModelSource | None:
         stmt = (
             select(ModelSource)
@@ -50,6 +51,8 @@ class ModelSourcesRepository:
             .order_by(ModelSource.name, ModelSource.id)
             .limit(1)
         )
+        if require_streaming:
+            stmt = stmt.where(ModelSourceModel.supports_streaming.is_(True))
         if allowed_source_ids is not None:
             if not allowed_source_ids:
                 return None

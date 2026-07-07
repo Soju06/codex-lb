@@ -446,6 +446,28 @@ async def test_responses_source_selector_can_require_streaming(async_client):
 
 
 @pytest.mark.asyncio
+async def test_chat_source_selector_can_require_streaming(async_client):
+    from app.modules.model_sources.repository import ModelSourcesRepository
+
+    model = "chat-non-streaming-model"
+    await _create_model_source(
+        async_client,
+        name="chat-non-streaming",
+        model=model,
+        base_url="http://127.0.0.1:9/v1",
+        supports_streaming=False,
+    )
+
+    async with SessionLocal() as session:
+        repo = ModelSourcesRepository(session)
+        non_streaming = await repo.find_chat_source_for_model(model)
+        streaming = await repo.find_chat_source_for_model(model, require_streaming=True)
+
+    assert non_streaming is not None
+    assert streaming is None
+
+
+@pytest.mark.asyncio
 async def test_source_usage_settles_cost_from_source_pricing(async_client, source_upstream):
     await _enable_api_key_auth(async_client)
 
@@ -1056,6 +1078,52 @@ async def test_source_chat_payload_keeps_reasoning_toggles_for_optin_model(async
     assert captured["include_reasoning"] is True
     assert captured["reasoning_effort"] == "high"
     assert "tools" not in captured
+
+
+@pytest.mark.asyncio
+async def test_source_chat_payload_overrides_enforced_reasoning_object(async_client, source_upstream):
+    await _enable_api_key_auth(async_client)
+    captured: dict[str, object] = {}
+
+    async def capture(request: web.Request) -> web.Response:
+        captured.update(await request.json())
+        return web.json_response(_chat_completion_body("reasoning-enforced-model"))
+
+    base_url = await source_upstream(capture)
+    model = "reasoning-enforced-model"
+    source_id = await _create_model_source(
+        async_client,
+        name="reasoning-enforced",
+        model=model,
+        base_url=base_url,
+        raw_metadata_json='{"supports_reasoning": true}',
+    )
+    key_response = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "reasoning enforced source key",
+            "enforcedReasoningEffort": "high",
+            "sourceAssignmentScopeEnabled": True,
+            "assignedSourceIds": [source_id],
+        },
+    )
+    assert key_response.status_code == 200
+    key = key_response.json()["key"]
+
+    response = await async_client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {key}"},
+        json={
+            "model": model,
+            "messages": [{"role": "user", "content": "hi"}],
+            "reasoning": {"effort": "low", "summary": "auto"},
+            "reasoning_effort": "low",
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["reasoning"] == {"effort": "high", "summary": "auto"}
+    assert captured["reasoning_effort"] == "high"
 
 
 @pytest.mark.asyncio

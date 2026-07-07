@@ -2145,7 +2145,11 @@ async def _build_codex_models_response(api_key: ApiKeyData | None) -> Response:
 
     registry = get_model_registry()
     models = registry.get_models_with_fallback()
-    source_models = await _list_enabled_source_catalog_models(api_key, require_responses=True)
+    source_models = [
+        model
+        for model in await _list_enabled_source_catalog_models(api_key, require_responses=True)
+        if model.raw.get("supports_streaming") is True
+    ]
 
     if not models and not source_models:
         await _release_reservation(reservation)
@@ -2538,7 +2542,7 @@ async def v1_chat_completions(
         return _logged_error_json_response(request, 400, error, headers=rate_limit_headers)
     apply_api_key_enforcement(responses_payload, api_key)
     source = (
-        await _select_chat_model_source(responses_payload.model, api_key)
+        await _select_chat_model_source(responses_payload.model, api_key, require_streaming=payload.stream is True)
         if not responses_shaped_payload and payload.messages is not None
         else None
     )
@@ -2645,7 +2649,12 @@ async def v1_chat_completions(
     )
 
 
-async def _select_chat_model_source(model: str, api_key: ApiKeyData | None) -> ModelSource | None:
+async def _select_chat_model_source(
+    model: str,
+    api_key: ApiKeyData | None,
+    *,
+    require_streaming: bool = False,
+) -> ModelSource | None:
     assigned_source_ids = _allowed_source_ids_for_api_key(api_key)
     subscription_model = get_model_registry().get_models_with_fallback().get(model)
     if assigned_source_ids is None and subscription_model is not None:
@@ -2654,6 +2663,7 @@ async def _select_chat_model_source(model: str, api_key: ApiKeyData | None) -> M
         source = await ModelSourcesRepository(session).find_chat_source_for_model(
             model,
             allowed_source_ids=assigned_source_ids,
+            require_streaming=require_streaming,
         )
         # ``close_session`` rolls back the read transaction, which would
         # expire the loaded row; detach it so the forwarding path can read

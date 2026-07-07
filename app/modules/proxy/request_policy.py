@@ -209,6 +209,11 @@ def apply_api_key_enforcement_to_chat_payload(
 
     if api_key.enforced_reasoning_effort is not None:
         payload["reasoning_effort"] = api_key.enforced_reasoning_effort
+        reasoning = payload.get("reasoning")
+        if isinstance(reasoning, dict):
+            payload["reasoning"] = {**reasoning, "effort": api_key.enforced_reasoning_effort}
+        else:
+            payload["reasoning"] = {"effort": api_key.enforced_reasoning_effort}
 
     if api_key.enforced_service_tier is not None:
         if api_key.enforced_service_tier in _UPSTREAM_OMIT_SERVICE_TIERS:

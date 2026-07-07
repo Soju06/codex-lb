@@ -94,6 +94,7 @@ async def _create_model_source(
     name: str,
     model: str,
     supports_responses: bool = False,
+    supports_streaming: bool = True,
 ) -> str:
     response = await async_client.post(
         "/api/model-sources/",
@@ -109,7 +110,7 @@ async def _create_model_source(
                     "displayName": model,
                     "contextWindow": 8192,
                     "maxOutputTokens": 1024,
-                    "supportsStreaming": True,
+                    "supportsStreaming": supports_streaming,
                     "supportsTools": True,
                     "supportsVision": False,
                 }
@@ -306,6 +307,13 @@ async def test_backend_codex_models_includes_only_responses_capable_source_model
         model="external-chat-only-model",
         supports_responses=False,
     )
+    await _create_model_source(
+        async_client,
+        name="codex-source-non-streaming",
+        model="external-non-streaming-responses-model",
+        supports_responses=True,
+        supports_streaming=False,
+    )
 
     response = await async_client.get("/backend-api/codex/models")
     assert response.status_code == 200
@@ -317,6 +325,8 @@ async def test_backend_codex_models_includes_only_responses_capable_source_model
     assert "external-responses-model" in data_ids
     assert "external-chat-only-model" not in slugs
     assert "external-chat-only-model" not in data_ids
+    assert "external-non-streaming-responses-model" not in slugs
+    assert "external-non-streaming-responses-model" not in data_ids
 
     source_entry = next(item for item in payload["models"] if item["slug"] == "external-responses-model")
     assert "source_id" not in source_entry

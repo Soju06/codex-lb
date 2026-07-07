@@ -680,6 +680,33 @@ def test_apply_api_key_enforcement_overrides_service_tier_aliases_to_priority():
     assert payload.service_tier == "priority"
 
 
+def test_apply_api_key_enforcement_to_chat_payload_overrides_reasoning_object():
+    payload: dict[str, JsonValue] = {
+        "model": "source-reasoning-model",
+        "messages": [{"role": "user", "content": "hi"}],
+        "reasoning": {"effort": "low", "summary": "auto"},
+        "reasoning_effort": "low",
+    }
+    api_key = proxy_service.ApiKeyData(
+        id="key_reasoning",
+        name="reasoning-key",
+        key_prefix="sk-clb-test",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort="high",
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+
+    proxy_request_policy.apply_api_key_enforcement_to_chat_payload(payload, api_key)
+
+    assert payload["reasoning"] == {"effort": "high", "summary": "auto"}
+    assert payload["reasoning_effort"] == "high"
+
+
 def _service_tier_enforcement_key(enforced: str) -> proxy_service.ApiKeyData:
     return proxy_service.ApiKeyData(
         id="key_default",

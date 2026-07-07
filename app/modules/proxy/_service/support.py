@@ -14,7 +14,9 @@ import anyio
 
 from app.core.balancer.types import UpstreamError
 from app.core.clients.proxy_websocket import UpstreamResponsesWebSocket
+from app.core.openai.model_registry import get_model_registry
 from app.core.openai.models import OpenAIEvent
+from app.core.plan_types import account_plan_matches_allowed
 from app.core.types import JsonValue
 from app.core.upstream_proxy import ResolvedUpstreamRoute
 from app.db.models import Account
@@ -41,7 +43,12 @@ _ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS = 10.0
 _ACCOUNT_SELECTION_RETRY_HINT_RE = re.compile(r"try again in\s+([0-9]+(?:\.[0-9]+)?)s", re.IGNORECASE)
 
 
-def _account_selection_recovery_sleep_seconds_from_message(message: str | None) -> float | None:
+def _account_selection_recovery_sleep_seconds_from_message(
+    message: str | None,
+    *,
+    error_code: str | None = None,
+    suppress_uncoded_local_selector_hint: bool = False,
+) -> float | None:
     message = (message or "").strip()
     if not message:
         return None
@@ -53,6 +60,10 @@ def _account_selection_recovery_sleep_seconds_from_message(message: str | None) 
         or "no accounts with a plan" in lowered
         or "no accounts with available additional quota" in lowered
         or "no fresh additional quota data" in lowered
+        or (
+            (error_code == "no_accounts" or (suppress_uncoded_local_selector_hint and error_code is None))
+            and lowered.startswith("rate limit exceeded. try again in")
+        )
     ):
         return None
 
@@ -74,7 +85,11 @@ def _account_selection_recovery_sleep_seconds_from_message(message: str | None) 
 
 
 def _account_selection_recovery_sleep_seconds(selection: AccountSelection) -> float | None:
-    return _account_selection_recovery_sleep_seconds_from_message(selection.error_message)
+    return _account_selection_recovery_sleep_seconds_from_message(
+        selection.error_message,
+        error_code=selection.error_code,
+        suppress_uncoded_local_selector_hint=selection.account is None,
+    )
 
 
 def _account_capacity_wait_payload(
@@ -411,6 +426,7 @@ class _HTTPBridgeSession:
     queued_request_count: int
     last_used_at: float
     idle_ttl_seconds: float
+    request_service_tier: str | None = None
     lifecycle_lock: anyio.Lock = field(default_factory=anyio.Lock)
     api_key: ApiKeyData | None = None
     codex_session: bool = False
@@ -436,6 +452,26 @@ class _HTTPBridgeSession:
     upstream_proxy_endpoint_id: str | None = None
     upstream_proxy_fallback_used: bool | None = None
     upstream_proxy_fail_closed_reason: str | None = None
+
+
+def _http_bridge_session_supports_service_tier(
+    session: _HTTPBridgeSession,
+    *,
+    request_model: str | None,
+    request_service_tier: str | None,
+) -> bool:
+    if request_model is None or request_service_tier is None:
+        return True
+
+    registry = get_model_registry()
+    allowed_account_ids = registry.account_ids_for_model_service_tier(request_model, request_service_tier)
+    if allowed_account_ids is not None:
+        return session.account.id in allowed_account_ids
+
+    allowed_plans = registry.plan_types_for_model_service_tier(request_model, request_service_tier)
+    if allowed_plans is None:
+        return True
+    return account_plan_matches_allowed(session.account.plan_type, allowed_plans)
 
 
 @dataclass(slots=True)

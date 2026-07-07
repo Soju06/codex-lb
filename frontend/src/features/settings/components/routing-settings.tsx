@@ -35,6 +35,13 @@ const WEEKDAYS = [
   { value: 5, key: "sat" },
   { value: 6, key: "sun" },
 ] as const;
+const WEEKLY_PACE_SMOOTHING_OPTIONS = [
+  { value: 15, label: "15m" },
+  { value: 30, label: "30m" },
+  { value: 60, label: "1h" },
+  { value: 120, label: "2h" },
+  { value: 240, label: "4h" },
+] as const;
 
 function parseWorkingDays(value: string): Set<number> {
   const days = new Set(
@@ -383,6 +390,27 @@ export function RoutingSettings({
                 <SelectItem value="round_robin">{t("settings.routing.strategy.roundRobin")}</SelectItem>
               </SelectContent>
             </Select>
+          </div>
+          <div className="space-y-2 px-3 pb-3 text-xs text-muted-foreground">
+            <p className="font-medium text-foreground">{t("settings.routing.strategy.guideTitle")}</p>
+            <dl className="grid gap-2 md:grid-cols-2">
+              {[
+                "capacityWeighted",
+                "relativeAvailability",
+                "usageWeighted",
+                "roundRobin",
+                "fillFirst",
+                "sequentialDrain",
+                "resetDrain",
+                "singleAccount",
+              ].map((strategy) => (
+                <div key={strategy} className="space-y-0.5">
+                  <dt className="font-medium text-foreground">{t(`settings.routing.strategy.${strategy}`)}</dt>
+                  <dd>{t(`settings.routing.strategy.guide.${strategy}`)}</dd>
+                </div>
+              ))}
+            </dl>
+            <p>{t("settings.routing.strategy.safetyNote")}</p>
           </div>
 
           <div className="space-y-3 p-3">
@@ -745,6 +773,34 @@ export function RoutingSettings({
                 </label>
               ))}
             </div>
+          </div>
+
+          <div className="flex flex-col gap-3 p-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <p className="text-sm font-medium">{t("settings.routing.paceSmoothing.label")}</p>
+              <p className="text-xs text-muted-foreground">{t("settings.routing.paceSmoothing.description")}</p>
+            </div>
+            <Select
+              value={String(settings.weeklyPaceSmoothingMinutes)}
+              onValueChange={(value) =>
+                save({ weeklyPaceSmoothingMinutes: Number(value) as SettingsUpdateRequest["weeklyPaceSmoothingMinutes"] })
+              }
+            >
+              <SelectTrigger
+                aria-label={t("settings.routing.paceSmoothing.label")}
+                className="h-8 w-full text-xs sm:w-32"
+                disabled={busy}
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent align="end">
+                {WEEKLY_PACE_SMOOTHING_OPTIONS.map((option) => (
+                  <SelectItem key={option.value} value={String(option.value)}>
+                    {option.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </div>
 
           <div className="space-y-3 p-3">

@@ -28,8 +28,10 @@ from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, UsageHistory
 from app.db.session import get_background_session
 from app.modules.accounts.auth_manager import AccountsRepositoryPort, AuthManager
+from app.modules.accounts.background_repository import BackgroundAccountsRepository
 from app.modules.proxy.account_cache import get_account_selection_cache, mark_account_routing_unavailable
 from app.modules.usage.additional_quota_keys import canonicalize_additional_quota_key
+from app.modules.usage.background_repository import BackgroundAdditionalUsageRepository, BackgroundUsageRepository
 from app.modules.usage.repository import AdditionalUsageRepository
 
 logger = logging.getLogger(__name__)
@@ -229,13 +231,16 @@ class UsageUpdater:
         usage_repo: UsageRepositoryPort,
         accounts_repo: AccountsRepositoryPort | None = None,
         additional_usage_repo: AdditionalUsageRepositoryPort | AdditionalUsageRepository | None = None,
+        *,
+        auth_manager: AuthManager | None = None,
     ) -> None:
         self._usage_repo = usage_repo
         self._accounts_repo = accounts_repo
         self._additional_usage_repo = additional_usage_repo
-        self._accounts_repo = accounts_repo
         self._encryptor = TokenEncryptor()
-        self._auth_manager = AuthManager(accounts_repo) if accounts_repo else None
+        self._auth_manager = (
+            auth_manager if auth_manager is not None else AuthManager(accounts_repo) if accounts_repo else None
+        )
 
     async def refresh_accounts(
         self,
@@ -314,10 +319,16 @@ class UsageUpdater:
                 continue
         return refreshed
 
-    async def force_refresh(self, account: Account) -> bool:
+    async def force_refresh(
+        self,
+        account: Account,
+        *,
+        ignore_refresh_disabled: bool = False,
+        access_token_override: str | None = None,
+    ) -> bool:
         """Refresh one account regardless of cached/fresh usage rows."""
         settings = get_settings()
-        if not settings.usage_refresh_enabled:
+        if not settings.usage_refresh_enabled and not ignore_refresh_disabled:
             return False
         if account.status in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
             return False
@@ -327,6 +338,7 @@ class UsageUpdater:
                 lambda: self._refresh_account(
                     account,
                     usage_account_id=account.chatgpt_account_id,
+                    access_token_override=access_token_override,
                 ),
                 join_existing=False,
             )
@@ -377,8 +389,9 @@ class UsageUpdater:
         account: Account,
         *,
         usage_account_id: str | None,
+        access_token_override: str | None = None,
     ) -> AccountRefreshResult:
-        access_token = self._encryptor.decrypt(account.access_token_encrypted)
+        access_token = access_token_override or self._encryptor.decrypt(account.access_token_encrypted)
         payload: UsagePayload | None = None
         try:
             route = await _resolve_upstream_route_for_account(account, operation="usage_refresh")
@@ -399,6 +412,9 @@ class UsageUpdater:
         except UsageFetchError as exc:
             if _should_deactivate_for_usage_error(exc):
                 await self._deactivate_for_client_error(account, exc)
+                return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
+            if access_token_override is not None:
+                _mark_usage_refresh_auth_cooldown(account.id, exc.status_code)
                 return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
             if exc.status_code != 401 or not self._auth_manager:
                 _mark_usage_refresh_auth_cooldown(account.id, exc.status_code)
@@ -737,6 +753,16 @@ class UsageUpdater:
         account.deactivation_reason = stored.deactivation_reason
         account.reset_at = stored.reset_at
         account.blocked_at = stored.blocked_at
+
+
+def build_background_usage_updater() -> UsageUpdater:
+    accounts_repo = BackgroundAccountsRepository()
+    return UsageUpdater(
+        BackgroundUsageRepository(),
+        accounts_repo=accounts_repo,
+        additional_usage_repo=BackgroundAdditionalUsageRepository(),
+        auth_manager=AuthManager(accounts_repo),
+    )
 
 
 def _credits_snapshot(payload: UsagePayload) -> tuple[bool | None, bool | None, float | None]:

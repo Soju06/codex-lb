@@ -356,6 +356,31 @@ async def test_consume_reset_credit_generates_fresh_redeem_request_id_each_call(
 
 
 @pytest.mark.asyncio
+async def test_consume_reset_credit_uses_supplied_redeem_request_id() -> None:
+    state = ClientState()
+    client = StubRetryClient(
+        [StubResponse(200, {"code": "reset", "credit": {"id": "x"}, "windows_reset": 1}, "")],
+        state,
+    )
+
+    await consume_reset_credit(
+        "access-token",
+        None,
+        "RateLimitResetCredit_test",
+        redeem_request_id="dashboard-retry-id",
+        base_url="http://upstream.test/backend-api",
+        timeout_seconds=2.0,
+        max_retries=0,
+        client=cast(Any, client),
+        allow_direct_egress=True,
+    )
+
+    assert state.json_body is not None
+    assert state.json_body["credit_id"] == "RateLimitResetCredit_test"
+    assert state.json_body["redeem_request_id"] == "dashboard-retry-id"
+
+
+@pytest.mark.asyncio
 async def test_consume_reset_credit_does_not_retry_when_max_retries_omitted(monkeypatch: pytest.MonkeyPatch) -> None:
     settings = get_settings()
     original_retries = settings.usage_fetch_max_retries

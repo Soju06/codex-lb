@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AccountUsagePanel } from "@/features/accounts/components/account-usage-panel";
@@ -110,6 +110,40 @@ describe("AccountUsagePanel", () => {
     expect(screen.getByText("Request logs total")).toBeInTheDocument();
     expect(screen.getByText(/\$0\.13/)).toBeInTheDocument();
     expect(screen.getByText(/51\.48K tok/)).toBeInTheDocument();
+  });
+
+  it("renders usage reset credit availability when provided", () => {
+    const account = createAccountSummary();
+
+    render(
+      <AccountUsagePanel
+        account={account}
+        trends={null}
+        resetCredits={{ availableCount: 3 }}
+      />,
+    );
+
+    expect(screen.getByText("Usage resets")).toBeInTheDocument();
+    expect(screen.getByText("3 available")).toBeInTheDocument();
+  });
+
+  it("renders a usage reset action when provided", () => {
+    const account = createAccountSummary({ accountId: "acc_reset" });
+    const onReset = vi.fn();
+
+    render(
+      <AccountUsagePanel
+        account={account}
+        trends={null}
+        resetCredits={{ availableCount: 1 }}
+        onReset={onReset}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Reset usage" }));
+
+    expect(onReset).toHaveBeenCalledWith("acc_reset");
+    expect(onReset).toHaveBeenCalledTimes(1);
   });
 
   it("shows the weekly plan legend when scheduled trend data exists", () => {

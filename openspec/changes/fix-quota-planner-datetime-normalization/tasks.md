@@ -1,0 +1,3 @@
+- [x] 1. Normalize quota planner repository datetime inputs before database binding.
+- [x] 2. Add regression coverage for aware datetime inputs at the repository boundary.
+- [x] 3. Validate OpenSpec and focused quota planner tests.

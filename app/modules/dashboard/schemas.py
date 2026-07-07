@@ -78,6 +78,9 @@ class WeeklyCreditPaceResponse(DashboardModel):
     scheduled_used_percent: float
     delta_percent: float
     schedule_gap_credits: float
+    smoothed_delta_percent: float
+    smoothed_schedule_gap_credits: float
+    pace_gap_smoothing_minutes: int
     # Legacy frontend field name kept as an alias-compatible value for one release.
     over_plan_credits: float
     projected_shortfall_credits: float

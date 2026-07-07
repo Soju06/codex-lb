@@ -1,9 +1,14 @@
 import { lazy, Suspense } from "react";
-import { Clock, Flame } from "lucide-react";
+import { Clock, Flame, RotateCcw } from "lucide-react";
 
+import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import type { AccountTrendChartProps } from "@/features/accounts/components/account-trend-chart";
-import type { AccountSummary, AccountTrendsResponse } from "@/features/accounts/schemas";
+import type {
+  AccountSummary,
+  AccountTrendsResponse,
+  AccountUsageResetCredits,
+} from "@/features/accounts/schemas";
 import { quotaBarColor, quotaBarTrack } from "@/utils/account-status";
 import {
   formatCompactNumber,
@@ -23,6 +28,11 @@ const AccountTrendChart = lazy(() =>
 export type AccountUsagePanelProps = {
   account: AccountSummary;
   trends?: AccountTrendsResponse | null;
+  resetCredits?: AccountUsageResetCredits | null;
+  resetCreditsLoading?: boolean;
+  resetCreditsUnavailable?: boolean;
+  resetDisabled?: boolean;
+  onReset?: (accountId: string) => void;
 };
 
 function QuotaRow({
@@ -135,7 +145,69 @@ const ADDITIONAL_ROUTING_POLICY_LABELS: Record<string, string> = {
   preserve: "Preserve",
 };
 
-export function AccountUsagePanel({ account, trends }: AccountUsagePanelProps) {
+function ResetCreditsRow({
+  accountId,
+  resetCredits,
+  loading,
+  unavailable,
+  resetDisabled,
+  onReset,
+}: {
+  accountId: string;
+  resetCredits?: AccountUsageResetCredits | null;
+  loading?: boolean;
+  unavailable?: boolean;
+  resetDisabled?: boolean;
+  onReset?: (accountId: string) => void;
+}) {
+  if (resetCredits == null && !loading && !unavailable) {
+    return null;
+  }
+
+  const availableCount = resetCredits?.availableCount ?? 0;
+  const valueLabel =
+    loading && resetCredits == null
+      ? "Checking..."
+      : unavailable && resetCredits == null
+        ? "Unavailable"
+        : `${availableCount} available`;
+
+  return (
+    <div className="flex items-center justify-between rounded-md border bg-background/60 px-3 py-2 text-xs">
+      <span className="flex min-w-0 items-center gap-2 text-muted-foreground">
+        <RotateCcw className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+        <span className="truncate font-medium">Usage resets</span>
+      </span>
+      <span className="flex shrink-0 items-center gap-2">
+        <span className="tabular-nums font-semibold">{valueLabel}</span>
+        {onReset ? (
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            className="h-6 gap-1 px-1.5 text-[11px]"
+            aria-label="Reset usage"
+            onClick={() => onReset(accountId)}
+            disabled={resetDisabled || availableCount <= 0}
+          >
+            <RotateCcw className="h-3 w-3" aria-hidden="true" />
+            Reset
+          </Button>
+        ) : null}
+      </span>
+    </div>
+  );
+}
+
+export function AccountUsagePanel({
+  account,
+  trends,
+  resetCredits,
+  resetCreditsLoading,
+  resetCreditsUnavailable,
+  resetDisabled = false,
+  onReset,
+}: AccountUsagePanelProps) {
   const primary = account.usage?.primaryRemainingPercent ?? null;
   const secondary = account.usage?.secondaryRemainingPercent ?? null;
   const monthly = account.usage?.monthlyRemainingPercent ?? null;
@@ -165,6 +237,14 @@ export function AccountUsagePanel({ account, trends }: AccountUsagePanelProps) {
           </>
         )}
       </div>
+      <ResetCreditsRow
+        accountId={account.accountId}
+        resetCredits={resetCredits}
+        loading={resetCreditsLoading}
+        unavailable={resetCreditsUnavailable}
+        resetDisabled={resetDisabled}
+        onReset={onReset}
+      />
       <div className="rounded-md border bg-background/60 px-3 py-2">
         <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Request logs total</p>
         {hasRequestUsage ? (

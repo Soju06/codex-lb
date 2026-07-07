@@ -6,6 +6,7 @@ import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import datetime, timezone
 from json import JSONDecodeError
 from typing import Any, Final, Literal, cast
@@ -46,6 +47,10 @@ from app.core.clients.rate_limit_reset_credits import (
     ResetCreditItem,
     consume_reset_credit,
 )
+from app.core.clients.usage import (
+    ConsumeRateLimitResetCreditResponse as UpstreamConsumeRateLimitResetCreditResponse,
+)
+from app.core.clients.usage import UsageFetchError, consume_rate_limit_reset_credit
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
@@ -56,7 +61,7 @@ from app.core.errors import (
     openai_error,
     response_failed_event,
 )
-from app.core.exceptions import ProxyAuthError, ProxyRateLimitError
+from app.core.exceptions import ProxyAuthError, ProxyRateLimitError, ProxyUpstreamError
 from app.core.metrics.prometheus import PROMETHEUS_AVAILABLE, bridge_public_contract_error_total
 from app.core.middleware.api_firewall import _parse_trusted_proxy_networks, resolve_connection_client_ip
 from app.core.openai.chat_requests import ChatCompletionsRequest
@@ -138,6 +143,8 @@ from app.modules.proxy.schemas import (
     AccountPoolUsageResponse,
     CodexModelEntry,
     CodexModelsResponse,
+    ConsumeRateLimitResetCreditRequest,
+    ConsumeRateLimitResetCreditResponse,
     FileCreateRequest,
     ModelListItem,
     ModelListResponse,
@@ -157,6 +164,7 @@ from app.modules.proxy.schemas import (
 )
 from app.modules.proxy.types import (
     CreditStatusDetailsData,
+    RateLimitResetCreditsData,
     RateLimitStatusPayloadData,
     RateLimitWindowSnapshotData,
 )
@@ -1204,6 +1212,24 @@ def _codex_usage_credit_snapshot(
         approx_local_messages=None,
         approx_cloud_messages=None,
     )
+
+
+def _codex_usage_reset_credits_from_request(request: Request) -> RateLimitResetCreditsData | None:
+    usage_payload = getattr(request.state, "codex_usage_identity_payload", None)
+    summary = getattr(usage_payload, "rate_limit_reset_credits", None)
+    if summary is None:
+        return None
+    return RateLimitResetCreditsData(available_count=max(0, int(summary.available_count or 0)))
+
+
+def _attach_codex_usage_reset_credits(
+    payload: RateLimitStatusPayloadData,
+    request: Request,
+) -> RateLimitStatusPayloadData:
+    reset_credits = _codex_usage_reset_credits_from_request(request)
+    if reset_credits is None:
+        return payload
+    return replace(payload, rate_limit_reset_credits=reset_credits)
 
 
 async def _build_aggregate_credit_limits(session: AsyncSession) -> dict[str, V1UsageLimitResponse]:
@@ -2997,15 +3023,114 @@ async def _transcribe_request(
 @usage_router.get("/api/codex/usage", response_model=RateLimitStatusPayload)
 @usage_router.get("/api/codex/usage/", response_model=RateLimitStatusPayload, include_in_schema=False)
 async def codex_usage(
+    request: Request,
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Depends(validate_codex_usage_identity),
 ) -> RateLimitStatusPayload:
     payload = (
         await _build_codex_usage_payload_for_api_key(api_key)
         if api_key is not None
-        else await context.service.get_rate_limit_payload()
+        else _attach_codex_usage_reset_credits(await context.service.get_rate_limit_payload(), request)
     )
     return RateLimitStatusPayload.from_data(payload)
+
+
+@usage_router.post(
+    "/api/codex/rate-limit-reset-credits/consume",
+    response_model=ConsumeRateLimitResetCreditResponse,
+)
+@usage_router.post(
+    "/api/codex/rate-limit-reset-credits/consume/",
+    response_model=ConsumeRateLimitResetCreditResponse,
+    include_in_schema=False,
+)
+async def codex_consume_rate_limit_reset_credit(
+    request: Request,
+    payload: ConsumeRateLimitResetCreditRequest = Body(...),
+    api_key: ApiKeyData | None = Depends(validate_codex_usage_identity),
+) -> ConsumeRateLimitResetCreditResponse | JSONResponse:
+    if api_key is not None:
+        raise ProxyAuthError("ChatGPT authentication required for usage limit reset credits")
+    redeem_request_id = payload.redeem_request_id.strip()
+    if not redeem_request_id:
+        return _logged_error_json_response(
+            request,
+            400,
+            openai_error(
+                "invalid_request_error",
+                "redeem_request_id must not be empty",
+                error_type="invalid_request_error",
+            ),
+        )
+
+    upstream_response = await _consume_rate_limit_reset_credit_for_request(
+        request,
+        redeem_request_id=redeem_request_id,
+    )
+    account_id = _request_state_str(request, "codex_usage_identity_account_id")
+    if account_id is not None:
+        await get_rate_limit_reset_credits_store().invalidate(account_id)
+    if upstream_response.code in {"reset", "already_redeemed"}:
+        await _force_refresh_codex_usage_identity_account(request)
+    return ConsumeRateLimitResetCreditResponse.model_validate(upstream_response.model_dump())
+
+
+async def _consume_rate_limit_reset_credit_for_request(
+    request: Request,
+    *,
+    redeem_request_id: str,
+) -> UpstreamConsumeRateLimitResetCreditResponse:
+    access_token = _request_state_str(request, "codex_usage_identity_access_token")
+    chatgpt_account_id = _request_state_str(request, "codex_usage_identity_chatgpt_account_id")
+    if access_token is None or chatgpt_account_id is None:
+        raise ProxyAuthError("ChatGPT authentication required for usage limit reset credits")
+    route = getattr(request.state, "codex_usage_identity_route", None)
+    try:
+        return await consume_rate_limit_reset_credit(
+            access_token=access_token,
+            account_id=chatgpt_account_id,
+            redeem_request_id=redeem_request_id,
+            route=route,
+            allow_direct_egress=route is None,
+        )
+    except UsageFetchError as exc:
+        if exc.status_code == 429:
+            raise ProxyRateLimitError(exc.message) from exc
+        if exc.status_code in (401, 403):
+            raise ProxyAuthError("Invalid ChatGPT token or chatgpt-account-id") from exc
+        raise ProxyUpstreamError("Unable to consume ChatGPT usage reset at this time") from exc
+
+
+async def _force_refresh_codex_usage_identity_account(request: Request) -> None:
+    account_id = _request_state_str(request, "codex_usage_identity_account_id")
+    if account_id is None:
+        return
+    access_token = _request_state_str(request, "codex_usage_identity_access_token")
+    async with get_background_session() as session:
+        accounts_repo = AccountsRepository(session)
+        account = await accounts_repo.get_by_id(account_id)
+        if account is None:
+            return
+        updater = UsageUpdater(
+            UsageRepository(session),
+            accounts_repo,
+            AdditionalUsageRepository(session),
+        )
+        usage_written = await updater.force_refresh(
+            account,
+            ignore_refresh_disabled=True,
+            access_token_override=access_token,
+        )
+        if usage_written:
+            get_account_selection_cache().invalidate()
+
+
+def _request_state_str(request: Request, name: str) -> str | None:
+    value = getattr(request.state, name, None)
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None
 
 
 async def _prepend_first(first: str | None, stream: AsyncIterator[str]) -> AsyncIterator[str]:

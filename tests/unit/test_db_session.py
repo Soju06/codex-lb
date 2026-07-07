@@ -6,13 +6,16 @@ import os
 import subprocess
 import sys
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
 import app.db.session as session_module
+from app.db.models import Account, AccountStatus, Base
 from app.db.sqlite_utils import IntegrityCheck, SqliteIntegrityCheckMode
 
 
@@ -242,6 +245,108 @@ def test_postgres_engine_kwargs_use_nullpool_under_test_db_url(monkeypatch) -> N
     assert kwargs["poolclass"] is NullPool
     assert "pool_pre_ping" not in kwargs
     assert "pool_recycle" not in kwargs
+
+
+def test_sqlite_file_engine_kwargs_use_nullpool_without_pool_controls(monkeypatch) -> None:
+    monkeypatch.setattr(
+        session_module,
+        "_settings",
+        _FakeSettings(
+            database_url="sqlite+aiosqlite:///store.db",
+            database_pool_size=15,
+            database_max_overflow=10,
+            database_pool_timeout_seconds=30.0,
+        ),
+    )
+
+    kwargs = session_module._sqlite_file_async_engine_kwargs()
+
+    assert kwargs["poolclass"] is NullPool
+    assert kwargs["connect_args"] == {"timeout": 30.0}
+    assert "pool_size" not in kwargs
+    assert "max_overflow" not in kwargs
+    assert "pool_timeout" not in kwargs
+
+
+def test_postgres_engine_kwargs_keep_pool_controls(monkeypatch) -> None:
+    monkeypatch.delenv("CODEX_LB_TEST_DATABASE_URL", raising=False)
+    monkeypatch.setattr(
+        session_module,
+        "_settings",
+        _FakeSettings(
+            database_url="postgresql+asyncpg://u:p@h/db",
+            database_pool_size=12,
+            database_max_overflow=4,
+            database_pool_timeout_seconds=11.0,
+            database_pool_recycle_seconds=900,
+        ),
+    )
+
+    kwargs = session_module._postgres_async_engine_kwargs("postgresql+asyncpg://u:p@h/db", background=False)
+
+    assert kwargs["pool_pre_ping"] is True
+    assert kwargs["pool_recycle"] == 900
+    assert kwargs["pool_size"] == 12
+    assert kwargs["max_overflow"] == 4
+    assert kwargs["pool_timeout"] == 11.0
+
+
+@pytest.mark.asyncio
+async def test_close_session_rolls_back_open_transaction_before_close() -> None:
+    calls: list[str] = []
+
+    class _Session:
+        def in_transaction(self) -> bool:
+            return True
+
+        async def rollback(self) -> None:
+            calls.append("rollback")
+
+        async def close(self) -> None:
+            calls.append("close")
+
+    await session_module.close_session(cast(Any, _Session()))
+
+    assert calls == ["rollback", "close"]
+
+
+@pytest.mark.asyncio
+async def test_detach_session_objects_keeps_loaded_fields_available_after_rollback() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+        async with session_factory() as session:
+            session.add(
+                Account(
+                    id="acc_detached",
+                    chatgpt_account_id="workspace-detached",
+                    email="detached@example.com",
+                    plan_type="plus",
+                    access_token_encrypted=b"access",
+                    refresh_token_encrypted=b"refresh",
+                    id_token_encrypted=b"id",
+                    last_refresh=datetime(2026, 1, 1),
+                    status=AccountStatus.ACTIVE,
+                )
+            )
+            await session.commit()
+
+        async with session_factory() as session:
+            account = await session.get(Account, "acc_detached")
+            assert account is not None
+            assert account.status == AccountStatus.ACTIVE
+            session_module.detach_session_objects(session)
+            await session.rollback()
+
+        assert account.id == "acc_detached"
+        assert account.status == AccountStatus.ACTIVE
+        assert account.chatgpt_account_id == "workspace-detached"
+        assert account.access_token_encrypted == b"access"
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.asyncio

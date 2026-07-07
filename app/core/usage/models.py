@@ -27,7 +27,7 @@ class CreditsPayload(BaseModel):
     balance: str | None = None
 
 
-class RateLimitResetCreditsSummary(BaseModel):
+class RateLimitResetCreditsPayload(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     available_count: int | None = None
@@ -50,5 +50,5 @@ class UsagePayload(BaseModel):
     seat_type: str | None = None
     rate_limit: RateLimitPayload | None = None
     credits: CreditsPayload | None = None
-    rate_limit_reset_credits: RateLimitResetCreditsSummary | None = None
+    rate_limit_reset_credits: RateLimitResetCreditsPayload | None = None
     additional_rate_limits: list[AdditionalRateLimitPayload] | None = None

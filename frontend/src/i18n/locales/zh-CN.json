@@ -160,7 +160,19 @@
         "resetDrain": "按重置消耗",
         "singleAccount": "单账户",
         "usageWeighted": "按用量加权",
-        "roundRobin": "轮询"
+        "roundRobin": "轮询",
+        "guideTitle": "策略指南",
+        "guide": {
+          "capacityWeighted": "适合作为合规混合账户池的默认选择；优先使用可用配额余量更多的账户。",
+          "relativeAvailability": "类似按容量加权，但会在最可用的候选账户中做平滑加权抽取。",
+          "usageWeighted": "根据已观察到的用量分散流量，并可响应近期消耗变化。",
+          "roundRobin": "在符合条件的账户间均匀轮换，不考虑配额形态。",
+          "fillFirst": "先集中使用一个账户再切换；适合受控消耗测试，不太适合日常保守流量。",
+          "sequentialDrain": "按固定顺序消耗账户。更适合维护窗口，不适合作为日常混合策略。",
+          "resetDrain": "围绕配额重置时间排序，让即将失效的容量优先被使用。",
+          "singleAccount": "将所有路由流量固定到一个选定的活跃账户。"
+        },
+        "safetyNote": "任何策略都不能保证账户安全结果。对于低流量、合规使用，优先选择按容量加权或相对可用性，并启用粘性会话，让流量更平稳且保持在同一会话本地。"
       },
       "stickyThreads": {
         "label": "粘性会话",
@@ -239,6 +251,10 @@
           "sat": "周六",
           "sun": "周日"
         }
+      },
+      "paceSmoothing": {
+        "label": "节奏差距平均",
+        "description": "用最近的配额样本平滑显示的周节奏差距。"
       },
       "limitWarmup": {
         "label": "额度预热",

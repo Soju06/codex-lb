@@ -30,20 +30,25 @@ function formatProAccountEquivalent(value: number): string {
 }
 
 function statusLabel(pace: WeeklyCreditPace): string {
+  const deltaPercent = pace.smoothedDeltaPercent ?? pace.deltaPercent;
   if (pace.status === "on_track") return "On pace";
-  if (pace.status === "danger" && pace.projectedShortfallCredits > 0 && pace.deltaPercent <= 0) {
+  if (pace.status === "danger" && pace.projectedShortfallCredits > 0 && deltaPercent <= 0) {
     return "Recent burn shortfall";
   }
-  const direction = pace.deltaPercent > 0 ? "over planned usage" : "below planned usage";
-  return `${formatSignedPercent(pace.deltaPercent)} ${direction}`;
+  const direction = deltaPercent > 0 ? "over planned usage" : "below planned usage";
+  return `${formatSignedPercent(deltaPercent)} ${direction}`;
 }
 
 function scheduleGapLine(pace: WeeklyCreditPace): string {
-  if (pace.scheduleGapCredits > 0) {
-    return `${formatCompactNumber(pace.scheduleGapCredits)} credits over planned usage now`;
+  const scheduleGapCredits = pace.smoothedScheduleGapCredits ?? pace.scheduleGapCredits;
+  const deltaPercent = pace.smoothedDeltaPercent ?? pace.deltaPercent;
+  const smoothingMinutes = pace.paceGapSmoothingMinutes ?? 0;
+  const suffix = smoothingMinutes > 0 ? ` over ${formatDurationHours(smoothingMinutes / 60)}` : " now";
+  if (scheduleGapCredits > 0) {
+    return `${formatCompactNumber(scheduleGapCredits)} credits over planned usage${suffix}`;
   }
-  if (pace.deltaPercent < 0) {
-    return `${formatSignedPercent(pace.deltaPercent)} below planned usage now`;
+  if (deltaPercent < 0) {
+    return `${formatSignedPercent(deltaPercent)} below planned usage${suffix}`;
   }
   return "On the current linear weekly schedule";
 }
@@ -87,8 +92,9 @@ function breakEvenLine(pace: WeeklyCreditPace): string | null {
 }
 
 function proAccountsLine(pace: WeeklyCreditPace): string | null {
+  const scheduleGapCredits = pace.smoothedScheduleGapCredits ?? pace.scheduleGapCredits;
   const gapCredits =
-    pace.projectedShortfallCredits > 0 ? pace.projectedShortfallCredits : Math.max(0, pace.scheduleGapCredits);
+    pace.projectedShortfallCredits > 0 ? pace.projectedShortfallCredits : Math.max(0, scheduleGapCredits);
   const equivalent =
     pace.proAccountEquivalentToCoverOverPlan ?? (gapCredits > 0 ? gapCredits / PRO_WEEKLY_CAPACITY_CREDITS : null);
   const accounts = pace.proAccountsToCoverOverPlan ?? (gapCredits > 0 ? Math.ceil(gapCredits / PRO_WEEKLY_CAPACITY_CREDITS) : null);
@@ -127,8 +133,9 @@ export function WeeklyCreditsPaceCard({ pace }: WeeklyCreditsPaceCardProps) {
   const throttle = throttleLine(pace);
   const proAccounts = proAccountsLine(pace);
   const breakEven = breakEvenLine(pace);
+  const smoothedScheduleGapCredits = pace.smoothedScheduleGapCredits ?? pace.scheduleGapCredits;
   const showRecommendations =
-    pace.scheduleGapCredits > 0 ||
+    smoothedScheduleGapCredits > 0 ||
     pace.projectedShortfallCredits > 0 ||
     Boolean(breakEven) ||
     Boolean(throttle) ||

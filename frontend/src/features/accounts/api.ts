@@ -12,6 +12,9 @@ import {
   AccountsResponseSchema,
   AccountRoutingPolicyUpdateRequestSchema,
   AccountRoutingPolicyUpdateResponseSchema,
+  AccountUsageResetConsumeRequestSchema,
+  AccountUsageResetConsumeResponseSchema,
+  AccountUsageResetCreditsResponseSchema,
   AccountTrendsResponseSchema,
   AccountProbeRequestSchema,
   AccountProbeResponseSchema,
@@ -26,7 +29,10 @@ import {
   RateLimitResetCreditsSnapshotSchema,
   RuntimeConnectAddressResponseSchema,
 } from "@/features/accounts/schemas";
-import type { AccountRoutingPolicy } from "@/features/accounts/schemas";
+import type {
+  AccountRoutingPolicy,
+  AccountUsageResetConsumeRequest,
+} from "@/features/accounts/schemas";
 
 const ACCOUNTS_BASE_PATH = "/api/accounts";
 const OAUTH_BASE_PATH = "/api/oauth";
@@ -103,6 +109,25 @@ export function getAccountTrends(accountId: string) {
   );
 }
 
+export function getAccountUsageResetCredits(accountId: string) {
+  return get(
+    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/usage-reset-credits`,
+    AccountUsageResetCreditsResponseSchema,
+  );
+}
+
+export function consumeAccountUsageResetCredit(
+  accountId: string,
+  payload?: AccountUsageResetConsumeRequest,
+) {
+  const validated = payload === undefined ? undefined : AccountUsageResetConsumeRequestSchema.parse(payload);
+  return post(
+    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/usage-reset-credits/consume`,
+    AccountUsageResetConsumeResponseSchema,
+    validated ? { body: validated } : undefined,
+  );
+}
+
 export function probeAccount(accountId: string, payload?: unknown) {
   const validated = payload === undefined ? undefined : AccountProbeRequestSchema.parse(payload);
   return post(
@@ -126,10 +151,15 @@ export function getRateLimitResetCredits(accountId: string) {
   );
 }
 
-export function consumeRateLimitResetCredit(accountId: string) {
+export function consumeRateLimitResetCredit(
+  accountId: string,
+  payload?: AccountUsageResetConsumeRequest,
+) {
+  const validated = payload === undefined ? undefined : AccountUsageResetConsumeRequestSchema.parse(payload);
   return post(
     `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/rate-limit-reset-credits/consume`,
     ConsumeRateLimitResetCreditResponseSchema,
+    validated ? { body: validated } : undefined,
   );
 }
 

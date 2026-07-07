@@ -13,6 +13,7 @@ import { AccountUsagePanel } from "@/features/accounts/components/account-usage-
 import type {
   AccountRoutingPolicy,
   AccountSummary,
+  AccountUsageResetCredits,
 } from "@/features/accounts/schemas";
 import { useAccountTrends } from "@/features/accounts/hooks/use-accounts";
 import type {
@@ -31,6 +32,7 @@ export type AccountDetailProps = {
   onPause: (accountId: string) => void;
   onResume: (accountId: string) => void;
   onProbe: (accountId: string) => void;
+  onResetUsage: (accountId: string) => void;
   onSetAlias: (accountId: string, alias: string | null) => Promise<unknown>;
   onDelete: (accountId: string) => void;
   onReauth: () => void;
@@ -45,6 +47,9 @@ export type AccountDetailProps = {
   upstreamProxyAdmin?: UpstreamProxyAdmin | null;
   onProxyBindingSave?: (accountId: string, payload: AccountProxyBindingRequest) => Promise<unknown>;
   onProxyEndpointTest?: (endpointId: string) => Promise<UpstreamProxyEndpointTestResponse>;
+  resetCredits?: AccountUsageResetCredits | null;
+  resetCreditsLoading?: boolean;
+  resetCreditsUnavailable?: boolean;
 };
 
 export function AccountDetail({
@@ -55,6 +60,7 @@ export function AccountDetail({
   onPause,
   onResume,
   onProbe,
+  onResetUsage,
   onSetAlias,
   onDelete,
   onReauth,
@@ -66,6 +72,9 @@ export function AccountDetail({
   upstreamProxyAdmin = null,
   onProxyBindingSave,
   onProxyEndpointTest,
+  resetCredits = null,
+  resetCreditsLoading = false,
+  resetCreditsUnavailable = false,
 }: AccountDetailProps) {
   const { data: trends } = useAccountTrends(account?.accountId ?? null);
   const blurred = usePrivacyStore((s) => s.blurred);
@@ -97,6 +106,10 @@ export function AccountDetail({
   const idSuffix = showAccountId ? ` (${compactId})` : "";
   const workspaceLabel = account.chatgptAccountId || account.workspaceLabel || account.workspaceId || "Personal / unknown workspace";
   const seatLabel = account.seatType ? ` | ${formatSlug(account.seatType)}` : "";
+  const operatorRecoveryAction =
+    account.status === "reauth_required" || account.status === "deactivated";
+  const usageResetDisabled =
+    busy || readOnly || account.status === "paused" || operatorRecoveryAction || (resetCredits?.availableCount ?? 0) <= 0;
 
   return (
     <div
@@ -145,7 +158,15 @@ export function AccountDetail({
           onTestEndpoint={onProxyEndpointTest}
         />
       ) : null}
-      <AccountUsagePanel account={account} trends={trends} />
+      <AccountUsagePanel
+        account={account}
+        trends={trends}
+        resetCredits={resetCredits}
+        resetCreditsLoading={resetCreditsLoading}
+        resetCreditsUnavailable={resetCreditsUnavailable}
+        resetDisabled={usageResetDisabled}
+        onReset={onResetUsage}
+      />
       <AccountTokenInfo account={account} />
       <AccountActions
         account={account}

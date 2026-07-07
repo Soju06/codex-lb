@@ -7,6 +7,7 @@ import type { RateLimitResetCreditItem } from "@/features/accounts/schemas";
 import { cn } from "@/lib/utils";
 import { getErrorMessage } from "@/utils/errors";
 import { formatLocalDateTimeSeconds, formatSingleUnitRemaining } from "@/utils/formatters";
+import { useEffect, useRef } from "react";
 
 export type ResetCreditConfirmDialogProps = {
   open: boolean;
@@ -69,6 +70,10 @@ function CreditExpiryLine({
   );
 }
 
+function createRedeemRequestId(): string {
+  return globalThis.crypto?.randomUUID?.() ?? `dashboard-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
 export function ResetCreditConfirmDialog({
   open,
   onOpenChange,
@@ -76,6 +81,7 @@ export function ResetCreditConfirmDialog({
   summaryAvailableCount = 0,
 }: ResetCreditConfirmDialogProps) {
   const { resetCreditConsumeMutation } = useAccountMutations();
+  const redeemRequestIdRef = useRef<string | null>(null);
   const snapshotQuery = useRateLimitResetCredits(accountId, open);
   const snapshotLoading = snapshotQuery.isPending;
   const snapshotError = snapshotQuery.isError;
@@ -94,12 +100,19 @@ export function ResetCreditConfirmDialog({
   const confirmDisabled =
     pending || !accountId || snapshotLoading || snapshotError || availableCount <= 0;
 
+  useEffect(() => {
+    if (!open) {
+      redeemRequestIdRef.current = null;
+    }
+  }, [open]);
+
   const handleConfirm = () => {
     if (!accountId || pending) {
       return;
     }
+    redeemRequestIdRef.current = redeemRequestIdRef.current ?? createRedeemRequestId();
     void resetCreditConsumeMutation
-      .mutateAsync(accountId)
+      .mutateAsync({ accountId, redeemRequestId: redeemRequestIdRef.current })
       .then(() => {
         onOpenChange(false);
       })
@@ -114,6 +127,9 @@ export function ResetCreditConfirmDialog({
     // mid-request. It closes once the promise settles.
     if (!next && pending) {
       return;
+    }
+    if (!next) {
+      redeemRequestIdRef.current = null;
     }
     onOpenChange(next);
   };

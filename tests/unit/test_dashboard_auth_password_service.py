@@ -230,6 +230,52 @@ async def test_verify_totp_inherits_existing_password_session_expiry(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_verify_totp_caps_inherited_password_session_to_requested_ttl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pyotp
+
+    import app.core.auth.totp as totp_module
+    import app.modules.dashboard_auth.service as service_module
+    from app.core.crypto import TokenEncryptor
+
+    current = {"value": 1_700_000_000}
+    monkeypatch.setattr(service_module, "time", lambda: current["value"])
+    monkeypatch.setattr(totp_module, "time", lambda: current["value"])
+
+    repository = _FakeRepository()
+    store = DashboardSessionStore()
+    service = DashboardAuthService(repository, store)
+    await service.setup_password("password123")
+
+    secret = pyotp.random_base32()
+    encryptor = TokenEncryptor()
+    repository.settings.totp_secret_encrypted = encryptor.encrypt(secret)
+
+    long_password_ttl = 365 * 24 * 60 * 60
+    remote_request_ttl = 12 * 60 * 60
+    password_session_id = store.create(
+        password_verified=True,
+        totp_verified=False,
+        ttl_seconds=long_password_ttl,
+    )
+
+    code = pyotp.TOTP(secret).at(current["value"])
+    new_session_id, applied_ttl = await service.verify_totp(
+        session_id=password_session_id,
+        code=code,
+        ttl_seconds=remote_request_ttl,
+    )
+
+    assert applied_ttl == remote_request_ttl
+    state = store.get(new_session_id)
+    assert state is not None
+    assert state.password_verified is True
+    assert state.totp_verified is True
+    assert state.expires_at == current["value"] + remote_request_ttl
+
+
+@pytest.mark.asyncio
 async def test_verify_totp_does_not_call_session_store_get_twice(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

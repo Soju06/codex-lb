@@ -326,7 +326,11 @@ async def test_api_key_list_includes_pooled_credit_fields_for_selectable_assigne
 @pytest.mark.asyncio
 async def test_deleted_assigned_accounts_do_not_fall_back_to_other_accounts(async_client, monkeypatch):
     await _populate_test_registry()
-    monkeypatch.setattr(load_balancer_module, "_filter_accounts_for_model", lambda accounts, model: accounts)
+    monkeypatch.setattr(
+        load_balancer_module,
+        "_filter_accounts_for_model",
+        lambda accounts, model, *, service_tier=None: accounts,
+    )
     assigned_account_id = await _import_account(async_client, "acc-scoped", "scoped@example.com")
     await _import_account(async_client, "acc-fallback", "fallback@example.com")
 

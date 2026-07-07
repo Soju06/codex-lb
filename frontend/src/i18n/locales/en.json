@@ -160,7 +160,19 @@
         "resetDrain": "Reset drain",
         "singleAccount": "Single account",
         "usageWeighted": "Usage weighted",
-        "roundRobin": "Round robin"
+        "roundRobin": "Round robin",
+        "guideTitle": "Strategy guide",
+        "guide": {
+          "capacityWeighted": "Good default for compliant mixed-account pools; prefers accounts with more usable quota headroom.",
+          "relativeAvailability": "Similar to capacity weighted, but smooths selection through a weighted draw over the strongest available accounts.",
+          "usageWeighted": "Spreads traffic by observed usage and can react to recent consumption patterns.",
+          "roundRobin": "Cycles evenly through eligible accounts without considering quota shape.",
+          "fillFirst": "Uses one account heavily before moving on; useful for controlled drain tests, but less conservative for normal traffic.",
+          "sequentialDrain": "Drains accounts in a fixed order. Prefer for maintenance windows, not everyday blended usage.",
+          "resetDrain": "Prioritizes accounts around quota reset timing so expiring capacity is consumed first.",
+          "singleAccount": "Pins all routed traffic to one selected active account."
+        },
+        "safetyNote": "No strategy can guarantee account-safety outcomes. For low-volume policy-compliant use, prefer capacity weighted or relative availability with sticky threads enabled so traffic stays steady and session-local."
       },
       "stickyThreads": {
         "label": "Sticky threads",
@@ -239,6 +251,10 @@
           "sat": "Sat",
           "sun": "Sun"
         }
+      },
+      "paceSmoothing": {
+        "label": "Pace gap average",
+        "description": "Smooth the displayed weekly pace gap over recent quota samples."
       },
       "limitWarmup": {
         "label": "Limit warm-up",

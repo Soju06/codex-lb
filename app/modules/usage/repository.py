@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Collection
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime
 from hashlib import sha256
@@ -344,7 +345,7 @@ def _latest_by_account_sqlite(
     """
 
     latest: dict[str, UsageHistory] = {}
-    with sqlite3.connect(db_path, detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES) as conn:
+    with closing(sqlite3.connect(db_path, detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)) as conn:
         conn.execute("PRAGMA query_only=ON")
         conn.execute("PRAGMA busy_timeout=30000")
         accounts = [str(row[0]) for row in conn.execute(account_sql, account_params)]
@@ -411,7 +412,7 @@ def _additional_latest_by_account_sqlite(
     """
 
     latest: dict[str, AdditionalUsageHistory] = {}
-    with sqlite3.connect(db_path, detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES) as conn:
+    with closing(sqlite3.connect(db_path, detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)) as conn:
         conn.execute("PRAGMA query_only=ON")
         conn.execute("PRAGMA busy_timeout=30000")
         accounts_params = [*scope_params, window, *account_params, *since_params]
@@ -431,7 +432,7 @@ def _bulk_history_since_sqlite(
     since: datetime,
 ) -> dict[str, list[UsageHistorySnapshot]]:
     cache_key = _bulk_history_cache_key(db_path, account_ids, window)
-    with sqlite3.connect(db_path, detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES) as conn:
+    with closing(sqlite3.connect(db_path, detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)) as conn:
         conn.execute("PRAGMA query_only=ON")
         conn.execute("PRAGMA busy_timeout=30000")
         with _BULK_HISTORY_SQLITE_CACHE_LOCK:

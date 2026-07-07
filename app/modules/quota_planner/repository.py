@@ -175,6 +175,7 @@ class QuotaPlannerRepository:
         return row
 
     async def count_executed_warmups_since(self, since: datetime) -> int:
+        since = to_utc_naive(since)
         stmt = select(func.count(QuotaPlannerDecision.id)).where(
             and_(
                 QuotaPlannerDecision.action == "warmup",
@@ -185,6 +186,7 @@ class QuotaPlannerRepository:
         return int(await self._session.scalar(stmt) or 0)
 
     async def warmup_cost_since(self, since: datetime) -> float:
+        since = to_utc_naive(since)
         stmt = select(func.coalesce(func.sum(RequestLog.cost_usd), 0.0)).where(
             and_(
                 RequestLog.request_kind == "warmup",
@@ -230,7 +232,7 @@ class QuotaPlannerRepository:
     ) -> QuotaWindowObservation:
         row = QuotaWindowObservation(
             account_id=account_id,
-            observed_at=observed_at or utcnow(),
+            observed_at=_to_db_naive_utc(observed_at) or utcnow(),
             model=model,
             primary_remaining_percent=primary_remaining_percent,
             primary_reset_at=primary_reset_at,
@@ -251,7 +253,7 @@ class QuotaPlannerRepository:
         since: datetime | None = None,
         bucket_seconds: int = 900,
     ) -> list[DemandBin]:
-        since = since or (utcnow() - timedelta(days=28))
+        since = to_utc_naive(since) if since is not None else (utcnow() - timedelta(days=28))
         bind = self._session.get_bind()
         dialect = bind.dialect.name if bind else "sqlite"
         if dialect == "postgresql":

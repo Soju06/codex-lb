@@ -879,6 +879,25 @@
         "code",
         "test"
       ]
+    },
+    {
+      "login": "evaldass",
+      "name": "evaldass",
+      "avatar_url": "https://avatars.githubusercontent.com/u/10763305?v=4",
+      "profile": "https://github.com/evaldass",
+      "contributions": [
+        "code",
+        "test"
+      ]
+    },
+    {
+      "login": "claude",
+      "name": "Claude",
+      "avatar_url": "https://avatars.githubusercontent.com/u/81847?v=4",
+      "profile": "https://github.com/claude",
+      "contributions": [
+        "code"
+      ]
     }
   ],
   "contributorsPerLine": 7,

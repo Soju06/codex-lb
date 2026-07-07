@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import cast
+
 from app.modules.model_sources.forwarding import (
     SourceStreamUsageParser,
     SourceUsageHolder,
@@ -127,6 +129,8 @@ def test_audio_seconds_ignores_nonpositive_and_nonjson() -> None:
 
 def test_audio_error_payload_preserves_text_body() -> None:
     payload = _error_payload_from_body(b"missing required field: file", "text/plain; charset=utf-8")
+    error = cast(dict[str, object], payload["error"])
+    assert isinstance(error, dict)
 
-    assert payload["error"]["code"] == "model_source_error"
-    assert payload["error"]["message"] == "missing required field: file"
+    assert error["code"] == "model_source_error"
+    assert error["message"] == "missing required field: file"

@@ -5,8 +5,10 @@ import base64
 import contextlib
 import json
 from datetime import timedelta
+from typing import cast
 
 import pytest
+from fastapi.responses import JSONResponse
 from sqlalchemy import select, update
 
 import app.modules.api_keys.repository as api_keys_repository_module
@@ -1025,8 +1027,7 @@ async def test_source_routed_chat_completion_settles_api_key_usage(async_client,
     assert response.status_code == 200
     assert response.json()["id"] == "chatcmpl_source_usage"
     assert observed["source_id"] == source_id
-    forwarded_payload = observed["payload"]
-    assert isinstance(forwarded_payload, dict)
+    forwarded_payload = cast("dict[str, object]", observed["payload"])
     assert forwarded_payload["model"] == model
     assert forwarded_payload["messages"] == [{"role": "user", "content": "hi"}]
     assert forwarded_payload["stream"] is False
@@ -1114,8 +1115,7 @@ async def test_source_routed_chat_completion_applies_api_key_enforcement(async_c
     )
 
     assert response.status_code == 200
-    forwarded_payload = observed["payload"]
-    assert isinstance(forwarded_payload, dict)
+    forwarded_payload = cast("dict[str, object]", observed["payload"])
     assert forwarded_payload["reasoning_effort"] == "high"
     assert forwarded_payload["service_tier"] == "priority"
 
@@ -1156,11 +1156,106 @@ async def test_backend_codex_responses_routes_responses_capable_model_source(asy
         lines = [line async for line in response.aiter_lines() if line]
 
     assert observed["source_id"] == source_id
-    forwarded_payload = observed["payload"]
-    assert isinstance(forwarded_payload, dict)
+    forwarded_payload = cast("dict[str, object]", observed["payload"])
     assert forwarded_payload["model"] == model
     assert forwarded_payload["stream"] is True
     assert any("resp_source" in line for line in lines)
+
+
+@pytest.mark.asyncio
+async def test_backend_codex_responses_compaction_trigger_skips_model_source(async_client, monkeypatch):
+    model = "external-codex-responses-compact"
+    await _create_model_source(
+        async_client,
+        name="codex-responses-compact",
+        model=model,
+        supports_responses=True,
+    )
+    observed: dict[str, object] = {}
+
+    async def fail_source(*args, **kwargs):
+        del args, kwargs
+        pytest.fail("compaction triggers must use the Codex compaction path")
+
+    async def fake_stream_responses(request, payload, context, api_key, **kwargs):
+        del request, context, api_key
+        observed["model"] = payload.model
+        observed["input"] = payload.input
+        observed["codex_session_affinity"] = kwargs.get("codex_session_affinity")
+        return JSONResponse({"ok": True})
+
+    monkeypatch.setattr(proxy_api, "stream_source_responses", fail_source)
+    monkeypatch.setattr(proxy_api, "_stream_responses", fake_stream_responses)
+
+    response = await async_client.post(
+        "/backend-api/codex/responses",
+        json={
+            "model": model,
+            "instructions": "compact this turn",
+            "input": [
+                {"role": "user", "content": "hello"},
+                {"type": "compaction_trigger"},
+            ],
+            "stream": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+    assert observed == {
+        "model": model,
+        "input": [{"role": "user", "content": "hello"}, {"type": "compaction_trigger"}],
+        "codex_session_affinity": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_backend_codex_responses_file_pinned_payload_skips_model_source(async_client, monkeypatch):
+    model = "external-codex-responses-file-pin"
+    await _create_model_source(
+        async_client,
+        name="codex-responses-file-pin",
+        model=model,
+        supports_responses=True,
+    )
+    observed: dict[str, object] = {}
+
+    async def fail_source(*args, **kwargs):
+        del args, kwargs
+        pytest.fail("file-pinned responses must use subscription routing")
+
+    async def fake_stream_responses(request, payload, context, api_key, **kwargs):
+        del request, context, api_key
+        observed["model"] = payload.model
+        observed["input"] = payload.input
+        observed["codex_session_affinity"] = kwargs.get("codex_session_affinity")
+        return JSONResponse({"ok": True})
+
+    monkeypatch.setattr(proxy_api, "stream_source_responses", fail_source)
+    monkeypatch.setattr(proxy_api, "_stream_responses", fake_stream_responses)
+
+    response = await async_client.post(
+        "/backend-api/codex/responses",
+        json={
+            "model": model,
+            "instructions": "read this file",
+            "input": [
+                {
+                    "role": "user",
+                    "content": [{"type": "input_file", "file_id": "file_pinned"}],
+                }
+            ],
+            "stream": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+    assert observed == {
+        "model": model,
+        "input": [{"role": "user", "content": [{"type": "input_file", "file_id": "file_pinned"}]}],
+        "codex_session_affinity": True,
+    }
 
 
 @pytest.mark.asyncio

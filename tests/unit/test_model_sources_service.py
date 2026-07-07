@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import cast
 
 import pytest
 
+from app.core.crypto import TokenEncryptor
 from app.db.models import ModelSource
+from app.modules.model_sources.repository import ModelSourcesRepository
 from app.modules.model_sources.schemas import ModelSourceCreateRequest, ModelSourceModelInput, ModelSourceUpdateRequest
 from app.modules.model_sources.service import ModelSourcesService, ModelSourceValidationError
 
@@ -52,9 +55,17 @@ def _stamp_source(row: ModelSource) -> None:
         model.updated_at = now
 
 
+def _as_repository(repository: _FakeRepository) -> ModelSourcesRepository:
+    return cast(ModelSourcesRepository, repository)
+
+
+def _fake_encryptor() -> TokenEncryptor:
+    return cast(TokenEncryptor, _FakeEncryptor())
+
+
 @pytest.mark.asyncio
 async def test_create_source_validates_absolute_http_url() -> None:
-    service = ModelSourcesService(_FakeRepository(), encryptor=_FakeEncryptor())  # type: ignore[arg-type]
+    service = ModelSourcesService(_as_repository(_FakeRepository()), encryptor=_fake_encryptor())
 
     with pytest.raises(ModelSourceValidationError, match="absolute HTTP"):
         await service.create_source(
@@ -68,7 +79,7 @@ async def test_create_source_validates_absolute_http_url() -> None:
 
 @pytest.mark.asyncio
 async def test_create_source_rejects_duplicate_models() -> None:
-    service = ModelSourcesService(_FakeRepository(), encryptor=_FakeEncryptor())  # type: ignore[arg-type]
+    service = ModelSourcesService(_as_repository(_FakeRepository()), encryptor=_fake_encryptor())
 
     with pytest.raises(ModelSourceValidationError, match="Duplicate"):
         await service.create_source(
@@ -86,7 +97,7 @@ async def test_create_source_rejects_duplicate_models() -> None:
 @pytest.mark.asyncio
 async def test_create_source_encrypts_api_key_without_account_row() -> None:
     repo = _FakeRepository()
-    service = ModelSourcesService(repo, encryptor=_FakeEncryptor())  # type: ignore[arg-type]
+    service = ModelSourcesService(_as_repository(repo), encryptor=_fake_encryptor())
 
     created = await service.create_source(
         ModelSourceCreateRequest(
@@ -108,7 +119,7 @@ async def test_create_source_encrypts_api_key_without_account_row() -> None:
 @pytest.mark.asyncio
 async def test_create_source_persists_audio_transcription_capability() -> None:
     repo = _FakeRepository()
-    service = ModelSourcesService(repo, encryptor=_FakeEncryptor())  # type: ignore[arg-type]
+    service = ModelSourcesService(_as_repository(repo), encryptor=_fake_encryptor())
 
     created = await service.create_source(
         ModelSourceCreateRequest(
@@ -127,7 +138,7 @@ async def test_create_source_persists_audio_transcription_capability() -> None:
 @pytest.mark.asyncio
 async def test_update_source_clears_nullable_fields_when_null_is_sent() -> None:
     repo = _FakeRepository()
-    service = ModelSourcesService(repo, encryptor=_FakeEncryptor())  # type: ignore[arg-type]
+    service = ModelSourcesService(_as_repository(repo), encryptor=_fake_encryptor())
     created = await service.create_source(
         ModelSourceCreateRequest(
             name="Local",

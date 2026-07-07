@@ -86,7 +86,7 @@ from app.core.openai.models import (
     OpenAIErrorEnvelope as OpenAIErrorEnvelopeModel,
 )
 from app.core.openai.parsing import parse_response_payload
-from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
+from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest, extract_input_file_ids
 from app.core.openai.v1_requests import V1ResponsesCompactRequest, V1ResponsesRequest
 from app.core.request_locality import resolve_request_client_host
 from app.core.resilience.overload import is_local_overload_error_code, merge_retry_after_headers
@@ -562,7 +562,14 @@ async def responses(
 
     apply_api_key_enforcement(responses_payload, api_key)
     validate_model_access(api_key, responses_payload.model)
-    source = await _select_responses_model_source(responses_payload.model, api_key)
+    try:
+        compact_trigger_input = strip_terminal_compaction_trigger_input(responses_payload)
+    except ClientPayloadError as exc:
+        error = openai_client_payload_error(exc)
+        return _logged_error_json_response(request, 400, error)
+    source = None
+    if compact_trigger_input is None and not extract_input_file_ids(responses_payload.input):
+        source = await _select_responses_model_source(responses_payload.model, api_key)
     if source is not None:
         # Opportunistic admission gates subscription *account* capacity;
         # source-routed requests use no account, so a closed/empty pool must
@@ -3218,6 +3225,7 @@ async def _source_chat_stream_with_settlement(
         status = "error"
         error_code = "client_disconnected"
         error_message = "client disconnected before stream completed"
+        await _aclose_stream(stream)
         await _release_reservation(reservation)
         raise
     except ModelSourceForwardingError as exc:

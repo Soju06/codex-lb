@@ -1,17 +1,19 @@
 from __future__ import annotations
 
+import asyncio
 import socket
-from collections.abc import AsyncIterator, Awaitable, Callable
-from typing import TypeAlias
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
+from typing import TypeAlias, cast
 
 import pytest
 from aiohttp import web
+from aiohttp.multipart import BodyPartReader
 from sqlalchemy import select
 
 from app.db.models import ApiKeyUsageReservation, RequestLog
 from app.db.session import SessionLocal
 from app.modules.api_keys.repository import ApiKeysRepository
-from app.modules.api_keys.service import ApiKeysService
+from app.modules.api_keys.service import ApiKeysService, ApiKeyUsageReservationData
 
 pytestmark = pytest.mark.integration
 
@@ -116,7 +118,11 @@ async def test_source_audio_transcription_routes_multipart_and_settles_usage(asy
         captured["authorization"] = request.headers.get("authorization")
         reader = await request.multipart()
         fields: dict[str, list[str]] = {}
-        while part := await reader.next():
+        while True:
+            next_part = await reader.next()
+            if next_part is None:
+                break
+            part = cast(BodyPartReader, next_part)
             if part.filename:
                 captured["filename"] = part.filename
                 captured["file_bytes"] = await part.read()
@@ -665,7 +671,11 @@ async def test_cancelled_buffered_stream_releases_reservation(async_client, monk
         supports_chat_completions=True,
         supports_responses=False,
     )
-    reservation = object()
+    reservation = ApiKeyUsageReservationData(
+        reservation_id="resv_cancelled",
+        key_id="key_cancelled",
+        model="cancelled-model",
+    )
 
     with pytest.raises(asyncio.CancelledError):
         await proxy_api._buffered_limited_source_chat_stream_response(
@@ -673,11 +683,83 @@ async def test_cancelled_buffered_stream_releases_reservation(async_client, monk
             source=source,
             api_key=None,
             model="cancelled-model",
-            reservation=reservation,  # type: ignore[arg-type]
+            reservation=reservation,
             stream=cancelled_stream(),
             usage_holder=SourceUsageHolder(),
             rate_limit_headers={},
         )
+
+    assert released == [reservation]
+    assert stream_closed is True
+
+
+@pytest.mark.asyncio
+async def test_downstream_disconnect_closes_source_stream(async_client, monkeypatch):
+    from starlette.requests import Request
+
+    import app.modules.proxy.api as proxy_api
+    from app.db.models import ModelSource
+    from app.modules.model_sources.forwarding import SourceUsageHolder
+
+    released: list[object] = []
+    stream_closed = False
+
+    async def record_release(reservation: object) -> None:
+        released.append(reservation)
+
+    async def skip_log(*args, **kwargs) -> None:
+        del args, kwargs
+
+    monkeypatch.setattr(proxy_api, "_release_reservation", record_release)
+    monkeypatch.setattr(proxy_api, "_log_source_chat_completion", skip_log)
+
+    async def source_stream() -> AsyncIterator[bytes]:
+        nonlocal stream_closed
+        try:
+            yield b"data: partial\n\n"
+            await asyncio.sleep(60)
+        finally:
+            stream_closed = True
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/v1/chat/completions",
+            "headers": [],
+            "client": ("127.0.0.1", 1234),
+            "query_string": b"",
+        }
+    )
+    source = ModelSource(
+        id="src_disconnect",
+        name="disconnect",
+        kind="openai_compatible",
+        base_url="http://127.0.0.1:9/v1",
+        is_enabled=True,
+        supports_chat_completions=True,
+        supports_responses=False,
+    )
+    reservation = ApiKeyUsageReservationData(
+        reservation_id="resv_disconnect",
+        key_id="key_disconnect",
+        model="disconnect-model",
+    )
+    response_stream = cast(
+        AsyncGenerator[bytes, None],
+        proxy_api._source_chat_stream_with_settlement(
+            source_stream(),
+            usage_holder=SourceUsageHolder(),
+            request=request,
+            source=source,
+            api_key=None,
+            model="disconnect-model",
+            reservation=reservation,
+        ),
+    )
+
+    assert await anext(response_stream) == b"data: partial\n\n"
+    await response_stream.aclose()
 
     assert released == [reservation]
     assert stream_closed is True

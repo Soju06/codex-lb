@@ -111,6 +111,8 @@ describe("ModelSourceEditDialog", () => {
           model: "enabled-model",
           displayName: "enabled-model",
           isEnabled: true,
+          contextWindow: 2048,
+          supportsVision: true,
         },
         {
           ...createModelSource().models[0],
@@ -118,6 +120,8 @@ describe("ModelSourceEditDialog", () => {
           model: "disabled-model",
           displayName: "disabled-model",
           isEnabled: false,
+          contextWindow: 4096,
+          supportsVision: false,
         },
       ],
     });
@@ -132,6 +136,9 @@ describe("ModelSourceEditDialog", () => {
       />,
     );
 
+    const outputPrice = screen.getByDisplayValue("1.5");
+    await user.clear(outputPrice);
+    await user.type(outputPrice, "2.0");
     await user.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() => {
@@ -140,10 +147,68 @@ describe("ModelSourceEditDialog", () => {
 
     expect(onSubmit.mock.calls[0][1].models).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ model: "enabled-model", isEnabled: true }),
-        expect.objectContaining({ model: "disabled-model", isEnabled: false }),
+        expect.objectContaining({
+          model: "enabled-model",
+          isEnabled: true,
+          contextWindow: 2048,
+          outputPer1M: 2,
+          supportsVision: true,
+        }),
+        expect.objectContaining({
+          model: "disabled-model",
+          isEnabled: false,
+          contextWindow: 4096,
+          outputPer1M: 2,
+          supportsVision: false,
+        }),
       ]),
     );
+  });
+
+  it("omits model rows when only source-level fields changed", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const source = createModelSource({
+      models: [
+        {
+          ...createModelSource().models[0],
+          model: "m-one",
+          displayName: "m-one",
+          contextWindow: 2048,
+          outputPer1M: 1.0,
+        },
+        {
+          ...createModelSource().models[0],
+          id: 2,
+          model: "m-two",
+          displayName: "m-two",
+          contextWindow: 4096,
+          outputPer1M: 2.0,
+        },
+      ],
+    });
+
+    renderWithProviders(
+      <ModelSourceEditDialog
+        open
+        busy={false}
+        source={source}
+        onOpenChange={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.clear(screen.getByLabelText("Name"));
+    await user.type(screen.getByLabelText("Name"), "vllm-local-updated");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+    });
+
+    const payload = onSubmit.mock.calls[0][1];
+    expect(payload.name).toBe("vllm-local-updated");
+    expect(payload.models).toBeUndefined();
   });
 
   it("prefills and submits the audio per-minute rate", async () => {

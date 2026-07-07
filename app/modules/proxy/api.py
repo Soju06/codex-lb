@@ -2768,7 +2768,7 @@ async def _source_audio_transcription_response(
     else:
         settle_usage = result.usage
         cost_override = None
-        if result.usage is None and _api_key_has_usage_limits(api_key):
+        if result.usage is None and _reservation_requires_usage(reservation):
             await _release_reservation(reservation)
             error = openai_error(
                 "usage_unavailable",
@@ -2872,7 +2872,7 @@ async def _source_responses_response(
                 upstream_status_code=exc.upstream_status_code,
             )
             return _logged_error_json_response(request, exc.status_code, exc.payload, headers=rate_limit_headers)
-        if _api_key_has_usage_limits(api_key):
+        if _reservation_requires_usage(reservation):
             return await _buffered_limited_source_chat_stream_response(
                 request,
                 source=source,
@@ -2918,7 +2918,7 @@ async def _source_responses_response(
         )
         return _logged_error_json_response(request, exc.status_code, exc.payload, headers=rate_limit_headers)
 
-    if result.usage is None and _api_key_has_usage_limits(api_key):
+    if result.usage is None and _reservation_requires_usage(reservation):
         await _release_reservation(reservation)
         error = openai_error(
             "usage_unavailable",
@@ -3007,7 +3007,7 @@ async def _source_chat_completion_response(
                 upstream_status_code=exc.upstream_status_code,
             )
             return _logged_error_json_response(request, exc.status_code, exc.payload, headers=rate_limit_headers)
-        if _api_key_has_usage_limits(api_key):
+        if _reservation_requires_usage(reservation):
             return await _buffered_limited_source_chat_stream_response(
                 request,
                 source=source,
@@ -3049,7 +3049,7 @@ async def _source_chat_completion_response(
         )
         return _logged_error_json_response(request, exc.status_code, exc.payload, headers=rate_limit_headers)
 
-    if result.usage is None and _api_key_has_usage_limits(api_key):
+    if result.usage is None and _reservation_requires_usage(reservation):
         await _release_reservation(reservation)
         error = openai_error(
             "usage_unavailable",
@@ -3277,7 +3277,7 @@ async def _source_chat_stream_with_settlement(
             status = "error"
             error_code = "usage_settlement_failed"
             error_message = "source usage settlement failed"
-        if usage_holder.usage is None and _api_key_has_usage_limits(api_key):
+        if usage_holder.usage is None and _reservation_requires_usage(reservation):
             status = "error"
             error_code = "usage_unavailable"
             error_message = "source stream missing usage"
@@ -4839,8 +4839,8 @@ async def _aclose_stream(stream: AsyncIterator[bytes]) -> None:
         await aclose()
 
 
-def _api_key_has_usage_limits(api_key: ApiKeyData | None) -> bool:
-    return bool(api_key and api_key.limits)
+def _reservation_requires_usage(reservation: ApiKeyUsageReservationData | None) -> bool:
+    return bool(reservation and reservation.has_applicable_limits)
 
 
 def _source_usage_settlement_failed_error() -> OpenAIErrorEnvelope:

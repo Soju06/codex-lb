@@ -434,6 +434,7 @@ class ApiKeyUsageReservationData:
     reservation_id: str
     key_id: str
     model: str
+    has_applicable_limits: bool = True
 
 
 class ApiKeysService:
@@ -864,6 +865,7 @@ class ApiKeysService:
             reservation_id=reservation_id,
             key_id=key_id,
             model=request_model or "",
+            has_applicable_limits=bool(reservation_items),
         )
 
     async def finalize_usage_reservation(

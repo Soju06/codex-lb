@@ -1023,6 +1023,57 @@ async def test_source_chat_payload_drops_empty_tools_and_reasoning_toggles(async
 
 
 @pytest.mark.asyncio
+async def test_source_chat_without_usage_ignores_limits_for_other_models(async_client, source_upstream):
+    await _enable_api_key_auth(async_client)
+
+    async def completion_without_usage(_request: web.Request) -> web.Response:
+        body = _chat_completion_body("source-unlimited-by-filter")
+        body.pop("usage", None)
+        return web.json_response(body)
+
+    base_url = await source_upstream(completion_without_usage)
+    model = "source-unlimited-by-filter"
+    source_id = await _create_model_source(
+        async_client,
+        name="source-unlimited-by-filter",
+        model=model,
+        base_url=base_url,
+    )
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "source limit for other model",
+            "assignedSourceIds": [source_id],
+            "limits": [
+                {
+                    "limitType": "total_tokens",
+                    "limitWindow": "weekly",
+                    "maxValue": 5,
+                    "modelFilter": "some-other-model",
+                },
+            ],
+        },
+    )
+    assert created.status_code == 200
+    key = created.json()["key"]
+
+    response = await async_client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"model": model, "messages": [{"role": "user", "content": "hi"}]},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["id"] == "chatcmpl_sanitized"
+
+    async with SessionLocal() as session:
+        result = await session.execute(
+            select(ApiKeyUsageReservation).where(ApiKeyUsageReservation.status == "reserved")
+        )
+        assert result.scalars().all() == []
+
+
+@pytest.mark.asyncio
 async def test_v1_models_metadata_reflects_reasoning_optin(async_client):
     await _create_model_source(
         async_client,

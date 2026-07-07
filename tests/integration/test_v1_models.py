@@ -294,6 +294,50 @@ async def test_v1_models_filters_openai_compatible_sources_by_api_key_assignment
 
 
 @pytest.mark.asyncio
+async def test_v1_models_filters_source_models_by_exact_allowlist(async_client):
+    await _create_model_source(async_client, name="alias-source", model="gpt-5-high")
+    await _create_model_source(async_client, name="plain-source", model="plain-source-model")
+
+    settings = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert settings.status_code == 200
+
+    alias_key = await async_client.post(
+        "/api/api-keys/",
+        json={"name": "exact source alias key", "allowedModels": ["gpt-5-high"]},
+    )
+    assert alias_key.status_code == 200
+    alias_response = await async_client.get(
+        "/v1/models",
+        headers={"Authorization": f"Bearer {alias_key.json()['key']}"},
+    )
+    assert alias_response.status_code == 200
+    alias_ids = {item["id"] for item in alias_response.json()["data"]}
+    assert "gpt-5-high" in alias_ids
+    assert "plain-source-model" not in alias_ids
+
+    canonical_key = await async_client.post(
+        "/api/api-keys/",
+        json={"name": "canonical source alias key", "allowedModels": ["gpt-5"]},
+    )
+    assert canonical_key.status_code == 200
+    canonical_response = await async_client.get(
+        "/v1/models",
+        headers={"Authorization": f"Bearer {canonical_key.json()['key']}"},
+    )
+    assert canonical_response.status_code == 200
+    canonical_ids = {item["id"] for item in canonical_response.json()["data"]}
+    assert "gpt-5-high" not in canonical_ids
+
+
+@pytest.mark.asyncio
 async def test_backend_codex_models_includes_only_responses_capable_source_models(async_client):
     await _create_model_source(
         async_client,

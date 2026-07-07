@@ -1081,6 +1081,46 @@ async def test_source_chat_payload_drops_empty_tools_and_reasoning_toggles(async
 
 
 @pytest.mark.asyncio
+async def test_source_chat_payload_enforced_reasoning_stays_stripped_for_plain_model(async_client, source_upstream):
+    await _enable_api_key_auth(async_client)
+    captured: dict[str, object] = {}
+
+    async def capture(request: web.Request) -> web.Response:
+        captured.update(await request.json())
+        return web.json_response(_chat_completion_body("plain-enforced-model"))
+
+    base_url = await source_upstream(capture)
+    model = "plain-enforced-model"
+    source_id = await _create_model_source(
+        async_client,
+        name="plain-enforced",
+        model=model,
+        base_url=base_url,
+    )
+    key_response = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "plain enforced source key",
+            "enforcedReasoningEffort": "high",
+            "sourceAssignmentScopeEnabled": True,
+            "assignedSourceIds": [source_id],
+        },
+    )
+    assert key_response.status_code == 200
+    key = key_response.json()["key"]
+
+    response = await async_client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"model": model, "messages": [{"role": "user", "content": "hi"}]},
+    )
+
+    assert response.status_code == 200
+    assert "reasoning" not in captured
+    assert "reasoning_effort" not in captured
+
+
+@pytest.mark.asyncio
 async def test_source_chat_without_usage_ignores_limits_for_other_models(async_client, source_upstream):
     await _enable_api_key_auth(async_client)
 

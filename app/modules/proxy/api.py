@@ -2220,6 +2220,7 @@ async def _build_models_response(api_key: ApiKeyData | None) -> Response:
     )
 
     allowed_models = _allowed_models_for_api_key(api_key)
+    exact_source_allowed_models = _exact_source_allowed_models_for_api_key(api_key)
     created = int(time.time())
 
     registry = get_model_registry()
@@ -2240,7 +2241,10 @@ async def _build_models_response(api_key: ApiKeyData | None) -> Response:
     for model in source_models:
         if model.slug in seen_slugs:
             continue
-        if not is_public_model(model, allowed_models):
+        if exact_source_allowed_models is not None:
+            if model.slug not in exact_source_allowed_models:
+                continue
+        elif not is_public_model(model, allowed_models):
             continue
         items.append(_to_model_list_item(model.slug, model, created=created))
         seen_slugs.add(model.slug)
@@ -2283,6 +2287,16 @@ def _allowed_models_for_api_key(api_key: ApiKeyData | None) -> set[str] | None:
     allowed_models = _canonical_model_set(api_key.allowed_models) if api_key and api_key.allowed_models else None
     if api_key and api_key.enforced_model:
         forced = {_canonical_model_slug(api_key.enforced_model)}
+        return forced if allowed_models is None else (allowed_models & forced)
+    return allowed_models
+
+
+def _exact_source_allowed_models_for_api_key(api_key: ApiKeyData | None) -> set[str] | None:
+    if api_key is None:
+        return None
+    allowed_models = set(api_key.allowed_models) if api_key.allowed_models else None
+    if api_key.enforced_model:
+        forced = {api_key.enforced_model}
         return forced if allowed_models is None else (allowed_models & forced)
     return allowed_models
 
@@ -3027,11 +3041,11 @@ async def _source_chat_completion_response(
     source_payload = payload.model_dump(mode="json", exclude_none=True)
     source_payload["model"] = model
     source_payload["stream"] = bool(payload.stream)
+    apply_api_key_enforcement_to_chat_payload(source_payload, api_key)
     sanitize_source_chat_payload(
         source_payload,
         allow_reasoning=source_model_supports_reasoning(source, model),
     )
-    apply_api_key_enforcement_to_chat_payload(source_payload, api_key)
 
     if payload.stream:
         stream_options = source_payload.get("stream_options")

@@ -148,8 +148,8 @@ async def test_refresh_accounts_owned_singleflight_session_outlives_caller_cance
         return usage_updater_module.AccountRefreshResult(usage_written=True)
 
     monkeypatch.setattr(usage_updater_module, "get_background_session", recording_background_session)
-    monkeypatch.setattr(usage_updater_module, "AccountsRepository", InnerAccountsRepository)
-    monkeypatch.setattr(usage_updater_module, "UsageRepository", InnerUsageRepository)
+    monkeypatch.setattr(usage_updater_module, "SessionAccountsRepository", InnerAccountsRepository)
+    monkeypatch.setattr(usage_updater_module, "SessionUsageRepository", InnerUsageRepository)
     monkeypatch.setattr(usage_updater_module, "AdditionalUsageRepository", InnerAdditionalUsageRepository)
     monkeypatch.setattr(UsageUpdater, "_refresh_account_if_stale", fake_refresh_account_if_stale)
     monkeypatch.setattr(usage_updater_module, "get_settings", Settings)

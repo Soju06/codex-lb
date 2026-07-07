@@ -95,6 +95,9 @@ async def _build_pressure_window(
     since = generated_at - timedelta(seconds=seconds)
     conditions = _request_log_conditions(since, visible_account_ids)
     totals = await _pressure_metrics(session, conditions)
+    by_account, accounts_truncated = await _pressure_by_account(session, conditions)
+    by_kind, kinds_truncated = await _pressure_by_kind(session, conditions)
+    by_client, clients_truncated = await _pressure_by_client(session, conditions)
     return FleetPressureWindow(
         key=key,
         label=label,
@@ -105,10 +108,11 @@ async def _build_pressure_window(
         cached_input_tokens=totals.cached_input_tokens,
         output_tokens=totals.output_tokens,
         cost_usd=totals.cost_usd,
+        truncated=accounts_truncated or kinds_truncated or clients_truncated,
         top_error_code=await _top_error_code(session, conditions),
-        by_account=await _pressure_by_account(session, conditions),
-        by_kind=await _pressure_by_kind(session, conditions),
-        by_client=await _pressure_by_client(session, conditions),
+        by_account=by_account,
+        by_kind=by_kind,
+        by_client=by_client,
     )
 
 
@@ -135,7 +139,9 @@ def _metric_columns():
         ).label("error_count"),
         func.coalesce(func.sum(RequestLog.input_tokens), 0).label("input_tokens"),
         func.coalesce(func.sum(RequestLog.cached_input_tokens), 0).label("cached_input_tokens"),
-        func.coalesce(func.sum(RequestLog.output_tokens), 0).label("output_tokens"),
+        func.coalesce(func.sum(func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)), 0).label(
+            "output_tokens"
+        ),
         func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("cost_usd"),
     )
 
@@ -177,7 +183,7 @@ async def _top_error_code(session: AsyncSession, conditions: list[ColumnElement[
 async def _pressure_by_account(
     session: AsyncSession,
     conditions: list[ColumnElement[bool]],
-) -> list[FleetPressureAccountBreakdown]:
+) -> tuple[list[FleetPressureAccountBreakdown], bool]:
     result = await session.execute(
         select(
             RequestLog.account_id,
@@ -189,48 +195,55 @@ async def _pressure_by_account(
         .where(and_(*conditions, RequestLog.account_id.is_not(None)))
         .group_by(RequestLog.account_id, Account.email)
         .order_by(func.count(RequestLog.id).desc(), RequestLog.account_id.asc())
-        .limit(_BREAKDOWN_LIMIT)
+        .limit(_BREAKDOWN_LIMIT + 1)
     )
     rows = result.all()
-    return [
-        FleetPressureAccountBreakdown(
-            account_id=str(row.account_id),
-            email=row.email,
-            label=row.email or str(row.account_id),
-            last_selected_at=row.last_selected_at if isinstance(row.last_selected_at, datetime) else None,
-            **_metric_from_row(row).model_dump(),
-        )
-        for row in rows
-        if row.account_id
-    ]
+    return (
+        [
+            FleetPressureAccountBreakdown(
+                account_id=str(row.account_id),
+                email=row.email,
+                label=row.email or str(row.account_id),
+                last_selected_at=row.last_selected_at if isinstance(row.last_selected_at, datetime) else None,
+                **_metric_from_row(row).model_dump(),
+            )
+            for row in rows[:_BREAKDOWN_LIMIT]
+            if row.account_id
+        ],
+        len(rows) > _BREAKDOWN_LIMIT,
+    )
 
 
 async def _pressure_by_kind(
     session: AsyncSession,
     conditions: list[ColumnElement[bool]],
-) -> list[FleetPressureKindBreakdown]:
+) -> tuple[list[FleetPressureKindBreakdown], bool]:
     kind = func.coalesce(func.nullif(RequestLog.request_kind, ""), "unknown").label("request_kind")
     result = await session.execute(
         select(kind, *_metric_columns())
         .where(and_(*conditions))
         .group_by(kind)
         .order_by(func.count(RequestLog.id).desc(), kind.asc())
-        .limit(_BREAKDOWN_LIMIT)
+        .limit(_BREAKDOWN_LIMIT + 1)
     )
-    return [
-        FleetPressureKindBreakdown(
-            name=str(row.request_kind or "unknown"),
-            request_kind=str(row.request_kind or "unknown"),
-            **_metric_from_row(row).model_dump(),
-        )
-        for row in result.all()
-    ]
+    rows = result.all()
+    return (
+        [
+            FleetPressureKindBreakdown(
+                name=str(row.request_kind or "unknown"),
+                request_kind=str(row.request_kind or "unknown"),
+                **_metric_from_row(row).model_dump(),
+            )
+            for row in rows[:_BREAKDOWN_LIMIT]
+        ],
+        len(rows) > _BREAKDOWN_LIMIT,
+    )
 
 
 async def _pressure_by_client(
     session: AsyncSession,
     conditions: list[ColumnElement[bool]],
-) -> list[FleetPressureClientBreakdown]:
+) -> tuple[list[FleetPressureClientBreakdown], bool]:
     client_group = func.coalesce(
         func.nullif(RequestLog.useragent_group, ""),
         func.nullif(RequestLog.source, ""),
@@ -241,16 +254,20 @@ async def _pressure_by_client(
         .where(and_(*conditions))
         .group_by(client_group)
         .order_by(func.count(RequestLog.id).desc(), client_group.asc())
-        .limit(_BREAKDOWN_LIMIT)
+        .limit(_BREAKDOWN_LIMIT + 1)
     )
-    return [
-        FleetPressureClientBreakdown(
-            name=str(row.client_group or "unknown"),
-            client_group=str(row.client_group or "unknown"),
-            **_metric_from_row(row).model_dump(),
-        )
-        for row in result.all()
-    ]
+    rows = result.all()
+    return (
+        [
+            FleetPressureClientBreakdown(
+                name=str(row.client_group or "unknown"),
+                client_group=str(row.client_group or "unknown"),
+                **_metric_from_row(row).model_dump(),
+            )
+            for row in rows[:_BREAKDOWN_LIMIT]
+        ],
+        len(rows) > _BREAKDOWN_LIMIT,
+    )
 
 
 async def _build_sticky_observability(

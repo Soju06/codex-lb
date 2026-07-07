@@ -43,7 +43,8 @@ def _usage_sections(raw: str) -> set[str]:
 
 
 async def _can_view_fleet_usage(api_key: ApiKeyData) -> bool:
-    if "account_pool_usage" not in _usage_sections(api_key.usage_sections):
+    sections = _usage_sections(api_key.usage_sections)
+    if "account_pool_usage" not in sections or "upstream_limits" not in sections:
         return False
     settings = await get_settings_cache().get()
     return not bool(getattr(settings, "hide_upstream_quota_from_api_keys", False))

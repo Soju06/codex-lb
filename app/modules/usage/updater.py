@@ -29,10 +29,12 @@ from app.db.models import Account, AccountStatus, UsageHistory
 from app.db.session import get_background_session
 from app.modules.accounts.auth_manager import AccountsRepositoryPort, AuthManager
 from app.modules.accounts.background_repository import BackgroundAccountsRepository
+from app.modules.accounts.repository import AccountsRepository as SessionAccountsRepository
 from app.modules.proxy.account_cache import get_account_selection_cache, mark_account_routing_unavailable
 from app.modules.usage.additional_quota_keys import canonicalize_additional_quota_key
 from app.modules.usage.background_repository import BackgroundAdditionalUsageRepository, BackgroundUsageRepository
 from app.modules.usage.repository import AdditionalUsageRepository
+from app.modules.usage.repository import UsageRepository as SessionUsageRepository
 
 logger = logging.getLogger(__name__)
 
@@ -324,6 +326,7 @@ class UsageUpdater:
                         own_singleflight_session=own_singleflight_sessions,
                     ),
                     refresh_factory,
+                    join_existing=not own_singleflight_sessions,
                 )
                 if not own_singleflight_sessions:
                     await self._sync_account_from_repo(account)
@@ -417,10 +420,15 @@ class UsageUpdater:
         *,
         interval_seconds: int,
     ) -> AccountRefreshResult:
+        @contextlib.asynccontextmanager
+        async def refresh_repo_factory():
+            async with get_background_session() as refresh_session:
+                yield SessionAccountsRepository(refresh_session)
+
         async with get_background_session() as session:
-            accounts_repo = BackgroundAccountsRepository(session)
-            usage_repo = BackgroundUsageRepository(session)
-            additional_usage_repo = BackgroundAdditionalUsageRepository(session)
+            accounts_repo = SessionAccountsRepository(session)
+            usage_repo = SessionUsageRepository(session)
+            additional_usage_repo = AdditionalUsageRepository(session)
             account = await accounts_repo.get_by_id(account_id)
             if account is None:
                 return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
@@ -428,6 +436,7 @@ class UsageUpdater:
                 usage_repo,
                 accounts_repo,
                 additional_usage_repo,
+                auth_manager=AuthManager(accounts_repo, refresh_repo_factory=refresh_repo_factory),
             )._refresh_account_if_stale(
                 account,
                 usage_account_id=account.chatgpt_account_id,

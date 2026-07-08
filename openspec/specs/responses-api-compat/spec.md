@@ -356,9 +356,9 @@ When an API key carries an enforced service tier, the proxy MUST override any in
 ### Requirement: Cursor GPT-5 model aliases normalize to canonical slugs
 
 For Responses proxy traffic, the service MUST recognize Cursor-style GPT-5 model aliases formed by appending known suffix tokens
-(`minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `extra`, `fast`, `priority`, `reasoning`, `thinking`) to supported GPT-5 family slugs. The alias
+(`minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `ultra`, `extra`, `fast`, `priority`, `reasoning`, `thinking`) to supported GPT-5 family slugs. The alias
 resolver MUST match longer qualified canonical slugs before shorter family prefixes so aliases such as `gpt-5.4-mini-high` and `gpt-5.3-codex-fast` normalize
-to the intended model. Unknown suffix tokens MUST leave the requested model unchanged.
+to the intended model. `ultra` MUST normalize to the upstream wire-level `max` effort. Unknown suffix tokens MUST leave the requested model unchanged.
 
 #### Scenario: Qualified mini model alias normalizes reasoning
 
@@ -372,9 +372,16 @@ to the intended model. Unknown suffix tokens MUST leave the requested model unch
 - **THEN** the forwarded upstream request uses `model: "gpt-5.3-codex"`
 - **AND** the forwarded upstream request uses `service_tier: "priority"`
 
+#### Scenario: Ultra model alias normalizes to wire max reasoning
+
+- **WHEN** a client sends a Responses request with `model: "gpt-5.6-terra-ultra-fast"`
+- **THEN** the forwarded upstream request uses `model: "gpt-5.6-terra"`
+- **AND** the forwarded upstream request uses `reasoning.effort: "max"`
+- **AND** the forwarded upstream request uses `service_tier: "priority"`
+
 ### Requirement: OpenAI-compatible Responses payload sanitation removes provider-specific thinking aliases
 
-The shared OpenAI-compatible Responses sanitation path MUST normalize third-party thinking aliases into the canonical `reasoning` object before upstream forwarding. Unknown provider-specific thinking controls MUST NOT be passed through unchanged to the upstream ChatGPT backend.
+The shared OpenAI-compatible Responses sanitation path MUST normalize third-party thinking aliases into the canonical `reasoning` object before upstream forwarding. The `ultra` thinking alias MUST normalize to the upstream wire-level `max` effort. Unknown provider-specific thinking controls MUST NOT be passed through unchanged to the upstream ChatGPT backend.
 
 #### Scenario: Shared payload sanitation maps enable_thinking
 
@@ -387,6 +394,13 @@ The shared OpenAI-compatible Responses sanitation path MUST normalize third-part
 
 - **WHEN** an internal Responses payload contains both `reasoning: {"effort":"high"}` and `thinking: {"type":"enabled"}`
 - **THEN** the forwarded upstream payload keeps `reasoning.effort: "high"`
+- **AND** the forwarded upstream payload does not include `thinking`
+
+#### Scenario: Ultra thinking alias normalizes to wire max reasoning
+
+- **WHEN** an internal Responses payload contains `thinking: "ultra"`
+- **AND** no explicit `reasoning.effort` is already present
+- **THEN** the forwarded upstream payload includes `reasoning.effort: "max"`
 - **AND** the forwarded upstream payload does not include `thinking`
 
 ### Requirement: Public Responses streams expose renderable final text

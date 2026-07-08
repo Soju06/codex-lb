@@ -175,12 +175,14 @@ _BOOTSTRAP_STATIC_MODELS: tuple[UpstreamModel, ...] = (
         "GPT-5.6 Terra",
         prefer_websockets=True,
         minimal_client_version="0.124.0",
+        reasoning_levels=_REASONING_LEVELS_MAX,
     ),
     _bootstrap_model(
         "gpt-5.6-luna",
         "GPT-5.6 Luna",
         prefer_websockets=True,
         minimal_client_version="0.124.0",
+        reasoning_levels=_REASONING_LEVELS_MAX,
     ),
     _bootstrap_model(
         "gpt-5.5",

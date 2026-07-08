@@ -873,6 +873,24 @@ def test_normalize_unsupported_reasoning_effort_preserves_supported_effort():
     assert payload.reasoning.effort == "high"
 
 
+def test_normalize_unsupported_reasoning_effort_maps_ultra_to_wire_max():
+    from app.core.openai.requests import ResponsesReasoning
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "hello",
+            "input": [],
+        }
+    )
+    payload.reasoning = ResponsesReasoning(effort="ultra")
+
+    proxy_request_policy.normalize_unsupported_reasoning_effort(payload)
+
+    assert payload.reasoning is not None
+    assert payload.reasoning.effort == "max"
+
+
 def test_apply_api_key_enforcement_normalizes_minimal_without_api_key():
     from app.core.openai.requests import ResponsesReasoning
 

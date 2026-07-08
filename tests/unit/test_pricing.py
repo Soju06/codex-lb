@@ -70,6 +70,7 @@ def test_get_pricing_for_model_gpt_5_4_alias():
         ("gpt-5.6-sol", "gpt-5.6-sol", 5.0, 30.0),
         ("gpt-5.6-sol-xhigh-fast", "gpt-5.6-sol", 5.0, 30.0),
         ("gpt-5.6-terra", "gpt-5.6-terra", 2.5, 15.0),
+        ("gpt-5.6-terra-ultra-fast", "gpt-5.6-terra", 2.5, 15.0),
         ("gpt-5.6-terra-medium", "gpt-5.6-terra", 2.5, 15.0),
         ("gpt-5.6-luna", "gpt-5.6-luna", 1.0, 6.0),
         ("gpt-5.6-luna-fast", "gpt-5.6-luna", 1.0, 6.0),

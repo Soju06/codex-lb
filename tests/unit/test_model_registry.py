@@ -172,13 +172,14 @@ def test_bootstrap_models_include_representative_upstream_metadata():
         assert model.context_window == 272_000
         assert model.supported_in_api is True
         assert model.raw["max_context_window"] == 272_000
-    assert {level.effort for level in models["gpt-5.6-sol"].supported_reasoning_levels} == {
-        "low",
-        "medium",
-        "high",
-        "xhigh",
-        "max",
-    }
+    for slug in ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"):
+        assert {level.effort for level in models[slug].supported_reasoning_levels} == {
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+        }
 
     mini = models["gpt-5.4-mini"]
     assert mini.prefer_websockets is True

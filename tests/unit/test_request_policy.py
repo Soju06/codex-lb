@@ -23,6 +23,7 @@ from app.modules.proxy.request_policy import apply_api_key_enforcement, validate
         ("gpt-5.3-codex-fast", "gpt-5.3-codex", None, "priority"),
         ("gpt-5.1-codex-mini-extra-fast", "gpt-5.1-codex-mini", "high", "priority"),
         ("gpt-5.6-sol-max-fast", "gpt-5.6-sol", "max", "priority"),
+        ("gpt-5.6-terra-ultra-fast", "gpt-5.6-terra", "max", "priority"),
         ("gpt-5.6-sol-xhigh-fast", "gpt-5.6-sol", "high", "priority"),
         ("gpt-5.6-terra-medium", "gpt-5.6-terra", "medium", None),
         ("gpt-5.6-luna-fast", "gpt-5.6-luna", None, "priority"),

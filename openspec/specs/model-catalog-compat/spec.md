@@ -13,7 +13,8 @@ data remains the authoritative source once available. The bootstrap catalog MUST
 include `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.5`, `gpt-5.4`,
 `gpt-5.4-mini`, `gpt-5.3-codex`, `gpt-5.3-codex-spark`, `gpt-5.2`, and
 `codex-auto-review`, and MUST NOT invent unverified variant slugs such as
-`gpt-5.5-pro`.
+`gpt-5.5-pro` or `gpt-5.6-pro`. The bundled `gpt-5.6-sol`, `gpt-5.6-terra`,
+and `gpt-5.6-luna` metadata MUST include the `max` reasoning level.
 
 #### Scenario: OpenAI-compatible models endpoint serves bootstrap slugs
 
@@ -27,6 +28,7 @@ include `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.5`, `gpt-5.4`,
 - **GIVEN** the model registry has no refreshed upstream snapshot
 - **WHEN** a client calls `GET /backend-api/codex/models`
 - **THEN** entries such as `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex`, `gpt-5.3-codex-spark`, and `codex-auto-review` include representative upstream metadata including client version, context-window, visibility, modality, plan-availability, and reasoning/verbosity fields where known
+- **AND** `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna` include `max` in `supported_reasoning_levels`
 
 ### Requirement: Refreshed upstream model data remains authoritative
 

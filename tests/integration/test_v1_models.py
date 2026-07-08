@@ -196,6 +196,13 @@ async def test_backend_codex_models_uses_bootstrap_upstream_metadata(async_clien
         assert entry["context_window"] == 272_000
         assert entry["supported_in_api"] is True
         assert entry["max_context_window"] == 272_000
+        assert {level["effort"] for level in entry["supported_reasoning_levels"]} == {
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+        }
 
     mini = entries["gpt-5.4-mini"]
     assert mini["prefer_websockets"] is True

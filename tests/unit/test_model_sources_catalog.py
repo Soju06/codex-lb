@@ -107,6 +107,7 @@ def test_source_models_to_upstream_models_defaults_missing_context_window() -> N
     assert len(models) == 1
     model = models[0]
     assert model.context_window == DEFAULT_SOURCE_CONTEXT_WINDOW
+    assert model.raw["shell_type"] == "shell_command"
     assert model.raw["max_context_window"] == DEFAULT_SOURCE_CONTEXT_WINDOW
     assert model.prefer_websockets is False
 

@@ -31,6 +31,7 @@ def _to_upstream_model(source: ModelSource, source_model: ModelSourceModel) -> U
     raw = _raw_metadata(source_model)
     context_window = source_model.context_window or DEFAULT_SOURCE_CONTEXT_WINDOW
     raw.setdefault("visibility", "list")
+    raw.setdefault("shell_type", "shell_command")
     raw.setdefault("max_context_window", context_window)
     if source_model.max_output_tokens is not None:
         raw["max_output_tokens"] = source_model.max_output_tokens

@@ -452,6 +452,7 @@ async def test_backend_codex_models_defaults_source_model_context_window(async_c
     assert response.status_code == 200
     source_entry = next(item for item in response.json()["models"] if item["slug"] == "external-default-context-model")
     assert source_entry["context_window"] == 128_000
+    assert source_entry["shell_type"] == "shell_command"
     assert source_entry["max_context_window"] == 128_000
     assert source_entry["prefer_websockets"] is False
 

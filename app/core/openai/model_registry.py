@@ -57,7 +57,13 @@ class ModelRegistrySnapshot:
     fetched_at: float
 
 
-_BOOTSTRAP_WEBSOCKET_PREFERRED_MODEL_PATTERNS = ("gpt-5.5", "gpt-5.5-*", "gpt-5.4", "gpt-5.4-*")
+_BOOTSTRAP_WEBSOCKET_PREFERRED_MODEL_PATTERNS = (
+    "gpt-5.6-*",
+    "gpt-5.5",
+    "gpt-5.5-*",
+    "gpt-5.4",
+    "gpt-5.4-*",
+)
 
 _REASONING_LEVELS_STANDARD = (
     ReasoningLevel(effort="low", description="Low reasoning effort"),
@@ -70,6 +76,11 @@ _REASONING_LEVELS_EXTENDED = (
     ReasoningLevel(effort="medium", description="Medium reasoning effort"),
     ReasoningLevel(effort="high", description="High reasoning effort"),
     ReasoningLevel(effort="xhigh", description="Extra high reasoning effort"),
+)
+
+_REASONING_LEVELS_MAX = (
+    *_REASONING_LEVELS_EXTENDED,
+    ReasoningLevel(effort="max", description="Maximum reasoning effort"),
 )
 
 _BOOTSTRAP_AVAILABLE_IN_PLANS = frozenset(
@@ -152,6 +163,25 @@ def _bootstrap_model(
 # explicit rather than inherited from helper defaults; every slug must exist
 # upstream, and live upstream data always takes precedence once available.
 _BOOTSTRAP_STATIC_MODELS: tuple[UpstreamModel, ...] = (
+    _bootstrap_model(
+        "gpt-5.6-sol",
+        "GPT-5.6 Sol",
+        prefer_websockets=True,
+        minimal_client_version="0.124.0",
+        reasoning_levels=_REASONING_LEVELS_MAX,
+    ),
+    _bootstrap_model(
+        "gpt-5.6-terra",
+        "GPT-5.6 Terra",
+        prefer_websockets=True,
+        minimal_client_version="0.124.0",
+    ),
+    _bootstrap_model(
+        "gpt-5.6-luna",
+        "GPT-5.6 Luna",
+        prefer_websockets=True,
+        minimal_client_version="0.124.0",
+    ),
     _bootstrap_model(
         "gpt-5.5",
         "GPT-5.5",

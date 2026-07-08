@@ -10,9 +10,10 @@ serve a conservative static catalog of known Codex model slugs from both
 `GET /v1/models` and `GET /backend-api/codex/models`. This static catalog is a
 bundled fallback for startup/offline paths; refreshed upstream model-registry
 data remains the authoritative source once available. The bootstrap catalog MUST
-include `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex`,
-`gpt-5.3-codex-spark`, `gpt-5.2`, and `codex-auto-review`, and MUST NOT invent
-unverified variant slugs such as `gpt-5.5-pro`.
+include `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.5`, `gpt-5.4`,
+`gpt-5.4-mini`, `gpt-5.3-codex`, `gpt-5.3-codex-spark`, `gpt-5.2`, and
+`codex-auto-review`, and MUST NOT invent unverified variant slugs such as
+`gpt-5.5-pro`.
 
 #### Scenario: OpenAI-compatible models endpoint serves bootstrap slugs
 
@@ -101,4 +102,3 @@ When serving `GET /backend-api/codex/models`, the system MUST keep Codex-native 
 - **WHEN** the upstream model catalog contains `gpt-5.5` with `context_window=272000`
 - **THEN** `GET /backend-api/codex/models` returns `gpt-5.5.context_window=272000`
 - **AND** it does not replace that field with `400000`
-

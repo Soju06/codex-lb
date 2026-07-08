@@ -37,6 +37,9 @@ _DEFAULT_REASONING_EFFORT_FALLBACK = "low"
 # Keep this deliberately narrow: only strip known Cursor-style suffix tokens
 # from known GPT-5 base model slugs, and leave every other model untouched.
 _GPT5_ALIAS_BASE_MODELS: tuple[str, ...] = (
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+    "gpt-5.6-sol",
     "gpt-5.4-mini",
     "gpt-5.3-codex",
     "gpt-5.2-codex",
@@ -56,10 +59,11 @@ _MODEL_ALIAS_REASONING_TOKENS: dict[str, str] = {
     "low": "low",
     "medium": "medium",
     "high": "high",
+    "max": "max",
     "xhigh": "high",
     "extra": "high",
 }
-_MODEL_ALIAS_REASONING_RANK: dict[str, int] = {"minimal": 0, "low": 1, "medium": 2, "high": 3}
+_MODEL_ALIAS_REASONING_RANK: dict[str, int] = {"minimal": 0, "low": 1, "medium": 2, "high": 3, "max": 4}
 _MODEL_ALIAS_SERVICE_TIER_TOKENS: dict[str, str] = {
     "fast": "priority",
     "priority": "priority",

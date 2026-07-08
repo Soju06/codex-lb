@@ -356,7 +356,7 @@ When an API key carries an enforced service tier, the proxy MUST override any in
 ### Requirement: Cursor GPT-5 model aliases normalize to canonical slugs
 
 For Responses proxy traffic, the service MUST recognize Cursor-style GPT-5 model aliases formed by appending known suffix tokens
-(`minimal`, `low`, `medium`, `high`, `xhigh`, `extra`, `fast`, `priority`, `reasoning`, `thinking`) to supported GPT-5 family slugs. The alias
+(`minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `extra`, `fast`, `priority`, `reasoning`, `thinking`) to supported GPT-5 family slugs. The alias
 resolver MUST match longer qualified canonical slugs before shorter family prefixes so aliases such as `gpt-5.4-mini-high` and `gpt-5.3-codex-fast` normalize
 to the intended model. Unknown suffix tokens MUST leave the requested model unchanged.
 

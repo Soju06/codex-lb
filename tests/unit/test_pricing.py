@@ -64,6 +64,32 @@ def test_get_pricing_for_model_gpt_5_4_alias():
     assert model == "gpt-5.4"
 
 
+@pytest.mark.parametrize(
+    ("requested_model", "canonical_model", "input_per_1m", "output_per_1m"),
+    [
+        ("gpt-5.6-sol", "gpt-5.6-sol", 5.0, 30.0),
+        ("gpt-5.6-sol-xhigh-fast", "gpt-5.6-sol", 5.0, 30.0),
+        ("gpt-5.6-terra", "gpt-5.6-terra", 2.5, 15.0),
+        ("gpt-5.6-terra-medium", "gpt-5.6-terra", 2.5, 15.0),
+        ("gpt-5.6-luna", "gpt-5.6-luna", 1.0, 6.0),
+        ("gpt-5.6-luna-fast", "gpt-5.6-luna", 1.0, 6.0),
+    ],
+)
+def test_get_pricing_for_model_gpt_5_6_aliases(
+    requested_model: str,
+    canonical_model: str,
+    input_per_1m: float,
+    output_per_1m: float,
+) -> None:
+    result = get_pricing_for_model(requested_model, DEFAULT_PRICING_MODELS, DEFAULT_MODEL_ALIASES)
+
+    assert result is not None
+    model, price = result
+    assert model == canonical_model
+    assert price.input_per_1m == input_per_1m
+    assert price.output_per_1m == output_per_1m
+
+
 def test_get_pricing_for_model_gpt_5_4_mini_alias():
     result = get_pricing_for_model("gpt-5.4-mini-2026-03-17", DEFAULT_PRICING_MODELS, DEFAULT_MODEL_ALIASES)
     assert result is not None

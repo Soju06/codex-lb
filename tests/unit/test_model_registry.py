@@ -27,6 +27,9 @@ EXPECTED_CORE_MODEL_PLANS = {
 }
 
 EXPECTED_BOOTSTRAP_MINIMAL_CLIENT_VERSIONS = {
+    "gpt-5.6-sol": "0.124.0",
+    "gpt-5.6-terra": "0.124.0",
+    "gpt-5.6-luna": "0.124.0",
     "gpt-5.5": "0.124.0",
     "gpt-5.4": "0.98.0",
     "gpt-5.4-mini": "0.98.0",
@@ -138,6 +141,9 @@ async def test_prefers_websockets_does_not_use_bootstrap_after_snapshot():
 def test_prefers_websockets_uses_bootstrap_fallback_when_uninitialized():
     registry = ModelRegistry(ttl_seconds=60.0)
 
+    assert registry.prefers_websockets("gpt-5.6-sol") is True
+    assert registry.prefers_websockets("gpt-5.6-terra") is True
+    assert registry.prefers_websockets("gpt-5.6-luna") is True
     assert registry.prefers_websockets("gpt-5.4") is True
     assert registry.prefers_websockets("gpt-5.4-2026") is True
     assert registry.prefers_websockets("gpt-5.3-codex") is True
@@ -159,6 +165,20 @@ def test_bootstrap_models_include_representative_upstream_metadata():
     assert gpt54.minimal_client_version == "0.98.0"
     assert gpt54.raw["max_context_window"] == 1_000_000
     assert gpt54.available_in_plans == EXPECTED_CORE_MODEL_PLANS
+
+    for slug in ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"):
+        model = models[slug]
+        assert model.prefer_websockets is True
+        assert model.context_window == 272_000
+        assert model.supported_in_api is True
+        assert model.raw["max_context_window"] == 272_000
+    assert {level.effort for level in models["gpt-5.6-sol"].supported_reasoning_levels} == {
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+    }
 
     mini = models["gpt-5.4-mini"]
     assert mini.prefer_websockets is True

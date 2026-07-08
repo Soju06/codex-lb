@@ -8,6 +8,9 @@ from app.core.types import JsonValue
 pytestmark = pytest.mark.integration
 
 BOOTSTRAP_MODEL_SLUGS = {
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
     "gpt-5.5",
     "gpt-5.4",
     "gpt-5.4-mini",
@@ -35,6 +38,9 @@ EXPECTED_CORE_MODEL_PLANS = {
 }
 
 EXPECTED_BOOTSTRAP_MINIMAL_CLIENT_VERSIONS = {
+    "gpt-5.6-sol": "0.124.0",
+    "gpt-5.6-terra": "0.124.0",
+    "gpt-5.6-luna": "0.124.0",
     "gpt-5.5": "0.124.0",
     "gpt-5.4": "0.98.0",
     "gpt-5.4-mini": "0.98.0",
@@ -183,6 +189,13 @@ async def test_backend_codex_models_uses_bootstrap_upstream_metadata(async_clien
     assert gpt54["minimal_client_version"] == "0.98.0"
     assert gpt54["max_context_window"] == 1_000_000
     assert set(gpt54["available_in_plans"]) == EXPECTED_CORE_MODEL_PLANS
+
+    for slug in ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"):
+        entry = entries[slug]
+        assert entry["prefer_websockets"] is True
+        assert entry["context_window"] == 272_000
+        assert entry["supported_in_api"] is True
+        assert entry["max_context_window"] == 272_000
 
     mini = entries["gpt-5.4-mini"]
     assert mini["prefer_websockets"] is True

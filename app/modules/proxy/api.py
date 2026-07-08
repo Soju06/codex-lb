@@ -124,6 +124,7 @@ from app.modules.firewall.service import FirewallRepositoryPort, FirewallService
 from app.modules.model_sources.catalog import (
     source_model_audio_cost_usd,
     source_model_cost_usd,
+    source_model_request_overrides,
     source_model_supports_reasoning,
     source_models_to_upstream_models,
 )
@@ -2925,6 +2926,7 @@ async def _source_responses_response(
     )
     source_payload = payload.model_dump(mode="json", exclude_none=True)
     source_payload["stream"] = bool(payload.stream)
+    _apply_source_response_request_overrides(source_payload, source_model_request_overrides(source, payload.model))
     _drop_unsupported_source_response_tools(source_payload)
 
     if payload.stream:
@@ -3036,6 +3038,22 @@ async def _source_responses_response(
         upstream_status_code=result.upstream_status_code,
     )
     return JSONResponse(content=result.payload, status_code=200, headers=rate_limit_headers)
+
+
+def _apply_source_response_request_overrides(
+    payload: dict[str, JsonValue],
+    overrides: Mapping[str, JsonValue],
+) -> None:
+    for key, value in overrides.items():
+        if key == "model":
+            continue
+        if key == "options" and isinstance(value, Mapping):
+            existing_options = payload.get("options")
+            merged_options = dict(existing_options) if isinstance(existing_options, Mapping) else {}
+            merged_options.update(value)
+            payload["options"] = merged_options
+            continue
+        payload[key] = value
 
 
 def _drop_unsupported_source_response_tools(payload: dict[str, JsonValue]) -> None:

@@ -89,6 +89,17 @@ def source_model_supports_reasoning(source: ModelSource, model: str) -> bool:
     return _raw_metadata(entry).get("supports_reasoning") is True
 
 
+def source_model_request_overrides(source: ModelSource, model: str) -> dict[str, JsonValue]:
+    entry = next(
+        (candidate for candidate in source.models if candidate.model == model and candidate.is_enabled),
+        None,
+    )
+    if entry is None:
+        return {}
+    value = _raw_metadata(entry).get("source_request_overrides")
+    return value if isinstance(value, dict) else {}
+
+
 def source_model_cost_usd(
     source: ModelSource,
     model: str,

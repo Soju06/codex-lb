@@ -1178,6 +1178,7 @@ async def test_backend_codex_responses_filters_unsupported_model_source_tools(as
         name="codex-responses-tools",
         model=model,
         supports_responses=True,
+        raw_metadata_json='{"source_request_overrides":{"options":{"num_ctx":32768},"model":"ignored-model"}}',
     )
     observed: dict[str, object] = {}
 
@@ -1220,6 +1221,8 @@ async def test_backend_codex_responses_filters_unsupported_model_source_tools(as
     assert forwarded_payload["tools"] == [
         {"type": "function", "name": "run_shell", "parameters": {"type": "object", "properties": {}}}
     ]
+    assert forwarded_payload["model"] == model
+    assert forwarded_payload["options"] == {"num_ctx": 32768}
     assert forwarded_payload["tool_choice"] == "auto"
     assert forwarded_payload["parallel_tool_calls"] is True
     assert any("resp_source_tools" in line for line in lines)

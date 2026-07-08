@@ -10,6 +10,9 @@ from app.core.types import JsonValue
 from app.db.models import ModelSource, ModelSourceModel
 
 
+DEFAULT_SOURCE_CONTEXT_WINDOW = 128_000
+
+
 def source_models_to_upstream_models(sources: list[ModelSource]) -> list[UpstreamModel]:
     models: list[UpstreamModel] = []
     for source in sources:
@@ -26,7 +29,9 @@ def source_models_to_upstream_models(sources: list[ModelSource]) -> list[Upstrea
 
 def _to_upstream_model(source: ModelSource, source_model: ModelSourceModel) -> UpstreamModel:
     raw = _raw_metadata(source_model)
+    context_window = source_model.context_window or DEFAULT_SOURCE_CONTEXT_WINDOW
     raw.setdefault("visibility", "list")
+    raw.setdefault("max_context_window", context_window)
     if source_model.max_output_tokens is not None:
         raw["max_output_tokens"] = source_model.max_output_tokens
     raw["supports_streaming"] = source_model.supports_streaming
@@ -41,7 +46,7 @@ def _to_upstream_model(source: ModelSource, source_model: ModelSourceModel) -> U
         slug=source_model.model,
         display_name=display_name,
         description=display_name,
-        context_window=source_model.context_window or 0,
+        context_window=context_window,
         input_modalities=input_modalities,
         supported_reasoning_levels=(),
         default_reasoning_level=None,

@@ -7,6 +7,7 @@ import pytest
 from app.core.openai.model_registry import MODEL_SOURCE_KIND_OPENAI_COMPATIBLE
 from app.db.models import ModelSource, ModelSourceModel
 from app.modules.model_sources.catalog import (
+    DEFAULT_SOURCE_CONTEXT_WINDOW,
     source_model_audio_cost_usd,
     source_models_to_upstream_models,
 )
@@ -81,6 +82,32 @@ def test_source_models_to_upstream_models_preserves_source_identity() -> None:
     assert model.context_window == 32768
     assert model.raw["max_output_tokens"] == 4096
     assert model.supports_parallel_tool_calls is True
+    assert model.prefer_websockets is False
+
+
+def test_source_models_to_upstream_models_defaults_missing_context_window() -> None:
+    source = ModelSource(
+        id="src_ollama",
+        name="Ollama",
+        kind=MODEL_SOURCE_KIND_OPENAI_COMPATIBLE,
+        base_url="http://127.0.0.1:11434/v1",
+        is_enabled=True,
+        supports_chat_completions=True,
+        supports_responses=True,
+        models=[
+            ModelSourceModel(
+                model="llama3.1:8b",
+                is_enabled=True,
+            )
+        ],
+    )
+
+    models = source_models_to_upstream_models([source])
+
+    assert len(models) == 1
+    model = models[0]
+    assert model.context_window == DEFAULT_SOURCE_CONTEXT_WINDOW
+    assert model.raw["max_context_window"] == DEFAULT_SOURCE_CONTEXT_WINDOW
     assert model.prefer_websockets is False
 
 

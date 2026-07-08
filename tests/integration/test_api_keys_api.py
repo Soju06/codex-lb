@@ -1171,6 +1171,61 @@ async def test_backend_codex_responses_routes_responses_capable_model_source(asy
 
 
 @pytest.mark.asyncio
+async def test_backend_codex_responses_filters_unsupported_model_source_tools(async_client, monkeypatch):
+    model = "external-codex-responses-tools"
+    await _create_model_source(
+        async_client,
+        name="codex-responses-tools",
+        model=model,
+        supports_responses=True,
+    )
+    observed: dict[str, object] = {}
+
+    async def fake_stream(source, payload):
+        observed["source_id"] = source.id
+        observed["payload"] = dict(payload)
+        usage_holder = SourceUsageHolder()
+
+        async def body():
+            usage_holder.usage = SourceUsage(input_tokens=2, output_tokens=1, cached_input_tokens=0)
+            yield (
+                b'data: {"type":"response.completed","response":{"id":"resp_source_tools",'
+                b'"usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}}}\n\n'
+            )
+
+        return SourceResponsesStream(body=body(), usage_holder=usage_holder, upstream_status_code=200)
+
+    monkeypatch.setattr(proxy_api, "stream_source_responses", fake_stream)
+
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        json={
+            "model": model,
+            "instructions": "hi",
+            "input": [],
+            "tools": [
+                {"type": "function", "name": "run_shell", "parameters": {"type": "object", "properties": {}}},
+                {"type": "namespace", "function": {"name": "multi_agent_v1"}},
+                {"type": "web_search"},
+            ],
+            "tool_choice": "auto",
+            "parallel_tool_calls": True,
+        },
+    ) as response:
+        assert response.status_code == 200
+        lines = [line async for line in response.aiter_lines() if line]
+
+    forwarded_payload = cast("dict[str, object]", observed["payload"])
+    assert forwarded_payload["tools"] == [
+        {"type": "function", "name": "run_shell", "parameters": {"type": "object", "properties": {}}}
+    ]
+    assert forwarded_payload["tool_choice"] == "auto"
+    assert forwarded_payload["parallel_tool_calls"] is True
+    assert any("resp_source_tools" in line for line in lines)
+
+
+@pytest.mark.asyncio
 async def test_backend_codex_responses_compaction_trigger_skips_model_source(async_client, monkeypatch):
     model = "external-codex-responses-compact"
     await _create_model_source(

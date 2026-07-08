@@ -2925,6 +2925,7 @@ async def _source_responses_response(
     )
     source_payload = payload.model_dump(mode="json", exclude_none=True)
     source_payload["stream"] = bool(payload.stream)
+    _drop_unsupported_source_response_tools(source_payload)
 
     if payload.stream:
         try:
@@ -3035,6 +3036,21 @@ async def _source_responses_response(
         upstream_status_code=result.upstream_status_code,
     )
     return JSONResponse(content=result.payload, status_code=200, headers=rate_limit_headers)
+
+
+def _drop_unsupported_source_response_tools(payload: dict[str, JsonValue]) -> None:
+    tools = payload.get("tools")
+    if not isinstance(tools, list):
+        return
+    supported_tools = [tool for tool in tools if isinstance(tool, Mapping) and tool.get("type") == "function"]
+    if len(supported_tools) == len(tools):
+        return
+    if supported_tools:
+        payload["tools"] = supported_tools
+        return
+    payload.pop("tools", None)
+    payload.pop("tool_choice", None)
+    payload.pop("parallel_tool_calls", None)
 
 
 async def _source_chat_completion_response(

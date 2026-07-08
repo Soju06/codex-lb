@@ -568,13 +568,13 @@ The system MUST recognize `gpt-5.4-mini` pricing when computing request costs. S
 
 ### Requirement: API keys can read their own `/v1/usage`
 
-The system SHALL expose `GET /v1/usage` for self-service usage lookup by API-key clients. The route MUST require a valid API key in the `Authorization` header using the Bearer authentication scheme even when `api_key_auth_enabled` is false globally. The response MUST include only data for the authenticated key and MUST return:
+The system SHALL expose `GET /v1/usage` for self-service usage lookup by API-key clients. The route MUST require a valid API key in the `Authorization` header using the Bearer authentication scheme even when `api_key_auth_enabled` is false globally. The response MUST include only data for the authenticated key and explicitly visible aggregate upstream quota sections, and MUST return:
 
 - `request_count`
 - `total_tokens`
 - `cached_input_tokens`
 - `total_cost_usd`
-- `limits[]` containing only limits configured on the authenticated API key, with `limit_type`, `limit_window`, `max_value`, `current_value`, `remaining_value`, `model_filter`, `reset_at`, and `source`
+- `limits[]` containing limits configured on the authenticated API key, with `limit_type`, `limit_window`, `max_value`, `current_value`, `remaining_value`, `model_filter`, `reset_at`, and `source`. When no API-key limits are configured and aggregate upstream quota details are visible to the caller, `limits[]` MAY mirror those aggregate upstream credit windows for legacy client compatibility.
 - `upstream_limits[]` containing aggregate upstream Codex credit windows when available, with the same fields and `source: "aggregate"`
 
 Validation failures MUST use the existing OpenAI error envelope used by `/v1/*` routes.
@@ -605,6 +605,13 @@ Validation failures MUST use the existing OpenAI error envelope used by `/v1/*` 
 - **AND** upstream Codex aggregate usage data exists
 - **THEN** `limits[]` contains the API-key limit values
 - **AND** `upstream_limits[]` contains the aggregate Codex credit windows
+
+#### Scenario: Upstream limits are mirrored for legacy clients without API-key limits
+
+- **WHEN** an API key without its own limits calls `GET /v1/usage`
+- **AND** upstream Codex aggregate usage data is visible to the key
+- **THEN** `upstream_limits[]` contains the aggregate Codex credit windows
+- **AND** `limits[]` contains the same aggregate Codex credit windows for legacy client compatibility
 
 #### Scenario: Self-usage works while global proxy auth is disabled
 

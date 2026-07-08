@@ -33,6 +33,12 @@ def _to_upstream_model(source: ModelSource, source_model: ModelSourceModel) -> U
     raw.setdefault("visibility", "list")
     raw.setdefault("shell_type", "shell_command")
     raw.setdefault("max_context_window", context_window)
+    raw.setdefault("truncation_policy", {"mode": "tokens", "limit": 10_000})
+    raw.setdefault("include_skills_usage_instructions", False)
+    raw.setdefault("supports_image_detail_original", False)
+    raw.setdefault("supports_search_tool", False)
+    raw.setdefault("use_responses_lite", False)
+    raw.setdefault("experimental_supported_tools", [])
     if source_model.max_output_tokens is not None:
         raw["max_output_tokens"] = source_model.max_output_tokens
     raw["supports_streaming"] = source_model.supports_streaming

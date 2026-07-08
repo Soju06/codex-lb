@@ -109,6 +109,12 @@ def test_source_models_to_upstream_models_defaults_missing_context_window() -> N
     assert model.context_window == DEFAULT_SOURCE_CONTEXT_WINDOW
     assert model.raw["shell_type"] == "shell_command"
     assert model.raw["max_context_window"] == DEFAULT_SOURCE_CONTEXT_WINDOW
+    assert model.raw["truncation_policy"] == {"mode": "tokens", "limit": 10_000}
+    assert model.raw["include_skills_usage_instructions"] is False
+    assert model.raw["supports_image_detail_original"] is False
+    assert model.raw["supports_search_tool"] is False
+    assert model.raw["use_responses_lite"] is False
+    assert model.raw["experimental_supported_tools"] == []
     assert model.prefer_websockets is False
 
 

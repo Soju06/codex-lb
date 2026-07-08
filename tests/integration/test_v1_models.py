@@ -454,6 +454,12 @@ async def test_backend_codex_models_defaults_source_model_context_window(async_c
     assert source_entry["context_window"] == 128_000
     assert source_entry["shell_type"] == "shell_command"
     assert source_entry["max_context_window"] == 128_000
+    assert source_entry["truncation_policy"] == {"mode": "tokens", "limit": 10_000}
+    assert source_entry["include_skills_usage_instructions"] is False
+    assert source_entry["supports_image_detail_original"] is False
+    assert source_entry["supports_search_tool"] is False
+    assert source_entry["use_responses_lite"] is False
+    assert source_entry["experimental_supported_tools"] == []
     assert source_entry["prefer_websockets"] is False
 
 

@@ -37,6 +37,55 @@ def test_main_passes_timestamped_log_config(monkeypatch):
     assert kwargs["timeout_keep_alive"] == 7200
 
 
+def test_main_binds_all_interfaces_by_default(monkeypatch):
+    captured: dict[str, Any] = {}
+
+    def fake_run(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(sys, "argv", ["codex-lb"])
+    monkeypatch.delenv("CODEX_LB_HOST", raising=False)
+    monkeypatch.delenv("HOST", raising=False)
+    monkeypatch.setattr(cli, "_load_uvicorn", lambda: SimpleNamespace(run=fake_run))
+
+    cli.main()
+
+    assert captured["kwargs"]["host"] == "0.0.0.0"
+
+
+def test_main_prefers_codex_lb_host_env(monkeypatch):
+    captured: dict[str, Any] = {}
+
+    def fake_run(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(sys, "argv", ["codex-lb"])
+    monkeypatch.setenv("HOST", "127.0.0.1")
+    monkeypatch.setenv("CODEX_LB_HOST", "0.0.0.0")
+    monkeypatch.setattr(cli, "_load_uvicorn", lambda: SimpleNamespace(run=fake_run))
+
+    cli.main()
+
+    assert captured["kwargs"]["host"] == "0.0.0.0"
+
+
+def test_main_allows_cli_host_override(monkeypatch):
+    captured: dict[str, Any] = {}
+
+    def fake_run(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(sys, "argv", ["codex-lb", "--host", "127.0.0.1"])
+    monkeypatch.setattr(cli, "_load_uvicorn", lambda: SimpleNamespace(run=fake_run))
+
+    cli.main()
+
+    assert captured["kwargs"]["host"] == "127.0.0.1"
+
+
 def test_main_passes_custom_keep_alive_timeout(monkeypatch):
     captured: dict[str, Any] = {}
 

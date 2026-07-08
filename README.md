@@ -76,6 +76,8 @@ docker run -d --name codex-lb \
 uvx codex-lb
 ```
 
+The CLI listens on `0.0.0.0:2455` by default so Docker, VMs, and remote dashboards can reach it. For a local-only listener, run `codex-lb --host 127.0.0.1` or set `CODEX_LB_HOST=127.0.0.1`.
+
 Open [localhost:2455](http://localhost:2455) → Add account → Done.
 
 ## Remote Setup
@@ -105,6 +107,13 @@ docker run -d --name codex-lb \
 ```
 
 **Local access** (localhost) bypasses bootstrap entirely — no token needed.
+
+If `http://<server-ip>:2455/dashboard` times out, verify that the process is listening on all interfaces and that the host firewall or cloud security group allows TCP `2455`:
+
+```bash
+ss -ltnp | grep 2455
+sudo ufw status
+```
 
 ## Client Setup
 
@@ -471,6 +480,7 @@ Backup this directory to preserve your data.
 ## Troubleshooting
 
 - [Usage and quota - why does codex-lb still say `rate_limited` when Codex Desktop says reset?](openspec/specs/usage-refresh-policy/context.md)
+- Remote dashboard does not load: make sure codex-lb is bound to `0.0.0.0:2455` and TCP `2455` is open. If you intentionally bind the app to `127.0.0.1`, access it through SSH port forwarding or a reverse proxy instead of `http://<server-ip>:2455`.
 
 ## Kubernetes
 

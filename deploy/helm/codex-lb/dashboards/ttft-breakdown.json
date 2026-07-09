@@ -1,0 +1,119 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "panels": [
+    {
+      "datasource": "${DS_SQL}",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "SELECT COALESCE(useragent_group, 'unknown') AS useragent_group, COALESCE(upstream_transport, 'unknown') AS upstream_transport, COALESCE(model, 'unknown') AS model, COUNT(*) AS requests, AVG(latency_first_token_ms) AS avg_ttft_ms, AVG(latency_response_created_ms) AS avg_response_created_ms, AVG(latency_first_upstream_event_ms) AS avg_first_upstream_event_ms, AVG(latency_response_create_gate_wait_ms) AS avg_gate_wait_ms, AVG(latency_bridge_queue_wait_ms) AS avg_bridge_queue_wait_ms, AVG(latency_ms) AS avg_total_ms FROM request_logs WHERE requested_at >= now() - interval '24 hours' GROUP BY useragent_group, upstream_transport, model ORDER BY requests DESC LIMIT 100"
+        }
+      ],
+      "title": "24h TTFT Phase Breakdown",
+      "type": "table"
+    },
+    {
+      "datasource": "${DS_SQL}",
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "id": 2,
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "SELECT COALESCE(prewarm_canary_bucket, 'unknown') AS bucket, COALESCE(prewarm_status, 'unknown') AS outcome, COALESCE(prewarm_eligible_reason, 'unknown') AS cohort, COUNT(*) AS requests, AVG(latency_first_token_ms) AS avg_ttft_ms, AVG(latency_ms) AS avg_total_ms FROM request_logs WHERE requested_at >= now() - interval '24 hours' GROUP BY bucket, outcome, cohort ORDER BY requests DESC"
+        }
+      ],
+      "title": "24h Prewarm Canary Outcomes",
+      "type": "table"
+    },
+    {
+      "datasource": "${DS_SQL}",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "id": 3,
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "SELECT CASE WHEN session_previous_gap_ms IS NULL THEN 'unknown' WHEN session_previous_gap_ms < 120000 THEN 'lt_2m' WHEN session_previous_gap_ms < 600000 THEN '2m_10m' ELSE 'gte_10m' END AS session_gap_cohort, COUNT(*) AS requests, AVG(latency_first_token_ms) AS avg_ttft_ms, AVG(latency_ms) AS avg_total_ms FROM request_logs WHERE requested_at >= now() - interval '24 hours' GROUP BY session_gap_cohort ORDER BY requests DESC"
+        }
+      ],
+      "title": "24h TTFT By Session Gap",
+      "type": "table"
+    },
+    {
+      "datasource": "${DS_SQL}",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "id": 4,
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "SELECT CASE WHEN input_tokens IS NULL THEN 'unknown' WHEN input_tokens < 2000 THEN 'lt_2k' WHEN input_tokens < 10000 THEN '2k_10k' WHEN input_tokens < 50000 THEN '10k_50k' ELSE '50k_plus' END AS prompt_size_cohort, CASE WHEN input_tokens IS NULL OR input_tokens = 0 THEN 'cache_unknown' WHEN COALESCE(cached_input_tokens, 0) * 1.0 / input_tokens >= 0.75 THEN 'cache_75_100' WHEN COALESCE(cached_input_tokens, 0) * 1.0 / input_tokens >= 0.25 THEN 'cache_25_75' ELSE 'cache_0_25' END AS cache_ratio, COUNT(*) AS requests, AVG(latency_first_token_ms) AS avg_ttft_ms, AVG(latency_ms) AS avg_total_ms FROM request_logs WHERE requested_at >= now() - interval '24 hours' GROUP BY prompt_size_cohort, cache_ratio ORDER BY requests DESC"
+        }
+      ],
+      "title": "24h TTFT By Prompt Size And Cache",
+      "type": "table"
+    }
+  ],
+  "refresh": "5m",
+  "schemaVersion": 39,
+  "tags": [
+    "codex-lb",
+    "ttft"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "timezone": "browser",
+  "title": "codex-lb TTFT Breakdown",
+  "uid": "codex-lb-ttft-breakdown",
+  "version": 1
+}

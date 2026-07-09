@@ -7,12 +7,36 @@ from typing import Protocol, cast
 
 import anyio
 
+from app.core.metrics.prometheus import PROMETHEUS_AVAILABLE, proxy_phase_latency_seconds
 from app.modules.api_keys.service import ApiKeyData
+from app.modules.proxy.affinity import _extract_model_class
 from app.modules.proxy.repo_bundle import ProxyRepoFactory
 
 logger = logging.getLogger("app.modules.proxy.service")
 
 _REQUEST_TRANSPORT_HTTP = "http"
+
+
+def _record_proxy_phase_latency(
+    *,
+    phase: str,
+    latency_ms: int | None,
+    transport: str | None,
+    upstream_transport: str | None,
+    useragent_group: str | None,
+    model: str | None,
+) -> None:
+    del useragent_group
+    if latency_ms is None or latency_ms < 0:
+        return
+    if not PROMETHEUS_AVAILABLE or proxy_phase_latency_seconds is None:
+        return
+    proxy_phase_latency_seconds.labels(
+        phase=phase,
+        transport=transport or "unknown",
+        upstream_transport=upstream_transport or "unknown",
+        model_class=_extract_model_class(model) if model else "unknown",
+    ).observe(latency_ms / 1000.0)
 
 
 class _RequestLogServiceProtocol(Protocol):
@@ -83,6 +107,15 @@ class _RequestLogMixin:
         latency_ms: int,
         status: str,
         latency_first_token_ms: int | None = None,
+        latency_response_created_ms: int | None = None,
+        latency_first_upstream_event_ms: int | None = None,
+        latency_response_create_gate_wait_ms: int | None = None,
+        latency_bridge_queue_wait_ms: int | None = None,
+        prewarm_status: str | None = None,
+        prewarm_latency_ms: int | None = None,
+        prewarm_canary_bucket: str | None = None,
+        prewarm_eligible_reason: str | None = None,
+        session_previous_gap_ms: int | None = None,
         error_code: str | None = None,
         error_message: str | None = None,
         input_tokens: int | None = None,
@@ -123,6 +156,15 @@ class _RequestLogMixin:
                 latency_ms=latency_ms,
                 status=status,
                 latency_first_token_ms=latency_first_token_ms,
+                latency_response_created_ms=latency_response_created_ms,
+                latency_first_upstream_event_ms=latency_first_upstream_event_ms,
+                latency_response_create_gate_wait_ms=latency_response_create_gate_wait_ms,
+                latency_bridge_queue_wait_ms=latency_bridge_queue_wait_ms,
+                prewarm_status=prewarm_status,
+                prewarm_latency_ms=prewarm_latency_ms,
+                prewarm_canary_bucket=prewarm_canary_bucket,
+                prewarm_eligible_reason=prewarm_eligible_reason,
+                session_previous_gap_ms=session_previous_gap_ms,
                 error_code=error_code,
                 error_message=error_message,
                 input_tokens=input_tokens,
@@ -159,6 +201,46 @@ class _RequestLogMixin:
         except asyncio.CancelledError:
             self._track_request_log_task(task, account_id=account_id, request_id=request_id)
             raise
+        _record_proxy_phase_latency(
+            phase="ttft",
+            latency_ms=latency_first_token_ms,
+            transport=transport,
+            upstream_transport=upstream_transport,
+            useragent_group=useragent_group,
+            model=model,
+        )
+        _record_proxy_phase_latency(
+            phase="response_created",
+            latency_ms=latency_response_created_ms,
+            transport=transport,
+            upstream_transport=upstream_transport,
+            useragent_group=useragent_group,
+            model=model,
+        )
+        _record_proxy_phase_latency(
+            phase="first_upstream_event",
+            latency_ms=latency_first_upstream_event_ms,
+            transport=transport,
+            upstream_transport=upstream_transport,
+            useragent_group=useragent_group,
+            model=model,
+        )
+        _record_proxy_phase_latency(
+            phase="response_create_gate_wait",
+            latency_ms=latency_response_create_gate_wait_ms,
+            transport=transport,
+            upstream_transport=upstream_transport,
+            useragent_group=useragent_group,
+            model=model,
+        )
+        _record_proxy_phase_latency(
+            phase="bridge_queue_wait",
+            latency_ms=latency_bridge_queue_wait_ms,
+            transport=transport,
+            upstream_transport=upstream_transport,
+            useragent_group=useragent_group,
+            model=model,
+        )
 
     def _track_request_log_task(
         self,
@@ -201,6 +283,15 @@ class _RequestLogMixin:
         latency_ms: int,
         status: str,
         latency_first_token_ms: int | None = None,
+        latency_response_created_ms: int | None = None,
+        latency_first_upstream_event_ms: int | None = None,
+        latency_response_create_gate_wait_ms: int | None = None,
+        latency_bridge_queue_wait_ms: int | None = None,
+        prewarm_status: str | None = None,
+        prewarm_latency_ms: int | None = None,
+        prewarm_canary_bucket: str | None = None,
+        prewarm_eligible_reason: str | None = None,
+        session_previous_gap_ms: int | None = None,
         error_code: str | None = None,
         error_message: str | None = None,
         input_tokens: int | None = None,
@@ -253,6 +344,15 @@ class _RequestLogMixin:
                     request_kind=request_kind,
                     latency_ms=latency_ms,
                     latency_first_token_ms=latency_first_token_ms,
+                    latency_response_created_ms=latency_response_created_ms,
+                    latency_first_upstream_event_ms=latency_first_upstream_event_ms,
+                    latency_response_create_gate_wait_ms=latency_response_create_gate_wait_ms,
+                    latency_bridge_queue_wait_ms=latency_bridge_queue_wait_ms,
+                    prewarm_status=prewarm_status,
+                    prewarm_latency_ms=prewarm_latency_ms,
+                    prewarm_canary_bucket=prewarm_canary_bucket,
+                    prewarm_eligible_reason=prewarm_eligible_reason,
+                    session_previous_gap_ms=session_previous_gap_ms,
                     status=status,
                     error_code=error_code,
                     error_message=error_message,

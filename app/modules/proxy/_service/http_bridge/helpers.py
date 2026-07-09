@@ -6,6 +6,7 @@ import sys
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from hashlib import sha256
 from ipaddress import ip_address
 from typing import Any, Literal, Mapping, TypeVar, cast
 from urllib.parse import urlparse
@@ -47,6 +48,8 @@ from app.core.metrics.prometheus import (
     bridge_drain_recovery_allowed_total,
     bridge_first_turn_timeout_total,
     bridge_reattach_total,
+    http_bridge_prewarm_total,
+    http_bridge_stuck_retire_total,
 )
 from app.core.openai.models import OpenAIEvent
 from app.core.openai.parsing import parse_sse_event
@@ -982,6 +985,99 @@ def _build_http_bridge_prewarm_text(text_data: str) -> str | None:
     return json.dumps(warmup_payload, ensure_ascii=True, separators=(",", ":"))
 
 
+def _http_bridge_prewarm_canary_bucket(
+    settings: Any,
+    *,
+    session: _HTTPBridgeSession,
+    request_state: _WebSocketRequestState,
+    text_data: str,
+) -> tuple[str, str | None]:
+    if not getattr(settings, "http_responses_session_bridge_codex_prewarm_enabled", False):
+        return "not_eligible", None
+    reason = _http_bridge_prewarm_eligible_reason(session, request_state=request_state, text_data=text_data)
+    raw_percent = getattr(settings, "http_responses_session_bridge_codex_prewarm_canary_percent", None)
+    api_key_id = session.key.api_key_id or (request_state.api_key.id if request_state.api_key else None)
+    allowlist = set(getattr(settings, "http_responses_session_bridge_codex_prewarm_allow_api_key_ids", []) or [])
+    denylist = set(getattr(settings, "http_responses_session_bridge_codex_prewarm_deny_api_key_ids", []) or [])
+    if api_key_id is not None and api_key_id in denylist:
+        return "control", reason or "legacy_all"
+    if allowlist and api_key_id not in allowlist:
+        return "control", reason or "legacy_all"
+    if raw_percent is None:
+        return "treatment", reason or "legacy_all"
+    if reason is None:
+        return "not_eligible", None
+    percent = max(0.0, min(100.0, float(raw_percent)))
+    sample_identity = "|".join(
+        (
+            api_key_id or "no_api_key",
+            request_state.session_id or session.key.affinity_kind,
+            session.key.affinity_key,
+        )
+    )
+    digest = sha256(sample_identity.encode("utf-8")).digest()
+    sample = int.from_bytes(digest[:8], "big") / float(2**64)
+    return ("treatment" if sample * 100.0 < percent else "control", reason)
+
+
+def _http_bridge_prewarm_eligible_reason(
+    session: _HTTPBridgeSession,
+    *,
+    request_state: _WebSocketRequestState,
+    text_data: str,
+) -> str | None:
+    if request_state.previous_response_id is not None:
+        return None
+    if _http_bridge_request_input_size_bytes(text_data) < 50_000:
+        return None
+    gap_seconds = max(0.0, request_state.started_at - session.last_used_at)
+    if gap_seconds < 120.0 and request_state.session_id is not None:
+        return None
+    return "first_turn_50k_gap_2m"
+
+
+def _http_bridge_request_input_size_bytes(text_data: str) -> int:
+    try:
+        payload = json.loads(text_data)
+    except json.JSONDecodeError:
+        return len(text_data.encode("utf-8"))
+    if not isinstance(payload, dict):
+        return len(text_data.encode("utf-8"))
+    input_value = payload.get("input")
+    if input_value is None:
+        return 0
+    return len(json.dumps(input_value, ensure_ascii=True, separators=(",", ":")).encode("utf-8"))
+
+
+def _record_http_bridge_prewarm_outcome(
+    *,
+    outcome: str,
+    cohort: str | None,
+    bucket: str | None,
+) -> None:
+    if not PROMETHEUS_AVAILABLE or http_bridge_prewarm_total is None:
+        return
+    http_bridge_prewarm_total.labels(
+        outcome=outcome,
+        cohort=cohort or "unknown",
+        bucket=bucket or "unknown",
+    ).inc()
+
+
+def _record_http_bridge_stuck_retire(
+    *,
+    reason: str,
+    session: _HTTPBridgeSession,
+) -> None:
+    if not PROMETHEUS_AVAILABLE or http_bridge_stuck_retire_total is None:
+        return
+    http_bridge_stuck_retire_total.labels(
+        reason=reason,
+        affinity_kind=session.key.affinity_kind,
+        model_class=_extract_model_class(session.request_model) if session.request_model else "unknown",
+    ).inc()
+
+
 def _http_bridge_payload_without_previous_response_id(payload: ResponsesRequest) -> ResponsesRequest:
     if payload.previous_response_id is None:
         return payload
@@ -1321,6 +1417,9 @@ for _helper_name in (
     "_effective_http_bridge_idle_ttl_seconds",
     "_http_bridge_eviction_priority",
     "_build_http_bridge_prewarm_text",
+    "_http_bridge_prewarm_canary_bucket",
+    "_record_http_bridge_prewarm_outcome",
+    "_record_http_bridge_stuck_retire",
     "_http_bridge_payload_without_previous_response_id",
     "_http_bridge_previous_response_error_envelope",
     "_http_bridge_continuity_lost_error_envelope",

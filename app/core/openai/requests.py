@@ -329,6 +329,67 @@ def _normalize_responses_input_instructions(data: JsonValue) -> JsonValue:
     return normalized
 
 
+def _is_responses_lite_input(input_value: list[JsonValue]) -> bool:
+    # Responses Lite requests carry their tool bundle as an input item with
+    # type=additional_tools and deliberately place base instructions as a
+    # developer message in input (with empty top-level instructions). That
+    # shape is exactly what the lite upstream expects, so the instruction
+    # lift must leave the whole request untouched.
+    return any(
+        (mapping := _json_mapping_or_none(item)) is not None and mapping.get("type") == "additional_tools"
+        for item in input_value
+    )
+
+
+def responses_input_uses_lite_tools(input_value: JsonValue) -> bool:
+    return is_json_list(input_value) and _is_responses_lite_input(input_value)
+
+
+def responses_lite_continuity_delta_input(
+    input_items: list[JsonValue],
+    *,
+    stored_count: int,
+) -> list[JsonValue]:
+    stored_prefix = input_items[:stored_count]
+    lite_prelude: list[JsonValue] = []
+    lite_started = False
+    for item in stored_prefix:
+        item_mapping = _json_mapping_or_none(item)
+        if item_mapping is None:
+            if lite_started:
+                break
+            continue
+        item_type = item_mapping.get("type")
+        if item_type == "additional_tools":
+            lite_started = True
+            lite_prelude.append(item)
+            continue
+        if (
+            lite_started
+            and item_type in {None, "message"}
+            and item_mapping.get("role")
+            in {
+                "system",
+                "developer",
+            }
+        ):
+            lite_prelude.append(item)
+            continue
+        if lite_started:
+            break
+    return [*lite_prelude, *input_items[stored_count:]]
+
+
+def _is_responses_instruction_message_item(item: Mapping[str, JsonValue]) -> bool:
+    role = item.get("role")
+    if role not in ("system", "developer"):
+        return False
+    item_type = item.get("type")
+    # Responses Lite encodes tool declarations as developer input items with
+    # type=additional_tools. Only role messages should be folded into the
+    # top-level instructions field.
+    return item_type is None or item_type == "message"
+
 def _merge_responses_instructions(existing: str, extra_parts: list[str]) -> str:
     extra = "\n".join(part for part in extra_parts if part)
     if not extra:

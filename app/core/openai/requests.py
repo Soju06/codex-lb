@@ -1051,6 +1051,10 @@ def _compact_reconciled_tool_call_indices(
 
 def _compact_item_is_state_anchor(item: Mapping[str, JsonValue]) -> bool:
     item_type = item.get("type")
+    if item_type == "additional_tools":
+        return True
+    if item_type == "message" and item.get("role") in {"system", "developer"}:
+        return True
     if item_type == "function_call":
         name = item.get("name")
         if isinstance(name, str) and name in _COMPACT_STATE_TOOL_NAMES:

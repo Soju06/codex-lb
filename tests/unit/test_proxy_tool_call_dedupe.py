@@ -120,6 +120,43 @@ def test_mark_duplicate_tool_call_downstream_event_suppresses_exec_command_with_
     )
 
 
+def test_mark_duplicate_tool_call_downstream_event_suppresses_code_mode_exec_replay():
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    first_payload: dict[str, JsonValue] = {
+        "type": "response.output_item.done",
+        "response_id": "resp_code_mode",
+        "item": {
+            "type": "custom_tool_call",
+            "name": "exec",
+            "input": "const r = await tools.exec_command({cmd: 'touch marker'}); text(r.output);",
+            "call_id": "call_exec",
+        },
+    }
+    replay_payload: dict[str, JsonValue] = {
+        **first_payload,
+        "response_id": "resp_code_mode_replay",
+    }
+
+    assert (
+        tool_call_dedupe.mark_duplicate_tool_call_downstream_event(
+            first_payload,
+            seen_tool_call_keys=upstream_control.seen_tool_call_keys,
+            response_id="resp_code_mode",
+            scope_side_effects_by_response_id=False,
+        )
+        is False
+    )
+    assert (
+        tool_call_dedupe.mark_duplicate_tool_call_downstream_event(
+            replay_payload,
+            seen_tool_call_keys=upstream_control.seen_tool_call_keys,
+            response_id="resp_code_mode_replay",
+            scope_side_effects_by_response_id=False,
+        )
+        is True
+    )
+
+
 def test_mark_duplicate_tool_call_downstream_event_suppresses_direct_wait_agent_replay():
     upstream_control = proxy_service._WebSocketUpstreamControl()
     first_payload: dict[str, JsonValue] = {

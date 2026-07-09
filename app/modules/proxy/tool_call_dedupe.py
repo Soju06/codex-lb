@@ -18,7 +18,9 @@ _DIRECT_SIDE_EFFECT_TOOL_CALL_NAMES = frozenset(
     {
         "apply_patch",
         "close_agent",
+        "collaboration",
         "create_goal",
+        "exec",
         "exec_command",
         "request_user_input",
         "resume_agent",

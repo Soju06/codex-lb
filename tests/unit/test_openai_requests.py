@@ -563,6 +563,29 @@ def test_responses_input_system_message_moves_to_instructions():
     assert request.input == [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}]
 
 
+def test_responses_input_additional_tools_item_is_preserved():
+    additional_tools = {
+        "type": "additional_tools",
+        "role": "developer",
+        "tools": [{"type": "custom", "name": "exec"}, {"type": "function", "name": "wait"}],
+    }
+    payload = {
+        "model": "gpt-5.6-sol",
+        "input": [
+            additional_tools,
+            {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "base"}]},
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+        ],
+    }
+    request = ResponsesRequest.model_validate(payload)
+
+    assert request.instructions == "base"
+    assert request.input == [
+        additional_tools,
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+    ]
+
+
 def test_responses_input_system_message_keeps_user_text_parts():
     payload = {
         "model": "gpt-5.1",
@@ -671,6 +694,26 @@ def test_responses_compact_input_system_message_moves_to_instructions():
 
     assert request.instructions == "primary\nsys"
     assert request.input == [{"role": "user", "content": "compact me"}]
+
+
+def test_responses_compact_input_additional_tools_item_is_preserved():
+    additional_tools = {
+        "type": "additional_tools",
+        "role": "developer",
+        "tools": [{"type": "custom", "name": "exec"}],
+    }
+    payload = {
+        "model": "gpt-5.6-sol",
+        "input": [
+            additional_tools,
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "compact me"},
+        ],
+    }
+    request = ResponsesCompactRequest.model_validate(payload)
+
+    assert request.instructions == "sys"
+    assert request.input == [additional_tools, {"role": "user", "content": "compact me"}]
 
 
 def test_responses_compact_to_payload_strips_late_system_message():

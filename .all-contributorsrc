@@ -907,6 +907,17 @@
       "contributions": [
         "code"
       ]
+    },
+    {
+      "login": "nazirulhafiy",
+      "name": "Hafiy",
+      "avatar_url": "https://avatars.githubusercontent.com/u/255521226?v=4",
+      "profile": "https://github.com/nazirulhafiy",
+      "contributions": [
+        "code",
+        "test",
+        "doc"
+      ]
     }
   ],
   "contributorsPerLine": 7,

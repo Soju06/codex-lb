@@ -286,7 +286,7 @@ class _HTTPBridgeStreamingMixin:
     ) -> AsyncIterator[str]:
         _maybe_log_proxy_request_payload("stream_http", payload, headers)
         proxy_api_authorization = _header_value_case_insensitive(headers, "authorization")
-        filtered = filter_inbound_headers(headers)
+        filtered = filter_inbound_headers(headers, preserve_responses_lite=True)
         return self._stream_http_bridge_or_retry(
             payload,
             filtered,

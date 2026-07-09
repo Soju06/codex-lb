@@ -449,7 +449,7 @@ class _StreamingMixin(_StreamingRetryMixin):
     ) -> AsyncIterator[str]:
         proxy = cast(_StreamingServiceProtocol, self)
         _maybe_log_proxy_request_payload("stream", payload, headers)
-        filtered = _facade().filter_inbound_headers(headers)
+        filtered = _facade().filter_inbound_headers(headers, preserve_responses_lite=True)
         return proxy._stream_with_retry(
             payload,
             filtered,

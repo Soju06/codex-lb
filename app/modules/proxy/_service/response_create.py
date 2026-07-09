@@ -15,9 +15,11 @@ from uuid import uuid4
 
 from app.core.clients.proxy import (
     CODEX_INSTALLATION_ID_HEADER,
+    CODEX_RESPONSES_LITE_WS_METADATA_KEY,
     ImageFetchSession,
     ProxyResponseError,
     _inline_content_images,
+    responses_lite_requested_from_native_headers,
 )
 from app.core.config.settings import DEFAULT_HOME_DIR, get_settings
 from app.core.errors import OpenAIErrorEnvelope, openai_error
@@ -763,6 +765,9 @@ def _response_create_client_metadata(
                 client_metadata[key] = value
 
     normalized_headers = {key.lower(): value for key, value in headers.items()}
+    if responses_lite_requested_from_native_headers(headers):
+        client_metadata.setdefault(CODEX_RESPONSES_LITE_WS_METADATA_KEY, "true")
+
     turn_metadata = normalized_headers.get("x-codex-turn-metadata")
     if isinstance(turn_metadata, str) and turn_metadata.strip():
         client_metadata.setdefault("x-codex-turn-metadata", turn_metadata)

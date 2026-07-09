@@ -82,6 +82,18 @@ def test_compact_client_metadata_is_stripped():
     assert "client_metadata" not in request.to_payload()
 
 
+def test_responses_client_metadata_is_preserved():
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [],
+        "client_metadata": {"keep": "yes"},
+    }
+    request = ResponsesRequest.model_validate(payload)
+
+    assert request.to_payload()["client_metadata"] == {"keep": "yes"}
+
+
 def test_known_unsupported_upstream_fields_are_stripped():
     payload = {
         "model": "gpt-5.1",
@@ -561,6 +573,53 @@ def test_responses_input_system_message_moves_to_instructions():
 
     assert request.instructions == "primary\nsys\ndev"
     assert request.input == [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}]
+
+
+def test_responses_input_preserves_responses_lite_shape_untouched():
+    additional_tools = {
+        "type": "additional_tools",
+        "role": "developer",
+        "tools": [
+            {
+                "type": "custom",
+                "name": "exec",
+                "format": {"type": "grammar", "syntax": "lark", "definition": "start: /.*/"},
+            }
+        ],
+    }
+    lite_input = [
+        additional_tools,
+        {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "dev instructions"}]},
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+        {"type": "custom_tool_call", "call_id": "call_1", "name": "exec", "input": "ls"},
+        {"type": "custom_tool_call_output", "call_id": "call_1", "output": "README.md"},
+    ]
+    payload = {
+        "model": "gpt-5.6-sol",
+        "instructions": "",
+        "input": lite_input,
+    }
+    request = ResponsesRequest.model_validate(payload)
+
+    assert request.instructions == ""
+    assert request.to_payload()["input"] == lite_input
+
+
+def test_responses_input_custom_tool_call_output_survives_instruction_lift():
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "",
+        "input": [
+            {"type": "message", "role": "developer", "content": "dev instructions"},
+            {"type": "custom_tool_call_output", "call_id": "call_1", "output": "README.md"},
+        ],
+    }
+    request = ResponsesRequest.model_validate(payload)
+
+    assert request.instructions == "dev instructions"
+    assert request.to_payload()["input"] == [
+        {"type": "custom_tool_call_output", "call_id": "call_1", "output": "README.md"},
+    ]
 
 
 def test_responses_input_system_message_keeps_user_text_parts():

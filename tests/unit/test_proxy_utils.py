@@ -559,6 +559,31 @@ def test_filter_inbound_headers_strips_internal_responses_lite_header():
     assert filtered["User-Agent"] == "codex-test"
 
 
+def test_filter_inbound_headers_preserves_native_responses_lite_header_when_requested():
+    headers = {
+        "X-OpenAI-Internal-Codex-Responses-Lite": "true",
+        "User-Agent": "codex_exec/0.144.0 (Mac OS 27.0.0; arm64) unknown (codex_exec; 0.144.0)",
+    }
+
+    filtered = filter_inbound_headers(headers, preserve_responses_lite=True)
+
+    assert filtered["X-OpenAI-Internal-Codex-Responses-Lite"] == "true"
+    assert filtered["User-Agent"] == headers["User-Agent"]
+
+
+def test_filter_inbound_headers_keeps_non_native_responses_lite_header_stripped_when_requested():
+    headers = {
+        "X-OpenAI-Internal-Codex-Responses-Lite": "true",
+        "User-Agent": "OpenAI/Python 2.24.0",
+    }
+
+    filtered = filter_inbound_headers(headers, preserve_responses_lite=True)
+    lowered = {key.lower() for key in filtered}
+
+    assert "x-openai-internal-codex-responses-lite" not in lowered
+    assert filtered["User-Agent"] == "OpenAI/Python 2.24.0"
+
+
 def test_request_log_useragent_fields_extract_full_value_and_group() -> None:
     assert proxy_service._request_log_useragent_fields(
         {
@@ -631,6 +656,19 @@ def test_build_upstream_headers_strips_internal_responses_lite_header():
 
     lowered = {key.lower() for key in headers}
     assert "x-openai-internal-codex-responses-lite" not in lowered
+
+
+def test_build_upstream_headers_emits_responses_lite_header_when_requested():
+    native_ua = "codex_exec/0.144.0 (Mac OS 27.0.0; arm64) unknown (codex_exec; 0.144.0)"
+    headers = _build_upstream_headers(
+        {"User-Agent": native_ua},
+        "token",
+        "acc_2",
+        responses_lite=True,
+    )
+
+    assert headers[proxy_module.CODEX_RESPONSES_LITE_HEADER] == "true"
+    assert headers["User-Agent"] == native_ua
 
 
 def test_build_upstream_headers_accept_override():
@@ -813,6 +851,54 @@ def _build_registry_with_model(slug: str, efforts: list[str]):
     registry = ModelRegistry()
     registry._snapshot = snapshot
     return registry
+
+
+def _codex_metadata_model(slug: str):
+    from app.core.openai.model_registry import ReasoningLevel, UpstreamModel
+
+    return UpstreamModel(
+        slug=slug,
+        display_name=slug,
+        description="",
+        context_window=128000,
+        input_modalities=("text",),
+        supported_reasoning_levels=(ReasoningLevel(effort="medium", description=""),),
+        default_reasoning_level="medium",
+        supports_reasoning_summaries=True,
+        support_verbosity=True,
+        default_verbosity="low",
+        prefer_websockets=True,
+        supports_parallel_tool_calls=True,
+        supported_in_api=True,
+        minimal_client_version=None,
+        priority=0,
+        available_in_plans=frozenset({"pro"}),
+        raw={
+            "use_responses_lite": True,
+            "tool_mode": "code_mode_only",
+            "multi_agent_version": "v2",
+            "shell_type": "shell_command",
+            "apply_patch_tool_type": "freeform",
+        },
+    )
+
+
+def test_codex_model_entry_preserves_gpt_5_6_lite_tool_metadata():
+    entry = proxy_api._to_codex_model_entry(_codex_metadata_model("gpt-5.6-terra")).model_dump(mode="json")
+
+    assert entry["use_responses_lite"] is True
+    assert entry["tool_mode"] == "code_mode_only"
+    assert entry["multi_agent_version"] == "v2"
+    assert entry["shell_type"] == "shell_command"
+    assert entry["apply_patch_tool_type"] == "freeform"
+
+
+def test_codex_model_entry_preserves_non_gpt_5_6_lite_tool_metadata():
+    entry = proxy_api._to_codex_model_entry(_codex_metadata_model("gpt-5.5")).model_dump(mode="json")
+
+    assert entry["use_responses_lite"] is True
+    assert entry["tool_mode"] == "code_mode_only"
+    assert entry["multi_agent_version"] == "v2"
 
 
 def test_normalize_unsupported_reasoning_effort_rewrites_minimal_to_low(caplog):
@@ -2163,6 +2249,33 @@ def test_response_create_client_metadata_reads_turn_metadata_case_insensitively(
     )
 
     assert metadata == {"x-codex-turn-metadata": '{"turn_id":"header-turn"}'}
+
+
+def test_response_create_client_metadata_sets_responses_lite_ws_metadata_from_header():
+    metadata = proxy_service._response_create_client_metadata(
+        {"client_metadata": {"keep": "yes"}},
+        headers={
+            "X-OpenAI-Internal-Codex-Responses-Lite": "true",
+            "User-Agent": "codex_exec/0.144.0 (Mac OS 27.0.0; arm64) unknown (codex_exec; 0.144.0)",
+        },
+    )
+
+    assert metadata == {
+        "keep": "yes",
+        proxy_module.CODEX_RESPONSES_LITE_WS_METADATA_KEY: "true",
+    }
+
+
+def test_response_create_client_metadata_ignores_responses_lite_header_from_non_native_client():
+    metadata = proxy_service._response_create_client_metadata(
+        {"client_metadata": {"keep": "yes"}},
+        headers={
+            "X-OpenAI-Internal-Codex-Responses-Lite": "true",
+            "User-Agent": "OpenAI/Python 2.24.0",
+        },
+    )
+
+    assert metadata == {"keep": "yes"}
 
 
 def test_has_native_codex_transport_headers_does_not_treat_session_id_as_websocket_signal():
@@ -4085,6 +4198,113 @@ async def test_stream_responses_uses_http_responses_stream_budget(monkeypatch):
     assert isinstance(timeout, proxy_module.aiohttp.ClientTimeout)
     assert timeout.total == pytest.approx(7200.0, abs=0.1)
     assert events == ['data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n']
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_forwards_responses_lite_header_and_tools_upstream(monkeypatch):
+    class Settings:
+        upstream_base_url = "https://chatgpt.com/backend-api"
+        upstream_connect_timeout_seconds = 1.0
+        stream_idle_timeout_seconds = 1.0
+        max_sse_event_bytes = 1024
+        image_inline_fetch_enabled = False
+        log_upstream_request_payload = False
+        proxy_request_budget_seconds = 15.0
+        upstream_stream_transport = "http"
+        log_upstream_request_summary = False
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
+
+    additional_tools = {
+        "type": "additional_tools",
+        "role": "developer",
+        "tools": [
+            {
+                "type": "custom",
+                "name": "exec",
+                "format": {"type": "grammar", "syntax": "lark", "definition": "start: /.*/"},
+            }
+        ],
+    }
+    lite_input = [
+        additional_tools,
+        {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "dev instructions"}]},
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+        {"type": "custom_tool_call_output", "call_id": "call_1", "output": "README.md"},
+    ]
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.6-sol", "instructions": "", "input": lite_input})
+    session = _SseSession(_SsePostResponse([b'data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n']))
+
+    events = [
+        event
+        async for event in proxy_module.stream_responses(
+            payload,
+            headers={
+                "User-Agent": "codex_exec/0.144.0 (Mac OS 27.0.0; arm64) unknown (codex_exec; 0.144.0)",
+                "X-OpenAI-Internal-Codex-Responses-Lite": "true",
+            },
+            access_token="token",
+            account_id="acc_1",
+            session=cast(proxy_module.aiohttp.ClientSession, session),
+        )
+    ]
+
+    assert events == ['data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n']
+    call = session.calls[0]
+    upstream_headers = cast(dict[str, str], call["headers"])
+    lite_header_values = {
+        key: value for key, value in upstream_headers.items() if key.lower() == proxy_module.CODEX_RESPONSES_LITE_HEADER
+    }
+    assert list(lite_header_values.values()) == ["true"]
+    upstream_payload = cast(dict[str, JsonValue], call["json"])
+    assert upstream_payload["input"] == lite_input
+    assert upstream_payload["instructions"] == ""
+    client_metadata = cast(dict[str, JsonValue], upstream_payload["client_metadata"])
+    assert client_metadata[proxy_module.CODEX_RESPONSES_LITE_WS_METADATA_KEY] == "true"
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_keeps_lite_header_stripped_for_non_native_client(monkeypatch):
+    class Settings:
+        upstream_base_url = "https://chatgpt.com/backend-api"
+        upstream_connect_timeout_seconds = 1.0
+        stream_idle_timeout_seconds = 1.0
+        max_sse_event_bytes = 1024
+        image_inline_fetch_enabled = False
+        log_upstream_request_payload = False
+        proxy_request_budget_seconds = 15.0
+        upstream_stream_transport = "http"
+        log_upstream_request_summary = False
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
+
+    payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.6-sol", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
+    )
+    session = _SseSession(_SsePostResponse([b'data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n']))
+
+    _ = [
+        event
+        async for event in proxy_module.stream_responses(
+            payload,
+            headers={
+                "User-Agent": "OpenAI/Python 2.24.0",
+                "X-OpenAI-Internal-Codex-Responses-Lite": "true",
+            },
+            access_token="token",
+            account_id="acc_1",
+            session=cast(proxy_module.aiohttp.ClientSession, session),
+        )
+    ]
+
+    upstream_headers = cast(dict[str, str], session.calls[0]["headers"])
+    assert proxy_module.CODEX_RESPONSES_LITE_HEADER not in {key.lower() for key in upstream_headers}
+    upstream_payload = cast(dict[str, JsonValue], session.calls[0]["json"])
+    assert "client_metadata" not in upstream_payload
 
 
 @pytest.mark.asyncio

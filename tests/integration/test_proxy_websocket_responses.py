@@ -675,17 +675,40 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_insta
     monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
     monkeypatch.setattr(proxy_module.ProxyService, "_write_request_log", fake_write_request_log)
 
+    additional_tools = {
+        "type": "additional_tools",
+        "role": "developer",
+        "tools": [{"type": "custom", "name": "shell"}],
+    }
+    custom_tool_call = {
+        "type": "custom_tool_call",
+        "call_id": "call_shell_1",
+        "name": "shell",
+        "input": "pwd",
+    }
+    custom_tool_output = {
+        "type": "custom_tool_call_output",
+        "call_id": "call_shell_1",
+        "output": "/repo",
+    }
     request_payload = {
         "type": "response.create",
-        "model": "gpt-5.4",
+        "model": "gpt-5.6-sol",
         "instructions": "",
         "client_metadata": {
             "x-codex-installation-id": "client-installation",
             "x-codex-turn-metadata": '{"turn_id":"turn_123","sandbox":"workspace-write"}',
+            "ws_request_header_x_openai_internal_codex_responses_lite": "stale",
         },
         "service_tier": "fast",
         "reasoning": {"effort": "high"},
-        "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+        "input": [
+            additional_tools,
+            {"type": "message", "role": "developer", "content": "use repository tools"},
+            custom_tool_call,
+            custom_tool_output,
+            {"role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+        ],
         "stream": True,
     }
 
@@ -712,17 +735,26 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_insta
     assert seen["sticky_kind"] == proxy_module.StickySessionKind.CODEX_SESSION
     assert seen["prefer_earlier_reset"] is False
     assert seen["routing_strategy"] == "usage_weighted"
-    assert seen["model"] == "gpt-5.4"
+    assert seen["model"] == "gpt-5.6-sol"
     _assert_upstream_payloads(
         fake_upstream.sent_text,
         [
             {
-                "model": "gpt-5.4",
+                "model": "gpt-5.6-sol",
                 "instructions": "",
-                "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+                "input": [
+                    additional_tools,
+                    {"type": "message", "role": "developer", "content": "use repository tools"},
+                    custom_tool_call,
+                    custom_tool_output,
+                    {"role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+                ],
                 "tools": [],
                 "reasoning": {"effort": "high"},
-                "client_metadata": {"x-codex-turn-metadata": '{"turn_id":"turn_123","sandbox":"workspace-write"}'},
+                "client_metadata": {
+                    "x-codex-turn-metadata": '{"turn_id":"turn_123","sandbox":"workspace-write"}',
+                    "ws_request_header_x_openai_internal_codex_responses_lite": "true",
+                },
                 "service_tier": "priority",
                 "store": False,
                 "include": [],
@@ -737,7 +769,7 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_insta
     assert log["archive_request_id"] == seen["request_id"]
     assert fake_upstream.sent_text_request_ids == [log["archive_request_id"]]
     assert fake_upstream.archived_receive_request_ids[0] == log["archive_request_id"]
-    assert log["model"] == "gpt-5.4"
+    assert log["model"] == "gpt-5.6-sol"
     assert log["service_tier"] == "priority"
     assert log["transport"] == "websocket"
     assert log["status"] == "success"

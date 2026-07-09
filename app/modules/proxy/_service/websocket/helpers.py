@@ -465,6 +465,16 @@ def _record_websocket_continuity_completion(
     continuity_state.last_pending_function_call_ids = list(request_state.pending_function_call_ids)
 
 
+def _record_websocket_responses_lite_acceptance(
+    continuity_state: _WebSocketContinuityState,
+    *,
+    request_state: _WebSocketRequestState,
+) -> None:
+    if request_state.request_kind == "prewarm":
+        return
+    continuity_state.responses_lite_model = request_state.responses_lite_model
+
+
 def _websocket_response_id(event: OpenAIEvent | None, payload: dict[str, JsonValue] | None) -> str | None:
     if event is not None and event.response is not None and event.response.id:
         return event.response.id

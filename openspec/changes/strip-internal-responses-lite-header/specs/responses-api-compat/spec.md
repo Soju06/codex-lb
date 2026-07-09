@@ -1,26 +1,102 @@
 ## ADDED Requirements
 
-### Requirement: Internal Responses Lite header is not forwarded upstream
+### Requirement: Responses Lite signaling is derived from the normalized body
 
-The service MUST accept inbound Responses and compact requests that include
-`X-OpenAI-Internal-Codex-Responses-Lite`, but MUST remove that header before
-calling upstream Responses, compact, or websocket transports. Header matching
-MUST be case-insensitive. The service MUST NOT strip unrelated OpenAI SDK
-telemetry headers solely because they start with `x-openai-`.
+The service MUST accept Responses and compact requests that include
+`X-OpenAI-Internal-Codex-Responses-Lite`, but MUST remove that inbound header
+case-insensitively before generic upstream-header forwarding. The service MUST
+NOT strip unrelated OpenAI SDK telemetry headers solely because they start with
+`x-openai-`.
 
-#### Scenario: HTTP and compact upstream headers omit Lite
+When an input array contains an item with `type = "additional_tools"`,
+instruction normalization MUST leave the entire input array and top-level
+`instructions` field unchanged. In particular, neither the tool item nor an
+adjacent developer instructions message may be extracted from the native Lite
+input prefix. The presence of the `additional_tools` item in the normalized
+input array MUST be the authoritative signal that the request uses Responses
+Lite.
 
-- **WHEN** a client sends a Responses or compact request with
-  `X-OpenAI-Internal-Codex-Responses-Lite: 1`
-- **THEN** the upstream HTTP request headers omit
-  `x-openai-internal-codex-responses-lite`
-- **AND** unrelated headers such as `x-openai-client-version` continue through
-  the existing fingerprint policy
+If compact-request size handling trims oversized conversation history, it MUST
+retain the `additional_tools` item and its immediately following developer
+instructions message. The resulting compact payload MUST therefore retain the
+body signal needed to synthesize the canonical Lite header.
 
-#### Scenario: Websocket upstream headers omit Lite
+For a Responses Lite body, upstream HTTP Responses and compact requests MUST
+include the canonical `x-openai-internal-codex-responses-lite: true` header.
+Upstream websocket handshakes MUST omit that header and each websocket
+`response.create` body MUST instead include
+`client_metadata.ws_request_header_x_openai_internal_codex_responses_lite = "true"`.
+For a non-Lite HTTP body, the proxy MUST omit the synthesized HTTP header. A
+websocket marker on an incremental frame without the full Lite input prefix MAY
+remain only when the same request continuity state previously received
+`response.created` for a Lite request derived from `additional_tools` using the
+same effective upstream model. The effective model comparison MUST occur after
+alias normalization and API-key enforcement, and a merely prepared request MUST
+NOT establish or clear trusted Lite continuity. Trusted state MUST update in
+upstream request-acceptance order rather than terminal-event completion order.
+Otherwise, the proxy MUST strip the reserved client-metadata marker. The
+HTTP-to-websocket bridge MUST preserve its internally derived canonical marker
+when it trims an already-stored input prefix or rebuilds the request during
+forwarding or retry, even if the remaining input delta has no `additional_tools`
+item.
 
-- **WHEN** a client opens a Responses websocket with
-  `X-OpenAI-Internal-Codex-Responses-Lite: 1`
-- **THEN** the upstream websocket connection headers omit
-  `x-openai-internal-codex-responses-lite`
-- **AND** existing websocket beta and Codex continuity headers are preserved
+#### Scenario: Instruction normalization preserves Lite tools and tool history
+
+- **WHEN** a request input contains an `additional_tools` item, developer text,
+  custom tool calls, and `custom_tool_call_output` items
+- **THEN** top-level `instructions` remains unchanged
+- **AND** the developer text, `additional_tools`, custom calls, and outputs all
+  remain in their original input order
+
+#### Scenario: HTTP and compact synthesize Lite only from the body
+
+- **WHEN** a normalized HTTP Responses or compact payload contains an
+  `additional_tools` input item
+- **THEN** the upstream request includes
+  `x-openai-internal-codex-responses-lite: true`
+- **AND** the original inbound Lite header value is not forwarded verbatim
+
+#### Scenario: Compact trimming retains the Lite prefix
+
+- **GIVEN** an oversized Responses Lite compact input whose tool bundle exceeds
+  the normally retained head budget
+- **WHEN** compact size handling trims conversation history
+- **THEN** the `additional_tools` item and adjacent developer instructions stay
+  in their original order
+- **AND** the upstream compact request includes the canonical Lite header
+
+#### Scenario: Websocket uses a per-request Lite marker
+
+- **WHEN** a websocket `response.create` payload contains an `additional_tools`
+  input item
+- **THEN** the upstream websocket handshake omits the Lite header
+- **AND** the forwarded `response.create` payload contains the canonical
+  per-request Lite client-metadata marker
+
+#### Scenario: HTTP bridge trimming preserves Lite metadata
+
+- **GIVEN** an HTTP Responses Lite request whose stored input prefix contains
+  the `additional_tools` item
+- **WHEN** the HTTP-to-websocket bridge trims that prefix and forwards only the
+  new input delta
+- **THEN** the forwarded `response.create` payload still contains the canonical
+  per-request Lite client-metadata marker
+
+#### Scenario: Incremental websocket marker requires trusted Lite continuity
+
+- **GIVEN** a websocket request received `response.created` after establishing
+  Lite mode from an `additional_tools` prefix for its effective upstream model
+- **WHEN** a later same-model incremental frame contains the canonical marker
+  but omits the already-known prefix
+- **THEN** the forwarded frame retains the canonical marker
+- **BUT WHEN** a request for another model supplies that marker without a Lite
+  prefix or trusted same-model continuity
+- **THEN** the proxy strips the marker
+
+#### Scenario: Stale inbound headers do not enable a non-Lite request
+
+- **WHEN** an HTTP request has no `additional_tools` input item but includes an
+  inbound Lite header
+- **THEN** the upstream HTTP request omits the Lite signal
+- **AND** existing Codex continuity and unrelated OpenAI telemetry headers are
+  preserved

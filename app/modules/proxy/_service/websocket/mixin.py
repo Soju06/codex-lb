@@ -33,6 +33,8 @@ from app.core.clients.proxy import (  # noqa: F401  # noqa: F401
     _as_image_fetch_session,
     _inline_content_images,
     _inline_input_image_urls,
+    _payload_has_responses_lite_websocket_marker,
+    _payload_uses_responses_lite,
     _ws_transport_payload_budget_bytes,
     apply_codex_installation_metadata,
     filter_inbound_headers,
@@ -367,6 +369,7 @@ from app.modules.proxy._service.websocket.helpers import (
     _pop_terminal_websocket_request_state,
     _prepare_websocket_request_state_for_auth_replay,
     _record_websocket_continuity_completion,
+    _record_websocket_responses_lite_acceptance,
     _release_websocket_response_create_gate,
     _rewrite_websocket_continuity_corruption_event,
     _rewrite_websocket_downstream_response_id,
@@ -1281,11 +1284,29 @@ class _WebSocketMixin:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
         refreshed_api_key = await proxy._refresh_websocket_api_key_policy(api_key)
-        client_metadata = _facade()._response_create_client_metadata(payload, headers=headers)
         responses_payload = normalize_responses_request_payload(
             payload,
             openai_compat=openai_cache_affinity,
         )
+        apply_api_key_enforcement(responses_payload, refreshed_api_key)
+        normalized_payload = responses_payload.to_payload()
+        body_uses_responses_lite = _payload_uses_responses_lite(normalized_payload)
+        trusted_incremental_responses_lite = bool(
+            not body_uses_responses_lite
+            and continuity_state is not None
+            and continuity_state.responses_lite_model == responses_payload.model
+            and _payload_has_responses_lite_websocket_marker(normalized_payload)
+        )
+        client_metadata = _facade()._response_create_client_metadata(
+            normalized_payload,
+            headers=headers,
+            preserve_existing_responses_lite=trusted_incremental_responses_lite,
+        )
+        next_responses_lite_model = (
+            responses_payload.model if body_uses_responses_lite or trusted_incremental_responses_lite else None
+        )
+        if client_metadata is not None or "client_metadata" in normalized_payload:
+            responses_payload = responses_payload.model_copy(update={"client_metadata": client_metadata})
         previous_response_trimmed_input_count: int | None = None
         previous_response_trimmed_input_fingerprint: str | None = None
         client_full_resend_payload: ResponsesRequest | None = None
@@ -1306,7 +1327,6 @@ class _WebSocketMixin:
                     previous_response_input_items
                 )
                 responses_payload = responses_payload.model_copy(update={"input": trimmed_input_items})
-        apply_api_key_enforcement(responses_payload, refreshed_api_key)
         if client_full_resend_retry_safe and client_full_resend_input_items is not None:
             client_full_resend_payload = responses_payload.model_copy(
                 update={
@@ -1389,6 +1409,7 @@ class _WebSocketMixin:
         request_state.useragent = useragent
         request_state.useragent_group = useragent_group
         request_state.client_ip = client_ip
+        request_state.responses_lite_model = next_responses_lite_model
         request_state.expose_stale_previous_response_classifier = codex_session_affinity
         original_full_resend_input: JsonValue | None = None
         if session_anchor is not None:
@@ -2817,6 +2838,11 @@ class _WebSocketMixin:
                 request_state = _assign_websocket_response_id(pending_requests, response_id)
                 created_request_state = request_state
                 release_create_gate = request_state is not None
+                if request_state is not None and continuity_state is not None:
+                    _record_websocket_responses_lite_acceptance(
+                        continuity_state,
+                        request_state=request_state,
+                    )
             elif response_id is not None:
                 request_state = _find_websocket_request_state_by_response_id(pending_requests, response_id)
                 release_create_gate = False

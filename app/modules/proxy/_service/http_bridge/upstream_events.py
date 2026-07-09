@@ -69,6 +69,7 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
     _security_work_advisory_event,
     _service_get_settings,
     _service_tier_from_event_payload,
+    _service_time,
     _upstream_websocket_disconnect_message,
     _websocket_event_error_code,
     _websocket_event_error_message,
@@ -394,6 +395,15 @@ class _HTTPBridgeUpstreamEventsMixin:
             _archive_http_bridge_upstream_text(session, original_text, matched_request_state)
 
             if matched_request_state is not None:
+                now = _service_time().monotonic()
+                if matched_request_state.latency_first_upstream_event_ms is None:
+                    matched_request_state.latency_first_upstream_event_ms = int(
+                        max(0.0, now - matched_request_state.started_at) * 1000
+                    )
+                if event_type == "response.created" and matched_request_state.latency_response_created_ms is None:
+                    matched_request_state.latency_response_created_ms = int(
+                        max(0.0, now - matched_request_state.started_at) * 1000
+                    )
                 actual_service_tier = _service_tier_from_event_payload(payload)
                 if actual_service_tier is not None:
                     matched_request_state.actual_service_tier = actual_service_tier

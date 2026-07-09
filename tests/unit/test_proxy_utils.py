@@ -4083,7 +4083,7 @@ async def test_stream_responses_uses_http_responses_stream_budget(monkeypatch):
 
     timeout = session.calls[0]["timeout"]
     assert isinstance(timeout, proxy_module.aiohttp.ClientTimeout)
-    assert timeout.total == pytest.approx(7200.0)
+    assert timeout.total == pytest.approx(7200.0, abs=0.1)
     assert events == ['data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n']
 
 

@@ -311,6 +311,17 @@ class _WebSocketRequestState:
     api_key_reservation: ApiKeyUsageReservationData | None
     started_at: float
     latency_first_token_ms: int | None = None
+    latency_response_created_ms: int | None = None
+    latency_first_upstream_event_ms: int | None = None
+    latency_response_create_gate_wait_ms: int | None = None
+    latency_bridge_queue_wait_ms: int | None = None
+    response_create_gate_wait_started_at: float | None = None
+    bridge_queue_wait_started_at: float | None = None
+    prewarm_status: str | None = None
+    prewarm_latency_ms: int | None = None
+    prewarm_canary_bucket: str | None = None
+    prewarm_eligible_reason: str | None = None
+    session_previous_gap_ms: int | None = None
     request_log_id: str | None = None
     archive_request_id: str | None = None
     requested_service_tier: str | None = None

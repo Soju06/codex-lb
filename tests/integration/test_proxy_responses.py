@@ -2004,7 +2004,8 @@ async def test_v1_responses_non_streaming_reconstructs_reasoning_output(async_cl
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kw):
         yield (
             'data: {"type":"response.output_item.done","output_index":0,"item":{"id":"rs_1",'
-            '"type":"reasoning","summary":[{"type":"summary_text","text":"Need more steps"}],'
+            '"type":"reasoning","summary":[{"type":"summary_text",'
+            '"text":"Need more steps\\n\\n<!-- -->"}],'
             '"reasoning_details":{"tokens":4}}}\n\n'
         )
         yield (
@@ -2028,6 +2029,38 @@ async def test_v1_responses_non_streaming_reconstructs_reasoning_output(async_cl
             "reasoning_details": {"tokens": 4},
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_backend_codex_responses_strips_blank_html_comment_from_reasoning_summary(async_client, monkeypatch):
+    email = "responses-reasoning-summary-comment@example.com"
+    raw_account_id = "acc_responses_reasoning_summary_comment"
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kw):
+        yield (
+            'data: {"type":"response.output_item.done","output_index":0,"item":{"id":"rs_1",'
+            '"type":"reasoning","summary":[{"type":"summary_text",'
+            '"text":"**Planning fix**\\n\\n<!-- -->"}]}}\n\n'
+        )
+        yield (
+            'data: {"type":"response.completed","response":{"id":"resp_reasoning_comment_1",'
+            '"object":"response","status":"completed","output":[],'
+            '"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {"model": "gpt-5.1", "input": [{"role": "user", "content": "hi"}], "stream": True}
+    async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
+        assert resp.status_code == 200
+        body = "\n".join([line async for line in resp.aiter_lines() if line])
+
+    assert "<!-- -->" not in body
+    assert "**Planning fix**" in body
 
 
 @pytest.mark.asyncio

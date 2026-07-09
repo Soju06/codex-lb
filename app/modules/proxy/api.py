@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from contextlib import asynccontextmanager
@@ -203,6 +204,8 @@ from app.modules.usage.repository import AdditionalUsageRepository, UsageReposit
 from app.modules.usage.updater import UsageUpdater
 
 logger = logging.getLogger(__name__)
+
+_REASONING_SUMMARY_BLANK_HTML_COMMENT_RE = re.compile(r"(?m)^[ \t]*<!--\s*-->[ \t]*(?:\r?\n)?")
 
 _PUBLIC_RESPONSE_OUTPUT_ITEM_TYPES = frozenset(
     {
@@ -5706,6 +5709,8 @@ def _normalize_public_response_mapping(
 
 def _normalize_public_output_item(item: Mapping[str, JsonValue]) -> dict[str, JsonValue] | None:
     item_type = item.get("type")
+    if item_type == "reasoning":
+        return _normalize_reasoning_output_item(item)
     if isinstance(item_type, str) and _is_public_passthrough_output_item_type(item_type):
         return dict(item)
     text_value = _extract_public_output_item_text(item)
@@ -5721,6 +5726,46 @@ def _normalize_public_output_item(item: Mapping[str, JsonValue]) -> dict[str, Js
     if isinstance(item_id, str) and item_id:
         normalized["id"] = item_id
     return normalized
+
+
+def _normalize_reasoning_output_item(item: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
+    """Remove renderer-only blank HTML comments from reasoning summaries.
+
+    Recent Codex reasoning summaries can include a standalone ``<!-- -->``
+    markdown placeholder after the visible summary heading. The Codex TUI renders
+    reasoning summary text directly, so proxying that inert marker verbatim makes
+    it visible between tool calls. Limit the cleanup to reasoning summary text so
+    assistant/user-visible content and non-empty HTML comments remain untouched.
+    """
+
+    normalized = dict(item)
+    summary = item.get("summary")
+    if not isinstance(summary, list):
+        return normalized
+
+    normalized_summary: list[JsonValue] = []
+    changed = False
+    for part in summary:
+        if not is_json_mapping(part):
+            normalized_summary.append(part)
+            continue
+        text = part.get("text")
+        if part.get("type") != "summary_text" or not isinstance(text, str):
+            normalized_summary.append(dict(part))
+            continue
+        cleaned = _strip_blank_html_comment_lines(text)
+        normalized_part = dict(part)
+        normalized_part["text"] = cleaned
+        normalized_summary.append(normalized_part)
+        changed = changed or cleaned != text
+
+    if changed:
+        normalized["summary"] = normalized_summary
+    return normalized
+
+
+def _strip_blank_html_comment_lines(text: str) -> str:
+    return _REASONING_SUMMARY_BLANK_HTML_COMMENT_RE.sub("", text).rstrip()
 
 
 def _is_public_passthrough_output_item_type(item_type: str) -> bool:

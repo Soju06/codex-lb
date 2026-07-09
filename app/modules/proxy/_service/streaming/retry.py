@@ -14,7 +14,7 @@ from app.core.auth.refresh import RefreshError
 from app.core.balancer import failover_decision
 from app.core.balancer.types import UpstreamError
 from app.core.clients.proxy import ProxyResponseError, _resolve_stream_transport, pop_stream_timeout_overrides
-from app.core.errors import openai_error, response_failed_event
+from app.core.errors import response_failed_event
 from app.core.openai.requests import ResponsesRequest
 from app.core.upstream_proxy import UpstreamProxyRouteError
 from app.core.utils.request_id import ensure_request_id
@@ -30,6 +30,7 @@ from app.modules.proxy._service.observability import (
 from app.modules.proxy._service.streaming.protocol import _StreamingServiceProtocol
 from app.modules.proxy._service.support import (
     _ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS,
+    _LOCAL_ACCOUNT_CAP_ERROR_CODES,
     _account_capacity_wait_payload,
     _account_selection_recovery_sleep_seconds,
     _request_log_useragent_fields,
@@ -54,7 +55,7 @@ from app.modules.proxy.helpers import (
     _parse_openai_error,
     _upstream_error_from_openai,
 )
-from app.modules.proxy.load_balancer import AccountLease
+from app.modules.proxy.load_balancer import AccountLease, AccountSelection
 
 _REQUEST_TRANSPORT_HTTP = "http"
 _REQUEST_TRANSPORT_WEBSOCKET = "websocket"
@@ -437,10 +438,14 @@ class _StreamingRetryMixin:
                         continue
                     if (
                         not account
-                        and not _facade()._is_local_account_cap_code(selection.error_code)
-                        and not (propagate_http_errors and last_transient_exc is not None)
-                        and last_retryable_stream_error is None
-                        and last_security_work_retry_error is None
+                        and (
+                            selection.error_code in _LOCAL_ACCOUNT_CAP_ERROR_CODES
+                            or not (propagate_http_errors and last_transient_exc is not None)
+                        )
+                        and (
+                            selection.error_code in _LOCAL_ACCOUNT_CAP_ERROR_CODES
+                            or (last_retryable_stream_error is None and last_security_work_retry_error is None)
+                        )
                     ):
                         recovery_sleep_seconds = _account_selection_recovery_sleep_seconds(selection)
                         if recovery_sleep_seconds is not None:
@@ -480,15 +485,35 @@ class _StreamingRetryMixin:
                             continue
                     break
                 if not account:
-                    if _facade()._is_local_account_cap_code(selection.error_code):
-                        raise ProxyResponseError(
-                            429,
-                            openai_error(
-                                selection.error_code or "account_stream_cap",
-                                selection.error_message or "Account stream capacity is exhausted",
-                                error_type="rate_limit_error",
-                            ),
+                    if selection.error_code in _LOCAL_ACCOUNT_CAP_ERROR_CODES:
+                        no_accounts_msg = selection.error_message or "Local account capacity is exhausted"
+                        error_code = selection.error_code
+                        event = response_failed_event(
+                            error_code,
+                            no_accounts_msg,
+                            error_type="rate_limit_error",
+                            response_id=request_id,
                         )
+                        yield format_sse_event(event)
+                        await proxy._write_request_log(
+                            account_id=None,
+                            api_key=api_key,
+                            request_id=request_id,
+                            model=payload.model,
+                            latency_ms=int((time.monotonic() - start) * 1000),
+                            status="error",
+                            error_code=error_code,
+                            error_message=no_accounts_msg,
+                            reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
+                            transport=request_transport,
+                            upstream_transport=upstream_stream_transport,
+                            service_tier=payload.service_tier,
+                            requested_service_tier=payload.service_tier,
+                            useragent=useragent,
+                            useragent_group=useragent_group,
+                            client_ip=client_ip,
+                        )
+                        return
                     if require_preferred_account and preferred_account_id is not None:
                         message = "Previous response owner account is unavailable; retry later."
                         _record_continuity_fail_closed(
@@ -590,6 +615,9 @@ class _StreamingRetryMixin:
                     event = response_failed_event(
                         error_code,
                         no_accounts_msg,
+                        error_type="rate_limit_error"
+                        if error_code in _LOCAL_ACCOUNT_CAP_ERROR_CODES
+                        else "server_error",
                         response_id=request_id,
                     )
                     yield format_sse_event(event)
@@ -918,6 +946,63 @@ class _StreamingRetryMixin:
                                     last_transient_exc = tex
                                     break
                                 if code == "account_response_create_cap":
+                                    last_transient_exc = tex
+                                    recovery_sleep_seconds = _account_selection_recovery_sleep_seconds(
+                                        AccountSelection(
+                                            account=None,
+                                            error_message=error_message,
+                                            error_code=code,
+                                        )
+                                    )
+                                    if recovery_sleep_seconds is not None:
+                                        can_try_other_account = (
+                                            not require_preferred_account
+                                            and account.id != file_preferred_account_id
+                                            and attempt < max_attempts - 1
+                                        )
+                                        if can_try_other_account:
+                                            await _release_tracked_stream_lease(current_account_lease)
+                                            current_account_lease = None
+                                            excluded_account_ids.add(account.id)
+                                            break
+                                        if propagate_http_errors:
+                                            raise
+                                        remaining_budget_seconds = _facade()._remaining_budget_seconds(deadline)
+                                        if remaining_budget_seconds <= 0:
+                                            raise
+                                        wait_started_at = time.monotonic()
+                                        remaining_sleep_seconds = min(recovery_sleep_seconds, remaining_budget_seconds)
+                                        _facade().logger.info(
+                                            "Waiting for response-create capacity before retrying stream "
+                                            "request_id=%s model=%s account_id=%s sleep_seconds=%.1f "
+                                            "recovery_hint_seconds=%.1f error=%s",
+                                            request_id,
+                                            payload.model,
+                                            account.id,
+                                            remaining_sleep_seconds,
+                                            recovery_sleep_seconds,
+                                            error_message,
+                                        )
+                                        while remaining_sleep_seconds > 0:
+                                            yield format_sse_event(
+                                                cast(
+                                                    Mapping[str, Any],
+                                                    _account_capacity_wait_payload(
+                                                        None,
+                                                        request_id=request_id,
+                                                        reason=error_message,
+                                                        retry_after_seconds=remaining_sleep_seconds,
+                                                        started_at=wait_started_at,
+                                                    ),
+                                                )
+                                            )
+                                            chunk_seconds = min(
+                                                remaining_sleep_seconds,
+                                                _ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS,
+                                            )
+                                            await asyncio.sleep(chunk_seconds)
+                                            remaining_sleep_seconds -= chunk_seconds
+                                        continue
                                     last_transient_exc = tex
                                     await _release_tracked_stream_lease(current_account_lease)
                                     current_account_lease = None
@@ -1427,6 +1512,22 @@ class _StreamingRetryMixin:
                         client_ip=client_ip,
                     )
                 return
+            if last_transient_exc is not None:
+                error = _parse_openai_error(last_transient_exc.payload)
+                error_code = _normalize_error_code(error.code if error else None, error.type if error else None)
+                if error_code == "account_response_create_cap":
+                    error_message = error.message if error else None
+                    event = response_failed_event(
+                        error_code,
+                        error_message or "Account response-create concurrency limit reached",
+                        error_type=(error.type if error else None) or "server_error",
+                        response_id=request_id,
+                        error_param=error.param if error else None,
+                    )
+                    _apply_error_metadata(event["response"]["error"], error)
+                    yield format_sse_event(event)
+                    return
+
             retries_exhausted_msg = "No available accounts after retries"
             _facade().logger.warning(
                 "Proxy streaming exhausted accounts request_id=%s model=%s transport=%s attempts=%s "

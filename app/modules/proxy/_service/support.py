@@ -41,6 +41,7 @@ _ACCOUNT_SELECTION_RECOVERY_DEFAULT_SLEEP_SECONDS = 30.0
 _ACCOUNT_SELECTION_RECOVERY_MAX_SLEEP_SECONDS = 300.0
 _ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS = 10.0
 _ACCOUNT_SELECTION_RETRY_HINT_RE = re.compile(r"try again in\s+([0-9]+(?:\.[0-9]+)?)s", re.IGNORECASE)
+_LOCAL_ACCOUNT_CAP_ERROR_CODES = frozenset({"account_response_create_cap", "account_stream_cap"})
 
 
 def _account_selection_recovery_sleep_seconds_from_message(
@@ -79,6 +80,9 @@ def _account_selection_recovery_sleep_seconds_from_message(
         )
 
     if "hit your spend cap set by the owner of your workspace" in lowered:
+        return _ACCOUNT_SELECTION_RECOVERY_DEFAULT_SLEEP_SECONDS
+
+    if error_code in _LOCAL_ACCOUNT_CAP_ERROR_CODES:
         return _ACCOUNT_SELECTION_RECOVERY_DEFAULT_SLEEP_SECONDS
 
     return None

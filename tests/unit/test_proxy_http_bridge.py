@@ -514,6 +514,19 @@ def test_http_bridge_account_capacity_wait_ignores_local_no_accounts_retry_hint(
     assert http_bridge_streaming_module._http_bridge_account_capacity_wait_seconds(exc) is None
 
 
+@pytest.mark.parametrize("error_code", ["account_stream_cap", "account_response_create_cap"])
+def test_http_bridge_account_capacity_wait_treats_local_account_caps_as_recoverable(error_code: str) -> None:
+    exc = ProxyResponseError(
+        429,
+        openai_error(
+            error_code,
+            "Account stream capacity is exhausted; per-account limit is 8.",
+        ),
+    )
+
+    assert http_bridge_streaming_module._http_bridge_account_capacity_wait_seconds(exc) == 30.0
+
+
 def _make_api_key(
     *,
     key_id: str,

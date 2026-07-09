@@ -217,7 +217,7 @@ def _proxy_error_code_message(exc: ProxyResponseError) -> tuple[str | None, str 
 
 def _http_bridge_account_capacity_wait_seconds(exc: ProxyResponseError) -> float | None:
     code, message = _proxy_error_code_message(exc)
-    if code in {"account_response_create_cap", "account_stream_cap", "capacity_exhausted_active_sessions"}:
+    if code == "capacity_exhausted_active_sessions":
         return None
     return _account_selection_recovery_sleep_seconds_from_message(
         message,

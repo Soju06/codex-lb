@@ -211,6 +211,22 @@ async def test_backend_codex_images_generations_alias_uses_same_validation(async
 
 
 @pytest.mark.asyncio
+async def test_backend_codex_images_generations_alias_auth_rejection_records_route_observability(async_client, caplog):
+    await _enable_api_key_auth(async_client)
+
+    with caplog.at_level(logging.WARNING, logger="app.modules.proxy.api"):
+        response = await async_client.post(
+            "/backend-api/codex/images/generations",
+            json={"model": "gpt-image-2", "prompt": "a red circle"},
+        )
+
+    assert response.status_code == 401
+    message = "images_route_complete route=generations model=gpt-image-2 stream=false status=401 outcome=auth_error"
+    assert message in caplog.text
+    assert caplog.text.count(message) == 1
+
+
+@pytest.mark.asyncio
 async def test_images_generations_trailing_slash_parity_between_v1_and_codex_alias(async_client):
     # Codex joins `base_url` + "images/generations" without a trailing slash,
     # so only the exact paths are handled. The trailing-slash variants fall
@@ -599,6 +615,26 @@ async def test_backend_codex_images_edits_requires_native_image_data_urls(async_
         "images_route_complete route=edits model=gpt-image-2 stream=false status=400 outcome=invalid_request"
         in caplog.text
     )
+
+
+@pytest.mark.asyncio
+async def test_backend_codex_images_edits_alias_auth_rejection_records_route_observability(async_client, caplog):
+    await _enable_api_key_auth(async_client)
+
+    with caplog.at_level(logging.WARNING, logger="app.modules.proxy.api"):
+        response = await async_client.post(
+            "/backend-api/codex/images/edits",
+            json={
+                "model": "gpt-image-2",
+                "prompt": "make it green",
+                "images": [{"image_url": "data:image/png;base64,aGVsbG8="}],
+            },
+        )
+
+    assert response.status_code == 401
+    message = "images_route_complete route=edits model=gpt-image-2 stream=false status=401 outcome=auth_error"
+    assert message in caplog.text
+    assert caplog.text.count(message) == 1
 
 
 @pytest.mark.asyncio

@@ -26,3 +26,13 @@ surface.
   without a non-empty `images[].image_url` data URL
 - **THEN** the service returns a 400 OpenAI `invalid_request_error` with
   `param: images`, rather than `405 Method Not Allowed` or a missing-prompt error
+
+#### Scenario: Codex-base alias failures before the handler record route observability
+
+- **WHEN** a request to `POST /backend-api/codex/images/generations` or
+  `POST /backend-api/codex/images/edits` fails before the route handler runs
+  (for example API-key authentication or request-body validation handled by
+  the shared exception layer)
+- **THEN** the service records the `images_route_complete` observability entry
+  (log and metrics) with the same `generations`/`edits` route label as the
+  `/v1` counterpart, exactly once

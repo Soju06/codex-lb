@@ -823,10 +823,20 @@ async def models(
     return await _build_codex_models_response(api_key)
 
 
-@v1_router.get("/models", response_model=ModelListResponse)
+@v1_router.get("/models", response_model=None)
 async def v1_models(
+    request: Request,
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
+    # Codex clients pointed at this proxy via `openai_base_url` fetch their model
+    # catalog from `<base_url>/models` and always append a `client_version` query
+    # parameter. They require the Codex catalog shape (`{"models": [...]}`); the
+    # OpenAI-compatible list shape fails to parse client-side, and the client
+    # silently falls back to its bundled model metadata (stale tool_mode /
+    # use_responses_lite flags and context windows). Serve the Codex catalog to
+    # Codex clients and keep the OpenAI-compatible shape for everyone else.
+    if request.query_params.get("client_version"):
+        return await _build_codex_models_response(api_key)
     return await _build_models_response(api_key)
 
 

@@ -154,6 +154,32 @@ async def test_v1_models_list(async_client):
 
 
 @pytest.mark.asyncio
+async def test_v1_models_with_client_version_returns_codex_catalog(async_client):
+    """Codex clients configured via `openai_base_url` fetch `<base>/models` with a
+    `client_version` query parameter and can only parse the Codex catalog shape;
+    the OpenAI-compatible list shape makes them silently fall back to bundled
+    model metadata."""
+    await _populate_test_registry()
+    resp = await async_client.get("/v1/models", params={"client_version": "0.144.1"})
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert "models" in payload
+    slugs = {entry["slug"] for entry in payload["models"]}
+    assert "gpt-5.2" in slugs
+    codex_resp = await async_client.get("/backend-api/codex/models")
+    assert codex_resp.status_code == 200
+    assert payload == codex_resp.json()
+
+
+@pytest.mark.asyncio
+async def test_v1_models_with_empty_client_version_keeps_openai_shape(async_client):
+    await _populate_test_registry()
+    resp = await async_client.get("/v1/models?client_version=")
+    assert resp.status_code == 200
+    assert resp.json()["object"] == "list"
+
+
+@pytest.mark.asyncio
 async def test_v1_models_uses_bootstrap_models_when_registry_not_populated(async_client):
     registry = get_model_registry()
     registry._snapshot = None

@@ -284,6 +284,14 @@ def _normalize_responses_input_instructions(data: JsonValue) -> JsonValue:
     input_value = data.get("input")
     if not is_json_list(input_value):
         return data
+    # Codex deliberately places the Lite tool bundle and base instructions in
+    # the input prefix. Keep that wire shape intact instead of lifting its
+    # developer message into the top-level ``instructions`` field.
+    if any(
+        (item_mapping := _json_mapping_or_none(item)) is not None and item_mapping.get("type") == "additional_tools"
+        for item in input_value
+    ):
+        return data
 
     instruction_parts: list[str] = []
     input_items: list[JsonValue] = []
@@ -868,6 +876,15 @@ def _compact_state_anchor_indices(input_value: list[JsonValue]) -> set[int]:
         if not is_json_mapping(item):
             continue
         item_mapping = item
+        if item_mapping.get("type") == "additional_tools":
+            preserved_indices.add(index)
+            developer_index = index + 1
+            if developer_index < len(input_value):
+                developer_item = input_value[developer_index]
+                if is_json_mapping(developer_item) and developer_item.get("role") == "developer":
+                    developer_type = developer_item.get("type")
+                    if developer_type is None or developer_type == "message":
+                        preserved_indices.add(developer_index)
         if _compact_item_is_state_anchor(item_mapping):
             preserved_indices.add(index)
             call_id = item_mapping.get("call_id")

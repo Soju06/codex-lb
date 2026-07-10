@@ -11,12 +11,16 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 from typing import Any, cast
 
 import pytest
+from starlette.responses import JSONResponse
 
+import app.modules.proxy.api as proxy_api_module
 import app.modules.proxy.service as proxy_module
 from app.core.config.settings import Settings
+from app.core.exceptions import ProxyModelNotAllowed, ProxyRateLimitError
 from app.db.models import DashboardSettings
 
 pytestmark = pytest.mark.integration
@@ -48,6 +52,19 @@ async def _import_account(async_client, account_id: str, email: str) -> None:
     auth_json = _make_auth_json(account_id, email)
     files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
     response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+
+async def _enable_api_key_auth(async_client) -> None:
+    response = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
     assert response.status_code == 200
 
 
@@ -103,14 +120,82 @@ def _disable_http_bridge(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_images_generations_unsupported_model_returns_400(async_client):
-    response = await async_client.post(
-        "/v1/images/generations",
-        json={"model": "dall-e-3", "prompt": "a red circle"},
-    )
+async def test_images_generations_unsupported_model_returns_400(async_client, caplog):
+    with caplog.at_level(logging.INFO, logger="app.modules.proxy.api"):
+        response = await async_client.post(
+            "/v1/images/generations",
+            json={"model": "dall-e-3", "prompt": "a red circle"},
+        )
     assert response.status_code == 400
     body = response.json()
     assert body["error"]["type"] == "invalid_request_error"
+    assert (
+        "images_route_complete route=generations model=invalid stream=false status=400 outcome=invalid_request"
+        in caplog.text
+    )
+
+
+@pytest.mark.asyncio
+async def test_images_generations_model_policy_rejection_records_route_observability(
+    async_client,
+    monkeypatch,
+    caplog,
+):
+    def reject_model_access(*args, **kwargs):
+        del args, kwargs
+        raise ProxyModelNotAllowed("This API key does not have access to model 'gpt-image-2'")
+
+    monkeypatch.setattr(proxy_api_module, "validate_model_access", reject_model_access)
+
+    with caplog.at_level(logging.WARNING, logger="app.modules.proxy.api"):
+        response = await async_client.post(
+            "/v1/images/generations",
+            json={"model": "gpt-image-2", "prompt": "a red circle"},
+        )
+    assert response.status_code == 403
+    body = response.json()
+    assert body["error"]["type"] == "permission_error"
+    assert (
+        "images_route_complete route=generations model=gpt-image-2 stream=false status=403 outcome=model_not_allowed"
+        in caplog.text
+    )
+
+
+@pytest.mark.asyncio
+async def test_images_generations_quota_rejection_records_route_observability(async_client, monkeypatch, caplog):
+    async def reject_request_limits(*args, **kwargs):
+        del args, kwargs
+        raise ProxyRateLimitError("API key quota exceeded")
+
+    monkeypatch.setattr(proxy_api_module, "_enforce_request_limits", reject_request_limits)
+
+    with caplog.at_level(logging.INFO, logger="app.modules.proxy.api"):
+        response = await async_client.post(
+            "/v1/images/generations",
+            json={"model": "gpt-image-2", "prompt": "a red circle"},
+        )
+
+    assert response.status_code == 429
+    assert (
+        "images_route_complete route=generations model=gpt-image-2 stream=false status=429 outcome=rate_limited"
+        in caplog.text
+    )
+
+
+@pytest.mark.asyncio
+async def test_images_generations_auth_rejection_records_route_observability(async_client, caplog):
+    await _enable_api_key_auth(async_client)
+
+    with caplog.at_level(logging.WARNING, logger="app.modules.proxy.api"):
+        response = await async_client.post(
+            "/v1/images/generations",
+            json={"model": "gpt-image-2", "prompt": "a red circle"},
+        )
+
+    assert response.status_code == 401
+    message = "images_route_complete route=generations model=gpt-image-2 stream=false status=401 outcome=auth_error"
+    assert message in caplog.text
+    assert caplog.text.count(message) == 1
 
 
 @pytest.mark.asyncio
@@ -167,7 +252,7 @@ async def test_images_generations_no_accounts_returns_5xx(async_client):
 
 
 @pytest.mark.asyncio
-async def test_images_generations_returns_envelope_on_success(async_client, monkeypatch):
+async def test_images_generations_returns_envelope_on_success(async_client, monkeypatch, caplog):
     await _import_account(async_client, "acc_images_basic", "img-basic@example.com")
 
     captured: dict[str, object] = {}
@@ -215,16 +300,17 @@ async def test_images_generations_returns_envelope_on_success(async_client, monk
     monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh)
 
-    response = await async_client.post(
-        "/v1/images/generations",
-        json={
-            "model": "gpt-image-2",
-            "prompt": "tiny red circle on white",
-            "n": 1,
-            "size": "1024x1024",
-            "quality": "low",
-        },
-    )
+    with caplog.at_level(logging.INFO, logger="app.modules.proxy.api"):
+        response = await async_client.post(
+            "/v1/images/generations",
+            json={
+                "model": "gpt-image-2",
+                "prompt": "tiny red circle on white",
+                "n": 1,
+                "size": "1024x1024",
+                "quality": "low",
+            },
+        )
 
     assert response.status_code == 200, response.text
     body = response.json()
@@ -240,6 +326,10 @@ async def test_images_generations_returns_envelope_on_success(async_client, monk
     assert image_tool["model"] == "gpt-image-2"
     assert image_tool["size"] == "1024x1024"
     assert image_tool["quality"] == "low"
+    assert (
+        "images_route_complete route=generations model=gpt-image-2 stream=false status=200 outcome=success"
+        in caplog.text
+    )
 
 
 @pytest.mark.asyncio
@@ -333,7 +423,95 @@ async def test_images_generations_streaming_emits_canonical_events(async_client,
 
 
 @pytest.mark.asyncio
-async def test_images_generations_failed_image_returns_5xx(async_client, monkeypatch):
+async def test_images_generations_streaming_records_image_errors(async_client, monkeypatch, caplog):
+    await _import_account(async_client, "acc_images_stream_error", "img-stream-error@example.com")
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
+        del payload, headers, access_token, account_id, base_url, raise_for_status, kwargs
+        yield _sse({"type": "response.created", "response": {"id": "resp_stream_error"}})
+        yield _sse(
+            {
+                "type": "response.failed",
+                "response": {
+                    "status": "failed",
+                    "error": {
+                        "code": "content_policy_violation",
+                        "message": "blocked",
+                        "type": "invalid_request_error",
+                    },
+                },
+            }
+        )
+
+    async def fake_ensure_fresh(self, account, **kwargs):
+        del self, kwargs
+        return account
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh)
+
+    with caplog.at_level(logging.INFO, logger="app.modules.proxy.api"):
+        async with async_client.stream(
+            "POST",
+            "/v1/images/generations",
+            json={
+                "model": "gpt-image-2",
+                "prompt": "blocked",
+                "stream": True,
+                "size": "1024x1024",
+                "quality": "low",
+            },
+        ) as resp:
+            assert resp.status_code == 200
+            body = await resp.aread()
+
+    assert b"content_policy_violation" in body
+    assert (
+        "images_route_complete route=generations model=gpt-image-2 stream=true status=200 outcome=image_error"
+        in caplog.text
+    )
+
+
+@pytest.mark.asyncio
+async def test_images_generations_streaming_records_post_prime_upstream_errors(async_client, monkeypatch, caplog):
+    from app.core.clients.proxy import ProxyResponseError
+
+    await _import_account(async_client, "acc_images_stream_late_error", "img-stream-late-error@example.com")
+
+    async def fake_stream_responses(self, payload, headers, **kwargs):
+        del self, payload, headers, kwargs
+        yield _sse({"type": "response.created", "response": {"id": "resp_stream_late_error"}})
+        raise ProxyResponseError(
+            status_code=503,
+            payload={"error": {"message": "late boom", "type": "server_error", "code": "upstream_error"}},
+        )
+
+    monkeypatch.setattr(proxy_module.ProxyService, "stream_responses", fake_stream_responses)
+
+    with caplog.at_level(logging.INFO, logger="app.modules.proxy.api"):
+        with pytest.raises(ProxyResponseError):
+            async with async_client.stream(
+                "POST",
+                "/v1/images/generations",
+                json={
+                    "model": "gpt-image-2",
+                    "prompt": "late failure",
+                    "stream": True,
+                    "size": "1024x1024",
+                    "quality": "low",
+                },
+            ) as resp:
+                assert resp.status_code == 200
+                await resp.aread()
+
+    assert (
+        "images_route_complete route=generations model=gpt-image-2 stream=true status=200 outcome=upstream_error"
+        in caplog.text
+    )
+
+
+@pytest.mark.asyncio
+async def test_images_generations_failed_image_returns_5xx(async_client, monkeypatch, caplog):
     await _import_account(async_client, "acc_images_failed", "img-failed@example.com")
 
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
@@ -361,14 +539,17 @@ async def test_images_generations_failed_image_returns_5xx(async_client, monkeyp
     monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh)
 
-    response = await async_client.post(
-        "/v1/images/generations",
-        json={"model": "gpt-image-2", "prompt": "blocked"},
-    )
+    with caplog.at_level(logging.WARNING, logger="app.modules.proxy.api"):
+        response = await async_client.post(
+            "/v1/images/generations",
+            json={"model": "gpt-image-2", "prompt": "blocked"},
+        )
 
     assert response.status_code in (400, 502)
     body = response.json()
     assert body["error"]["code"] in {"content_policy_violation", "image_generation_failed"}
+    assert "images_route_complete route=generations model=gpt-image-2 stream=false" in caplog.text
+    assert "outcome=image_error" in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -448,6 +629,32 @@ async def test_images_edits_basic_round_trip(async_client, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_images_edits_passes_outer_started_at_after_file_reads(async_client, monkeypatch):
+    captured: dict[str, Any] = {}
+
+    async def fake_proxy_images_edit_request(**kwargs):
+        captured.update(kwargs)
+        return JSONResponse({"ok": True})
+
+    monkeypatch.setattr(proxy_api_module.time, "perf_counter", lambda: 123.456)
+    monkeypatch.setattr(proxy_api_module, "_proxy_images_edit_request", fake_proxy_images_edit_request)
+
+    image_bytes = b"\x89PNG\r\n\x1a\n"
+    response = await async_client.post(
+        "/v1/images/edits",
+        data={
+            "model": "gpt-image-2",
+            "prompt": "hi",
+        },
+        files={"image": ("source.png", image_bytes, "image/png")},
+    )
+
+    assert response.status_code == 200
+    assert captured["started_at"] == 123.456
+    assert captured["images"] == [(image_bytes, "image/png")]
+
+
+@pytest.mark.asyncio
 async def test_images_edits_input_fidelity_rejected_on_gpt_image_2(async_client):
     image_bytes = b"\x89PNG\r\n\x1a\n"
     response = await async_client.post(
@@ -465,19 +672,85 @@ async def test_images_edits_input_fidelity_rejected_on_gpt_image_2(async_client)
 
 
 @pytest.mark.asyncio
-async def test_images_edits_unsupported_model(async_client):
+async def test_images_edits_unsupported_model(async_client, caplog):
     image_bytes = b"\x89PNG\r\n\x1a\n"
-    response = await async_client.post(
-        "/v1/images/edits",
-        data={
-            "model": "dall-e-3",
-            "prompt": "hi",
-        },
-        files={"image": ("source.png", image_bytes, "image/png")},
-    )
+    with caplog.at_level(logging.WARNING, logger="app.modules.proxy.api"):
+        response = await async_client.post(
+            "/v1/images/edits",
+            data={
+                "model": "bad-model-for-observability-cardinality",
+                "prompt": "hi",
+            },
+            files={"image": ("source.png", image_bytes, "image/png")},
+        )
     assert response.status_code == 400
     body = response.json()
     assert body["error"]["type"] == "invalid_request_error"
+    assert (
+        "images_route_complete route=edits model=invalid stream=false status=400 outcome=invalid_request" in caplog.text
+    )
+
+
+@pytest.mark.asyncio
+async def test_images_edits_missing_image_records_route_observability(async_client, caplog):
+    with caplog.at_level(logging.WARNING, logger="app.modules.proxy.api"):
+        response = await async_client.post(
+            "/v1/images/edits",
+            data={
+                "model": "gpt-image-2",
+                "prompt": "hi",
+            },
+        )
+    assert response.status_code == 400
+    body = response.json()
+    assert body["error"]["param"] == "image"
+    assert (
+        "images_route_complete route=edits model=gpt-image-2 stream=false status=400 outcome=invalid_request"
+        in caplog.text
+    )
+
+
+@pytest.mark.asyncio
+async def test_images_edits_validation_error_records_supplied_model(async_client, caplog):
+    image_bytes = b"\x89PNG\r\n\x1a\n"
+    with caplog.at_level(logging.WARNING, logger="app.modules.proxy.api"):
+        response = await async_client.post(
+            "/v1/images/edits",
+            data={"model": "gpt-image-2"},
+            files={"image": ("source.png", image_bytes, "image/png")},
+        )
+
+    assert response.status_code == 400
+    assert (
+        "images_route_complete route=edits model=gpt-image-2 stream=false status=400 outcome=invalid_request"
+        in caplog.text
+    )
+
+
+@pytest.mark.asyncio
+async def test_images_edits_quota_rejection_records_route_observability(async_client, monkeypatch, caplog):
+    async def reject_request_limits(*args, **kwargs):
+        del args, kwargs
+        raise ProxyRateLimitError("API key quota exceeded")
+
+    monkeypatch.setattr(proxy_api_module, "_enforce_request_limits", reject_request_limits)
+
+    image_bytes = b"\x89PNG\r\n\x1a\n"
+    with caplog.at_level(logging.WARNING, logger="app.modules.proxy.api"):
+        response = await async_client.post(
+            "/v1/images/edits",
+            data={
+                "model": "gpt-image-2",
+                "prompt": "hi",
+            },
+            files={"image": ("source.png", image_bytes, "image/png")},
+        )
+
+    assert response.status_code == 429
+    assert (
+        "images_route_complete route=edits model=gpt-image-2 stream=false status=429 outcome=rate_limited"
+        in caplog.text
+    )
 
 
 # ---------------------------------------------------------------------------

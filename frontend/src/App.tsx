@@ -7,6 +7,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { AuthGate } from "@/features/auth/components/auth-gate";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import { AccountsPage } from "@/features/accounts/components/accounts-page";
+import { AutomationsPage } from "@/features/automations/components/automations-page";
 import { ApisPage } from "@/features/apis/components/apis-page";
 import { DashboardPage } from "@/features/dashboard/components/dashboard-page";
 import { ReportsPage } from "@/features/reports/components/reports-page";
@@ -51,6 +52,7 @@ export default function App() {
             <Route path="/dashboard" element={<DashboardPage />} />
             <Route path="/reports" element={<ReportsPage />} />
             <Route path="/accounts" element={<AccountsPage />} />
+            <Route path="/automations" element={<AutomationsPage />} />
             <Route path="/apis" element={<ApisPage />} />
             <Route path="/settings" element={<SettingsPage />} />
             <Route path="/firewall" element={<Navigate to="/settings" replace />} />

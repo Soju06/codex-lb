@@ -18,7 +18,7 @@ import pytest
 from fastapi import WebSocket
 
 from app.core.auth.refresh import RefreshError
-from app.core.clients.proxy import ProxyResponseError
+from app.core.clients.proxy import CODEX_RESPONSES_LITE_WEBSOCKET_METADATA_KEY, ProxyResponseError
 from app.core.clients.proxy_websocket import (
     CodexResponsesWebSocket,
     UpstreamResponsesWebSocket,
@@ -79,6 +79,121 @@ def _make_bridge_session(
     )
 
 
+def test_codex_prewarm_enabled_without_percent_preserves_full_treatment() -> None:
+    settings = _make_app_settings(http_responses_session_bridge_codex_prewarm_enabled=True)
+    state = proxy_service._WebSocketRequestState(
+        request_id="req-prewarm-sample",
+        model="gpt-5.2",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        request_text=json.dumps({"input": "x" * 50000}),
+    )
+    session = _make_bridge_session()
+    session.codex_session = True
+    session.last_used_at = -180.0
+
+    bucket, reason = proxy_service._http_bridge_prewarm_canary_bucket(
+        settings,
+        session=session,
+        request_state=state,
+        text_data=state.request_text or "{}",
+    )
+
+    assert bucket == "treatment"
+    assert reason == "first_turn_50k_gap_2m"
+
+
+def test_codex_prewarm_legacy_mode_honors_api_key_denylist() -> None:
+    settings = _make_app_settings(
+        http_responses_session_bridge_codex_prewarm_enabled=True,
+        http_responses_session_bridge_codex_prewarm_deny_api_key_ids=["key-denied"],
+    )
+    state = proxy_service._WebSocketRequestState(
+        request_id="req-prewarm-denied",
+        model="gpt-5.2",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        api_key=_make_api_key(key_id="key-denied", assigned_account_ids=[]),
+        started_at=1.0,
+        request_text=json.dumps({"input": "x" * 50000}),
+    )
+    session = _make_bridge_session()
+    session.codex_session = True
+    session.last_used_at = -180.0
+
+    bucket, reason = proxy_service._http_bridge_prewarm_canary_bucket(
+        settings,
+        session=session,
+        request_state=state,
+        text_data=state.request_text or "{}",
+    )
+
+    assert bucket == "control"
+    assert reason == "first_turn_50k_gap_2m"
+
+
+def test_codex_prewarm_legacy_mode_honors_api_key_allowlist() -> None:
+    settings = _make_app_settings(
+        http_responses_session_bridge_codex_prewarm_enabled=True,
+        http_responses_session_bridge_codex_prewarm_allow_api_key_ids=["key-allowed"],
+    )
+    state = proxy_service._WebSocketRequestState(
+        request_id="req-prewarm-not-allowed",
+        model="gpt-5.2",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        api_key=_make_api_key(key_id="key-other", assigned_account_ids=[]),
+        started_at=1.0,
+        request_text=json.dumps({"input": "x" * 50000}),
+    )
+    session = _make_bridge_session()
+    session.codex_session = True
+    session.last_used_at = -180.0
+
+    bucket, reason = proxy_service._http_bridge_prewarm_canary_bucket(
+        settings,
+        session=session,
+        request_state=state,
+        text_data=state.request_text or "{}",
+    )
+
+    assert bucket == "control"
+    assert reason == "first_turn_50k_gap_2m"
+
+
+def test_codex_prewarm_percent_zero_records_canary_miss_for_eligible_request() -> None:
+    settings = _make_app_settings(
+        http_responses_session_bridge_codex_prewarm_enabled=True,
+        http_responses_session_bridge_codex_prewarm_canary_percent=0.0,
+    )
+    state = proxy_service._WebSocketRequestState(
+        request_id="req-prewarm-control",
+        model="gpt-5.2",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        request_text=json.dumps({"input": "x" * 50000}),
+    )
+    session = _make_bridge_session()
+    session.codex_session = True
+    session.last_used_at = -180.0
+
+    bucket, reason = proxy_service._http_bridge_prewarm_canary_bucket(
+        settings,
+        session=session,
+        request_state=state,
+        text_data=state.request_text or "{}",
+    )
+
+    assert bucket == "control"
+    assert reason == "first_turn_50k_gap_2m"
+
+
 @pytest.mark.asyncio
 async def test_http_bridge_activity_snapshot_counts_pending_and_inflight_sessions():
     service = proxy_service.ProxyService(cast(Any, SimpleNamespace()))
@@ -118,6 +233,148 @@ async def test_http_bridge_activity_snapshot_counts_pending_and_inflight_session
         "http_bridge_active": True,
         "http_bridge_restart_blocking": True,
     }
+
+
+@pytest.mark.asyncio
+async def test_response_create_gate_timeout_retires_session_with_old_pending_visible_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _make_app_settings(
+        proxy_admission_wait_timeout_seconds=0.001,
+        http_responses_session_bridge_stuck_gate_retire_after_seconds=300.0,
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    service = proxy_service.ProxyService(cast(Any, SimpleNamespace()))
+    session = _make_bridge_session()
+    service._http_bridge_sessions[session.key] = session
+    await session.response_create_gate.acquire()
+    old_pending = proxy_service._WebSocketRequestState(
+        request_id="req-old-pending",
+        model="gpt-5.2",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic() - 301.0,
+        transport="http",
+        response_create_gate_acquired=True,
+        awaiting_response_created=True,
+        downstream_visible=False,
+    )
+    waiter = proxy_service._WebSocketRequestState(
+        request_id="req-visible-waiter",
+        model="gpt-5.2",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        transport="http",
+        downstream_visible=True,
+    )
+    async with session.pending_lock:
+        session.pending_requests.append(old_pending)
+        session.queued_request_count = 1
+
+    retire_calls: list[str] = []
+
+    async def fake_retire(
+        retire_session: proxy_service._HTTPBridgeSession,
+        *,
+        detail: str,
+    ) -> None:
+        retire_calls.append(detail)
+        retire_session.closed = True
+
+    monkeypatch.setattr(service, "_retire_stale_pending_http_bridge_session", fake_retire)
+
+    try:
+        with pytest.raises(ProxyResponseError) as exc_info:
+            await service._acquire_request_state_response_create_admission(
+                waiter,
+                response_create_gate=session.response_create_gate,
+                account_id=session.account.id,
+                surface="http_bridge",
+                bridge_session=session,
+            )
+    finally:
+        if session.response_create_gate.locked():
+            session.response_create_gate.release()
+
+    assert exc_info.value.payload["error"]["code"] == "response_create_gate_timeout"
+    assert retire_calls == ["response_create_gate_timeout_stuck_pending"]
+    assert session.closed is True
+    assert waiter.response_create_gate is None
+    assert waiter.response_create_gate_acquired is False
+
+
+@pytest.mark.asyncio
+async def test_response_create_gate_timeout_does_not_retire_visible_active_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _make_app_settings(
+        proxy_admission_wait_timeout_seconds=0.001,
+        http_responses_session_bridge_stuck_gate_retire_after_seconds=300.0,
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    service = proxy_service.ProxyService(cast(Any, SimpleNamespace()))
+    session = _make_bridge_session()
+    service._http_bridge_sessions[session.key] = session
+    await session.response_create_gate.acquire()
+    active_stream = proxy_service._WebSocketRequestState(
+        request_id="req-active-visible",
+        model="gpt-5.2",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic() - 301.0,
+        transport="http",
+        response_create_gate_acquired=True,
+        awaiting_response_created=False,
+        downstream_visible=True,
+        latency_response_created_ms=100,
+        response_event_count=1,
+    )
+    waiter = proxy_service._WebSocketRequestState(
+        request_id="req-visible-waiter",
+        model="gpt-5.2",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        transport="http",
+        downstream_visible=True,
+    )
+    async with session.pending_lock:
+        session.pending_requests.append(active_stream)
+        session.queued_request_count = 1
+
+    retire_calls: list[str] = []
+
+    async def fake_retire(
+        retire_session: proxy_service._HTTPBridgeSession,
+        *,
+        detail: str,
+    ) -> None:
+        retire_calls.append(detail)
+        retire_session.closed = True
+
+    monkeypatch.setattr(service, "_retire_stale_pending_http_bridge_session", fake_retire)
+
+    try:
+        with pytest.raises(ProxyResponseError) as exc_info:
+            await service._acquire_request_state_response_create_admission(
+                waiter,
+                response_create_gate=session.response_create_gate,
+                account_id=session.account.id,
+                surface="http_bridge",
+                bridge_session=session,
+            )
+    finally:
+        if session.response_create_gate.locked():
+            session.response_create_gate.release()
+
+    assert exc_info.value.payload["error"]["code"] == "response_create_gate_timeout"
+    assert retire_calls == []
+    assert session.closed is False
 
 
 @pytest.mark.asyncio
@@ -3606,8 +3863,12 @@ async def test_stream_via_http_bridge_injects_durable_anchor_for_trimmable_full_
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     input_items = [
+        {
+            "type": "additional_tools",
+            "role": "developer",
+            "tools": [{"type": "custom", "name": "shell"}],
+        },
         {"role": "user", "content": "hello"},
-        {"role": "assistant", "content": "world"},
         {"role": "user", "content": "follow up"},
     ]
     payload = proxy_service.ResponsesRequest.model_validate(
@@ -3632,6 +3893,8 @@ async def test_stream_via_http_bridge_injects_durable_anchor_for_trimmable_full_
     await event_queue.put(None)
     prepared_previous_response_ids: list[str | None] = []
     prepared_input_lengths: list[int] = []
+    prepared_frames: list[dict[str, Any]] = []
+    real_prepare = service._prepare_http_bridge_request
 
     def fake_prepare(
         prepared_payload: proxy_service.ResponsesRequest,
@@ -3641,12 +3904,22 @@ async def test_stream_via_http_bridge_injects_durable_anchor_for_trimmable_full_
         api_key_reservation: proxy_service.ApiKeyUsageReservationData | None,
         request_id: str,
         client_ip: str | None = None,
+        **kwargs: Any,
     ) -> tuple[proxy_service._WebSocketRequestState, str]:
-        del api_key, api_key_reservation, request_id, client_ip
         prepared_previous_response_ids.append(prepared_payload.previous_response_id)
         inp = prepared_payload.input
         prepared_input_lengths.append(len(inp) if isinstance(inp, list) else 1)
-        return request_state, '{"type":"response.create"}'
+        _, text_data = real_prepare(
+            prepared_payload,
+            _headers,
+            api_key=api_key,
+            api_key_reservation=api_key_reservation,
+            request_id=request_id,
+            client_ip=client_ip,
+            **kwargs,
+        )
+        prepared_frames.append(json.loads(text_data))
+        return request_state, text_data
 
     session = proxy_service._HTTPBridgeSession(
         key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-123", None),
@@ -3734,6 +4007,12 @@ async def test_stream_via_http_bridge_injects_durable_anchor_for_trimmable_full_
     assert chunks == []
     assert prepared_previous_response_ids == [None, "resp_latest", "resp_latest"]
     assert prepared_input_lengths == [3, 3, 1]
+    assert prepared_frames[-1]["input"] == [input_items[-1]]
+    assert [frame["client_metadata"][CODEX_RESPONSES_LITE_WEBSOCKET_METADATA_KEY] for frame in prepared_frames] == [
+        "true",
+        "true",
+        "true",
+    ]
 
 
 @pytest.mark.asyncio

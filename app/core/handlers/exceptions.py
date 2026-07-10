@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import logging
+import time
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.exception_handlers import (
@@ -29,8 +32,11 @@ from app.core.exceptions import (
     ProxyUpstreamError,
 )
 from app.core.runtime_logging import log_error_response
+from app.modules.proxy.images_observability import ImageRoute, record_images_route_observability
 
 logger = logging.getLogger(__name__)
+
+_IMAGE_ROUTE_STARTED_AT_STATE = "_codex_lb_image_route_started_at"
 
 _OPENAI_EXCEPTION_TYPES: tuple[type[AppError], ...] = (
     ProxyAuthError,
@@ -65,7 +71,77 @@ def _error_format(request: Request) -> str | None:
     return None
 
 
+def _image_route_from_path(path: str) -> ImageRoute | None:
+    if path == "/v1/images/generations":
+        return "generations"
+    if path == "/v1/images/edits":
+        return "edits"
+    return None
+
+
+async def _image_request_model_and_stream(request: Request, route: ImageRoute) -> tuple[str | None, bool]:
+    model: str | None = None
+    stream = False
+
+    if route == "generations":
+        try:
+            payload: Any = await request.json()
+        except Exception:
+            payload = None
+        if isinstance(payload, dict):
+            model_value = payload.get("model")
+            if isinstance(model_value, str) and model_value:
+                model = model_value
+            stream = payload.get("stream") is True
+        return model, stream
+
+    try:
+        form = await request.form()
+    except Exception:
+        return model, stream
+    model_value = form.get("model")
+    if isinstance(model_value, str) and model_value:
+        model = model_value
+    stream = form.get("stream") in {"true", "True", "1", "yes", "on"}
+    return model, stream
+
+
+async def _record_image_route_exception_observability(
+    request: Request,
+    *,
+    status: int,
+    outcome: str,
+) -> None:
+    path = request.url.path
+    route = _image_route_from_path(path)
+    if route is None:
+        return
+
+    model, stream = await _image_request_model_and_stream(request, route)
+    started_at = getattr(request.state, _IMAGE_ROUTE_STARTED_AT_STATE, None)
+    if not isinstance(started_at, float):
+        started_at = time.perf_counter()
+
+    record_images_route_observability(
+        route=route,
+        model=model,
+        stream=stream,
+        status=status,
+        outcome=outcome,
+        started_at=started_at,
+    )
+
+
 def add_exception_handlers(app: FastAPI) -> None:
+    @app.middleware("http")
+    async def _image_route_started_at_middleware(
+        request: Request,
+        call_next: Callable[[Request], Awaitable[Response]],
+    ) -> Response:
+        if _image_route_from_path(request.url.path) is not None:
+            setattr(request.state, _IMAGE_ROUTE_STARTED_AT_STATE, time.perf_counter())
+        return await call_next(request)
+
     # --- Domain exceptions: OpenAI envelope ---
 
     for exc_cls in _OPENAI_EXCEPTION_TYPES:
@@ -81,6 +157,12 @@ def add_exception_handlers(app: FastAPI) -> None:
                 exc.message,
                 category="openai_error_response",
             )
+            if isinstance(exc, ProxyAuthError):
+                await _record_image_route_exception_observability(
+                    request,
+                    status=exc.status_code,
+                    outcome="auth_error",
+                )
             return JSONResponse(
                 status_code=exc.status_code,
                 content=openai_error(exc.code, exc.message, error_type=error_type),
@@ -152,6 +234,11 @@ def add_exception_handlers(app: FastAPI) -> None:
                 "invalid_request_error",
                 first_message or "Invalid request payload",
                 category="openai_error_response",
+            )
+            await _record_image_route_exception_observability(
+                request,
+                status=400,
+                outcome="invalid_request",
             )
             return JSONResponse(status_code=400, content=error)
         return await request_validation_exception_handler(request, exc)

@@ -40,8 +40,32 @@ async def get_projections(
 async def list_models() -> dict:
     registry = get_model_registry()
     models_by_slug = registry.get_models_with_fallback()
+    if not models_by_slug:
+        return {"models": []}
+    allowed_efforts = {"minimal", "low", "medium", "high", "xhigh"}
+
+    def _normalize_effort(value: str | None) -> str | None:
+        if not isinstance(value, str):
+            return None
+        normalized = value.strip().lower()
+        if normalized in allowed_efforts:
+            return normalized
+        return None
+
     models = [
-        {"id": slug, "name": model.display_name or slug}
+        {
+            "id": slug,
+            "name": model.display_name or slug,
+            "sourceOnly": False,
+            "supportedReasoningEfforts": list(
+                dict.fromkeys(
+                    effort
+                    for effort in (_normalize_effort(level.effort) for level in model.supported_reasoning_levels)
+                    if effort is not None
+                )
+            ),
+            "defaultReasoningEffort": _normalize_effort(model.default_reasoning_level),
+        }
         for slug, model in models_by_slug.items()
         if is_public_model(model, None)
     ]
@@ -55,5 +79,11 @@ async def list_models() -> dict:
         if source_model.slug in seen_slugs:
             continue
         seen_slugs.add(source_model.slug)
-        models.append({"id": source_model.slug, "name": source_model.display_name or source_model.slug})
+        models.append(
+            {
+                "id": source_model.slug,
+                "name": source_model.display_name or source_model.slug,
+                "sourceOnly": True,
+            }
+        )
     return {"models": models}

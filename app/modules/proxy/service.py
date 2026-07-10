@@ -223,6 +223,9 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_previous_response_error_envelope as _http_bridge_previous_response_error_envelope,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
+    _http_bridge_prewarm_canary_bucket as _http_bridge_prewarm_canary_bucket,
+)
+from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_request_counts_against_queue as _http_bridge_request_counts_against_queue,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
@@ -302,6 +305,9 @@ from app.modules.proxy._service.http_bridge.helpers import (
 )
 from app.modules.proxy._service.http_bridge.helpers import (
     _record_bridge_reattach as _record_bridge_reattach,
+)
+from app.modules.proxy._service.http_bridge.helpers import (
+    _record_http_bridge_stuck_retire as _record_http_bridge_stuck_retire,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
     _trim_http_bridge_previous_response_input_items as _trim_http_bridge_previous_response_input_items,
@@ -634,6 +640,7 @@ from app.modules.proxy._service.websocket.helpers import (
     _prepare_websocket_request_state_for_auth_replay,  # noqa: F401
     _prepare_websocket_request_state_for_visible_output_replay,  # noqa: F401
     _record_websocket_continuity_completion,  # noqa: F401
+    _record_websocket_responses_lite_acceptance,  # noqa: F401
     _refresh_websocket_request_input_fingerprint_from_text,  # noqa: F401
     _release_websocket_response_create_gate,  # noqa: F401
     _rewrite_websocket_continuity_corruption_event,  # noqa: F401
@@ -1256,6 +1263,7 @@ class ProxyService(
     ) -> None:
         timeout_seconds = _proxy_admission_wait_timeout_seconds()
         request_state.response_create_gate = response_create_gate
+        request_state.response_create_gate_wait_started_at = time.monotonic()
         if account_id is not None:
             request_state.account_response_create_lease = await self._acquire_account_response_create_lease_or_overload(
                 account_id=account_id,
@@ -1274,6 +1282,7 @@ class ProxyService(
             queued_count = None
             pending_request_ids: list[str] | None = None
             pending_request_ages_seconds: list[float] | None = None
+            should_retire_stuck_session = False
             if bridge_session is not None:
                 now = time.monotonic()
                 async with bridge_session.pending_lock:
@@ -1282,6 +1291,24 @@ class ProxyService(
                     queued_count = bridge_session.queued_request_count
                 pending_request_ids = [state.request_log_id or state.request_id for state in pending_states]
                 pending_request_ages_seconds = [max(0.0, now - state.started_at) for state in pending_states]
+                threshold_seconds = float(
+                    getattr(
+                        get_settings(),
+                        "http_responses_session_bridge_stuck_gate_retire_after_seconds",
+                        300.0,
+                    )
+                )
+                should_retire_stuck_session = any(
+                    state.transport == _REQUEST_TRANSPORT_HTTP
+                    and not state.skip_request_log
+                    and state.response_create_gate_acquired
+                    and state.awaiting_response_created
+                    and not state.downstream_visible
+                    and state.latency_first_upstream_event_ms is None
+                    and state.latency_response_created_ms is None
+                    and max(0.0, now - state.started_at) >= threshold_seconds
+                    for state in pending_states
+                )
             _log_http_bridge_startup_wait_timeout(
                 stage="response_create_gate",
                 timeout_seconds=timeout_seconds,
@@ -1294,6 +1321,15 @@ class ProxyService(
                 pending_request_ids=pending_request_ids,
                 pending_request_ages_seconds=pending_request_ages_seconds,
             )
+            if bridge_session is not None and should_retire_stuck_session:
+                _record_http_bridge_stuck_retire(
+                    reason="response_create_gate_timeout_stuck_pending",
+                    session=bridge_session,
+                )
+                await self._retire_stale_pending_http_bridge_session(
+                    bridge_session,
+                    detail="response_create_gate_timeout_stuck_pending",
+                )
             raise _http_bridge_startup_wait_timeout_error(
                 "http_bridge_response_create_gate",
                 code="response_create_gate_timeout",
@@ -1306,6 +1342,10 @@ class ProxyService(
             raise
         request_state.response_create_gate_acquired = True
         request_state.awaiting_response_created = True
+        if request_state.response_create_gate_wait_started_at is not None:
+            request_state.latency_response_create_gate_wait_ms = int(
+                max(0.0, time.monotonic() - request_state.response_create_gate_wait_started_at) * 1000
+            )
         try:
             request_state.response_create_admission = await self._get_work_admission().acquire_response_create(
                 compact=compact

@@ -1412,9 +1412,12 @@ async def test_dashboard_models_endpoint_lists_source_models(async_client):
 
     response = await async_client.get("/api/models")
     assert response.status_code == 200
-    ids = [entry["id"] for entry in response.json()["models"]]
+    models = response.json()["models"]
+    ids = [entry["id"] for entry in models]
     assert model in ids
     assert ids.count(model) == 1
+    source_entry = next(entry for entry in models if entry["id"] == model)
+    assert source_entry["sourceOnly"] is True
 
 
 @pytest.mark.asyncio

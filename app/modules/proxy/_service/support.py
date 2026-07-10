@@ -310,7 +310,19 @@ class _WebSocketRequestState:
     reasoning_effort: str | None
     api_key_reservation: ApiKeyUsageReservationData | None
     started_at: float
+    responses_lite_model: str | None = None
     latency_first_token_ms: int | None = None
+    latency_response_created_ms: int | None = None
+    latency_first_upstream_event_ms: int | None = None
+    latency_response_create_gate_wait_ms: int | None = None
+    latency_bridge_queue_wait_ms: int | None = None
+    response_create_gate_wait_started_at: float | None = None
+    bridge_queue_wait_started_at: float | None = None
+    prewarm_status: str | None = None
+    prewarm_latency_ms: int | None = None
+    prewarm_canary_bucket: str | None = None
+    prewarm_eligible_reason: str | None = None
+    session_previous_gap_ms: int | None = None
     request_log_id: str | None = None
     archive_request_id: str | None = None
     requested_service_tier: str | None = None
@@ -345,6 +357,12 @@ class _WebSocketRequestState:
     # on, and dropping the anchor there would silently turn a continuation into
     # a context-free fresh turn.
     fresh_upstream_request_is_retry_safe: bool = False
+    # Responses-Lite model advertised by ``fresh_upstream_request_text``. A
+    # fresh replay built from a trusted marker-only frame has the reserved
+    # marker stripped, so swapping to the fresh body must also swap this onto
+    # ``responses_lite_model``; otherwise the replay's ``response.created``
+    # would be recorded as a Lite acceptance for a non-Lite upstream request.
+    fresh_upstream_request_responses_lite_model: str | None = None
     request_stage: str = "first_turn"
     preferred_account_id: str | None = None
     require_security_work_authorized: bool = False
@@ -480,6 +498,8 @@ class _WebSocketContinuityState:
     last_completed_response_id: str | None = None
     last_completed_input_prefix_fingerprint: str | None = None
     last_pending_function_call_ids: list[str] = field(default_factory=list)
+    responses_lite_model: str | None = None
+    responses_lite_response_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

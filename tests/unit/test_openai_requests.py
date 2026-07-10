@@ -563,6 +563,56 @@ def test_responses_input_system_message_moves_to_instructions():
     assert request.input == [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}]
 
 
+@pytest.mark.parametrize("request_type", [ResponsesRequest, ResponsesCompactRequest])
+def test_responses_input_additional_tools_item_is_preserved(request_type):
+    additional_tools = {
+        "type": "additional_tools",
+        "role": "developer",
+        "tools": [
+            {
+                "type": "custom",
+                "name": "shell",
+                "description": "Run shell commands",
+                "format": {"type": "grammar", "syntax": "lark"},
+            }
+        ],
+    }
+    custom_tool_call = {
+        "type": "custom_tool_call",
+        "call_id": "call_shell_1",
+        "name": "shell",
+        "input": "pwd",
+    }
+    custom_tool_output = {
+        "type": "custom_tool_call_output",
+        "call_id": "call_shell_1",
+        "output": "/repo",
+    }
+    payload = {
+        "model": "gpt-5.6-sol",
+        "instructions": "",
+        "input": [
+            additional_tools,
+            {"type": "message", "role": "developer", "content": "dev"},
+            custom_tool_call,
+            custom_tool_output,
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "inspect"}]},
+        ],
+    }
+
+    request = request_type.model_validate(payload)
+
+    assert request.instructions == ""
+    assert request.input == [
+        additional_tools,
+        {"type": "message", "role": "developer", "content": "dev"},
+        custom_tool_call,
+        custom_tool_output,
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "inspect"}]},
+    ]
+    assert request.to_payload()["input"] == request.input
+
+
 def test_responses_input_system_message_keeps_user_text_parts():
     payload = {
         "model": "gpt-5.1",
@@ -863,6 +913,46 @@ def test_compact_trims_oversized_input_by_estimated_tokens_with_head_tail_and_ma
     assert "estimated tokens" in marker_text
     assert "initial context, most recent context, and compact state anchors were preserved" in marker_text
     assert "codex-lb" not in marker_text
+
+
+def test_compact_trimming_preserves_oversized_responses_lite_prefix():
+    additional_tools = {
+        "type": "additional_tools",
+        "role": "developer",
+        "tools": [
+            {
+                "type": "custom",
+                "name": "shell",
+                "description": "x" * 60_000,
+                "format": {"type": "grammar", "syntax": "lark"},
+            }
+        ],
+    }
+    developer_instructions = {
+        "type": "message",
+        "role": "developer",
+        "content": "preserve these base instructions",
+    }
+    input_items = [
+        additional_tools,
+        developer_instructions,
+        {"role": "assistant", "content": "middle context " + "y" * 500_000},
+        {"role": "user", "content": "latest request"},
+    ]
+
+    request = ResponsesCompactRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "",
+            "input": input_items,
+        }
+    )
+
+    dumped_input = request.to_payload()["input"]
+    assert isinstance(dumped_input, list)
+    assert dumped_input[0:2] == [additional_tools, developer_instructions]
+    assert input_items[2] not in dumped_input
+    assert dumped_input[-1] == input_items[-1]
 
 
 def test_compact_trimming_drops_oversized_leading_item():

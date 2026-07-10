@@ -306,10 +306,7 @@ def _normalize_responses_input_instructions(data: JsonValue) -> JsonValue:
     # Codex deliberately places the Lite tool bundle and base instructions in
     # the input prefix. Keep that wire shape intact instead of lifting its
     # developer message into the top-level ``instructions`` field.
-    if any(
-        (item_mapping := _json_mapping_or_none(item)) is not None and item_mapping.get("type") == "additional_tools"
-        for item in input_value
-    ):
+    if responses_input_uses_lite_tools(input_value):
         return data
 
     instruction_parts: list[str] = []

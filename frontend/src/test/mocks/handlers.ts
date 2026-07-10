@@ -199,7 +199,7 @@ const AutomationCreatePayloadSchema = z.object({
 	includePausedAccounts: z.boolean().optional(),
 	schedule: AutomationSchedulePayloadSchema,
 	model: z.string().min(1),
-	reasoningEffort: z.enum(["minimal", "low", "medium", "high", "xhigh"]).nullable().optional(),
+	reasoningEffort: z.enum(["minimal", "low", "medium", "high", "xhigh", "max", "ultra"]).nullable().optional(),
 	prompt: z.string().optional(),
 	accountIds: z.array(z.string().min(1)),
 });
@@ -211,7 +211,7 @@ const AutomationUpdatePayloadSchema = z
 		includePausedAccounts: z.boolean().optional(),
 		schedule: AutomationSchedulePayloadSchema.optional(),
 		model: z.string().min(1).optional(),
-		reasoningEffort: z.enum(["minimal", "low", "medium", "high", "xhigh"]).nullable().optional(),
+		reasoningEffort: z.enum(["minimal", "low", "medium", "high", "xhigh", "max", "ultra"]).nullable().optional(),
 		prompt: z.string().min(1).optional(),
 		accountIds: z.array(z.string().min(1)).optional(),
 	})
@@ -255,7 +255,7 @@ type MockState = {
       days: Array<"mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun">;
     };
     model: string;
-    reasoningEffort: "minimal" | "low" | "medium" | "high" | "xhigh" | null;
+    reasoningEffort: "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra" | null;
     prompt: string;
     accountIds: string[];
     nextRunAt: string | null;
@@ -263,7 +263,7 @@ type MockState = {
       id: string;
       jobId: string;
       model: string | null;
-      reasoningEffort: "minimal" | "low" | "medium" | "high" | "xhigh" | null;
+      reasoningEffort: "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra" | null;
       trigger: "scheduled" | "manual";
       status: "running" | "success" | "failed" | "partial";
       scheduledFor: string;
@@ -287,6 +287,8 @@ type MockState = {
         | "medium"
         | "high"
         | "xhigh"
+        | "max"
+        | "ultra"
         | null;
       trigger: "scheduled" | "manual";
       status: "running" | "success" | "failed" | "partial";
@@ -618,7 +620,7 @@ function listAutomationRunsWithContext() {
 		(MockState["automationRuns"][string][number] & {
 			jobName: string | null;
 			model: string | null;
-			reasoningEffort: "minimal" | "low" | "medium" | "high" | "xhigh" | null;
+			reasoningEffort: "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra" | null;
 			effectiveStatus: "running" | "success" | "failed" | "partial";
 			totalAccounts: number;
 			completedAccounts: number;

@@ -31,12 +31,24 @@ logger = logging.getLogger(__name__)
 _UNSUPPORTED_UPSTREAM_REASONING_EFFORTS: frozenset[str] = frozenset({"minimal"})
 _DEFAULT_REASONING_EFFORT_FALLBACK = "low"
 
+# Client-plane reasoning efforts the reference Codex client never sends on the
+# wire. GPT-5.6 Sol/Terra advertise ``ultra`` in their catalog entries, but the
+# official client rewrites it to ``max`` before building the Responses request
+# (``reasoning_effort_for_request`` in codex-rs ``core/src/client.rs`` at
+# rust-v0.144.1); ``ultra``'s extra effect (proactive multi-agent mode) is
+# purely client-side. Mirror that aliasing for API-key enforcement and raw
+# API callers so the upstream backend only ever sees wire-safe values.
+_REASONING_EFFORT_WIRE_ALIASES: dict[str, str] = {"ultra": "max"}
+
 # Cursor exposes GPT-5 family model labels with UI suffixes such as "Extra
 # High Fast". The ChatGPT/Codex upstream accepts the canonical GPT-5-family
 # slug plus request fields, not those synthetic suffixes in the model name.
 # Keep this deliberately narrow: only strip known Cursor-style suffix tokens
 # from known GPT-5 base model slugs, and leave every other model untouched.
 _GPT5_ALIAS_BASE_MODELS: tuple[str, ...] = (
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
     "gpt-5.4-mini",
     "gpt-5.3-codex",
     "gpt-5.2-codex",
@@ -81,6 +93,19 @@ _MODEL_ALIAS_TOKENS: frozenset[str] = frozenset(
 # ``service_tier`` instead of sending a literal that fails upstream. See
 # https://github.com/Soju06/codex-lb/issues/546
 _UPSTREAM_OMIT_SERVICE_TIERS: frozenset[str] = frozenset({"auto", "default"})
+
+
+def resolve_wire_reasoning_effort(effort: str) -> str:
+    """Return the wire-safe value for a client-plane reasoning effort.
+
+    The reference Codex client rewrites client-plane efforts (``ultra`` ->
+    ``max``) before building the upstream Responses request; every codex-lb
+    code path that builds an upstream payload directly (proxy enforcement,
+    automation compact pings) applies the same aliasing so the upstream
+    backend never sees a client-plane literal. Unknown values pass through
+    unchanged.
+    """
+    return _REASONING_EFFORT_WIRE_ALIASES.get(effort.strip().lower(), effort)
 
 
 def validate_model_access(api_key: ApiKeyData | None, model: str | None) -> None:
@@ -208,12 +233,13 @@ def apply_api_key_enforcement_to_chat_payload(
         return
 
     if api_key.enforced_reasoning_effort is not None:
-        payload["reasoning_effort"] = api_key.enforced_reasoning_effort
+        enforced_effort = resolve_wire_reasoning_effort(api_key.enforced_reasoning_effort)
+        payload["reasoning_effort"] = enforced_effort
         reasoning = payload.get("reasoning")
         if isinstance(reasoning, dict):
-            payload["reasoning"] = {**reasoning, "effort": api_key.enforced_reasoning_effort}
+            payload["reasoning"] = {**reasoning, "effort": enforced_effort}
         else:
-            payload["reasoning"] = {"effort": api_key.enforced_reasoning_effort}
+            payload["reasoning"] = {"effort": enforced_effort}
 
     if api_key.enforced_service_tier is not None:
         if api_key.enforced_service_tier in _UPSTREAM_OMIT_SERVICE_TIERS:
@@ -330,6 +356,9 @@ def normalize_unsupported_reasoning_effort(
     so clients (e.g. Codex CLI's ``--reasoning-effort minimal``) keep
     working. Mapping picks the model's lowest advertised effort, falling
     back to ``low`` when the registry has no metadata yet.
+
+    Client-plane efforts the reference Codex client aliases before sending
+    (``ultra`` -> ``max``) are rewritten the same way here.
     """
 
     if payload.reasoning is None or payload.reasoning.effort is None:
@@ -337,6 +366,19 @@ def normalize_unsupported_reasoning_effort(
 
     requested_effort = payload.reasoning.effort
     normalized_effort = requested_effort.strip().lower()
+
+    wire_alias = _REASONING_EFFORT_WIRE_ALIASES.get(normalized_effort)
+    if wire_alias is not None:
+        payload.reasoning.effort = wire_alias
+        logger.info(
+            "reasoning_effort_wire_aliased request_id=%s model=%s requested_effort=%s aliased_effort=%s",
+            get_request_id(),
+            payload.model,
+            requested_effort,
+            wire_alias,
+        )
+        return
+
     if normalized_effort not in _UNSUPPORTED_UPSTREAM_REASONING_EFFORTS:
         return
 

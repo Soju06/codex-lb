@@ -389,7 +389,7 @@ export function AutomationsPage() {
       days: ("mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun")[];
     };
     model: string;
-    reasoningEffort?: "minimal" | "low" | "medium" | "high" | "xhigh" | null;
+    reasoningEffort?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra" | null;
     prompt?: string;
     accountIds: string[];
   }) => {
@@ -408,7 +408,7 @@ export function AutomationsPage() {
       days: ("mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun")[];
     };
     model?: string;
-    reasoningEffort?: "minimal" | "low" | "medium" | "high" | "xhigh" | null;
+    reasoningEffort?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra" | null;
     prompt?: string;
     accountIds?: string[];
   }) => {

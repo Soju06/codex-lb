@@ -31,6 +31,7 @@ import { ModelSourceMultiSelect } from "@/features/model-sources/components/mode
 import type {
   ApiKeyCreateRequest,
   LimitRuleCreate,
+  ReasoningEffortType,
   ServiceTierType,
   TrafficClass,
   TransportPolicyOverride,
@@ -120,7 +121,7 @@ function ApiKeyCreateForm({ busy, onClose, onSubmit }: ApiKeyCreateFormProps) {
       enforcedReasoningEffort:
         draft.enforcedReasoningEffort === "none"
           ? null
-          : draft.enforcedReasoningEffort as "minimal" | "low" | "medium" | "high" | "xhigh",
+          : draft.enforcedReasoningEffort as ReasoningEffortType,
       enforcedServiceTier: draft.enforcedServiceTier === "none" ? null : draft.enforcedServiceTier as ServiceTierType,
       trafficClass: draft.trafficClass,
       transportPolicyOverride: draft.transportPolicyOverride,
@@ -216,6 +217,8 @@ function ApiKeyCreateForm({ busy, onClose, onSubmit }: ApiKeyCreateFormProps) {
                   <SelectItem value="medium">Medium</SelectItem>
                   <SelectItem value="high">High</SelectItem>
                   <SelectItem value="xhigh">XHigh</SelectItem>
+                  <SelectItem value="max">Max</SelectItem>
+                  <SelectItem value="ultra">Ultra</SelectItem>
                 </SelectContent>
               </Select>
             </div>

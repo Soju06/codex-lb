@@ -42,7 +42,7 @@ async def list_models() -> dict:
     models_by_slug = registry.get_models_with_fallback()
     if not models_by_slug:
         return {"models": []}
-    allowed_efforts = {"minimal", "low", "medium", "high", "xhigh"}
+    allowed_efforts = {"minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
 
     def _normalize_effort(value: str | None) -> str | None:
         if not isinstance(value, str):

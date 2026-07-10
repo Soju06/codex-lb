@@ -199,6 +199,49 @@ async def test_images_generations_auth_rejection_records_route_observability(asy
 
 
 @pytest.mark.asyncio
+async def test_backend_codex_images_generations_alias_uses_same_validation(async_client):
+    response = await async_client.post(
+        "/backend-api/codex/images/generations",
+        json={"model": "dall-e-3", "prompt": "a red circle"},
+    )
+    assert response.status_code == 400
+    body = response.json()
+    assert body["error"]["type"] == "invalid_request_error"
+    assert body["error"]["param"] == "model"
+
+
+@pytest.mark.asyncio
+async def test_backend_codex_images_generations_alias_auth_rejection_records_route_observability(async_client, caplog):
+    await _enable_api_key_auth(async_client)
+
+    with caplog.at_level(logging.WARNING, logger="app.modules.proxy.api"):
+        response = await async_client.post(
+            "/backend-api/codex/images/generations",
+            json={"model": "gpt-image-2", "prompt": "a red circle"},
+        )
+
+    assert response.status_code == 401
+    message = "images_route_complete route=generations model=gpt-image-2 stream=false status=401 outcome=auth_error"
+    assert message in caplog.text
+    assert caplog.text.count(message) == 1
+
+
+@pytest.mark.asyncio
+async def test_images_generations_trailing_slash_parity_between_v1_and_codex_alias(async_client):
+    # Codex joins `base_url` + "images/generations" without a trailing slash,
+    # so only the exact paths are handled. The trailing-slash variants fall
+    # through to the SPA catch-all route and must fail identically (405 with
+    # the OpenAI error envelope) on the canonical and alias surfaces.
+    payload = {"model": "dall-e-3", "prompt": "a red circle"}
+    v1_response = await async_client.post("/v1/images/generations/", json=payload)
+    alias_response = await async_client.post("/backend-api/codex/images/generations/", json=payload)
+    assert v1_response.status_code == 405
+    assert alias_response.status_code == 405
+    assert v1_response.json()["error"]["type"] == "invalid_request_error"
+    assert alias_response.json() == v1_response.json()
+
+
+@pytest.mark.asyncio
 async def test_images_generations_rejects_transparent_background(async_client):
     response = await async_client.post(
         "/v1/images/generations",
@@ -558,6 +601,76 @@ async def test_images_generations_failed_image_returns_5xx(async_client, monkeyp
 
 
 @pytest.mark.asyncio
+async def test_backend_codex_images_edits_requires_native_image_data_urls(async_client, caplog):
+    with caplog.at_level(logging.WARNING, logger="app.modules.proxy.api"):
+        response = await async_client.post(
+            "/backend-api/codex/images/edits",
+            json={"model": "gpt-image-2", "prompt": "make it green", "images": []},
+        )
+    assert response.status_code == 400
+    body = response.json()
+    assert body["error"]["type"] == "invalid_request_error"
+    assert body["error"]["param"] == "images"
+    assert (
+        "images_route_complete route=edits model=gpt-image-2 stream=false status=400 outcome=invalid_request"
+        in caplog.text
+    )
+
+
+@pytest.mark.asyncio
+async def test_backend_codex_images_edits_alias_auth_rejection_records_route_observability(async_client, caplog):
+    await _enable_api_key_auth(async_client)
+
+    with caplog.at_level(logging.WARNING, logger="app.modules.proxy.api"):
+        response = await async_client.post(
+            "/backend-api/codex/images/edits",
+            json={
+                "model": "gpt-image-2",
+                "prompt": "make it green",
+                "images": [{"image_url": "data:image/png;base64,aGVsbG8="}],
+            },
+        )
+
+    assert response.status_code == 401
+    message = "images_route_complete route=edits model=gpt-image-2 stream=false status=401 outcome=auth_error"
+    assert message in caplog.text
+    assert caplog.text.count(message) == 1
+
+
+@pytest.mark.asyncio
+async def test_images_edits_trailing_slash_parity_between_v1_and_codex_alias(async_client):
+    # Codex joins `base_url` + "images/edits" without a trailing slash, so
+    # only the exact paths are handled. The trailing-slash variants fall
+    # through to the SPA catch-all route and must fail identically (405 with
+    # the OpenAI error envelope) on the canonical and alias surfaces.
+    payload = {"model": "gpt-image-2", "prompt": "make it green", "images": []}
+    v1_response = await async_client.post("/v1/images/edits/", json=payload)
+    alias_response = await async_client.post("/backend-api/codex/images/edits/", json=payload)
+    assert v1_response.status_code == 405
+    assert alias_response.status_code == 405
+    assert v1_response.json()["error"]["type"] == "invalid_request_error"
+    assert alias_response.json() == v1_response.json()
+
+
+@pytest.mark.asyncio
+async def test_backend_codex_images_edits_invalid_utf8_returns_400(async_client, caplog):
+    with caplog.at_level(logging.WARNING, logger="app.modules.proxy.api"):
+        response = await async_client.post(
+            "/backend-api/codex/images/edits",
+            content=b"\xff",
+            headers={"content-type": "application/json"},
+        )
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body["error"]["type"] == "invalid_request_error"
+    assert body["error"]["param"] == "prompt"
+    assert (
+        "images_route_complete route=edits model=unknown stream=false status=400 outcome=invalid_request" in caplog.text
+    )
+
+
+@pytest.mark.asyncio
 async def test_images_edits_basic_round_trip(async_client, monkeypatch):
     await _import_account(async_client, "acc_images_edit", "img-edit@example.com")
 
@@ -610,6 +723,77 @@ async def test_images_edits_basic_round_trip(async_client, monkeypatch):
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["data"] == [{"b64_json": "EDITED_B64", "revised_prompt": "edited"}]
+
+    # Verify the upstream payload contained the image as an input_image data
+    # URL alongside the prompt text.
+    input_value = cast(list[Any], captured["input"])
+    assert input_value
+    first_message = cast(dict[str, Any], input_value[0])
+    content = cast(list[Any], first_message["content"])
+    text_part = cast(dict[str, Any], content[0])
+    assert text_part["type"] == "input_text"
+    assert text_part["text"] == "make it green"
+    image_parts: list[dict[str, Any]] = [
+        cast(dict[str, Any], p) for p in content if isinstance(p, dict) and p.get("type") == "input_image"
+    ]
+    assert len(image_parts) == 1
+    image_url_value = cast(str, image_parts[0]["image_url"])
+    assert image_url_value.startswith("data:image/png;base64,")
+
+
+@pytest.mark.asyncio
+async def test_backend_codex_images_edits_json_data_urls_round_trip(async_client, monkeypatch):
+    await _import_account(async_client, "acc_images_edit_codex", "img-edit-codex@example.com")
+
+    captured: dict[str, object] = {}
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
+        del headers, access_token, base_url, raise_for_status, kwargs
+        captured["input"] = payload.input
+        captured["tools"] = list(payload.tools)
+        captured["account_id"] = account_id
+        yield _sse(
+            {
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "image_generation_call",
+                    "id": "ig_edit_codex",
+                    "status": "completed",
+                    "result": "EDITED_B64",
+                    "revised_prompt": "edited",
+                    "size": "1024x1024",
+                    "quality": "auto",
+                    "background": "auto",
+                    "output_format": "png",
+                },
+            }
+        )
+        yield _sse({"type": "response.completed", "response": {}})
+
+    async def fake_ensure_fresh(self, account, **kwargs):
+        del self, kwargs
+        return account
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh)
+
+    image_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+    image_url = f"data:image/png;base64,{base64.b64encode(image_bytes).decode('ascii')}"
+    response = await async_client.post(
+        "/backend-api/codex/images/edits",
+        json={
+            "model": "gpt-image-2",
+            "prompt": "make it green",
+            "images": [{"image_url": image_url}],
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["data"] == [{"b64_json": "EDITED_B64", "revised_prompt": "edited"}]
+    input_items = cast(list[dict[str, Any]], captured["input"])
+    content = cast(list[dict[str, Any]], input_items[0]["content"])
+    assert content[1]["type"] == "input_image"
 
     # Verify the upstream payload contained the image as an input_image data
     # URL alongside the prompt text.

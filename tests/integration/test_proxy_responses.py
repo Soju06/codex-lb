@@ -15,6 +15,7 @@ import app.modules.proxy.service as proxy_module
 from app.core.auth import generate_unique_account_id
 from app.core.config.settings import Settings
 from app.core.openai.models import CompactResponsePayload
+from app.core.types import JsonValue
 from app.db.models import Account, DashboardSettings, RequestLog
 from app.db.session import SessionLocal
 from app.modules.proxy._service.streaming import retry as streaming_retry_module
@@ -220,6 +221,7 @@ async def test_backend_responses_preserves_responses_lite_tools_and_outputs(asyn
             custom_tool_output,
             {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "inspect"}]},
         ],
+        "reasoning": {"effort": "ultra"},
         "stream": True,
     }
     async with async_client.stream(
@@ -241,6 +243,20 @@ async def test_backend_responses_preserves_responses_lite_tools_and_outputs(asyn
         custom_tool_output,
         {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "inspect"}]},
     ]
+    # Catalog-advertised ``ultra`` must be aliased to ``max`` on the wire,
+    # exactly like the reference Codex client (codex-rs core/src/client.rs
+    # ``reasoning_effort_for_request`` at rust-v0.144.1).
+    reasoning = cast("dict[str, JsonValue]", seen_payload["reasoning"])
+    assert reasoning["effort"] == "max"
+    # The forwarded payload must keep signaling Responses Lite: the upstream
+    # HTTP client derives the internal Lite header from the additional_tools
+    # input prefix that survived the round trip.
+    upstream_headers: dict[str, str] = {}
+    proxy_client_module._apply_responses_lite_http_header(
+        upstream_headers,
+        cast("Mapping[str, JsonValue]", seen_payload),
+    )
+    assert upstream_headers == {proxy_client_module.CODEX_RESPONSES_LITE_HEADER: "true"}
 
 
 @pytest.mark.asyncio

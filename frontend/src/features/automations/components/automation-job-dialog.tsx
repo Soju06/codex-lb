@@ -57,13 +57,15 @@ const DEFAULT_SCHEDULE_TIME = "05:00";
 const DEFAULT_SCHEDULE_THRESHOLD_MINUTES = 0;
 const MAX_SCHEDULE_THRESHOLD_MINUTES = 240;
 const DEFAULT_REASONING_EFFORT_VALUE = "__default__";
-const FALLBACK_REASONING_EFFORTS: AutomationReasoningEffort[] = ["low", "medium", "high", "xhigh"];
+const FALLBACK_REASONING_EFFORTS: AutomationReasoningEffort[] = ["low", "medium", "high", "xhigh", "max", "ultra"];
 const REASONING_LABELS: Record<AutomationReasoningEffort, string> = {
   minimal: "Minimal",
   low: "Low",
   medium: "Medium",
   high: "High",
   xhigh: "XHigh",
+  max: "Max",
+  ultra: "Ultra",
 };
 
 type CreateFormField = "name" | "model" | "time" | "threshold" | "accounts";

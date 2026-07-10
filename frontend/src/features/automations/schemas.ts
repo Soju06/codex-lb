@@ -4,7 +4,7 @@ export const AutomationScheduleTypeSchema = z.enum(["daily"]);
 export const AutomationScheduleDaySchema = z.enum(["mon", "tue", "wed", "thu", "fri", "sat", "sun"]);
 export const AutomationRunStatusSchema = z.enum(["running", "success", "failed", "partial"]);
 export const AutomationRunTriggerSchema = z.enum(["scheduled", "manual"]);
-export const AutomationReasoningEffortSchema = z.enum(["minimal", "low", "medium", "high", "xhigh"]);
+export const AutomationReasoningEffortSchema = z.enum(["minimal", "low", "medium", "high", "xhigh", "max", "ultra"]);
 
 export const AutomationScheduleDaysSchema = z
   .array(AutomationScheduleDaySchema)

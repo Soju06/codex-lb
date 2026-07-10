@@ -35,6 +35,7 @@ from app.modules.automations.repository import (
 )
 from app.modules.proxy.account_cache import get_account_selection_cache, mark_account_routing_unavailable
 from app.modules.proxy.helpers import _header_account_id
+from app.modules.proxy.request_policy import resolve_wire_reasoning_effort
 from app.modules.request_logs.repository import RequestLogsRepository
 
 AUTOMATION_SCHEDULE_DAILY = "daily"
@@ -1117,6 +1118,12 @@ class AutomationsService:
         account_ids_to_try = _prioritize_forced_account(account_ids_to_try, forced_account_id_for_priority)
         run_model = run.model or job.model
         run_reasoning_effort = run.reasoning_effort
+        # Client-plane efforts (``ultra``) must be aliased to their wire-safe
+        # value (``max``) here because the compact ping bypasses the proxy
+        # request-policy path that performs this rewrite for proxied traffic.
+        wire_reasoning_effort = (
+            resolve_wire_reasoning_effort(run_reasoning_effort) if run_reasoning_effort is not None else None
+        )
         run_prompt = run.prompt or job.prompt
 
         for account_id in account_ids_to_try:
@@ -1148,7 +1155,7 @@ class AutomationsService:
                     model=run_model,
                     input=run_prompt,
                     instructions="Automation ping",
-                    reasoning=ResponsesReasoning(effort=run_reasoning_effort) if run_reasoning_effort else None,
+                    reasoning=ResponsesReasoning(effort=wire_reasoning_effort) if wire_reasoning_effort else None,
                 )
                 request_started_at = time.monotonic()
                 compact_response = await asyncio.wait_for(
@@ -1175,7 +1182,7 @@ class AutomationsService:
                     account_id=account.id,
                     request_id=request_id,
                     model=run_model,
-                    reasoning_effort=run_reasoning_effort,
+                    reasoning_effort=wire_reasoning_effort,
                     latency_ms=latency_ms,
                     status="success",
                     input_tokens=input_tokens,
@@ -1208,7 +1215,7 @@ class AutomationsService:
                     account_id=account.id,
                     request_id=_automation_request_id(None, run.id, attempt_count),
                     model=run_model,
-                    reasoning_effort=run_reasoning_effort,
+                    reasoning_effort=wire_reasoning_effort,
                     latency_ms=_elapsed_ms(request_started_at),
                     status="error",
                     error_code=error_code,
@@ -1226,7 +1233,7 @@ class AutomationsService:
                         account_id=account.id,
                         request_id=_automation_request_id(None, run.id, attempt_count),
                         model=run_model,
-                        reasoning_effort=run_reasoning_effort,
+                        reasoning_effort=wire_reasoning_effort,
                         latency_ms=_elapsed_ms(request_started_at),
                         status="error",
                         error_code=last_error_code,
@@ -2123,7 +2130,7 @@ def _normalize_reasoning_effort(value: str | None, *, model_slug: str) -> str | 
     normalized = value.strip().lower()
     if not normalized:
         return None
-    allowed = {"minimal", "low", "medium", "high", "xhigh"}
+    allowed = {"minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
     if normalized not in allowed:
         raise AutomationValidationError(
             f"Unsupported reasoning effort: {value}",

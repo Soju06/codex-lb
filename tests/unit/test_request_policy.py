@@ -24,6 +24,12 @@ from app.modules.proxy.request_policy import apply_api_key_enforcement, validate
         ("gpt-5.1-codex-mini-extra-fast", "gpt-5.1-codex-mini", "high", "priority"),
         ("gpt-5.5-extra", "gpt-5.5", "high", None),
         ("gpt-5.5-extra-high-fast", "gpt-5.5", "high", "priority"),
+        ("gpt-5.6-sol-extra-high-fast", "gpt-5.6-sol", "high", "priority"),
+        ("gpt-5.6-sol-xhigh", "gpt-5.6-sol", "high", None),
+        ("gpt-5.6-terra-extra-high-fast", "gpt-5.6-terra", "high", "priority"),
+        ("gpt-5.6-terra-medium", "gpt-5.6-terra", "medium", None),
+        ("gpt-5.6-luna-extra-high-fast", "gpt-5.6-luna", "high", "priority"),
+        ("gpt-5.6-luna-low-fast", "gpt-5.6-luna", "low", "priority"),
     ],
 )
 def test_gpt5_cursor_aliases_target_canonical_models(
@@ -82,10 +88,36 @@ def test_unknown_gpt5_suffix_is_not_rewritten() -> None:
     assert request.service_tier is None
 
 
+def test_gpt56_ultra_suffix_is_not_rewritten() -> None:
+    # The Cursor-style suffix grammar has no ``ultra``/``max`` reasoning
+    # tokens (they are not effort levels every GPT-5-family base supports;
+    # e.g. gpt-5.6-luna has no ``ultra``), so an ``ultra``-suffixed label is
+    # an unknown alias and must pass through unchanged.
+    request = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol-ultra",
+            "instructions": "",
+            "input": [],
+        }
+    )
+
+    apply_api_key_enforcement(request, None)
+
+    assert request.model == "gpt-5.6-sol-ultra"
+    assert request.reasoning is None
+    assert request.service_tier is None
+
+
 def test_model_access_accepts_allowed_canonical_model_alias() -> None:
     api_key = cast(ApiKeyData, SimpleNamespace(allowed_models=frozenset({"gpt-5.5"})))
 
     validate_model_access(api_key, "gpt-5.5-extra-high-fast")
+
+
+def test_model_access_accepts_allowed_canonical_gpt56_model_alias() -> None:
+    api_key = cast(ApiKeyData, SimpleNamespace(allowed_models=frozenset({"gpt-5.6-sol"})))
+
+    validate_model_access(api_key, "gpt-5.6-sol-extra-high-fast")
 
 
 def test_model_access_accepts_allowed_qualified_canonical_model_alias() -> None:

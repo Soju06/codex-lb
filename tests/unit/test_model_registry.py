@@ -26,7 +26,36 @@ EXPECTED_CORE_MODEL_PLANS = {
     "enterprise_cbp_usage_based",
 }
 
+# The 21-plan list upstream advertises for GPT-5.6
+# (codex-rs/models-manager/models.json at rust-v0.144.1).
+EXPECTED_GPT56_MODEL_PLANS = {
+    "business",
+    "edu",
+    "edu_plus",
+    "edu_pro",
+    "education",
+    "enterprise",
+    "enterprise_cbp_automation",
+    "enterprise_cbp_usage_based",
+    "finserv",
+    "free",
+    "free_workspace",
+    "go",
+    "hc",
+    "k12",
+    "plus",
+    "pro",
+    "prolite",
+    "quorum",
+    "sci",
+    "self_serve_business_usage_based",
+    "team",
+}
+
 EXPECTED_BOOTSTRAP_MINIMAL_CLIENT_VERSIONS = {
+    "gpt-5.6-sol": "0.144.0",
+    "gpt-5.6-terra": "0.144.0",
+    "gpt-5.6-luna": "0.144.0",
     "gpt-5.5": "0.124.0",
     "gpt-5.4": "0.98.0",
     "gpt-5.4-mini": "0.98.0",
@@ -138,6 +167,9 @@ async def test_prefers_websockets_does_not_use_bootstrap_after_snapshot():
 def test_prefers_websockets_uses_bootstrap_fallback_when_uninitialized():
     registry = ModelRegistry(ttl_seconds=60.0)
 
+    assert registry.prefers_websockets("gpt-5.6-sol") is True
+    assert registry.prefers_websockets("gpt-5.6-terra") is True
+    assert registry.prefers_websockets("gpt-5.6-luna") is True
     assert registry.prefers_websockets("gpt-5.4") is True
     assert registry.prefers_websockets("gpt-5.4-2026") is True
     assert registry.prefers_websockets("gpt-5.3-codex") is True
@@ -154,6 +186,66 @@ def test_bootstrap_models_include_representative_upstream_metadata():
     assert set(models) == set(EXPECTED_BOOTSTRAP_MINIMAL_CLIENT_VERSIONS)
     for slug, expected_version in EXPECTED_BOOTSTRAP_MINIMAL_CLIENT_VERSIONS.items():
         assert models[slug].minimal_client_version == expected_version
+
+    sol = models["gpt-5.6-sol"]
+    assert sol.display_name == "GPT-5.6-Sol"
+    assert sol.context_window == 372_000
+    assert sol.default_reasoning_level == "low"
+    assert [level.effort for level in sol.supported_reasoning_levels] == [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra",
+    ]
+    assert sol.raw["additional_speed_tiers"] == ["fast"]
+
+    terra = models["gpt-5.6-terra"]
+    assert terra.display_name == "GPT-5.6-Terra"
+    assert terra.default_reasoning_level == "medium"
+    assert [level.effort for level in terra.supported_reasoning_levels] == [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra",
+    ]
+
+    luna = models["gpt-5.6-luna"]
+    assert luna.display_name == "GPT-5.6-Luna"
+    assert luna.default_reasoning_level == "medium"
+    assert [level.effort for level in luna.supported_reasoning_levels] == ["low", "medium", "high", "xhigh", "max"]
+
+    # Upstream-exact GPT-5.6 raw metadata (codex-rs/models-manager/models.json
+    # at rust-v0.144.1).
+    for gpt56 in (sol, terra, luna):
+        assert gpt56.minimal_client_version == "0.144.0"
+        assert gpt56.raw["tool_mode"] == "code_mode_only"
+        assert gpt56.raw["use_responses_lite"] is True
+        assert gpt56.raw["apply_patch_tool_type"] == "freeform"
+        assert gpt56.raw["web_search_tool_type"] == "text_and_image"
+        assert gpt56.raw["supports_image_detail_original"] is True
+        assert gpt56.raw["truncation_policy"] == {"mode": "tokens", "limit": 10_000}
+        assert gpt56.raw["comp_hash"] == "3000"
+        assert gpt56.raw["reasoning_summary_format"] == "experimental"
+        assert gpt56.raw["default_reasoning_summary"] == "none"
+        assert gpt56.raw["include_skills_usage_instructions"] is False
+        assert gpt56.raw["experimental_supported_tools"] == []
+        assert gpt56.raw["supports_search_tool"] is True
+        assert gpt56.raw["max_context_window"] == 372_000
+        assert gpt56.raw["service_tiers"] == [
+            {"id": "priority", "name": "Fast", "description": "1.5x speed, increased usage"}
+        ]
+        assert gpt56.available_in_plans == EXPECTED_GPT56_MODEL_PLANS
+    assert sol.raw["multi_agent_version"] == "v2"
+    assert terra.raw["multi_agent_version"] == "v2"
+    assert luna.raw["multi_agent_version"] == "v1"
+    assert isinstance(sol.raw["availability_nux"], dict)
+    assert "most capable model yet" in str(sol.raw["availability_nux"]["message"])
+    assert terra.raw["availability_nux"] is None
+    assert luna.raw["availability_nux"] is None
 
     gpt54 = models["gpt-5.4"]
     assert gpt54.minimal_client_version == "0.98.0"

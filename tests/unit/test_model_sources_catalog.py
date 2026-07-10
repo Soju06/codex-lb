@@ -7,7 +7,10 @@ import pytest
 from app.core.openai.model_registry import MODEL_SOURCE_KIND_OPENAI_COMPATIBLE
 from app.db.models import ModelSource, ModelSourceModel
 from app.modules.model_sources.catalog import (
+    DEFAULT_SOURCE_CONTEXT_WINDOW,
     source_model_audio_cost_usd,
+    source_model_request_overrides,
+    source_model_supported_tool_types,
     source_models_to_upstream_models,
 )
 
@@ -82,6 +85,98 @@ def test_source_models_to_upstream_models_preserves_source_identity() -> None:
     assert model.raw["max_output_tokens"] == 4096
     assert model.supports_parallel_tool_calls is True
     assert model.prefer_websockets is False
+
+
+def test_source_models_to_upstream_models_defaults_missing_context_window() -> None:
+    source = ModelSource(
+        id="src_ollama",
+        name="Ollama",
+        kind=MODEL_SOURCE_KIND_OPENAI_COMPATIBLE,
+        base_url="http://127.0.0.1:11434/v1",
+        is_enabled=True,
+        supports_chat_completions=True,
+        supports_responses=True,
+        models=[
+            ModelSourceModel(
+                model="llama3.1:8b",
+                is_enabled=True,
+            )
+        ],
+    )
+
+    models = source_models_to_upstream_models([source])
+
+    assert len(models) == 1
+    model = models[0]
+    assert model.context_window == DEFAULT_SOURCE_CONTEXT_WINDOW
+    assert model.raw["shell_type"] == "shell_command"
+    assert model.raw["max_context_window"] == DEFAULT_SOURCE_CONTEXT_WINDOW
+    assert model.raw["truncation_policy"] == {"mode": "tokens", "limit": 10_000}
+    assert model.raw["include_skills_usage_instructions"] is False
+    assert model.raw["supports_image_detail_original"] is False
+    assert model.raw["supports_search_tool"] is False
+    assert model.raw["use_responses_lite"] is False
+    assert model.raw["experimental_supported_tools"] == []
+    assert model.prefer_websockets is False
+
+
+def _overrides_source(raw_metadata: dict[str, object]) -> ModelSource:
+    return ModelSource(
+        id="src_overrides",
+        name="Overrides",
+        kind=MODEL_SOURCE_KIND_OPENAI_COMPATIBLE,
+        base_url="http://127.0.0.1:11434/v1",
+        is_enabled=True,
+        supports_chat_completions=True,
+        supports_responses=True,
+        models=[
+            ModelSourceModel(
+                model="llama3.1:8b",
+                raw_metadata_json=json.dumps(raw_metadata),
+                is_enabled=True,
+            )
+        ],
+    )
+
+
+def test_source_request_overrides_never_reach_upstream_model_raw() -> None:
+    source = _overrides_source({"source_request_overrides": {"options": {"num_ctx": 32768}}})
+
+    models = source_models_to_upstream_models([source])
+
+    assert len(models) == 1
+    assert "source_request_overrides" not in models[0].raw
+    # Overrides stay available for operator-side request application.
+    assert source_model_request_overrides(source, "llama3.1:8b") == {"options": {"num_ctx": 32768}}
+
+
+def test_source_model_request_overrides_ignores_non_mapping_values() -> None:
+    source = _overrides_source({"source_request_overrides": ["not", "a", "mapping"]})
+
+    assert source_model_request_overrides(source, "llama3.1:8b") == {}
+    assert source_model_request_overrides(source, "unknown-model") == {}
+
+
+def test_source_model_supported_tool_types_defaults_to_empty() -> None:
+    source = _overrides_source({})
+
+    assert source_model_supported_tool_types(source, "llama3.1:8b") == frozenset()
+    assert source_model_supported_tool_types(source, "unknown-model") == frozenset()
+
+
+def test_source_model_supported_tool_types_honors_search_opt_in() -> None:
+    source = _overrides_source({"supports_search_tool": True})
+
+    supported = source_model_supported_tool_types(source, "llama3.1:8b")
+
+    assert "web_search" in supported
+    assert "web_search_preview" in supported
+
+
+def test_source_model_supported_tool_types_includes_experimental_tools() -> None:
+    source = _overrides_source({"experimental_supported_tools": ["custom", 42, {"type": "bad"}]})
+
+    assert source_model_supported_tool_types(source, "llama3.1:8b") == frozenset({"custom"})
 
 
 def test_source_models_to_upstream_models_skips_disabled_sources_and_models() -> None:

@@ -264,6 +264,24 @@ def test_provider_thinking_aliases_are_normalized():
     assert "enable_thinking" not in dumped
 
 
+def test_provider_thinking_string_alias_accepts_catalog_advertised_efforts():
+    # GPT-5.6 catalog entries advertise ``max`` and ``ultra``
+    # (codex-rs/models-manager/models.json at rust-v0.144.1); the string-form
+    # thinking alias must accept every catalog-advertised effort.
+    for effort in ("low", "medium", "high", "xhigh", "max", "ultra"):
+        payload = {
+            "model": "gpt-5.6-sol",
+            "instructions": "hi",
+            "input": [],
+            "thinking": effort,
+        }
+        request = ResponsesRequest.model_validate(payload)
+
+        dumped = request.to_payload()
+        assert dumped["reasoning"] == {"effort": effort}
+        assert "thinking" not in dumped
+
+
 def test_explicit_reasoning_wins_over_provider_thinking_aliases():
     payload = {
         "model": "gpt-5.1",

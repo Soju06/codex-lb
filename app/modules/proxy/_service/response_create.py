@@ -266,10 +266,19 @@ def _slim_response_create_payload_for_upstream(
     }
 
 
+_PENDING_TOOL_CALL_OUTPUT_ITEM_TYPE_BY_CALL_TYPE = {
+    "function_call": "function_call_output",
+    "custom_tool_call": "custom_tool_call_output",
+    "apply_patch_call": "apply_patch_call_output",
+}
+_PENDING_TOOL_CALL_ITEM_TYPES = frozenset(_PENDING_TOOL_CALL_OUTPUT_ITEM_TYPE_BY_CALL_TYPE)
+_PENDING_TOOL_CALL_OUTPUT_ITEM_TYPES = frozenset(_PENDING_TOOL_CALL_OUTPUT_ITEM_TYPE_BY_CALL_TYPE.values())
+
+
 def _function_call_output_call_ids(input_items: list[JsonValue]) -> set[str]:
     call_ids: set[str] = set()
     for item in input_items:
-        if not isinstance(item, dict) or item.get("type") != "function_call_output":
+        if not isinstance(item, dict) or item.get("type") not in _PENDING_TOOL_CALL_OUTPUT_ITEM_TYPES:
             continue
         call_id = item.get("call_id")
         if isinstance(call_id, str) and call_id:
@@ -288,37 +297,64 @@ def _missing_function_call_outputs_for_previous_response(
     return [call_id for call_id in pending_call_ids if call_id not in present_call_ids]
 
 
-def _synthetic_interrupted_function_call_output(call_id: str) -> dict[str, JsonValue]:
-    return {
-        "type": "function_call_output",
+def _synthetic_interrupted_function_call_output(
+    call_id: str,
+    *,
+    call_type: str = "function_call",
+) -> dict[str, JsonValue]:
+    output_type = _PENDING_TOOL_CALL_OUTPUT_ITEM_TYPE_BY_CALL_TYPE.get(call_type, "function_call_output")
+    item: dict[str, JsonValue] = {
+        "type": output_type,
         "call_id": call_id,
         "output": (
             "Tool call was not executed because the previous turn was interrupted before tool output was available."
         ),
     }
+    if output_type == "apply_patch_call_output":
+        item["status"] = "failed"
+    return item
 
 
 def _inject_missing_interrupted_function_call_outputs(
     input_items: list[JsonValue],
     *,
     missing_call_ids: list[str],
+    pending_call_types: Mapping[str, str] | None = None,
 ) -> list[JsonValue]:
     if not missing_call_ids:
         return input_items
+    call_types = pending_call_types or {}
     return [
-        *[_synthetic_interrupted_function_call_output(call_id) for call_id in missing_call_ids],
+        *[
+            _synthetic_interrupted_function_call_output(
+                call_id,
+                call_type=call_types.get(call_id, "function_call"),
+            )
+            for call_id in missing_call_ids
+        ],
         *input_items,
     ]
 
 
-def _response_output_item_done_function_call_id(payload: dict[str, JsonValue] | None) -> str | None:
+def _response_output_item_done_tool_call(payload: dict[str, JsonValue] | None) -> tuple[str, str] | None:
+    """Return ``(call_id, item_type)`` for a completed tool-call output item.
+
+    Covers every tool-call item type that upstream requires a matching output
+    item for on the next anchored request: ``function_call``,
+    ``custom_tool_call``, and ``apply_patch_call``.
+    """
     if not isinstance(payload, dict) or payload.get("type") != "response.output_item.done":
         return None
     item = payload.get("item")
-    if not isinstance(item, dict) or item.get("type") != "function_call":
+    if not isinstance(item, dict):
+        return None
+    item_type = item.get("type")
+    if not isinstance(item_type, str) or item_type not in _PENDING_TOOL_CALL_ITEM_TYPES:
         return None
     call_id = item.get("call_id")
-    return call_id if isinstance(call_id, str) and call_id else None
+    if not isinstance(call_id, str) or not call_id:
+        return None
+    return call_id, item_type
 
 
 def _response_create_too_large_error_envelope(

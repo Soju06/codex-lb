@@ -403,8 +403,16 @@ def _service_tier_from_event_payload(*args: Any, **kwargs: Any) -> Any:
     return _service_global("_service_tier_from_event_payload")(*args, **kwargs)
 
 
-def _response_output_item_done_function_call_id(*args: Any, **kwargs: Any) -> Any:
-    return _service_global("_response_output_item_done_function_call_id")(*args, **kwargs)
+def _response_output_item_done_tool_call(*args: Any, **kwargs: Any) -> Any:
+    return _service_global("_response_output_item_done_tool_call")(*args, **kwargs)
+
+
+def _missing_function_call_outputs_for_previous_response(*args: Any, **kwargs: Any) -> Any:
+    return _service_global("_missing_function_call_outputs_for_previous_response")(*args, **kwargs)
+
+
+def _inject_missing_interrupted_function_call_outputs(*args: Any, **kwargs: Any) -> Any:
+    return _service_global("_inject_missing_interrupted_function_call_outputs")(*args, **kwargs)
 
 
 def _rewrite_websocket_downstream_response_id(*args: Any, **kwargs: Any) -> Any:

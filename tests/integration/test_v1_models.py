@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 
 import pytest
@@ -103,7 +104,21 @@ async def _create_model_source(
     model: str,
     supports_responses: bool = False,
     supports_streaming: bool = True,
+    context_window: int | None = 8192,
+    raw_metadata_json: str | None = None,
 ) -> str:
+    model_payload: dict[str, object] = {
+        "model": model,
+        "displayName": model,
+        "maxOutputTokens": 1024,
+        "supportsStreaming": supports_streaming,
+        "supportsTools": True,
+        "supportsVision": False,
+    }
+    if context_window is not None:
+        model_payload["contextWindow"] = context_window
+    if raw_metadata_json is not None:
+        model_payload["rawMetadataJson"] = raw_metadata_json
     response = await async_client.post(
         "/api/model-sources/",
         json={
@@ -112,17 +127,7 @@ async def _create_model_source(
             "apiKey": f"token-{name}",
             "supportsChatCompletions": True,
             "supportsResponses": supports_responses,
-            "models": [
-                {
-                    "model": model,
-                    "displayName": model,
-                    "contextWindow": 8192,
-                    "maxOutputTokens": 1024,
-                    "supportsStreaming": supports_streaming,
-                    "supportsTools": True,
-                    "supportsVision": False,
-                }
-            ],
+            "models": [model_payload],
         },
     )
     assert response.status_code == 200
@@ -528,6 +533,59 @@ async def test_backend_codex_models_includes_only_responses_capable_source_model
     source_entry = next(item for item in payload["models"] if item["slug"] == "external-responses-model")
     assert "source_id" not in source_entry
     assert "source_kind" not in source_entry
+
+
+@pytest.mark.asyncio
+async def test_backend_codex_models_defaults_source_model_context_window(async_client):
+    await _create_model_source(
+        async_client,
+        name="codex-source-default-context",
+        model="external-default-context-model",
+        supports_responses=True,
+        context_window=None,
+    )
+
+    response = await async_client.get("/backend-api/codex/models")
+
+    assert response.status_code == 200
+    source_entry = next(item for item in response.json()["models"] if item["slug"] == "external-default-context-model")
+    assert source_entry["context_window"] == 128_000
+    assert source_entry["shell_type"] == "shell_command"
+    assert source_entry["max_context_window"] == 128_000
+    assert source_entry["truncation_policy"] == {"mode": "tokens", "limit": 10_000}
+    assert source_entry["include_skills_usage_instructions"] is False
+    assert source_entry["supports_image_detail_original"] is False
+    assert source_entry["supports_search_tool"] is False
+    assert source_entry["use_responses_lite"] is False
+    assert source_entry["experimental_supported_tools"] == []
+    assert source_entry["prefer_websockets"] is False
+
+
+@pytest.mark.asyncio
+async def test_backend_codex_models_never_exposes_source_request_overrides(async_client):
+    await _create_model_source(
+        async_client,
+        name="codex-source-overrides",
+        model="external-overrides-model",
+        supports_responses=True,
+        raw_metadata_json=json.dumps(
+            {
+                "source_request_overrides": {"options": {"num_ctx": 32768}, "temperature": 0.2},
+                "supports_search_tool": True,
+            }
+        ),
+    )
+
+    response = await async_client.get("/backend-api/codex/models")
+
+    assert response.status_code == 200
+    payload = response.json()
+    source_entry = next(item for item in payload["models"] if item["slug"] == "external-overrides-model")
+    assert "source_request_overrides" not in source_entry
+    # Capability metadata still flows through to the client-visible entry.
+    assert source_entry["supports_search_tool"] is True
+    # The operator override config must not leak anywhere in the catalog payload.
+    assert "source_request_overrides" not in response.text
 
 
 @pytest.mark.asyncio

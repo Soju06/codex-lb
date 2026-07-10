@@ -1,0 +1,10 @@
+- [x] 1. Record completed `custom_tool_call` / `apply_patch_call` items (with item type) in the pending tool-call trackers on both the WebSocket route and the HTTP bridge upstream readers.
+- [x] 2. Synthesize the matching interrupted output item type per pending call type on the WebSocket route injection path.
+- [x] 3. Inject synthetic interrupted outputs on the HTTP bridge when a follow-up anchors on the session's last completed response id.
+- [x] 4. Extend `_is_missing_tool_output_error` to match the custom tool call and apply patch call message variants.
+- [x] 5. Add regression tests at the WebSocket route and HTTP bridge surfaces plus a classifier unit test.
+- [x] 6. Inject HTTP bridge synthetic outputs into the payload before request preparation so the `response.create` slim/size guard, the stored input context (item count/fingerprint), and the usage budget observe the injected upstream-shaped input, with bridge-route regression coverage for the size guard and stored context.
+- [x] 7. Apply best-effort synthetic-output injection on the owner-forward failure recovery path from the rebound local session's pending state, and document the bounded gap when that state lives only in the remote owner instance's memory (recovery resubmits unmodified; the extended classifier masks the upstream missing-tool-output error), with unit coverage for both recovery shapes.
+- [x] 8. Recognize `apply_patch_call` / `apply_patch_call_output` in the HTTP bridge previous-response replay trim for parity with the WebSocket route, with helper and bridge-route regression tests.
+- [x] 9. Re-inject synthetic interrupted outputs on the HTTP bridge local previous-response recovery retry from the failed session's pending tool-call state, with unit regression coverage.
+- [x] 10. Record the WebSocket continuity anchor (completed response id + pending tool-call metadata) regardless of input shape, clearing only the prefix count/fingerprint pair when the input yields no fingerprint (string or empty inputs), mirroring the HTTP bridge completion recording, with helper unit tests and a websocket-surface regression test covering string and empty inputs.

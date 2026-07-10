@@ -927,6 +927,26 @@
         "code",
         "test"
       ]
+    },
+    {
+      "login": "nazirulhafiy",
+      "name": "Hafiy",
+      "avatar_url": "https://avatars.githubusercontent.com/u/255521226?v=4",
+      "profile": "https://github.com/nazirulhafiy",
+      "contributions": [
+        "code",
+        "test",
+        "doc"
+      ]
+    },
+    {
+      "login": "kvz",
+      "name": "Kevin van Zonneveld",
+      "avatar_url": "https://avatars.githubusercontent.com/u/26752?v=4",
+      "profile": "https://github.com/kvz",
+      "contributions": [
+        "code"
+      ]
     }
   ],
   "contributorsPerLine": 7,

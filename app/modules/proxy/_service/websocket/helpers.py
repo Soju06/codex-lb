@@ -454,16 +454,29 @@ def _record_websocket_continuity_completion(
     request_state: _WebSocketRequestState,
     response_id: str | None,
 ) -> None:
-    if response_id is None or request_state.input_item_count <= 0 or request_state.input_full_fingerprint is None:
+    if response_id is None:
         continuity_state.last_completed_response_id = None
         continuity_state.last_completed_input_count = 0
         continuity_state.last_completed_input_prefix_fingerprint = None
         continuity_state.last_pending_function_call_ids = []
+        continuity_state.last_pending_tool_call_types = {}
         return
+    # Record the completed response id and pending tool-call metadata
+    # regardless of input shape (string inputs leave ``input_item_count`` at
+    # 0), so an anchored follow-up can still match continuity and receive
+    # synthetic interrupted tool outputs. Prefix anchoring/trimming is only
+    # meaningful for fingerprinted list inputs, so the count/fingerprint pair
+    # is cleared rather than left stale when the completed turn cannot
+    # provide one.
     continuity_state.last_completed_response_id = response_id
-    continuity_state.last_completed_input_count = request_state.input_item_count
-    continuity_state.last_completed_input_prefix_fingerprint = request_state.input_full_fingerprint
+    if request_state.input_item_count > 0 and request_state.input_full_fingerprint is not None:
+        continuity_state.last_completed_input_count = request_state.input_item_count
+        continuity_state.last_completed_input_prefix_fingerprint = request_state.input_full_fingerprint
+    else:
+        continuity_state.last_completed_input_count = 0
+        continuity_state.last_completed_input_prefix_fingerprint = None
     continuity_state.last_pending_function_call_ids = list(request_state.pending_function_call_ids)
+    continuity_state.last_pending_tool_call_types = dict(request_state.pending_tool_call_types)
 
 
 def _record_websocket_responses_lite_acceptance(

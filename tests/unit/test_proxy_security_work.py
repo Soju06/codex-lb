@@ -130,6 +130,7 @@ async def test_http_bridge_create_passes_security_work_requirement_to_selection(
 
     assert select_account.await_args is not None
     assert select_account.await_args.kwargs["require_security_work_authorized"] is True
+    assert session.upstream_reader is not None
     await session.upstream_reader
 
 
@@ -140,7 +141,8 @@ async def test_http_bridge_reconnect_claims_durable_owner_before_publishing_acco
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     old_account = _make_account("acc_durable_old")
     replacement_account = _make_account("acc_durable_replacement")
-    old_upstream = cast(UpstreamResponsesWebSocket, SimpleNamespace(close=AsyncMock()))
+    old_upstream_close = AsyncMock()
+    old_upstream = cast(UpstreamResponsesWebSocket, SimpleNamespace(close=old_upstream_close))
     replacement_upstream = cast(UpstreamResponsesWebSocket, SimpleNamespace(close=AsyncMock()))
     session = _make_bridge_session()
     session.account = old_account
@@ -175,7 +177,7 @@ async def test_http_bridge_reconnect_claims_durable_owner_before_publishing_acco
         assert allow_takeover is True
         assert force_owner_epoch_advance is True
         assert claimed_session.account is old_account
-        old_upstream.close.assert_not_awaited()
+        old_upstream_close.assert_not_awaited()
         claim_calls.append(claim_account_id)
 
     monkeypatch.setattr(service, "_select_account_with_budget_for_stream", select_account)
@@ -196,7 +198,7 @@ async def test_http_bridge_reconnect_claims_durable_owner_before_publishing_acco
     assert claim_calls == [replacement_account.id]
     assert session.account is replacement_account
     assert session.upstream is replacement_upstream
-    old_upstream.close.assert_awaited_once()
+    old_upstream_close.assert_awaited_once()
 
 
 def test_websocket_replay_safe_owner_failover_can_migrate_without_security_filter() -> None:

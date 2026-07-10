@@ -1409,11 +1409,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 session.queued_request_count += 1
 
         _log_http_bridge_event(
-            (
-                "retry_security_work_authorized"
-                if require_security_work_authorized
-                else "retry_owner_failover"
-            ),
+            ("retry_security_work_authorized" if require_security_work_authorized else "retry_owner_failover"),
             session.key,
             account_id=session.account.id,
             model=session.request_model,

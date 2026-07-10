@@ -147,7 +147,7 @@ def apply_api_key_enforcement(
                 api_key.id,
                 requested_model,
                 api_key.enforced_model,
-        )
+            )
         payload.model = api_key.enforced_model
         normalize_upstream_model_alias(payload, prohibit_fast_mode=prohibit_fast_mode)
         if (

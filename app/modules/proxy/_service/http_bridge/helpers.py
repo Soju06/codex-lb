@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import sys
@@ -592,6 +593,55 @@ def _http_bridge_session_has_visible_requests(session: "_HTTPBridgeSession") -> 
     return session.queued_request_count > 0 or any(
         _http_bridge_request_counts_against_queue(request_state) for request_state in session.pending_requests
     )
+
+
+def _http_bridge_unanchored_parallel_fork_key(
+    *,
+    key: "_HTTPBridgeSessionKey",
+    session: "_HTTPBridgeSession | None",
+    inflight_creation: bool,
+    incoming_turn_state: str | None,
+    previous_response_id: str | None,
+    request_model: str | None,
+) -> "_HTTPBridgeSessionKey | None":
+    """Give independent process-session requests separate websocket lanes."""
+
+    if key.affinity_kind != "session_header" or incoming_turn_state is not None or previous_response_id is not None:
+        return None
+    reason: str | None = None
+    if inflight_creation:
+        reason = "session_creation_inflight"
+    elif session is not None and not session.closed:
+        if _http_bridge_session_has_visible_requests(session):
+            reason = "active_request"
+        elif (
+            request_model is not None
+            and session.request_model is not None
+            and _extract_model_class(request_model) != _extract_model_class(session.request_model)
+        ):
+            reason = "model_class_change"
+    if reason is None:
+        return None
+
+    task_identity = id(asyncio.current_task())
+    request_identity = get_request_id() or "internal"
+    fork_key = _HTTPBridgeSessionKey(
+        "internal_unanchored_parallel",
+        sha256(f"{request_identity}:{task_identity}".encode()).hexdigest(),
+        key.api_key_id,
+        strength="soft",
+    )
+    _log_http_bridge_event(
+        "unanchored_parallel_fork",
+        key,
+        account_id=None,
+        model=request_model,
+        detail=f"reason={reason}",
+        cache_key_family=key.affinity_kind,
+        model_class=_extract_model_class(request_model) if request_model else None,
+        owner_check_applied=False,
+    )
+    return fork_key
 
 
 def _http_bridge_session_retiring_with_visible_requests(session: "_HTTPBridgeSession") -> bool:

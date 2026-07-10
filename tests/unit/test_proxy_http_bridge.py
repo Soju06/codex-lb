@@ -8744,7 +8744,7 @@ async def test_get_or_create_http_bridge_session_does_not_publish_before_durable
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
-    key = proxy_service._HTTPBridgeSessionKey("session_header", "sid-race", None)
+    key = proxy_service._HTTPBridgeSessionKey("turn_state_header", "sid-race", None)
     created_session = proxy_service._HTTPBridgeSession(
         key=key,
         headers={"x-codex-session-id": "sid-race"},
@@ -8841,7 +8841,7 @@ async def test_get_or_create_http_bridge_session_waiter_propagates_terminal_infl
         await asyncio.wait_for(
             service._get_or_create_http_bridge_session(
                 key,
-                headers={"x-codex-session-id": "sid-race"},
+                headers={"x-codex-turn-state": "sid-race"},
                 affinity=proxy_service._AffinityPolicy(
                     key="sid-race",
                     kind=proxy_service.StickySessionKind.CODEX_SESSION,
@@ -8863,7 +8863,7 @@ async def test_get_or_create_http_bridge_session_inflight_wait_times_out(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
-    key = proxy_service._HTTPBridgeSessionKey("session_header", "sid-stuck-inflight", None)
+    key = proxy_service._HTTPBridgeSessionKey("turn_state_header", "sid-stuck-inflight", None)
     inflight_future: asyncio.Future[proxy_service._HTTPBridgeSession] = asyncio.get_running_loop().create_future()
     service._http_bridge_inflight_sessions[key] = inflight_future
     settings = _make_app_settings()
@@ -8883,7 +8883,7 @@ async def test_get_or_create_http_bridge_session_inflight_wait_times_out(
         await asyncio.wait_for(
             service._get_or_create_http_bridge_session(
                 key,
-                headers={"x-codex-session-id": "sid-stuck-inflight"},
+                headers={"x-codex-turn-state": "sid-stuck-inflight"},
                 affinity=proxy_service._AffinityPolicy(
                     key="sid-stuck-inflight",
                     kind=proxy_service.StickySessionKind.CODEX_SESSION,
@@ -9438,10 +9438,11 @@ async def test_get_or_create_http_bridge_session_late_owner_after_inflight_evict
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
-    key = proxy_service._HTTPBridgeSessionKey("session_header", "sid-late-owner", None)
+    key = proxy_service._HTTPBridgeSessionKey("turn_state_header", "sid-late-owner", None)
     settings = _make_app_settings()
     settings.proxy_admission_wait_timeout_seconds = 0.01
     created = _make_bridge_session(key_value="sid-late-owner")
+    created.key = key
     create_started = asyncio.Event()
     finish_create = asyncio.Event()
 
@@ -9467,7 +9468,7 @@ async def test_get_or_create_http_bridge_session_late_owner_after_inflight_evict
     async def get_session() -> proxy_service._HTTPBridgeSession | proxy_service._HTTPBridgeOwnerForward:
         return await service._get_or_create_http_bridge_session(
             key,
-            headers={"x-codex-session-id": "sid-late-owner"},
+            headers={"x-codex-turn-state": "sid-late-owner"},
             affinity=proxy_service._AffinityPolicy(
                 key="sid-late-owner",
                 kind=proxy_service.StickySessionKind.CODEX_SESSION,

@@ -64,6 +64,7 @@ from app.modules.proxy._service.compact import (
     _sticky_key_from_compact_payload as _sticky_key_from_compact_payload,
 )
 from app.modules.proxy._service.http_bridge.account_sessions import _HTTPBridgeAccountSessionsMixin
+from app.modules.proxy._service.http_bridge.activity import _HTTPBridgeActivityMixin
 from app.modules.proxy._service.http_bridge.helpers import (
     _HTTP_BRIDGE_INFLIGHT_STARTED_AT_ATTR,
     _active_http_bridge_instance_ring,
@@ -86,7 +87,6 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_owner_lookup_unavailable_error_envelope,
     _http_bridge_previous_response_alias_key,
     _http_bridge_request_budget_seconds,
-    _http_bridge_request_counts_against_queue,
     _http_bridge_session_account_active,
     _http_bridge_session_allows_api_key,
     _http_bridge_session_matches_preferred_account,
@@ -95,6 +95,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_should_wait_for_registration,
     _http_bridge_startup_wait_timeout_error,
     _http_bridge_turn_state_alias_key,
+    _http_bridge_unanchored_parallel_fork_key,
     _is_missing_durable_bridge_table_error,
     _log_http_bridge_event,
     _log_http_bridge_startup_wait_timeout,
@@ -102,12 +103,6 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _record_bridge_drain_recovery_allowed,
     _record_bridge_first_turn_timeout,
     _record_bridge_reattach,
-)
-from app.modules.proxy._service.http_bridge.helpers import (
-    _http_bridge_pending_count_nowait as helpers_http_bridge_pending_count_nowait,
-)
-from app.modules.proxy._service.http_bridge.helpers import (
-    http_bridge_activity_snapshot_nowait as helpers_http_bridge_activity_snapshot_nowait,
 )
 from app.modules.proxy._service.http_bridge.owner_forwarding import _HTTPBridgeOwnerForwardingMixin
 from app.modules.proxy._service.http_bridge.protocol import _HTTPBridgeServiceProtocol
@@ -229,31 +224,12 @@ _HTTP_BRIDGE_BACKGROUND_CLEANUP_WARN_THRESHOLD = 100
 class _HTTPBridgeMixin(
     _HTTPBridgeStreamingMixin,
     _HTTPBridgeAccountSessionsMixin,
+    _HTTPBridgeActivityMixin,
     _HTTPBridgeOwnerForwardingMixin,
     _HTTPBridgeRequestSubmitMixin,
     _HTTPBridgeUpstreamEventsMixin,
     _HTTPBridgeServiceProtocol,
 ):
-    async def _http_bridge_pending_count(self, session: "_HTTPBridgeSession") -> int:
-        async with session.pending_lock:
-            visible_pending_count = sum(
-                1
-                for request_state in session.pending_requests
-                if _http_bridge_request_counts_against_queue(request_state)
-            )
-            return max(visible_pending_count, session.queued_request_count)
-
-    def http_bridge_activity_snapshot_nowait(self) -> dict[str, int | bool]:
-        return helpers_http_bridge_activity_snapshot_nowait(self)
-
-    def _http_bridge_pending_count_nowait(
-        self,
-        session: "_HTTPBridgeSession",
-        *,
-        context: str,
-    ) -> int | None:
-        return helpers_http_bridge_pending_count_nowait(session, context=context)
-
     async def _close_http_bridge_session_bounded(
         self,
         session: "_HTTPBridgeSession",
@@ -658,6 +634,19 @@ class _HTTPBridgeMixin(
                     )
 
                 existing = self._http_bridge_sessions.get(key)
+                fork_key = _http_bridge_unanchored_parallel_fork_key(
+                    key=key,
+                    session=existing,
+                    inflight_creation=key in self._http_bridge_inflight_sessions,
+                    incoming_turn_state=incoming_turn_state,
+                    previous_response_id=previous_response_id,
+                    request_model=request_model,
+                )
+                if fork_key is not None:
+                    key = fork_key
+                    durable_lookup = None
+                    force_durable_takeover_after_detach = False
+                    continue
                 if (
                     existing is not None
                     and not existing.closed

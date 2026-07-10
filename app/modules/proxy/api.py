@@ -3332,7 +3332,7 @@ async def _source_responses_response(
         request_service_tier=payload.service_tier,
         request_usage_budget=estimate_api_key_request_usage(payload),
     )
-    source_payload = payload.model_dump(mode="json", exclude_none=True)
+    source_payload = payload.model_dump_for_forwarding()
     source_payload["stream"] = bool(payload.stream)
     _apply_source_response_request_overrides(source_payload, source_model_request_overrides(source, payload.model))
     _drop_unsupported_source_response_tools(

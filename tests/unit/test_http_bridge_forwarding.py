@@ -608,6 +608,19 @@ async def test_owner_forward_allows_json_content_type_for_internal_post(
     assert len(events) == 1
     assert '"code":"stream_incomplete"' in events[0]
     headers = cast(dict[str, str], captured["headers"])
+    forwarded_json = cast(dict[str, object], captured["json"])
+    assert "tools" not in forwarded_json
+    forwarded_payload = ResponsesRequest.model_validate(forwarded_json)
+    assert "tools" not in forwarded_payload.model_fields_set
+    assert "tools" not in forwarded_payload.to_payload()
+    forwarded, error = parse_forwarded_request(
+        headers,
+        payload=forwarded_payload,
+        current_instance="instance-b",
+    )
+    assert error is None
+    assert forwarded is not None
+    assert forwarded.context == context
     assert isinstance(headers, dict)
     assert "Content-Type" not in headers
     assert "content-type" not in headers

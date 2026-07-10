@@ -203,36 +203,93 @@ def test_settings_default_prompt_cache_affinity_ttl_is_1800():
     assert settings.openai_cache_affinity_max_age_seconds == 1800
 
 
-def test_responses_to_payload_canonicalizes_tool_order_and_object_keys():
+def test_responses_to_payload_omits_unset_tools_but_preserves_explicit_empty_tools():
+    base_payload = {
+        "model": "gpt-5.6-sol",
+        "instructions": "",
+        "input": [
+            {
+                "type": "additional_tools",
+                "role": "developer",
+                "tools": [{"type": "custom", "name": "exec"}],
+            }
+        ],
+    }
+
+    omitted = ResponsesRequest.model_validate(base_payload)
+    explicit_empty = ResponsesRequest.model_validate({**base_payload, "tools": []})
+
+    assert omitted.tools == []
+    assert "tools" not in omitted.model_fields_set
+    omitted_payload = omitted.to_payload()
+    assert "tools" not in omitted_payload
+    assert "tool_choice" not in omitted_payload
+    assert "parallel_tool_calls" not in omitted_payload
+    assert "tools" in explicit_empty.model_fields_set
+    assert explicit_empty.to_payload()["tools"] == []
+
+
+def test_v1_responses_conversion_preserves_omitted_vs_explicit_empty_tools():
+    base_payload = {
+        "model": "gpt-5.6-sol",
+        "instructions": "",
+        "input": [
+            {
+                "type": "additional_tools",
+                "role": "developer",
+                "tools": [{"type": "custom", "name": "exec"}],
+            }
+        ],
+    }
+
+    omitted = V1ResponsesRequest.model_validate(base_payload).to_responses_request()
+    explicit_empty = V1ResponsesRequest.model_validate({**base_payload, "tools": []}).to_responses_request()
+
+    assert omitted.tools == []
+    assert "tools" not in omitted.model_fields_set
+    assert "tools" not in omitted.to_payload()
+    assert "tools" in explicit_empty.model_fields_set
+    assert explicit_empty.to_payload()["tools"] == []
+
+
+def test_responses_to_payload_preserves_tool_order_and_object_keys():
+    tools: list[JsonValue] = [
+        {
+            "type": "function",
+            "name": "zeta",
+            "parameters": {"required": [], "type": "object", "properties": {}},
+            "description": "later",
+        },
+        {
+            "description": "reserved model tool",
+            "parameters": {
+                "required": ["task_name", "message"],
+                "type": "object",
+                "properties": {
+                    "message": {"description": "Task instructions", "type": "string"},
+                    "task_name": {"type": "string", "description": "Task name"},
+                },
+                "additionalProperties": False,
+            },
+            "type": "function",
+            "name": "collaboration.spawn_agent",
+        },
+    ]
     request = ResponsesRequest.model_validate(
         {
             "model": "gpt-5.1",
             "instructions": "hi",
             "input": [],
-            "tools": [
-                {
-                    "type": "function",
-                    "name": "zeta",
-                    "parameters": {"required": [], "type": "object", "properties": {}},
-                    "description": "later",
-                },
-                {
-                    "description": "first",
-                    "parameters": {"properties": {}, "required": [], "type": "object"},
-                    "type": "function",
-                    "name": "alpha",
-                },
-            ],
+            "tools": tools,
         }
     )
 
     dumped = request.to_payload()
-    tools = cast(list[JsonValue], dumped["tools"])
-    first_tool = cast(Mapping[str, JsonValue], tools[0])
-    parameters = cast(Mapping[str, JsonValue], first_tool["parameters"])
-    assert first_tool["name"] == "alpha"
-    assert list(first_tool.keys()) == ["description", "name", "parameters", "type"]
-    assert list(parameters.keys()) == ["properties", "required", "type"]
+    dumped_tools = cast(list[JsonValue], dumped["tools"])
+
+    # Mapping equality ignores key order, so compare the compact JSON subtree
+    # to prove both tool-array order and nested object-key order survived.
+    assert json.dumps(dumped_tools, separators=(",", ":")) == json.dumps(tools, separators=(",", ":"))
 
 
 def test_openai_compatible_reasoning_aliases_are_normalized():

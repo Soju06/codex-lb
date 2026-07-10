@@ -236,6 +236,7 @@ async def test_backend_responses_preserves_responses_lite_tools_and_outputs(asyn
 
     event = _extract_first_event(lines)
     assert event["type"] == "response.completed"
+    assert "tools" not in seen_payload
     assert seen_payload["instructions"] == ""
     assert seen_payload["input"] == [
         additional_tools,
@@ -258,6 +259,71 @@ async def test_backend_responses_preserves_responses_lite_tools_and_outputs(asyn
         cast("Mapping[str, JsonValue]", seen_payload),
     )
     assert upstream_headers == {proxy_client_module.CODEX_RESPONSES_LITE_HEADER: "true"}
+
+
+@pytest.mark.asyncio
+async def test_backend_responses_preserves_explicit_reserved_tool_wire_order(async_client, monkeypatch):
+    raw_account_id = "acc_reserved_tool_wire_order"
+    auth_json = _make_auth_json(raw_account_id, "reserved-tool-wire-order@example.com")
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    reserved_tools: list[JsonValue] = [
+        {
+            "type": "function",
+            "name": "collaboration.spawn_agent",
+            "description": "Start a subagent.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task_name": {"type": "string", "description": "Stable task name."},
+                    "message": {"description": "Task instructions.", "type": "string"},
+                    "fork_turns": {"enum": ["all", "none"], "type": "string"},
+                },
+                "required": ["task_name", "message", "fork_turns"],
+                "additionalProperties": False,
+            },
+            "strict": True,
+        },
+        {
+            "description": "A deliberately second tool.",
+            "type": "function",
+            "name": "zeta",
+            "parameters": {"required": [], "properties": {}, "type": "object"},
+        },
+    ]
+    seen_payload: dict[str, object] = {}
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
+        del headers, access_token, account_id, base_url, raise_for_status, kwargs
+        seen_payload.update(payload.to_payload())
+        yield (
+            'data: {"type":"response.completed","response":{"id":"resp_reserved_tool_wire_order",'
+            '"object":"response","status":"completed","usage":{"input_tokens":2,"output_tokens":1}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        json={
+            "model": "gpt-5.6-sol",
+            "instructions": "Use the configured tools.",
+            "input": [{"role": "user", "content": "delegate"}],
+            "tools": reserved_tools,
+            "stream": True,
+        },
+    ) as resp:
+        assert resp.status_code == 200, await resp.aread()
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    assert _extract_first_event(lines)["type"] == "response.completed"
+    assert json.dumps(seen_payload["tools"], separators=(",", ":")) == json.dumps(
+        reserved_tools,
+        separators=(",", ":"),
+    )
 
 
 @pytest.mark.asyncio

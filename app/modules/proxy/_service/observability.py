@@ -14,7 +14,7 @@ from app.core.metrics.prometheus import (
     continuity_owner_resolution_total,
     upstream_transport_decisions_total,
 )
-from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
+from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest, _canonicalize_tools_for_hash
 from app.core.types import JsonValue
 from app.core.utils.request_id import get_request_id
 from app.modules.proxy.affinity import (
@@ -250,7 +250,8 @@ def _tools_hash(payload: ResponsesRequest | ResponsesCompactRequest) -> str | No
     payload_tools = payload.to_payload().get("tools")
     if not isinstance(payload_tools, list) or not payload_tools:
         return None
-    serialized = json.dumps(payload_tools, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    canonical_tools = _canonicalize_tools_for_hash(cast(list[JsonValue], payload_tools))
+    serialized = json.dumps(canonical_tools, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
     return _hash_identifier(serialized)
 
 

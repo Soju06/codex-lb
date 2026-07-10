@@ -66,6 +66,8 @@ class V1ResponsesRequest(BaseModel):
 
     def to_responses_request(self) -> ResponsesRequest:
         data = self.model_dump(mode="json", exclude_none=True)
+        if "tools" not in self.model_fields_set:
+            data.pop("tools", None)
         messages = data.pop("messages", None)
         instructions = data.get("instructions")
         instruction_text = instructions if isinstance(instructions, str) else ""

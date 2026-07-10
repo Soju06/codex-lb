@@ -3955,6 +3955,72 @@ def test_log_proxy_request_shape_includes_affinity_metadata(monkeypatch, caplog)
     assert "tools_hash=sha256:" in caplog.text
 
 
+def test_tools_hash_is_order_insensitive_without_mutating_forwarded_tools():
+    first_tools: list[JsonValue] = [
+        {
+            "type": "function",
+            "name": "zeta",
+            "parameters": {"required": [], "type": "object", "properties": {}},
+            "description": "later",
+        },
+        {
+            "description": "reserved model tool",
+            "parameters": {
+                "required": ["task_name", "message"],
+                "type": "object",
+                "properties": {
+                    "message": {"description": "Task instructions", "type": "string"},
+                    "task_name": {"type": "string", "description": "Task name"},
+                },
+                "additionalProperties": False,
+            },
+            "type": "function",
+            "name": "collaboration.spawn_agent",
+        },
+    ]
+    equivalent_reordered_tools: list[JsonValue] = [
+        {
+            "name": "collaboration.spawn_agent",
+            "type": "function",
+            "parameters": {
+                "additionalProperties": False,
+                "properties": {
+                    "task_name": {"description": "Task name", "type": "string"},
+                    "message": {"type": "string", "description": "Task instructions"},
+                },
+                "type": "object",
+                "required": ["task_name", "message"],
+            },
+            "description": "reserved model tool",
+        },
+        {
+            "description": "later",
+            "parameters": {"properties": {}, "type": "object", "required": []},
+            "name": "zeta",
+            "type": "function",
+        },
+    ]
+    first = ResponsesRequest.model_validate(
+        {"model": "gpt-5.6-sol", "instructions": "", "input": [], "tools": first_tools}
+    )
+    reordered = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "",
+            "input": [],
+            "tools": equivalent_reordered_tools,
+        }
+    )
+    first_wire_before = json.dumps(first.to_payload()["tools"], separators=(",", ":"))
+    reordered_wire_before = json.dumps(reordered.to_payload()["tools"], separators=(",", ":"))
+
+    assert first_wire_before != reordered_wire_before
+    assert proxy_service._tools_hash(first) == proxy_service._tools_hash(reordered)
+    assert proxy_service._tools_hash(first) is not None
+    assert json.dumps(first.to_payload()["tools"], separators=(",", ":")) == first_wire_before
+    assert json.dumps(reordered.to_payload()["tools"], separators=(",", ":")) == reordered_wire_before
+
+
 def test_log_proxy_request_shape_hashes_prompt_cache_key_without_raw_value(monkeypatch, caplog):
     payload = ResponsesRequest.model_validate(
         {

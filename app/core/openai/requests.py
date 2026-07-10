@@ -699,8 +699,14 @@ class ResponsesRequest(BaseModel):
             raise ValueError("Provide either 'conversation' or 'previous_response_id', not both.")
         return self
 
-    def to_payload(self) -> JsonObject:
+    def model_dump_for_forwarding(self) -> MutableJsonObject:
         payload: MutableJsonObject = self.model_dump(mode="json", exclude_none=True)
+        if "tools" not in self.model_fields_set:
+            payload.pop("tools", None)
+        return payload
+
+    def to_payload(self) -> JsonObject:
+        payload = self.model_dump_for_forwarding()
         return _strip_unsupported_fields(payload)
 
 
@@ -777,7 +783,6 @@ def _strip_unsupported_fields(payload: MutableJsonObject) -> MutableJsonObject:
     _normalize_service_tier_aliases(payload)
     _sanitize_interleaved_reasoning_input(payload)
     _strip_poisoned_local_compact_fallback_items(payload)
-    _canonicalize_tools(payload)
     for key in _UNSUPPORTED_UPSTREAM_FIELDS:
         payload.pop(key, None)
     return payload
@@ -828,15 +833,9 @@ def _is_poisoned_local_compact_fallback_message(item: JsonValue) -> bool:
     return False
 
 
-def _canonicalize_tools(payload: MutableJsonObject) -> None:
-    tools = payload.get("tools")
-    if not is_json_list(tools):
-        return
-    tool_list = tools
-    if not tool_list:
-        return
-    sorted_tools = sorted(tool_list, key=_tool_sort_key)
-    payload["tools"] = [_sort_keys_recursive(t) for t in sorted_tools]
+def _canonicalize_tools_for_hash(tools: list[JsonValue]) -> list[JsonValue]:
+    sorted_tools = sorted(tools, key=_tool_sort_key)
+    return [_sort_keys_recursive(tool) for tool in sorted_tools]
 
 
 def _tool_sort_key(tool: JsonValue) -> str:

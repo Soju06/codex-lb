@@ -8,3 +8,4 @@
 - [x] 6. Preserve unanchored status with a v2-bound forwarding signature and fail closed across mixed versions.
 - [x] 7. Own the complete pre-submit reservation handoff through every cancellation and early error.
 - [x] 8. Run focused, full-suite, lint, type, and strict OpenSpec validation.
+- [x] 9. Preserve legacy primary HMAC compatibility for explicitly anchored forwards during rolling upgrades.

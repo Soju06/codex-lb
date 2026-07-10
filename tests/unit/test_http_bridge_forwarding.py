@@ -126,6 +126,9 @@ def test_build_owner_forward_headers_uses_v2_signature_with_client_ip_header() -
         target_instance="instance-b",
         codex_session_affinity=True,
         downstream_turn_state="http_turn_123",
+        original_request_unanchored=True,
+        original_affinity_kind="session_header",
+        original_affinity_key="sid-123",
         client_ip="203.0.113.42",
     )
 
@@ -144,6 +147,34 @@ def test_build_owner_forward_headers_uses_v2_signature_with_client_ip_header() -
         context=context,
         include_client_ip=True,
         signature_version="2",
+    )
+
+
+def test_build_owner_forward_headers_keeps_anchored_primary_signature_legacy_compatible() -> None:
+    payload = _payload()
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=True,
+        downstream_turn_state="explicit_turn_state",
+        original_affinity_kind="turn_state_header",
+        original_affinity_key="explicit_turn_state",
+        client_ip="203.0.113.42",
+    )
+
+    headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
+
+    assert HTTP_BRIDGE_SIGNATURE_VERSION_HEADER not in headers
+    assert HTTP_BRIDGE_ORIGINAL_UNANCHORED_HEADER not in headers
+    assert headers[HTTP_BRIDGE_SIGNATURE_HEADER] == _bridge_forward_signature(
+        payload=payload,
+        context=context,
+        include_client_ip=False,
+    )
+    assert headers[HTTP_BRIDGE_CLIENT_IP_SIGNATURE_HEADER] == _bridge_forward_signature(
+        payload=payload,
+        context=context,
+        include_client_ip=True,
     )
 
 

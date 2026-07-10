@@ -2,7 +2,7 @@
 
 ### Requirement: Unanchored process-session concurrency uses independent bridge lanes
 
-When multiple Responses requests share a process-level session header but carry neither `previous_response_id` nor turn-state continuity, the service MUST NOT queue an independent request behind an active response-create gate. If the canonical bridge is still being created, reserved by another request before submit, already has a visible request, or belongs to a different model class, the service MUST create a server request-scoped bridge lane. The lane identity MUST NOT depend on a client-controlled request ID. The fork MUST leave the canonical bridge and its model metadata unchanged. Sequential idle requests of the same model class MAY keep reusing the canonical bridge. A pre-submit handoff reservation MUST protect its bridge from idle pruning and capacity eviction, and an aborted handoff MUST NOT leave its canonical bridge reserved. Owner forwarding MUST preserve whether the originating request was unanchored instead of treating a proxy-generated downstream turn-state as an explicit client anchor, and MUST fail closed when a mixed-version hop cannot authenticate that state. Durable aliases derived from the forked lane MUST retain hard owner and account continuity.
+When multiple Responses requests share a process-level session header but carry neither `previous_response_id` nor turn-state continuity, the service MUST NOT queue an independent request behind an active response-create gate. If the canonical bridge is still being created, reserved by another request before submit, already has a visible request, or belongs to a different model class, the service MUST create a server request-scoped bridge lane. The lane identity MUST NOT depend on a client-controlled request ID. The fork MUST leave the canonical bridge and its model metadata unchanged. Sequential idle requests of the same model class MAY keep reusing the canonical bridge. A pre-submit handoff reservation MUST protect its bridge from idle pruning and capacity eviction, and an aborted handoff MUST NOT leave its canonical bridge reserved. Owner forwarding MUST preserve whether the originating request was unanchored instead of treating a proxy-generated downstream turn-state as an explicit client anchor, and MUST fail closed when a mixed-version hop cannot authenticate that state. Explicitly anchored owner forwards MUST retain the legacy-compatible primary signature during rolling upgrades. Durable aliases derived from the forked lane MUST retain hard owner and account continuity.
 
 #### Scenario: Background requests do not block behind a foreground turn
 
@@ -40,6 +40,13 @@ When multiple Responses requests share a process-level session header but carry 
 - **WHEN** the signed unanchored boolean is changed, removed, or repacked into affinity fields, or either instance only supports the legacy signature
 - **THEN** the owner-forward hop fails closed
 - **AND** the request is not attached to the shared canonical response-create gate
+
+#### Scenario: Anchored forwarding remains rolling-upgrade compatible
+
+- **GIVEN** an owner-forward request carries explicit previous-response or turn-state continuity
+- **WHEN** the origin and owner run different bridge protocol versions
+- **THEN** the primary signature remains valid under the legacy contract
+- **AND** the anchored request can continue without weakening unanchored fail-closed behavior
 
 #### Scenario: Durable fork continuation remains owner-bound
 

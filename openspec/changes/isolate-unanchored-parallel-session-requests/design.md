@@ -34,14 +34,19 @@ also clears it on every pre-submit error or cancellation. Recovery paths claim
 the same lease before awaiting API-key admission. Idle pruning and capacity
 eviction both skip a session while this handoff lease is owned.
 
-Owner forwarding protocol v2 includes the unanchored boolean in the main HMAC
-for both true and false values. The owner still receives the generated
-downstream turn-state for response aliasing, but it removes that generated
-value from bridge lookup when the originating request was unanchored. A v2
-origin therefore cannot be downgraded by changing or stripping the boolean. A
-legacy unanchored forward fails closed on a v2 owner, while a v2 signature fails
+Unanchored owner forwarding uses protocol v2, whose main HMAC binds the
+unanchored boolean in both true and false forms. The owner still receives the
+generated downstream turn-state for response aliasing, but removes that value
+from bridge lookup when the originating request was unanchored. A v2 origin
+therefore cannot be downgraded by changing or stripping the boolean. A legacy
+unanchored forward fails closed on a v2 owner, while a v2 signature fails
 legacy validation on an old owner; mixed-version deployments never silently
 fall back to the shared canonical response-create gate.
+
+Explicitly anchored forwards retain the legacy-compatible primary HMAC (and
+the existing client-IP companion HMAC) so ordinary continuity traffic keeps
+working in both directions during a rolling upgrade. Only the newly introduced
+unanchored state requires the incompatible v2 primary signature.
 
 The v2 HMAC input uses a domain-separated canonical JSON object rather than the
 legacy delimiter-joined field list. This prevents signed v2 fields from being

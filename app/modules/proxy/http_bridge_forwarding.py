@@ -190,8 +190,10 @@ def build_owner_forward_headers(
     forwarded[HTTP_BRIDGE_ORIGIN_INSTANCE_HEADER] = context.origin_instance
     forwarded[HTTP_BRIDGE_TARGET_INSTANCE_HEADER] = context.target_instance
     forwarded[HTTP_BRIDGE_CODEX_AFFINITY_HEADER] = "1" if context.codex_session_affinity else "0"
-    forwarded[HTTP_BRIDGE_SIGNATURE_VERSION_HEADER] = _HTTP_BRIDGE_SIGNATURE_VERSION_V2
-    forwarded[HTTP_BRIDGE_ORIGINAL_UNANCHORED_HEADER] = "1" if context.original_request_unanchored else "0"
+    signature_version = _HTTP_BRIDGE_SIGNATURE_VERSION_V2 if context.original_request_unanchored else None
+    if signature_version is not None:
+        forwarded[HTTP_BRIDGE_SIGNATURE_VERSION_HEADER] = signature_version
+        forwarded[HTTP_BRIDGE_ORIGINAL_UNANCHORED_HEADER] = "1"
     if context.original_affinity_kind and context.original_affinity_key:
         forwarded[HTTP_BRIDGE_AFFINITY_KIND_HEADER] = context.original_affinity_kind
         forwarded[HTTP_BRIDGE_AFFINITY_KEY_HEADER] = context.original_affinity_key
@@ -201,7 +203,7 @@ def build_owner_forward_headers(
             payload=payload,
             context=context,
             include_client_ip=True,
-            signature_version=_HTTP_BRIDGE_SIGNATURE_VERSION_V2,
+            signature_version=signature_version,
         )
     if context.downstream_turn_state:
         forwarded["x-codex-turn-state"] = context.downstream_turn_state
@@ -213,7 +215,7 @@ def build_owner_forward_headers(
         payload=payload,
         context=context,
         include_client_ip=False,
-        signature_version=_HTTP_BRIDGE_SIGNATURE_VERSION_V2,
+        signature_version=signature_version,
     )
     return forwarded
 

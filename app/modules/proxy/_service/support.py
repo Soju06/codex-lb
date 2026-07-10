@@ -493,6 +493,7 @@ class _WebSocketContinuityState:
     last_completed_input_prefix_fingerprint: str | None = None
     last_pending_function_call_ids: list[str] = field(default_factory=list)
     responses_lite_model: str | None = None
+    responses_lite_response_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

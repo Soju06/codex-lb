@@ -1295,6 +1295,8 @@ class _WebSocketMixin:
             not body_uses_responses_lite
             and continuity_state is not None
             and continuity_state.responses_lite_model == responses_payload.model
+            and continuity_state.responses_lite_response_id is not None
+            and responses_payload.previous_response_id == continuity_state.responses_lite_response_id
             and _payload_has_responses_lite_websocket_marker(normalized_payload)
         )
         client_metadata = _facade()._response_create_client_metadata(

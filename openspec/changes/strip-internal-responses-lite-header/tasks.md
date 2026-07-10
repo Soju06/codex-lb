@@ -11,3 +11,4 @@
 - [x] 9. Preserve canonical Lite client metadata across HTTP-bridge prefix trimming and retries, with regression coverage.
 - [x] 10. Reject untrusted websocket Lite metadata while retaining same-model incremental Lite continuity.
 - [x] 11. Establish Lite continuity from accepted prewarms and cover empty and nonempty incremental reuse.
+- [x] 12. Require incremental Lite trust to reference the accepted Lite response via `previous_response_id`, keep non-Lite acceptances from clobbering recorded Lite continuity, and cover trusted and untrusted linkage paths.

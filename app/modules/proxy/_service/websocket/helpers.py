@@ -473,7 +473,14 @@ def _record_websocket_responses_lite_acceptance(
     # Codex can reuse an accepted ``generate=false`` prewarm response and send
     # only an empty or user-only input delta next. That frame no longer carries
     # ``additional_tools``, so the accepted prewarm must seed Lite continuity.
+    # Only Lite acceptances may update the single-slot state: a non-Lite
+    # acceptance must not clobber a previously accepted Lite continuity with
+    # ``None``. The accepted response id is recorded so trusted incremental
+    # continuity can require ``previous_response_id`` to reference it.
+    if request_state.responses_lite_model is None:
+        return
     continuity_state.responses_lite_model = request_state.responses_lite_model
+    continuity_state.responses_lite_response_id = request_state.response_id
 
 
 def _websocket_response_id(event: OpenAIEvent | None, payload: dict[str, JsonValue] | None) -> str | None:

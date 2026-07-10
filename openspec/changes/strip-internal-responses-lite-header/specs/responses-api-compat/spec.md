@@ -30,10 +30,15 @@ For a non-Lite HTTP body, the proxy MUST omit the synthesized HTTP header. A
 websocket marker on an incremental frame without the full Lite input prefix MAY
 remain only when the same request continuity state previously received
 `response.created` for a Lite request derived from `additional_tools` using the
-same effective upstream model. The effective model comparison MUST occur after
-alias normalization and API-key enforcement, and a merely prepared request MUST
-NOT establish or clear trusted Lite continuity. Trusted state MUST update in
-upstream request-acceptance order rather than terminal-event completion order.
+same effective upstream model, and the frame's `previous_response_id` references
+the response ID recorded by the most recent such Lite acceptance. A frame
+without a `previous_response_id`, or one referencing any other response, MUST
+NOT receive trusted Lite treatment. The effective model comparison MUST occur
+after alias normalization and API-key enforcement, and a merely prepared request
+MUST NOT establish or clear trusted Lite continuity. Trusted state MUST update
+in upstream request-acceptance order rather than terminal-event completion
+order, and acceptance of a non-Lite request MUST NOT clear previously recorded
+Lite continuity.
 An accepted `generate = false` prewarm derived from an `additional_tools` prefix
 MUST establish the same trusted continuity because a later request MAY reuse its
 response ID without repeating that prefix.
@@ -89,12 +94,19 @@ item.
 
 - **GIVEN** a websocket request received `response.created` after establishing
   Lite mode from an `additional_tools` prefix for its effective upstream model
-- **WHEN** a later same-model incremental frame contains the canonical marker
-  but omits the already-known prefix
+- **WHEN** a later same-model incremental frame contains the canonical marker,
+  omits the already-known prefix, and its `previous_response_id` references the
+  accepted Lite response
 - **THEN** the forwarded frame retains the canonical marker
 - **BUT WHEN** a request for another model supplies that marker without a Lite
   prefix or trusted same-model continuity
 - **THEN** the proxy strips the marker
+- **BUT WHEN** a same-model frame supplies that marker without a
+  `previous_response_id`, or with one referencing a response other than the
+  accepted Lite response
+- **THEN** the proxy strips the marker
+- **AND** the recorded Lite continuity remains available to later frames that
+  do reference the accepted Lite response
 
 #### Scenario: Accepted Lite prewarm authorizes incremental reuse
 

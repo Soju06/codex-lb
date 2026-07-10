@@ -2381,6 +2381,15 @@ class _HTTPBridgeMixin(
         session.closed = False
         session.last_upstream_close_code = None
         session.upstream_turn_state = _upstream_turn_state_from_socket(upstream) or session.upstream_turn_state
+        if account.id != old_account_id and session.durable_session_id is not None:
+            # A transparent account migration must update the durable owner for
+            # the original session-header key.  Otherwise the next client turn
+            # resurrects the stale account and silently undoes the migration.
+            await self._claim_durable_http_bridge_session(
+                session,
+                allow_takeover=True,
+                force_owner_epoch_advance=True,
+            )
         if restart_reader:
             session.upstream_reader = asyncio.create_task(self._relay_http_bridge_upstream_messages(session))
         _log_http_bridge_event(

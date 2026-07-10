@@ -24706,7 +24706,11 @@ async def test_reconnect_http_bridge_skips_extra_same_account_retry_after_keepal
         last_used_at=0.0,
         idle_ttl_seconds=30.0,
         last_upstream_close_code=1011,
+        durable_session_id="durable-keepalive",
+        durable_owner_epoch=1,
     )
+    claim_durable = AsyncMock()
+    monkeypatch.setattr(service, "_claim_durable_http_bridge_session", claim_durable)
 
     await service._reconnect_http_bridge_session(session, request_state=request_state)
 
@@ -24714,6 +24718,11 @@ async def test_reconnect_http_bridge_skips_extra_same_account_retry_after_keepal
     assert seen_account_ids == [None]
     assert session.account == account_b
     assert session.upstream is new_upstream
+    claim_durable.assert_awaited_once_with(
+        session,
+        allow_takeover=True,
+        force_owner_epoch_advance=True,
+    )
 
 
 @pytest.mark.asyncio

@@ -269,55 +269,51 @@ async def _iter_account_capacity_wait_sse(
         remaining_sleep_seconds -= chunk_seconds
 
 
-def _http_bridge_text_with_interrupted_tool_outputs(
+def _http_bridge_interrupted_tool_outputs_input(
     session: _HTTPBridgeSession,
     *,
-    request_state: _WebSocketRequestState,
-    text_data: str,
+    payload: ResponsesRequest,
     request_id: str,
-) -> str:
-    """Prepend synthetic interrupted tool outputs to an anchored bridge request.
+) -> list[JsonValue] | None:
+    """Return ``payload.input`` with synthetic interrupted tool outputs prepended.
 
     When the session's last completed response left tool-call items pending
     (the turn was interrupted before their outputs were sent) and the outgoing
     request anchors on that response id without supplying those outputs,
     upstream rejects it with ``No tool output found for ... call_``. Mirror
     the direct WebSocket route by injecting synthetic outputs of the matching
-    item type instead.
+    item type into the payload *before* it is prepared, so the slim/size
+    guard, the stored input context, and the usage budget all observe the
+    upstream-shaped input. Returns ``None`` when no injection is needed.
     """
     if not session.last_pending_tool_calls or session.last_completed_response_id is None:
-        return text_data
-    try:
-        payload = json.loads(text_data)
-    except (TypeError, ValueError):
-        return text_data
-    if not isinstance(payload, dict):
-        return text_data
-    if payload.get("previous_response_id") != session.last_completed_response_id:
-        return text_data
-    input_items = payload.get("input")
+        return None
+    if payload.previous_response_id != session.last_completed_response_id:
+        return None
+    input_items = payload.input
     if not isinstance(input_items, list):
-        return text_data
+        return None
+    input_item_list = cast(list[JsonValue], input_items)
     missing_call_ids = _missing_function_call_outputs_for_previous_response(
-        input_items,
+        input_item_list,
         pending_call_ids=list(session.last_pending_tool_calls),
     )
     if not missing_call_ids:
-        return text_data
-    payload["input"] = _inject_missing_interrupted_function_call_outputs(
-        input_items,
-        missing_call_ids=missing_call_ids,
-        pending_call_types=session.last_pending_tool_calls,
-    )
-    updated_text = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
-    request_state.request_text = updated_text
+        return None
     logger.warning(
         "http_bridge_interrupted_tool_outputs_injected request_id=%s previous_response_id=%s missing_call_count=%s",
         request_id,
         session.last_completed_response_id,
         len(missing_call_ids),
     )
-    return updated_text
+    return cast(
+        list[JsonValue],
+        _inject_missing_interrupted_function_call_outputs(
+            input_item_list,
+            missing_call_ids=missing_call_ids,
+            pending_call_types=session.last_pending_tool_calls,
+        ),
+    )
 
 
 class _HTTPBridgeStreamingMixin:
@@ -1097,6 +1093,10 @@ class _HTTPBridgeStreamingMixin:
         incoming_input = effective_payload.input
         stored_count = session.last_completed_input_count
         stored_fingerprint = session.last_completed_input_prefix_fingerprint
+        submit_payload = effective_payload
+        store_context_trim_applied = False
+        store_context_original_count = 0
+        store_context_original_fingerprint: str | None = None
         if (
             has_previous_response_id
             and stored_count > 0
@@ -1107,39 +1107,15 @@ class _HTTPBridgeStreamingMixin:
             incoming_input_list = cast(list[JsonValue], incoming_input)
             incoming_prefix_fingerprint = _fingerprint_input_items(incoming_input_list[:stored_count])
             if incoming_prefix_fingerprint == stored_fingerprint:
-                original_count = len(incoming_input_list)
-                trimmed_input = incoming_input_list[stored_count:]
-                trimmed_payload = effective_payload.model_copy(update={"input": trimmed_input})
-                previous_preferred_account_id = request_state.preferred_account_id
-                request_state, text_data = prepare_bridge_request(trimmed_payload)
-                request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
-                request_state.affinity_policy = affinity
-                if downstream_turn_state is not None:
-                    request_state.session_id = _normalize_session_id(downstream_turn_state)
-                request_state.transport = _REQUEST_TRANSPORT_HTTP
-                request_state.request_stage = _http_bridge_request_stage(
-                    headers=headers,
-                    payload=trimmed_payload,
-                    durable_lookup=durable_lookup,
-                )
-                request_state.preferred_account_id = previous_preferred_account_id
-                request_state.input_item_count = original_count
-                request_state.input_full_fingerprint = _fingerprint_input_items(incoming_input_list)
-                if proxy_injected_previous_response_id:
-                    request_state.proxy_injected_previous_response_id = True
-                    request_state.fresh_upstream_request_text = fresh_upstream_request_text
-                    # The trim branch only fires when the untrimmed payload
-                    # is a true full resend whose prefix exactly matches the
-                    # already-stored context, so the unanchored request text
-                    # is a safe fresh-turn replay target regardless of
-                    # whether the anchor came from the durable or
-                    # session-level injection path.
-                    request_state.fresh_upstream_request_is_retry_safe = True
+                store_context_trim_applied = True
+                store_context_original_count = len(incoming_input_list)
+                store_context_original_fingerprint = _fingerprint_input_items(incoming_input_list)
+                submit_payload = effective_payload.model_copy(update={"input": incoming_input_list[stored_count:]})
                 logger.info(
                     "store_context_input_trimmed request_id=%s original_items=%s trimmed_to=%s previous_response_id=%s",
                     request_id,
-                    original_count,
-                    len(trimmed_input),
+                    store_context_original_count,
+                    store_context_original_count - stored_count,
                     effective_payload.previous_response_id,
                 )
             else:
@@ -1151,12 +1127,53 @@ class _HTTPBridgeStreamingMixin:
                     stored_count,
                     effective_payload.previous_response_id,
                 )
-        text_data = _http_bridge_text_with_interrupted_tool_outputs(
+        injected_input_items = _http_bridge_interrupted_tool_outputs_input(
             session,
-            request_state=request_state,
-            text_data=text_data,
+            payload=submit_payload,
             request_id=request_id,
         )
+        if injected_input_items is not None:
+            submit_payload = submit_payload.model_copy(update={"input": injected_input_items})
+        if store_context_trim_applied or injected_input_items is not None:
+            # Re-prepare from the final upstream-shaped payload (post-trim,
+            # post-injection) so the serialized request text, the slim/size
+            # guard, the stored input context, and the usage budget all
+            # observe the input actually sent upstream.
+            previous_request_state = request_state
+            request_state, text_data = prepare_bridge_request(submit_payload)
+            request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
+            request_state.affinity_policy = affinity
+            if downstream_turn_state is not None:
+                request_state.session_id = _normalize_session_id(downstream_turn_state)
+            request_state.transport = _REQUEST_TRANSPORT_HTTP
+            request_state.request_stage = _http_bridge_request_stage(
+                headers=headers,
+                payload=submit_payload,
+                durable_lookup=durable_lookup,
+            )
+            request_state.preferred_account_id = previous_request_state.preferred_account_id
+            if store_context_trim_applied:
+                # Store the full incoming client input as the session context
+                # so the client's next full resend can prefix-match it.
+                request_state.input_item_count = store_context_original_count
+                request_state.input_full_fingerprint = store_context_original_fingerprint
+            elif previous_response_trimmed_input_count is not None:
+                request_state.input_item_count = previous_response_trimmed_input_count
+                request_state.input_full_fingerprint = previous_response_trimmed_input_fingerprint
+            if proxy_injected_previous_response_id:
+                request_state.proxy_injected_previous_response_id = True
+                request_state.fresh_upstream_request_text = fresh_upstream_request_text
+                # The trim branch only fires when the untrimmed payload
+                # is a true full resend whose prefix exactly matches the
+                # already-stored context, so the unanchored request text
+                # is a safe fresh-turn replay target regardless of
+                # whether the anchor came from the durable or
+                # session-level injection path. Injection-only re-prepares
+                # keep the replay-safety decision made when the anchor was
+                # injected.
+                request_state.fresh_upstream_request_is_retry_safe = (
+                    True if store_context_trim_applied else previous_request_state.fresh_upstream_request_is_retry_safe
+                )
         session_events: AsyncGenerator[str, None] = self._stream_http_bridge_session_events(
             session,
             request_state=request_state,

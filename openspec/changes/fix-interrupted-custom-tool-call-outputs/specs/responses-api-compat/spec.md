@@ -22,6 +22,16 @@ The service MUST track tool-call items completed by a streamed response that may
 - **WHEN** the anchored follow-up input already contains a `function_call_output`, `custom_tool_call_output`, or `apply_patch_call_output` item for a pending call id
 - **THEN** the service does not inject a synthetic output for that call id
 
+#### Scenario: injected bridge outputs stay subject to the request size guard
+- **GIVEN** an HTTP bridge follow-up whose serialized `response.create` is close to the upstream byte limit
+- **WHEN** synthetic interrupted outputs are injected
+- **THEN** the service prepares the upstream request from the injected payload so the `response.create` slim/size guard runs against the bytes actually sent upstream
+- **AND** an over-limit injected request is rejected locally with `payload_too_large` instead of being forwarded upstream
+
+#### Scenario: stored input context reflects the injected upstream input
+- **WHEN** an HTTP bridge follow-up gains synthetic interrupted outputs
+- **THEN** the input item count, input fingerprint, and request usage budget recorded for the request are computed from the injected upstream-shaped input, so later full-resend/anchor comparisons on the same bridge session match what upstream actually stored
+
 ### Requirement: Missing-tool-output classification covers all tool call variants
 The service MUST classify an upstream `invalid_request_error` with `param=input` whose message starts with `No tool output found for function call call_`, `No tool output found for custom tool call call_`, or `No tool output found for apply patch call call_` as a missing-tool-output continuity error, so the existing masking and retry recovery paths engage instead of forwarding the raw upstream 400 downstream.
 

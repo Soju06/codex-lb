@@ -342,6 +342,117 @@ async def test_durable_response_fence_rejection_rolls_back_local_alias(
 
 
 @pytest.mark.asyncio
+async def test_durable_alias_fence_rejection_rolls_back_after_same_session_epoch_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session()
+    session.durable_session_id = "durable-session"
+    session.durable_owner_epoch = 3
+    service._http_bridge_sessions[session.key] = session
+
+    async def reject_turn_state(**_kwargs: Any) -> bool:
+        session.durable_owner_epoch = 4
+        return False
+
+    async def reject_previous_response(**_kwargs: Any) -> bool:
+        session.durable_owner_epoch = 5
+        return False
+
+    service._durable_bridge = SimpleNamespace(
+        register_turn_state=reject_turn_state,
+        register_previous_response_id=reject_previous_response,
+    )
+    monkeypatch.setattr(http_bridge_helpers_module, "get_settings", _make_app_settings)
+
+    await service._register_http_bridge_turn_state(session, "turn-rejected-after-refresh")
+    await service._register_http_bridge_previous_response_id(session, "resp-rejected-after-refresh")
+
+    turn_alias_key = proxy_service._http_bridge_turn_state_alias_key(
+        "turn-rejected-after-refresh", session.key.api_key_id
+    )
+    response_alias_key = proxy_service._http_bridge_previous_response_alias_key(
+        "resp-rejected-after-refresh", session.key.api_key_id
+    )
+    assert "turn-rejected-after-refresh" not in session.downstream_turn_state_aliases
+    assert session.downstream_turn_state is None
+    assert turn_alias_key not in service._http_bridge_turn_state_index
+    assert "resp-rejected-after-refresh" not in session.previous_response_ids
+    assert response_alias_key not in service._http_bridge_previous_response_index
+
+
+@pytest.mark.asyncio
+async def test_stale_turn_state_rejection_preserves_newer_same_session_registration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session()
+    session.durable_session_id = "durable-session"
+    session.durable_owner_epoch = 3
+    service._http_bridge_sessions[session.key] = session
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+
+    async def register_turn_state(*, owner_epoch: int, **_kwargs: Any) -> bool:
+        if owner_epoch == 3:
+            first_started.set()
+            await release_first.wait()
+            return False
+        assert owner_epoch == 4
+        return True
+
+    service._durable_bridge = SimpleNamespace(register_turn_state=register_turn_state)
+    monkeypatch.setattr(http_bridge_helpers_module, "get_settings", _make_app_settings)
+
+    stale_registration = asyncio.create_task(service._register_http_bridge_turn_state(session, "turn-race"))
+    await first_started.wait()
+    session.durable_owner_epoch = 4
+    await service._register_http_bridge_turn_state(session, "turn-race")
+    release_first.set()
+    await stale_registration
+
+    alias_key = proxy_service._http_bridge_turn_state_alias_key("turn-race", session.key.api_key_id)
+    assert "turn-race" in session.downstream_turn_state_aliases
+    assert session.downstream_turn_state == "turn-race"
+    assert service._http_bridge_turn_state_index[alias_key] == session.key
+
+
+@pytest.mark.asyncio
+async def test_stale_response_rejection_preserves_newer_same_session_registration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session()
+    session.durable_session_id = "durable-session"
+    session.durable_owner_epoch = 3
+    service._http_bridge_sessions[session.key] = session
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+
+    async def register_previous_response_id(*, owner_epoch: int, **_kwargs: Any) -> bool:
+        if owner_epoch == 3:
+            first_started.set()
+            await release_first.wait()
+            return False
+        assert owner_epoch == 4
+        return True
+
+    service._durable_bridge = SimpleNamespace(register_previous_response_id=register_previous_response_id)
+    monkeypatch.setattr(http_bridge_helpers_module, "get_settings", _make_app_settings)
+
+    stale_registration = asyncio.create_task(service._register_http_bridge_previous_response_id(session, "resp-race"))
+    await first_started.wait()
+    session.durable_owner_epoch = 4
+    await service._register_http_bridge_previous_response_id(session, "resp-race")
+    release_first.set()
+    await stale_registration
+
+    alias_key = proxy_service._http_bridge_previous_response_alias_key("resp-race", session.key.api_key_id)
+    assert "resp-race" in session.previous_response_ids
+    assert service._http_bridge_previous_response_index[alias_key] == session.key
+
+
+@pytest.mark.asyncio
 async def test_durable_alias_fence_rejection_preserves_new_local_generation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -109,6 +109,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _record_bridge_reattach,
     _refresh_reused_http_bridge_session_with_handoff,
     _reserve_http_bridge_unanchored_handoff,
+    _track_alias_registration,
 )
 from app.modules.proxy._service.http_bridge.owner_forwarding import _HTTPBridgeOwnerForwardingMixin
 from app.modules.proxy._service.http_bridge.protocol import _HTTPBridgeServiceProtocol
@@ -1626,6 +1627,7 @@ class _HTTPBridgeMixin(
         async with self._http_bridge_lock:
             if session.closed:
                 return
+            registration_generation = _track_alias_registration(session, turn_state, turn_state=True)
             session.downstream_turn_state_aliases.add(turn_state)
             if session.downstream_turn_state is None:
                 session.downstream_turn_state = turn_state
@@ -1638,6 +1640,7 @@ class _HTTPBridgeMixin(
                 self,
                 session,
                 turn_state=turn_state,
+                registration_generation=registration_generation,
                 instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
                 lease_ttl_seconds=_http_bridge_durable_lease_ttl_seconds(),
             )
@@ -1662,6 +1665,7 @@ class _HTTPBridgeMixin(
             ):
                 return
             alias_key = _http_bridge_previous_response_alias_key(stripped_response_id, session.key.api_key_id)
+            registration_generation = _track_alias_registration(session, stripped_response_id, turn_state=False)
             self._http_bridge_previous_response_index[alias_key] = session.key
             session.previous_response_ids.add(stripped_response_id)
         if session.durable_session_id is not None and session.durable_owner_epoch is not None:
@@ -1669,6 +1673,7 @@ class _HTTPBridgeMixin(
                 self,
                 session,
                 response_id=stripped_response_id,
+                registration_generation=registration_generation,
                 input_item_count=input_item_count,
                 input_full_fingerprint=input_full_fingerprint,
                 instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
@@ -1716,6 +1721,7 @@ class _HTTPBridgeMixin(
             if self._http_bridge_turn_state_index.get(alias_key) == session.key:
                 self._http_bridge_turn_state_index.pop(alias_key, None)
         session.downstream_turn_state_aliases.clear()
+        getattr(session, "turn_state_alias_registration_generations", {}).clear()
 
     def _unregister_http_bridge_previous_response_ids_locked(self, session: "_HTTPBridgeSession") -> None:
         response_ids = tuple(session.previous_response_ids)
@@ -1731,6 +1737,7 @@ class _HTTPBridgeMixin(
             if self._http_bridge_previous_response_index.get(alias_key) == session.key:
                 self._http_bridge_previous_response_index.pop(alias_key, None)
         session.previous_response_ids.clear()
+        getattr(session, "previous_response_alias_registration_generations", {}).clear()
 
     def _promote_http_bridge_session_to_codex_affinity(
         self,

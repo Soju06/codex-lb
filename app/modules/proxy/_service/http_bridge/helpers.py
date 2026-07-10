@@ -1041,11 +1041,24 @@ async def _release_http_bridge_unanchored_handoffs_for_request(
             _release_http_bridge_unanchored_handoff(session, request_scope_id=request_scope_id)
 
 
+def _track_alias_registration(session: _HTTPBridgeSession, alias: str, *, turn_state: bool) -> int:
+    session.alias_registration_generation += 1
+    generation = session.alias_registration_generation
+    registrations = (
+        session.turn_state_alias_registration_generations
+        if turn_state
+        else session.previous_response_alias_registration_generations
+    )
+    registrations[alias] = generation
+    return generation
+
+
 async def _persist_http_bridge_turn_state_alias(
     service: _HTTPBridgeServiceProtocol,
     session: _HTTPBridgeSession,
     *,
     turn_state: str,
+    registration_generation: int,
     instance_id: str,
     lease_ttl_seconds: float,
 ) -> None:
@@ -1066,8 +1079,9 @@ async def _persist_http_bridge_turn_state_alias(
         return
 
     async with service._http_bridge_lock:
-        if session.durable_owner_epoch != owner_epoch:
+        if session.turn_state_alias_registration_generations.get(turn_state) != registration_generation:
             return
+        session.turn_state_alias_registration_generations.pop(turn_state, None)
         session.downstream_turn_state_aliases.discard(turn_state)
         if session.downstream_turn_state == turn_state:
             session.downstream_turn_state = None
@@ -1087,6 +1101,7 @@ async def _persist_http_bridge_previous_response_alias(
     session: _HTTPBridgeSession,
     *,
     response_id: str,
+    registration_generation: int,
     input_item_count: int | None,
     input_full_fingerprint: str | None,
     instance_id: str,
@@ -1111,8 +1126,9 @@ async def _persist_http_bridge_previous_response_alias(
         return
 
     async with service._http_bridge_lock:
-        if session.durable_owner_epoch != owner_epoch:
+        if session.previous_response_alias_registration_generations.get(response_id) != registration_generation:
             return
+        session.previous_response_alias_registration_generations.pop(response_id, None)
         session.previous_response_ids.discard(response_id)
         alias_key = _http_bridge_previous_response_alias_key(response_id, session.key.api_key_id)
         current_session = service._http_bridge_sessions.get(session.key)

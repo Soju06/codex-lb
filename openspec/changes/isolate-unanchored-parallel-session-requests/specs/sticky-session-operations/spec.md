@@ -90,10 +90,10 @@ When multiple Responses requests share a process-level session header but carry 
 - **WHEN** that value is presented by a legacy-signed owner forward
 - **THEN** the owner rejects it with `bridge_forward_upgrade_required`
 
-#### Scenario: Stale owners cannot register proof aliases after takeover
+#### Scenario: Stale owners cannot register continuity aliases after takeover
 
 - **GIVEN** durable ownership advanced to a new owner epoch
-- **WHEN** the stale owner attempts to register a turn-state alias with its old epoch
+- **WHEN** the stale owner attempts to register a turn-state or previous-response alias with its old epoch
 - **THEN** alias registration writes nothing
 - **AND** the stale value cannot satisfy legacy anchor proof
 

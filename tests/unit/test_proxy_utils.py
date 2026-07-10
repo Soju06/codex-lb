@@ -327,6 +327,20 @@ def test_request_log_reasoning_effort_preserves_codex_ultra_metadata():
     assert payload.reasoning.effort == "max"
 
 
+def test_request_log_reasoning_effort_accepts_structured_codex_ultra_metadata():
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "",
+            "input": [],
+            "reasoning": {"effort": "max"},
+        }
+    )
+    client_metadata: dict[str, JsonValue] = {"x-codex-turn-metadata": {"reasoning_effort": "ultra"}}
+
+    assert proxy_http_bridge_request_submit._request_log_reasoning_effort(payload, client_metadata) == "ultra"
+
+
 @pytest.mark.parametrize(
     "client_metadata",
     [

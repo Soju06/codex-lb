@@ -231,11 +231,14 @@ def _request_log_reasoning_effort(
     if upstream_effort != "max" or not client_metadata:
         return upstream_effort
     raw_turn_metadata = client_metadata.get("x-codex-turn-metadata")
-    if not isinstance(raw_turn_metadata, str):
-        return upstream_effort
-    try:
-        turn_metadata = json.loads(raw_turn_metadata)
-    except json.JSONDecodeError:
+    if isinstance(raw_turn_metadata, str):
+        try:
+            turn_metadata = json.loads(raw_turn_metadata)
+        except json.JSONDecodeError:
+            return upstream_effort
+    elif isinstance(raw_turn_metadata, dict):
+        turn_metadata = raw_turn_metadata
+    else:
         return upstream_effort
     if not isinstance(turn_metadata, dict):
         return upstream_effort

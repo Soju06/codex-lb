@@ -631,6 +631,34 @@ def test_responses_input_additional_tools_item_is_preserved(request_type):
     assert request.to_payload()["input"] == request.input
 
 
+@pytest.mark.parametrize("request_type", [ResponsesRequest, ResponsesCompactRequest])
+def test_responses_input_non_message_developer_item_is_preserved(request_type):
+    # Synthetic future item type: developer role, no content — must survive
+    # normalization untouched even without the Lite additional_tools prefix.
+    developer_state = {
+        "type": "developer_state",
+        "role": "developer",
+        "state": {"budget_remaining": 3},
+    }
+    payload = {
+        "model": "gpt-5.1",
+        "input": [
+            developer_state,
+            {"type": "message", "role": "system", "content": "sys"},
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+        ],
+    }
+
+    request = request_type.model_validate(payload)
+
+    assert request.instructions == "sys"
+    assert request.input == [
+        developer_state,
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+    ]
+    assert request.to_payload()["input"] == request.input
+
+
 def test_responses_input_system_message_keeps_user_text_parts():
     payload = {
         "model": "gpt-5.1",

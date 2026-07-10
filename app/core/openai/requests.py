@@ -305,6 +305,15 @@ def _normalize_responses_input_instructions(data: JsonValue) -> JsonValue:
         if role not in ("system", "developer"):
             input_items.append(item)
             continue
+        # Only lift actual instruction messages. A typed non-message item that
+        # carries a system/developer role (like the Lite ``additional_tools``
+        # bundle, or any future upstream item type without ``content``) must
+        # keep its position and wire shape — folding it into ``instructions``
+        # silently drops it, the hazard class behind #1157.
+        item_type = item_mapping.get("type")
+        if item_type is not None and item_type != "message":
+            input_items.append(item)
+            continue
         instruction_text, preserved_content = _split_responses_instruction_item_content(item_mapping)
         if instruction_text:
             instruction_parts.append(instruction_text)

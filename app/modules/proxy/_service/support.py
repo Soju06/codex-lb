@@ -27,6 +27,7 @@ from app.modules.api_keys.service import (
 )
 from app.modules.proxy.affinity import _AffinityPolicy
 from app.modules.proxy.load_balancer import AccountLease, AccountSelection
+from app.modules.proxy.tool_call_dedupe import ToolCallDedupeKey
 from app.modules.proxy.work_admission import AdmissionLease
 
 logger = logging.getLogger(__name__)
@@ -385,7 +386,7 @@ class _WebSocketRequestState:
     suppressed_duplicate_tool_call: bool = False
     pending_function_call_ids: list[str] = field(default_factory=list)
     pending_tool_call_types: dict[str, str] = field(default_factory=dict)
-    seen_tool_call_keys: dict[tuple[str, str, str | None, str | None, str], None] = field(default_factory=dict)
+    seen_tool_call_keys: dict[ToolCallDedupeKey, None] = field(default_factory=dict)
     input_item_count: int = 0
     input_full_fingerprint: str | None = None
     api_key_reservation_last_touch_at: float = field(default_factory=time.monotonic)
@@ -466,7 +467,7 @@ class _HTTPBridgeSession:
     closed: bool = False
     account_lease: AccountLease | None = None
     upstream_close_attempted: bool = False
-    seen_tool_call_keys: dict[tuple[str, str, str | None, str | None, str], None] = field(default_factory=dict)
+    seen_tool_call_keys: dict[ToolCallDedupeKey, None] = field(default_factory=dict)
     upstream_proxy_route_mode: str | None = None
     upstream_proxy_pool_id: str | None = None
     upstream_proxy_endpoint_id: str | None = None
@@ -518,7 +519,7 @@ class _WebSocketUpstreamControl:
     suppress_downstream_event: bool = False
     replay_request_state: _WebSocketRequestState | None = None
     downstream_texts: list[str] | None = None
-    seen_tool_call_keys: dict[tuple[str, str, str | None, str | None, str], None] = field(default_factory=dict)
+    seen_tool_call_keys: dict[ToolCallDedupeKey, None] = field(default_factory=dict)
 
 
 @dataclass(slots=True)

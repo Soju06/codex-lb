@@ -3884,13 +3884,22 @@ async def test_v1_responses_http_bridge_reuses_upstream_websocket_and_preserves_
             "x-codex-installation-id": "client-spoofed-installation-id",
         },
     }
-    first = await async_client.post("/v1/responses", json=payload)
+    first = await async_client.post(
+        "/v1/responses",
+        json=payload,
+        headers={"x-codex-window-id": "parent-thread:0"},
+    )
     assert first.status_code == 200
     first_body = first.json()
 
     second = await async_client.post(
         "/v1/responses",
         json={**payload, "previous_response_id": first_body["id"]},
+        headers={
+            "x-openai-subagent": "collab_spawn",
+            "x-codex-parent-thread-id": "parent-thread",
+            "x-codex-window-id": "child-thread:0",
+        },
     )
     assert second.status_code == 200
     second_body = second.json()
@@ -3903,7 +3912,14 @@ async def test_v1_responses_http_bridge_reuses_upstream_websocket_and_preserves_
     assert first_upstream_payload["client_metadata"]["keep"] == "yes"
     assert first_upstream_payload["client_metadata"]["x-codex-installation-id"] == account.codex_installation_id
     assert first_upstream_payload["client_metadata"]["x-codex-installation-id"] != "client-spoofed-installation-id"
-    assert json.loads(fake_upstream.sent_text[1])["previous_response_id"] == "resp_bridge_1"
+    assert first_upstream_payload["client_metadata"]["x-codex-window-id"] == "parent-thread:0"
+    assert "x-openai-subagent" not in first_upstream_payload["client_metadata"]
+    assert "x-codex-parent-thread-id" not in first_upstream_payload["client_metadata"]
+    second_upstream_payload = json.loads(fake_upstream.sent_text[1])
+    assert second_upstream_payload["previous_response_id"] == "resp_bridge_1"
+    assert second_upstream_payload["client_metadata"]["x-openai-subagent"] == "collab_spawn"
+    assert second_upstream_payload["client_metadata"]["x-codex-parent-thread-id"] == "parent-thread"
+    assert second_upstream_payload["client_metadata"]["x-codex-window-id"] == "child-thread:0"
 
 
 @pytest.mark.asyncio

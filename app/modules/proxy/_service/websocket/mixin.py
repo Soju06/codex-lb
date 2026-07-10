@@ -3152,11 +3152,19 @@ class _WebSocketMixin:
                 payload=payload,
                 has_other_pending_requests=has_other_pending_requests,
             )
+        fresh_owner_failover = bool(
+            retry_error_code in _facade()._WEBSOCKET_TRANSPARENT_REPLAY_ERROR_CODES
+            and request_state.previous_response_id is not None
+            and request_state.preferred_account_id is not None
+            and request_state.fresh_upstream_request_is_retry_safe
+            and request_state.fresh_upstream_request_text
+        )
         if (
             retry_error_code in _facade()._WEBSOCKET_TRANSPARENT_REPLAY_ERROR_CODES
             and request_state.previous_response_id is not None
             and request_state.preferred_account_id is not None
             and not retry_safe_previous_response_not_found
+            and not fresh_owner_failover
         ):
             await proxy._handle_stream_error(
                 account,
@@ -3192,8 +3200,15 @@ class _WebSocketMixin:
                     upstream_control.suppress_downstream_event = True
                     upstream_control.replay_request_state = request_state
             else:
+                if fresh_owner_failover:
+                    fresh_owner_failover = _prepare_websocket_request_state_for_owner_failover(
+                        request_state,
+                        owner_account_id=account.id,
+                        exclude_account_ids=request_state.excluded_account_ids,
+                    )
                 upstream_control.reconnect_requested = True
-                request_state.replay_count += 1
+                if not fresh_owner_failover:
+                    request_state.replay_count += 1
                 request_state.awaiting_response_created = True
                 request_state.response_id = None
                 _clear_websocket_request_error_overrides(request_state)

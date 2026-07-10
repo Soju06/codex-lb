@@ -11390,6 +11390,62 @@ async def test_websocket_keeps_previous_response_pinned_security_work_error(monk
 
 
 @pytest.mark.asyncio
+async def test_websocket_owner_error_replays_validated_full_resend_on_security_account(monkeypatch):
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    handle_stream_error = AsyncMock()
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    account = _make_account("acc_ws_owner_full_resend")
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_owner_full_resend",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        awaiting_response_created=True,
+        request_text='{"type":"response.create","previous_response_id":"resp_anchor","input":[]}',
+        previous_response_id="resp_anchor",
+        preferred_account_id=account.id,
+        fresh_upstream_request_text='{"type":"response.create","input":[]}',
+        fresh_upstream_request_is_retry_safe=True,
+    )
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    payload = {
+        "type": "response.failed",
+        "response": {
+            "status": "failed",
+            "error": {
+                "code": "usage_limit_reached",
+                "type": "usage_limit_reached",
+                "message": "The usage limit has been reached",
+            },
+        },
+    }
+
+    await service._process_upstream_websocket_text(
+        json.dumps(payload, separators=(",", ":")),
+        account=account,
+        account_id_value=account.id,
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=upstream_control,
+        response_create_gate=asyncio.Semaphore(1),
+    )
+
+    assert upstream_control.reconnect_requested is True
+    assert upstream_control.suppress_downstream_event is True
+    assert upstream_control.replay_request_state is request_state
+    assert request_state.previous_response_id is None
+    assert request_state.preferred_account_id is None
+    assert request_state.require_security_work_authorized is True
+    assert request_state.request_text == '{"type":"response.create","input":[]}'
+    assert request_state.excluded_account_ids == {account.id}
+    assert request_state.replay_count == 1
+    handle_stream_error.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_reports_missing_security_work_pool_before_original_warning(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))

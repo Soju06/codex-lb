@@ -373,9 +373,7 @@ def _prepare_websocket_request_state_for_owner_failover(
 ) -> bool:
     if request_state.file_required_preferred_account:
         return False
-    if not (
-        request_state.fresh_upstream_request_is_retry_safe and request_state.fresh_upstream_request_text
-    ):
+    if not (request_state.fresh_upstream_request_is_retry_safe and request_state.fresh_upstream_request_text):
         return False
     request_state.preferred_account_id = None
     request_state.require_security_work_authorized = True

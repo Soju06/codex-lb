@@ -17,6 +17,12 @@ After a request is classified as Responses Lite shaped, the service MUST preserv
 - **AND** any matching call or output present in the supplied input is retained with it
 - **AND** the service returns `responses_compact_input_too_large` instead of silently dropping the latest item when the required pair cannot fit
 
+#### Scenario: Reused call IDs keep only the required occurrence
+
+- **WHEN** an older tool call and a required state-tool call reuse the same call ID
+- **THEN** compact trimming retains the output matched to the required state-call occurrence
+- **AND** it does not retain an oversized historical output solely because its earlier call reused that ID
+
 #### Scenario: Final compact wire expansion is rejected locally
 
 - **WHEN** Unicode escaping, JSON array framing, or image inlining makes the final compact input exceed the upstream limit

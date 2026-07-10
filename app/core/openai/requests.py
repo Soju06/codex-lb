@@ -981,7 +981,6 @@ def validate_compact_input_wire_budget(payload: Mapping[str, JsonValue]) -> None
 
 def _compact_state_anchor_indices(input_value: list[JsonValue]) -> set[int]:
     preserved_indices: set[int] = set()
-    preserved_call_ids: set[str] = set()
     for index, item in enumerate(input_value):
         if not is_json_mapping(item):
             continue
@@ -996,21 +995,6 @@ def _compact_state_anchor_indices(input_value: list[JsonValue]) -> set[int]:
                     if developer_type is None or developer_type == "message":
                         preserved_indices.add(developer_index)
         if _compact_item_is_state_anchor(item_mapping):
-            preserved_indices.add(index)
-            call_id = item_mapping.get("call_id")
-            if isinstance(call_id, str) and call_id:
-                preserved_call_ids.add(call_id)
-
-    if not preserved_call_ids:
-        return preserved_indices
-    for index, item in enumerate(input_value):
-        if index in preserved_indices or not is_json_mapping(item):
-            continue
-        item_mapping = item
-        if item_mapping.get("type") != "function_call_output":
-            continue
-        call_id = item_mapping.get("call_id")
-        if isinstance(call_id, str) and call_id in preserved_call_ids:
             preserved_indices.add(index)
     return preserved_indices
 

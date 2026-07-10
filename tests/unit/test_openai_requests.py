@@ -1284,6 +1284,45 @@ def test_compact_trimming_preserves_plan_and_goal_tool_call_outputs():
     assert unrelated_output not in dumped_input
 
 
+def test_compact_state_anchor_matches_duplicate_call_id_by_occurrence():
+    historical_call = {
+        "type": "function_call",
+        "name": "exec",
+        "call_id": "call-reused",
+        "arguments": "{}",
+    }
+    historical_output = {
+        "type": "function_call_output",
+        "call_id": "call-reused",
+        "output": "historical " + "z" * 500_000,
+    }
+    state_call = {
+        "type": "function_call",
+        "name": "update_plan",
+        "call_id": "call-reused",
+        "arguments": "{}",
+    }
+    state_output = {
+        "type": "function_call_output",
+        "call_id": "call-reused",
+        "output": "Plan updated",
+    }
+    latest = {"role": "user", "content": "continue"}
+    payload = {
+        "model": "gpt-5.6-sol",
+        "instructions": "",
+        "input": [historical_call, historical_output, state_call, state_output, latest],
+    }
+
+    dumped_input = ResponsesCompactRequest.model_validate(payload).to_payload()["input"]
+
+    assert isinstance(dumped_input, list)
+    assert historical_output not in dumped_input
+    assert state_call in dumped_input
+    assert state_output in dumped_input
+    assert latest in dumped_input
+
+
 def test_compact_trimming_keeps_selected_tool_outputs_with_matching_calls():
     tool_call = {
         "type": "function_call",

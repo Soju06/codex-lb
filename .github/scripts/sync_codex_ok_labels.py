@@ -776,8 +776,7 @@ def authoritative_ci_workflow_run_id(
     workflow_runs = [
         item
         for item in check_runs
-        if github_actions_workflow_id(item) == workflow_id
-        and github_actions_workflow_run_id(item) is not None
+        if github_actions_workflow_id(item) == workflow_id and github_actions_workflow_run_id(item) is not None
     ]
     if not workflow_runs:
         return None

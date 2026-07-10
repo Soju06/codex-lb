@@ -1862,6 +1862,35 @@ class _HTTPBridgeStreamingMixin:
                     try:
                         event_block = await asyncio.wait_for(event_queue.get(), timeout=wait_timeout)
                     except asyncio.TimeoutError:
+                        response_created_timeout_seconds = float(
+                            getattr(
+                                settings,
+                                "http_responses_session_bridge_response_created_timeout_seconds",
+                                30.0,
+                            )
+                        )
+                        if (
+                            request_state.latency_response_created_ms is None
+                            and request_state.awaiting_response_created
+                            and _service_time().monotonic() - request_state.started_at
+                            >= response_created_timeout_seconds
+                        ):
+                            logger.warning(
+                                "HTTP bridge response.created timeout request_id=%s timeout_seconds=%s",
+                                request_state.request_id,
+                                response_created_timeout_seconds,
+                            )
+                            yield format_sse_event(
+                                cast(
+                                    Mapping[str, JsonValue],
+                                    response_failed_event(
+                                        "response_created_timeout",
+                                        "Upstream did not create a response within the startup window",
+                                        response_id=_websocket_downstream_response_id(request_state),
+                                    ),
+                                )
+                            )
+                            break
                         if request_state.account_capacity_waiting:
                             keepalive_count = 0
                             keepalive_sent = True

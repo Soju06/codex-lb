@@ -1633,6 +1633,41 @@ async def test_http_bridge_keepalive_counts_as_first_yield_before_late_response_
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_times_out_before_response_created(monkeypatch: pytest.MonkeyPatch) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    monkeypatch.setattr(service, "_detach_http_bridge_request", AsyncMock())
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: SimpleNamespace(
+            sse_keepalive_interval_seconds=0.001,
+            stream_idle_timeout_seconds=7200.0,
+            http_responses_session_bridge_response_created_timeout_seconds=0.002,
+        ),
+    )
+    monkeypatch.setattr(proxy_service, "_HTTP_BRIDGE_STARTUP_KEEPALIVE_GRACE_SECONDS", 0.001)
+    session = _make_bridge_session()
+    state = proxy_service._WebSocketRequestState(
+        request_id="req-created-timeout", model="gpt-5.6-sol", service_tier=None,
+        reasoning_effort=None, api_key_reservation=None, started_at=time.monotonic(),
+        event_queue=asyncio.Queue(), transport="http", awaiting_response_created=True,
+    )
+
+    async def fake_submit(*args: object, **kwargs: object) -> None:
+        session.pending_requests.append(state)
+
+    monkeypatch.setattr(service, "_submit_http_bridge_request", fake_submit)
+    stream = service._stream_http_bridge_session_events(
+        session, request_state=state, text_data="{}", queue_limit=8,
+        propagate_http_errors=True, downstream_turn_state=None,
+    )
+
+    block = await asyncio.wait_for(anext(stream), timeout=1.0)
+    payload = proxy_service.parse_sse_data_json(block)
+    assert payload["response"]["error"]["code"] == "response_created_timeout"
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_account_capacity_wait_sends_keepalive_instead_of_idle_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -15,6 +15,7 @@ import app.modules.proxy.service as proxy_module
 from app.core.auth import generate_unique_account_id
 from app.core.config.settings import Settings
 from app.core.openai.models import CompactResponsePayload
+from app.core.types import JsonValue
 from app.db.models import Account, DashboardSettings, RequestLog
 from app.db.session import SessionLocal
 from app.modules.proxy._service.streaming import retry as streaming_retry_module
@@ -172,6 +173,146 @@ async def test_proxy_responses_no_accounts(async_client):
     assert event["response"]["status"] == "failed"
     assert event["response"]["id"] == request_id
     assert event["response"]["error"]["code"] == "no_accounts"
+
+
+@pytest.mark.asyncio
+async def test_backend_responses_preserves_responses_lite_tools_and_outputs(async_client, monkeypatch):
+    raw_account_id = "acc_responses_lite_tools"
+    auth_json = _make_auth_json(raw_account_id, "responses-lite-tools@example.com")
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    additional_tools = {
+        "type": "additional_tools",
+        "role": "developer",
+        "tools": [{"type": "custom", "name": "shell"}],
+    }
+    custom_tool_call = {
+        "type": "custom_tool_call",
+        "call_id": "call_shell_1",
+        "name": "shell",
+        "input": "pwd",
+    }
+    custom_tool_output = {
+        "type": "custom_tool_call_output",
+        "call_id": "call_shell_1",
+        "output": "/repo",
+    }
+    seen_payload: dict[str, object] = {}
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
+        del headers, access_token, account_id, base_url, raise_for_status, kwargs
+        seen_payload.update(payload.to_payload())
+        yield (
+            'data: {"type":"response.completed","response":{"id":"resp_responses_lite_tools",'
+            '"object":"response","status":"completed","usage":{"input_tokens":2,"output_tokens":1}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    request_payload = {
+        "model": "gpt-5.6-sol",
+        "instructions": "",
+        "input": [
+            additional_tools,
+            {"type": "message", "role": "developer", "content": "use repository tools"},
+            custom_tool_call,
+            custom_tool_output,
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "inspect"}]},
+        ],
+        "reasoning": {"effort": "ultra"},
+        "stream": True,
+    }
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        json=request_payload,
+        headers={"x-openai-internal-codex-responses-lite": "untrusted"},
+    ) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    event = _extract_first_event(lines)
+    assert event["type"] == "response.completed"
+    assert seen_payload["instructions"] == ""
+    assert seen_payload["input"] == [
+        additional_tools,
+        {"type": "message", "role": "developer", "content": "use repository tools"},
+        custom_tool_call,
+        custom_tool_output,
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "inspect"}]},
+    ]
+    # Catalog-advertised ``ultra`` must be aliased to ``max`` on the wire,
+    # exactly like the reference Codex client (codex-rs core/src/client.rs
+    # ``reasoning_effort_for_request`` at rust-v0.144.1).
+    reasoning = cast("dict[str, JsonValue]", seen_payload["reasoning"])
+    assert reasoning["effort"] == "max"
+    # The forwarded payload must keep signaling Responses Lite: the upstream
+    # HTTP client derives the internal Lite header from the additional_tools
+    # input prefix that survived the round trip.
+    upstream_headers: dict[str, str] = {}
+    proxy_client_module._apply_responses_lite_http_header(
+        upstream_headers,
+        cast("Mapping[str, JsonValue]", seen_payload),
+    )
+    assert upstream_headers == {proxy_client_module.CODEX_RESPONSES_LITE_HEADER: "true"}
+
+
+@pytest.mark.asyncio
+async def test_backend_responses_preserves_non_message_developer_directive(async_client, monkeypatch):
+    raw_account_id = "acc_future_directive"
+    auth_json = _make_auth_json(raw_account_id, "future-directive@example.com")
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    developer_directive = {
+        "type": "future_directive",
+        "role": "developer",
+        "directive": {"mode": "strict", "budget": 3},
+        "reasoning_content": "directive-level reasoning",
+        "tool_calls": [{"id": "call_1", "name": "future_tool"}],
+    }
+    seen_payload: dict[str, object] = {}
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
+        del headers, access_token, account_id, base_url, raise_for_status, kwargs
+        seen_payload.update(payload.to_payload())
+        yield (
+            'data: {"type":"response.completed","response":{"id":"resp_future_directive",'
+            '"object":"response","status":"completed","usage":{"input_tokens":2,"output_tokens":1}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    request_payload = {
+        "model": "gpt-5.6-sol",
+        "input": [
+            developer_directive,
+            {"type": "message", "role": "developer", "content": "follow the directive"},
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+        ],
+        "stream": True,
+    }
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        json=request_payload,
+    ) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    event = _extract_first_event(lines)
+    assert event["type"] == "response.completed"
+    # The plain developer message is still hoisted into instructions, while the
+    # typed directive is forwarded upstream byte-identical (including keys the
+    # interleaved-reasoning sanitizer strips from message items).
+    assert seen_payload["instructions"] == "follow the directive"
+    assert seen_payload["input"] == [
+        developer_directive,
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+    ]
 
 
 @pytest.mark.asyncio

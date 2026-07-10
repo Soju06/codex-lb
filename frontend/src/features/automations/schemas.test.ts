@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   AutomationCreateRequestSchema,
   AutomationJobSchema,
+  AutomationReasoningEffortSchema,
   AutomationRunSchema,
 } from "@/features/automations/schemas";
 
@@ -65,6 +66,11 @@ describe("automations schemas", () => {
     });
 
     expect(parsed.accountIds).toEqual([]);
+  });
+
+  it("accepts extended GPT-5.6 reasoning efforts", () => {
+    expect(AutomationReasoningEffortSchema.parse("max")).toBe("max");
+    expect(AutomationReasoningEffortSchema.parse("ultra")).toBe("ultra");
   });
 
   it("rejects duplicate schedule days", () => {

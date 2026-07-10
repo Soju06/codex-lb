@@ -310,6 +310,7 @@ class _WebSocketRequestState:
     reasoning_effort: str | None
     api_key_reservation: ApiKeyUsageReservationData | None
     started_at: float
+    responses_lite_model: str | None = None
     latency_first_token_ms: int | None = None
     latency_response_created_ms: int | None = None
     latency_first_upstream_event_ms: int | None = None
@@ -356,6 +357,12 @@ class _WebSocketRequestState:
     # on, and dropping the anchor there would silently turn a continuation into
     # a context-free fresh turn.
     fresh_upstream_request_is_retry_safe: bool = False
+    # Responses-Lite model advertised by ``fresh_upstream_request_text``. A
+    # fresh replay built from a trusted marker-only frame has the reserved
+    # marker stripped, so swapping to the fresh body must also swap this onto
+    # ``responses_lite_model``; otherwise the replay's ``response.created``
+    # would be recorded as a Lite acceptance for a non-Lite upstream request.
+    fresh_upstream_request_responses_lite_model: str | None = None
     request_stage: str = "first_turn"
     preferred_account_id: str | None = None
     require_security_work_authorized: bool = False
@@ -377,6 +384,7 @@ class _WebSocketRequestState:
     suppressed_downstream_tool_call: bool = False
     suppressed_duplicate_tool_call: bool = False
     pending_function_call_ids: list[str] = field(default_factory=list)
+    pending_tool_call_types: dict[str, str] = field(default_factory=dict)
     seen_tool_call_keys: dict[tuple[str, str, str | None, str | None, str], None] = field(default_factory=dict)
     input_item_count: int = 0
     input_full_fingerprint: str | None = None
@@ -450,6 +458,7 @@ class _HTTPBridgeSession:
     last_completed_input_count: int = 0
     last_completed_response_id: str | None = None
     last_completed_input_prefix_fingerprint: str | None = None
+    last_pending_tool_calls: dict[str, str] = field(default_factory=dict)
     durable_session_id: str | None = None
     durable_owner_epoch: int | None = None
     upstream_reader: asyncio.Task[None] | None = None
@@ -491,6 +500,9 @@ class _WebSocketContinuityState:
     last_completed_response_id: str | None = None
     last_completed_input_prefix_fingerprint: str | None = None
     last_pending_function_call_ids: list[str] = field(default_factory=list)
+    last_pending_tool_call_types: dict[str, str] = field(default_factory=dict)
+    responses_lite_model: str | None = None
+    responses_lite_response_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

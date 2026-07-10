@@ -264,6 +264,24 @@ def test_provider_thinking_aliases_are_normalized():
     assert "enable_thinking" not in dumped
 
 
+def test_provider_thinking_string_alias_accepts_catalog_advertised_efforts():
+    # GPT-5.6 catalog entries advertise ``max`` and ``ultra``
+    # (codex-rs/models-manager/models.json at rust-v0.144.1); the string-form
+    # thinking alias must accept every catalog-advertised effort.
+    for effort in ("low", "medium", "high", "xhigh", "max", "ultra"):
+        payload = {
+            "model": "gpt-5.6-sol",
+            "instructions": "hi",
+            "input": [],
+            "thinking": effort,
+        }
+        request = ResponsesRequest.model_validate(payload)
+
+        dumped = request.to_payload()
+        assert dumped["reasoning"] == {"effort": effort}
+        assert "thinking" not in dumped
+
+
 def test_explicit_reasoning_wins_over_provider_thinking_aliases():
     payload = {
         "model": "gpt-5.1",
@@ -561,6 +579,143 @@ def test_responses_input_system_message_moves_to_instructions():
 
     assert request.instructions == "primary\nsys\ndev"
     assert request.input == [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}]
+
+
+@pytest.mark.parametrize("request_type", [ResponsesRequest, ResponsesCompactRequest])
+def test_responses_input_additional_tools_item_is_preserved(request_type):
+    additional_tools = {
+        "type": "additional_tools",
+        "role": "developer",
+        "tools": [
+            {
+                "type": "custom",
+                "name": "shell",
+                "description": "Run shell commands",
+                "format": {"type": "grammar", "syntax": "lark"},
+            }
+        ],
+    }
+    custom_tool_call = {
+        "type": "custom_tool_call",
+        "call_id": "call_shell_1",
+        "name": "shell",
+        "input": "pwd",
+    }
+    custom_tool_output = {
+        "type": "custom_tool_call_output",
+        "call_id": "call_shell_1",
+        "output": "/repo",
+    }
+    payload = {
+        "model": "gpt-5.6-sol",
+        "instructions": "",
+        "input": [
+            additional_tools,
+            {"type": "message", "role": "developer", "content": "dev"},
+            custom_tool_call,
+            custom_tool_output,
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "inspect"}]},
+        ],
+    }
+
+    request = request_type.model_validate(payload)
+
+    assert request.instructions == ""
+    assert request.input == [
+        additional_tools,
+        {"type": "message", "role": "developer", "content": "dev"},
+        custom_tool_call,
+        custom_tool_output,
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "inspect"}]},
+    ]
+    assert request.to_payload()["input"] == request.input
+
+
+@pytest.mark.parametrize("request_type", [ResponsesRequest, ResponsesCompactRequest])
+def test_responses_input_non_message_system_and_developer_items_are_preserved(request_type):
+    developer_directive = {
+        "type": "future_directive",
+        "role": "developer",
+        "directive": {"mode": "strict", "budget": 3},
+    }
+    system_directive = {
+        "type": "future_directive",
+        "role": "system",
+        "directive": {"mode": "audit"},
+    }
+    payload = {
+        "model": "gpt-5.1",
+        "input": [
+            developer_directive,
+            {"type": "message", "role": "developer", "content": "dev"},
+            system_directive,
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+        ],
+    }
+
+    request = request_type.model_validate(payload)
+
+    assert request.instructions == "dev"
+    assert request.input == [
+        developer_directive,
+        system_directive,
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+    ]
+    assert request.to_payload()["input"] == request.input
+
+
+@pytest.mark.parametrize("request_type", [ResponsesRequest, ResponsesCompactRequest])
+def test_responses_input_preserved_directive_keeps_reasoning_and_tool_call_keys(request_type):
+    developer_directive = {
+        "type": "future_directive",
+        "role": "developer",
+        "reasoning_content": "directive-level reasoning",
+        "reasoning_details": [{"type": "spec", "detail": "keep me"}],
+        "tool_calls": [{"id": "call_1", "name": "future_tool"}],
+        "function_call": {"name": "future_tool", "arguments": "{}"},
+        "content": [{"type": "reasoning", "text": "also keep me"}],
+    }
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "primary",
+        "input": [
+            developer_directive,
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+        ],
+    }
+
+    request = request_type.model_validate(payload)
+
+    assert request.input == [
+        developer_directive,
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+    ]
+    assert request.to_payload()["input"] == request.input
+
+
+@pytest.mark.parametrize("request_type", [ResponsesRequest, ResponsesCompactRequest])
+def test_responses_input_directive_only_request_defaults_instructions(request_type):
+    developer_directive = {
+        "type": "future_directive",
+        "role": "developer",
+        "directive": {"mode": "strict", "budget": 3},
+    }
+    payload = {
+        "model": "gpt-5.1",
+        "input": [
+            developer_directive,
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+        ],
+    }
+
+    request = request_type.model_validate(payload)
+
+    assert request.instructions == ""
+    assert request.input == [
+        developer_directive,
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+    ]
+    assert request.to_payload()["input"] == request.input
 
 
 def test_responses_input_system_message_keeps_user_text_parts():
@@ -865,6 +1020,46 @@ def test_compact_trims_oversized_input_by_estimated_tokens_with_head_tail_and_ma
     assert "codex-lb" not in marker_text
 
 
+def test_compact_trimming_preserves_oversized_responses_lite_prefix():
+    additional_tools = {
+        "type": "additional_tools",
+        "role": "developer",
+        "tools": [
+            {
+                "type": "custom",
+                "name": "shell",
+                "description": "x" * 60_000,
+                "format": {"type": "grammar", "syntax": "lark"},
+            }
+        ],
+    }
+    developer_instructions = {
+        "type": "message",
+        "role": "developer",
+        "content": "preserve these base instructions",
+    }
+    input_items = [
+        additional_tools,
+        developer_instructions,
+        {"role": "assistant", "content": "middle context " + "y" * 500_000},
+        {"role": "user", "content": "latest request"},
+    ]
+
+    request = ResponsesCompactRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "",
+            "input": input_items,
+        }
+    )
+
+    dumped_input = request.to_payload()["input"]
+    assert isinstance(dumped_input, list)
+    assert dumped_input[0:2] == [additional_tools, developer_instructions]
+    assert input_items[2] not in dumped_input
+    assert dumped_input[-1] == input_items[-1]
+
+
 def test_compact_trimming_drops_oversized_leading_item():
     input_items = [
         {"role": "assistant", "content": "x" * 500_000},
@@ -952,6 +1147,40 @@ def test_compact_trimming_preserves_codex_goal_context_anchor_from_middle():
     assert dumped_input[0] == input_items[0]
     assert goal_context in dumped_input
     assert dumped_input[-1] == input_items[-1]
+
+
+def test_compact_trimming_preserves_non_message_developer_directive_from_middle():
+    developer_directive = {
+        "type": "future_directive",
+        "role": "developer",
+        "directive": {"mode": "strict", "budget": 3},
+    }
+    input_items = [
+        {"role": "user", "content": "initial instructions"},
+        {"role": "assistant", "content": "x" * 300_000},
+        developer_directive,
+        # Large enough to exhaust the tail budget on its own, so the directive
+        # in the middle survives only if it is treated as a trim anchor.
+        {"role": "assistant", "content": "y" * 500_000},
+        {"role": "user", "content": "latest request"},
+    ]
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": input_items,
+    }
+
+    request = ResponsesCompactRequest.model_validate(payload)
+    dumped = request.to_payload()
+    dumped_input = dumped["input"]
+
+    assert isinstance(dumped_input, list)
+    assert dumped_input[0] == input_items[0]
+    assert developer_directive in dumped_input
+    assert dumped_input[-1] == input_items[-1]
+    # Trimming actually occurred: the oversized filler items were dropped.
+    assert input_items[1] not in dumped_input
+    assert input_items[3] not in dumped_input
 
 
 def test_compact_trimming_preserves_plan_and_goal_tool_call_outputs():

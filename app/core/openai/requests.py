@@ -268,9 +268,27 @@ def extract_input_image_file_references(input_value: JsonValue) -> list[InputIma
     return references
 
 
+def _is_preserved_non_message_directive(item: Mapping[str, JsonValue]) -> bool:
+    # Shared preservation rule: any system/developer-role input item whose type
+    # is present and not "message" must reach upstream byte-identical. It gates
+    # instruction hoisting, input sanitization, and compact trim anchoring.
+    if item.get("role") not in ("system", "developer"):
+        return False
+    item_type = item.get("type")
+    return item_type is not None and item_type != "message"
+
+
 def _sanitize_input_items(input_items: list[JsonValue]) -> list[JsonValue]:
     sanitized_input: list[JsonValue] = []
     for item in input_items:
+        item_mapping = _json_mapping_or_none(item)
+        if item_mapping is not None and _is_preserved_non_message_directive(item_mapping):
+            # Preserved directives are forwarded unchanged; the interleaved
+            # reasoning sanitizer targets assistant-message echo fields and
+            # must not strip keys such as tool_calls or reasoning_content
+            # from a typed directive.
+            sanitized_input.append(item)
+            continue
         sanitized_item = _sanitize_interleaved_reasoning_input_item(item)
         if sanitized_item is None:
             continue
@@ -284,6 +302,14 @@ def _normalize_responses_input_instructions(data: JsonValue) -> JsonValue:
     input_value = data.get("input")
     if not is_json_list(input_value):
         return data
+    # Codex deliberately places the Lite tool bundle and base instructions in
+    # the input prefix. Keep that wire shape intact instead of lifting its
+    # developer message into the top-level ``instructions`` field.
+    if any(
+        (item_mapping := _json_mapping_or_none(item)) is not None and item_mapping.get("type") == "additional_tools"
+        for item in input_value
+    ):
+        return data
 
     instruction_parts: list[str] = []
     input_items: list[JsonValue] = []
@@ -292,6 +318,18 @@ def _normalize_responses_input_instructions(data: JsonValue) -> JsonValue:
         item_mapping = _json_mapping_or_none(item)
         if item_mapping is None:
             input_items.append(item)
+            continue
+        # Only hoist actual message items (type omitted or "message"). Non-message
+        # typed system/developer items (e.g. the Codex responses-lite
+        # {"type": "additional_tools", "role": "developer", "tools": [...]} bundle, or
+        # any future typed item) carry no instruction content; hoisting used to drop
+        # them entirely, so pass them through untouched regardless of role.
+        if _is_preserved_non_message_directive(item_mapping):
+            input_items.append(item)
+            # Still counts as a normalization outcome: directive-only inputs
+            # must default top-level ``instructions`` (to "") so the request
+            # validates instead of failing on the required field.
+            changed = True
             continue
         role = item_mapping.get("role")
         if role not in ("system", "developer"):
@@ -868,6 +906,17 @@ def _compact_state_anchor_indices(input_value: list[JsonValue]) -> set[int]:
         if not is_json_mapping(item):
             continue
         item_mapping = item
+        if item_mapping.get("type") == "additional_tools":
+            preserved_indices.add(index)
+            developer_index = index + 1
+            if developer_index < len(input_value):
+                developer_item = input_value[developer_index]
+                if is_json_mapping(developer_item) and developer_item.get("role") == "developer":
+                    developer_type = developer_item.get("type")
+                    if developer_type is None or developer_type == "message":
+                        preserved_indices.add(developer_index)
+        if _is_preserved_non_message_directive(item_mapping):
+            preserved_indices.add(index)
         if _compact_item_is_state_anchor(item_mapping):
             preserved_indices.add(index)
             call_id = item_mapping.get("call_id")
@@ -1137,7 +1186,7 @@ def _normalize_thinking_alias(
         return {"effort": "medium"} if thinking else None
     if isinstance(thinking, str):
         normalized = thinking.strip().lower()
-        if normalized in {"low", "medium", "high", "xhigh"}:
+        if normalized in {"low", "medium", "high", "xhigh", "max", "ultra"}:
             return {"effort": normalized}
         if normalized in {"enabled", "true", "on"}:
             return {"effort": "medium"}

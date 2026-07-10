@@ -71,19 +71,32 @@ def _error_format(request: Request) -> str | None:
     return None
 
 
+# Codex-native aliases under /backend-api/codex map to the same route labels
+# as their /v1 counterparts so observability stays consistent across surfaces.
+_IMAGE_ROUTE_PATHS: dict[str, ImageRoute] = {
+    "/v1/images/generations": "generations",
+    "/backend-api/codex/images/generations": "generations",
+    "/v1/images/edits": "edits",
+    "/backend-api/codex/images/edits": "edits",
+}
+
+
 def _image_route_from_path(path: str) -> ImageRoute | None:
-    if path == "/v1/images/generations":
-        return "generations"
-    if path == "/v1/images/edits":
-        return "edits"
-    return None
+    return _IMAGE_ROUTE_PATHS.get(path)
+
+
+def _is_json_request(request: Request) -> bool:
+    content_type = request.headers.get("content-type", "")
+    return content_type.split(";", 1)[0].strip().lower() == "application/json"
 
 
 async def _image_request_model_and_stream(request: Request, route: ImageRoute) -> tuple[str | None, bool]:
     model: str | None = None
     stream = False
 
-    if route == "generations":
+    # Generations is always JSON; the codex edits alias also accepts a JSON
+    # payload (unlike the multipart /v1 edits surface).
+    if route == "generations" or _is_json_request(request):
         try:
             payload: Any = await request.json()
         except Exception:

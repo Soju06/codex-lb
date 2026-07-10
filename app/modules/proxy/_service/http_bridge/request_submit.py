@@ -247,6 +247,7 @@ class _HTTPBridgeRequestSubmitMixin:
         request_id: str | None = None,
         client_ip: str | None = None,
         enforce_openai_sdk_contract: bool = True,
+        preserve_responses_lite_client_metadata: bool = False,
     ) -> tuple[_WebSocketRequestState, str]:
         request_state, text_data = self._prepare_response_bridge_request_state(
             payload,
@@ -255,7 +256,11 @@ class _HTTPBridgeRequestSubmitMixin:
             include_type_field=True,
             attach_event_queue=True,
             transport=_REQUEST_TRANSPORT_HTTP,
-            client_metadata=_response_create_client_metadata(payload.to_payload(), headers=headers),
+            client_metadata=_response_create_client_metadata(
+                payload.to_payload(),
+                headers=headers,
+                preserve_existing_responses_lite=preserve_responses_lite_client_metadata,
+            ),
             headers=headers,
             session_id=_owner_lookup_session_id_from_headers(headers),
             request_log_id=request_id or get_request_id() or ensure_request_id(None),

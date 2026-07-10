@@ -6961,32 +6961,28 @@ async def test_v1_responses_http_bridge_forks_parallel_unanchored_session_reques
     foreground.queued_request_count = 1
     service._http_bridge_sessions[shared_key] = foreground
 
+    async def get_memory_session(request_id: str) -> proxy_module._HTTPBridgeSession:
+        request_id_token = set_request_id(request_id)
+        try:
+            return await service._get_or_create_http_bridge_session(
+                shared_key,
+                headers={"session_id": "shared-codex-process"},
+                affinity=proxy_module._AffinityPolicy(
+                    key="shared-codex-process",
+                    kind=proxy_module.StickySessionKind.CODEX_SESSION,
+                ),
+                api_key=None,
+                request_model="gpt-5.4-mini",
+                idle_ttl_seconds=120.0,
+                max_sessions=8,
+            )
+        finally:
+            reset_request_id(request_id_token)
+
     try:
         first_memory, second_memory = await asyncio.gather(
-            service._get_or_create_http_bridge_session(
-                shared_key,
-                headers={"session_id": "shared-codex-process"},
-                affinity=proxy_module._AffinityPolicy(
-                    key="shared-codex-process",
-                    kind=proxy_module.StickySessionKind.CODEX_SESSION,
-                ),
-                api_key=None,
-                request_model="gpt-5.4-mini",
-                idle_ttl_seconds=120.0,
-                max_sessions=8,
-            ),
-            service._get_or_create_http_bridge_session(
-                shared_key,
-                headers={"session_id": "shared-codex-process"},
-                affinity=proxy_module._AffinityPolicy(
-                    key="shared-codex-process",
-                    kind=proxy_module.StickySessionKind.CODEX_SESSION,
-                ),
-                api_key=None,
-                request_model="gpt-5.4-mini",
-                idle_ttl_seconds=120.0,
-                max_sessions=8,
-            ),
+            get_memory_session("memory-request-a"),
+            get_memory_session("memory-request-b"),
         )
 
         assert first_memory is not foreground

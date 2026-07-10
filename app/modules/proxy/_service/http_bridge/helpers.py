@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import sys
@@ -59,7 +58,7 @@ from app.core.openai.requests import (
 )
 from app.core.resilience.overload import local_overload_error
 from app.core.types import JsonValue
-from app.core.utils.request_id import get_request_id
+from app.core.utils.request_id import ensure_request_id, get_request_id
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
 from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import (
@@ -623,11 +622,9 @@ def _http_bridge_unanchored_parallel_fork_key(
     if reason is None:
         return None
 
-    task_identity = id(asyncio.current_task())
-    request_identity = get_request_id() or "internal"
     fork_key = _HTTPBridgeSessionKey(
         "internal_unanchored_parallel",
-        sha256(f"{request_identity}:{task_identity}".encode()).hexdigest(),
+        sha256(ensure_request_id().encode()).hexdigest(),
         key.api_key_id,
         strength="soft",
     )

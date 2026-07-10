@@ -17,12 +17,11 @@ An unanchored `session_header` request receives an
 - the canonical session has a visible queued or active request; or
 - the canonical idle session records a different model class.
 
-The internal key hashes the inbound HTTP request context together with the
-serving task identity and uses soft strength. Distinct concurrent requests
-therefore create distinct upstream websocket sessions, while a retry inside one
-HTTP request keeps a stable lane. The original bridge stays registered under
-the canonical session key and its model metadata is not changed by the forked
-request.
+The internal key hashes the inbound HTTP request ID and uses soft strength.
+Distinct concurrent requests therefore create distinct upstream websocket
+sessions, while a retry inside one HTTP request keeps a stable lane. The
+original bridge stays registered under the canonical session key and its model
+metadata is not changed by the forked request.
 
 ## Capacity and observability
 

@@ -135,6 +135,86 @@ def test_classify_check_state_ignores_stale_duplicate_that_finishes_late() -> No
     )
 
 
+def test_classify_check_state_ignores_unique_failure_from_superseded_ci_run() -> None:
+    module = load_sync_module()
+
+    check_runs = [
+        {
+            "name": "Tests (pytest, ${{ matrix.slice.name }})",
+            "status": "completed",
+            "conclusion": "failure",
+            "started_at": "2026-07-10T06:00:37Z",
+            "completed_at": "2026-07-10T06:00:37Z",
+            "details_url": "https://github.com/Soju06/codex-lb/actions/runs/100/job/1",
+        },
+        {
+            "name": "CI Required",
+            "status": "completed",
+            "conclusion": "failure",
+            "started_at": "2026-07-10T06:00:38Z",
+            "completed_at": "2026-07-10T06:00:41Z",
+            "details_url": "https://github.com/Soju06/codex-lb/actions/runs/100/job/2",
+        },
+        {
+            "name": "Tests (pytest, unit)",
+            "status": "completed",
+            "conclusion": "success",
+            "started_at": "2026-07-10T06:01:00Z",
+            "completed_at": "2026-07-10T06:05:00Z",
+            "details_url": "https://github.com/Soju06/codex-lb/actions/runs/200/job/3",
+        },
+        {
+            "name": "CI Required",
+            "status": "completed",
+            "conclusion": "success",
+            "started_at": "2026-07-10T06:09:01Z",
+            "completed_at": "2026-07-10T06:09:05Z",
+            "details_url": "https://github.com/Soju06/codex-lb/actions/runs/200/job/4",
+        },
+    ]
+
+    assert (
+        module.classify_check_state(
+            check_runs,
+            {"statuses": []},
+            required_check_names=frozenset({"CI Required", "Tests (pytest, unit)"}),
+        )
+        == "success"
+    )
+
+
+def test_classify_check_state_keeps_optional_failure_from_authoritative_ci_run() -> None:
+    module = load_sync_module()
+
+    check_runs = [
+        {
+            "name": "optional security scan",
+            "status": "completed",
+            "conclusion": "failure",
+            "started_at": "2026-07-10T06:09:00Z",
+            "completed_at": "2026-07-10T06:09:04Z",
+            "details_url": "https://github.com/Soju06/codex-lb/actions/runs/200/job/3",
+        },
+        {
+            "name": "CI Required",
+            "status": "completed",
+            "conclusion": "success",
+            "started_at": "2026-07-10T06:09:01Z",
+            "completed_at": "2026-07-10T06:09:05Z",
+            "details_url": "https://github.com/Soju06/codex-lb/actions/runs/200/job/4",
+        },
+    ]
+
+    assert (
+        module.classify_check_state(
+            check_runs,
+            {"statuses": []},
+            required_check_names=frozenset({"CI Required"}),
+        )
+        == "failure"
+    )
+
+
 def test_apply_decision_tolerates_github_app_write_denial(monkeypatch: pytest.MonkeyPatch) -> None:
     module = load_sync_module()
 

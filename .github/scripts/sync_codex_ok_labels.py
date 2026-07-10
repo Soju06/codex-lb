@@ -696,6 +696,15 @@ def classify_check_state(
     named_check_runs: dict[str, dict[str, Any]] = {}
     unnamed_check_runs: list[dict[str, Any]] = []
 
+    authoritative_ci_run = authoritative_ci_workflow_run_id(check_runs)
+    if authoritative_ci_run is not None:
+        check_runs = [
+            item
+            for item in check_runs
+            if item.get("name") in required_check_names
+            or github_actions_workflow_run_id(item) in {None, authoritative_ci_run}
+        ]
+
     for item in check_runs:
         name = item.get("name")
         if isinstance(name, str):
@@ -743,6 +752,22 @@ def check_run_recency_key(item: dict[str, Any]) -> tuple[str, str]:
         ),
         str(item.get("completed_at") or item.get("completedAt") or ""),
     )
+
+
+def github_actions_workflow_run_id(item: dict[str, Any]) -> str | None:
+    details_url = item.get("details_url") or item.get("detailsUrl")
+    if not isinstance(details_url, str):
+        return None
+    match = re.search(r"/actions/runs/(\d+)(?:/|$)", details_url)
+    return match.group(1) if match is not None else None
+
+
+def authoritative_ci_workflow_run_id(check_runs: list[dict[str, Any]]) -> str | None:
+    required_runs = [item for item in check_runs if item.get("name") == "CI Required"]
+    if not required_runs:
+        return None
+    latest_required = max(required_runs, key=check_run_recency_key)
+    return github_actions_workflow_run_id(latest_required)
 
 
 def commit_checks_state(repo: str, head_sha: str) -> str:

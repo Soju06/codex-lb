@@ -468,7 +468,6 @@ async def test_v1_usage_returns_aggregate_credit_limits_when_upstream_usage_exis
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["limits"] == []
     assert payload["upstream_limits"][0] == {
         "limit_type": "credits",
         "limit_window": "5h",
@@ -491,6 +490,7 @@ async def test_v1_usage_returns_aggregate_credit_limits_when_upstream_usage_exis
     }
     assert payload["upstream_limits"][0]["reset_at"].endswith("Z")
     assert payload["upstream_limits"][1]["reset_at"].endswith("Z")
+    assert payload["limits"] == payload["upstream_limits"]
 
 
 @pytest.mark.asyncio
@@ -733,7 +733,6 @@ async def test_v1_usage_ignores_paused_and_deactivated_accounts_in_aggregate_cre
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["limits"] == []
     assert payload["upstream_limits"] == [
         {
             "limit_type": "credits",
@@ -756,3 +755,4 @@ async def test_v1_usage_ignores_paused_and_deactivated_accounts_in_aggregate_cre
             "source": "aggregate",
         },
     ]
+    assert payload["limits"] == payload["upstream_limits"]

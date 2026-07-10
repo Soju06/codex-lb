@@ -973,6 +973,44 @@ def test_compact_trimming_preserves_oversized_responses_lite_prefix():
     assert dumped_input[-1] == input_items[-1]
 
 
+def test_compact_rejects_responses_lite_prelude_that_exceeds_upstream_limit():
+    payload = {
+        "model": "gpt-5.6-sol",
+        "instructions": "",
+        "input": [
+            {
+                "type": "additional_tools",
+                "role": "developer",
+                "tools": [
+                    {
+                        "type": "custom",
+                        "name": "exec",
+                        "format": {
+                            "type": "grammar",
+                            "syntax": "lark",
+                            "definition": "x" * 500_000,
+                        },
+                    }
+                ],
+            },
+            {
+                "type": "message",
+                "role": "developer",
+                "content": [{"type": "input_text", "text": "dev instructions"}],
+            },
+            {"type": "message", "role": "user", "content": "latest request"},
+        ],
+    }
+
+    request = ResponsesCompactRequest.model_validate(payload)
+
+    with pytest.raises(ClientPayloadError, match="cannot be trimmed without removing required state anchors") as raised:
+        request.to_payload()
+
+    assert raised.value.param == "input"
+    assert raised.value.code == "responses_compact_input_too_large"
+
+
 def test_compact_trimming_drops_oversized_leading_item():
     input_items = [
         {"role": "assistant", "content": "x" * 500_000},

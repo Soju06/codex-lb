@@ -7,6 +7,7 @@ from typing import cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.core.openai.exceptions import ClientPayloadError
 from app.core.types import JsonObject, JsonValue
 from app.core.utils.json_guards import is_json_list, is_json_mapping
 
@@ -906,6 +907,15 @@ def _trim_compact_input_for_upstream(payload: MutableJsonObject) -> None:
 
     head_count = _compact_trim_prefix_count(token_counts)
     preserved_indices = _compact_state_anchor_indices(input_value)
+    required_input = _compact_trimmed_input_with_markers(input_value, token_counts, preserved_indices)
+    required_tokens = sum(_estimated_json_tokens(item) for item in required_input)
+    if required_tokens > _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS:
+        raise ClientPayloadError(
+            "Compact input exceeds the upstream size limit and cannot be trimmed "
+            "without removing required state anchors.",
+            param="input",
+            code="responses_compact_input_too_large",
+        )
     selected_indices = set(preserved_indices)
     selected_indices.update(range(head_count))
     marker_tokens = _estimated_json_tokens(_compact_trim_marker(omitted_items=0, omitted_tokens=0))

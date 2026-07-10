@@ -137,14 +137,16 @@ def apply_api_key_enforcement(
         normalize_unsupported_reasoning_effort(payload)
         return
 
-    if api_key.enforced_model and payload.model != api_key.enforced_model:
-        logger.info(
-            "api_key_model_enforced request_id=%s key_id=%s requested_model=%s enforced_model=%s",
-            get_request_id(),
-            api_key.id,
-            payload.model,
-            api_key.enforced_model,
-        )
+    if api_key.enforced_model:
+        requested_model = payload.model
+        if requested_model != api_key.enforced_model:
+            logger.info(
+                "api_key_model_enforced request_id=%s key_id=%s requested_model=%s enforced_model=%s",
+                get_request_id(),
+                api_key.id,
+                requested_model,
+                api_key.enforced_model,
+            )
         payload.model = api_key.enforced_model
         normalize_upstream_model_alias(payload)
         if (

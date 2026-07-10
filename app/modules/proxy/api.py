@@ -4006,6 +4006,11 @@ async def _compact_responses(
 ) -> JSONResponse:
     apply_api_key_enforcement(payload, api_key)
     validate_model_access(api_key, payload.model)
+    try:
+        request_usage_budget = estimate_api_key_request_usage(payload)
+    except ClientPayloadError as exc:
+        error = openai_client_payload_error(exc)
+        return _logged_error_json_response(request, 400, error)
     admission_denial = await _opportunistic_admission_denial(
         request,
         context,
@@ -4019,7 +4024,7 @@ async def _compact_responses(
         api_key,
         request_model=payload.model,
         request_service_tier=_compact_request_service_tier(payload),
-        request_usage_budget=estimate_api_key_request_usage(payload),
+        request_usage_budget=request_usage_budget,
     )
 
     rate_limit_headers = await _rate_limit_headers_for_request(context, api_key)

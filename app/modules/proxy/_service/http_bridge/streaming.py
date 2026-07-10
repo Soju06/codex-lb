@@ -79,6 +79,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_should_attempt_soft_affinity_reroute,
     _http_bridge_should_rollover_after_context_overflow,
     _log_http_bridge_event,
+    _make_http_bridge_session_header_fallback_key,
     _make_http_bridge_session_key,
     _record_bridge_reattach,
     _record_continuity_fail_closed,
@@ -670,7 +671,8 @@ class _HTTPBridgeStreamingMixin:
 
         incoming_turn_state_header = _sticky_key_from_turn_state_header(headers) if not forwarded_request else None
         incoming_session_header = _sticky_key_from_session_header(headers) if not forwarded_request else None
-        had_prompt_cache_key = _prompt_cache_key_from_request_model(payload) is not None
+        explicit_prompt_cache_key = _prompt_cache_key_from_request_model(payload)
+        had_prompt_cache_key = explicit_prompt_cache_key is not None
         affinity = _sticky_key_for_responses_request(
             payload,
             headers,
@@ -702,9 +704,19 @@ class _HTTPBridgeStreamingMixin:
             affinity=affinity,
             api_key=api_key,
             request_id=request_id,
+            explicit_prompt_cache_key=explicit_prompt_cache_key,
             allow_forwarded_affinity_headers=forwarded_request,
             forwarded_affinity_kind=forwarded_affinity_kind,
             forwarded_affinity_key=forwarded_affinity_key,
+        )
+        session_header_fallback_key = (
+            _make_http_bridge_session_header_fallback_key(
+                headers=headers,
+                api_key=api_key,
+                explicit_prompt_cache_key=explicit_prompt_cache_key,
+            )
+            if not forwarded_request
+            else None
         )
         legacy_anchor_lookup = await _legacy_forward_anchor_lookup(
             durable_bridge=self._durable_bridge,
@@ -733,7 +745,11 @@ class _HTTPBridgeStreamingMixin:
                     session_key_value=bridge_session_key.affinity_key,
                     api_key_id=bridge_session_key.api_key_id,
                     turn_state=incoming_turn_state_header,
-                    session_header=incoming_session_header,
+                    session_header=(
+                        session_header_fallback_key.affinity_key
+                        if explicit_prompt_cache_key is not None and session_header_fallback_key is not None
+                        else incoming_session_header
+                    ),
                     previous_response_id=payload.previous_response_id,
                 )
             except Exception:
@@ -936,6 +952,7 @@ class _HTTPBridgeStreamingMixin:
                     fallback_on_preferred_account_unavailable=not file_required_preferred_account,
                     request_usage_budget=request_state.request_usage_budget,
                     request_deadline=request_deadline,
+                    session_header_fallback_key=session_header_fallback_key,
                 )
             except ProxyResponseError as exc:
                 if not (
@@ -1101,6 +1118,7 @@ class _HTTPBridgeStreamingMixin:
                             request_stage="reattach",
                             preferred_account_id=request_state.preferred_account_id,
                             request_usage_budget=request_state.request_usage_budget,
+                            session_header_fallback_key=session_header_fallback_key,
                             request_deadline=request_deadline,
                         )
                     except ProxyResponseError as capacity_exc:
@@ -1643,6 +1661,7 @@ class _HTTPBridgeStreamingMixin:
                         allow_forward_to_owner=False,
                         forwarded_request=False,
                         allow_previous_response_recovery_rebind=allow_previous_response_recovery_rebind,
+                        session_header_fallback_key=session_header_fallback_key,
                         durable_lookup=durable_lookup,
                         request_stage=retry_request_stage,
                         preferred_account_id=retry_preferred_account_id,

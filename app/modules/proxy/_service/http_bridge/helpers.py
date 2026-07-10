@@ -799,6 +799,7 @@ def _make_http_bridge_session_key(
     affinity: _AffinityPolicy,
     api_key: ApiKeyData | None,
     request_id: str,
+    explicit_prompt_cache_key: str | None = None,
     allow_forwarded_affinity_headers: bool = False,
     forwarded_affinity_kind: str | None = None,
     forwarded_affinity_key: str | None = None,
@@ -823,7 +824,18 @@ def _make_http_bridge_session_key(
     else:
         session_key = _sticky_key_from_session_header(headers)
         if session_key is not None:
-            affinity_key = session_key
+            # One Codex process session can host several independent agent
+            # threads. Codex keeps the process-level session header shared but
+            # gives every thread a stable explicit prompt_cache_key. Keying
+            # only by the header makes a later, non-overlapping child reuse the
+            # parent's upstream conversation and receive the wrong history.
+            session_header_key = _make_http_bridge_session_header_fallback_key(
+                headers=headers,
+                api_key=api_key,
+                explicit_prompt_cache_key=explicit_prompt_cache_key,
+            )
+            assert session_header_key is not None
+            affinity_key = session_header_key.affinity_key
             affinity_kind = "session_header"
             strength = "hard"
         else:
@@ -835,6 +847,27 @@ def _make_http_bridge_session_key(
         affinity_key=affinity_key,
         api_key_id=api_key.id if api_key is not None else None,
         strength=strength,
+    )
+
+
+def _make_http_bridge_session_header_fallback_key(
+    *,
+    headers: Mapping[str, str],
+    api_key: ApiKeyData | None,
+    explicit_prompt_cache_key: str | None,
+) -> _HTTPBridgeSessionKey | None:
+    session_key = _sticky_key_from_session_header(headers)
+    if session_key is None:
+        return None
+    affinity_key = (
+        sha256(f"{session_key}\0{explicit_prompt_cache_key.strip()}".encode()).hexdigest()
+        if isinstance(explicit_prompt_cache_key, str) and explicit_prompt_cache_key.strip()
+        else session_key
+    )
+    return _HTTPBridgeSessionKey(
+        "session_header",
+        affinity_key,
+        api_key.id if api_key is not None else None,
     )
 
 

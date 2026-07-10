@@ -428,6 +428,7 @@ class _HTTPBridgeMixin(
         fallback_on_preferred_account_unavailable: bool = True,
         request_usage_budget: ApiKeyRequestUsageBudget | None = None,
         request_deadline: float | None = None,
+        session_header_fallback_key: "_HTTPBridgeSessionKey | None" = None,
     ) -> "_HTTPBridgeSession": ...
 
     @overload
@@ -457,6 +458,7 @@ class _HTTPBridgeMixin(
         fallback_on_preferred_account_unavailable: bool = True,
         request_usage_budget: ApiKeyRequestUsageBudget | None = None,
         request_deadline: float | None = None,
+        session_header_fallback_key: "_HTTPBridgeSessionKey | None" = None,
     ) -> "_HTTPBridgeSession | _HTTPBridgeOwnerForward": ...
 
     async def _get_or_create_http_bridge_session(
@@ -485,12 +487,14 @@ class _HTTPBridgeMixin(
         fallback_on_preferred_account_unavailable: bool = True,
         request_usage_budget: ApiKeyRequestUsageBudget | None = None,
         request_deadline: float | None = None,
+        session_header_fallback_key: "_HTTPBridgeSessionKey | None" = None,
     ) -> "_HTTPBridgeSession | _HTTPBridgeOwnerForward":
         settings = _service_get_settings()
         request_scope_id = ensure_request_scope_id()
         api_key_id = api_key.id if api_key is not None else None
         incoming_turn_state = _sticky_key_from_turn_state_header(headers)
         incoming_session_key = _sticky_key_from_session_header(headers)
+        initial_session_key = session_header_fallback_key or (key if key.affinity_kind == "session_header" else None)
         original_request_unanchored = _http_bridge_request_needs_unanchored_handoff(
             key, incoming_turn_state, previous_response_id, forwarded_request, forwarded_original_request_unanchored
         )
@@ -632,7 +636,9 @@ class _HTTPBridgeMixin(
                             if previous_key is not None:
                                 self._http_bridge_previous_response_index.pop(previous_alias_key, None)
                         if incoming_session_key is not None:
-                            key = _HTTPBridgeSessionKey("session_header", incoming_session_key, api_key_id)
+                            key = initial_session_key or _HTTPBridgeSessionKey(
+                                "session_header", incoming_session_key, api_key_id
+                            )
                             used_session_header_fallback = True
                         else:
                             key = _HTTPBridgeSessionKey("turn_state_header", incoming_turn_state, api_key_id)

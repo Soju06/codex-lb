@@ -2495,6 +2495,62 @@ def test_http_bridge_session_key_infers_strength_from_affinity_kind() -> None:
     assert proxy_service._HTTPBridgeSessionKey("request", "request", None).strength == "soft"
 
 
+def test_http_bridge_session_header_key_is_scoped_by_explicit_prompt_cache_key() -> None:
+    headers = {"session_id": "process-session"}
+    first = proxy_service.ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "",
+            "input": [],
+            "prompt_cache_key": "parent-thread",
+        }
+    )
+    child = first.model_copy(update={"prompt_cache_key": "child-thread"})
+
+    first_key = proxy_service._make_http_bridge_session_key(
+        first,
+        headers=headers,
+        affinity=proxy_service._AffinityPolicy(),
+        api_key=None,
+        request_id="request-1",
+        explicit_prompt_cache_key="parent-thread",
+    )
+    same_thread_key = proxy_service._make_http_bridge_session_key(
+        first,
+        headers=headers,
+        affinity=proxy_service._AffinityPolicy(),
+        api_key=None,
+        request_id="request-2",
+        explicit_prompt_cache_key="parent-thread",
+    )
+    child_key = proxy_service._make_http_bridge_session_key(
+        child,
+        headers=headers,
+        affinity=proxy_service._AffinityPolicy(),
+        api_key=None,
+        request_id="request-3",
+        explicit_prompt_cache_key="child-thread",
+    )
+
+    assert first_key.affinity_kind == "session_header"
+    assert first_key == same_thread_key
+    assert first_key != child_key
+
+
+def test_http_bridge_session_header_key_without_prompt_cache_key_stays_legacy_compatible() -> None:
+    payload = proxy_service.ResponsesRequest.model_validate({"model": "gpt-5.6-sol", "instructions": "", "input": []})
+
+    key = proxy_service._make_http_bridge_session_key(
+        payload,
+        headers={"session_id": "legacy-session"},
+        affinity=proxy_service._AffinityPolicy(),
+        api_key=None,
+        request_id="request-1",
+    )
+
+    assert key == proxy_service._HTTPBridgeSessionKey("session_header", "legacy-session", None)
+
+
 def test_http_bridge_owner_check_required_keeps_prompt_cache_soft() -> None:
     key = proxy_service._HTTPBridgeSessionKey("prompt_cache", "cache", None)
 
@@ -8528,7 +8584,7 @@ async def test_get_or_create_http_bridge_session_falls_back_to_session_header_wh
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     requested_key = proxy_service._HTTPBridgeSessionKey("turn_state_header", "http_turn_generated", None)
-    fallback_key = proxy_service._HTTPBridgeSessionKey("session_header", "sid-123", None)
+    fallback_key = proxy_service._HTTPBridgeSessionKey("session_header", "thread-scoped-sid-123", None)
     created_session = proxy_service._HTTPBridgeSession(
         key=fallback_key,
         headers={"x-codex-session-id": "sid-123"},
@@ -8602,6 +8658,7 @@ async def test_get_or_create_http_bridge_session_falls_back_to_session_header_wh
         idle_ttl_seconds=120.0,
         max_sessions=8,
         previous_response_id="resp_prev_1",
+        session_header_fallback_key=fallback_key,
     )
 
     assert resolved is created_session

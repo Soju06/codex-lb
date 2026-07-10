@@ -1376,27 +1376,27 @@ class _WebSocketMixin:
             continuity_state is not None
             and responses_payload.previous_response_id is not None
             and responses_payload.previous_response_id == continuity_state.last_completed_response_id
-            and continuity_state.last_pending_function_call_ids
+            and continuity_state.last_pending_tool_calls
             and isinstance(responses_payload.input, list)
         ):
             input_items = cast(list[JsonValue], responses_payload.input)
-            missing_call_ids = _facade()._missing_function_call_outputs_for_previous_response(
+            missing_calls = _facade()._missing_tool_call_outputs_for_previous_response(
                 input_items,
-                pending_call_ids=continuity_state.last_pending_function_call_ids,
+                pending_calls=continuity_state.last_pending_tool_calls,
             )
-            if missing_call_ids:
+            if missing_calls:
                 responses_payload = responses_payload.model_copy(
                     update={
-                        "input": _facade()._inject_missing_interrupted_function_call_outputs(
+                        "input": _facade()._inject_missing_interrupted_tool_call_outputs(
                             input_items,
-                            missing_call_ids=missing_call_ids,
+                            missing_calls=missing_calls,
                         )
                     }
                 )
                 _facade().logger.warning(
                     "websocket_interrupted_tool_outputs_injected previous_response_id=%s missing_call_count=%s",
                     responses_payload.previous_response_id,
-                    len(missing_call_ids),
+                    len(missing_calls),
                 )
         reservation = await proxy._reserve_websocket_api_key_usage(
             refreshed_api_key,
@@ -2889,12 +2889,10 @@ class _WebSocketMixin:
                 if actual_service_tier is not None:
                     request_state.actual_service_tier = actual_service_tier
                     request_state.service_tier = actual_service_tier
-                completed_function_call_id = _facade()._response_output_item_done_function_call_id(payload)
-                if (
-                    completed_function_call_id is not None
-                    and completed_function_call_id not in request_state.pending_function_call_ids
-                ):
-                    request_state.pending_function_call_ids.append(completed_function_call_id)
+                completed_tool_call = _facade()._response_output_item_done_tool_call(payload)
+                if completed_tool_call is not None:
+                    call_id, call_item_type = completed_tool_call
+                    request_state.pending_tool_calls.setdefault(call_id, call_item_type)
                 if mark_duplicate_tool_call_downstream_event(
                     payload,
                     seen_tool_call_keys=request_state.seen_tool_call_keys,

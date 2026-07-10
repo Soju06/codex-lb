@@ -11133,6 +11133,60 @@ async def test_process_http_bridge_upstream_text_scopes_tool_dedupe_to_request_s
 
 
 @pytest.mark.asyncio
+async def test_process_http_bridge_upstream_text_records_pending_custom_tool_call() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-bridge-custom-tool",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        response_id="resp_bridge_custom_tool",
+        event_queue=asyncio.Queue(),
+        transport="http",
+        skip_request_log=True,
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-custom", None),
+        headers={"x-codex-session-id": "sid-custom"},
+        affinity=proxy_service._AffinityPolicy(
+            key="sid-custom",
+            kind=proxy_service.StickySessionKind.CODEX_SESSION,
+        ),
+        request_model="gpt-5.6-sol",
+        account=cast(Any, SimpleNamespace(id="acc-1", status=AccountStatus.ACTIVE)),
+        upstream=cast(UpstreamResponsesWebSocket, SimpleNamespace(close=AsyncMock())),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=1.0,
+        idle_ttl_seconds=120.0,
+    )
+
+    event = json.dumps(
+        {
+            "type": "response.output_item.done",
+            "response": {"id": "resp_bridge_custom_tool", "status": "in_progress"},
+            "response_id": "resp_bridge_custom_tool",
+            "item": {
+                "type": "custom_tool_call",
+                "name": "exec",
+                "input": "pwd",
+                "call_id": "call_shell_1",
+            },
+        },
+        separators=(",", ":"),
+    )
+
+    await service._process_http_bridge_upstream_text(session, event)
+
+    assert request_state.pending_tool_calls == {"call_shell_1": "custom_tool_call"}
+
+
+@pytest.mark.asyncio
 async def test_process_http_bridge_upstream_text_marks_text_delta_downstream_visible() -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     request_state = proxy_service._WebSocketRequestState(

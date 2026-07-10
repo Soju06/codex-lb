@@ -388,10 +388,10 @@ from app.modules.proxy._service.response_create import (
     _fingerprint_input_items as _fingerprint_input_items,
 )
 from app.modules.proxy._service.response_create import (
-    _function_call_output_call_ids as _function_call_output_call_ids,
+    _tool_call_output_call_ids as _tool_call_output_call_ids,
 )
 from app.modules.proxy._service.response_create import (
-    _inject_missing_interrupted_function_call_outputs as _inject_missing_interrupted_function_call_outputs,
+    _inject_missing_interrupted_tool_call_outputs as _inject_missing_interrupted_tool_call_outputs,
 )
 from app.modules.proxy._service.response_create import (
     _inline_top_level_input_image_urls as _inline_top_level_input_image_urls,
@@ -412,7 +412,7 @@ from app.modules.proxy._service.response_create import (
     _maybe_dump_oversized_response_create_request as _maybe_dump_oversized_response_create_request,
 )
 from app.modules.proxy._service.response_create import (
-    _missing_function_call_outputs_for_previous_response as _missing_function_call_outputs_for_previous_response,
+    _missing_tool_call_outputs_for_previous_response as _missing_tool_call_outputs_for_previous_response,
 )
 from app.modules.proxy._service.response_create import (
     _oversized_response_create_dump_dir as _oversized_response_create_dump_dir,
@@ -445,7 +445,7 @@ from app.modules.proxy._service.response_create import (
     _response_create_too_large_error_envelope as _response_create_too_large_error_envelope,
 )
 from app.modules.proxy._service.response_create import (
-    _response_output_item_done_function_call_id as _response_output_item_done_function_call_id,
+    _response_output_item_done_tool_call as _response_output_item_done_tool_call,
 )
 from app.modules.proxy._service.response_create import (
     _responses_request_contains_input_image as _responses_request_contains_input_image,
@@ -481,7 +481,7 @@ from app.modules.proxy._service.response_create import (
     _summarize_response_create_payload as _summarize_response_create_payload,
 )
 from app.modules.proxy._service.response_create import (
-    _synthetic_interrupted_function_call_output as _synthetic_interrupted_function_call_output,
+    _synthetic_interrupted_tool_call_output as _synthetic_interrupted_tool_call_output,
 )
 from app.modules.proxy._service.response_create import (
     _write_response_create_dump as _write_response_create_dump,
@@ -2056,7 +2056,13 @@ def _is_missing_tool_output_error(
     if code != "invalid_request_error" or param != "input" or message is None:
         return False
     normalized = " ".join(message.lower().split())
-    return normalized.startswith("no tool output found for function call call_")
+    return normalized.startswith(
+        (
+            "no tool output found for function call call_",
+            "no tool output found for custom tool call call_",
+            "no tool output found for apply patch call call_",
+        )
+    )
 
 
 def _is_previous_response_not_found_error(

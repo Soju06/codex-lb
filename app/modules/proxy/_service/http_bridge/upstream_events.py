@@ -61,7 +61,7 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
     _pop_terminal_websocket_request_state,
     _previous_response_id_from_not_found_message,
     _release_websocket_response_create_gate,
-    _response_output_item_done_function_call_id,
+    _response_output_item_done_tool_call,
     _rewrite_websocket_continuity_corruption_event,
     _rewrite_websocket_downstream_response_id,
     _rewrite_websocket_previous_response_owner_unavailable_event,
@@ -408,12 +408,10 @@ class _HTTPBridgeUpstreamEventsMixin:
                 if actual_service_tier is not None:
                     matched_request_state.actual_service_tier = actual_service_tier
                     matched_request_state.service_tier = actual_service_tier
-                completed_function_call_id = _response_output_item_done_function_call_id(payload)
-                if (
-                    completed_function_call_id is not None
-                    and completed_function_call_id not in matched_request_state.pending_function_call_ids
-                ):
-                    matched_request_state.pending_function_call_ids.append(completed_function_call_id)
+                completed_tool_call = _response_output_item_done_tool_call(payload)
+                if completed_tool_call is not None:
+                    call_id, call_item_type = completed_tool_call
+                    matched_request_state.pending_tool_calls.setdefault(call_id, call_item_type)
                 if mark_duplicate_tool_call_downstream_event(
                     payload,
                     seen_tool_call_keys=matched_request_state.seen_tool_call_keys,

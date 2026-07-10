@@ -266,10 +266,22 @@ def _slim_response_create_payload_for_upstream(
     }
 
 
-def _function_call_output_call_ids(input_items: list[JsonValue]) -> set[str]:
+# Tool call item types whose outputs upstream demands on the next request, and
+# the output item type each one pairs with. custom_tool_call (Responses Lite
+# shell) and apply_patch_call were previously untracked, so interrupted calls
+# produced "No tool output found for custom tool call call_..." 400s (#1168).
+_TOOL_CALL_OUTPUT_TYPE_BY_ITEM_TYPE = {
+    "function_call": "function_call_output",
+    "custom_tool_call": "custom_tool_call_output",
+    "apply_patch_call": "apply_patch_call_output",
+}
+_TOOL_CALL_OUTPUT_ITEM_TYPES = frozenset(_TOOL_CALL_OUTPUT_TYPE_BY_ITEM_TYPE.values())
+
+
+def _tool_call_output_call_ids(input_items: list[JsonValue]) -> set[str]:
     call_ids: set[str] = set()
     for item in input_items:
-        if not isinstance(item, dict) or item.get("type") != "function_call_output":
+        if not isinstance(item, dict) or item.get("type") not in _TOOL_CALL_OUTPUT_ITEM_TYPES:
             continue
         call_id = item.get("call_id")
         if isinstance(call_id, str) and call_id:
@@ -277,20 +289,24 @@ def _function_call_output_call_ids(input_items: list[JsonValue]) -> set[str]:
     return call_ids
 
 
-def _missing_function_call_outputs_for_previous_response(
+def _missing_tool_call_outputs_for_previous_response(
     input_items: list[JsonValue],
     *,
-    pending_call_ids: list[str],
-) -> list[str]:
-    if not pending_call_ids:
+    pending_calls: Mapping[str, str],
+) -> list[tuple[str, str]]:
+    if not pending_calls:
         return []
-    present_call_ids = _function_call_output_call_ids(input_items)
-    return [call_id for call_id in pending_call_ids if call_id not in present_call_ids]
+    present_call_ids = _tool_call_output_call_ids(input_items)
+    return [
+        (call_id, call_item_type)
+        for call_id, call_item_type in pending_calls.items()
+        if call_id not in present_call_ids
+    ]
 
 
-def _synthetic_interrupted_function_call_output(call_id: str) -> dict[str, JsonValue]:
+def _synthetic_interrupted_tool_call_output(call_id: str, call_item_type: str) -> dict[str, JsonValue]:
     return {
-        "type": "function_call_output",
+        "type": _TOOL_CALL_OUTPUT_TYPE_BY_ITEM_TYPE.get(call_item_type, "function_call_output"),
         "call_id": call_id,
         "output": (
             "Tool call was not executed because the previous turn was interrupted before tool output was available."
@@ -298,27 +314,36 @@ def _synthetic_interrupted_function_call_output(call_id: str) -> dict[str, JsonV
     }
 
 
-def _inject_missing_interrupted_function_call_outputs(
+def _inject_missing_interrupted_tool_call_outputs(
     input_items: list[JsonValue],
     *,
-    missing_call_ids: list[str],
+    missing_calls: list[tuple[str, str]],
 ) -> list[JsonValue]:
-    if not missing_call_ids:
+    if not missing_calls:
         return input_items
     return [
-        *[_synthetic_interrupted_function_call_output(call_id) for call_id in missing_call_ids],
+        *[
+            _synthetic_interrupted_tool_call_output(call_id, call_item_type)
+            for call_id, call_item_type in missing_calls
+        ],
         *input_items,
     ]
 
 
-def _response_output_item_done_function_call_id(payload: dict[str, JsonValue] | None) -> str | None:
+def _response_output_item_done_tool_call(payload: dict[str, JsonValue] | None) -> tuple[str, str] | None:
+    """Return ``(call_id, call_item_type)`` for a completed tool call item, if any."""
     if not isinstance(payload, dict) or payload.get("type") != "response.output_item.done":
         return None
     item = payload.get("item")
-    if not isinstance(item, dict) or item.get("type") != "function_call":
+    if not isinstance(item, dict):
+        return None
+    item_type = item.get("type")
+    if not isinstance(item_type, str) or item_type not in _TOOL_CALL_OUTPUT_TYPE_BY_ITEM_TYPE:
         return None
     call_id = item.get("call_id")
-    return call_id if isinstance(call_id, str) and call_id else None
+    if not isinstance(call_id, str) or not call_id:
+        return None
+    return call_id, item_type
 
 
 def _response_create_too_large_error_envelope(

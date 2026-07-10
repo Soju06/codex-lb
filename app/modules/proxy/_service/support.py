@@ -383,7 +383,7 @@ class _WebSocketRequestState:
     affinity_policy: _AffinityPolicy = field(default_factory=_AffinityPolicy)
     suppressed_downstream_tool_call: bool = False
     suppressed_duplicate_tool_call: bool = False
-    pending_function_call_ids: list[str] = field(default_factory=list)
+    pending_tool_calls: dict[str, str] = field(default_factory=dict)
     seen_tool_call_keys: dict[tuple[str, str, str | None, str | None, str], None] = field(default_factory=dict)
     input_item_count: int = 0
     input_full_fingerprint: str | None = None
@@ -497,7 +497,7 @@ class _WebSocketContinuityState:
     last_completed_input_count: int = 0
     last_completed_response_id: str | None = None
     last_completed_input_prefix_fingerprint: str | None = None
-    last_pending_function_call_ids: list[str] = field(default_factory=list)
+    last_pending_tool_calls: dict[str, str] = field(default_factory=dict)
     responses_lite_model: str | None = None
     responses_lite_response_id: str | None = None
 

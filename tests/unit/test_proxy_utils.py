@@ -12710,7 +12710,7 @@ async def test_prepare_websocket_response_create_request_fills_interrupted_pendi
 
     continuity_state = proxy_service._WebSocketContinuityState(
         last_completed_response_id="resp_pending_tool_calls",
-        last_pending_function_call_ids=["call_missing_a", "call_missing_b"],
+        last_pending_tool_calls={"call_missing_a": "function_call", "call_missing_b": "function_call"},
     )
     interrupted_input: list[JsonValue] = [
         {
@@ -12767,6 +12767,111 @@ async def test_prepare_websocket_response_create_request_fills_interrupted_pendi
     ]
     assert upstream_payload["input"][2:] == interrupted_input
     assert prepared.request_state.input_item_count == 4
+
+
+@pytest.mark.asyncio
+async def test_prepare_websocket_response_create_request_fills_interrupted_custom_tool_outputs(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    reserve_usage = AsyncMock(return_value=None)
+    api_key = ApiKeyData(
+        id="key_ws_interrupted_custom",
+        name="ws-interrupted-custom",
+        key_prefix="sk-ws-custom",
+        allowed_models=["gpt-5.6-sol"],
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+
+    class Settings:
+        log_proxy_request_payload = False
+        log_proxy_request_shape = False
+        log_proxy_request_shape_raw_cache_key = False
+        log_proxy_service_tier_trace = False
+        openai_prompt_cache_key_derivation_enabled = True
+
+    continuity_state = proxy_service._WebSocketContinuityState(
+        last_completed_response_id="resp_pending_custom_calls",
+        last_pending_tool_calls={"call_shell_1": "custom_tool_call", "call_patch_1": "apply_patch_call"},
+    )
+    interrupted_input: list[JsonValue] = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_text",
+                    "text": "<turn_aborted>\nThe user interrupted the previous turn on purpose.\n</turn_aborted>",
+                }
+            ],
+        },
+        {"role": "user", "content": [{"type": "input_text", "text": "continue"}]},
+    ]
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: Settings())
+    monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", reserve_usage)
+    monkeypatch.setattr(service, "_refresh_websocket_api_key_policy", AsyncMock(return_value=api_key))
+
+    prepared = await service._prepare_websocket_response_create_request(
+        cast(
+            dict[str, JsonValue],
+            {
+                "type": "response.create",
+                "model": "gpt-5.6-sol",
+                "previous_response_id": "resp_pending_custom_calls",
+                "input": interrupted_input,
+            },
+        ),
+        headers={"session_id": "turn_ws_interrupted_custom"},
+        codex_session_affinity=True,
+        openai_cache_affinity=True,
+        sticky_threads_enabled=False,
+        openai_cache_affinity_max_age_seconds=300,
+        api_key=api_key,
+        continuity_state=continuity_state,
+    )
+
+    upstream_payload = json.loads(prepared.text_data)
+    assert upstream_payload["previous_response_id"] == "resp_pending_custom_calls"
+    interrupted_tool_output = (
+        "Tool call was not executed because the previous turn was interrupted before tool output was available."
+    )
+    assert upstream_payload["input"][:2] == [
+        {
+            "type": "custom_tool_call_output",
+            "call_id": "call_shell_1",
+            "output": interrupted_tool_output,
+        },
+        {
+            "type": "apply_patch_call_output",
+            "call_id": "call_patch_1",
+            "output": interrupted_tool_output,
+        },
+    ]
+    assert upstream_payload["input"][2:] == interrupted_input
+    assert prepared.request_state.input_item_count == 4
+
+
+def test_is_missing_tool_output_error_matches_custom_and_apply_patch_variants():
+    for message in (
+        "No tool output found for function call call_abc123.",
+        "No tool output found for custom tool call call_XnzBtHwdOs9bda4KP9DE44rm.",
+        "No tool output found for apply patch call call_def456.",
+    ):
+        assert proxy_service._is_missing_tool_output_error(
+            code="invalid_request_error",
+            param="input",
+            message=message,
+        )
+    assert not proxy_service._is_missing_tool_output_error(
+        code="invalid_request_error",
+        param="input",
+        message="No tool output found for web search call call_ghi789.",
+    )
 
 
 @pytest.mark.asyncio

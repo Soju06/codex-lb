@@ -117,6 +117,10 @@ from app.modules.proxy._service.http_bridge.helpers import (
 )
 from app.modules.proxy._service.http_bridge.owner_forwarding import _HTTPBridgeOwnerForwardingMixin
 from app.modules.proxy._service.http_bridge.protocol import _HTTPBridgeServiceProtocol
+from app.modules.proxy._service.http_bridge.registry import (
+    unregister_previous_response_ids_locked,
+    unregister_turn_states_locked,
+)
 from app.modules.proxy._service.http_bridge.request_submit import _HTTPBridgeRequestSubmitMixin
 from app.modules.proxy._service.http_bridge.service_stubs import (
     _await_cancelled_task,
@@ -1577,8 +1581,8 @@ class _HTTPBridgeMixin(
     ) -> None:
         session.closed = True
         if turn_state_lock_held:
-            self._unregister_http_bridge_turn_states_locked(session)
-            self._unregister_http_bridge_previous_response_ids_locked(session)
+            unregister_turn_states_locked(self, session)
+            unregister_previous_response_ids_locked(self, session)
         else:
             await self._unregister_http_bridge_turn_states(session)
             await self._unregister_http_bridge_previous_response_ids(session)
@@ -1695,11 +1699,11 @@ class _HTTPBridgeMixin(
 
     async def _unregister_http_bridge_turn_states(self, session: "_HTTPBridgeSession") -> None:
         async with self._http_bridge_lock:
-            self._unregister_http_bridge_turn_states_locked(session)
+            unregister_turn_states_locked(self, session)
 
     async def _unregister_http_bridge_previous_response_ids(self, session: "_HTTPBridgeSession") -> None:
         async with self._http_bridge_lock:
-            self._unregister_http_bridge_previous_response_ids_locked(session)
+            unregister_previous_response_ids_locked(self, session)
 
     def _detach_http_bridge_session_locked(
         self,
@@ -1716,41 +1720,9 @@ class _HTTPBridgeMixin(
         self._http_bridge_sessions.pop(key, None)
         if mark_closed:
             session.closed = True
-        self._unregister_http_bridge_turn_states_locked(session)
-        self._unregister_http_bridge_previous_response_ids_locked(session)
+        unregister_turn_states_locked(self, session)
+        unregister_previous_response_ids_locked(self, session)
         return session
-
-    def _unregister_http_bridge_turn_states_locked(self, session: "_HTTPBridgeSession") -> None:
-        aliases = tuple(session.downstream_turn_state_aliases)
-        current_session = self._http_bridge_sessions.get(session.key)
-        for alias in aliases:
-            alias_key = _http_bridge_turn_state_alias_key(alias, session.key.api_key_id)
-            if (
-                current_session is not None
-                and current_session is not session
-                and alias in current_session.downstream_turn_state_aliases
-            ):
-                continue
-            if self._http_bridge_turn_state_index.get(alias_key) == session.key:
-                self._http_bridge_turn_state_index.pop(alias_key, None)
-        session.downstream_turn_state_aliases.clear()
-        getattr(session, "turn_state_alias_registration_generations", {}).clear()
-
-    def _unregister_http_bridge_previous_response_ids_locked(self, session: "_HTTPBridgeSession") -> None:
-        response_ids = tuple(session.previous_response_ids)
-        current_session = self._http_bridge_sessions.get(session.key)
-        for response_id in response_ids:
-            alias_key = _http_bridge_previous_response_alias_key(response_id, session.key.api_key_id)
-            if (
-                current_session is not None
-                and current_session is not session
-                and response_id in current_session.previous_response_ids
-            ):
-                continue
-            if self._http_bridge_previous_response_index.get(alias_key) == session.key:
-                self._http_bridge_previous_response_index.pop(alias_key, None)
-        session.previous_response_ids.clear()
-        getattr(session, "previous_response_alias_registration_generations", {}).clear()
 
     def _promote_http_bridge_session_to_codex_affinity(
         self,
@@ -2149,9 +2121,7 @@ class _HTTPBridgeMixin(
         require_security_work_authorized: bool = False,
         require_same_account: bool = False,
     ) -> None:
-        require_security_work_authorized = (
-            require_security_work_authorized or session.requires_security_work_authorized
-        )
+        require_security_work_authorized = require_security_work_authorized or session.requires_security_work_authorized
         old_account_id = session.account.id
         old_upstream = session.upstream
         old_reader = session.upstream_reader if restart_reader else None

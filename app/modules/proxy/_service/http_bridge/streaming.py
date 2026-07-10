@@ -1376,9 +1376,7 @@ class _HTTPBridgeStreamingMixin:
                 durable_lookup=durable_lookup,
             )
             request_state.preferred_account_id = previous_request_state.preferred_account_id
-            request_state.require_security_work_authorized = (
-                previous_request_state.require_security_work_authorized
-            )
+            request_state.require_security_work_authorized = previous_request_state.require_security_work_authorized
             if store_context_trim_applied:
                 # Store the full incoming client input as the session context
                 # so the client's next full resend can prefix-match it.

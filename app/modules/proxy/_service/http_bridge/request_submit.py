@@ -73,6 +73,10 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _record_http_bridge_prewarm_outcome,
     _release_http_bridge_unanchored_handoff,
 )
+from app.modules.proxy._service.http_bridge.registry import (
+    unregister_previous_response_ids_locked,
+    unregister_turn_states_locked,
+)
 from app.modules.proxy._service.http_bridge.service_stubs import (
     _classify_upstream_close,
     _count_external_image_urls,
@@ -1093,8 +1097,8 @@ class _HTTPBridgeRequestSubmitMixin:
         async with self._http_bridge_lock:
             if self._http_bridge_sessions.get(session.key) is session:
                 self._http_bridge_sessions.pop(session.key, None)
-                self._unregister_http_bridge_turn_states_locked(session)
-                self._unregister_http_bridge_previous_response_ids_locked(session)
+                unregister_turn_states_locked(self, session)
+                unregister_previous_response_ids_locked(self, session)
         if session.durable_session_id is not None and session.durable_owner_epoch is not None:
             durable_session_id = session.durable_session_id
             durable_owner_epoch = session.durable_owner_epoch

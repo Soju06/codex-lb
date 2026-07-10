@@ -588,6 +588,11 @@ def _http_bridge_request_counts_against_queue(request_state: _WebSocketRequestSt
     return not request_state.draining_until_terminal
 
 
+def _http_bridge_session_has_admission_waiter(session: object | None) -> bool:
+    """Keep a closed bridge registered while an unsent request owns its handoff."""
+    return session is not None and bool(getattr(session, "admission_waiter_count", 0))
+
+
 def _http_bridge_session_has_visible_requests(session: "_HTTPBridgeSession") -> bool:
     return session.queued_request_count > 0 or any(
         _http_bridge_request_counts_against_queue(request_state) for request_state in session.pending_requests

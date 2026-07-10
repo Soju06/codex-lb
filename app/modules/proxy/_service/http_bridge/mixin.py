@@ -89,6 +89,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_request_counts_against_queue,
     _http_bridge_session_account_active,
     _http_bridge_session_allows_api_key,
+    _http_bridge_session_has_admission_waiter,
     _http_bridge_session_matches_preferred_account,
     _http_bridge_session_retiring_with_visible_requests,
     _http_bridge_session_reusable_for_request,
@@ -652,17 +653,9 @@ class _HTTPBridgeMixin(
                 if pruned_sessions:
                     if any(session.key == key for session in pruned_sessions):
                         force_durable_takeover = True
-                    self._schedule_http_bridge_session_closes(
-                        pruned_sessions,
-                        reason="registry_detach",
-                    )
-
+                    self._schedule_http_bridge_session_closes(pruned_sessions, reason="registry_detach")
                 existing = self._http_bridge_sessions.get(key)
-                if (
-                    existing is not None
-                    and existing.closed
-                    and getattr(existing, "admission_waiter_count", 0) > 0
-                ):
+                if existing is not None and existing.closed and _http_bridge_session_has_admission_waiter(existing):
                     return existing
                 if (
                     existing is not None
@@ -1525,9 +1518,7 @@ class _HTTPBridgeMixin(
         now = _service_time().monotonic()
         stale_keys: list[_HTTPBridgeSessionKey] = []
         for key, session in self._http_bridge_sessions.items():
-            # An admitted request waiting for the response-create gate owns the
-            # session handoff even when the old upstream reader just closed.
-            if getattr(session, "admission_waiter_count", 0) > 0:
+            if _http_bridge_session_has_admission_waiter(session):
                 continue
             if session.closed:
                 stale_keys.append(key)
@@ -2159,9 +2150,7 @@ class _HTTPBridgeMixin(
         settings = await _service_get_settings_cache().get()
         session.api_key = request_state.api_key
         close_skips_account = session.last_upstream_close_code in _UPSTREAM_CLOSE_CODES_SKIP_SAME_ACCOUNT_RETRY
-        hard_close_account_bound = session.key.strength == "hard" and (
-            close_skips_account or require_same_account
-        )
+        hard_close_account_bound = session.key.strength == "hard" and (close_skips_account or require_same_account)
         skip_same_account = session.key.strength != "hard" and close_skips_account
         forced_refresh_account_id = request_state.force_refresh_account_id
         excluded_account_ids: set[str] = set(request_state.excluded_account_ids)

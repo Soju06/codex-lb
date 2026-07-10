@@ -957,6 +957,7 @@ def _compact_fit_selected_indices_to_wire_budget(
             token_counts=token_counts,
             token_budget=marker_budget,
             required_indices=required_indices,
+            allow_pair_additions=False,
         )
         if required_indices <= trial and trial != selected:
             selected = trial
@@ -1006,6 +1007,7 @@ def _compact_reconciled_tool_call_indices(
     token_counts: list[int],
     token_budget: int,
     required_indices: set[int] | None = None,
+    allow_pair_additions: bool = True,
 ) -> set[int]:
     call_indices_by_id: dict[str, list[int]] = {}
     output_indices_by_id: dict[str, list[int]] = {}
@@ -1068,6 +1070,8 @@ def _compact_reconciled_tool_call_indices(
             call_index = matching_call_index(call_indices, output_index)
             if call_index is None:
                 remove_indices([output_index])
+            elif not allow_pair_additions and call_index not in reconciled:
+                remove_indices([output_index])
             elif not add_indices([call_index]):
                 remove_indices([output_index])
     for call_id, call_indices in call_indices_by_id.items():
@@ -1078,6 +1082,9 @@ def _compact_reconciled_tool_call_indices(
             matched_output_indices = matching_output_indices(call_indices, call_index, output_indices)
             if not matched_output_indices:
                 remove_indices([call_index])
+                continue
+            if not allow_pair_additions and any(index not in reconciled for index in matched_output_indices):
+                remove_indices([call_index, *matched_output_indices])
                 continue
             if not add_indices(matched_output_indices):
                 remove_indices([call_index, *matched_output_indices])

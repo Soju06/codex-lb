@@ -1323,6 +1323,46 @@ def test_compact_state_anchor_matches_duplicate_call_id_by_occurrence():
     assert latest in dumped_input
 
 
+def test_compact_backtracking_drops_optional_tool_pair_when_markers_exceed_budget():
+    optional_call = {
+        "type": "function_call",
+        "name": "exec",
+        "call_id": "call-optional",
+        "arguments": "{}",
+    }
+    optional_output = {
+        "type": "function_call_output",
+        "call_id": "call-optional",
+        "output": "o" * 2_000,
+    }
+    omitted = {"role": "assistant", "content": "x" * 500_000}
+    first_anchor = {
+        "role": "user",
+        "content": '<codex_internal_context source="goal">\n' + "a" * 198_535,
+    }
+    second_anchor = {
+        "role": "user",
+        "content": "<collaboration_mode># Plan Mode\n" + "b" * 198_535,
+    }
+    latest = {"role": "user", "content": "continue"}
+    payload = {
+        "model": "gpt-5.6-sol",
+        "instructions": "",
+        "input": [optional_call, optional_output, omitted, first_anchor, omitted, second_anchor, latest],
+    }
+
+    dumped_input = ResponsesCompactRequest.model_validate(payload).to_payload()["input"]
+
+    assert isinstance(dumped_input, list)
+    assert optional_call not in dumped_input
+    assert optional_output not in dumped_input
+    assert first_anchor in dumped_input
+    assert second_anchor in dumped_input
+    assert latest in dumped_input
+    wire_bytes = len(json.dumps(dumped_input, ensure_ascii=True, sort_keys=True).encode("utf-8"))
+    assert wire_bytes <= _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS * _ESTIMATED_CHARS_PER_TOKEN
+
+
 def test_compact_trimming_keeps_selected_tool_outputs_with_matching_calls():
     tool_call = {
         "type": "function_call",

@@ -23,6 +23,12 @@ After a request is classified as Responses Lite shaped, the service MUST preserv
 - **THEN** compact trimming retains the output matched to the required state-call occurrence
 - **AND** it does not retain an oversized historical output solely because its earlier call reused that ID
 
+#### Scenario: Exact-budget backtracking drops an optional tool pair together
+
+- **WHEN** optional tool context fits the approximate item budget but trim-marker framing exceeds the exact wire cap
+- **THEN** backtracking removes the optional call and its matching output as one group
+- **AND** it does not re-add either counterpart while preserving every required item
+
 #### Scenario: Final compact wire expansion is rejected locally
 
 - **WHEN** Unicode escaping, JSON array framing, or image inlining makes the final compact input exceed the upstream limit

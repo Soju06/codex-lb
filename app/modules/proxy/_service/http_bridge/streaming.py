@@ -841,6 +841,9 @@ class _HTTPBridgeStreamingMixin:
             payload=effective_payload,
             durable_lookup=durable_lookup,
         )
+        request_state.require_security_work_authorized = bool(
+            durable_lookup is not None and durable_lookup.requires_security_work_authorized
+        )
         request_state.preferred_account_id = (
             durable_lookup.account_id
             if (
@@ -942,6 +945,7 @@ class _HTTPBridgeStreamingMixin:
                     request_usage_budget=request_state.request_usage_budget,
                     request_deadline=request_deadline,
                     session_header_fallback_key=session_header_fallback_key,
+                    require_security_work_authorized=request_state.require_security_work_authorized,
                 )
             except ProxyResponseError as exc:
                 if not (
@@ -983,7 +987,9 @@ class _HTTPBridgeStreamingMixin:
                     cache_key_family=bridge_session_key.affinity_kind,
                     model_class=_extract_model_class(payload.model) if payload.model else None,
                 )
+                previous_security_requirement = request_state.require_security_work_authorized
                 request_state, text_data = prepare_bridge_request(payload)
+                request_state.require_security_work_authorized = previous_security_requirement
                 request_state.affinity_policy = affinity
                 if downstream_turn_state is not None:
                     request_state.session_id = _normalize_session_id(downstream_turn_state)
@@ -1285,6 +1291,9 @@ class _HTTPBridgeStreamingMixin:
                 payload=effective_payload,
                 durable_lookup=durable_lookup,
             )
+            request_state.require_security_work_authorized = bool(
+                durable_lookup is not None and durable_lookup.requires_security_work_authorized
+            )
             request_state.preferred_account_id = durable_lookup.account_id if durable_lookup is not None else None
             request_state.proxy_injected_previous_response_id = True
             request_state.fresh_upstream_request_text = fresh_upstream_request_text
@@ -1367,6 +1376,9 @@ class _HTTPBridgeStreamingMixin:
                 durable_lookup=durable_lookup,
             )
             request_state.preferred_account_id = previous_request_state.preferred_account_id
+            request_state.require_security_work_authorized = (
+                previous_request_state.require_security_work_authorized
+            )
             if store_context_trim_applied:
                 # Store the full incoming client input as the session context
                 # so the client's next full resend can prefix-match it.

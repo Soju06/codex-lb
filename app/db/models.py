@@ -1298,6 +1298,9 @@ class HttpBridgeSessionRecord(Base):
     )
     model: Mapped[str | None] = mapped_column(String, nullable=True)
     service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
+    requires_security_work_authorized: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
     latest_turn_state: Mapped[str | None] = mapped_column(Text, nullable=True)
     latest_response_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     latest_input_item_count: Mapped[int | None] = mapped_column(Integer, nullable=True)

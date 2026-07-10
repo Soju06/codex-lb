@@ -519,6 +519,7 @@ class _HTTPBridgeSession:
     last_pending_tool_calls: dict[str, str] = field(default_factory=dict)
     durable_session_id: str | None = None
     durable_owner_epoch: int | None = None
+    requires_security_work_authorized: bool = False
     upstream_reader: asyncio.Task[None] | None = None
     last_upstream_close_code: int | None = None
     closed: bool = False

@@ -1336,8 +1336,16 @@ class _HTTPBridgeRequestSubmitMixin:
         session: "_HTTPBridgeSession",
         request_state: _WebSocketRequestState,
     ) -> bool:
-        if getattr(session.account, "security_work_authorized", False):
-            return False
+        if session.durable_session_id is not None:
+            durable_lookup = await self._durable_bridge.require_security_work_authorized(
+                session_id=session.durable_session_id
+            )
+            if durable_lookup is None:
+                # A claimed production lineage must be durably marked before
+                # it can move accounts. Fail closed if its record disappeared.
+                return False
+        session.requires_security_work_authorized = True
+        request_state.require_security_work_authorized = True
         if request_state.response_id is not None:
             return False
         if request_state.replay_count >= 1:
@@ -1354,8 +1362,9 @@ class _HTTPBridgeRequestSubmitMixin:
             retry_text = request_state.fresh_upstream_request_text
 
         owner_account_id = session.account.id
+        if getattr(session.account, "security_work_authorized", False):
+            return False
         request_state.preferred_account_id = None
-        request_state.require_security_work_authorized = True
         request_state.excluded_account_ids.add(owner_account_id)
 
         request_state.replay_count += 1

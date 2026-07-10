@@ -433,6 +433,7 @@ class _HTTPBridgeMixin(
         request_usage_budget: ApiKeyRequestUsageBudget | None = None,
         request_deadline: float | None = None,
         session_header_fallback_key: "_HTTPBridgeSessionKey | None" = None,
+        require_security_work_authorized: bool = False,
     ) -> "_HTTPBridgeSession": ...
 
     @overload
@@ -463,6 +464,7 @@ class _HTTPBridgeMixin(
         request_usage_budget: ApiKeyRequestUsageBudget | None = None,
         request_deadline: float | None = None,
         session_header_fallback_key: "_HTTPBridgeSessionKey | None" = None,
+        require_security_work_authorized: bool = False,
     ) -> "_HTTPBridgeSession | _HTTPBridgeOwnerForward": ...
 
     async def _get_or_create_http_bridge_session(
@@ -492,6 +494,7 @@ class _HTTPBridgeMixin(
         request_usage_budget: ApiKeyRequestUsageBudget | None = None,
         request_deadline: float | None = None,
         session_header_fallback_key: "_HTTPBridgeSessionKey | None" = None,
+        require_security_work_authorized: bool = False,
     ) -> "_HTTPBridgeSession | _HTTPBridgeOwnerForward":
         settings = _service_get_settings()
         request_scope_id = ensure_request_scope_id()
@@ -671,18 +674,25 @@ class _HTTPBridgeMixin(
                 retained_handoff = bool(
                     existing and existing.closed and _http_bridge_session_has_admission_waiter(existing)
                 )
-                reusable = existing is not None and _http_bridge_session_reusable_for_lookup(
-                    session=existing,
-                    key=key,
-                    api_key=api_key,
-                    incoming_turn_state=incoming_turn_state,
-                    previous_response_id=previous_response_id,
-                    preferred_account_id=preferred_account_id,
-                    require_preferred_account=require_preferred_account,
-                    service_tier_supported=_http_bridge_session_supports_service_tier(
-                        existing, request_model=request_model, request_service_tier=request_service_tier
-                    ),
-                    allow_closed_admission_handoff=retained_handoff,
+                reusable = (
+                    existing is not None
+                    and (
+                        not require_security_work_authorized
+                        or bool(getattr(existing.account, "security_work_authorized", False))
+                    )
+                    and _http_bridge_session_reusable_for_lookup(
+                        session=existing,
+                        key=key,
+                        api_key=api_key,
+                        incoming_turn_state=incoming_turn_state,
+                        previous_response_id=previous_response_id,
+                        preferred_account_id=preferred_account_id,
+                        require_preferred_account=require_preferred_account,
+                        service_tier_supported=_http_bridge_session_supports_service_tier(
+                            existing, request_model=request_model, request_service_tier=request_service_tier
+                        ),
+                        allow_closed_admission_handoff=retained_handoff,
+                    )
                 )
                 if retained_handoff and not reusable:
                     _raise_http_bridge_incompatible_admission_handoff()
@@ -693,6 +703,9 @@ class _HTTPBridgeMixin(
                         existing.api_key = api_key
                         existing.request_model = request_model
                         existing.request_service_tier = request_service_tier
+                        existing.requires_security_work_authorized = (
+                            existing.requires_security_work_authorized or require_security_work_authorized
+                        )
                         existing.last_used_at = _service_time().monotonic()
                         await _refresh_reused_http_bridge_session_with_handoff(
                             self,
@@ -1404,6 +1417,7 @@ class _HTTPBridgeMixin(
                     ),
                     "request_usage_budget": request_usage_budget,
                     "request_deadline": request_deadline,
+                    "require_security_work_authorized": require_security_work_authorized,
                 }
                 try:
                     create_signature = inspect.signature(create_session)
@@ -1414,7 +1428,12 @@ class _HTTPBridgeMixin(
                     for parameter in create_signature.parameters.values()
                 )
                 if create_signature is not None and not create_accepts_var_keyword:
-                    for optional_kwarg in ("request_service_tier", "request_usage_budget", "request_deadline"):
+                    for optional_kwarg in (
+                        "request_service_tier",
+                        "request_usage_budget",
+                        "request_deadline",
+                        "require_security_work_authorized",
+                    ):
                         if optional_kwarg not in create_signature.parameters:
                             create_kwargs.pop(optional_kwarg, None)
                 created_session = await create_session(key, **create_kwargs)
@@ -1774,6 +1793,9 @@ class _HTTPBridgeMixin(
                     latest_response_id=None,
                     allow_takeover=allow_takeover,
                     force_owner_epoch_advance=force_owner_epoch_advance or claim_attempt > 0,
+                    requires_security_work_authorized=bool(
+                        getattr(session, "requires_security_work_authorized", False)
+                    ),
                 )
                 if lookup.owner_instance_id == current_instance:
                     break
@@ -1807,6 +1829,7 @@ class _HTTPBridgeMixin(
                 )
             session.durable_session_id = lookup.session_id
             session.durable_owner_epoch = lookup.owner_epoch
+            session.requires_security_work_authorized = lookup.requires_security_work_authorized
             session.headers = _headers_with_turn_state(session.headers, session.downstream_turn_state)
             if (
                 PROMETHEUS_AVAILABLE
@@ -1862,6 +1885,7 @@ class _HTTPBridgeMixin(
         fallback_on_preferred_account_unavailable: bool = True,
         request_usage_budget: ApiKeyRequestUsageBudget | None = None,
         request_deadline: float | None = None,
+        require_security_work_authorized: bool = False,
     ) -> "_HTTPBridgeSession":
         request_state = _WebSocketRequestState(
             request_id=f"http_bridge_connect_{uuid4().hex}",
@@ -2110,6 +2134,7 @@ class _HTTPBridgeMixin(
             upstream_turn_state=_upstream_turn_state_from_socket(upstream),
             downstream_turn_state=None,
             account_lease=selected_account_lease,
+            requires_security_work_authorized=require_security_work_authorized,
         )
         _copy_websocket_route_metadata_to_session(session, request_state)
         session.upstream_reader = asyncio.create_task(self._relay_http_bridge_upstream_messages(session))
@@ -2124,6 +2149,9 @@ class _HTTPBridgeMixin(
         require_security_work_authorized: bool = False,
         require_same_account: bool = False,
     ) -> None:
+        require_security_work_authorized = (
+            require_security_work_authorized or session.requires_security_work_authorized
+        )
         old_account_id = session.account.id
         old_upstream = session.upstream
         old_reader = session.upstream_reader if restart_reader else None

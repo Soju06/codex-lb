@@ -10991,6 +10991,12 @@ async def test_http_bridge_retries_security_work_warning_on_authorized_account(m
         session.upstream_control = proxy_service._WebSocketUpstreamControl()
 
     monkeypatch.setattr(service, "_reconnect_http_bridge_session", fake_reconnect_http_bridge_session)
+    persist_security_requirement = AsyncMock(return_value=SimpleNamespace(session_id="durable-security"))
+    monkeypatch.setattr(
+        service._durable_bridge,
+        "require_security_work_authorized",
+        persist_security_requirement,
+    )
 
     request_state = proxy_service._WebSocketRequestState(
         request_id="bridge_req_security",
@@ -11018,6 +11024,7 @@ async def test_http_bridge_retries_security_work_warning_on_authorized_account(m
         queued_request_count=1,
         last_used_at=1.0,
         idle_ttl_seconds=300.0,
+        durable_session_id="durable-security",
     )
     cyber_message = (
         "ⓘ This content can't be shown\n"
@@ -11069,6 +11076,8 @@ async def test_http_bridge_retries_security_work_warning_on_authorized_account(m
     assert warning["warning"]["code"] == "security_work_authorization_required"
     assert warning["warning"]["action"] == "retry_security_work_authorized"
     assert request_state.event_queue.empty()
+    persist_security_requirement.assert_awaited_once_with(session_id="durable-security")
+    assert session.requires_security_work_authorized is True
 
 
 @pytest.mark.asyncio

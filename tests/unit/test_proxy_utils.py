@@ -21912,6 +21912,36 @@ async def test_select_account_with_budget_forwards_estimated_lease_tokens(monkey
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("request_stage", "expected_reserve"), [("first_turn", 1), ("follow_up", 1), ("reattach", 0)])
+async def test_select_account_with_budget_reserves_stream_slot_for_reattach(
+    monkeypatch,
+    request_stage,
+    expected_reserve,
+):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    settings.proxy_account_stream_recovery_reserve = 1
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_recovery_reserve")
+    select_account = AsyncMock(return_value=AccountSelection(account=account, error_message=None))
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    monkeypatch.setattr(proxy_service, "_remaining_budget_seconds", lambda _deadline: 10.0)
+
+    await service._select_account_with_budget(
+        deadline=123.0,
+        request_id=f"req-{request_stage}",
+        kind="http_bridge",
+        request_stage=request_stage,
+        lease_kind="stream",
+        model="gpt-5.6-sol",
+    )
+
+    assert select_account.await_args is not None
+    assert select_account.await_args.kwargs["stream_reserve_slots"] == expected_reserve
+
+
+@pytest.mark.asyncio
 async def test_transcribe_budget_exhaustion_blocks_401_retry_with_timeout(monkeypatch):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     request_logs = _RequestLogsRecorder()

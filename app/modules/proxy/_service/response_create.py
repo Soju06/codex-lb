@@ -18,6 +18,7 @@ from app.core.clients.proxy import (
     ImageFetchSession,
     ProxyResponseError,
     _inline_content_images,
+    _normalize_responses_lite_websocket_client_metadata,
 )
 from app.core.config.settings import DEFAULT_HOME_DIR, get_settings
 from app.core.errors import OpenAIErrorEnvelope, openai_error
@@ -754,6 +755,7 @@ def _response_create_client_metadata(
     *,
     headers: Mapping[str, str],
     codex_installation_id: str | None = None,
+    preserve_existing_responses_lite: bool = False,
 ) -> Mapping[str, JsonValue] | None:
     raw_value = payload.get("client_metadata")
     client_metadata: dict[str, JsonValue] = {}
@@ -769,4 +771,9 @@ def _response_create_client_metadata(
 
     if codex_installation_id:
         client_metadata[CODEX_INSTALLATION_ID_HEADER] = codex_installation_id
+    client_metadata = _normalize_responses_lite_websocket_client_metadata(
+        payload,
+        client_metadata,
+        preserve_existing=preserve_existing_responses_lite,
+    )
     return client_metadata or None

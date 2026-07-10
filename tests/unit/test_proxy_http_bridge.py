@@ -18,7 +18,7 @@ import pytest
 from fastapi import WebSocket
 
 from app.core.auth.refresh import RefreshError
-from app.core.clients.proxy import ProxyResponseError
+from app.core.clients.proxy import CODEX_RESPONSES_LITE_WEBSOCKET_METADATA_KEY, ProxyResponseError
 from app.core.clients.proxy_websocket import (
     CodexResponsesWebSocket,
     UpstreamResponsesWebSocket,
@@ -3863,8 +3863,12 @@ async def test_stream_via_http_bridge_injects_durable_anchor_for_trimmable_full_
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     input_items = [
+        {
+            "type": "additional_tools",
+            "role": "developer",
+            "tools": [{"type": "custom", "name": "shell"}],
+        },
         {"role": "user", "content": "hello"},
-        {"role": "assistant", "content": "world"},
         {"role": "user", "content": "follow up"},
     ]
     payload = proxy_service.ResponsesRequest.model_validate(
@@ -3889,6 +3893,8 @@ async def test_stream_via_http_bridge_injects_durable_anchor_for_trimmable_full_
     await event_queue.put(None)
     prepared_previous_response_ids: list[str | None] = []
     prepared_input_lengths: list[int] = []
+    prepared_frames: list[dict[str, Any]] = []
+    real_prepare = service._prepare_http_bridge_request
 
     def fake_prepare(
         prepared_payload: proxy_service.ResponsesRequest,
@@ -3898,12 +3904,22 @@ async def test_stream_via_http_bridge_injects_durable_anchor_for_trimmable_full_
         api_key_reservation: proxy_service.ApiKeyUsageReservationData | None,
         request_id: str,
         client_ip: str | None = None,
+        **kwargs: Any,
     ) -> tuple[proxy_service._WebSocketRequestState, str]:
-        del api_key, api_key_reservation, request_id, client_ip
         prepared_previous_response_ids.append(prepared_payload.previous_response_id)
         inp = prepared_payload.input
         prepared_input_lengths.append(len(inp) if isinstance(inp, list) else 1)
-        return request_state, '{"type":"response.create"}'
+        _, text_data = real_prepare(
+            prepared_payload,
+            _headers,
+            api_key=api_key,
+            api_key_reservation=api_key_reservation,
+            request_id=request_id,
+            client_ip=client_ip,
+            **kwargs,
+        )
+        prepared_frames.append(json.loads(text_data))
+        return request_state, text_data
 
     session = proxy_service._HTTPBridgeSession(
         key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-123", None),
@@ -3991,6 +4007,12 @@ async def test_stream_via_http_bridge_injects_durable_anchor_for_trimmable_full_
     assert chunks == []
     assert prepared_previous_response_ids == [None, "resp_latest", "resp_latest"]
     assert prepared_input_lengths == [3, 3, 1]
+    assert prepared_frames[-1]["input"] == [input_items[-1]]
+    assert [frame["client_metadata"][CODEX_RESPONSES_LITE_WEBSOCKET_METADATA_KEY] for frame in prepared_frames] == [
+        "true",
+        "true",
+        "true",
+    ]
 
 
 @pytest.mark.asyncio

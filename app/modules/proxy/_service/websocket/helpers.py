@@ -350,6 +350,7 @@ def _prepare_websocket_request_state_for_visible_output_replay(
         request_state.previous_response_id = None
         request_state.proxy_injected_previous_response_id = False
         request_state.fresh_upstream_request_is_retry_safe = False
+        request_state.responses_lite_model = request_state.fresh_upstream_request_responses_lite_model
         _refresh_websocket_request_input_fingerprint_from_text(request_state)
     request_text = request_state.request_text
     if not isinstance(request_text, str):
@@ -463,6 +464,30 @@ def _record_websocket_continuity_completion(
     continuity_state.last_completed_input_count = request_state.input_item_count
     continuity_state.last_completed_input_prefix_fingerprint = request_state.input_full_fingerprint
     continuity_state.last_pending_function_call_ids = list(request_state.pending_function_call_ids)
+
+
+def _record_websocket_responses_lite_acceptance(
+    continuity_state: _WebSocketContinuityState,
+    *,
+    request_state: _WebSocketRequestState,
+) -> None:
+    # Codex can reuse an accepted ``generate=false`` prewarm response and send
+    # only an empty or user-only input delta next. That frame no longer carries
+    # ``additional_tools``, so the accepted prewarm must seed Lite continuity.
+    # Only Lite acceptances may update the single-slot state: a non-Lite
+    # acceptance must not clobber a previously accepted Lite continuity with
+    # ``None``. The accepted response id is recorded so trusted incremental
+    # continuity can require ``previous_response_id`` to reference it.
+    if request_state.responses_lite_model is None:
+        return
+    continuity_state.responses_lite_model = request_state.responses_lite_model
+    # Prefer the downstream-visible id: a suppressed-created replay keeps
+    # exposing the original response id to the client (every downstream event
+    # is rewritten to it), so the next incremental frame can only reference
+    # that visible id, never the hidden upstream replay id.
+    continuity_state.responses_lite_response_id = (
+        request_state.replay_downstream_response_id or request_state.response_id
+    )
 
 
 def _websocket_response_id(event: OpenAIEvent | None, payload: dict[str, JsonValue] | None) -> str | None:
@@ -683,6 +708,7 @@ def _prepare_websocket_request_state_for_auth_replay(
         request_state.preferred_account_id = None
         request_state.proxy_injected_previous_response_id = False
         request_state.fresh_upstream_request_is_retry_safe = False
+        request_state.responses_lite_model = request_state.fresh_upstream_request_responses_lite_model
         _refresh_websocket_request_input_fingerprint_from_text(request_state)
     request_text = request_state.request_text
     if not isinstance(request_text, str):

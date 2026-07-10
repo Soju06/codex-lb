@@ -2100,6 +2100,52 @@ def test_response_create_client_metadata_preserves_existing_json_values_and_turn
     }
 
 
+def test_response_create_client_metadata_reconstructs_responses_lite_marker():
+    marker = proxy_module.CODEX_RESPONSES_LITE_WEBSOCKET_METADATA_KEY
+    metadata = proxy_service._response_create_client_metadata(
+        {
+            "input": [
+                {
+                    "type": "additional_tools",
+                    "role": "developer",
+                    "tools": [{"type": "custom", "name": "shell"}],
+                }
+            ],
+            "client_metadata": {"keep": "yes", marker.upper(): "stale"},
+        },
+        headers={},
+    )
+
+    assert metadata == {"keep": "yes", marker: "true"}
+
+
+def test_response_create_client_metadata_strips_untrusted_responses_lite_marker():
+    marker = proxy_module.CODEX_RESPONSES_LITE_WEBSOCKET_METADATA_KEY
+    metadata = proxy_service._response_create_client_metadata(
+        {
+            "input": [{"role": "user", "content": "hello"}],
+            "client_metadata": {"keep": "yes", marker: "true"},
+        },
+        headers={},
+    )
+
+    assert metadata == {"keep": "yes"}
+
+
+def test_response_create_client_metadata_preserves_trusted_incremental_responses_lite_marker():
+    marker = proxy_module.CODEX_RESPONSES_LITE_WEBSOCKET_METADATA_KEY
+    metadata = proxy_service._response_create_client_metadata(
+        {
+            "input": [{"role": "user", "content": "hello"}],
+            "client_metadata": {"keep": "yes", marker: "true"},
+        },
+        headers={},
+        preserve_existing_responses_lite=True,
+    )
+
+    assert metadata == {"keep": "yes", marker: "true"}
+
+
 def test_response_create_client_metadata_replaces_installation_id():
     metadata = proxy_service._response_create_client_metadata(
         {
@@ -4578,7 +4624,65 @@ async def test_stream_responses_falls_back_to_http_post_without_native_codex_hea
 
 
 @pytest.mark.asyncio
-async def test_stream_responses_uses_websocket_transport(monkeypatch):
+async def test_stream_responses_derives_lite_http_header_from_additional_tools(monkeypatch):
+    class Settings:
+        upstream_base_url = "https://chatgpt.com/backend-api"
+        upstream_connect_timeout_seconds = 8.0
+        stream_idle_timeout_seconds = 45.0
+        max_sse_event_bytes = 1024
+        image_inline_fetch_enabled = False
+        log_upstream_request_payload = False
+        proxy_request_budget_seconds = 15.0
+        upstream_stream_transport = "http"
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
+
+    additional_tools = {
+        "type": "additional_tools",
+        "role": "developer",
+        "tools": [{"type": "custom", "name": "shell"}],
+    }
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "",
+            "input": [additional_tools, {"role": "user", "content": "inspect"}],
+            "client_metadata": {
+                proxy_module.CODEX_RESPONSES_LITE_WEBSOCKET_METADATA_KEY: "stale",
+                "keep": "yes",
+            },
+        }
+    )
+    session = _WsSession(
+        _WsConnection([]),
+        sse_response=_SsePostResponse([b'data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n']),
+    )
+
+    events = [
+        event
+        async for event in proxy_module.stream_responses(
+            payload,
+            headers={"X-OpenAI-Internal-Codex-Responses-Lite": "untrusted"},
+            access_token="token",
+            account_id="acc_1",
+            session=cast(proxy_module.aiohttp.ClientSession, session),
+        )
+    ]
+
+    assert events == ['data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n']
+    upstream_headers = cast(dict[str, str], session.post_calls[0]["headers"])
+    assert upstream_headers[proxy_module.CODEX_RESPONSES_LITE_HEADER] == "true"
+    upstream_payload = cast(dict[str, object], session.post_calls[0]["json"])
+    assert cast(list[object], upstream_payload["input"])[0] == additional_tools
+    assert upstream_payload["client_metadata"] == {
+        "keep": "yes",
+    }
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_uses_websocket_transport_and_marks_lite_payload(monkeypatch):
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"
         upstream_stream_transport = "websocket"
@@ -4606,8 +4710,21 @@ async def test_stream_responses_uses_websocket_transport(monkeypatch):
     ]
     websocket = _WsResponse(messages)
     session = _WsSession(websocket)
+    additional_tools = {
+        "type": "additional_tools",
+        "role": "developer",
+        "tools": [{"type": "custom", "name": "shell"}],
+    }
     payload = ResponsesRequest.model_validate(
-        {"model": "gpt-5.1", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "hi",
+            "input": [additional_tools, {"role": "user", "content": "hi"}],
+            "client_metadata": {
+                proxy_module.CODEX_RESPONSES_LITE_WEBSOCKET_METADATA_KEY: "stale",
+                "keep": "yes",
+            },
+        }
     )
 
     events = [
@@ -4627,7 +4744,13 @@ async def test_stream_responses_uses_websocket_transport(monkeypatch):
         "type": "response.create",
         **{k: v for k, v in payload.to_payload().items() if k != "stream"},
     }
+    expected_request_payload["client_metadata"] = {
+        "keep": "yes",
+        proxy_module.CODEX_RESPONSES_LITE_WEBSOCKET_METADATA_KEY: "true",
+    }
     assert request_payload == expected_request_payload
+    upstream_headers = cast(dict[str, str], session.ws_calls[0]["headers"])
+    assert proxy_module.CODEX_RESPONSES_LITE_HEADER not in {key.lower() for key in upstream_headers}
     expected_created = (
         "event: response.created\ndata: "
         '{"type":"response.created","response":{"id":"resp_ws","service_tier":"auto"}}\n\n'
@@ -6605,6 +6728,68 @@ async def test_compact_responses_starts_upstream_timer_after_image_inlining(monk
     assert dumped["object"] == "response.compaction"
     assert dumped["compaction_summary"]["encrypted_content"] == "enc_summary_1"
     assert recorded["started_at"] == 205.5
+
+
+@pytest.mark.asyncio
+async def test_compact_responses_derives_lite_http_header_from_additional_tools(monkeypatch):
+    class Settings:
+        upstream_base_url = "https://chatgpt.com/backend-api"
+        upstream_connect_timeout_seconds = 1.0
+        upstream_compact_timeout_seconds = 12.0
+        image_inline_fetch_enabled = False
+        log_upstream_request_payload = False
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
+
+    additional_tools = {
+        "type": "additional_tools",
+        "role": "developer",
+        "tools": [
+            {
+                "type": "custom",
+                "name": "shell",
+                "description": "x" * 60_000,
+            }
+        ],
+    }
+    developer_instructions = {
+        "type": "message",
+        "role": "developer",
+        "content": "preserve these base instructions",
+    }
+    payload = proxy_module.ResponsesCompactRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "",
+            "input": [
+                additional_tools,
+                developer_instructions,
+                {"role": "assistant", "content": "middle context " + "y" * 500_000},
+                {"role": "user", "content": "inspect"},
+            ],
+        }
+    )
+    session = _CompactSession(
+        _JsonCompactResponse(
+            {"object": "response.compaction", "compaction_summary": {"encrypted_content": "enc_summary_1"}}
+        )
+    )
+
+    await proxy_module.compact_responses(
+        payload,
+        headers={"X-OpenAI-Internal-Codex-Responses-Lite": "untrusted"},
+        access_token="token",
+        account_id="acc_1",
+        session=cast(proxy_module.aiohttp.ClientSession, session),
+    )
+
+    upstream_headers = cast(dict[str, str], session.calls[0]["headers"])
+    assert upstream_headers[proxy_module.CODEX_RESPONSES_LITE_HEADER] == "true"
+    upstream_payload = cast(dict[str, object], session.calls[0]["json"])
+    assert cast(list[object], upstream_payload["input"])[0] == additional_tools
+    assert cast(list[object], upstream_payload["input"])[1] == developer_instructions
 
 
 @pytest.mark.asyncio
@@ -11639,6 +11824,365 @@ async def test_prepare_websocket_response_create_request_releases_reservation_on
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "incremental_input",
+    [
+        pytest.param([], id="empty-delta"),
+        pytest.param([{"role": "user", "content": "continue"}], id="user-delta"),
+    ],
+)
+async def test_websocket_lite_prewarm_acceptance_preserves_incremental_marker(
+    monkeypatch,
+    incremental_input: list[JsonValue],
+):
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    api_key = ApiKeyData(
+        id="key_ws_lite_continuity",
+        name="ws-lite-continuity",
+        key_prefix="sk-ws-lite",
+        allowed_models=["gpt-5.6-sol", "gpt-5.4"],
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+    enforced_api_key = ApiKeyData(
+        id=api_key.id,
+        name=api_key.name,
+        key_prefix=api_key.key_prefix,
+        allowed_models=api_key.allowed_models,
+        enforced_model="gpt-5.4",
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=api_key.created_at,
+        last_used_at=None,
+    )
+
+    class Settings:
+        log_proxy_request_payload = False
+        log_proxy_request_shape = False
+        log_proxy_request_shape_raw_cache_key = False
+        log_proxy_service_tier_trace = False
+        openai_prompt_cache_key_derivation_enabled = True
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: Settings())
+    monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        service,
+        "_refresh_websocket_api_key_policy",
+        AsyncMock(side_effect=[api_key, api_key, enforced_api_key]),
+    )
+
+    marker = proxy_module.CODEX_RESPONSES_LITE_WEBSOCKET_METADATA_KEY
+    prewarm_headers = {
+        "x-codex-turn-metadata": json.dumps({"request_kind": "prewarm"}),
+    }
+    continuity_state = proxy_service._WebSocketContinuityState()
+    first = await service._prepare_websocket_response_create_request(
+        cast(
+            dict[str, JsonValue],
+            {
+                "type": "response.create",
+                "model": "gpt-5.6-sol",
+                "instructions": "",
+                "generate": False,
+                "input": [
+                    {
+                        "type": "additional_tools",
+                        "role": "developer",
+                        "tools": [{"type": "custom", "name": "shell"}],
+                    },
+                    {"type": "message", "role": "developer", "content": "use repository tools"},
+                ],
+                "client_metadata": {marker.upper(): "stale"},
+            },
+        ),
+        headers=prewarm_headers,
+        codex_session_affinity=False,
+        openai_cache_affinity=True,
+        sticky_threads_enabled=False,
+        openai_cache_affinity_max_age_seconds=300,
+        api_key=api_key,
+        continuity_state=continuity_state,
+    )
+
+    first_payload = json.loads(first.text_data)
+    assert first_payload["generate"] is False
+    assert first_payload["client_metadata"][marker] == "true"
+    assert first.request_state.request_kind == "prewarm"
+    assert continuity_state.responses_lite_model is None
+    first.request_state.response_create_gate_acquired = True
+    response_create_gate = asyncio.Semaphore(0)
+    account = _make_account("acc_ws_lite_prewarm")
+    await service._process_upstream_websocket_text(
+        json.dumps(
+            {
+                "type": "response.created",
+                "response": {"id": "resp_ws_lite_prewarm", "status": "in_progress"},
+            },
+            separators=(",", ":"),
+        ),
+        account=account,
+        account_id_value=account.id,
+        pending_requests=deque([first.request_state]),
+        pending_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        response_create_gate=response_create_gate,
+        continuity_state=continuity_state,
+    )
+    assert continuity_state.responses_lite_model == "gpt-5.6-sol"
+    assert continuity_state.responses_lite_response_id == "resp_ws_lite_prewarm"
+    await asyncio.wait_for(response_create_gate.acquire(), timeout=1.0)
+
+    incremental = await service._prepare_websocket_response_create_request(
+        cast(
+            dict[str, JsonValue],
+            {
+                "type": "response.create",
+                "model": "gpt-5.6-sol",
+                "instructions": "",
+                "previous_response_id": "resp_ws_lite_prewarm",
+                "input": incremental_input,
+                "client_metadata": {
+                    marker: "true",
+                    "x-codex-turn-metadata": json.dumps({"request_kind": "turn"}),
+                },
+            },
+        ),
+        headers=prewarm_headers,
+        codex_session_affinity=False,
+        openai_cache_affinity=True,
+        sticky_threads_enabled=False,
+        openai_cache_affinity_max_age_seconds=300,
+        api_key=api_key,
+        continuity_state=continuity_state,
+    )
+
+    incremental_payload = json.loads(incremental.text_data)
+    assert incremental.request_state.request_kind == "prewarm"
+    assert incremental_payload["client_metadata"][marker] == "true"
+    incremental_turn_metadata = json.loads(incremental_payload["client_metadata"]["x-codex-turn-metadata"])
+    assert incremental_turn_metadata["request_kind"] == "turn"
+
+    incompatible = await service._prepare_websocket_response_create_request(
+        cast(
+            dict[str, JsonValue],
+            {
+                "type": "response.create",
+                "model": "gpt-5.6-sol",
+                "instructions": "",
+                "input": [{"role": "user", "content": "ordinary request"}],
+                "client_metadata": {marker: "true"},
+            },
+        ),
+        headers=prewarm_headers,
+        codex_session_affinity=False,
+        openai_cache_affinity=True,
+        sticky_threads_enabled=False,
+        openai_cache_affinity_max_age_seconds=300,
+        api_key=api_key,
+        continuity_state=continuity_state,
+    )
+
+    incompatible_payload = json.loads(incompatible.text_data)
+    assert incompatible_payload["model"] == "gpt-5.4"
+    assert marker not in incompatible_payload["client_metadata"]
+    assert "x-codex-turn-metadata" in incompatible_payload["client_metadata"]
+    assert continuity_state.responses_lite_model == "gpt-5.6-sol"
+    proxy_service._record_websocket_responses_lite_acceptance(
+        continuity_state,
+        request_state=incompatible.request_state,
+    )
+    assert continuity_state.responses_lite_model == "gpt-5.6-sol"
+    assert continuity_state.responses_lite_response_id == "resp_ws_lite_prewarm"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "previous_response_id",
+    [
+        pytest.param(None, id="absent"),
+        pytest.param("resp_ws_other", id="foreign-response"),
+    ],
+)
+async def test_websocket_lite_incremental_requires_previous_response_linkage(
+    monkeypatch,
+    previous_response_id: str | None,
+):
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    api_key = ApiKeyData(
+        id="key_ws_lite_linkage",
+        name="ws-lite-linkage",
+        key_prefix="sk-ws-lite",
+        allowed_models=["gpt-5.6-sol"],
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+
+    class Settings:
+        log_proxy_request_payload = False
+        log_proxy_request_shape = False
+        log_proxy_request_shape_raw_cache_key = False
+        log_proxy_service_tier_trace = False
+        openai_prompt_cache_key_derivation_enabled = True
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: Settings())
+    monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_refresh_websocket_api_key_policy", AsyncMock(return_value=api_key))
+
+    marker = proxy_module.CODEX_RESPONSES_LITE_WEBSOCKET_METADATA_KEY
+    continuity_state = proxy_service._WebSocketContinuityState(
+        responses_lite_model="gpt-5.6-sol",
+        responses_lite_response_id="resp_ws_lite_prewarm",
+    )
+    payload: dict[str, JsonValue] = {
+        "type": "response.create",
+        "model": "gpt-5.6-sol",
+        "instructions": "",
+        "input": [{"role": "user", "content": "continue"}],
+        "client_metadata": {marker: "true"},
+    }
+    if previous_response_id is not None:
+        payload["previous_response_id"] = previous_response_id
+
+    prepared = await service._prepare_websocket_response_create_request(
+        payload,
+        headers={},
+        codex_session_affinity=False,
+        openai_cache_affinity=True,
+        sticky_threads_enabled=False,
+        openai_cache_affinity_max_age_seconds=300,
+        api_key=api_key,
+        continuity_state=continuity_state,
+    )
+
+    prepared_payload = json.loads(prepared.text_data)
+    assert marker not in prepared_payload.get("client_metadata", {})
+    assert prepared.request_state.responses_lite_model is None
+    assert continuity_state.responses_lite_model == "gpt-5.6-sol"
+    assert continuity_state.responses_lite_response_id == "resp_ws_lite_prewarm"
+
+
+@pytest.mark.asyncio
+async def test_websocket_lite_fresh_replay_strips_trusted_marker(monkeypatch):
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    api_key = ApiKeyData(
+        id="key_ws_lite_replay",
+        name="ws-lite-replay",
+        key_prefix="sk-ws-lite",
+        allowed_models=["gpt-5.6-sol"],
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+
+    class Settings:
+        log_proxy_request_payload = False
+        log_proxy_request_shape = False
+        log_proxy_request_shape_raw_cache_key = False
+        log_proxy_service_tier_trace = False
+        openai_prompt_cache_key_derivation_enabled = True
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: Settings())
+    monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_refresh_websocket_api_key_policy", AsyncMock(return_value=api_key))
+
+    marker = proxy_module.CODEX_RESPONSES_LITE_WEBSOCKET_METADATA_KEY
+    continuity_state = proxy_service._WebSocketContinuityState(
+        responses_lite_model="gpt-5.6-sol",
+        responses_lite_response_id="resp_ws_lite_prev",
+    )
+
+    trusted = await service._prepare_websocket_response_create_request(
+        cast(
+            dict[str, JsonValue],
+            {
+                "type": "response.create",
+                "model": "gpt-5.6-sol",
+                "instructions": "",
+                "previous_response_id": "resp_ws_lite_prev",
+                "input": [
+                    {"role": "user", "content": "continue"},
+                    {"role": "user", "content": "with details"},
+                ],
+                "client_metadata": {marker: "true", "keep": "yes"},
+            },
+        ),
+        headers={},
+        codex_session_affinity=False,
+        openai_cache_affinity=True,
+        sticky_threads_enabled=False,
+        openai_cache_affinity_max_age_seconds=300,
+        api_key=api_key,
+        continuity_state=continuity_state,
+    )
+
+    trusted_payload = json.loads(trusted.text_data)
+    assert trusted_payload["client_metadata"][marker] == "true"
+    assert trusted.request_state.fresh_upstream_request_is_retry_safe
+    assert trusted.request_state.fresh_upstream_request_text is not None
+    replay_payload = json.loads(trusted.request_state.fresh_upstream_request_text)
+    assert "previous_response_id" not in replay_payload
+    assert replay_payload["input"] == trusted_payload["input"]
+    assert replay_payload["client_metadata"] == {"keep": "yes"}
+    # The marker-stripped fresh body is non-Lite, so swapping to it for a
+    # transparent replay must also clear the Lite acceptance flag.
+    assert trusted.request_state.responses_lite_model == "gpt-5.6-sol"
+    assert trusted.request_state.fresh_upstream_request_responses_lite_model is None
+
+    body_lite = await service._prepare_websocket_response_create_request(
+        cast(
+            dict[str, JsonValue],
+            {
+                "type": "response.create",
+                "model": "gpt-5.6-sol",
+                "instructions": "",
+                "previous_response_id": "resp_ws_lite_prev",
+                "input": [
+                    {
+                        "type": "additional_tools",
+                        "role": "developer",
+                        "tools": [{"type": "custom", "name": "shell"}],
+                    },
+                    {"role": "user", "content": "continue"},
+                ],
+                "client_metadata": {marker: "stale", "keep": "yes"},
+            },
+        ),
+        headers={},
+        codex_session_affinity=False,
+        openai_cache_affinity=True,
+        sticky_threads_enabled=False,
+        openai_cache_affinity_max_age_seconds=300,
+        api_key=api_key,
+        continuity_state=proxy_service._WebSocketContinuityState(),
+    )
+
+    body_lite_payload = json.loads(body_lite.text_data)
+    assert body_lite_payload["client_metadata"][marker] == "true"
+    assert body_lite.request_state.fresh_upstream_request_text is not None
+    body_lite_replay = json.loads(body_lite.request_state.fresh_upstream_request_text)
+    assert "previous_response_id" not in body_lite_replay
+    assert body_lite_replay["client_metadata"][marker] == "true"
+    assert body_lite.request_state.fresh_upstream_request_responses_lite_model == "gpt-5.6-sol"
+
+
+@pytest.mark.asyncio
 async def test_prepare_websocket_response_create_request_does_not_infer_previous_response_id_from_session_scope(
     monkeypatch,
 ):
@@ -13392,6 +13936,123 @@ async def test_finalize_websocket_empty_prewarm_does_not_store_continuity_anchor
     assert continuity_state.last_completed_response_id == "resp_existing"
     assert continuity_state.last_completed_input_count == 2
     assert continuity_state.last_completed_input_prefix_fingerprint == "existing-fingerprint"
+
+
+@pytest.mark.asyncio
+async def test_process_upstream_websocket_text_commits_lite_state_when_response_is_created():
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_ws_lite_created")
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_lite_created",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        responses_lite_model="gpt-5.6-sol",
+        response_create_gate_acquired=True,
+    )
+    continuity_state = proxy_service._WebSocketContinuityState()
+    response_create_gate = asyncio.Semaphore(0)
+    payload = {
+        "type": "response.created",
+        "response": {"id": "resp_ws_lite_created", "status": "in_progress"},
+    }
+
+    await service._process_upstream_websocket_text(
+        json.dumps(payload, separators=(",", ":")),
+        account=account,
+        account_id_value=account.id,
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        response_create_gate=response_create_gate,
+        continuity_state=continuity_state,
+    )
+
+    assert continuity_state.responses_lite_model == "gpt-5.6-sol"
+    assert continuity_state.responses_lite_response_id == "resp_ws_lite_created"
+    await asyncio.wait_for(response_create_gate.acquire(), timeout=1.0)
+
+    non_lite_request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_non_lite_created",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        response_create_gate_acquired=True,
+    )
+    await service._process_upstream_websocket_text(
+        json.dumps(
+            {
+                "type": "response.created",
+                "response": {"id": "resp_ws_non_lite_created", "status": "in_progress"},
+            },
+            separators=(",", ":"),
+        ),
+        account=account,
+        account_id_value=account.id,
+        pending_requests=deque([non_lite_request_state]),
+        pending_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        response_create_gate=response_create_gate,
+        continuity_state=continuity_state,
+    )
+
+    assert continuity_state.responses_lite_model == "gpt-5.6-sol"
+    assert continuity_state.responses_lite_response_id == "resp_ws_lite_created"
+    await asyncio.wait_for(response_create_gate.acquire(), timeout=1.0)
+
+
+@pytest.mark.asyncio
+async def test_process_upstream_websocket_text_records_visible_replay_id_for_lite_acceptance():
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_ws_lite_visible_replay")
+    # A suppressed-created replay: the client already received
+    # ``response.created`` with the original visible id, so the replay's
+    # hidden upstream id is never exposed downstream.
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_lite_visible_replay",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        responses_lite_model="gpt-5.6-sol",
+        response_create_gate_acquired=True,
+        awaiting_response_created=True,
+        replay_count=1,
+        replay_downstream_response_id="resp_ws_lite_visible",
+        suppress_next_created_downstream=True,
+    )
+    continuity_state = proxy_service._WebSocketContinuityState()
+    response_create_gate = asyncio.Semaphore(0)
+
+    await service._process_upstream_websocket_text(
+        json.dumps(
+            {
+                "type": "response.created",
+                "response": {"id": "resp_ws_lite_hidden", "status": "in_progress"},
+            },
+            separators=(",", ":"),
+        ),
+        account=account,
+        account_id_value=account.id,
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        response_create_gate=response_create_gate,
+        continuity_state=continuity_state,
+    )
+
+    assert request_state.response_id == "resp_ws_lite_hidden"
+    assert continuity_state.responses_lite_model == "gpt-5.6-sol"
+    assert continuity_state.responses_lite_response_id == "resp_ws_lite_visible"
+    await asyncio.wait_for(response_create_gate.acquire(), timeout=1.0)
 
 
 @pytest.mark.asyncio

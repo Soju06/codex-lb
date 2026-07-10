@@ -25,14 +25,16 @@ from app.core.balancer.types import ClassifiedFailure, UpstreamError
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
 from app.core.clients.files import finalize_file as core_finalize_file  # noqa: F401
 from app.core.clients.http import lease_http_session as lease_http_session  # noqa: F401
-from app.core.clients.proxy import CodexControlResponse as CodexControlResponse
 from app.core.clients.proxy import (  # noqa: F401  # noqa: F401
+    CODEX_RESPONSES_LITE_WEBSOCKET_METADATA_KEY,
     ImageFetchSession,
     ProxyResponseError,
     UpstreamProxyRouteTrace,
     _as_image_fetch_session,
     _inline_content_images,
     _inline_input_image_urls,
+    _payload_has_responses_lite_websocket_marker,
+    _payload_uses_responses_lite,
     _ws_transport_payload_budget_bytes,
     apply_codex_installation_metadata,
     filter_inbound_headers,
@@ -43,6 +45,7 @@ from app.core.clients.proxy import (  # noqa: F401  # noqa: F401
     push_stream_timeout_overrides,
     push_transcribe_timeout_overrides,
 )
+from app.core.clients.proxy import CodexControlResponse as CodexControlResponse
 from app.core.clients.proxy import codex_control_request as core_codex_control_request  # noqa: F401
 from app.core.clients.proxy import compact_responses as core_compact_responses  # noqa: F401
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
@@ -367,6 +370,7 @@ from app.modules.proxy._service.websocket.helpers import (
     _pop_terminal_websocket_request_state,
     _prepare_websocket_request_state_for_auth_replay,
     _record_websocket_continuity_completion,
+    _record_websocket_responses_lite_acceptance,
     _release_websocket_response_create_gate,
     _rewrite_websocket_continuity_corruption_event,
     _rewrite_websocket_downstream_response_id,
@@ -1281,11 +1285,31 @@ class _WebSocketMixin:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
         refreshed_api_key = await proxy._refresh_websocket_api_key_policy(api_key)
-        client_metadata = _facade()._response_create_client_metadata(payload, headers=headers)
         responses_payload = normalize_responses_request_payload(
             payload,
             openai_compat=openai_cache_affinity,
         )
+        apply_api_key_enforcement(responses_payload, refreshed_api_key)
+        normalized_payload = responses_payload.to_payload()
+        body_uses_responses_lite = _payload_uses_responses_lite(normalized_payload)
+        trusted_incremental_responses_lite = bool(
+            not body_uses_responses_lite
+            and continuity_state is not None
+            and continuity_state.responses_lite_model == responses_payload.model
+            and continuity_state.responses_lite_response_id is not None
+            and responses_payload.previous_response_id == continuity_state.responses_lite_response_id
+            and _payload_has_responses_lite_websocket_marker(normalized_payload)
+        )
+        client_metadata = _facade()._response_create_client_metadata(
+            normalized_payload,
+            headers=headers,
+            preserve_existing_responses_lite=trusted_incremental_responses_lite,
+        )
+        next_responses_lite_model = (
+            responses_payload.model if body_uses_responses_lite or trusted_incremental_responses_lite else None
+        )
+        if client_metadata is not None or "client_metadata" in normalized_payload:
+            responses_payload = responses_payload.model_copy(update={"client_metadata": client_metadata})
         previous_response_trimmed_input_count: int | None = None
         previous_response_trimmed_input_fingerprint: str | None = None
         client_full_resend_payload: ResponsesRequest | None = None
@@ -1306,12 +1330,24 @@ class _WebSocketMixin:
                     previous_response_input_items
                 )
                 responses_payload = responses_payload.model_copy(update={"input": trimmed_input_items})
-        apply_api_key_enforcement(responses_payload, refreshed_api_key)
+        full_resend_client_metadata = client_metadata
         if client_full_resend_retry_safe and client_full_resend_input_items is not None:
+            if trusted_incremental_responses_lite and client_metadata is not None:
+                # The transparent fresh replay clears ``previous_response_id``
+                # and this input carries no ``additional_tools`` prefix, so the
+                # replay loses the linkage that justified the trusted marker.
+                # Strip it so the replay does not advertise Responses Lite.
+                stripped_metadata = {
+                    key: value
+                    for key, value in client_metadata.items()
+                    if key.lower() != CODEX_RESPONSES_LITE_WEBSOCKET_METADATA_KEY
+                }
+                full_resend_client_metadata = stripped_metadata or None
             client_full_resend_payload = responses_payload.model_copy(
                 update={
                     "previous_response_id": None,
                     "input": client_full_resend_input_items,
+                    "client_metadata": full_resend_client_metadata,
                 }
             )
         validate_model_access(refreshed_api_key, responses_payload.model)
@@ -1389,6 +1425,7 @@ class _WebSocketMixin:
         request_state.useragent = useragent
         request_state.useragent_group = useragent_group
         request_state.client_ip = client_ip
+        request_state.responses_lite_model = next_responses_lite_model
         request_state.expose_stale_previous_response_classifier = codex_session_affinity
         original_full_resend_input: JsonValue | None = None
         if session_anchor is not None:
@@ -1417,6 +1454,9 @@ class _WebSocketMixin:
             )
             if not request_state.fresh_upstream_request_is_retry_safe:
                 request_state.fresh_upstream_request_text = None
+            request_state.fresh_upstream_request_responses_lite_model = (
+                responses_payload.model if body_uses_responses_lite else None
+            )
             _facade().logger.info(
                 "websocket_session_anchor_injected request_id=%s response_id=%s original_items=%s trimmed_to=%s",
                 request_state.request_id,
@@ -1444,11 +1484,17 @@ class _WebSocketMixin:
             request_state.fresh_upstream_request_text = _facade()._response_create_text_with_size_guard(
                 client_full_resend_payload,
                 include_type_field=True,
-                client_metadata=client_metadata,
+                client_metadata=full_resend_client_metadata,
                 request_state=request_state,
                 transport=_REQUEST_TRANSPORT_WEBSOCKET,
             )
             request_state.fresh_upstream_request_is_retry_safe = request_state.fresh_upstream_request_text is not None
+            # A marker-only trusted incremental frame yields a fresh body with
+            # the reserved marker stripped, so the replay must not be treated
+            # as a Lite request when it is accepted upstream.
+            request_state.fresh_upstream_request_responses_lite_model = (
+                responses_payload.model if body_uses_responses_lite else None
+            )
             if request_state.fresh_upstream_request_is_retry_safe:
                 _facade().logger.info(
                     (
@@ -1521,6 +1567,7 @@ class _WebSocketMixin:
         if responses_payload.previous_response_id is None and not request_state.proxy_injected_previous_response_id:
             request_state.fresh_upstream_request_text = text_data
             request_state.fresh_upstream_request_is_retry_safe = True
+            request_state.fresh_upstream_request_responses_lite_model = next_responses_lite_model
 
         return _PreparedWebSocketRequest(
             text_data=text_data,
@@ -2817,6 +2864,11 @@ class _WebSocketMixin:
                 request_state = _assign_websocket_response_id(pending_requests, response_id)
                 created_request_state = request_state
                 release_create_gate = request_state is not None
+                if request_state is not None and continuity_state is not None:
+                    _record_websocket_responses_lite_acceptance(
+                        continuity_state,
+                        request_state=request_state,
+                    )
             elif response_id is not None:
                 request_state = _find_websocket_request_state_by_response_id(pending_requests, response_id)
                 release_create_gate = False
@@ -3090,6 +3142,7 @@ class _WebSocketMixin:
                     request_state.previous_response_id = None
                     request_state.proxy_injected_previous_response_id = False
                     request_state.fresh_upstream_request_is_retry_safe = False
+                    request_state.responses_lite_model = request_state.fresh_upstream_request_responses_lite_model
                     request_state.replay_count += 1
                     request_state.awaiting_response_created = True
                     request_state.response_id = None
@@ -3171,6 +3224,9 @@ class _WebSocketMixin:
                             request_state.previous_response_id = None
                             request_state.proxy_injected_previous_response_id = False
                             request_state.request_text = retry_text
+                            request_state.responses_lite_model = (
+                                request_state.fresh_upstream_request_responses_lite_model
+                            )
                         upstream_control.reconnect_requested = True
                         upstream_control.suppress_downstream_event = True
                         await _release_websocket_response_create_gate(request_state, response_create_gate)

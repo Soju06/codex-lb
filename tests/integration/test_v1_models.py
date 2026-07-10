@@ -722,6 +722,11 @@ async def test_backend_codex_models_entry_has_upstream_fields(async_client):
                 "visibility": "list",
                 "availability_nux": None,
                 "upgrade": {"model": "gpt-5.4", "migration_markdown": "Upgrade!"},
+                "model_messages": {
+                    "instructions_template": "You are a coding assistant.",
+                    "instructions_variables": {"personality_default": ""},
+                    "approvals": None,
+                },
             },
             base_instructions="You are a helpful coding assistant.",
         ),
@@ -742,6 +747,11 @@ async def test_backend_codex_models_entry_has_upstream_fields(async_client):
     assert entry["visibility"] == "list"
     assert entry["availability_nux"] is None
     assert entry["upgrade"] == {"model": "gpt-5.4", "migration_markdown": "Upgrade!"}
+    assert entry["model_messages"] == {
+        "instructions_template": "You are a coding assistant.",
+        "instructions_variables": {"personality_default": ""},
+        "approvals": None,
+    }
 
 
 @pytest.mark.asyncio

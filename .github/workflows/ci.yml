@@ -3,11 +3,16 @@ name: CI
 on:
   push:
     branches: ["main"]
-  # No `edited` type: PR title/body edits (often made by tooling right after a
-  # push) raced the `synchronize` run for the same head SHA, so every push
-  # produced a duplicate run that concurrency immediately cancelled.
+  # `edited` must stay: release-guard evidence (validation checklist + exact
+  # head SHA) is added by editing the release PR body, and CI Required only
+  # reruns for that PR via an `edited` event (scripts/guard_beta_release.py).
+  # Known cost: a body edit right after a push starts a duplicate run for the
+  # same head SHA and concurrency cancels the older one. Do NOT "fix" this by
+  # skipping edited runs for non-release PRs: skipped or all-skipped
+  # "CI Required" check runs still satisfy branch protection, so a body-only
+  # edit could mint a passing check for a red or untested head.
   pull_request:
-    types: [opened, reopened, synchronize, ready_for_review]
+    types: [opened, reopened, synchronize, edited, ready_for_review]
   merge_group:
 
 concurrency:

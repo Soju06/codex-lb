@@ -466,6 +466,32 @@ def filter_inbound_headers(headers: Mapping[str, str]) -> dict[str, str]:
     return {key: value for key, value in headers.items() if not _should_drop_inbound_header(key)}
 
 
+def responses_lite_for_model(model: str | None) -> bool:
+    """Return True when ``model`` is a Responses Lite upstream model.
+
+    GPT-5.6 models ship with ``use_responses_lite: true`` in the upstream Codex
+    catalog. The Codex CLI signals this mode to the upstream ChatGPT backend
+    with the ``x-openai-internal-codex-responses-lite: true`` header. That
+    header is stripped from inbound requests (see ``_should_drop_inbound_header``)
+    so a client cannot spoof it; codex-lb must reconstruct it from its own model
+    registry when forwarding a request for a Responses Lite model, otherwise the
+    upstream rejects the request as ``Model not found`` (issue #1157).
+    """
+    if not model:
+        return False
+    registry = get_model_registry()
+    # ``getattr`` fallback keeps unit tests that pass narrowed ``SimpleNamespace``
+    # registry fakes (only exposing ``prefers_websockets``) working without forcing
+    # every fake to redeclare ``get_models_with_fallback``.
+    get_models = getattr(registry, "get_models_with_fallback", None)
+    if get_models is None:
+        return False
+    upstream = get_models().get(model)
+    if upstream is None:
+        return False
+    return bool(upstream.raw.get("use_responses_lite"))
+
+
 def apply_codex_installation_metadata(payload: dict[str, JsonValue], codex_installation_id: str | None) -> None:
     raw_metadata = payload.get("client_metadata")
     client_metadata: dict[str, JsonValue] = {}
@@ -585,7 +611,9 @@ def _build_upstream_headers(
     inbound: Mapping[str, str],
     access_token: str,
     account_id: str | None,
+    *,
     accept: str = "text/event-stream",
+    model: str | None = None,
 ) -> dict[str, str]:
     headers = filter_inbound_headers(inbound)
     native = _is_native_codex_request(headers)
@@ -604,6 +632,8 @@ def _build_upstream_headers(
             headers["chatgpt-account-id"] = account_id
         else:
             headers[_CHATGPT_ACCOUNT_ID_HEADER] = account_id
+    if responses_lite_for_model(model):
+        headers[CODEX_RESPONSES_LITE_HEADER] = "true"
     return headers
 
 
@@ -635,6 +665,8 @@ def _build_upstream_websocket_headers(
     inbound: Mapping[str, str],
     access_token: str,
     account_id: str | None,
+    *,
+    model: str | None = None,
 ) -> dict[str, str]:
     connected_header_tokens: set[str] = set()
     for key, value in inbound.items():
@@ -666,6 +698,8 @@ def _build_upstream_websocket_headers(
             headers["chatgpt-account-id"] = account_id
         else:
             headers[_CHATGPT_ACCOUNT_ID_HEADER] = account_id
+    if responses_lite_for_model(model):
+        headers[CODEX_RESPONSES_LITE_HEADER] = "true"
     return headers
 
 
@@ -2444,10 +2478,10 @@ async def _stream_responses_with_session(
         payload_size_estimate_bytes=payload_size_estimate_bytes,
     )
     if transport == "websocket":
-        upstream_headers = _build_upstream_websocket_headers(headers, access_token, account_id)
+        upstream_headers = _build_upstream_websocket_headers(headers, access_token, account_id, model=payload.model)
         method = "GET"
     else:
-        upstream_headers = _build_upstream_headers(headers, access_token, account_id)
+        upstream_headers = _build_upstream_headers(headers, access_token, account_id, model=payload.model)
         method = "POST"
     remaining_request_timeout = _remaining_total_timeout(
         request_total_timeout,
@@ -2695,7 +2729,7 @@ async def _stream_responses_with_session(
         )
 
         transport = "http"
-        upstream_headers = _build_upstream_headers(headers, access_token, account_id)
+        upstream_headers = _build_upstream_headers(headers, access_token, account_id, model=payload.model)
         method = "POST"
         remaining_request_timeout = _remaining_total_timeout(
             request_total_timeout,
@@ -3170,6 +3204,7 @@ class _CompactCommandTransport:
             self.access_token,
             upstream_account_id,
             accept="application/json",
+            model=self.payload.model,
         )
         pre_request_started_at = time.monotonic()
         compact_timeout_seconds = _effective_compact_total_timeout(settings.upstream_compact_timeout_seconds)

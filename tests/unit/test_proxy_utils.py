@@ -633,6 +633,56 @@ def test_build_upstream_headers_strips_internal_responses_lite_header():
     assert "x-openai-internal-codex-responses-lite" not in lowered
 
 
+def _responses_lite_registry(models: dict[str, dict[str, JsonValue]]) -> object:
+    return SimpleNamespace(
+        get_models_with_fallback=lambda: {slug: SimpleNamespace(raw=raw) for slug, raw in models.items()}
+    )
+
+
+def test_build_upstream_headers_reconstructs_responses_lite_header_for_lite_model(monkeypatch):
+    monkeypatch.setattr(
+        proxy_module,
+        "get_model_registry",
+        lambda: _responses_lite_registry({"gpt-5.6-luna": {"use_responses_lite": True}}),
+    )
+    headers = _build_upstream_headers({}, "token", "acc_2", model="gpt-5.6-luna")
+    assert headers["x-openai-internal-codex-responses-lite"] == "true"
+
+
+def test_build_upstream_headers_omits_responses_lite_header_for_non_lite_model(monkeypatch):
+    monkeypatch.setattr(
+        proxy_module,
+        "get_model_registry",
+        lambda: _responses_lite_registry({"gpt-5.5": {"use_responses_lite": False}}),
+    )
+    headers = _build_upstream_headers({}, "token", "acc_2", model="gpt-5.5")
+    lowered = {key.lower() for key in headers}
+    assert "x-openai-internal-codex-responses-lite" not in lowered
+
+
+def test_build_upstream_headers_omits_responses_lite_header_for_unknown_model(monkeypatch):
+    monkeypatch.setattr(
+        proxy_module,
+        "get_model_registry",
+        lambda: _responses_lite_registry({"gpt-5.6-luna": {"use_responses_lite": True}}),
+    )
+    headers = _build_upstream_headers({}, "token", "acc_2", model="gpt-9-does-not-exist")
+    lowered = {key.lower() for key in headers}
+    assert "x-openai-internal-codex-responses-lite" not in lowered
+
+
+def test_build_upstream_websocket_headers_reconstructs_responses_lite_header(monkeypatch):
+    monkeypatch.setattr(
+        proxy_module,
+        "get_model_registry",
+        lambda: _responses_lite_registry({"gpt-5.6-sol": {"use_responses_lite": True}}),
+    )
+    headers = proxy_module._build_upstream_websocket_headers(
+        {"Connection": "Upgrade"}, "token", "acc_2", model="gpt-5.6-sol"
+    )
+    assert headers["x-openai-internal-codex-responses-lite"] == "true"
+
+
 def test_build_upstream_headers_accept_override():
     inbound = {}
     headers = _build_upstream_headers(inbound, "token", None, accept="application/json")

@@ -61,20 +61,21 @@ official Codex CLI sends (`get_codex_user_agent()` in
 2. Strip SDK-only fingerprint headers (`x-openai-client-version`,
    `x-openai-client-os`, `x-openai-client-arch`, `x-openai-client-id`,
    `x-openai-client-user-agent`).
-3. Do **not** add an `originator` header: the real Codex CLI omits the
-   `originator` header when the originator equals the default (`codex_cli_rs`)
-   and lets the backend read it from the `User-Agent` prefix. Strip any
-   inbound `originator` header so no SDK-supplied value leaks through.
+3. Strip any inbound `originator` and `version` headers, then install the
+   canonical Codex identity pair: `originator: codex_cli_rs` and
+   `version: <version>`, using the same cached version embedded in the
+   `User-Agent`. The official Codex client installs the default originator on
+   its shared HTTP client and adds the package version through its model
+   provider headers; omitting either header does not match its wire identity.
 4. Use PascalCase `ChatGPT-Account-Id` for the account header, matching Codex
    CLI (`codex-rs/backend-client/src/client.rs`).
 
 A request is **native** (left untouched) when its User-Agent already begins
 with a known Codex client token (`codex_cli_rs`, `codex-tui`, `codex_exec`,
-`codex_vscode`, `Codex Desktop`, or `Codex ...`) **or** it already carries
-native Codex transport headers (`originator` in the native set, or any
-`x-codex-*` stream header). websocket requests are unaffected because they use
-`_build_upstream_websocket_headers` and already connect as native Codex
-clients.
+`codex_vscode`, `Codex Desktop`, or `Codex ...`) **or** it carries an
+`originator` in the native Codex set. Continuity-only `x-codex-*` headers do
+not make a request native. The same normalization applies to non-native HTTP,
+internal websocket, and client-facing Responses websocket egress.
 
 ## Why this is correct as a behavior change
 
@@ -94,7 +95,7 @@ clients.
 
 ### Spec deltas
 - `outbound-http-clients`: ADD a Requirement covering non-native upstream http
-  request fingerprint normalization (User-Agent, originator omission, SDK
+  request fingerprint normalization (User-Agent, canonical identity, SDK
   header stripping, account-header casing, native-client exemption).
 
 ### Code
@@ -103,19 +104,21 @@ clients.
   hot header-build path; background refresh stays on the existing async
   `get_version()` already called every model-registry refresh cycle.
 - `app/core/clients/proxy.py` — add `build_codex_user_agent(version)` helper
-  and a `_normalize_non_native_upstream_fingerprint()` step; call it from
-  `_build_upstream_headers` for non-native http requests. Add native-client
-  detection by User-Agent prefix combined with the existing
-  `_has_native_codex_transport_headers`.
+  and a shared `_normalize_non_native_upstream_fingerprint()` step; call it
+  from HTTP and internal websocket builders for non-native requests. Replace
+  untrusted `originator` / `version` values with canonical Codex identity
+  headers. Add native-client detection by User-Agent prefix or allowlisted
+  first-party originator. The client-facing Responses websocket builder reuses
+  the same normalization.
 - `app/core/config/settings.py` — add `codex_fingerprint_os`,
   `codex_fingerprint_arch`, `codex_fingerprint_terminal` settings (defaults
   `Mac OS 26.5.0` / `arm64` / `iTerm.app/3.6.10`).
 
 ### Tests
 - `tests/unit/test_proxy_upstream_fingerprint.py` (new) — non-native http UA
-  rewritten to `codex_cli_rs/...`; native UA + websocket unchanged;
-  `x-openai-client-*` and inbound `originator` stripped; no `originator` header
-  added; PascalCase `ChatGPT-Account-Id`; version sourced from cache with
+  and websocket UAs rewritten to `codex_cli_rs/...`; native identities
+  unchanged; SDK identity stripped and canonical `originator` / `version`
+  installed; PascalCase `ChatGPT-Account-Id`; version sourced from cache with
   settings-default fallback.
 - `tests/unit/test_codex_version_cache.py` — `cached_version_or_default()`
   returns the cached version when present and the settings default when empty,
@@ -123,7 +126,6 @@ clients.
 
 ## Out of scope
 
-- Changing websocket upstream headers (`_build_upstream_websocket_headers`).
 - Changing native Codex client requests.
 - Per-key rate limiting, account-pool sizing, or retry/backoff policy for
   `auto`-tier overloads (separate concerns).

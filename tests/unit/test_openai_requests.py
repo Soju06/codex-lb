@@ -1011,6 +1011,33 @@ def test_compact_rejects_responses_lite_prelude_that_exceeds_upstream_limit():
     assert raised.value.code == "responses_compact_input_too_large"
 
 
+def test_compact_rejects_anchor_selection_that_still_exceeds_upstream_limit():
+    payload = {
+        "model": "gpt-5.6-sol",
+        "instructions": "",
+        "input": [
+            {
+                "type": "additional_tools",
+                "role": "developer",
+                "tools": [{"type": "custom", "name": "exec", "description": "a" * 4_000}],
+            },
+            {"type": "message", "role": "developer", "content": "prelude"},
+            {"type": "message", "role": "user", "content": "h" * 32_000},
+            {"type": "message", "role": "assistant", "content": "m" * 80_000},
+            {"type": "message", "role": "developer", "content": "d" * 360_000},
+            {"type": "message", "role": "user", "content": "z" * 4_000},
+        ],
+    }
+
+    request = ResponsesCompactRequest.model_validate(payload)
+
+    with pytest.raises(ClientPayloadError, match="still exceeds the upstream size limit") as raised:
+        request.to_payload()
+
+    assert raised.value.param == "input"
+    assert raised.value.code == "responses_compact_input_too_large"
+
+
 def test_compact_trimming_drops_oversized_leading_item():
     input_items = [
         {"role": "assistant", "content": "x" * 500_000},

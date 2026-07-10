@@ -935,9 +935,21 @@ def _trim_compact_input_for_upstream(payload: MutableJsonObject) -> None:
         token_counts=token_counts,
         token_budget=max(0, _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS - marker_tokens),
     )
-    if len(selected_indices) == len(input_value):
+    trimmed_input = (
+        input_value
+        if len(selected_indices) == len(input_value)
+        else _compact_trimmed_input_with_markers(input_value, token_counts, selected_indices)
+    )
+    trimmed_tokens = sum(_estimated_json_tokens(item) for item in trimmed_input)
+    if preserved_indices and trimmed_tokens > _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS:
+        raise ClientPayloadError(
+            "Compact input still exceeds the upstream size limit after preserving required state anchors.",
+            param="input",
+            code="responses_compact_input_too_large",
+        )
+    if trimmed_input is input_value:
         return
-    payload["input"] = _compact_trimmed_input_with_markers(input_value, token_counts, selected_indices)
+    payload["input"] = trimmed_input
 
 
 def _compact_state_anchor_indices(input_value: list[JsonValue]) -> set[int]:

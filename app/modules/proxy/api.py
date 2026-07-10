@@ -3382,6 +3382,41 @@ def _normalize_source_allowed_tool_choice_aliases(payload: dict[str, JsonValue])
     payload["tool_choice"] = updated_choice
 
 
+# Maps hosted tool types to the Responses ``include`` prefixes that only make
+# sense while that tool is present (see _RESPONSES_INCLUDE_ALLOWLIST in
+# app.core.openai.requests). When the source filter drops a hosted tool, the
+# matching include entries must be pruned with it: sources that validate
+# ``include`` would otherwise reject the request the filter just repaired.
+# Non-tool-specific entries (``reasoning.*``, ``message.*``) are never pruned.
+_SOURCE_TOOL_INCLUDE_PREFIXES: dict[str, tuple[str, ...]] = {
+    "web_search": ("web_search_call.",),
+    "file_search": ("file_search_call.",),
+    "code_interpreter": ("code_interpreter_call.",),
+    "computer_use": ("computer_call_output.",),
+    "computer_use_preview": ("computer_call_output.",),
+}
+
+
+def _prune_source_tool_specific_includes(payload: dict[str, JsonValue], dropped_tool_types: frozenset[str]) -> None:
+    prefixes = tuple(
+        prefix for tool_type in dropped_tool_types for prefix in _SOURCE_TOOL_INCLUDE_PREFIXES.get(tool_type, ())
+    )
+    if not prefixes:
+        return
+    include = payload.get("include")
+    if not is_json_list(include):
+        return
+    kept_include: list[JsonValue] = [
+        entry for entry in include if not (isinstance(entry, str) and entry.startswith(prefixes))
+    ]
+    if len(kept_include) == len(include):
+        return
+    if not kept_include:
+        payload.pop("include", None)
+        return
+    payload["include"] = kept_include
+
+
 def _drop_unsupported_source_response_tools(
     payload: dict[str, JsonValue],
     *,
@@ -3393,17 +3428,21 @@ def _drop_unsupported_source_response_tools(
         return
     kept_tools: list[JsonValue] = []
     kept_types: set[str] = set()
+    dropped_types: set[str] = set()
     for tool in tools:
         if not is_json_mapping(tool):
             continue
         tool_type = tool.get("type")
         if not _source_tool_type_supported(tool_type, supported_tool_types):
+            if isinstance(tool_type, str):
+                dropped_types.add(normalize_tool_type(tool_type))
             continue
         kept_tools.append(tool)
         if isinstance(tool_type, str):
             kept_types.add(tool_type)
     if len(kept_tools) == len(tools):
         return
+    _prune_source_tool_specific_includes(payload, frozenset(dropped_types))
     if not kept_tools:
         payload.pop("tools", None)
         payload.pop("tool_choice", None)

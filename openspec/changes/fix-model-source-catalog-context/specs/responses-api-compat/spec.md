@@ -13,8 +13,15 @@ When only some tools are dropped, a `tool_choice` that references a dropped
 tool MUST be removed so the forwarded payload never names a tool that is not
 present; `function`-typed choices MUST be preserved. When all tools are
 dropped, `tools`, `tool_choice`, and `parallel_tool_calls` MUST be removed
-together. This filtering MUST apply on every source-routed Responses surface
-(`/backend-api/codex/responses` and `/v1/responses`).
+together. Whenever a hosted tool is dropped, `include` entries specific to
+that tool type (for example `web_search_call.*` for `web_search`,
+`file_search_call.*` for `file_search`, `code_interpreter_call.*` for
+`code_interpreter`, and `computer_call_output.*` for computer-use tools) MUST
+be pruned from the forwarded payload; non-tool-specific entries (for example
+`reasoning.encrypted_content`) MUST be kept, and the `include` field MUST be
+removed entirely when pruning empties it. This filtering MUST apply on every
+source-routed Responses surface (`/backend-api/codex/responses` and
+`/v1/responses`).
 
 #### Scenario: Codex-only tools are dropped for a plain source model
 
@@ -35,6 +42,13 @@ together. This filtering MUST apply on every source-routed Responses surface
 - **WHEN** a Responses request with a `function` tool, a `web_search` tool, and `tool_choice` `{"type": "web_search"}` is forwarded to it
 - **THEN** the forwarded payload contains only the `function` tool
 - **AND** the forwarded payload contains no `tool_choice` key
+
+#### Scenario: include entries of a dropped tool are pruned
+
+- **GIVEN** a source model with no tool capability opt-ins
+- **WHEN** a Responses request with a `function` tool, a `web_search` tool, and `include` `["web_search_call.action.sources", "reasoning.encrypted_content"]` is forwarded to it
+- **THEN** the forwarded payload contains only the `function` tool
+- **AND** the forwarded payload's `include` contains only `"reasoning.encrypted_content"`
 
 #### Scenario: Dropping every tool removes the tool-only fields
 

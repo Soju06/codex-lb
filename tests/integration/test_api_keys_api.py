@@ -1472,6 +1472,58 @@ async def test_backend_codex_responses_drops_tool_choice_referencing_dropped_sou
 
 
 @pytest.mark.asyncio
+async def test_backend_codex_responses_prunes_include_entries_of_dropped_source_tools(async_client, monkeypatch):
+    model = "external-codex-responses-include-prune"
+    await _create_model_source(
+        async_client,
+        name="codex-responses-include-prune",
+        model=model,
+        supports_responses=True,
+    )
+    observed: dict[str, object] = {}
+
+    async def fake_stream(source, payload):
+        observed["payload"] = dict(payload)
+        usage_holder = SourceUsageHolder()
+
+        async def body():
+            usage_holder.usage = SourceUsage(input_tokens=2, output_tokens=1, cached_input_tokens=0)
+            yield (
+                b'data: {"type":"response.completed","response":{"id":"resp_source_include_prune",'
+                b'"usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}}}\n\n'
+            )
+
+        return SourceResponsesStream(body=body(), usage_holder=usage_holder, upstream_status_code=200)
+
+    monkeypatch.setattr(proxy_api, "stream_source_responses", fake_stream)
+
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        json={
+            "model": model,
+            "instructions": "hi",
+            "input": [],
+            "tools": [
+                {"type": "function", "name": "run_shell", "parameters": {"type": "object", "properties": {}}},
+                {"type": "web_search"},
+            ],
+            "include": ["web_search_call.action.sources", "reasoning.encrypted_content"],
+        },
+    ) as response:
+        assert response.status_code == 200
+        [line async for line in response.aiter_lines() if line]
+
+    forwarded_payload = cast("dict[str, object]", observed["payload"])
+    assert forwarded_payload["tools"] == [
+        {"type": "function", "name": "run_shell", "parameters": {"type": "object", "properties": {}}}
+    ]
+    # The web_search-specific include entry must be pruned with the dropped
+    # tool; non-tool-specific entries stay untouched.
+    assert forwarded_payload["include"] == ["reasoning.encrypted_content"]
+
+
+@pytest.mark.asyncio
 async def test_v1_responses_filters_unsupported_model_source_tools(async_client, monkeypatch):
     model = "external-v1-responses-tools"
     source_id = await _create_model_source(

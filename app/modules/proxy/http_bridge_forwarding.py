@@ -54,10 +54,11 @@ HTTP_BRIDGE_RESERVATION_MODEL_HEADER = "x-codex-bridge-reservation-model"
 HTTP_BRIDGE_AFFINITY_KIND_HEADER = "x-codex-bridge-affinity-kind"
 HTTP_BRIDGE_AFFINITY_KEY_HEADER = "x-codex-bridge-affinity-key"
 HTTP_BRIDGE_ORIGINAL_UNANCHORED_HEADER = "x-codex-bridge-original-unanchored"
-HTTP_BRIDGE_ORIGINAL_UNANCHORED_SIGNATURE_HEADER = "x-codex-bridge-original-unanchored-signature"
+HTTP_BRIDGE_SIGNATURE_VERSION_HEADER = "x-codex-bridge-signature-version"
 HTTP_BRIDGE_CLIENT_IP_HEADER = "x-codex-bridge-client-ip"
 HTTP_BRIDGE_CLIENT_IP_SIGNATURE_HEADER = "x-codex-bridge-client-ip-signature"
 HTTP_BRIDGE_SIGNATURE_HEADER = "x-codex-bridge-signature"
+_HTTP_BRIDGE_SIGNATURE_VERSION_V2 = "2"
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,21 +190,18 @@ def build_owner_forward_headers(
     forwarded[HTTP_BRIDGE_ORIGIN_INSTANCE_HEADER] = context.origin_instance
     forwarded[HTTP_BRIDGE_TARGET_INSTANCE_HEADER] = context.target_instance
     forwarded[HTTP_BRIDGE_CODEX_AFFINITY_HEADER] = "1" if context.codex_session_affinity else "0"
+    forwarded[HTTP_BRIDGE_SIGNATURE_VERSION_HEADER] = _HTTP_BRIDGE_SIGNATURE_VERSION_V2
+    forwarded[HTTP_BRIDGE_ORIGINAL_UNANCHORED_HEADER] = "1" if context.original_request_unanchored else "0"
     if context.original_affinity_kind and context.original_affinity_key:
         forwarded[HTTP_BRIDGE_AFFINITY_KIND_HEADER] = context.original_affinity_kind
         forwarded[HTTP_BRIDGE_AFFINITY_KEY_HEADER] = context.original_affinity_key
-    if context.original_request_unanchored:
-        forwarded[HTTP_BRIDGE_ORIGINAL_UNANCHORED_HEADER] = "1"
-        forwarded[HTTP_BRIDGE_ORIGINAL_UNANCHORED_SIGNATURE_HEADER] = _bridge_forward_unanchored_signature(
-            payload=payload,
-            context=context,
-        )
     if context.client_ip:
         forwarded[HTTP_BRIDGE_CLIENT_IP_HEADER] = context.client_ip
         forwarded[HTTP_BRIDGE_CLIENT_IP_SIGNATURE_HEADER] = _bridge_forward_signature(
             payload=payload,
             context=context,
             include_client_ip=True,
+            signature_version=_HTTP_BRIDGE_SIGNATURE_VERSION_V2,
         )
     if context.downstream_turn_state:
         forwarded["x-codex-turn-state"] = context.downstream_turn_state
@@ -215,6 +213,7 @@ def build_owner_forward_headers(
         payload=payload,
         context=context,
         include_client_ip=False,
+        signature_version=_HTTP_BRIDGE_SIGNATURE_VERSION_V2,
     )
     return forwarded
 
@@ -245,7 +244,16 @@ def parse_forwarded_request(
             ),
         )
     client_ip = _optional_header(headers.get(HTTP_BRIDGE_CLIENT_IP_HEADER))
-    original_request_unanchored = _bool_header(headers.get(HTTP_BRIDGE_ORIGINAL_UNANCHORED_HEADER))
+    signature_version = _optional_header(headers.get(HTTP_BRIDGE_SIGNATURE_VERSION_HEADER))
+    original_unanchored_value = _optional_header(headers.get(HTTP_BRIDGE_ORIGINAL_UNANCHORED_HEADER))
+    if signature_version == _HTTP_BRIDGE_SIGNATURE_VERSION_V2:
+        if original_unanchored_value not in {"0", "1"}:
+            return None, _invalid_bridge_forward_signature_error()
+        original_request_unanchored = original_unanchored_value == "1"
+    elif signature_version is None:
+        original_request_unanchored = False
+    else:
+        return None, _invalid_bridge_forward_signature_error()
     context = HTTPBridgeForwardContext(
         origin_instance=headers.get(HTTP_BRIDGE_ORIGIN_INSTANCE_HEADER, "").strip() or "unknown",
         target_instance=target_instance,
@@ -259,40 +267,56 @@ def parse_forwarded_request(
     )
     signature = _optional_header(headers.get(HTTP_BRIDGE_SIGNATURE_HEADER))
     client_ip_signature = _optional_header(headers.get(HTTP_BRIDGE_CLIENT_IP_SIGNATURE_HEADER))
-    original_unanchored_signature = _optional_header(headers.get(HTTP_BRIDGE_ORIGINAL_UNANCHORED_SIGNATURE_HEADER))
-    expected_signature = _bridge_forward_signature(payload=payload, context=context)
-    legacy_signature = _bridge_forward_signature(
+    expected_signature = _bridge_forward_signature(
+        payload=payload,
+        context=context,
+        signature_version=signature_version,
+    )
+    signature_without_client_ip = _bridge_forward_signature(
         payload=payload,
         context=context,
         include_client_ip=False,
+        signature_version=signature_version,
     )
     primary_signature_valid = signature is not None and hmac.compare_digest(signature, expected_signature)
-    legacy_signature_valid = signature is not None and hmac.compare_digest(signature, legacy_signature)
+    signature_without_client_ip_valid = signature is not None and hmac.compare_digest(
+        signature,
+        signature_without_client_ip,
+    )
     client_ip_signature_valid = client_ip_signature is not None and hmac.compare_digest(
         client_ip_signature,
         expected_signature,
     )
-    base_signature_valid = primary_signature_valid or (
-        legacy_signature_valid and (client_ip is None or client_ip_signature_valid)
+    signature_valid = primary_signature_valid or (
+        signature_without_client_ip_valid and (client_ip is None or client_ip_signature_valid)
     )
-    original_unanchored_signature_valid = not original_request_unanchored or (
-        original_unanchored_signature is not None
-        and hmac.compare_digest(
-            original_unanchored_signature,
-            _bridge_forward_unanchored_signature(payload=payload, context=context),
-        )
-    )
-    signature_valid = base_signature_valid and original_unanchored_signature_valid
     if not signature_valid:
+        return None, _invalid_bridge_forward_signature_error()
+    if (
+        signature_version is None
+        and context.original_affinity_kind == "session_header"
+        and payload.previous_response_id is None
+    ):
         return None, ProxyResponseError(
-            400,
+            409,
             openai_error(
-                "bridge_forward_invalid",
-                "Internal bridge forward signature is invalid",
-                error_type="invalid_request_error",
+                "bridge_forward_upgrade_required",
+                "Unanchored owner forwarding requires bridge signature protocol v2",
+                error_type="server_error",
             ),
         )
     return HTTPBridgeForwardedRequest(context=context), None
+
+
+def _invalid_bridge_forward_signature_error() -> ProxyResponseError:
+    return ProxyResponseError(
+        400,
+        openai_error(
+            "bridge_forward_invalid",
+            "Internal bridge forward signature is invalid",
+            error_type="invalid_request_error",
+        ),
+    )
 
 
 def _owner_forward_timeout(*, connect_timeout_seconds: float, idle_timeout_seconds: float) -> aiohttp.ClientTimeout:
@@ -334,6 +358,7 @@ def _bridge_forward_signature(
     payload: ResponsesRequest,
     context: HTTPBridgeForwardContext,
     include_client_ip: bool = True,
+    signature_version: str | None = None,
 ) -> str:
     payload_json = json.dumps(
         payload.model_dump(mode="json", exclude_none=True),
@@ -350,6 +375,13 @@ def _bridge_forward_signature(
         context.original_affinity_kind or "",
         context.original_affinity_key or "",
     ]
+    if signature_version is not None:
+        fields.extend(
+            (
+                f"signature_version={signature_version}",
+                f"original_request_unanchored={int(context.original_request_unanchored)}",
+            )
+        )
     if include_client_ip:
         fields.append(context.client_ip or "")
     fields.extend(
@@ -362,21 +394,6 @@ def _bridge_forward_signature(
     )
     signing_payload = "|".join(fields)
     secret = get_or_create_key(get_settings().encryption_key_file)
-    return hmac.new(secret, signing_payload.encode("utf-8"), hashlib.sha256).hexdigest()
-
-
-def _bridge_forward_unanchored_signature(
-    *,
-    payload: ResponsesRequest,
-    context: HTTPBridgeForwardContext,
-) -> str:
-    base_signature = _bridge_forward_signature(
-        payload=payload,
-        context=context,
-        include_client_ip=False,
-    )
-    secret = get_or_create_key(get_settings().encryption_key_file)
-    signing_payload = f"{base_signature}|original_request_unanchored=1"
     return hmac.new(secret, signing_payload.encode("utf-8"), hashlib.sha256).hexdigest()
 
 

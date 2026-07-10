@@ -645,6 +645,33 @@ def _http_bridge_unanchored_parallel_fork_key(
     return fork_key
 
 
+def _reserve_http_bridge_unanchored_handoff(
+    session: "_HTTPBridgeSession",
+    *,
+    request_scope_id: str,
+) -> None:
+    current_reservation = getattr(session, "unanchored_reservation_id", None)
+    if current_reservation is not None and current_reservation != request_scope_id:
+        raise ProxyResponseError(
+            409,
+            openai_error(
+                "bridge_session_reserved",
+                "HTTP responses session bridge is reserved by another request",
+                error_type="server_error",
+            ),
+        )
+    session.unanchored_reservation_id = request_scope_id
+
+
+def _release_http_bridge_unanchored_handoff(
+    session: "_HTTPBridgeSession",
+    *,
+    request_scope_id: str,
+) -> None:
+    if session.unanchored_reservation_id == request_scope_id:
+        session.unanchored_reservation_id = None
+
+
 def _http_bridge_session_retiring_with_visible_requests(session: "_HTTPBridgeSession") -> bool:
     return session.upstream_control.retire_after_drain and _http_bridge_session_has_visible_requests(session)
 

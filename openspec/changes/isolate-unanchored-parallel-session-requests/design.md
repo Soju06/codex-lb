@@ -24,19 +24,23 @@ create distinct upstream websocket sessions even when a client repeats
 original bridge stays registered under the canonical session key and its model
 metadata is not changed by the forked request.
 
-The canonical session is reserved for that request while lookup returns and
-before submission makes its queued activity visible. A different request that
-arrives in this interval forks instead of reusing the apparently idle session.
-Submission clears the matching reservation in the same synchronous section
-that increments the queued count. Reuse performs cancellable durable refresh
-before publishing the reservation, so an aborted lookup cannot strand it.
+The canonical session is reserved for that request at the first cancellable
+handoff after lookup and before submission makes its queued activity visible.
+There is no event-loop yield between a normal lookup return and that claim. A
+different request that arrives after the claim forks instead of reusing the
+apparently idle session. Submission clears the matching reservation in the same
+synchronous section that increments the queued count, and an owned `finally`
+also clears it on every pre-submit error or cancellation. Recovery paths claim
+the same lease before awaiting API-key admission.
 
-Owner forwarding carries a separately signed bit recording whether the
-originating request had an explicit turn-state or previous-response anchor.
-The owner still receives the generated downstream turn-state for response
-aliasing, but it removes that generated value from bridge lookup when the
-originating request was unanchored. This preserves the same fork decision on
-local and forwarded requests.
+Owner forwarding protocol v2 includes the unanchored boolean in the main HMAC
+for both true and false values. The owner still receives the generated
+downstream turn-state for response aliasing, but it removes that generated
+value from bridge lookup when the originating request was unanchored. A v2
+origin therefore cannot be downgraded by changing or stripping the boolean. A
+legacy unanchored forward fails closed on a v2 owner, while a v2 signature fails
+legacy validation on an old owner; mixed-version deployments never silently
+fall back to the shared canonical response-create gate.
 
 Forked lanes use hard continuity strength. They are independent at creation,
 but any durable turn-state or previous-response alias derived from that lane

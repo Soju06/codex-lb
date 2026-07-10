@@ -29,6 +29,10 @@ from app.core.utils.request_id import (
 from app.db.models import Account, AccountStatus, DashboardSettings
 from app.db.session import SessionLocal
 from app.dependencies import get_proxy_service_for_app
+from app.modules.proxy._service.http_bridge.helpers import (
+    _release_http_bridge_unanchored_handoff,
+    _reserve_http_bridge_unanchored_handoff,
+)
 from app.modules.proxy.load_balancer import AccountSelection
 
 pytestmark = pytest.mark.integration
@@ -7018,7 +7022,7 @@ async def test_v1_responses_http_bridge_forks_parallel_unanchored_session_reques
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_http_bridge_reserves_idle_canonical_session_before_submit(
+async def test_v1_responses_http_bridge_reserved_handoff_forks_before_submit(
     app_instance,
     monkeypatch,
 ):
@@ -7072,12 +7076,16 @@ async def test_v1_responses_http_bridge_reserves_idle_canonical_session_before_s
             reset_request_id(request_id_token)
 
     first = await get_session("scope-before-submit-a")
-    second = await get_session("scope-before-submit-b")
+    _reserve_http_bridge_unanchored_handoff(first, request_scope_id="scope-before-submit-a")
+    try:
+        second = await get_session("scope-before-submit-b")
+    finally:
+        _release_http_bridge_unanchored_handoff(first, request_scope_id="scope-before-submit-a")
 
     assert first.key == shared_key
     assert service._http_bridge_sessions[shared_key] is first
     assert first.queued_request_count == 0
-    assert first.unanchored_reservation_id == "scope-before-submit-a"
+    assert first.unanchored_reservation_id is None
     assert second is not first
     assert second.key.affinity_kind == "internal_unanchored_parallel"
     assert second.key.strength == "hard"

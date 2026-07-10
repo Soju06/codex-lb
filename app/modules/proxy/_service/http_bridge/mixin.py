@@ -680,8 +680,6 @@ class _HTTPBridgeMixin(
                         existing.request_service_tier = request_service_tier
                         existing.last_used_at = _service_time().monotonic()
                         await self._refresh_durable_http_bridge_session(existing)
-                        if key.affinity_kind == "session_header" and incoming_turn_state is None:
-                            existing.unanchored_reservation_id = request_scope_id
                         _log_http_bridge_event(
                             "reuse",
                             key,
@@ -1426,8 +1424,6 @@ class _HTTPBridgeMixin(
                     current_future = self._http_bridge_inflight_sessions.get(key)
                     if current_future is inflight_future:
                         self._http_bridge_inflight_sessions.pop(key, None)
-                        if key.affinity_kind == "session_header" and incoming_turn_state is None:
-                            created_session.unanchored_reservation_id = request_scope_id
                         self._http_bridge_sessions[key] = created_session
                         session_registered = True
                         if inflight_future is not None and not inflight_future.done():

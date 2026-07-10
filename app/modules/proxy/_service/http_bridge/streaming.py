@@ -46,7 +46,7 @@ from app.core.openai.requests import (
     ResponsesRequest,
 )
 from app.core.types import JsonValue
-from app.core.utils.request_id import ensure_request_id
+from app.core.utils.request_id import ensure_request_id, ensure_request_scope_id
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
 from app.db.models import (
     StickySessionKind,
@@ -81,6 +81,8 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _make_http_bridge_session_key,
     _record_bridge_reattach,
     _record_continuity_fail_closed,
+    _release_http_bridge_unanchored_handoff,
+    _reserve_http_bridge_unanchored_handoff,
     _trim_http_bridge_previous_response_input_items,
 )
 from app.modules.proxy._service.http_bridge.service_stubs import (
@@ -552,6 +554,11 @@ class _HTTPBridgeStreamingMixin:
             forwarded_affinity_kind=forwarded_affinity_kind,
             forwarded_affinity_key=forwarded_affinity_key,
         )
+        original_request_unanchored = (
+            bridge_session_key.affinity_kind == "session_header"
+            and _sticky_key_from_turn_state_header(headers) is None
+            and payload.previous_response_id is None
+        )
         try:
             durable_lookup = await self._durable_bridge.lookup_request_targets(
                 session_key_kind=bridge_session_key.affinity_kind,
@@ -967,6 +974,12 @@ class _HTTPBridgeStreamingMixin:
                 )
                 if recovery_injected_input is not None:
                     recovery_payload = recovery_payload.model_copy(update={"input": recovery_injected_input})
+                owner_recovery_scope_id = ensure_request_scope_id() if original_request_unanchored else None
+                if owner_recovery_scope_id is not None:
+                    _reserve_http_bridge_unanchored_handoff(
+                        session,
+                        request_scope_id=owner_recovery_scope_id,
+                    )
                 retry_request_state: _WebSocketRequestState | None = None
                 try:
                     retry_api_key_reservation = api_key_reservation
@@ -1021,6 +1034,11 @@ class _HTTPBridgeStreamingMixin:
                         await self._release_websocket_reservation(retry_api_key_reservation)
                     raise
                 finally:
+                    if owner_recovery_scope_id is not None:
+                        _release_http_bridge_unanchored_handoff(
+                            session,
+                            request_scope_id=owner_recovery_scope_id,
+                        )
                     if retry_request_state is not None:
                         with anyio.CancelScope(shield=True):
                             await self._detach_http_bridge_request(session, request_state=retry_request_state)
@@ -1192,6 +1210,13 @@ class _HTTPBridgeStreamingMixin:
                 request_state.fresh_upstream_request_is_retry_safe = (
                     True if store_context_trim_applied else previous_request_state.fresh_upstream_request_is_retry_safe
                 )
+        initial_handoff_session = session
+        initial_handoff_scope_id = ensure_request_scope_id() if original_request_unanchored else None
+        if initial_handoff_scope_id is not None:
+            _reserve_http_bridge_unanchored_handoff(
+                initial_handoff_session,
+                request_scope_id=initial_handoff_scope_id,
+            )
         session_events: AsyncGenerator[str, None] = self._stream_http_bridge_session_events(
             session,
             request_state=request_state,
@@ -1474,6 +1499,12 @@ class _HTTPBridgeStreamingMixin:
                 break
             _record_bridge_reattach(path=recovery_path, outcome="success")
 
+            local_recovery_scope_id = ensure_request_scope_id() if original_request_unanchored else None
+            if local_recovery_scope_id is not None:
+                _reserve_http_bridge_unanchored_handoff(
+                    session,
+                    request_scope_id=local_recovery_scope_id,
+                )
             try:
                 retry_api_key_reservation = api_key_reservation
                 retry_reservation_reacquired = False
@@ -1519,7 +1550,18 @@ class _HTTPBridgeStreamingMixin:
                 if retry_reservation_reacquired and retry_api_key_reservation is not None:
                     await self._release_websocket_reservation(retry_api_key_reservation)
                 raise
+            finally:
+                if local_recovery_scope_id is not None:
+                    _release_http_bridge_unanchored_handoff(
+                        session,
+                        request_scope_id=local_recovery_scope_id,
+                    )
         finally:
+            if initial_handoff_scope_id is not None:
+                _release_http_bridge_unanchored_handoff(
+                    initial_handoff_session,
+                    request_scope_id=initial_handoff_scope_id,
+                )
             try:
                 await session_events.aclose()
             except Exception:

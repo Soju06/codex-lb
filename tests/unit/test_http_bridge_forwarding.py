@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Iterator
-from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -21,15 +20,14 @@ from app.modules.proxy.http_bridge_forwarding import (
     HTTP_BRIDGE_FORWARDED_HEADER,
     HTTP_BRIDGE_ORIGIN_INSTANCE_HEADER,
     HTTP_BRIDGE_ORIGINAL_UNANCHORED_HEADER,
-    HTTP_BRIDGE_ORIGINAL_UNANCHORED_SIGNATURE_HEADER,
     HTTP_BRIDGE_RESERVATION_KEY_ID_HEADER,
     HTTP_BRIDGE_RESERVATION_MODEL_HEADER,
     HTTP_BRIDGE_SIGNATURE_HEADER,
+    HTTP_BRIDGE_SIGNATURE_VERSION_HEADER,
     HTTP_BRIDGE_TARGET_INSTANCE_HEADER,
     HTTPBridgeForwardContext,
     HTTPBridgeOwnerClient,
     _bridge_forward_signature,
-    _bridge_forward_unanchored_signature,
     _owner_forward_receive_timeout,
     _owner_forward_timeout,
     build_owner_forward_headers,
@@ -47,6 +45,27 @@ def _temp_bridge_key(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterato
 
 def _payload() -> ResponsesRequest:
     return ResponsesRequest.model_validate({"model": "gpt-5.4", "instructions": "hi", "input": "hi"})
+
+
+def _use_legacy_forward_signature(
+    headers: dict[str, str],
+    *,
+    payload: ResponsesRequest,
+    context: HTTPBridgeForwardContext,
+) -> None:
+    headers.pop(HTTP_BRIDGE_SIGNATURE_VERSION_HEADER, None)
+    headers.pop(HTTP_BRIDGE_ORIGINAL_UNANCHORED_HEADER, None)
+    headers[HTTP_BRIDGE_SIGNATURE_HEADER] = _bridge_forward_signature(
+        payload=payload,
+        context=context,
+        include_client_ip=False,
+    )
+    if context.client_ip is not None:
+        headers[HTTP_BRIDGE_CLIENT_IP_SIGNATURE_HEADER] = _bridge_forward_signature(
+            payload=payload,
+            context=context,
+            include_client_ip=True,
+        )
 
 
 def test_parse_forwarded_request_accepts_signed_internal_forward() -> None:
@@ -100,7 +119,7 @@ def test_parse_forwarded_request_accepts_signed_internal_forward_with_client_ip(
     assert forwarded.context.client_ip == "203.0.113.42"
 
 
-def test_build_owner_forward_headers_uses_legacy_signature_with_client_ip_header() -> None:
+def test_build_owner_forward_headers_uses_v2_signature_with_client_ip_header() -> None:
     payload = _payload()
     context = HTTPBridgeForwardContext(
         origin_instance="instance-a",
@@ -113,15 +132,18 @@ def test_build_owner_forward_headers_uses_legacy_signature_with_client_ip_header
     headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
 
     assert headers[HTTP_BRIDGE_CLIENT_IP_HEADER] == "203.0.113.42"
+    assert headers[HTTP_BRIDGE_SIGNATURE_VERSION_HEADER] == "2"
     assert headers[HTTP_BRIDGE_SIGNATURE_HEADER] == _bridge_forward_signature(
         payload=payload,
         context=context,
         include_client_ip=False,
+        signature_version="2",
     )
     assert headers[HTTP_BRIDGE_CLIENT_IP_SIGNATURE_HEADER] == _bridge_forward_signature(
         payload=payload,
         context=context,
         include_client_ip=True,
+        signature_version="2",
     )
 
 
@@ -134,11 +156,7 @@ def test_parse_forwarded_request_accepts_legacy_signature_without_client_ip_head
         downstream_turn_state="http_turn_123",
     )
     headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
-    headers[HTTP_BRIDGE_SIGNATURE_HEADER] = _bridge_forward_signature(
-        payload=payload,
-        context=context,
-        include_client_ip=False,
-    )
+    _use_legacy_forward_signature(headers, payload=payload, context=context)
 
     forwarded, error = parse_forwarded_request(
         headers,
@@ -161,16 +179,7 @@ def test_parse_forwarded_request_accepts_legacy_signature_with_bound_client_ip_h
         client_ip="203.0.113.9",
     )
     headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
-    headers[HTTP_BRIDGE_SIGNATURE_HEADER] = _bridge_forward_signature(
-        payload=payload,
-        context=context,
-        include_client_ip=False,
-    )
-    headers[HTTP_BRIDGE_CLIENT_IP_SIGNATURE_HEADER] = _bridge_forward_signature(
-        payload=payload,
-        context=context,
-        include_client_ip=True,
-    )
+    _use_legacy_forward_signature(headers, payload=payload, context=context)
     assert headers[HTTP_BRIDGE_CLIENT_IP_HEADER] == "203.0.113.9"
 
     forwarded, error = parse_forwarded_request(
@@ -194,11 +203,7 @@ def test_parse_forwarded_request_rejects_legacy_signature_with_unbound_client_ip
         client_ip="203.0.113.9",
     )
     headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
-    headers[HTTP_BRIDGE_SIGNATURE_HEADER] = _bridge_forward_signature(
-        payload=payload,
-        context=context,
-        include_client_ip=False,
-    )
+    _use_legacy_forward_signature(headers, payload=payload, context=context)
     headers.pop(HTTP_BRIDGE_CLIENT_IP_SIGNATURE_HEADER, None)
 
     forwarded, error = parse_forwarded_request(
@@ -247,12 +252,8 @@ def test_parse_forwarded_request_accepts_legacy_signature_when_client_ip_header_
         client_ip="203.0.113.9",
     )
     headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
+    _use_legacy_forward_signature(headers, payload=payload, context=context)
     headers[HTTP_BRIDGE_CLIENT_IP_HEADER] = "   "
-    headers[HTTP_BRIDGE_SIGNATURE_HEADER] = _bridge_forward_signature(
-        payload=payload,
-        context=context,
-        include_client_ip=False,
-    )
 
     forwarded, error = parse_forwarded_request(
         headers,
@@ -302,16 +303,13 @@ def test_parse_forwarded_request_preserves_signed_original_unanchored_status() -
     )
 
     assert headers[HTTP_BRIDGE_ORIGINAL_UNANCHORED_HEADER] == "1"
-    assert headers[HTTP_BRIDGE_ORIGINAL_UNANCHORED_SIGNATURE_HEADER] == _bridge_forward_unanchored_signature(
-        payload=payload,
-        context=context,
-    )
+    assert headers[HTTP_BRIDGE_SIGNATURE_VERSION_HEADER] == "2"
     assert error is None
     assert forwarded is not None
     assert forwarded.context == context
 
 
-def test_original_unanchored_marker_preserves_legacy_main_signature() -> None:
+def test_v2_signature_binds_original_unanchored_boolean() -> None:
     payload = _payload()
     context = HTTPBridgeForwardContext(
         origin_instance="instance-a",
@@ -327,14 +325,24 @@ def test_original_unanchored_marker_preserves_legacy_main_signature() -> None:
         payload=payload,
         context=context,
         include_client_ip=False,
-    ) == _bridge_forward_signature(
+        signature_version="2",
+    ) != _bridge_forward_signature(
         payload=payload,
-        context=replace(context, original_request_unanchored=False),
+        context=HTTPBridgeForwardContext(
+            origin_instance=context.origin_instance,
+            target_instance=context.target_instance,
+            codex_session_affinity=context.codex_session_affinity,
+            downstream_turn_state=context.downstream_turn_state,
+            original_request_unanchored=False,
+            original_affinity_kind=context.original_affinity_kind,
+            original_affinity_key=context.original_affinity_key,
+        ),
         include_client_ip=False,
+        signature_version="2",
     )
 
 
-def test_parse_forwarded_request_rejects_unsigned_original_unanchored_status() -> None:
+def test_parse_forwarded_request_rejects_original_unanchored_downgrade_to_false() -> None:
     payload = _payload()
     context = HTTPBridgeForwardContext(
         origin_instance="instance-a",
@@ -346,7 +354,7 @@ def test_parse_forwarded_request_rejects_unsigned_original_unanchored_status() -
         original_affinity_key="sid-123",
     )
     headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
-    headers.pop(HTTP_BRIDGE_ORIGINAL_UNANCHORED_SIGNATURE_HEADER)
+    headers[HTTP_BRIDGE_ORIGINAL_UNANCHORED_HEADER] = "0"
 
     forwarded, error = parse_forwarded_request(
         headers,
@@ -358,6 +366,68 @@ def test_parse_forwarded_request_rejects_unsigned_original_unanchored_status() -
     assert error is not None
     assert error.status_code == 400
     assert error.payload["error"]["code"] == "bridge_forward_invalid"
+
+
+def test_parse_forwarded_request_rejects_stripped_v2_unanchored_marker() -> None:
+    payload = _payload()
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=True,
+        downstream_turn_state="http_turn_generated",
+        original_request_unanchored=True,
+        original_affinity_kind="session_header",
+        original_affinity_key="sid-123",
+    )
+    headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
+    headers.pop(HTTP_BRIDGE_ORIGINAL_UNANCHORED_HEADER)
+
+    forwarded, error = parse_forwarded_request(headers, payload=payload, current_instance="instance-b")
+
+    assert forwarded is None
+    assert error is not None
+    assert error.payload["error"]["code"] == "bridge_forward_invalid"
+
+
+def test_v2_forward_fails_legacy_signature_validation() -> None:
+    payload = _payload()
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=True,
+        downstream_turn_state="http_turn_generated",
+        original_request_unanchored=True,
+        original_affinity_kind="session_header",
+        original_affinity_key="sid-123",
+    )
+    headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
+
+    assert headers[HTTP_BRIDGE_SIGNATURE_HEADER] != _bridge_forward_signature(
+        payload=payload,
+        context=context,
+        include_client_ip=False,
+    )
+
+
+def test_legacy_unanchored_forward_fails_closed_on_v2_owner() -> None:
+    payload = _payload()
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=True,
+        downstream_turn_state="http_turn_generated",
+        original_affinity_kind="session_header",
+        original_affinity_key="sid-123",
+    )
+    headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
+    _use_legacy_forward_signature(headers, payload=payload, context=context)
+
+    forwarded, error = parse_forwarded_request(headers, payload=payload, current_instance="instance-b")
+
+    assert forwarded is None
+    assert error is not None
+    assert error.status_code == 409
+    assert error.payload["error"]["code"] == "bridge_forward_upgrade_required"
 
 
 def test_parse_forwarded_request_rejects_missing_signature() -> None:

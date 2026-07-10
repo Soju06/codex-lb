@@ -71,6 +71,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_request_counts_against_queue,
     _log_http_bridge_event,
     _record_http_bridge_prewarm_outcome,
+    _release_http_bridge_unanchored_handoff,
 )
 from app.modules.proxy._service.http_bridge.service_stubs import (
     _classify_upstream_close,
@@ -481,6 +482,29 @@ class _HTTPBridgeRequestSubmitMixin:
         queue_limit: int,
     ) -> None:
         request_scope_id = ensure_request_scope_id()
+        try:
+            await self._submit_http_bridge_request_with_handoff(
+                session,
+                request_state=request_state,
+                text_data=text_data,
+                queue_limit=queue_limit,
+                request_scope_id=request_scope_id,
+            )
+        finally:
+            _release_http_bridge_unanchored_handoff(
+                session,
+                request_scope_id=request_scope_id,
+            )
+
+    async def _submit_http_bridge_request_with_handoff(
+        self: Any,
+        session: "_HTTPBridgeSession",
+        *,
+        request_state: _WebSocketRequestState,
+        text_data: str,
+        queue_limit: int,
+        request_scope_id: str,
+    ) -> None:
         text_data = self._http_bridge_text_with_account_installation_id(session, request_state, text_data)
         if request_state.response_id is not None or request_state.response_event_count > 0:
             _log_http_bridge_event(

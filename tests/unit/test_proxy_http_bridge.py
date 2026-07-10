@@ -26,7 +26,7 @@ from app.core.clients.proxy_websocket import (
 )
 from app.core.config.settings import Settings
 from app.core.errors import openai_error
-from app.core.utils.request_id import get_request_id
+from app.core.utils.request_id import get_request_id, reset_request_scope_id, set_request_scope_id
 from app.db.models import AccountStatus, HttpBridgeSessionState
 from app.modules.proxy import service as proxy_service
 from app.modules.proxy._service.http_bridge import mixin as http_bridge_mixin_module
@@ -77,6 +77,83 @@ def _make_bridge_session(
         last_used_at=1.0,
         idle_ttl_seconds=120.0,
     )
+
+
+@pytest.mark.asyncio
+async def test_submit_http_bridge_request_cancellation_releases_published_handoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session()
+    session.unanchored_reservation_id = "scope-cancelled-submit"
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-cancelled-submit",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        request_text='{"type":"response.create","model":"gpt-5.6-sol","input":"hi"}',
+        transport="http",
+        skip_request_log=True,
+    )
+    monkeypatch.setattr(service, "_maybe_prewarm_http_bridge_session", AsyncMock())
+    await session.pending_lock.acquire()
+    request_scope_token = set_request_scope_id("scope-cancelled-submit")
+    try:
+        submit_task = asyncio.create_task(
+            service._submit_http_bridge_request(
+                session,
+                request_state=request_state,
+                text_data=request_state.request_text or "{}",
+                queue_limit=8,
+            )
+        )
+        await asyncio.sleep(0)
+        submit_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await submit_task
+    finally:
+        session.pending_lock.release()
+        reset_request_scope_id(request_scope_token)
+
+    assert session.unanchored_reservation_id is None
+
+
+@pytest.mark.asyncio
+async def test_submit_http_bridge_request_early_failure_releases_published_handoff() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session()
+    session.closed = True
+    session.unanchored_reservation_id = "scope-closed-submit"
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-closed-submit",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        request_text='{"type":"response.create","model":"gpt-5.6-sol","input":"hi"}',
+        transport="http",
+        skip_request_log=True,
+    )
+    request_scope_token = set_request_scope_id("scope-closed-submit")
+    try:
+        with pytest.raises(proxy_service.ProxyResponseError):
+            await service._submit_http_bridge_request(
+                session,
+                request_state=request_state,
+                text_data=request_state.request_text or "{}",
+                queue_limit=8,
+            )
+    finally:
+        reset_request_scope_id(request_scope_token)
+
+    assert session.unanchored_reservation_id is None
 
 
 def test_codex_prewarm_enabled_without_percent_preserves_full_treatment() -> None:
@@ -1408,7 +1485,7 @@ def test_http_bridge_request_text_rejects_installation_metadata_size_overflow(
 
 
 def test_submit_http_bridge_request_uses_bridge_installation_metadata_helper() -> None:
-    source = inspect.getsource(proxy_service.ProxyService._submit_http_bridge_request)
+    source = inspect.getsource(proxy_service.ProxyService._submit_http_bridge_request_with_handoff)
 
     assert "_response_create_text_with_account_installation_id(" not in source
     assert source.count("_http_bridge_text_with_account_installation_id(") >= 3

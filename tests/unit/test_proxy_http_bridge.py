@@ -31,6 +31,7 @@ from app.db.models import AccountStatus, HttpBridgeSessionState
 from app.modules.proxy import service as proxy_service
 from app.modules.proxy._service.http_bridge import helpers as http_bridge_helpers_module
 from app.modules.proxy._service.http_bridge import mixin as http_bridge_mixin_module
+from app.modules.proxy._service.http_bridge import request_submit as http_bridge_request_submit_module
 from app.modules.proxy._service.http_bridge import streaming as http_bridge_streaming_module
 from app.modules.proxy.account_cache import clear_account_routing_unavailable, mark_account_routing_unavailable
 from app.modules.proxy.http_bridge_forwarding import OwnerForwardRelayFailure
@@ -1767,6 +1768,7 @@ async def test_http_bridge_account_capacity_wait_sends_keepalive_instead_of_idle
         lambda: SimpleNamespace(
             sse_keepalive_interval_seconds=0.001,
             stream_idle_timeout_seconds=0.001,
+            http_responses_session_bridge_response_created_timeout_seconds=0.001,
         ),
     )
     monkeypatch.setattr(proxy_service, "_HTTP_BRIDGE_STARTUP_KEEPALIVE_GRACE_SECONDS", 0.001)
@@ -1796,8 +1798,10 @@ async def test_http_bridge_account_capacity_wait_sends_keepalive_instead_of_idle
         reasoning_effort=None,
         api_key_reservation=None,
         started_at=time.monotonic(),
+        upstream_sent_at=time.monotonic() - 10.0,
         event_queue=asyncio.Queue(),
         transport="http",
+        awaiting_response_created=True,
     )
     request_state.account_capacity_waiting = True
     request_state.account_capacity_wait_reason = "Rate limit exceeded. Try again in 120s"
@@ -1835,6 +1839,45 @@ async def test_http_bridge_account_capacity_wait_sends_keepalive_instead_of_idle
     assert "stream_idle_timeout" not in keepalive
 
     await stream.aclose()
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_send_stamps_response_created_watchdog_for_each_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    send_text = AsyncMock()
+    session = _make_bridge_session()
+    session.upstream = cast(UpstreamResponsesWebSocket, SimpleNamespace(send_text=send_text))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-send-attempt-timestamp",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        upstream_sent_at=1.0,
+    )
+    now = 100.0
+    monkeypatch.setattr(
+        http_bridge_request_submit_module,
+        "_service_time",
+        lambda: SimpleNamespace(monotonic=lambda: now),
+    )
+
+    await http_bridge_request_submit_module._send_http_bridge_request_text_with_archive_id(
+        session,
+        request_state,
+        '{"type":"response.create"}',
+    )
+    now = 200.0
+    await http_bridge_request_submit_module._send_http_bridge_request_text_with_archive_id(
+        session,
+        request_state,
+        '{"type":"response.create"}',
+    )
+
+    assert request_state.upstream_sent_at == 200.0
+    assert send_text.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -11475,7 +11518,9 @@ async def test_process_http_bridge_upstream_text_masks_previous_response_usage_l
         idle_ttl_seconds=120.0,
     )
     handle_stream_error = AsyncMock()
+    retry_security_work = AsyncMock(return_value=True)
     monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    monkeypatch.setattr(service, "_retry_http_bridge_security_work_request", retry_security_work)
 
     await service._process_http_bridge_upstream_text(
         session,
@@ -11496,6 +11541,7 @@ async def test_process_http_bridge_upstream_text_masks_previous_response_usage_l
     )
 
     handle_stream_error.assert_awaited_once()
+    retry_security_work.assert_not_awaited()
     event_queue = request_state.event_queue
     assert event_queue is not None
     event_block = await event_queue.get()

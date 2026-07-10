@@ -1748,6 +1748,7 @@ class _HTTPBridgeMixin(
         *,
         allow_takeover: bool,
         force_owner_epoch_advance: bool = False,
+        claim_account_id: str | None = None,
     ) -> None:
         current_instance = _service_get_settings().http_responses_session_bridge_instance_id
         try:
@@ -1759,7 +1760,7 @@ class _HTTPBridgeMixin(
                     api_key_id=session.key.api_key_id,
                     instance_id=current_instance,
                     lease_ttl_seconds=_http_bridge_durable_lease_ttl_seconds(),
-                    account_id=session.account.id,
+                    account_id=claim_account_id or session.account.id,
                     model=session.request_model,
                     service_tier=getattr(session, "request_service_tier", None),
                     latest_turn_state=session.downstream_turn_state,
@@ -1902,6 +1903,7 @@ class _HTTPBridgeMixin(
                 "lease_kind": "stream",
                 "estimated_lease_tokens": _estimated_lease_tokens_from_request_usage_budget(request_usage_budget),
                 "fallback_on_preferred_account_unavailable": fallback_on_preferred_account_unavailable,
+                "require_security_work_authorized": require_security_work_authorized,
             }
             selection = await self._select_account_with_budget_for_stream(deadline, **select_kwargs)
             selected_account_lease = selection.lease
@@ -2366,6 +2368,28 @@ class _HTTPBridgeMixin(
                     continue
                 await release_selected_account_lease()
                 raise
+        # Commit a cross-account migration to durable state before exposing
+        # the replacement upstream to other bridge operations. A rejected
+        # durable claim leaves the current owner/session untouched.
+        if account.id != old_account_id and session.durable_session_id is not None:
+            try:
+                await _call_with_supported_optional_kwargs(
+                    self._claim_durable_http_bridge_session,
+                    session,
+                    optional_kwargs={"claim_account_id": account.id},
+                    allow_takeover=True,
+                    force_owner_epoch_advance=True,
+                )
+            except BaseException:
+                try:
+                    await upstream.close()
+                except Exception:
+                    logger.debug(
+                        "Failed to close unclaimed HTTP bridge replacement websocket",
+                        exc_info=True,
+                    )
+                await release_selected_account_lease()
+                raise
         try:
             await old_upstream.close()
         except Exception:
@@ -2380,12 +2404,6 @@ class _HTTPBridgeMixin(
         session.closed = False
         session.last_upstream_close_code = None
         session.upstream_turn_state = _upstream_turn_state_from_socket(upstream) or session.upstream_turn_state
-        if account.id != old_account_id and session.durable_session_id is not None:
-            await self._claim_durable_http_bridge_session(
-                session,
-                allow_takeover=True,
-                force_owner_epoch_advance=True,
-            )
         if restart_reader:
             session.upstream_reader = asyncio.create_task(self._relay_http_bridge_upstream_messages(session))
         _log_http_bridge_event(

@@ -896,11 +896,13 @@ class _HTTPBridgeStreamingMixin:
             if rewritten_file_account_id is not None:
                 request_state.preferred_account_id = rewritten_file_account_id
                 file_required_preferred_account = True
+                request_state.file_required_preferred_account = True
         if request_state.preferred_account_id is None:
             resolved_file_account_id = await self._resolve_file_account_for_responses(effective_payload, headers)
             if resolved_file_account_id is not None:
                 request_state.preferred_account_id = resolved_file_account_id
                 file_required_preferred_account = True
+                request_state.file_required_preferred_account = True
         if proxy_injected_previous_response_id:
             request_state.proxy_injected_previous_response_id = True
             request_state.fresh_upstream_request_text = fresh_upstream_request_text or text_data
@@ -1003,11 +1005,13 @@ class _HTTPBridgeStreamingMixin:
                 if rewritten_file_account_id is not None:
                     request_state.preferred_account_id = rewritten_file_account_id
                     file_required_preferred_account = True
+                    request_state.file_required_preferred_account = True
                 if request_state.preferred_account_id is None:
                     resolved_file_account_id = await self._resolve_file_account_for_responses(payload, headers)
                     if resolved_file_account_id is not None:
                         request_state.preferred_account_id = resolved_file_account_id
                         file_required_preferred_account = True
+                        request_state.file_required_preferred_account = True
                 effective_payload = payload
                 untrimmed_effective_payload = payload
                 proxy_injected_previous_response_id = False
@@ -1377,6 +1381,9 @@ class _HTTPBridgeStreamingMixin:
             )
             request_state.preferred_account_id = previous_request_state.preferred_account_id
             request_state.require_security_work_authorized = previous_request_state.require_security_work_authorized
+            request_state.file_required_preferred_account = (
+                previous_request_state.file_required_preferred_account
+            )
             if store_context_trim_applied:
                 # Store the full incoming client input as the session context
                 # so the client's next full resend can prefix-match it.
@@ -1872,36 +1879,10 @@ class _HTTPBridgeStreamingMixin:
                     try:
                         event_block = await asyncio.wait_for(event_queue.get(), timeout=wait_timeout)
                     except asyncio.TimeoutError:
-                        response_created_timeout_seconds = float(
-                            getattr(
-                                settings,
-                                "http_responses_session_bridge_response_created_timeout_seconds",
-                                30.0,
-                            )
-                        )
-                        if (
-                            request_state.latency_response_created_ms is None
-                            and request_state.awaiting_response_created
-                            and request_state.upstream_sent_at is not None
-                            and _service_time().monotonic() - request_state.upstream_sent_at
-                            >= response_created_timeout_seconds
-                        ):
-                            logger.warning(
-                                "HTTP bridge response.created timeout request_id=%s timeout_seconds=%s",
-                                request_state.request_id,
-                                response_created_timeout_seconds,
-                            )
-                            yield format_sse_event(
-                                cast(
-                                    Mapping[str, JsonValue],
-                                    response_failed_event(
-                                        "response_created_timeout",
-                                        "Upstream did not create a response within the startup window",
-                                        response_id=_websocket_downstream_response_id(request_state),
-                                    ),
-                                )
-                            )
-                            break
+                        # Account-capacity recovery has not sent a
+                        # response.create upstream yet.  Keep reporting that
+                        # wait instead of treating its elapsed local time as a
+                        # failed upstream creation attempt.
                         if request_state.account_capacity_waiting:
                             keepalive_count = 0
                             keepalive_sent = True
@@ -1932,6 +1913,36 @@ class _HTTPBridgeStreamingMixin:
                                     )
                                 )
                             continue
+                        response_created_timeout_seconds = float(
+                            getattr(
+                                settings,
+                                "http_responses_session_bridge_response_created_timeout_seconds",
+                                30.0,
+                            )
+                        )
+                        if (
+                            request_state.latency_response_created_ms is None
+                            and request_state.awaiting_response_created
+                            and request_state.upstream_sent_at is not None
+                            and _service_time().monotonic() - request_state.upstream_sent_at
+                            >= response_created_timeout_seconds
+                        ):
+                            logger.warning(
+                                "HTTP bridge response.created timeout request_id=%s timeout_seconds=%s",
+                                request_state.request_id,
+                                response_created_timeout_seconds,
+                            )
+                            yield format_sse_event(
+                                cast(
+                                    Mapping[str, JsonValue],
+                                    response_failed_event(
+                                        "response_created_timeout",
+                                        "Upstream did not create a response within the startup window",
+                                        response_id=_websocket_downstream_response_id(request_state),
+                                    ),
+                                )
+                            )
+                            break
                         keepalive_count += 1
                         downstream_response_id = _websocket_downstream_response_id(request_state)
                         if keepalive_count > max_keepalive_count:

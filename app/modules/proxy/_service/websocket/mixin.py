@@ -1818,7 +1818,7 @@ class _WebSocketMixin:
                     await proxy._load_balancer.release_account_lease(selection.lease)
                     preferred_account_id = None
                     require_preferred_account = False
-                    require_security_work_authorized = True
+                    require_security_work_authorized = request_state.require_security_work_authorized
                     reallocate_sticky = True
                     _facade().logger.info(
                         "websocket_owner_unavailable_fresh_security_replay request_id=%s model=%s",
@@ -3255,7 +3255,7 @@ class _WebSocketMixin:
                     and request_state.response_id is None
                     and request_state.replay_count < 1
                     and bool(request_state.request_text)
-                    and request_state.preferred_account_id != account.id
+                    and not request_state.file_required_preferred_account
                     and (
                         request_state.previous_response_id is None
                         or (

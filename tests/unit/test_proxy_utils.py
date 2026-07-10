@@ -11081,19 +11081,18 @@ async def test_http_bridge_retries_security_work_warning_on_authorized_account(m
 
 
 @pytest.mark.asyncio
-async def test_http_bridge_owner_error_replays_validated_full_resend_on_security_account(monkeypatch):
+async def test_http_bridge_owner_error_replays_validated_full_resend_on_available_account(monkeypatch):
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     owner = _make_account("acc_bridge_owner_unavailable")
-    trusted = _make_account("acc_bridge_owner_trusted")
-    trusted.security_work_authorized = True
+    replacement = _make_account("acc_bridge_owner_replacement")
     sent: list[str] = []
 
     async def fake_reconnect(session, *, request_state, restart_reader=False, require_security_work_authorized=False):
         assert restart_reader is False
-        assert require_security_work_authorized is True
+        assert require_security_work_authorized is False
         assert request_state.preferred_account_id is None
         assert request_state.excluded_account_ids == {owner.id}
-        session.account = trusted
+        session.account = replacement
 
         async def send_text(text: str) -> None:
             sent.append(text)
@@ -11152,7 +11151,7 @@ async def test_http_bridge_owner_error_replays_validated_full_resend_on_security
     assert sent == ['{"type":"response.create","input":[]}']
     assert state.previous_response_id is None
     assert state.preferred_account_id is None
-    assert state.require_security_work_authorized is True
+    assert state.require_security_work_authorized is False
     assert state.excluded_account_ids == {owner.id}
     assert state.replay_count == 1
     assert state.event_queue is not None
@@ -11480,15 +11479,17 @@ async def test_websocket_keeps_previous_response_pinned_security_work_error(monk
     )
 
     assert '"type":"response.failed"' in downstream_text
-    assert upstream_control.reconnect_requested is False
-    assert upstream_control.suppress_downstream_event is False
-    assert request_state.replay_count == 0
-    assert request_state.previous_response_id == "resp_anchor"
+    assert upstream_control.reconnect_requested is True
+    assert upstream_control.suppress_downstream_event is True
+    assert upstream_control.replay_request_state is request_state
+    assert request_state.replay_count == 1
+    assert request_state.previous_response_id is None
+    assert request_state.require_security_work_authorized is True
     handle_stream_error.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_websocket_owner_error_replays_validated_full_resend_on_security_account(monkeypatch):
+async def test_websocket_owner_error_replays_validated_full_resend_on_available_account(monkeypatch):
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     handle_stream_error = AsyncMock()
     monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
@@ -11536,7 +11537,7 @@ async def test_websocket_owner_error_replays_validated_full_resend_on_security_a
     assert upstream_control.replay_request_state is request_state
     assert request_state.previous_response_id is None
     assert request_state.preferred_account_id is None
-    assert request_state.require_security_work_authorized is True
+    assert request_state.require_security_work_authorized is False
     assert request_state.request_text == '{"type":"response.create","input":[]}'
     assert request_state.excluded_account_ids == {account.id}
     assert request_state.replay_count == 1
@@ -12967,12 +12968,11 @@ async def test_select_websocket_connect_account_preferred_owner_missing_fails_cl
 
 
 @pytest.mark.asyncio
-async def test_select_websocket_connect_account_replays_full_resend_on_security_account_when_owner_missing(
+async def test_select_websocket_connect_account_replays_full_resend_on_available_account_when_owner_missing(
     monkeypatch,
 ):
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
-    approved = _make_account("acc_security_replay")
-    approved.security_work_authorized = True
+    replacement = _make_account("acc_owner_replay_replacement")
     request_state = proxy_service._WebSocketRequestState(
         request_id="ws_req_owner_missing_security_replay",
         model="gpt-5.6-sol",
@@ -12990,7 +12990,7 @@ async def test_select_websocket_connect_account_replays_full_resend_on_security_
     select_account = AsyncMock(
         side_effect=[
             AccountSelection(account=None, error_message="No active accounts available", error_code="no_accounts"),
-            AccountSelection(account=approved, error_message=None),
+            AccountSelection(account=replacement, error_message=None),
         ]
     )
     monkeypatch.setattr(service, "_select_account_with_budget", select_account)
@@ -13015,16 +13015,16 @@ async def test_select_websocket_connect_account_replays_full_resend_on_security_
         require_preferred_account=True,
     )
 
-    assert result is approved
+    assert result is replacement
     assert request_state.previous_response_id is None
     assert request_state.preferred_account_id is None
-    assert request_state.require_security_work_authorized is True
+    assert request_state.require_security_work_authorized is False
     assert request_state.request_text == '{"type":"response.create","input":[]}'
     assert request_state.replay_count == 1
     assert select_account.await_count == 2
     retry_call = select_account.await_args_list[1]
     assert retry_call.kwargs["preferred_account_id"] is None
-    assert retry_call.kwargs["require_security_work_authorized"] is True
+    assert retry_call.kwargs["require_security_work_authorized"] is False
     assert retry_call.kwargs["exclude_account_ids"] == {"acc_owner"}
     websocket_send.assert_not_awaited()
 
@@ -24787,6 +24787,7 @@ async def test_reconnect_http_bridge_skips_extra_same_account_retry_after_keepal
         session,
         allow_takeover=True,
         force_owner_epoch_advance=True,
+        claim_account_id=account_b.id,
     )
 
 

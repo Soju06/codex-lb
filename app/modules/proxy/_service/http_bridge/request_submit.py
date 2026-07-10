@@ -201,6 +201,10 @@ async def _send_http_bridge_request_text_with_archive_id(
 ) -> None:
     token = set_request_id(request_state.archive_request_id)
     try:
+        # The response.created watchdog measures the lifetime of this specific
+        # upstream attempt.  Replays reuse the request state, so stamp it in
+        # the shared send helper rather than only on the initial submission.
+        request_state.upstream_sent_at = _service_time().monotonic()
         await session.upstream.send_text(text_data)
     finally:
         reset_request_id(token)
@@ -715,7 +719,6 @@ class _HTTPBridgeRequestSubmitMixin:
                     session.admission_waiter_count = max(0, session.admission_waiter_count - 1)
                     admission_waiter_registered = False
                 request_enqueued = True
-                request_state.upstream_sent_at = _service_time().monotonic()
                 await _send_http_bridge_request_text_with_archive_id(session, request_state, text_data)
                 session.last_used_at = _service_time().monotonic()
         except ProxyResponseError:
@@ -1341,16 +1344,24 @@ class _HTTPBridgeRequestSubmitMixin:
         session: "_HTTPBridgeSession",
         request_state: _WebSocketRequestState,
     ) -> bool:
-        if session.durable_session_id is not None:
-            durable_lookup = await self._durable_bridge.require_security_work_authorized(
-                session_id=session.durable_session_id
-            )
-            if durable_lookup is None:
-                # A claimed production lineage must be durably marked before
-                # it can move accounts. Fail closed if its record disappeared.
-                return False
-        session.requires_security_work_authorized = True
-        request_state.require_security_work_authorized = True
+        return await self._retry_http_bridge_owner_failover_request(
+            session,
+            request_state,
+            require_security_work_authorized=True,
+        )
+
+    async def _retry_http_bridge_owner_failover_request(
+        self: Any,
+        session: "_HTTPBridgeSession",
+        request_state: _WebSocketRequestState,
+        *,
+        require_security_work_authorized: bool,
+    ) -> bool:
+        # Uploaded file ids are scoped to the account that registered them.
+        # Never mark or migrate the lineage before proving the request is
+        # replayable on another account.
+        if request_state.file_required_preferred_account:
+            return False
         if request_state.response_id is not None:
             return False
         if request_state.replay_count >= 1:
@@ -1367,8 +1378,19 @@ class _HTTPBridgeRequestSubmitMixin:
             retry_text = request_state.fresh_upstream_request_text
 
         owner_account_id = session.account.id
-        if getattr(session.account, "security_work_authorized", False):
+        if require_security_work_authorized and getattr(session.account, "security_work_authorized", False):
             return False
+        if require_security_work_authorized and session.durable_session_id is not None:
+            durable_lookup = await self._durable_bridge.require_security_work_authorized(
+                session_id=session.durable_session_id
+            )
+            if durable_lookup is None:
+                # A claimed production lineage must be durably marked before
+                # it can move accounts. Fail closed if its record disappeared.
+                return False
+        if require_security_work_authorized:
+            session.requires_security_work_authorized = True
+            request_state.require_security_work_authorized = True
         request_state.preferred_account_id = None
         request_state.excluded_account_ids.add(owner_account_id)
 
@@ -1387,7 +1409,11 @@ class _HTTPBridgeRequestSubmitMixin:
                 session.queued_request_count += 1
 
         _log_http_bridge_event(
-            "retry_security_work_authorized",
+            (
+                "retry_security_work_authorized"
+                if require_security_work_authorized
+                else "retry_owner_failover"
+            ),
             session.key,
             account_id=session.account.id,
             model=session.request_model,
@@ -1399,18 +1425,26 @@ class _HTTPBridgeRequestSubmitMixin:
             await self._reconnect_http_bridge_session(
                 session,
                 request_state=request_state,
-                require_security_work_authorized=True,
+                require_security_work_authorized=require_security_work_authorized,
             )
             retry_text = self._http_bridge_text_with_account_installation_id(session, request_state, retry_text)
             await _send_http_bridge_request_text_with_archive_id(session, request_state, retry_text)
             session.last_used_at = _service_time().monotonic()
             return True
         except Exception as exc:
-            logger.warning("HTTP bridge security-work retry failed", exc_info=True)
+            logger.warning(
+                "HTTP bridge owner failover retry failed security_required=%s",
+                require_security_work_authorized,
+                exc_info=True,
+            )
             if isinstance(exc, ProxyResponseError):
                 error = _parse_openai_error(exc.payload)
                 code = _normalize_error_code(error.code if error else None, error.type if error else None)
-                if code == _NO_SECURITY_WORK_AUTHORIZED_ACCOUNTS_CODE and request_state.event_queue is not None:
+                if (
+                    require_security_work_authorized
+                    and code == _NO_SECURITY_WORK_AUTHORIZED_ACCOUNTS_CODE
+                    and request_state.event_queue is not None
+                ):
                     await request_state.event_queue.put(
                         format_sse_event(
                             _security_work_advisory_event(

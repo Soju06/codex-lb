@@ -1281,6 +1281,8 @@ class _HTTPBridgeStreamingMixin:
             and session.last_completed_response_id is not None
             and session_anchor_trimmable
         ):
+            previous_preferred_account_id = request_state.preferred_account_id
+            previous_file_required_preferred_account = request_state.file_required_preferred_account
             fresh_upstream_request_text = text_data
             effective_payload = effective_payload.model_copy(
                 update={"previous_response_id": session.last_completed_response_id}
@@ -1298,7 +1300,12 @@ class _HTTPBridgeStreamingMixin:
             request_state.require_security_work_authorized = bool(
                 durable_lookup is not None and durable_lookup.requires_security_work_authorized
             )
-            request_state.preferred_account_id = durable_lookup.account_id if durable_lookup is not None else None
+            request_state.preferred_account_id = (
+                previous_preferred_account_id
+                if previous_file_required_preferred_account
+                else (durable_lookup.account_id if durable_lookup is not None else previous_preferred_account_id)
+            )
+            request_state.file_required_preferred_account = previous_file_required_preferred_account
             request_state.proxy_injected_previous_response_id = True
             request_state.fresh_upstream_request_text = fresh_upstream_request_text
             # Session-level anchor injection may be attached to a payload

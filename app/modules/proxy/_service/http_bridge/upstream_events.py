@@ -277,6 +277,8 @@ class _HTTPBridgeUpstreamEventsMixin:
                     if receive_timeout is None:
                         raise
                     retried_startup_request = False
+                    terminal_error_code = receive_timeout.error_code
+                    terminal_error_message = receive_timeout.error_message
                     if receive_timeout.response_created_request_ids:
                         async with session.pending_lock:
                             has_pending_sibling = any(
@@ -298,7 +300,16 @@ class _HTTPBridgeUpstreamEventsMixin:
                             error_message=receive_timeout.error_message,
                         )
                         if has_pending_sibling:
-                            continue
+                            # A late response.created for the request removed
+                            # above has no correlation key on this multiplexed
+                            # transport. Keeping the socket alive could assign
+                            # it to a healthy sibling, so retire the bridge and
+                            # fail the remaining work explicitly instead.
+                            terminal_error_code = "stream_incomplete"
+                            terminal_error_message = (
+                                "Upstream bridge retired after another request timed out before response.created"
+                            )
+                            retried_startup_request = True
                     if not retried_startup_request:
                         retried = await self._retry_http_bridge_precreated_request(session)
                         if retried:
@@ -306,8 +317,8 @@ class _HTTPBridgeUpstreamEventsMixin:
                     async with session.lifecycle_lock:
                         await self._fail_http_bridge_reader_and_maybe_retire(
                             session,
-                            error_code=receive_timeout.error_code,
-                            error_message=receive_timeout.error_message,
+                            error_code=terminal_error_code,
+                            error_message=terminal_error_message,
                         )
                     break
 

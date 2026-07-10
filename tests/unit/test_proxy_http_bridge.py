@@ -4747,6 +4747,98 @@ async def test_stream_via_http_bridge_skips_session_anchor_injection_when_trim_w
 
 
 @pytest.mark.asyncio
+async def test_stream_via_http_bridge_session_anchor_preserves_file_account_pin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    input_items: list[proxy_service.JsonValue] = [
+        {"type": "input_file", "file_id": "file_pinned"},
+        {"role": "user", "content": [{"type": "input_text", "text": "follow up"}]},
+    ]
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {"model": "gpt-5.6-sol", "instructions": "hi", "input": input_items}
+    )
+    prepared_states: list[proxy_service._WebSocketRequestState] = []
+
+    def fake_prepare(prepared_payload: proxy_service.ResponsesRequest, *_args: Any, **_kwargs: Any):
+        event_queue: asyncio.Queue[str | None] = asyncio.Queue()
+        state = proxy_service._WebSocketRequestState(
+            request_id="req-file-anchor",
+            model="gpt-5.6-sol",
+            service_tier=None,
+            reasoning_effort=None,
+            api_key_reservation=None,
+            started_at=1.0,
+            event_queue=event_queue,
+            transport="http",
+            previous_response_id=prepared_payload.previous_response_id,
+        )
+        event_queue.put_nowait(None)
+        prepared_states.append(state)
+        return state, json.dumps({"type": "response.create", "input": prepared_payload.input})
+
+    session = _make_bridge_session(key_value="sid-file-anchor")
+    session.codex_session = True
+    session.last_completed_response_id = "resp_file_anchor"
+    session.last_completed_input_count = 1
+    session.last_completed_input_prefix_fingerprint = proxy_service._fingerprint_input_items(input_items[:1])
+    create_session = AsyncMock(return_value=session)
+
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: cast(
+            Any,
+            SimpleNamespace(
+                get=AsyncMock(
+                    return_value=SimpleNamespace(
+                        sticky_threads_enabled=False,
+                        openai_cache_affinity_max_age_seconds=1800,
+                        http_responses_session_bridge_enabled=True,
+                        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,
+                        http_responses_session_bridge_gateway_safe_mode=False,
+                    )
+                )
+            ),
+        ),
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_prepare_http_bridge_request", fake_prepare)
+    monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value="acc-file"))
+    monkeypatch.setattr(service, "_get_or_create_http_bridge_session", create_session)
+    monkeypatch.setattr(service, "_submit_http_bridge_request", AsyncMock())
+    monkeypatch.setattr(service, "_detach_http_bridge_request", AsyncMock())
+
+    chunks = [
+        chunk
+        async for chunk in service._stream_via_http_bridge(
+            payload,
+            headers={"x-codex-session-id": "sid-file-anchor"},
+            codex_session_affinity=True,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            idle_ttl_seconds=120.0,
+            codex_idle_ttl_seconds=1800.0,
+            max_sessions=8,
+            queue_limit=4,
+        )
+    ]
+
+    assert chunks == []
+    assert len(prepared_states) == 3
+    final_state = prepared_states[-1]
+    assert final_state.preferred_account_id == "acc-file"
+    assert final_state.file_required_preferred_account is True
+    assert create_session.await_args is not None
+    assert create_session.await_args.kwargs["preferred_account_id"] == "acc-file"
+    assert create_session.await_args.kwargs["fallback_on_preferred_account_unavailable"] is False
+
+
+@pytest.mark.asyncio
 async def test_stream_via_http_bridge_does_not_inject_durable_previous_response_anchor_for_full_resend_payload(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -15093,7 +15185,9 @@ async def test_http_bridge_reader_uses_bridge_request_budget(
 
 
 @pytest.mark.asyncio
-async def test_http_bridge_startup_timeout_leaves_healthy_sibling_running(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_http_bridge_startup_timeout_retires_bridge_with_healthy_sibling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     expired_request = proxy_service._WebSocketRequestState(
         request_id="req-startup-expired",
@@ -15118,14 +15212,7 @@ async def test_http_bridge_startup_timeout_leaves_healthy_sibling_running(monkey
         pending_requests=deque([expired_request, healthy_request]),
         queued_request_count=2,
     )
-    receive_started = asyncio.Event()
-
-    async def receive() -> UpstreamWebSocketMessage:
-        receive_started.set()
-        await asyncio.Event().wait()
-        raise AssertionError("unreachable")
-
-    session.upstream = cast(UpstreamResponsesWebSocket, SimpleNamespace(receive=receive, close=AsyncMock()))
+    session.upstream = cast(UpstreamResponsesWebSocket, SimpleNamespace(receive=AsyncMock(), close=AsyncMock()))
     next_timeout = AsyncMock(
         side_effect=[
             proxy_service._WebSocketReceiveTimeout(
@@ -15133,8 +15220,7 @@ async def test_http_bridge_startup_timeout_leaves_healthy_sibling_running(monkey
                 error_code="response_created_timeout",
                 error_message="Upstream did not create a response within the startup window",
                 response_created_request_ids=frozenset({expired_request.request_id}),
-            ),
-            None,
+            )
         ]
     )
     fail_pending = AsyncMock()
@@ -15144,20 +15230,18 @@ async def test_http_bridge_startup_timeout_leaves_healthy_sibling_running(monkey
     monkeypatch.setattr(service, "_fail_pending_websocket_requests", fail_pending)
     monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", retry_precreated)
 
-    task = asyncio.create_task(service._relay_http_bridge_upstream_messages(session))
-    try:
-        await asyncio.wait_for(receive_started.wait(), timeout=1.0)
-        retry_precreated.assert_not_awaited()
-        fail_pending.assert_awaited_once()
-        assert fail_pending.await_args is not None
-        assert list(fail_pending.await_args.kwargs["pending_requests"]) == [expired_request]
-        assert list(session.pending_requests) == [healthy_request]
-        assert session.queued_request_count == 1
-        assert session.closed is False
-    finally:
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
+    await service._relay_http_bridge_upstream_messages(session)
+
+    retry_precreated.assert_not_awaited()
+    assert fail_pending.await_count == 2
+    expired_call, sibling_call = fail_pending.await_args_list
+    assert list(expired_call.kwargs["pending_requests"]) == [expired_request]
+    assert expired_call.kwargs["error_code"] == "response_created_timeout"
+    assert list(sibling_call.kwargs["pending_requests"]) == [healthy_request]
+    assert sibling_call.kwargs["error_code"] == "stream_incomplete"
+    assert list(session.pending_requests) == [healthy_request]
+    assert session.queued_request_count == 0
+    assert session.closed is True
 
 
 @pytest.mark.asyncio

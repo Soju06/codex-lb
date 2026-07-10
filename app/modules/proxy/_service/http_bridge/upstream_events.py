@@ -250,6 +250,7 @@ class _HTTPBridgeUpstreamEventsMixin:
         session: "_HTTPBridgeSession",
     ) -> None:
         runtime_settings = _service_get_settings()
+        relay_upstream = session.upstream
         try:
             while True:
                 receive_timeout = await self._next_websocket_receive_timeout(
@@ -319,7 +320,8 @@ class _HTTPBridgeUpstreamEventsMixin:
                     error_message="HTTP bridge upstream reader crashed before response.completed",
                 )
         finally:
-            session.closed = True
+            if session.upstream is relay_upstream:
+                session.closed = True
 
     async def _process_http_bridge_upstream_text(
         self: Any,

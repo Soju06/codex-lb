@@ -1881,7 +1881,6 @@ class _HTTPBridgeStreamingMixin:
                         )
                         if (
                             request_state.latency_response_created_ms is None
-                            and request_state.latency_first_upstream_event_ms is None
                             and request_state.awaiting_response_created
                             and request_state.upstream_sent_at is not None
                             and _service_time().monotonic() - request_state.upstream_sent_at

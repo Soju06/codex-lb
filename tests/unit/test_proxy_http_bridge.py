@@ -1684,7 +1684,9 @@ async def test_http_bridge_times_out_before_response_created(monkeypatch: pytest
 
 
 @pytest.mark.asyncio
-async def test_http_bridge_startup_watchdog_ignores_upstream_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_http_bridge_startup_watchdog_times_out_despite_upstream_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     monkeypatch.setattr(service, "_detach_http_bridge_request", AsyncMock())
     monkeypatch.setattr(
@@ -1740,8 +1742,17 @@ async def test_http_bridge_startup_watchdog_ignores_upstream_metadata(monkeypatc
         downstream_turn_state=None,
     )
 
-    block = await asyncio.wait_for(anext(stream), timeout=1.0)
-    assert "upstream_test_done" in block
+    try:
+        block = await asyncio.wait_for(anext(stream), timeout=1.0)
+    finally:
+        await stream.aclose()
+    payload = proxy_service.parse_sse_data_json(block)
+    assert isinstance(payload, dict)
+    response = payload.get("response")
+    assert isinstance(response, dict)
+    error = response.get("error")
+    assert isinstance(error, dict)
+    assert error.get("code") == "response_created_timeout"
 
 
 @pytest.mark.asyncio
@@ -15018,9 +15029,11 @@ async def test_http_bridge_reader_uses_bridge_request_budget(
     )
     original_next_timeout = service._next_websocket_receive_timeout
     seen_budgets: list[float] = []
+    seen_response_created_timeouts: list[float] = []
 
     async def record_next_timeout(*args: Any, **kwargs: Any):
         seen_budgets.append(kwargs["proxy_request_budget_seconds"])
+        seen_response_created_timeouts.append(kwargs["response_created_timeout_seconds"])
         return await original_next_timeout(*args, **kwargs)
 
     monkeypatch.setattr(service, "_next_websocket_receive_timeout", record_next_timeout)
@@ -15030,6 +15043,7 @@ async def test_http_bridge_reader_uses_bridge_request_budget(
     await service._relay_http_bridge_upstream_messages(session)
 
     assert seen_budgets == [2222.0]
+    assert seen_response_created_timeouts == [120.0]
 
 
 @pytest.mark.asyncio

@@ -3358,6 +3358,7 @@ class _WebSocketMixin:
         pending_lock: anyio.Lock,
         proxy_request_budget_seconds: float,
         stream_idle_timeout_seconds: float,
+        response_created_timeout_seconds: float | None = None,
     ) -> _WebSocketReceiveTimeout | None:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
@@ -3367,11 +3368,31 @@ class _WebSocketMixin:
                 for request_state in pending_requests
                 if _http_bridge_request_counts_against_queue(request_state)
             ]
-        return _websocket_receive_timeout_for_pending_requests(
+            response_created_deadlines = [
+                request_state.upstream_sent_at + response_created_timeout_seconds
+                for request_state in pending_requests
+                if response_created_timeout_seconds is not None
+                and request_state.upstream_sent_at is not None
+                and request_state.response_id is None
+                and request_state.awaiting_response_created
+                and _http_bridge_request_counts_against_queue(request_state)
+            ]
+        receive_timeout = _websocket_receive_timeout_for_pending_requests(
             started_ats,
             proxy_request_budget_seconds=proxy_request_budget_seconds,
             stream_idle_timeout_seconds=stream_idle_timeout_seconds,
         )
+        if not response_created_deadlines:
+            return receive_timeout
+        response_created_timeout = _WebSocketReceiveTimeout(
+            timeout_seconds=max(0.0, min(response_created_deadlines) - time.monotonic()),
+            error_code="response_created_timeout",
+            error_message="Upstream did not create a response within the startup window",
+            fail_all_pending=True,
+        )
+        if receive_timeout is None or response_created_timeout.timeout_seconds < receive_timeout.timeout_seconds:
+            return response_created_timeout
+        return receive_timeout
 
     async def _emit_pending_websocket_keepalive(
         self,

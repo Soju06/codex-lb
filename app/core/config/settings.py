@@ -215,7 +215,7 @@ class Settings(BaseSettings):
         default_factory=list
     )
     http_responses_session_bridge_stuck_gate_retire_after_seconds: float = Field(default=300.0, gt=0)
-    http_responses_session_bridge_response_created_timeout_seconds: float = Field(default=300.0, gt=0)
+    http_responses_session_bridge_response_created_timeout_seconds: float = Field(default=120.0, gt=0)
     http_responses_session_bridge_max_sessions: int = Field(default=256, gt=0)
     http_responses_session_bridge_queue_limit: int = Field(default=8, gt=0)
     http_responses_session_bridge_gateway_safe_mode: bool = False

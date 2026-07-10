@@ -2,25 +2,43 @@
 
 ## Summary
 
-Stop dropping non-message `input` items with a `system`/`developer` role when hoisting instruction messages into the `instructions` field.
+Stop dropping non-message `input` items with a `system`/`developer` role when
+hoisting instruction messages into the `instructions` field.
 
 ## Motivation
 
-Codex clients in responses-lite mode (gpt-5.6 models, which set `use_responses_lite=true` and `tool_mode=code_mode_only` in their model metadata) no longer send a top-level `tools` array. Instead, tool definitions are delivered as the first `input` item:
+The instruction-hoisting normalizer treated every `system`/`developer`-role
+input item as an instruction message. Items that carry no `content` (such as
+the Codex responses-lite `{"type": "additional_tools", "role": "developer",
+"tools": [...]}` prefix) contributed no instruction text, produced no preserved
+item, and were silently removed from `input`. Upstream then received a
+well-formed request with no tools anywhere, and the model responded that no
+terminal/filesystem tool was exposed (issue #1157).
 
-```json
-{"type": "additional_tools", "role": "developer", "tools": [{"type": "custom", "name": "exec"}, ...]}
-```
-
-The instruction-hoisting normalizer treats every `system`/`developer`-role input item as an instruction message. `additional_tools` items carry no `content`, so they contributed no instruction text, produced no preserved item, and were silently removed from `input`. Upstream then received a well-formed request with no tools anywhere, and the model responded that no terminal/filesystem tool was exposed — every gpt-5.6 session through codex-lb was effectively toolless, while gpt-5.5 (classic top-level `tools`) kept working.
+The merged fix for #1157 preserved the `additional_tools` case by skipping
+normalization entirely for Lite-shaped requests. But the underlying hazard is
+broader: any future non-message typed item that upstream introduces with
+`role: developer/system` and no `content` would still be folded away in a
+non-Lite request, reproducing the same class of bug (issue #1171). Two of the
+duplicate fixes for #1157 (#1159, #1158) carried a more general guard — never
+fold a `system`/`developer` input item whose `type` is present and not
+`"message"` — which is better defense-in-depth.
 
 ## Scope
 
-- Only hoist input items that are actual messages (`type` omitted or `"message"`) into `instructions`.
-- Pass every other `system`/`developer`-role input item through to upstream untouched, byte-for-byte.
-- Applies to both `ResponsesRequest` and `ResponsesCompactRequest` normalization.
+- Only hoist input items that are actual messages (`type` omitted or
+  `"message"`) into `instructions`.
+- Pass every other typed `system`/`developer`-role input item through to
+  upstream untouched, byte-for-byte and in its original position.
+- Applies to both `ResponsesRequest` and `ResponsesCompactRequest`
+  normalization, at validation time and on upstream serialization
+  (`to_payload()`).
 
 ## Out of Scope
 
 - Changing how message-shaped instruction items are hoisted or merged.
-- Modeling the `additional_tools` item shape; it is forwarded opaquely to stay codex-faithful.
+- Changing the Responses Lite `additional_tools` whole-request preservation
+  rule: requests containing an `additional_tools` item still skip instruction
+  hoisting entirely so the native Lite input prefix stays byte-for-byte intact.
+- Modeling unknown item shapes; they are forwarded opaquely to stay
+  codex-faithful.

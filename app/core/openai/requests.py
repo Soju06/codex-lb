@@ -305,10 +305,11 @@ def _normalize_responses_input_instructions(data: JsonValue) -> JsonValue:
         if role not in ("system", "developer"):
             input_items.append(item)
             continue
-        # Only hoist actual message items. Codex responses-lite clients (gpt-5.6+ models with
-        # use_responses_lite/tool_mode=code_mode_only) send non-message developer items such as
-        # {"type": "additional_tools", "role": "developer", "tools": [...]} inside input; those
-        # have no content, so hoisting used to drop them entirely and the model lost all tools.
+        # Only hoist actual message items (type omitted or "message"). Non-message
+        # typed system/developer items (e.g. the Codex responses-lite
+        # {"type": "additional_tools", "role": "developer", "tools": [...]} bundle, or
+        # any future typed item) carry no instruction content; hoisting used to drop
+        # them entirely, so pass them through untouched regardless of role.
         item_type = item_mapping.get("type")
         if item_type is not None and item_type != "message":
             input_items.append(item)

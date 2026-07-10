@@ -613,6 +613,39 @@ def test_responses_input_additional_tools_item_is_preserved(request_type):
     assert request.to_payload()["input"] == request.input
 
 
+@pytest.mark.parametrize("request_type", [ResponsesRequest, ResponsesCompactRequest])
+def test_responses_input_non_message_system_and_developer_items_are_preserved(request_type):
+    developer_directive = {
+        "type": "future_directive",
+        "role": "developer",
+        "directive": {"mode": "strict", "budget": 3},
+    }
+    system_directive = {
+        "type": "future_directive",
+        "role": "system",
+        "directive": {"mode": "audit"},
+    }
+    payload = {
+        "model": "gpt-5.1",
+        "input": [
+            developer_directive,
+            {"type": "message", "role": "developer", "content": "dev"},
+            system_directive,
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+        ],
+    }
+
+    request = request_type.model_validate(payload)
+
+    assert request.instructions == "dev"
+    assert request.input == [
+        developer_directive,
+        system_directive,
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+    ]
+    assert request.to_payload()["input"] == request.input
+
+
 def test_responses_input_system_message_keeps_user_text_parts():
     payload = {
         "model": "gpt-5.1",

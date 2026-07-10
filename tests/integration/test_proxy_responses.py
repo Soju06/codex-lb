@@ -11,6 +11,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 
 import app.core.clients.proxy as proxy_client_module
+import app.modules.proxy.api as proxy_api_module
 import app.modules.proxy.service as proxy_module
 from app.core.auth import generate_unique_account_id
 from app.core.config.settings import Settings
@@ -484,6 +485,49 @@ async def test_proxy_responses_compaction_trigger_preserves_conversation(async_c
     assert compact_payload["conversation"] == "conv_compact_anchor"
     assert "include" not in compact_payload
     assert "stream" not in compact_payload
+
+
+@pytest.mark.asyncio
+async def test_proxy_responses_compaction_trigger_rejects_untrimmable_input_before_admission(
+    async_client,
+    monkeypatch,
+):
+    async def unexpected_admission(*args, **kwargs):
+        del args, kwargs
+        pytest.fail("admission should not run for an untrimmable compaction trigger")
+
+    async def unexpected_limits(*args, **kwargs):
+        del args, kwargs
+        pytest.fail("limit reservation should not run for an untrimmable compaction trigger")
+
+    async def unexpected_compact(*args, **kwargs):
+        del args, kwargs
+        pytest.fail("compact should not run for an untrimmable compaction trigger")
+
+    monkeypatch.setattr(proxy_api_module, "_opportunistic_admission_denial", unexpected_admission)
+    monkeypatch.setattr(proxy_api_module, "_enforce_request_limits", unexpected_limits)
+    monkeypatch.setattr(proxy_module.ProxyService, "compact_responses", unexpected_compact)
+
+    response = await async_client.post(
+        "/backend-api/codex/responses",
+        json={
+            "model": "gpt-5.1",
+            "instructions": "compact this turn",
+            "input": [
+                {"role": "user", "content": "initial instructions"},
+                {"role": "assistant", "content": "middle context " + "y" * 500_000},
+                {"role": "user", "content": "latest request " + "x" * 500_000},
+                {"type": "compaction_trigger"},
+            ],
+            "stream": True,
+        },
+    )
+
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["type"] == "invalid_request_error"
+    assert error["code"] == "responses_compact_input_too_large"
+    assert error["param"] == "input"
 
 
 @pytest.mark.asyncio

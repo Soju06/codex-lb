@@ -1336,7 +1336,7 @@ class _HTTPBridgeRequestSubmitMixin:
         session: "_HTTPBridgeSession",
         request_state: _WebSocketRequestState,
     ) -> bool:
-        if session.account.security_work_authorized:
+        if getattr(session.account, "security_work_authorized", False):
             return False
         if request_state.response_id is not None:
             return False

@@ -11111,14 +11111,32 @@ async def test_http_bridge_owner_error_replays_validated_full_resend_on_security
     )
     session = proxy_service._HTTPBridgeSession(
         key=proxy_service._HTTPBridgeSessionKey("session_header", "owner-retry", None),
-        headers={}, affinity=proxy_service._AffinityPolicy(), request_model="gpt-5.6-sol",
-        account=owner, upstream=cast(proxy_service.UpstreamResponsesWebSocket, SimpleNamespace()),
-        upstream_control=proxy_service._WebSocketUpstreamControl(), pending_requests=deque([state]),
-        pending_lock=anyio.Lock(), response_create_gate=asyncio.Semaphore(1), queued_request_count=1,
-        last_used_at=1.0, idle_ttl_seconds=300.0,
+        headers={},
+        affinity=proxy_service._AffinityPolicy(),
+        request_model="gpt-5.6-sol",
+        account=owner,
+        upstream=cast(proxy_service.UpstreamResponsesWebSocket, SimpleNamespace()),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=1.0,
+        idle_ttl_seconds=300.0,
     )
-    payload = json.dumps({"type":"response.failed","response":{"status":"failed","error":{
-        "code":"usage_limit_reached","type":"usage_limit_reached","message":"The usage limit has been reached"}}})
+    payload = json.dumps(
+        {
+            "type": "response.failed",
+            "response": {
+                "status": "failed",
+                "error": {
+                    "code": "usage_limit_reached",
+                    "type": "usage_limit_reached",
+                    "message": "The usage limit has been reached",
+                },
+            },
+        }
+    )
 
     await service._process_http_bridge_upstream_text(session, payload)
 
@@ -11128,6 +11146,7 @@ async def test_http_bridge_owner_error_replays_validated_full_resend_on_security
     assert state.require_security_work_authorized is True
     assert state.excluded_account_ids == {owner.id}
     assert state.replay_count == 1
+    assert state.event_queue is not None
     assert state.event_queue.empty()
 
 
@@ -11286,7 +11305,10 @@ async def test_http_bridge_nonreplayable_auth_failure_marks_account_permanent(mo
         affinity=proxy_service._AffinityPolicy(),
         request_model="gpt-5.1",
         account=account,
-        upstream=cast(proxy_service.UpstreamResponsesWebSocket, AsyncMock()),
+        upstream=cast(
+            proxy_service.UpstreamResponsesWebSocket,
+            SimpleNamespace(archive_received=MagicMock(), send_text=AsyncMock()),
+        ),
         upstream_control=proxy_service._WebSocketUpstreamControl(),
         pending_requests=deque([request_state]),
         pending_lock=anyio.Lock(),
@@ -11322,7 +11344,7 @@ async def test_http_bridge_nonreplayable_auth_failure_marks_account_permanent(mo
 
 
 @pytest.mark.asyncio
-async def test_http_bridge_keeps_previous_response_pinned_security_work_error(monkeypatch):
+async def test_http_bridge_replays_previous_response_from_validated_full_resend_on_security_account(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     account = _make_account("acc_bridge_security_previous_pinned")
@@ -11383,14 +11405,18 @@ async def test_http_bridge_keeps_previous_response_pinned_security_work_error(mo
 
     await service._process_http_bridge_upstream_text(session, text)
 
-    reconnect.assert_not_awaited()
-    assert request_state.replay_count == 0
-    assert request_state.previous_response_id == "resp_anchor"
+    reconnect.assert_awaited_once()
+    assert reconnect.await_args is not None
+    assert reconnect.await_args.kwargs["require_security_work_authorized"] is True
+    assert request_state.replay_count == 1
+    assert request_state.previous_response_id is None
+    assert request_state.require_security_work_authorized is True
+    assert request_state.excluded_account_ids == {account.id}
     assert request_state.event_queue is not None
     warning_block = await request_state.event_queue.get()
     assert warning_block is not None
     warning = json.loads(warning_block.split("data: ", 1)[1])
-    assert warning["warning"]["action"] == "forward_original_security_work_error"
+    assert warning["warning"]["action"] == "retry_security_work_authorized"
 
 
 @pytest.mark.asyncio

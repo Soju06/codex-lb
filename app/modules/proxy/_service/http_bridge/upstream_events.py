@@ -837,7 +837,7 @@ class _HTTPBridgeUpstreamEventsMixin:
             terminal_error_message = error.message if error else None
             if _is_security_work_authorization_required_error(terminal_error_code, terminal_error_message):
                 can_retry_security_work = (
-                    not session.account.security_work_authorized
+                    not getattr(session.account, "security_work_authorized", False)
                     and not has_other_pending_requests
                     and terminal_request_state.response_id is None
                     and terminal_request_state.replay_count < 1

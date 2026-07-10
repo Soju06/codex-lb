@@ -211,6 +211,21 @@ async def test_backend_codex_images_generations_alias_uses_same_validation(async
 
 
 @pytest.mark.asyncio
+async def test_images_generations_trailing_slash_parity_between_v1_and_codex_alias(async_client):
+    # Codex joins `base_url` + "images/generations" without a trailing slash,
+    # so only the exact paths are handled. The trailing-slash variants fall
+    # through to the SPA catch-all route and must fail identically (405 with
+    # the OpenAI error envelope) on the canonical and alias surfaces.
+    payload = {"model": "dall-e-3", "prompt": "a red circle"}
+    v1_response = await async_client.post("/v1/images/generations/", json=payload)
+    alias_response = await async_client.post("/backend-api/codex/images/generations/", json=payload)
+    assert v1_response.status_code == 405
+    assert alias_response.status_code == 405
+    assert v1_response.json()["error"]["type"] == "invalid_request_error"
+    assert alias_response.json() == v1_response.json()
+
+
+@pytest.mark.asyncio
 async def test_images_generations_rejects_transparent_background(async_client):
     response = await async_client.post(
         "/v1/images/generations",
@@ -584,6 +599,21 @@ async def test_backend_codex_images_edits_requires_native_image_data_urls(async_
         "images_route_complete route=edits model=gpt-image-2 stream=false status=400 outcome=invalid_request"
         in caplog.text
     )
+
+
+@pytest.mark.asyncio
+async def test_images_edits_trailing_slash_parity_between_v1_and_codex_alias(async_client):
+    # Codex joins `base_url` + "images/edits" without a trailing slash, so
+    # only the exact paths are handled. The trailing-slash variants fall
+    # through to the SPA catch-all route and must fail identically (405 with
+    # the OpenAI error envelope) on the canonical and alias surfaces.
+    payload = {"model": "gpt-image-2", "prompt": "make it green", "images": []}
+    v1_response = await async_client.post("/v1/images/edits/", json=payload)
+    alias_response = await async_client.post("/backend-api/codex/images/edits/", json=payload)
+    assert v1_response.status_code == 405
+    assert alias_response.status_code == 405
+    assert v1_response.json()["error"]["type"] == "invalid_request_error"
+    assert alias_response.json() == v1_response.json()
 
 
 @pytest.mark.asyncio

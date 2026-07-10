@@ -941,9 +941,9 @@ def _trim_compact_input_for_upstream(payload: MutableJsonObject) -> None:
         else _compact_trimmed_input_with_markers(input_value, token_counts, selected_indices)
     )
     trimmed_tokens = sum(_estimated_json_tokens(item) for item in trimmed_input)
-    if preserved_indices and trimmed_tokens > _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS:
+    if trimmed_tokens > _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS:
         raise ClientPayloadError(
-            "Compact input still exceeds the upstream size limit after preserving required state anchors.",
+            "Compact input still exceeds the upstream size limit after retaining required compact context.",
             param="input",
             code="responses_compact_input_too_large",
         )

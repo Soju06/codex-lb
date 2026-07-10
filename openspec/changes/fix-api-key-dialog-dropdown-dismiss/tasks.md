@@ -22,5 +22,5 @@
 
 ## 5. Upstream handoff
 
-- [ ] Commit the focused patch and push the branch.
-- [ ] Open an upstream-ready PR that reports the live reproduction and verification evidence.
+- [x] Commit the focused patch and push the branch.
+- [x] Open an upstream-ready PR that reports the live reproduction and verification evidence.

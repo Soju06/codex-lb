@@ -697,11 +697,13 @@ def classify_check_state(
     unnamed_check_runs: list[dict[str, Any]] = []
 
     authoritative_ci_run = authoritative_ci_workflow_run_id(check_runs)
-    if authoritative_ci_run is not None:
+    authoritative_ci_workflow = authoritative_ci_workflow_id(check_runs)
+    if authoritative_ci_run is not None and authoritative_ci_workflow is not None:
         check_runs = [
             item
             for item in check_runs
             if item.get("name") in required_check_names
+            or github_actions_workflow_id(item) != authoritative_ci_workflow
             or github_actions_workflow_run_id(item) in {None, authoritative_ci_run}
         ]
 
@@ -770,8 +772,42 @@ def authoritative_ci_workflow_run_id(check_runs: list[dict[str, Any]]) -> str | 
     return github_actions_workflow_run_id(latest_required)
 
 
+def github_actions_workflow_id(item: dict[str, Any]) -> str | None:
+    workflow_id = item.get("_github_actions_workflow_id")
+    return str(workflow_id) if isinstance(workflow_id, (int, str)) else None
+
+
+def authoritative_ci_workflow_id(check_runs: list[dict[str, Any]]) -> str | None:
+    required_runs = [item for item in check_runs if item.get("name") == "CI Required"]
+    if not required_runs:
+        return None
+    latest_required = max(required_runs, key=check_run_recency_key)
+    return github_actions_workflow_id(latest_required)
+
+
+def annotate_github_actions_workflow_ids(repo: str, check_runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    workflow_ids_by_run: dict[str, str] = {}
+    for run_id in {github_actions_workflow_run_id(item) for item in check_runs} - {None}:
+        assert run_id is not None
+        try:
+            workflow_run = gh_api(f"/repos/{repo}/actions/runs/{run_id}")
+        except GhError:
+            continue
+        workflow_id = workflow_run.get("workflow_id") if isinstance(workflow_run, dict) else None
+        if isinstance(workflow_id, (int, str)):
+            workflow_ids_by_run[run_id] = str(workflow_id)
+
+    annotated: list[dict[str, Any]] = []
+    for item in check_runs:
+        run_id = github_actions_workflow_run_id(item)
+        workflow_id = workflow_ids_by_run.get(run_id) if run_id is not None else None
+        annotated.append({**item, "_github_actions_workflow_id": workflow_id} if workflow_id is not None else item)
+    return annotated
+
+
 def commit_checks_state(repo: str, head_sha: str) -> str:
     check_runs = paged_api(f"/repos/{repo}/commits/{head_sha}/check-runs")
+    check_runs = annotate_github_actions_workflow_ids(repo, check_runs)
     combined_status = gh_api(f"/repos/{repo}/commits/{head_sha}/status")
     return classify_check_state(
         check_runs,

@@ -146,6 +146,7 @@ def test_classify_check_state_ignores_unique_failure_from_superseded_ci_run() ->
             "started_at": "2026-07-10T06:00:37Z",
             "completed_at": "2026-07-10T06:00:37Z",
             "details_url": "https://github.com/Soju06/codex-lb/actions/runs/100/job/1",
+            "_github_actions_workflow_id": "ci",
         },
         {
             "name": "CI Required",
@@ -154,6 +155,7 @@ def test_classify_check_state_ignores_unique_failure_from_superseded_ci_run() ->
             "started_at": "2026-07-10T06:00:38Z",
             "completed_at": "2026-07-10T06:00:41Z",
             "details_url": "https://github.com/Soju06/codex-lb/actions/runs/100/job/2",
+            "_github_actions_workflow_id": "ci",
         },
         {
             "name": "Tests (pytest, unit)",
@@ -162,6 +164,7 @@ def test_classify_check_state_ignores_unique_failure_from_superseded_ci_run() ->
             "started_at": "2026-07-10T06:01:00Z",
             "completed_at": "2026-07-10T06:05:00Z",
             "details_url": "https://github.com/Soju06/codex-lb/actions/runs/200/job/3",
+            "_github_actions_workflow_id": "ci",
         },
         {
             "name": "CI Required",
@@ -170,6 +173,7 @@ def test_classify_check_state_ignores_unique_failure_from_superseded_ci_run() ->
             "started_at": "2026-07-10T06:09:01Z",
             "completed_at": "2026-07-10T06:09:05Z",
             "details_url": "https://github.com/Soju06/codex-lb/actions/runs/200/job/4",
+            "_github_actions_workflow_id": "ci",
         },
     ]
 
@@ -194,6 +198,7 @@ def test_classify_check_state_keeps_optional_failure_from_authoritative_ci_run()
             "started_at": "2026-07-10T06:09:00Z",
             "completed_at": "2026-07-10T06:09:04Z",
             "details_url": "https://github.com/Soju06/codex-lb/actions/runs/200/job/3",
+            "_github_actions_workflow_id": "ci",
         },
         {
             "name": "CI Required",
@@ -202,6 +207,7 @@ def test_classify_check_state_keeps_optional_failure_from_authoritative_ci_run()
             "started_at": "2026-07-10T06:09:01Z",
             "completed_at": "2026-07-10T06:09:05Z",
             "details_url": "https://github.com/Soju06/codex-lb/actions/runs/200/job/4",
+            "_github_actions_workflow_id": "ci",
         },
     ]
 
@@ -213,6 +219,68 @@ def test_classify_check_state_keeps_optional_failure_from_authoritative_ci_run()
         )
         == "failure"
     )
+
+
+def test_classify_check_state_keeps_failure_from_independent_workflow_run() -> None:
+    module = load_sync_module()
+
+    check_runs = [
+        {
+            "name": "independent security scan",
+            "status": "completed",
+            "conclusion": "failure",
+            "started_at": "2026-07-10T06:08:00Z",
+            "completed_at": "2026-07-10T06:08:30Z",
+            "details_url": "https://github.com/Soju06/codex-lb/actions/runs/300/job/1",
+            "_github_actions_workflow_id": "security",
+        },
+        {
+            "name": "CI Required",
+            "status": "completed",
+            "conclusion": "success",
+            "started_at": "2026-07-10T06:09:01Z",
+            "completed_at": "2026-07-10T06:09:05Z",
+            "details_url": "https://github.com/Soju06/codex-lb/actions/runs/200/job/4",
+            "_github_actions_workflow_id": "ci",
+        },
+    ]
+
+    assert (
+        module.classify_check_state(
+            check_runs,
+            {"statuses": []},
+            required_check_names=frozenset({"CI Required"}),
+        )
+        == "failure"
+    )
+
+
+def test_annotate_github_actions_workflow_ids_is_conservative_when_metadata_lookup_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = load_sync_module()
+    check_runs = [
+        {
+            "name": "CI Required",
+            "details_url": "https://github.com/Soju06/codex-lb/actions/runs/200/job/4",
+        },
+        {
+            "name": "independent scan",
+            "details_url": "https://github.com/Soju06/codex-lb/actions/runs/300/job/1",
+        },
+    ]
+
+    def workflow_run(path: str) -> dict[str, int]:
+        if path.endswith("/200"):
+            return {"workflow_id": 10}
+        raise module.GhError("metadata unavailable")
+
+    monkeypatch.setattr(module, "gh_api", workflow_run)
+
+    annotated = module.annotate_github_actions_workflow_ids("Soju06/codex-lb", check_runs)
+
+    assert annotated[0]["_github_actions_workflow_id"] == "10"
+    assert "_github_actions_workflow_id" not in annotated[1]
 
 
 def test_apply_decision_tolerates_github_app_write_denial(monkeypatch: pytest.MonkeyPatch) -> None:

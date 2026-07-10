@@ -3,11 +3,11 @@
 ### Requirement: Codex review labels use the authoritative current-head CI suite
 
 The Codex review label synchronizer SHALL treat the run containing the most
-recent `CI Required` check as the authoritative CI suite when multiple GitHub
-Actions CI workflow runs exist for one pull-request head. It MUST ignore
+recent `CI Required` check as the authoritative CI suite when multiple runs of
+the same GitHub Actions CI workflow exist for one pull-request head. It MUST ignore
 non-required Actions checks from superseded runs, while required check contexts,
-non-Actions status evidence, and failures from the authoritative run remain
-blocking.
+non-Actions status evidence, failures from the authoritative run, and failures
+from independent workflows remain blocking.
 
 #### Scenario: Cancelled duplicate leaves a unique failed placeholder
 
@@ -24,3 +24,10 @@ blocking.
 - **AND** another check in that same run failed
 - **WHEN** Codex review labels are synchronized
 - **THEN** the current head remains classified as failed
+
+#### Scenario: Independent workflow on the same head fails
+
+- **GIVEN** the authoritative CI workflow run is successful
+- **AND** a different GitHub Actions workflow has a failed check on the same head
+- **WHEN** Codex review labels are synchronized
+- **THEN** the independent workflow failure remains blocking

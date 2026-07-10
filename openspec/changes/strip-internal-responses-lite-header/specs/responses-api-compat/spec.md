@@ -42,6 +42,10 @@ Lite continuity.
 An accepted `generate = false` prewarm derived from an `additional_tools` prefix
 MUST establish the same trusted continuity because a later request MAY reuse its
 response ID without repeating that prefix.
+A transparent fresh full-resend replay that clears `previous_response_id` (for
+example after an upstream previous-response miss) severs that linkage, so the
+replayed request MUST NOT carry the reserved marker unless its own input
+contains the `additional_tools` prefix.
 Otherwise, the proxy MUST strip the reserved client-metadata marker. The
 HTTP-to-websocket bridge MUST preserve its internally derived canonical marker
 when it trims an already-stored input prefix or rebuilds the request during
@@ -107,6 +111,16 @@ item.
 - **THEN** the proxy strips the marker
 - **AND** the recorded Lite continuity remains available to later frames that
   do reference the accepted Lite response
+
+#### Scenario: Fresh replay of a trusted incremental frame drops the marker
+
+- **GIVEN** a trusted marker-only incremental websocket frame whose
+  self-contained multi-item input yields a transparent fresh full-resend replay
+- **WHEN** upstream reports the referenced previous response as not found and
+  the proxy replays the request without `previous_response_id`
+- **THEN** the replayed request omits the reserved client-metadata marker
+- **BUT WHEN** the replayed input itself contains the `additional_tools` prefix
+- **THEN** the replayed request retains the canonical marker
 
 #### Scenario: Accepted Lite prewarm authorizes incremental reuse
 

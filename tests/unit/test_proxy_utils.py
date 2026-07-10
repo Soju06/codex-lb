@@ -12075,6 +12075,109 @@ async def test_websocket_lite_incremental_requires_previous_response_linkage(
 
 
 @pytest.mark.asyncio
+async def test_websocket_lite_fresh_replay_strips_trusted_marker(monkeypatch):
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    api_key = ApiKeyData(
+        id="key_ws_lite_replay",
+        name="ws-lite-replay",
+        key_prefix="sk-ws-lite",
+        allowed_models=["gpt-5.6-sol"],
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+
+    class Settings:
+        log_proxy_request_payload = False
+        log_proxy_request_shape = False
+        log_proxy_request_shape_raw_cache_key = False
+        log_proxy_service_tier_trace = False
+        openai_prompt_cache_key_derivation_enabled = True
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: Settings())
+    monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_refresh_websocket_api_key_policy", AsyncMock(return_value=api_key))
+
+    marker = proxy_module.CODEX_RESPONSES_LITE_WEBSOCKET_METADATA_KEY
+    continuity_state = proxy_service._WebSocketContinuityState(
+        responses_lite_model="gpt-5.6-sol",
+        responses_lite_response_id="resp_ws_lite_prev",
+    )
+
+    trusted = await service._prepare_websocket_response_create_request(
+        cast(
+            dict[str, JsonValue],
+            {
+                "type": "response.create",
+                "model": "gpt-5.6-sol",
+                "instructions": "",
+                "previous_response_id": "resp_ws_lite_prev",
+                "input": [
+                    {"role": "user", "content": "continue"},
+                    {"role": "user", "content": "with details"},
+                ],
+                "client_metadata": {marker: "true", "keep": "yes"},
+            },
+        ),
+        headers={},
+        codex_session_affinity=False,
+        openai_cache_affinity=True,
+        sticky_threads_enabled=False,
+        openai_cache_affinity_max_age_seconds=300,
+        api_key=api_key,
+        continuity_state=continuity_state,
+    )
+
+    trusted_payload = json.loads(trusted.text_data)
+    assert trusted_payload["client_metadata"][marker] == "true"
+    assert trusted.request_state.fresh_upstream_request_is_retry_safe
+    assert trusted.request_state.fresh_upstream_request_text is not None
+    replay_payload = json.loads(trusted.request_state.fresh_upstream_request_text)
+    assert "previous_response_id" not in replay_payload
+    assert replay_payload["input"] == trusted_payload["input"]
+    assert replay_payload["client_metadata"] == {"keep": "yes"}
+
+    body_lite = await service._prepare_websocket_response_create_request(
+        cast(
+            dict[str, JsonValue],
+            {
+                "type": "response.create",
+                "model": "gpt-5.6-sol",
+                "instructions": "",
+                "previous_response_id": "resp_ws_lite_prev",
+                "input": [
+                    {
+                        "type": "additional_tools",
+                        "role": "developer",
+                        "tools": [{"type": "custom", "name": "shell"}],
+                    },
+                    {"role": "user", "content": "continue"},
+                ],
+                "client_metadata": {marker: "stale", "keep": "yes"},
+            },
+        ),
+        headers={},
+        codex_session_affinity=False,
+        openai_cache_affinity=True,
+        sticky_threads_enabled=False,
+        openai_cache_affinity_max_age_seconds=300,
+        api_key=api_key,
+        continuity_state=proxy_service._WebSocketContinuityState(),
+    )
+
+    body_lite_payload = json.loads(body_lite.text_data)
+    assert body_lite_payload["client_metadata"][marker] == "true"
+    assert body_lite.request_state.fresh_upstream_request_text is not None
+    body_lite_replay = json.loads(body_lite.request_state.fresh_upstream_request_text)
+    assert "previous_response_id" not in body_lite_replay
+    assert body_lite_replay["client_metadata"][marker] == "true"
+
+
+@pytest.mark.asyncio
 async def test_prepare_websocket_response_create_request_does_not_infer_previous_response_id_from_session_scope(
     monkeypatch,
 ):

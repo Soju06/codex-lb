@@ -125,6 +125,27 @@ _BOOTSTRAP_CORE_AVAILABLE_IN_PLANS = frozenset(
     plan for plan in _BOOTSTRAP_AVAILABLE_IN_PLANS if plan not in {"free", "free_workspace", "k12"}
 )
 
+# GPT-5.6 ships to four additional plan tiers upstream
+# (codex-rs/models-manager/models.json at rust-v0.144.1).
+_BOOTSTRAP_GPT56_AVAILABLE_IN_PLANS = frozenset(
+    {
+        *_BOOTSTRAP_AVAILABLE_IN_PLANS,
+        "edu_plus",
+        "edu_pro",
+        "enterprise_cbp_automation",
+        "sci",
+    }
+)
+
+_GPT56_SOL_AVAILABILITY_NUX: dict[str, JsonValue] = {
+    "message": (
+        "Our most capable model yet. GPT-5.6 Sol can tackle complex code changes, "
+        "dig into research, produce polished documents, and take on your most "
+        "ambitious work. Sol is highly capable at lower reasoning efforts—try "
+        "starting lower, then turn it up for harder jobs."
+    )
+}
+
 
 def _bootstrap_model(
     slug: str,
@@ -174,14 +195,43 @@ def _bootstrap_model(
     )
 
 
-def _gpt56_raw() -> dict[str, JsonValue]:
+def _gpt56_raw(
+    *,
+    multi_agent_version: str,
+    availability_nux: dict[str, JsonValue] | None = None,
+) -> dict[str, JsonValue]:
+    """Raw catalog fields for the GPT-5.6 family, mirroring the upstream
+    bundled catalog (codex-rs/models-manager/models.json at rust-v0.144.1)
+    field-for-field. The ~16.5 KB ``base_instructions`` string and the
+    personality-templated ``model_messages`` object are deliberately not
+    bundled; the live upstream registry supplies them on the first refresh.
+    """
     return {
-        "additional_speed_tiers": ["fast"],
-        "service_tiers": _BOOTSTRAP_FAST_SERVICE_TIERS,
-        "effective_context_window_percent": 95,
+        "apply_patch_tool_type": "freeform",
+        "web_search_tool_type": "text_and_image",
+        "supports_image_detail_original": True,
         "truncation_policy": {"mode": "tokens", "limit": 10_000},
-        "supports_search_tool": True,
+        # ``tool_mode`` / ``multi_agent_version`` drive Codex client tool
+        # assembly and the ``ultra`` proactive multi-agent mode; omitting them
+        # would make a bootstrap-served catalog change client behavior.
+        "tool_mode": "code_mode_only",
+        "multi_agent_version": multi_agent_version,
         "use_responses_lite": True,
+        "include_skills_usage_instructions": False,
+        "auto_review_model_override": None,
+        "auto_compact_token_limit": None,
+        "comp_hash": "3000",
+        "reasoning_summary_format": "experimental",
+        "default_reasoning_summary": "none",
+        "availability_nux": availability_nux,
+        "upgrade": None,
+        # Required (no serde default) by the Rust ``ModelInfo`` deserializer;
+        # a Codex client rejects catalog entries that omit it.
+        "experimental_supported_tools": [],
+        "supports_search_tool": True,
+        "default_service_tier": None,
+        "service_tiers": _BOOTSTRAP_FAST_SERVICE_TIERS,
+        "additional_speed_tiers": ["fast"],
     }
 
 
@@ -189,44 +239,50 @@ def _gpt56_raw() -> dict[str, JsonValue]:
 # This mirrors Codex's model-manager pattern: ship a conservative catalog so
 # startup/offline paths have usable metadata, then treat the live upstream
 # registry as authoritative once a refresh succeeds. Keep compatibility fields
-# explicit rather than inherited from helper defaults; every slug must exist
-# upstream, and live upstream data always takes precedence once available.
+# explicit rather than inherited from helper defaults; every slug must be a
+# real upstream slug (never invented), and live upstream data always takes
+# precedence once available. ``gpt-5.3-codex`` / ``gpt-5.3-codex-spark`` were
+# dropped from upstream's bundled catalog at rust-v0.144.x but are retained
+# here for older pinned clients; the upstream backend still serves them.
 _BOOTSTRAP_STATIC_MODELS: tuple[UpstreamModel, ...] = (
     _bootstrap_model(
         "gpt-5.6-sol",
         "GPT-5.6-Sol",
         description="Latest frontier agentic coding model.",
         prefer_websockets=True,
-        minimal_client_version=None,
+        minimal_client_version="0.144.0",
         reasoning_levels=_REASONING_LEVELS_ULTRA,
         context_window=372_000,
         default_reasoning_level="low",
         priority=1,
-        raw=_gpt56_raw(),
+        available_in_plans=_BOOTSTRAP_GPT56_AVAILABLE_IN_PLANS,
+        raw=_gpt56_raw(multi_agent_version="v2", availability_nux=_GPT56_SOL_AVAILABILITY_NUX),
     ),
     _bootstrap_model(
         "gpt-5.6-terra",
         "GPT-5.6-Terra",
         description="Balanced agentic coding model for everyday work.",
         prefer_websockets=True,
-        minimal_client_version=None,
+        minimal_client_version="0.144.0",
         reasoning_levels=_REASONING_LEVELS_ULTRA,
         context_window=372_000,
         default_reasoning_level="medium",
         priority=2,
-        raw=_gpt56_raw(),
+        available_in_plans=_BOOTSTRAP_GPT56_AVAILABLE_IN_PLANS,
+        raw=_gpt56_raw(multi_agent_version="v2"),
     ),
     _bootstrap_model(
         "gpt-5.6-luna",
         "GPT-5.6-Luna",
         description="Fast and affordable agentic coding model.",
         prefer_websockets=True,
-        minimal_client_version=None,
+        minimal_client_version="0.144.0",
         reasoning_levels=_REASONING_LEVELS_MAX,
         context_window=372_000,
         default_reasoning_level="medium",
         priority=3,
-        raw=_gpt56_raw(),
+        available_in_plans=_BOOTSTRAP_GPT56_AVAILABLE_IN_PLANS,
+        raw=_gpt56_raw(multi_agent_version="v1"),
     ),
     _bootstrap_model(
         "gpt-5.5",

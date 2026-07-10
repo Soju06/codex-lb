@@ -40,9 +40,9 @@ EXPECTED_CORE_MODEL_PLANS = {
 }
 
 EXPECTED_BOOTSTRAP_MINIMAL_CLIENT_VERSIONS = {
-    "gpt-5.6-sol": None,
-    "gpt-5.6-terra": None,
-    "gpt-5.6-luna": None,
+    "gpt-5.6-sol": "0.144.0",
+    "gpt-5.6-terra": "0.144.0",
+    "gpt-5.6-luna": "0.144.0",
     "gpt-5.5": "0.124.0",
     "gpt-5.4": "0.98.0",
     "gpt-5.4-mini": "0.98.0",
@@ -247,6 +247,31 @@ async def test_backend_codex_models_uses_bootstrap_upstream_metadata(async_clien
         "xhigh",
         "max",
     }
+
+    # Upstream-exact GPT-5.6 metadata as served on the Codex catalog wire
+    # (codex-rs/models-manager/models.json at rust-v0.144.1).
+    for gpt56 in (sol, terra, luna):
+        assert gpt56["minimal_client_version"] == "0.144.0"
+        assert gpt56["tool_mode"] == "code_mode_only"
+        assert gpt56["use_responses_lite"] is True
+        assert gpt56["apply_patch_tool_type"] == "freeform"
+        assert gpt56["web_search_tool_type"] == "text_and_image"
+        assert gpt56["truncation_policy"] == {"mode": "tokens", "limit": 10_000}
+        assert gpt56["default_reasoning_summary"] == "none"
+        assert gpt56["reasoning_summary_format"] == "experimental"
+        assert gpt56["comp_hash"] == "3000"
+        assert gpt56["experimental_supported_tools"] == []
+        assert gpt56["max_context_window"] == 372_000
+        assert gpt56["service_tiers"] == [
+            {"id": "priority", "name": "Fast", "description": "1.5x speed, increased usage"}
+        ]
+        assert {"edu_plus", "edu_pro", "enterprise_cbp_automation", "sci"} <= set(gpt56["available_in_plans"])
+    assert sol["multi_agent_version"] == "v2"
+    assert terra["multi_agent_version"] == "v2"
+    assert luna["multi_agent_version"] == "v1"
+    assert "most capable model yet" in sol["availability_nux"]["message"]
+    assert terra["availability_nux"] is None
+    assert luna["availability_nux"] is None
 
     gpt54 = entries["gpt-5.4"]
     assert gpt54["minimal_client_version"] == "0.98.0"

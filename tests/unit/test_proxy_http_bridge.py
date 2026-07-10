@@ -1654,6 +1654,7 @@ async def test_http_bridge_times_out_before_response_created(monkeypatch: pytest
         reasoning_effort=None,
         api_key_reservation=None,
         started_at=time.monotonic(),
+        upstream_sent_at=time.monotonic(),
         event_queue=asyncio.Queue(),
         transport="http",
         awaiting_response_created=True,
@@ -1680,6 +1681,67 @@ async def test_http_bridge_times_out_before_response_created(monkeypatch: pytest
     error = response.get("error")
     assert isinstance(error, dict)
     assert error.get("code") == "response_created_timeout"
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_startup_watchdog_ignores_upstream_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    monkeypatch.setattr(service, "_detach_http_bridge_request", AsyncMock())
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: SimpleNamespace(
+            sse_keepalive_interval_seconds=0.001,
+            stream_idle_timeout_seconds=7200.0,
+            http_responses_session_bridge_response_created_timeout_seconds=0.001,
+        ),
+    )
+    monkeypatch.setattr(proxy_service, "_HTTP_BRIDGE_STARTUP_KEEPALIVE_GRACE_SECONDS", 0.001)
+    session = _make_bridge_session()
+    state = proxy_service._WebSocketRequestState(
+        request_id="req-created-upstream-active",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic() - 10.0,
+        upstream_sent_at=time.monotonic() - 10.0,
+        latency_first_upstream_event_ms=1,
+        event_queue=asyncio.Queue(),
+        transport="http",
+        awaiting_response_created=True,
+    )
+
+    async def fake_submit(*args: object, **kwargs: object) -> None:
+        session.pending_requests.append(state)
+
+        async def emit_later() -> None:
+            await asyncio.sleep(0.01)
+            assert state.event_queue is not None
+            await state.event_queue.put(
+                proxy_service.format_sse_event(
+                    proxy_service.response_failed_event(
+                        "upstream_test_done",
+                        "test terminal",
+                        response_id="resp_upstream_active",
+                    )
+                )
+            )
+
+        asyncio.create_task(emit_later())
+
+    monkeypatch.setattr(service, "_submit_http_bridge_request", fake_submit)
+    stream = service._stream_http_bridge_session_events(
+        session,
+        request_state=state,
+        text_data="{}",
+        queue_limit=8,
+        propagate_http_errors=True,
+        downstream_turn_state=None,
+    )
+
+    block = await asyncio.wait_for(anext(stream), timeout=1.0)
+    assert "upstream_test_done" in block
 
 
 @pytest.mark.asyncio

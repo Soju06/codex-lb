@@ -1278,6 +1278,30 @@ class ProxyService(
         surface: str = "websocket",
     ) -> None:
         timeout_seconds = _proxy_admission_wait_timeout_seconds()
+        if bridge_session is not None:
+            settings = get_settings()
+            stale_threshold = float(
+                getattr(settings, "http_responses_session_bridge_stuck_gate_retire_after_seconds", 300.0)
+            )
+            now = time.monotonic()
+            async with bridge_session.pending_lock:
+                gate_holders = [
+                    state
+                    for state in bridge_session.pending_requests
+                    if state.response_create_gate_acquired and state.awaiting_response_created
+                ]
+            silent_remaining = [
+                max(0.0, stale_threshold - max(0.0, now - state.started_at))
+                for state in gate_holders
+                if state.latency_first_upstream_event_ms is None and state.latency_response_created_ms is None
+            ]
+            if silent_remaining:
+                timeout_seconds = max(timeout_seconds, min(silent_remaining))
+            elif gate_holders:
+                timeout_seconds = max(
+                    timeout_seconds,
+                    float(getattr(settings, "stream_idle_timeout_seconds", 7200.0)),
+                )
         request_state.response_create_gate = response_create_gate
         request_state.response_create_gate_wait_started_at = time.monotonic()
         if account_id is not None:

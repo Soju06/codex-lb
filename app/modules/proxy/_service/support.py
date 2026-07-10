@@ -366,6 +366,7 @@ class _WebSocketRequestState:
     latency_first_token_ms: int | None = None
     latency_response_created_ms: int | None = None
     latency_first_upstream_event_ms: int | None = None
+    upstream_sent_at: float | None = None
     latency_response_create_gate_wait_ms: int | None = None
     latency_bridge_queue_wait_ms: int | None = None
     response_create_gate_wait_started_at: float | None = None

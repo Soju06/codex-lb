@@ -715,6 +715,7 @@ class _HTTPBridgeRequestSubmitMixin:
                     session.admission_waiter_count = max(0, session.admission_waiter_count - 1)
                     admission_waiter_registered = False
                 request_enqueued = True
+                request_state.upstream_sent_at = _service_time().monotonic()
                 await _send_http_bridge_request_text_with_archive_id(session, request_state, text_data)
                 session.last_used_at = _service_time().monotonic()
         except ProxyResponseError:

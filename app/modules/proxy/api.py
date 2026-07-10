@@ -205,7 +205,14 @@ from app.modules.usage.updater import UsageUpdater
 
 logger = logging.getLogger(__name__)
 
-_REASONING_SUMMARY_BLANK_HTML_COMMENT_RE = re.compile(r"(?m)^[ \t]*<!--\s*-->[ \t]*(?:\r?\n)?")
+_REASONING_SUMMARY_BLANK_HTML_COMMENT_RE = re.compile(r"(?m)^[ \t]*<!--\s*-->[ \t]*(?:\r?\n|\Z)")
+_REASONING_SUMMARY_DELTA_TYPES = frozenset({"response.reasoning_summary_text.delta"})
+_REASONING_SUMMARY_DONE_TYPES = frozenset(
+    {
+        "response.reasoning_summary_text.done",
+        "response.reasoning_summary_part.done",
+    }
+)
 
 _PUBLIC_RESPONSE_OUTPUT_ITEM_TYPES = frozenset(
     {
@@ -5057,6 +5064,7 @@ async def _normalize_public_responses_stream(
     *,
     enforce_openai_sdk_contract: bool = True,
 ) -> AsyncIterator[str]:
+    stream = _normalize_reasoning_summary_stream(stream)
     """Normalize the upstream SSE event stream for the public /v1 surface.
 
     Args:
@@ -5480,6 +5488,18 @@ def _normalize_public_stream_payload(
     enforce_openai_sdk_contract: bool = True,
 ) -> tuple[dict[str, JsonValue] | None, str | None]:
     event_type = payload.get("type")
+    if event_type == "response.reasoning_summary_text.done" and isinstance(payload.get("text"), str):
+        normalized_payload = dict(payload)
+        normalized_payload["text"] = _strip_blank_html_comment_lines(cast(str, payload["text"]))
+        return normalized_payload, None
+    if event_type in {"response.reasoning_summary_part.added", "response.reasoning_summary_part.done"}:
+        part = payload.get("part")
+        if is_json_mapping(part) and part.get("type") == "summary_text" and isinstance(part.get("text"), str):
+            normalized_part = dict(part)
+            normalized_part["text"] = _strip_blank_html_comment_lines(cast(str, part["text"]))
+            normalized_payload = dict(payload)
+            normalized_payload["part"] = normalized_part
+            return normalized_payload, None
     # Drop Codex-internal vendor events on the public /v1 surface only. The
     # upstream Codex backend emits non-standard events (notably
     # ``codex.rate_limits``, which is throttled per rate-limit window and so
@@ -5765,7 +5785,111 @@ def _normalize_reasoning_output_item(item: Mapping[str, JsonValue]) -> dict[str,
 
 
 def _strip_blank_html_comment_lines(text: str) -> str:
-    return _REASONING_SUMMARY_BLANK_HTML_COMMENT_RE.sub("", text).rstrip()
+    terminal_match = None
+    for match in _REASONING_SUMMARY_BLANK_HTML_COMMENT_RE.finditer(text):
+        if match.end() == len(text):
+            terminal_match = match
+    cleaned, count = _REASONING_SUMMARY_BLANK_HTML_COMMENT_RE.subn("", text)
+    if count == 0:
+        return text
+    if terminal_match is not None:
+        return cleaned.rstrip("\r\n")
+    return cleaned
+
+
+def _reasoning_summary_delta_key(payload: Mapping[str, JsonValue]) -> tuple[str | None, int | None, int | None]:
+    item_id = payload.get("item_id")
+    output_index = payload.get("output_index")
+    summary_index = payload.get("summary_index")
+    return (
+        item_id if isinstance(item_id, str) else None,
+        output_index if isinstance(output_index, int) else None,
+        summary_index if isinstance(summary_index, int) else None,
+    )
+
+
+def _could_be_blank_html_comment_line(text: str) -> bool:
+    candidate = text.rsplit("\n", 1)[-1].lstrip(" \t")
+    if not candidate:
+        return False
+    if not candidate.startswith("<!--"):
+        return "<!--".startswith(candidate)
+    remainder = candidate[4:].lstrip()
+    if not remainder.startswith("-->"):
+        return "-->".startswith(remainder)
+    return not remainder[3:].strip(" \t\r")
+
+
+async def _normalize_reasoning_summary_stream(stream: AsyncIterator[str]) -> AsyncIterator[str]:
+    pending: dict[tuple[str | None, int | None, int | None], list[dict[str, JsonValue]]] = {}
+
+    def flush(key: tuple[str | None, int | None, int | None]) -> list[str]:
+        payloads = pending.pop(key, [])
+        text = "".join(cast(str, payload.get("delta")) for payload in payloads)
+        cleaned = _strip_blank_html_comment_lines(text)
+        if cleaned == text:
+            return [format_sse_event(payload) for payload in payloads]
+        if not cleaned or not payloads:
+            return []
+        normalized = dict(payloads[0])
+        normalized["delta"] = cleaned
+        return [format_sse_event(normalized)]
+
+    async for event_block in stream:
+        payload = _parse_sse_payload(event_block)
+        if payload is None:
+            yield event_block
+            continue
+        event_type = payload.get("type")
+        event_key = _reasoning_summary_delta_key(payload)
+        if pending and not (
+            event_type in _REASONING_SUMMARY_DELTA_TYPES | _REASONING_SUMMARY_DONE_TYPES and event_key in pending
+        ):
+            for pending_key in tuple(pending):
+                for buffered in flush(pending_key):
+                    yield buffered
+        if event_type in _REASONING_SUMMARY_DELTA_TYPES:
+            delta = payload.get("delta")
+            if not isinstance(delta, str):
+                yield event_block
+                continue
+            key = event_key
+            if key in pending:
+                pending[key].append(payload)
+                buffered_text = "".join(cast(str, item.get("delta")) for item in pending[key])
+                if _strip_blank_html_comment_lines(buffered_text) != buffered_text:
+                    for buffered in flush(key):
+                        yield buffered
+                    continue
+                if _could_be_blank_html_comment_line(buffered_text):
+                    continue
+                for buffered in flush(key):
+                    yield buffered
+                continue
+            cleaned_delta = _strip_blank_html_comment_lines(delta)
+            if cleaned_delta != delta:
+                normalized_payload = dict(payload)
+                normalized_payload["delta"] = cleaned_delta
+                yield format_sse_event(normalized_payload)
+                continue
+            if _could_be_blank_html_comment_line(delta):
+                pending[key] = [payload]
+                continue
+            yield event_block
+            continue
+        if event_type in _REASONING_SUMMARY_DONE_TYPES:
+            key = event_key
+            for buffered in flush(key):
+                yield buffered
+        elif event_type in _PUBLIC_RESPONSE_STREAM_TERMINAL_TYPES:
+            for key in tuple(pending):
+                for buffered in flush(key):
+                    yield buffered
+        yield event_block
+
+    for key in tuple(pending):
+        for buffered in flush(key):
+            yield buffered
 
 
 def _is_public_passthrough_output_item_type(item_type: str) -> bool:

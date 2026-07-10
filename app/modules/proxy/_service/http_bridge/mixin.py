@@ -1516,6 +1516,11 @@ class _HTTPBridgeMixin(
             if session.closed:
                 stale_keys.append(key)
                 continue
+            # A request owns this otherwise-idle session from lookup until
+            # submit makes queued activity visible. Pruning it during an
+            # admission or durable-refresh await would invalidate that handoff.
+            if getattr(session, "unanchored_reservation_id", None) is not None:
+                continue
             pending_count = self._http_bridge_pending_count_nowait(
                 session,
                 context="idle_prune",

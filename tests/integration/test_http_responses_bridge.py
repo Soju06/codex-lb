@@ -7077,6 +7077,8 @@ async def test_v1_responses_http_bridge_reserved_handoff_forks_before_submit(
 
     first = await get_session("scope-before-submit-a")
     _reserve_http_bridge_unanchored_handoff(first, request_scope_id="scope-before-submit-a")
+    first.last_used_at = time.monotonic() - 300.0
+    first.idle_ttl_seconds = 1.0
     try:
         second = await get_session("scope-before-submit-b")
     finally:
@@ -7084,6 +7086,7 @@ async def test_v1_responses_http_bridge_reserved_handoff_forks_before_submit(
 
     assert first.key == shared_key
     assert service._http_bridge_sessions[shared_key] is first
+    assert first.closed is False
     assert first.queued_request_count == 0
     assert first.unanchored_reservation_id is None
     assert second is not first

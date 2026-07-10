@@ -31,7 +31,8 @@ different request that arrives after the claim forks instead of reusing the
 apparently idle session. Submission clears the matching reservation in the same
 synchronous section that increments the queued count, and an owned `finally`
 also clears it on every pre-submit error or cancellation. Recovery paths claim
-the same lease before awaiting API-key admission.
+the same lease before awaiting API-key admission. Idle pruning and capacity
+eviction both skip a session while this handoff lease is owned.
 
 Owner forwarding protocol v2 includes the unanchored boolean in the main HMAC
 for both true and false values. The owner still receives the generated

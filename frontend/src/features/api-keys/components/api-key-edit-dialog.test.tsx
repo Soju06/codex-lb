@@ -374,6 +374,7 @@ describe("ApiKeyEditDialog", () => {
 
     await user.click(await screen.findByRole("button", { name: "1 model selected" }));
     await user.click(screen.getByRole("menuitemcheckbox", { name: "gpt-5.6-sol" }));
+    await user.keyboard("{Escape}");
 
     expect(screen.getByRole("dialog", { name: "Edit API key" })).toBeInTheDocument();
     expect(onOpenChange).not.toHaveBeenCalledWith(false);

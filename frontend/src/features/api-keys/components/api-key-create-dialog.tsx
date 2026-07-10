@@ -44,6 +44,8 @@ const TRANSPORT_POLICY_LABELS = {
   always_websocket: "Prefer persistent sessions",
 } as const;
 
+import { preventApiKeyDialogDropdownDismiss } from "./api-key-dialog-interactions";
+
 const formSchema = z.object({
   name: z.string().min(1, "Name is required"),
 });
@@ -303,7 +305,10 @@ export function ApiKeyCreateDialog({ open, busy, onOpenChange, onSubmit }: ApiKe
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       {open ? (
-        <DialogContent className="sm:max-w-3xl">
+        <DialogContent
+          className="sm:max-w-3xl"
+          onInteractOutside={preventApiKeyDialogDropdownDismiss}
+        >
           <DialogHeader>
             <DialogTitle>Create API key</DialogTitle>
             <DialogDescription>Set restrictions and expiration for this key.</DialogDescription>

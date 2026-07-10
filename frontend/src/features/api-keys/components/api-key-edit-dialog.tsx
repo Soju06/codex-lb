@@ -41,6 +41,7 @@ import type {
 } from "@/features/api-keys/schemas";
 import { parseDate } from "@/utils/formatters";
 
+import { preventApiKeyDialogDropdownDismiss } from "./api-key-dialog-interactions";
 import { hasLimitRuleChanges, normalizeLimitRules } from "./limit-rules-utils";
 
 const TRANSPORT_POLICY_FOLLOW_GLOBAL = "follow_global";
@@ -442,7 +443,10 @@ function formatTokenCount(n: number): string {
 export function ApiKeyEditDialog({ open, busy, apiKey, onOpenChange, onSubmit }: ApiKeyEditDialogProps) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-3xl">
+      <DialogContent
+        className="sm:max-w-3xl"
+        onInteractOutside={preventApiKeyDialogDropdownDismiss}
+      >
         <DialogHeader>
           <DialogTitle>Edit API key</DialogTitle>
           <DialogDescription>Update restrictions and lifecycle settings.</DialogDescription>

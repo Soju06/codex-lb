@@ -4,6 +4,8 @@
 
 When an upstream Responses request fails because the work requires cybersecurity authorization, codex-lb MUST retry the request on an account marked as security-work-authorized when the request can be safely replayed on a different account. The retry MUST exclude the account that produced the authorization error.
 
+The classifier MUST recognize both the legacy cybersecurity-risk message and the current `This content can't be shown` / `We take extra caution with cybersecurity requests` Trusted Access denial. For an eligible HTTP-bridge or websocket request, the retry MUST reconnect the existing downstream session to the authorized account and continue without forwarding the denial as the terminal response.
+
 #### Scenario: Unpinned stream request retries on an authorized account
 
 - **WHEN** an unpinned streamed Responses request fails with a security-work authorization error on an account that is not security-work-authorized

@@ -855,10 +855,20 @@ _WEBSOCKET_PREVIOUS_RESPONSE_ACCOUNT_CACHE_LIMIT = 4096
 _WEBSOCKET_CONTINUITY_CACHE_LIMIT = 4096
 _SECURITY_WORK_AUTHORIZATION_REQUIRED_CODE = "security_work_authorization_required"
 _NO_SECURITY_WORK_AUTHORIZED_ACCOUNTS_CODE = "no_security_work_authorized_accounts"
-_SECURITY_WORK_AUTHORIZATION_REQUIRED_HINTS = (
-    "flagged for possible cybersecurity risk",
-    "authorized for security work",
-    "chatgpt.com/cyber",
+_SECURITY_WORK_AUTHORIZATION_REQUIRED_HINT_GROUPS = (
+    (
+        "flagged for possible cybersecurity risk",
+        "authorized for security work",
+        "chatgpt.com/cyber",
+    ),
+    (
+        "we take extra caution with cybersecurity requests",
+        "trusted access",
+    ),
+    (
+        "this content can't be shown",
+        "enterprise-trusted-access-for-cyber",
+    ),
 )
 _SECURITY_WORK_RETRY_MESSAGE = (
     "Upstream flagged this request as possible cybersecurity work. "
@@ -2336,7 +2346,10 @@ def _is_security_work_authorization_required_error(code: str | None, message: st
     normalized_message = (message or "").strip().lower()
     if not normalized_message:
         return False
-    return all(hint in normalized_message for hint in _SECURITY_WORK_AUTHORIZATION_REQUIRED_HINTS)
+    return any(
+        all(hint in normalized_message for hint in hint_group)
+        for hint_group in _SECURITY_WORK_AUTHORIZATION_REQUIRED_HINT_GROUPS
+    )
 
 
 def _raise_proxy_budget_exhausted() -> NoReturn:

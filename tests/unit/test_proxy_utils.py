@@ -10710,9 +10710,10 @@ async def test_stream_responses_security_work_retry_exhaustion_logs_useragent(mo
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     regular_account = _make_account("acc_regular_security_exhausted")
     cyber_message = (
-        "This chat was flagged for possible cybersecurity risk. "
-        "To get authorized for security work, join the Trusted Access for Cyber program. "
-        "https://chatgpt.com/cyber"
+        "ⓘ This content can't be shown\n"
+        "We take extra caution with cybersecurity requests. If you’re a security professional, "
+        "you may be able to apply for Trusted Access.\n"
+        "Trusted Access: https://openai.com/form/enterprise-trusted-access-for-cyber/"
     )
     select_account = AsyncMock(
         side_effect=[
@@ -11019,9 +11020,10 @@ async def test_http_bridge_retries_security_work_warning_on_authorized_account(m
         idle_ttl_seconds=300.0,
     )
     cyber_message = (
-        "This chat was flagged for possible cybersecurity risk. "
-        "To get authorized for security work, join the Trusted Access for Cyber program. "
-        "https://chatgpt.com/cyber"
+        "ⓘ This content can't be shown\n"
+        "We take extra caution with cybersecurity requests. If you’re a security professional, "
+        "you may be able to apply for Trusted Access.\n"
+        "Trusted Access: https://openai.com/form/enterprise-trusted-access-for-cyber/"
     )
     text = json.dumps(
         {

@@ -2,15 +2,84 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections import deque
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import anyio
 import pytest
 
 from app.modules.proxy import service as proxy_service
+from tests.unit.test_proxy_http_bridge import _make_app_settings, _make_bridge_session
 from tests.unit.test_proxy_utils import _make_account, _repo_factory, _RequestLogsRecorder
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        (
+            "This chat was flagged for possible cybersecurity risk. "
+            "To get authorized for security work, join the Trusted Access for Cyber program. "
+            "https://chatgpt.com/cyber"
+        ),
+        (
+            "ⓘ This content can't be shown\n"
+            "We take extra caution with cybersecurity requests. If you’re a security professional, "
+            "you may be able to apply for Trusted Access.\n"
+            "Trusted Access: https://openai.com/form/enterprise-trusted-access-for-cyber/"
+        ),
+    ],
+)
+def test_security_work_denial_classifier_accepts_upstream_variants(message: str) -> None:
+    assert proxy_service._is_security_work_authorization_required_error("invalid_request_error", message)
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_reconnect_selects_security_work_authorized_account(monkeypatch: pytest.MonkeyPatch) -> None:
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    regular_account = _make_account("acc_security_regular")
+    authorized_account = _make_account("acc_security_authorized")
+    authorized_account.security_work_authorized = True
+    session = _make_bridge_session()
+    session.account = regular_account
+    session.upstream = SimpleNamespace(close=AsyncMock())
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="security_reconnect",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        transport="http",
+        request_text='{"type":"response.create","model":"gpt-5.6-sol","input":[]}',
+    )
+    selection = proxy_service.AccountSelection(account=authorized_account, error_message=None, error_code=None)
+    select_account = AsyncMock(return_value=selection)
+    new_upstream = SimpleNamespace(close=AsyncMock())
+    monkeypatch.setattr(service, "_select_account_with_budget_for_stream", select_account)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=authorized_account))
+    monkeypatch.setattr(service, "_open_upstream_websocket_with_budget", AsyncMock(return_value=new_upstream))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: SimpleNamespace(
+            get=AsyncMock(return_value=SimpleNamespace(prefer_earlier_reset_accounts=False, routing_strategy=None))
+        ),
+    )
+
+    await service._reconnect_http_bridge_session(
+        session,
+        request_state=request_state,
+        require_security_work_authorized=True,
+    )
+
+    assert select_account.await_args.kwargs["require_security_work_authorized"] is True
+    assert session.account is authorized_account
+    assert session.upstream is new_upstream
 
 
 @pytest.mark.asyncio

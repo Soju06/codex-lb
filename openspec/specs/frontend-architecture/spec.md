@@ -5,11 +5,16 @@
 Define dashboard surface contracts so settings, account management, and operational views stay coherent across the SPA.
 ## Requirements
 ### Requirement: Settings page
-The Settings page SHALL include sections for: routing settings (sticky threads, reset priority, prompt-cache affinity TTL), password management (setup/change/remove), TOTP management (setup/disable), API key auth toggle, API key management (table, create, edit, delete, regenerate), and sticky-session administration.
+The Settings page SHALL include sections for: routing settings (sticky threads, reset priority, prompt-cache affinity TTL, and Fast Mode prohibition), password management (setup/change/remove), TOTP management (setup/disable), API key auth toggle, API key management (table, create, edit, delete, regenerate), and sticky-session administration.
 
 #### Scenario: Save prompt-cache affinity TTL
 - **WHEN** a user updates the prompt-cache affinity TTL from the routing settings section
 - **THEN** the app calls `PUT /api/settings` with the updated TTL and reflects the saved value
+
+#### Scenario: Save Fast Mode prohibition
+- **WHEN** a user enables or disables the Fast Mode prohibition control in the routing settings section
+- **THEN** the app calls `PUT /api/settings` with `prohibitFastMode`
+- **AND** reflects the saved value
 
 #### Scenario: View sticky-session mappings
 - **WHEN** a user opens the sticky-session section on the Settings page

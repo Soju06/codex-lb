@@ -626,6 +626,7 @@ class _WebSocketMixin:
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
         sticky_threads_enabled = settings.sticky_threads_enabled
         openai_cache_affinity_max_age_seconds = settings.openai_cache_affinity_max_age_seconds
+        prohibit_fast_mode = bool(getattr(settings, "prohibit_fast_mode", False))
         routing_strategy = _facade()._routing_strategy(settings)
         pending_requests: deque[_WebSocketRequestState] = deque()
         pending_lock = anyio.Lock()
@@ -781,6 +782,7 @@ class _WebSocketMixin:
                                     openai_cache_affinity=openai_cache_affinity,
                                     sticky_threads_enabled=sticky_threads_enabled,
                                     openai_cache_affinity_max_age_seconds=openai_cache_affinity_max_age_seconds,
+                                    prohibit_fast_mode=prohibit_fast_mode,
                                     api_key=api_key,
                                     continuity_state=continuity_state,
                                     useragent=useragent,
@@ -816,6 +818,7 @@ class _WebSocketMixin:
                                         openai_cache_affinity=openai_cache_affinity,
                                         sticky_threads_enabled=sticky_threads_enabled,
                                         openai_cache_affinity_max_age_seconds=openai_cache_affinity_max_age_seconds,
+                                        prohibit_fast_mode=prohibit_fast_mode,
                                         api_key=api_key,
                                         continuity_state=continuity_state,
                                         useragent=useragent,
@@ -1277,6 +1280,7 @@ class _WebSocketMixin:
         sticky_threads_enabled: bool,
         openai_cache_affinity_max_age_seconds: int,
         api_key: ApiKeyData | None,
+        prohibit_fast_mode: bool = False,
         continuity_state: "_WebSocketContinuityState | None" = None,
         useragent: str | None = None,
         useragent_group: str | None = None,
@@ -1289,7 +1293,11 @@ class _WebSocketMixin:
             payload,
             openai_compat=openai_cache_affinity,
         )
-        apply_api_key_enforcement(responses_payload, refreshed_api_key)
+        apply_api_key_enforcement(
+            responses_payload,
+            refreshed_api_key,
+            prohibit_fast_mode=prohibit_fast_mode,
+        )
         normalized_payload = responses_payload.to_payload()
         body_uses_responses_lite = _payload_uses_responses_lite(normalized_payload)
         trusted_incremental_responses_lite = bool(

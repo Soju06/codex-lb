@@ -49,6 +49,7 @@ async def test_settings_api_get_and_update(async_client):
     payload = response.json()
     assert payload["stickyThreadsEnabled"] is True
     assert payload["upstreamStreamTransport"] == "default"
+    assert payload["prohibitFastMode"] is False
     assert payload["upstreamProxyRoutingEnabled"] is False
     assert payload["upstreamProxyDefaultPoolId"] is None
     assert payload["preferEarlierResetAccounts"] is True
@@ -86,6 +87,7 @@ async def test_settings_api_get_and_update(async_client):
         json={
             "stickyThreadsEnabled": False,
             "upstreamStreamTransport": "websocket",
+            "prohibitFastMode": True,
             "upstreamProxyRoutingEnabled": True,
             "upstreamProxyDefaultPoolId": None,
             "preferEarlierResetAccounts": False,
@@ -122,6 +124,7 @@ async def test_settings_api_get_and_update(async_client):
     updated = response.json()
     assert updated["stickyThreadsEnabled"] is False
     assert updated["upstreamStreamTransport"] == "websocket"
+    assert updated["prohibitFastMode"] is True
     assert updated["upstreamProxyRoutingEnabled"] is True
     assert updated["upstreamProxyDefaultPoolId"] is None
     assert updated["preferEarlierResetAccounts"] is False
@@ -159,6 +162,7 @@ async def test_settings_api_get_and_update(async_client):
     payload = response.json()
     assert payload["stickyThreadsEnabled"] is False
     assert payload["upstreamStreamTransport"] == "websocket"
+    assert payload["prohibitFastMode"] is True
     assert payload["upstreamProxyRoutingEnabled"] is True
     assert payload["upstreamProxyDefaultPoolId"] is None
     assert payload["preferEarlierResetAccounts"] is False

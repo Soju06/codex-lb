@@ -6,7 +6,7 @@ This change treats the body-derived `additional_tools` shape implemented by #116
 
 ## Compact wire budget
 
-Compact trimming preserves `additional_tools`, typed or role-only system/developer state, required state-tool calls, and matching outputs. Token estimation uses the complete JSON array representation so brackets, separators, whitespace, and escaped non-ASCII content count toward the cap. After image URLs are inlined, the final transformed input is checked again before logging or starting an upstream request.
+Compact trimming preserves `additional_tools`, typed or role-only system/developer state, required state-tool calls, matching outputs, and the latest input item. When that latest item has a matching tool-call pair in the supplied input, the pair is part of the required selection; the request fails closed if the pair cannot fit. Token estimation uses the complete JSON array representation so brackets, separators, whitespace, and escaped non-ASCII content count toward the cap. After image URLs are inlined, the final transformed input is checked again before logging or starting an upstream request.
 
 An untrimmable request raises the standard `responses_compact_input_too_large` client error. Terminal compaction triggers perform the same validation before admission and reservation work. A rejection discovered after API-key reservation releases that reservation and does not penalize an upstream account.
 

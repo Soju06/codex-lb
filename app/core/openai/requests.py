@@ -865,6 +865,13 @@ def _trim_compact_input_for_upstream(payload: MutableJsonObject) -> None:
     required_indices = set(preserved_indices)
     if input_value:
         required_indices.add(len(input_value) - 1)
+    required_indices = _compact_reconciled_tool_call_indices(
+        input_value,
+        required_indices,
+        token_counts=token_counts,
+        token_budget=sum(token_counts),
+        required_indices=required_indices,
+    )
     required_input = _compact_trimmed_input_with_markers(input_value, token_counts, required_indices)
     required_tokens = _estimated_json_tokens(required_input)
     if required_tokens > _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS:
@@ -893,6 +900,7 @@ def _trim_compact_input_for_upstream(payload: MutableJsonObject) -> None:
         selected_indices,
         token_counts=token_counts,
         token_budget=max(0, _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS - marker_tokens),
+        required_indices=required_indices,
     )
     selected_indices = _compact_fit_selected_indices_to_wire_budget(
         input_value,
@@ -948,6 +956,7 @@ def _compact_fit_selected_indices_to_wire_budget(
             trial,
             token_counts=token_counts,
             token_budget=marker_budget,
+            required_indices=required_indices,
         )
         if required_indices <= trial and trial != selected:
             selected = trial
@@ -1012,6 +1021,7 @@ def _compact_reconciled_tool_call_indices(
     *,
     token_counts: list[int],
     token_budget: int,
+    required_indices: set[int] | None = None,
 ) -> set[int]:
     call_indices_by_id: dict[str, list[int]] = {}
     output_indices_by_id: dict[str, list[int]] = {}
@@ -1028,6 +1038,7 @@ def _compact_reconciled_tool_call_indices(
             output_indices_by_id.setdefault(call_id, []).append(index)
 
     reconciled = set(selected_indices)
+    protected_indices = required_indices or set()
     selected_tokens = sum(token_counts[index] for index in reconciled)
 
     def add_indices(indices: Iterable[int]) -> bool:
@@ -1043,7 +1054,7 @@ def _compact_reconciled_tool_call_indices(
     def remove_indices(indices: Iterable[int]) -> None:
         nonlocal selected_tokens
         for index in indices:
-            if index in reconciled:
+            if index in reconciled and index not in protected_indices:
                 reconciled.remove(index)
                 selected_tokens -= token_counts[index]
 

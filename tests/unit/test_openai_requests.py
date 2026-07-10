@@ -1134,6 +1134,57 @@ def test_compact_trimming_rejects_oversized_latest_item():
     assert raised.value.code == "responses_compact_input_too_large"
 
 
+def test_compact_trimming_preserves_latest_unmatched_tool_call():
+    latest_call = {
+        "type": "function_call",
+        "name": "exec",
+        "call_id": "call-latest",
+        "arguments": "{}",
+    }
+    payload = {
+        "model": "gpt-5.6-sol",
+        "instructions": "",
+        "input": [
+            {"role": "assistant", "content": "x" * 500_000},
+            latest_call,
+        ],
+    }
+
+    dumped_input = ResponsesCompactRequest.model_validate(payload).to_payload()["input"]
+
+    assert isinstance(dumped_input, list)
+    assert latest_call in dumped_input
+
+
+def test_compact_trimming_rejects_latest_tool_output_when_matching_call_cannot_fit():
+    payload = {
+        "model": "gpt-5.6-sol",
+        "instructions": "",
+        "input": [
+            {
+                "type": "function_call",
+                "name": "exec",
+                "call_id": "call-pair",
+                "arguments": "x" * 450_000,
+            },
+            {"role": "assistant", "content": "middle"},
+            {
+                "type": "function_call_output",
+                "call_id": "call-pair",
+                "output": "latest result",
+            },
+        ],
+    }
+
+    request = ResponsesCompactRequest.model_validate(payload)
+
+    with pytest.raises(ClientPayloadError, match="cannot be trimmed without removing required state anchors") as raised:
+        request.to_payload()
+
+    assert raised.value.param == "input"
+    assert raised.value.code == "responses_compact_input_too_large"
+
+
 def test_compact_rejects_unicode_item_that_expands_past_wire_budget():
     def request_with_content(content: str) -> ResponsesCompactRequest:
         return ResponsesCompactRequest.model_validate(

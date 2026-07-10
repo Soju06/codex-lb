@@ -46,6 +46,7 @@ from app.core.metrics.prometheus import (
     bridge_soft_local_rebind_total,
 )
 from app.core.resilience.overload import local_overload_error
+from app.core.utils.request_id import ensure_request_scope_id
 from app.db.models import (
     AccountStatus,
     StickySessionKind,
@@ -477,6 +478,7 @@ class _HTTPBridgeMixin(
         request_deadline: float | None = None,
     ) -> "_HTTPBridgeSession | _HTTPBridgeOwnerForward":
         settings = _service_get_settings()
+        request_scope_id = ensure_request_scope_id()
         api_key_id = api_key.id if api_key is not None else None
         incoming_turn_state = _sticky_key_from_turn_state_header(headers)
         incoming_session_key = _sticky_key_from_session_header(headers)
@@ -641,6 +643,7 @@ class _HTTPBridgeMixin(
                     incoming_turn_state=incoming_turn_state,
                     previous_response_id=previous_response_id,
                     request_model=request_model,
+                    request_scope_id=request_scope_id,
                 )
                 if fork_key is not None:
                     key = fork_key
@@ -672,6 +675,8 @@ class _HTTPBridgeMixin(
                 ):
                     current_instance = settings.http_responses_session_bridge_instance_id
                     if _durable_bridge_lookup_allows_local_reuse(durable_lookup, current_instance=current_instance):
+                        if key.affinity_kind == "session_header" and incoming_turn_state is None:
+                            existing.unanchored_reservation_id = request_scope_id
                         existing.api_key = api_key
                         existing.request_model = request_model
                         existing.request_service_tier = request_service_tier
@@ -1199,6 +1204,8 @@ class _HTTPBridgeMixin(
                         ):
                             evictable_sessions: list[tuple[_HTTPBridgeSessionKey, _HTTPBridgeSession]] = []
                             for candidate_key, candidate_session in self._http_bridge_sessions.items():
+                                if getattr(candidate_session, "unanchored_reservation_id", None) is not None:
+                                    continue
                                 pending_count = self._http_bridge_pending_count_nowait(
                                     candidate_session,
                                     context="capacity_evict_scan",
@@ -1419,6 +1426,8 @@ class _HTTPBridgeMixin(
                     current_future = self._http_bridge_inflight_sessions.get(key)
                     if current_future is inflight_future:
                         self._http_bridge_inflight_sessions.pop(key, None)
+                        if key.affinity_kind == "session_header" and incoming_turn_state is None:
+                            created_session.unanchored_reservation_id = request_scope_id
                         self._http_bridge_sessions[key] = created_session
                         session_registered = True
                         if inflight_future is not None and not inflight_future.done():

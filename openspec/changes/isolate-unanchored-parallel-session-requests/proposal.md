@@ -11,11 +11,13 @@ model metadata while the foreground request is still active.
 
 ## What Changes
 
-- Give an unanchored request a request-scoped soft bridge lane when the shared
+- Give an unanchored request a server-scoped bridge lane when the shared
   session is creating, already serving a visible request, or belongs to another
   model class.
+- Reserve an idle canonical bridge across the lookup-to-submit boundary.
 - Keep `previous_response_id` and turn-state requests on their hard continuity
   session.
+- Keep durable aliases derived from a forked lane hard owner- and account-bound.
 - Preserve normal idle same-model session reuse.
 - Add regression coverage for one foreground turn plus multiple concurrent
   background requests sharing the same session header.

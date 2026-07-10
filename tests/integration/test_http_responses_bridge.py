@@ -20,7 +20,12 @@ from sqlalchemy import select
 
 import app.modules.proxy.service as proxy_module
 from app.core.config.settings import Settings
-from app.core.utils.request_id import reset_request_id, set_request_id
+from app.core.utils.request_id import (
+    reset_request_id,
+    reset_request_scope_id,
+    set_request_id,
+    set_request_scope_id,
+)
 from app.db.models import Account, AccountStatus, DashboardSettings
 from app.db.session import SessionLocal
 from app.dependencies import get_proxy_service_for_app
@@ -6559,7 +6564,19 @@ async def test_v1_responses_http_bridge_enforces_queue_limit_atomically_for_same
 
     first_state, first_text = service._prepare_http_bridge_request(payload, {}, api_key=None, api_key_reservation=None)
     first_state.transport = "http"
-    await service._submit_http_bridge_request(session, request_state=first_state, text_data=first_text, queue_limit=1)
+    session.unanchored_reservation_id = "scope-submit"
+    request_scope_token = set_request_scope_id("scope-submit")
+    try:
+        await service._submit_http_bridge_request(
+            session,
+            request_state=first_state,
+            text_data=first_text,
+            queue_limit=1,
+        )
+    finally:
+        reset_request_scope_id(request_scope_token)
+
+    assert session.unanchored_reservation_id is None
 
     second_state, second_text = service._prepare_http_bridge_request(
         payload, {}, api_key=None, api_key_reservation=None
@@ -6961,8 +6978,9 @@ async def test_v1_responses_http_bridge_forks_parallel_unanchored_session_reques
     foreground.queued_request_count = 1
     service._http_bridge_sessions[shared_key] = foreground
 
-    async def get_memory_session(request_id: str) -> proxy_module._HTTPBridgeSession:
-        request_id_token = set_request_id(request_id)
+    async def get_memory_session(request_scope_id: str) -> proxy_module._HTTPBridgeSession:
+        request_id_token = set_request_id("duplicate-client-request-id")
+        request_scope_token = set_request_scope_id(request_scope_id)
         try:
             return await service._get_or_create_http_bridge_session(
                 shared_key,
@@ -6977,6 +6995,7 @@ async def test_v1_responses_http_bridge_forks_parallel_unanchored_session_reques
                 max_sessions=8,
             )
         finally:
+            reset_request_scope_id(request_scope_token)
             reset_request_id(request_id_token)
 
     try:
@@ -6991,11 +7010,79 @@ async def test_v1_responses_http_bridge_forks_parallel_unanchored_session_reques
         assert foreground.request_model == "gpt-5.6-sol"
         assert {key.affinity_kind for key in created_keys} == {"internal_unanchored_parallel"}
         assert len({key.affinity_key for key in created_keys}) == 2
-        assert all(key.strength == "soft" for key in created_keys)
+        assert all(key.strength == "hard" for key in created_keys)
     finally:
         service._http_bridge_sessions.clear()
         service._http_bridge_inflight_sessions.clear()
         service._http_bridge_turn_state_index.clear()
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_http_bridge_reserves_idle_canonical_session_before_submit(
+    app_instance,
+    monkeypatch,
+):
+    service = get_proxy_service_for_app(app_instance)
+    service._http_bridge_sessions.clear()
+    service._http_bridge_inflight_sessions.clear()
+    service._http_bridge_turn_state_index.clear()
+
+    _install_proxy_settings(
+        monkeypatch,
+        app_settings=_make_app_settings(
+            enabled=True,
+            max_sessions=8,
+            admission_wait_timeout_seconds=1.0,
+            codex_idle_ttl_seconds=120.0,
+            instance_id="instance-a",
+            instance_ring=[],
+        ),
+        dashboard_settings=_make_dashboard_settings(),
+    )
+
+    shared_key = proxy_module._HTTPBridgeSessionKey("session_header", "shared-codex-process", None)
+    canonical = _make_dummy_bridge_session(shared_key)
+    canonical.request_model = "gpt-5.6-sol"
+    service._http_bridge_sessions[shared_key] = canonical
+
+    async def fake_create_http_bridge_session(self, key, **kwargs):
+        del self
+        session = _make_dummy_bridge_session(key)
+        session.request_model = kwargs["request_model"]
+        return session
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_create_http_bridge_session", fake_create_http_bridge_session)
+    monkeypatch.setattr(proxy_module.ProxyService, "_claim_durable_http_bridge_session", AsyncMock())
+
+    async def get_session(request_scope_id: str) -> proxy_module._HTTPBridgeSession:
+        request_id_token = set_request_id("duplicate-client-request-id")
+        request_scope_token = set_request_scope_id(request_scope_id)
+        try:
+            return await service._get_or_create_http_bridge_session(
+                shared_key,
+                headers={"session_id": "shared-codex-process"},
+                affinity=proxy_module._AffinityPolicy(
+                    key="shared-codex-process",
+                    kind=proxy_module.StickySessionKind.CODEX_SESSION,
+                ),
+                api_key=None,
+                request_model="gpt-5.6-sol",
+                idle_ttl_seconds=120.0,
+                max_sessions=8,
+            )
+        finally:
+            reset_request_scope_id(request_scope_token)
+            reset_request_id(request_id_token)
+
+    first = await get_session("scope-before-submit-a")
+    second = await get_session("scope-before-submit-b")
+
+    assert first is canonical
+    assert canonical.queued_request_count == 0
+    assert canonical.unanchored_reservation_id == "scope-before-submit-a"
+    assert second is not canonical
+    assert second.key.affinity_kind == "internal_unanchored_parallel"
+    assert second.key.strength == "hard"
 
 
 @pytest.mark.asyncio

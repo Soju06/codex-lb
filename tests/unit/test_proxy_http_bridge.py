@@ -3199,6 +3199,26 @@ def test_make_http_bridge_session_key_prefers_signed_forwarded_affinity_over_gen
     assert key.strength == "hard"
 
 
+def test_make_http_bridge_session_key_keeps_forwarded_parallel_lane_hard() -> None:
+    payload = proxy_service.ResponsesRequest.model_validate({"model": "gpt-5.4", "instructions": "hi", "input": "hi"})
+
+    key = proxy_service._make_http_bridge_session_key(
+        payload,
+        headers={
+            "x-codex-bridge-affinity-kind": "internal_unanchored_parallel",
+            "x-codex-bridge-affinity-key": "fork-request-scope",
+        },
+        affinity=proxy_service._AffinityPolicy(key="fork-request-scope"),
+        api_key=None,
+        request_id="duplicate-client-request-id",
+        allow_forwarded_affinity_headers=True,
+    )
+
+    assert key.affinity_kind == "internal_unanchored_parallel"
+    assert key.affinity_key == "fork-request-scope"
+    assert key.strength == "hard"
+
+
 def test_make_http_bridge_session_key_ignores_forwarded_affinity_headers_on_public_requests() -> None:
     payload = proxy_service.ResponsesRequest.model_validate({"model": "gpt-5.4", "instructions": "hi", "input": "hi"})
 
@@ -7700,6 +7720,60 @@ async def test_get_or_create_http_bridge_session_returns_owner_forward_for_hard_
         allow_forward_to_owner=True,
     )
 
+    assert isinstance(resolved, proxy_service._HTTPBridgeOwnerForward)
+    assert resolved.owner_instance == "instance-b"
+    assert resolved.owner_endpoint == "http://instance-b"
+    assert resolved.key == key
+
+
+@pytest.mark.asyncio
+async def test_get_or_create_http_bridge_session_forwards_durable_parallel_lane_to_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    key = proxy_service._HTTPBridgeSessionKey(
+        "internal_unanchored_parallel",
+        "fork-request-scope",
+        None,
+    )
+    durable_lookup = proxy_service.DurableBridgeLookup(
+        session_id="durable-fork",
+        canonical_kind="internal_unanchored_parallel",
+        canonical_key="fork-request-scope",
+        api_key_scope="__anonymous__",
+        account_id="acc-owner",
+        owner_instance_id="instance-b",
+        owner_epoch=2,
+        lease_expires_at=proxy_service.utcnow() + timedelta(seconds=60),
+        state=HttpBridgeSessionState.ACTIVE,
+        latest_turn_state="http_turn_fork",
+        latest_response_id="resp_fork",
+    )
+    monkeypatch.setattr(service, "_prune_http_bridge_sessions_locked", Mock(return_value=[]))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(proxy_service, "_http_bridge_owner_instance", AsyncMock(return_value="instance-b"))
+    monkeypatch.setattr(
+        proxy_service,
+        "_active_http_bridge_instance_ring",
+        AsyncMock(return_value=("instance-a", ["instance-a", "instance-b"])),
+    )
+    service._ring_membership = cast(Any, SimpleNamespace(resolve_endpoint=AsyncMock(return_value="http://instance-b")))
+
+    resolved = await service._get_or_create_http_bridge_session(
+        key,
+        headers={"x-codex-turn-state": "http_turn_fork"},
+        affinity=proxy_service._AffinityPolicy(key="fork-request-scope"),
+        api_key=None,
+        request_model="gpt-5.4-mini",
+        idle_ttl_seconds=120.0,
+        max_sessions=8,
+        allow_forward_to_owner=True,
+        durable_lookup=durable_lookup,
+        request_stage="follow_up",
+        preferred_account_id="acc-owner",
+    )
+
+    assert key.strength == "hard"
     assert isinstance(resolved, proxy_service._HTTPBridgeOwnerForward)
     assert resolved.owner_instance == "instance-b"
     assert resolved.owner_endpoint == "http://instance-b"

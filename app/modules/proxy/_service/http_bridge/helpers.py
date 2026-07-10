@@ -58,7 +58,7 @@ from app.core.openai.requests import (
 )
 from app.core.resilience.overload import local_overload_error
 from app.core.types import JsonValue
-from app.core.utils.request_id import ensure_request_id, get_request_id
+from app.core.utils.request_id import get_request_id
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
 from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import (
@@ -602,6 +602,7 @@ def _http_bridge_unanchored_parallel_fork_key(
     incoming_turn_state: str | None,
     previous_response_id: str | None,
     request_model: str | None,
+    request_scope_id: str,
 ) -> "_HTTPBridgeSessionKey | None":
     """Give independent process-session requests separate websocket lanes."""
 
@@ -614,6 +615,10 @@ def _http_bridge_unanchored_parallel_fork_key(
         if _http_bridge_session_has_visible_requests(session):
             reason = "active_request"
         elif (
+            reservation_id := getattr(session, "unanchored_reservation_id", None)
+        ) is not None and reservation_id != request_scope_id:
+            reason = "session_reserved"
+        elif (
             request_model is not None
             and session.request_model is not None
             and _extract_model_class(request_model) != _extract_model_class(session.request_model)
@@ -624,9 +629,8 @@ def _http_bridge_unanchored_parallel_fork_key(
 
     fork_key = _HTTPBridgeSessionKey(
         "internal_unanchored_parallel",
-        sha256(ensure_request_id().encode()).hexdigest(),
+        sha256(f"{key.affinity_key}\0{request_scope_id}".encode()).hexdigest(),
         key.api_key_id,
-        strength="soft",
     )
     _log_http_bridge_event(
         "unanchored_parallel_fork",
@@ -970,7 +974,7 @@ def _forwarded_http_bridge_session_key(
     if affinity_kind is None or affinity_key is None:
         return None
     strength: Literal["hard", "soft"]
-    if affinity_kind in {"turn_state_header", "session_header"}:
+    if affinity_kind in _HARD_HTTP_BRIDGE_AFFINITY_KINDS:
         strength = "hard"
     else:
         strength = "soft"

@@ -8744,7 +8744,7 @@ async def test_get_or_create_http_bridge_session_does_not_publish_before_durable
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
-    key = proxy_service._HTTPBridgeSessionKey("turn_state_header", "sid-race", None)
+    key = proxy_service._HTTPBridgeSessionKey("session_header", "sid-race", None)
     created_session = proxy_service._HTTPBridgeSession(
         key=key,
         headers={"x-codex-session-id": "sid-race"},
@@ -8814,7 +8814,7 @@ async def test_get_or_create_http_bridge_session_waiter_propagates_terminal_infl
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
-    key = proxy_service._HTTPBridgeSessionKey("session_header", "sid-race", None)
+    key = proxy_service._HTTPBridgeSessionKey("turn_state_header", "sid-race", None)
     inflight_future: asyncio.Future[proxy_service._HTTPBridgeSession] = asyncio.get_running_loop().create_future()
     inflight_future.set_exception(
         ProxyResponseError(

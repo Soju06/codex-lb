@@ -34,6 +34,9 @@ same effective upstream model. The effective model comparison MUST occur after
 alias normalization and API-key enforcement, and a merely prepared request MUST
 NOT establish or clear trusted Lite continuity. Trusted state MUST update in
 upstream request-acceptance order rather than terminal-event completion order.
+An accepted `generate = false` prewarm derived from an `additional_tools` prefix
+MUST establish the same trusted continuity because a later request MAY reuse its
+response ID without repeating that prefix.
 Otherwise, the proxy MUST strip the reserved client-metadata marker. The
 HTTP-to-websocket bridge MUST preserve its internally derived canonical marker
 when it trims an already-stored input prefix or rebuilds the request during
@@ -92,6 +95,15 @@ item.
 - **BUT WHEN** a request for another model supplies that marker without a Lite
   prefix or trusted same-model continuity
 - **THEN** the proxy strips the marker
+
+#### Scenario: Accepted Lite prewarm authorizes incremental reuse
+
+- **GIVEN** a same-model Lite prewarm containing `additional_tools` receives
+  `response.created`
+- **WHEN** Codex reuses that response ID in a later frame with the canonical
+  marker but without the already-sent Lite prefix
+- **THEN** the forwarded frame retains the canonical marker whether its input
+  delta is empty or contains new user input
 
 #### Scenario: Stale inbound headers do not enable a non-Lite request
 

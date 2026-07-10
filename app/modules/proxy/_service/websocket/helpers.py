@@ -470,8 +470,9 @@ def _record_websocket_responses_lite_acceptance(
     *,
     request_state: _WebSocketRequestState,
 ) -> None:
-    if request_state.request_kind == "prewarm":
-        return
+    # Codex can reuse an accepted ``generate=false`` prewarm response and send
+    # only an empty or user-only input delta next. That frame no longer carries
+    # ``additional_tools``, so the accepted prewarm must seed Lite continuity.
     continuity_state.responses_lite_model = request_state.responses_lite_model
 
 

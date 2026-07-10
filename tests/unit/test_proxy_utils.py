@@ -11824,8 +11824,16 @@ async def test_prepare_websocket_response_create_request_releases_reservation_on
 
 
 @pytest.mark.asyncio
-async def test_prepare_websocket_response_create_request_trusts_lite_marker_only_after_body_prefix(
+@pytest.mark.parametrize(
+    "incremental_input",
+    [
+        pytest.param([], id="empty-delta"),
+        pytest.param([{"role": "user", "content": "continue"}], id="user-delta"),
+    ],
+)
+async def test_websocket_lite_prewarm_acceptance_preserves_incremental_marker(
     monkeypatch,
+    incremental_input: list[JsonValue],
 ):
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     api_key = ApiKeyData(
@@ -11871,6 +11879,9 @@ async def test_prepare_websocket_response_create_request_trusts_lite_marker_only
     )
 
     marker = proxy_module.CODEX_RESPONSES_LITE_WEBSOCKET_METADATA_KEY
+    prewarm_headers = {
+        "x-codex-turn-metadata": json.dumps({"request_kind": "prewarm"}),
+    }
     continuity_state = proxy_service._WebSocketContinuityState()
     first = await service._prepare_websocket_response_create_request(
         cast(
@@ -11879,18 +11890,19 @@ async def test_prepare_websocket_response_create_request_trusts_lite_marker_only
                 "type": "response.create",
                 "model": "gpt-5.6-sol",
                 "instructions": "",
+                "generate": False,
                 "input": [
                     {
                         "type": "additional_tools",
                         "role": "developer",
                         "tools": [{"type": "custom", "name": "shell"}],
                     },
-                    {"role": "user", "content": "inspect"},
+                    {"type": "message", "role": "developer", "content": "use repository tools"},
                 ],
                 "client_metadata": {marker.upper(): "stale"},
             },
         ),
-        headers={},
+        headers=prewarm_headers,
         codex_session_affinity=False,
         openai_cache_affinity=True,
         sticky_threads_enabled=False,
@@ -11900,13 +11912,32 @@ async def test_prepare_websocket_response_create_request_trusts_lite_marker_only
     )
 
     first_payload = json.loads(first.text_data)
+    assert first_payload["generate"] is False
     assert first_payload["client_metadata"][marker] == "true"
+    assert first.request_state.request_kind == "prewarm"
     assert continuity_state.responses_lite_model is None
-    proxy_service._record_websocket_responses_lite_acceptance(
-        continuity_state,
-        request_state=first.request_state,
+    first.request_state.response_create_gate_acquired = True
+    response_create_gate = asyncio.Semaphore(0)
+    account = _make_account("acc_ws_lite_prewarm")
+    await service._process_upstream_websocket_text(
+        json.dumps(
+            {
+                "type": "response.created",
+                "response": {"id": "resp_ws_lite_prewarm", "status": "in_progress"},
+            },
+            separators=(",", ":"),
+        ),
+        account=account,
+        account_id_value=account.id,
+        pending_requests=deque([first.request_state]),
+        pending_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        response_create_gate=response_create_gate,
+        continuity_state=continuity_state,
     )
     assert continuity_state.responses_lite_model == "gpt-5.6-sol"
+    await asyncio.wait_for(response_create_gate.acquire(), timeout=1.0)
 
     incremental = await service._prepare_websocket_response_create_request(
         cast(
@@ -11915,11 +11946,15 @@ async def test_prepare_websocket_response_create_request_trusts_lite_marker_only
                 "type": "response.create",
                 "model": "gpt-5.6-sol",
                 "instructions": "",
-                "input": [{"role": "user", "content": "continue"}],
-                "client_metadata": {marker: "true"},
+                "previous_response_id": "resp_ws_lite_prewarm",
+                "input": incremental_input,
+                "client_metadata": {
+                    marker: "true",
+                    "x-codex-turn-metadata": json.dumps({"request_kind": "turn"}),
+                },
             },
         ),
-        headers={},
+        headers=prewarm_headers,
         codex_session_affinity=False,
         openai_cache_affinity=True,
         sticky_threads_enabled=False,
@@ -11929,7 +11964,10 @@ async def test_prepare_websocket_response_create_request_trusts_lite_marker_only
     )
 
     incremental_payload = json.loads(incremental.text_data)
+    assert incremental.request_state.request_kind == "prewarm"
     assert incremental_payload["client_metadata"][marker] == "true"
+    incremental_turn_metadata = json.loads(incremental_payload["client_metadata"]["x-codex-turn-metadata"])
+    assert incremental_turn_metadata["request_kind"] == "turn"
 
     incompatible = await service._prepare_websocket_response_create_request(
         cast(
@@ -11942,7 +11980,7 @@ async def test_prepare_websocket_response_create_request_trusts_lite_marker_only
                 "client_metadata": {marker: "true"},
             },
         ),
-        headers={},
+        headers=prewarm_headers,
         codex_session_affinity=False,
         openai_cache_affinity=True,
         sticky_threads_enabled=False,
@@ -11953,7 +11991,8 @@ async def test_prepare_websocket_response_create_request_trusts_lite_marker_only
 
     incompatible_payload = json.loads(incompatible.text_data)
     assert incompatible_payload["model"] == "gpt-5.4"
-    assert "client_metadata" not in incompatible_payload
+    assert marker not in incompatible_payload["client_metadata"]
+    assert "x-codex-turn-metadata" in incompatible_payload["client_metadata"]
     assert continuity_state.responses_lite_model == "gpt-5.6-sol"
     proxy_service._record_websocket_responses_lite_acceptance(
         continuity_state,

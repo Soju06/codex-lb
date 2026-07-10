@@ -23,6 +23,7 @@ Newer Codex models also use a developer-role `additional_tools` input item as th
 - For upstream websocket requests, synthesize the per-request Lite client-metadata marker while continuing to omit the handshake header.
 - Preserve the websocket Lite marker when the HTTP bridge trims stored input prefixes or rebuilds a request for retry.
 - Strip an untrusted Lite client-metadata marker unless the same websocket continuity state already established Lite mode from a full body prefix for that model.
+- Treat an upstream-accepted full Lite prewarm as establishing continuity so Codex can reuse its response ID with an empty or user-only incremental input delta.
 - Preserve other OpenAI SDK telemetry headers and existing Codex continuity headers.
 - Cover HTTP response-create, compact, internal auto-websocket, and client-facing websocket request forwarding.
 

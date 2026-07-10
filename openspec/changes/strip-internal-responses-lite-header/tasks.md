@@ -10,3 +10,4 @@
 - [x] 8. Run focused tests, lint, and strict OpenSpec validation.
 - [x] 9. Preserve canonical Lite client metadata across HTTP-bridge prefix trimming and retries, with regression coverage.
 - [x] 10. Reject untrusted websocket Lite metadata while retaining same-model incremental Lite continuity.
+- [x] 11. Establish Lite continuity from accepted prewarms and cover empty and nonempty incremental reuse.

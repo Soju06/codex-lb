@@ -91,7 +91,12 @@ from app.core.openai.models import (
     OpenAIErrorEnvelope as OpenAIErrorEnvelopeModel,
 )
 from app.core.openai.parsing import parse_response_payload
-from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest, extract_input_file_ids
+from app.core.openai.requests import (
+    ResponsesCompactRequest,
+    ResponsesRequest,
+    extract_input_file_ids,
+    normalize_tool_type,
+)
 from app.core.openai.v1_requests import V1ResponsesCompactRequest, V1ResponsesRequest
 from app.core.request_locality import resolve_request_client_host
 from app.core.resilience.overload import is_local_overload_error_code, merge_retry_after_headers
@@ -3378,6 +3383,10 @@ def _drop_dangling_source_tool_choice(payload: dict[str, JsonValue], kept_types:
     ``{"type": "web_search"}``) would make the source reject the request, so it
     falls back to the provider default by removing the key. ``function``-typed
     choices always stay: function tools are never dropped by the filter.
+
+    Entries under ``allowed_tools`` get the same tool-type alias normalization
+    as the ``tools`` list (``web_search_preview`` -> ``web_search``) so a
+    legacy-alias forced choice keeps matching the normalized tool it targets.
     """
     tool_choice = payload.get("tool_choice")
     if not is_json_mapping(tool_choice):
@@ -3389,12 +3398,20 @@ def _drop_dangling_source_tool_choice(payload: dict[str, JsonValue], kept_types:
         allowed = tool_choice.get("tools")
         if not is_json_list(allowed):
             return
-        kept_allowed: list[JsonValue] = [
-            entry
-            for entry in allowed
-            if is_json_mapping(entry) and _source_tool_type_supported(entry.get("type"), kept_types)
-        ]
-        if len(kept_allowed) == len(allowed):
+        kept_allowed: list[JsonValue] = []
+        for entry in allowed:
+            if not is_json_mapping(entry):
+                continue
+            entry_type = entry.get("type")
+            if isinstance(entry_type, str):
+                normalized_type = normalize_tool_type(entry_type)
+                if normalized_type != entry_type:
+                    entry = {**entry, "type": normalized_type}
+                    entry_type = normalized_type
+            if not _source_tool_type_supported(entry_type, kept_types):
+                continue
+            kept_allowed.append(entry)
+        if kept_allowed == list(allowed):
             return
         if not kept_allowed:
             payload.pop("tool_choice", None)

@@ -1287,6 +1287,76 @@ async def test_backend_codex_responses_keeps_search_tools_for_capable_model_sour
 
 
 @pytest.mark.asyncio
+async def test_backend_codex_responses_keeps_legacy_alias_allowed_search_tool_choice(async_client, monkeypatch):
+    model = "external-codex-responses-alias-allowed"
+    await _create_model_source(
+        async_client,
+        name="codex-responses-alias-allowed",
+        model=model,
+        supports_responses=True,
+        raw_metadata_json='{"supports_search_tool":true}',
+    )
+    observed: dict[str, object] = {}
+
+    async def fake_stream(source, payload):
+        observed["payload"] = dict(payload)
+        usage_holder = SourceUsageHolder()
+
+        async def body():
+            usage_holder.usage = SourceUsage(input_tokens=2, output_tokens=1, cached_input_tokens=0)
+            yield (
+                b'data: {"type":"response.completed","response":{"id":"resp_source_alias_allowed",'
+                b'"usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}}}\n\n'
+            )
+
+        return SourceResponsesStream(body=body(), usage_holder=usage_holder, upstream_status_code=200)
+
+    monkeypatch.setattr(proxy_api, "stream_source_responses", fake_stream)
+
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        json={
+            "model": model,
+            "instructions": "hi",
+            "input": [],
+            "tools": [
+                {"type": "function", "name": "run_shell", "parameters": {"type": "object", "properties": {}}},
+                {"type": "web_search_preview"},
+                {"type": "namespace", "function": {"name": "multi_agent_v1"}},
+            ],
+            "tool_choice": {
+                "type": "allowed_tools",
+                "mode": "required",
+                "tools": [
+                    {"type": "function", "name": "run_shell"},
+                    {"type": "web_search_preview"},
+                ],
+            },
+        },
+    ) as response:
+        assert response.status_code == 200
+        [line async for line in response.aiter_lines() if line]
+
+    forwarded_payload = cast("dict[str, object]", observed["payload"])
+    # The legacy alias in the tools list is normalized before filtering.
+    assert forwarded_payload["tools"] == [
+        {"type": "function", "name": "run_shell", "parameters": {"type": "object", "properties": {}}},
+        {"type": "web_search"},
+    ]
+    # The allowed_tools entries get the same alias normalization, so the
+    # forced search choice survives alongside the (normalized) search tool.
+    assert forwarded_payload["tool_choice"] == {
+        "type": "allowed_tools",
+        "mode": "required",
+        "tools": [
+            {"type": "function", "name": "run_shell"},
+            {"type": "web_search"},
+        ],
+    }
+
+
+@pytest.mark.asyncio
 async def test_backend_codex_responses_drops_tool_choice_referencing_dropped_source_tool(async_client, monkeypatch):
     model = "external-codex-responses-dangling-choice"
     await _create_model_source(

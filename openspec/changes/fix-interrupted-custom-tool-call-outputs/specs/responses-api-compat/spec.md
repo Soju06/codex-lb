@@ -32,6 +32,16 @@ The service MUST track tool-call items completed by a streamed response that may
 - **WHEN** an HTTP bridge follow-up gains synthetic interrupted outputs
 - **THEN** the input item count, input fingerprint, and request usage budget recorded for the request are computed from the injected upstream-shaped input, so later full-resend/anchor comparisons on the same bridge session match what upstream actually stored
 
+#### Scenario: local previous-response recovery retry keeps injected outputs
+- **GIVEN** an HTTP bridge submit whose payload gained synthetic interrupted outputs and which fails before yielding with a previous-response continuity error
+- **WHEN** the local recovery path re-prepares the anchored retry request
+- **THEN** the synthetic interrupted outputs are re-injected from the failed session's pending tool-call state, so the recovered submit does not reintroduce the upstream missing-tool-output failure
+
+#### Scenario: replayed apply_patch prefix is trimmed on anchored bridge follow-ups
+- **GIVEN** an HTTP bridge follow-up that anchors via `previous_response_id` and replays a prior `apply_patch_call` item (marked as response output) followed by its `apply_patch_call_output`
+- **WHEN** the bridge trims the previous-response prefix already covered by the anchor
+- **THEN** `apply_patch_call` and `apply_patch_call_output` items are recognized by the trim exactly like the `function_call` and `custom_tool_call` variants, matching the WebSocket route's replay trim
+
 #### Scenario: owner-forward failover recovery injects from local session state when available
 - **GIVEN** a multi-instance bridge where an anchored follow-up is forwarded to the remote owner instance and the relay fails before yielding any bytes
 - **WHEN** the local instance recovers by rebinding a local bridge session and resubmitting the anchored request

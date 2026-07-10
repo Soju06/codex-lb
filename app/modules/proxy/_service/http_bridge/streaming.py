@@ -1399,6 +1399,19 @@ class _HTTPBridgeStreamingMixin:
                 )
                 recovery_path = "local_previous_response_error"
                 retry_payload = effective_payload
+                # The failed session object still carries the pending
+                # tool-call state recorded for its last completed response,
+                # so re-run synthetic interrupted-output injection for the
+                # anchored recovery payload; ``effective_payload`` alone
+                # would drop the outputs injected into ``submit_payload``
+                # and reintroduce the upstream missing-tool-output failure.
+                retry_injected_input = _http_bridge_interrupted_tool_outputs_input(
+                    session,
+                    payload=retry_payload,
+                    request_id=request_id,
+                )
+                if retry_injected_input is not None:
+                    retry_payload = retry_payload.model_copy(update={"input": retry_injected_input})
                 retry_previous_response_id = request_state.previous_response_id
                 retry_request_stage = "reattach"
                 retry_preferred_account_id = request_state.preferred_account_id

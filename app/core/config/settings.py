@@ -257,7 +257,11 @@ class Settings(BaseSettings):
     # cap is lifted in the same change that introduces fan-out.
     model_registry_enabled: bool = True
     model_registry_refresh_interval_seconds: int = Field(default=300, gt=0)
-    model_registry_client_version: str = "0.101.0"
+    # Fallback Codex client version used when the live release lookup fails.
+    # Must stay >= the highest ``minimal_client_version`` in the bootstrap
+    # catalog (GPT-5.6 requires 0.144.0) or a degraded-startup refresh would
+    # receive an upstream catalog without those models.
+    model_registry_client_version: str = "0.144.0"
     codex_fingerprint_os: str = "Mac OS 26.5.0"
     codex_fingerprint_arch: str = "arm64"
     codex_fingerprint_terminal: str = "iTerm.app/3.6.10"

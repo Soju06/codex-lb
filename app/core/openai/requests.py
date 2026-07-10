@@ -949,6 +949,8 @@ def _compact_fit_selected_indices_to_wire_budget(
         candidate_input = _compact_trimmed_input_with_markers(input_value, token_counts, selected)
         if _estimated_json_tokens(candidate_input) <= _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS:
             break
+        if index not in selected:
+            continue
         trial = set(selected)
         trial.remove(index)
         trial = _compact_reconciled_tool_call_indices(

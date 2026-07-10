@@ -1363,6 +1363,44 @@ def test_compact_backtracking_drops_optional_tool_pair_when_markers_exceed_budge
     assert wire_bytes <= _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS * _ESTIMATED_CHARS_PER_TOKEN
 
 
+def test_compact_backtracking_skips_pair_mate_removed_by_cascade():
+    optional_head = {"role": "user", "content": "h" * 2_300}
+    optional_call = {
+        "type": "function_call",
+        "name": "exec",
+        "call_id": "call-optional",
+        "arguments": "{}",
+    }
+    optional_output = {
+        "type": "function_call_output",
+        "call_id": "call-optional",
+        "output": "ok",
+    }
+    omitted = {"role": "assistant", "content": "x" * 500_000}
+    anchors = [
+        {
+            "role": "user",
+            "content": '<codex_internal_context source="goal">\n' + chr(ord("a") + index) * 39_375,
+        }
+        for index in range(10)
+    ]
+    latest = {"role": "user", "content": "continue"}
+    input_items: list[JsonValue] = [optional_head, optional_call, optional_output, omitted]
+    for anchor in anchors:
+        input_items.extend([anchor, omitted])
+    input_items.append(latest)
+    payload = {"model": "gpt-5.6-sol", "instructions": "", "input": input_items}
+
+    dumped_input = ResponsesCompactRequest.model_validate(payload).to_payload()["input"]
+
+    assert isinstance(dumped_input, list)
+    assert optional_head not in dumped_input
+    assert optional_call not in dumped_input
+    assert optional_output not in dumped_input
+    assert all(anchor in dumped_input for anchor in anchors)
+    assert latest in dumped_input
+
+
 def test_compact_trimming_keeps_selected_tool_outputs_with_matching_calls():
     tool_call = {
         "type": "function_call",

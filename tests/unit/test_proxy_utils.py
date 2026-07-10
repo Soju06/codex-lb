@@ -14008,6 +14008,54 @@ async def test_process_upstream_websocket_text_commits_lite_state_when_response_
 
 
 @pytest.mark.asyncio
+async def test_process_upstream_websocket_text_records_visible_replay_id_for_lite_acceptance():
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_ws_lite_visible_replay")
+    # A suppressed-created replay: the client already received
+    # ``response.created`` with the original visible id, so the replay's
+    # hidden upstream id is never exposed downstream.
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_lite_visible_replay",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        responses_lite_model="gpt-5.6-sol",
+        response_create_gate_acquired=True,
+        awaiting_response_created=True,
+        replay_count=1,
+        replay_downstream_response_id="resp_ws_lite_visible",
+        suppress_next_created_downstream=True,
+    )
+    continuity_state = proxy_service._WebSocketContinuityState()
+    response_create_gate = asyncio.Semaphore(0)
+
+    await service._process_upstream_websocket_text(
+        json.dumps(
+            {
+                "type": "response.created",
+                "response": {"id": "resp_ws_lite_hidden", "status": "in_progress"},
+            },
+            separators=(",", ":"),
+        ),
+        account=account,
+        account_id_value=account.id,
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        response_create_gate=response_create_gate,
+        continuity_state=continuity_state,
+    )
+
+    assert request_state.response_id == "resp_ws_lite_hidden"
+    assert continuity_state.responses_lite_model == "gpt-5.6-sol"
+    assert continuity_state.responses_lite_response_id == "resp_ws_lite_visible"
+    await asyncio.wait_for(response_create_gate.acquire(), timeout=1.0)
+
+
+@pytest.mark.asyncio
 async def test_process_upstream_websocket_text_does_not_match_foreign_response_id_to_only_pending_request(
     monkeypatch,
 ):

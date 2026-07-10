@@ -33,7 +33,11 @@ remain only when the same request continuity state previously received
 same effective upstream model, and the frame's `previous_response_id` references
 the response ID recorded by the most recent such Lite acceptance. A frame
 without a `previous_response_id`, or one referencing any other response, MUST
-NOT receive trusted Lite treatment. The effective model comparison MUST occur
+NOT receive trusted Lite treatment. The recorded acceptance ID MUST be the
+response ID exposed downstream: when a transparent replay suppresses its
+`response.created` and keeps rewriting events to the originally visible
+response ID, Lite continuity records that visible ID rather than the hidden
+upstream replay ID. The effective model comparison MUST occur
 after alias normalization and API-key enforcement, and a merely prepared request
 MUST NOT establish or clear trusted Lite continuity. Trusted state MUST update
 in upstream request-acceptance order rather than terminal-event completion
@@ -115,6 +119,18 @@ item.
 - **THEN** the proxy strips the marker
 - **AND** the recorded Lite continuity remains available to later frames that
   do reference the accepted Lite response
+
+#### Scenario: Suppressed-created replay keeps Lite continuity on the visible id
+
+- **GIVEN** a Lite websocket request whose `response.created` was already sent
+  downstream when the upstream connection is lost
+- **WHEN** the proxy transparently replays the request, suppresses the new
+  `response.created`, and rewrites downstream events to the original visible
+  response id
+- **THEN** a later same-model marker-only frame whose `previous_response_id`
+  references the visible response id keeps the trusted marker
+- **BUT WHEN** a frame references the hidden upstream replay id instead
+- **THEN** the proxy strips the marker
 
 #### Scenario: Fresh replay of a trusted incremental frame drops the marker
 

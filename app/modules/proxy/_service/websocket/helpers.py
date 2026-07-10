@@ -481,7 +481,13 @@ def _record_websocket_responses_lite_acceptance(
     if request_state.responses_lite_model is None:
         return
     continuity_state.responses_lite_model = request_state.responses_lite_model
-    continuity_state.responses_lite_response_id = request_state.response_id
+    # Prefer the downstream-visible id: a suppressed-created replay keeps
+    # exposing the original response id to the client (every downstream event
+    # is rewritten to it), so the next incremental frame can only reference
+    # that visible id, never the hidden upstream replay id.
+    continuity_state.responses_lite_response_id = (
+        request_state.replay_downstream_response_id or request_state.response_id
+    )
 
 
 def _websocket_response_id(event: OpenAIEvent | None, payload: dict[str, JsonValue] | None) -> str | None:

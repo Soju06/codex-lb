@@ -3909,6 +3909,7 @@ async def test_v1_responses_http_bridge_reuses_upstream_websocket_and_preserves_
     assert connect_calls == [(account_id, account.chatgpt_account_id)]
     assert len(fake_upstream.sent_text) == 2
     first_upstream_payload = json.loads(fake_upstream.sent_text[0])
+    assert "tools" not in first_upstream_payload
     assert first_upstream_payload["client_metadata"]["keep"] == "yes"
     assert first_upstream_payload["client_metadata"]["x-codex-installation-id"] == account.codex_installation_id
     assert first_upstream_payload["client_metadata"]["x-codex-installation-id"] != "client-spoofed-installation-id"

@@ -113,7 +113,7 @@ class HTTPBridgeOwnerClient:
         async with aiohttp.ClientSession(timeout=timeout, trust_env=False) as session:
             async with session.post(
                 f"{owner_endpoint}{HTTP_BRIDGE_INTERNAL_FORWARD_PATH}",
-                json=payload.model_dump(mode="json", exclude_none=True),
+                json=payload.model_dump_for_forwarding(),
                 headers=build_owner_forward_headers(headers=headers, payload=payload, context=context),
                 skip_auto_headers=_OWNER_FORWARD_SKIP_AUTO_HEADERS,
             ) as response:

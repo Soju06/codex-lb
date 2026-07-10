@@ -1189,7 +1189,10 @@ def _compact_trim_marker(*, omitted_items: int, omitted_tokens: int) -> JsonObje
 
 
 def _estimated_json_tokens(value: JsonValue) -> int:
-    serialized = json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    # Match the stdlib/aiohttp wire escaping used by compact HTTP requests so
+    # non-ASCII text cannot look small here and then expand past the upstream
+    # request-body limit when serialized as ``\uXXXX`` sequences.
+    serialized = json.dumps(value, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
     return max(1, (len(serialized) + _ESTIMATED_CHARS_PER_TOKEN - 1) // _ESTIMATED_CHARS_PER_TOKEN)
 
 

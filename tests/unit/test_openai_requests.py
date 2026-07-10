@@ -1083,6 +1083,25 @@ def test_compact_trimming_rejects_oversized_latest_item():
     assert raised.value.code == "responses_compact_input_too_large"
 
 
+def test_compact_rejects_unicode_item_that_expands_past_wire_budget():
+    def request_with_content(content: str) -> ResponsesCompactRequest:
+        return ResponsesCompactRequest.model_validate(
+            {
+                "model": "gpt-5.1",
+                "instructions": "hi",
+                "input": [{"role": "user", "content": content}],
+            }
+        )
+
+    assert request_with_content("x" * 40_000).to_payload()["input"]
+
+    with pytest.raises(ClientPayloadError, match="still exceeds the upstream size limit") as raised:
+        request_with_content("😀" * 40_000).to_payload()
+
+    assert raised.value.param == "input"
+    assert raised.value.code == "responses_compact_input_too_large"
+
+
 def test_compact_trimming_preserves_codex_goal_context_anchor_from_middle():
     goal_context = {
         "type": "message",

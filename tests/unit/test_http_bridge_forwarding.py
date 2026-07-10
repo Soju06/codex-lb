@@ -389,6 +389,33 @@ def test_parse_forwarded_request_rejects_stripped_v2_unanchored_marker() -> None
     assert error.payload["error"]["code"] == "bridge_forward_invalid"
 
 
+def test_parse_forwarded_request_rejects_v2_fields_repacked_as_legacy_affinity() -> None:
+    payload = _payload()
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=True,
+        downstream_turn_state="http_turn_generated",
+        original_request_unanchored=True,
+        original_affinity_kind="session_header",
+        original_affinity_key="sid-123",
+    )
+    headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
+    headers.pop(HTTP_BRIDGE_SIGNATURE_VERSION_HEADER)
+    headers.pop(HTTP_BRIDGE_ORIGINAL_UNANCHORED_HEADER)
+    # This preserved the old delimiter-joined byte string while moving the v2
+    # fields into attacker-controlled affinity values.
+    headers[HTTP_BRIDGE_AFFINITY_KIND_HEADER] = "session_header|sid-123"
+    headers[HTTP_BRIDGE_AFFINITY_KEY_HEADER] = "signature_version=2|original_request_unanchored=1"
+
+    forwarded, error = parse_forwarded_request(headers, payload=payload, current_instance="instance-b")
+
+    assert forwarded is None
+    assert error is not None
+    assert error.status_code == 400
+    assert error.payload["error"]["code"] == "bridge_forward_invalid"
+
+
 def test_v2_forward_fails_legacy_signature_validation() -> None:
     payload = _payload()
     context = HTTPBridgeForwardContext(

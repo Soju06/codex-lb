@@ -37,7 +37,7 @@ When multiple Responses requests share a process-level session header but carry 
 #### Scenario: Forwarding downgrade fails closed
 
 - **GIVEN** an owner-forward request requires unanchored concurrency semantics
-- **WHEN** the signed unanchored boolean is changed or removed, or either instance only supports the legacy signature
+- **WHEN** the signed unanchored boolean is changed, removed, or repacked into affinity fields, or either instance only supports the legacy signature
 - **THEN** the owner-forward hop fails closed
 - **AND** the request is not attached to the shared canonical response-create gate
 

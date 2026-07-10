@@ -375,24 +375,52 @@ def _bridge_forward_signature(
         context.original_affinity_kind or "",
         context.original_affinity_key or "",
     ]
-    if signature_version is not None:
-        fields.extend(
-            (
-                f"signature_version={signature_version}",
-                f"original_request_unanchored={int(context.original_request_unanchored)}",
-            )
-        )
-    if include_client_ip:
-        fields.append(context.client_ip or "")
-    fields.extend(
-        (
-            context.reservation.reservation_id if context.reservation is not None else "",
-            context.reservation.key_id if context.reservation is not None else "",
-            context.reservation.model if context.reservation is not None else "",
-            body_digest,
-        )
+    reservation_fields = (
+        context.reservation.reservation_id if context.reservation is not None else "",
+        context.reservation.key_id if context.reservation is not None else "",
+        context.reservation.model if context.reservation is not None else "",
     )
-    signing_payload = "|".join(fields)
+    if signature_version is None:
+        # Preserve the deployed legacy wire format for anchored requests during
+        # rolling upgrades. Its delimiter-based encoding is intentionally not
+        # reused by v2 because attacker-controlled affinity values can contain
+        # the delimiter and make different field layouts authenticate alike.
+        if include_client_ip:
+            fields.append(context.client_ip or "")
+        fields.extend((*reservation_fields, body_digest))
+        signing_payload = "|".join(fields)
+    else:
+        # Versioned signatures use an explicit domain and canonical structured
+        # encoding. Object boundaries make field re-packing impossible, and
+        # the client-IP mode is itself authenticated.
+        signing_payload = json.dumps(
+            {
+                "body_digest": body_digest,
+                "client_ip": context.client_ip if include_client_ip else None,
+                "codex_session_affinity": context.codex_session_affinity,
+                "downstream_turn_state": context.downstream_turn_state,
+                "include_client_ip": include_client_ip,
+                "origin_instance": context.origin_instance,
+                "original_affinity_key": context.original_affinity_key,
+                "original_affinity_kind": context.original_affinity_kind,
+                "original_request_unanchored": context.original_request_unanchored,
+                "protocol": "codex-lb-http-bridge-forward",
+                "reservation": (
+                    {
+                        "id": reservation_fields[0],
+                        "key_id": reservation_fields[1],
+                        "model": reservation_fields[2],
+                    }
+                    if context.reservation is not None
+                    else None
+                ),
+                "signature_version": signature_version,
+                "target_instance": context.target_instance,
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
     secret = get_or_create_key(get_settings().encryption_key_file)
     return hmac.new(secret, signing_payload.encode("utf-8"), hashlib.sha256).hexdigest()
 

@@ -42,6 +42,11 @@ legacy unanchored forward fails closed on a v2 owner, while a v2 signature fails
 legacy validation on an old owner; mixed-version deployments never silently
 fall back to the shared canonical response-create gate.
 
+The v2 HMAC input uses a domain-separated canonical JSON object rather than the
+legacy delimiter-joined field list. This prevents signed v2 fields from being
+repacked into attacker-controlled affinity values to produce the same bytes
+under legacy validation.
+
 Forked lanes use hard continuity strength. They are independent at creation,
 but any durable turn-state or previous-response alias derived from that lane
 must retain its account and owner binding on later requests.

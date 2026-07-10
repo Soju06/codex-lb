@@ -297,6 +297,16 @@ def _normalize_responses_input_instructions(data: JsonValue) -> JsonValue:
         if role not in ("system", "developer"):
             input_items.append(item)
             continue
+        # Responses Lite (GPT-5.6) carries the custom exec tool grammar in a
+        # developer-role ``additional_tools`` input item instead of the
+        # top-level ``tools`` field. Such an item has no ``content``, so the
+        # instruction normalization below would silently drop it and leave the
+        # upstream model without any shell/filesystem tool definitions
+        # (issue #1157). Preserve it unchanged so the tool bundle reaches the
+        # upstream request intact.
+        if item_mapping.get("type") == "additional_tools":
+            input_items.append(item)
+            continue
         instruction_text, preserved_content = _split_responses_instruction_item_content(item_mapping)
         if instruction_text:
             instruction_parts.append(instruction_text)

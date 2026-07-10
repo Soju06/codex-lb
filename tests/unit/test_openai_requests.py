@@ -1619,3 +1619,55 @@ def test_extract_input_image_file_references_collects_tool_output_paths():
         (0, None, "file_tool"),
         (0, None, "file_nested"),
     ]
+
+
+def test_responses_preserves_responses_lite_additional_tools_item():
+    """GPT-5.6 Responses Lite places the exec tool grammar in a developer-role
+    ``additional_tools`` input item with no ``content``. Normalization must keep
+    it instead of dropping it (issue #1157)."""
+    additional_tools_item = {
+        "type": "additional_tools",
+        "role": "developer",
+        "tools": [
+            {
+                "type": "custom",
+                "name": "exec",
+                "format": {"type": "grammar", "syntax": "lark"},
+            }
+        ],
+    }
+    request = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-luna",
+            "instructions": "You are Codex.",
+            "input": [
+                additional_tools_item,
+                {"role": "user", "content": "Inspect this repository."},
+            ],
+        }
+    )
+
+    input_items = cast(list[JsonValue], request.input)
+    preserved = [item for item in input_items if cast(Mapping[str, JsonValue], item).get("type") == "additional_tools"]
+    assert len(preserved) == 1, "additional_tools item was dropped during normalization"
+    assert preserved[0] == additional_tools_item
+
+
+def test_responses_still_lifts_developer_text_instructions_into_instructions_field():
+    """A regular developer text item is still merged into ``instructions`` and
+    removed from ``input`` after the additional_tools fix."""
+    request = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-luna",
+            "instructions": "Base.",
+            "input": [
+                {"role": "developer", "content": "Extra guidance."},
+                {"role": "user", "content": "Hi"},
+            ],
+        }
+    )
+
+    input_items = cast(list[JsonValue], request.input)
+    developer_items = [item for item in input_items if cast(Mapping[str, JsonValue], item).get("role") == "developer"]
+    assert developer_items == []
+    assert "Extra guidance." in request.instructions

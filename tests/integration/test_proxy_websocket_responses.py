@@ -663,14 +663,14 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_insta
 
     request_payload = {
         "type": "response.create",
-        "model": "gpt-5.4",
+        "model": "gpt-5.6-sol",
         "instructions": "",
         "client_metadata": {
             "x-codex-installation-id": "client-installation",
-            "x-codex-turn-metadata": '{"turn_id":"turn_123","sandbox":"workspace-write"}',
+            "x-codex-turn-metadata": ('{"turn_id":"turn_123","sandbox":"workspace-write","reasoning_effort":"ultra"}'),
         },
         "service_tier": "fast",
-        "reasoning": {"effort": "high"},
+        "reasoning": {"effort": "max"},
         "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
         "stream": True,
     }
@@ -698,17 +698,21 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_insta
     assert seen["sticky_kind"] == proxy_module.StickySessionKind.CODEX_SESSION
     assert seen["prefer_earlier_reset"] is False
     assert seen["routing_strategy"] == "usage_weighted"
-    assert seen["model"] == "gpt-5.4"
+    assert seen["model"] == "gpt-5.6-sol"
     _assert_upstream_payloads(
         fake_upstream.sent_text,
         [
             {
-                "model": "gpt-5.4",
+                "model": "gpt-5.6-sol",
                 "instructions": "",
                 "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
                 "tools": [],
-                "reasoning": {"effort": "high"},
-                "client_metadata": {"x-codex-turn-metadata": '{"turn_id":"turn_123","sandbox":"workspace-write"}'},
+                "reasoning": {"effort": "max"},
+                "client_metadata": {
+                    "x-codex-turn-metadata": (
+                        '{"turn_id":"turn_123","sandbox":"workspace-write","reasoning_effort":"ultra"}'
+                    )
+                },
                 "service_tier": "priority",
                 "store": False,
                 "include": [],
@@ -720,7 +724,8 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_insta
     log = log_calls[0]
     assert log["account_id"] == "acct_ws_proxy"
     assert log["request_id"] == "resp_ws_1"
-    assert log["model"] == "gpt-5.4"
+    assert log["model"] == "gpt-5.6-sol"
+    assert log["reasoning_effort"] == "ultra"
     assert log["service_tier"] == "priority"
     assert log["transport"] == "websocket"
     assert log["status"] == "success"

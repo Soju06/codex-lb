@@ -311,6 +311,46 @@ def test_http_bridge_client_metadata_cannot_spoof_reserved_request_kind():
     )
 
 
+def test_request_log_reasoning_effort_preserves_codex_ultra_metadata():
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "",
+            "input": [],
+            "reasoning": {"effort": "max"},
+        }
+    )
+    client_metadata: dict[str, JsonValue] = {"x-codex-turn-metadata": json.dumps({"reasoning_effort": "ultra"})}
+
+    assert proxy_http_bridge_request_submit._request_log_reasoning_effort(payload, client_metadata) == "ultra"
+    assert payload.reasoning is not None
+    assert payload.reasoning.effort == "max"
+
+
+@pytest.mark.parametrize(
+    "client_metadata",
+    [
+        None,
+        {},
+        {"x-codex-turn-metadata": "not-json"},
+        {"x-codex-turn-metadata": json.dumps({"reasoning_effort": "max"})},
+    ],
+)
+def test_request_log_reasoning_effort_keeps_upstream_max_without_ultra_metadata(
+    client_metadata: Mapping[str, JsonValue] | None,
+):
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "",
+            "input": [],
+            "reasoning": {"effort": "max"},
+        }
+    )
+
+    assert proxy_http_bridge_request_submit._request_log_reasoning_effort(payload, client_metadata) == "max"
+
+
 def test_compact_client_metadata_cannot_spoof_reserved_request_kind():
     assert (
         proxy_compact_service._request_kind_from_headers(

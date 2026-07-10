@@ -223,6 +223,28 @@ def _request_kind_from_headers(headers: Mapping[str, str] | None) -> str:
     return "normal"
 
 
+def _request_log_reasoning_effort(
+    payload: ResponsesRequest,
+    client_metadata: Mapping[str, JsonValue] | None,
+) -> str | None:
+    upstream_effort = payload.reasoning.effort if payload.reasoning else None
+    if upstream_effort != "max" or not client_metadata:
+        return upstream_effort
+    raw_turn_metadata = client_metadata.get("x-codex-turn-metadata")
+    if not isinstance(raw_turn_metadata, str):
+        return upstream_effort
+    try:
+        turn_metadata = json.loads(raw_turn_metadata)
+    except json.JSONDecodeError:
+        return upstream_effort
+    if not isinstance(turn_metadata, dict):
+        return upstream_effort
+    metadata_effort = turn_metadata.get("reasoning_effort")
+    if isinstance(metadata_effort, str) and metadata_effort.strip().lower() == "ultra":
+        return "ultra"
+    return upstream_effort
+
+
 class _HTTPBridgeRequestSubmitMixin:
     def _prepare_http_bridge_request(
         self: Any,
@@ -234,6 +256,7 @@ class _HTTPBridgeRequestSubmitMixin:
         request_id: str | None = None,
         enforce_openai_sdk_contract: bool = True,
     ) -> tuple[_WebSocketRequestState, str]:
+        client_metadata = _response_create_client_metadata(payload.to_payload(), headers=headers)
         request_state, text_data = self._prepare_response_bridge_request_state(
             payload,
             api_key=api_key,
@@ -241,7 +264,7 @@ class _HTTPBridgeRequestSubmitMixin:
             include_type_field=True,
             attach_event_queue=True,
             transport=_REQUEST_TRANSPORT_HTTP,
-            client_metadata=_response_create_client_metadata(payload.to_payload(), headers=headers),
+            client_metadata=client_metadata,
             headers=headers,
             session_id=_owner_lookup_session_id_from_headers(headers),
             request_log_id=request_id or get_request_id() or ensure_request_id(None),
@@ -301,7 +324,7 @@ class _HTTPBridgeRequestSubmitMixin:
             request_log_id=request_log_id,
             model=payload.model,
             service_tier=forwarded_service_tier,
-            reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
+            reasoning_effort=_request_log_reasoning_effort(payload, client_metadata),
             api_key_reservation=api_key_reservation,
             started_at=_service_time().monotonic(),
             requested_service_tier=forwarded_service_tier,

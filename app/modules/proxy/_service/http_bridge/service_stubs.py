@@ -24,6 +24,7 @@ from app.core.openai.requests import ResponsesRequest
 from app.core.types import JsonValue
 from app.core.utils.sse import CODEX_KEEPALIVE_FRAME
 from app.db.models import Account, DashboardSettings
+from app.modules.proxy._service.response_create import _RESPONSE_CREATE_COMPATIBILITY_METADATA_HEADERS
 from app.modules.proxy._service.support import _RequestLogFailureMetadata
 
 T = TypeVar("T")
@@ -296,7 +297,12 @@ def _headers_with_turn_state(*args: Any, **kwargs: Any) -> Any:
 
 
 def _websocket_safe_headers_with_turn_state(headers: Mapping[str, str], turn_state: str | None) -> dict[str, str]:
-    return cast(dict[str, str], _headers_with_turn_state(filter_inbound_websocket_headers(dict(headers)), turn_state))
+    filtered = {
+        key: value
+        for key, value in filter_inbound_websocket_headers(dict(headers)).items()
+        if key.lower() not in _RESPONSE_CREATE_COMPATIBILITY_METADATA_HEADERS
+    }
+    return cast(dict[str, str], _headers_with_turn_state(filtered, turn_state))
 
 
 def _headers_with_authorization(*args: Any, **kwargs: Any) -> Any:

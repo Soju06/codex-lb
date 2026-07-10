@@ -2625,6 +2625,10 @@ async def test_create_http_bridge_session_filters_http_headers_for_upstream_webs
             "transfer-encoding": "chunked",
             "upgrade": "websocket",
             "user-agent": "pi",
+            "X-Codex-Turn-Metadata": '{"turn_id":"turn-create"}',
+            "x-OpenAI-Subagent": "collab_spawn",
+            "X-Codex-Parent-Thread-ID": "parent-create",
+            "x-CODEX-window-id": "child-create:0",
             "x-handshake-debug": "1",
         },
         affinity=proxy_service._AffinityPolicy(
@@ -2656,6 +2660,10 @@ async def test_create_http_bridge_session_filters_http_headers_for_upstream_webs
     assert "trailer" not in forwarded
     assert "transfer-encoding" not in forwarded
     assert "upgrade" not in forwarded
+    assert "x-codex-turn-metadata" not in forwarded
+    assert "x-openai-subagent" not in forwarded
+    assert "x-codex-parent-thread-id" not in forwarded
+    assert "x-codex-window-id" not in forwarded
     assert "x-handshake-debug" not in forwarded
 
 
@@ -2682,6 +2690,10 @@ async def test_reconnect_http_bridge_session_filters_http_headers_for_upstream_w
         "transfer-encoding": "chunked",
         "upgrade": "websocket",
         "user-agent": "pi",
+        "X-Codex-Turn-Metadata": '{"turn_id":"turn-reconnect"}',
+        "x-OpenAI-Subagent": "collab_spawn",
+        "X-Codex-Parent-Thread-ID": "parent-reconnect",
+        "x-CODEX-window-id": "child-reconnect:0",
         "x-handshake-debug": "1",
     }
     session.upstream_turn_state = "upstream-turn-state"
@@ -2743,6 +2755,10 @@ async def test_reconnect_http_bridge_session_filters_http_headers_for_upstream_w
     assert "trailer" not in forwarded
     assert "transfer-encoding" not in forwarded
     assert "upgrade" not in forwarded
+    assert "x-codex-turn-metadata" not in forwarded
+    assert "x-openai-subagent" not in forwarded
+    assert "x-codex-parent-thread-id" not in forwarded
+    assert "x-codex-window-id" not in forwarded
     assert "x-handshake-debug" not in forwarded
 
 

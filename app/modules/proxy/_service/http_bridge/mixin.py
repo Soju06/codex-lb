@@ -675,13 +675,13 @@ class _HTTPBridgeMixin(
                 ):
                     current_instance = settings.http_responses_session_bridge_instance_id
                     if _durable_bridge_lookup_allows_local_reuse(durable_lookup, current_instance=current_instance):
-                        if key.affinity_kind == "session_header" and incoming_turn_state is None:
-                            existing.unanchored_reservation_id = request_scope_id
                         existing.api_key = api_key
                         existing.request_model = request_model
                         existing.request_service_tier = request_service_tier
                         existing.last_used_at = _service_time().monotonic()
                         await self._refresh_durable_http_bridge_session(existing)
+                        if key.affinity_kind == "session_header" and incoming_turn_state is None:
+                            existing.unanchored_reservation_id = request_scope_id
                         _log_http_bridge_event(
                             "reuse",
                             key,

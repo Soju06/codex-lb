@@ -28,7 +28,15 @@ The canonical session is reserved for that request while lookup returns and
 before submission makes its queued activity visible. A different request that
 arrives in this interval forks instead of reusing the apparently idle session.
 Submission clears the matching reservation in the same synchronous section
-that increments the queued count.
+that increments the queued count. Reuse performs cancellable durable refresh
+before publishing the reservation, so an aborted lookup cannot strand it.
+
+Owner forwarding carries a separately signed bit recording whether the
+originating request had an explicit turn-state or previous-response anchor.
+The owner still receives the generated downstream turn-state for response
+aliasing, but it removes that generated value from bridge lookup when the
+originating request was unanchored. This preserves the same fork decision on
+local and forwarded requests.
 
 Forked lanes use hard continuity strength. They are independent at creation,
 but any durable turn-state or previous-response alias derived from that lane

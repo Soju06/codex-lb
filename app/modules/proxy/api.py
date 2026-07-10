@@ -769,6 +769,10 @@ async def internal_bridge_responses(
         return auth_error
     skip_limit_enforcement = api_key is None or forwarded_request_context.context.reservation is not None
     forwarded_headers = _strip_internal_bridge_headers(request.headers)
+    if forwarded_request_context.context.original_request_unanchored:
+        forwarded_headers = {
+            key: value for key, value in forwarded_headers.items() if key.lower() != "x-codex-turn-state"
+        }
     return await _stream_responses(
         request,
         payload,

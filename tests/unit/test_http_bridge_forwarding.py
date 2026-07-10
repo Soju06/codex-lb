@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Iterator
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -19,6 +20,8 @@ from app.modules.proxy.http_bridge_forwarding import (
     HTTP_BRIDGE_CODEX_AFFINITY_HEADER,
     HTTP_BRIDGE_FORWARDED_HEADER,
     HTTP_BRIDGE_ORIGIN_INSTANCE_HEADER,
+    HTTP_BRIDGE_ORIGINAL_UNANCHORED_HEADER,
+    HTTP_BRIDGE_ORIGINAL_UNANCHORED_SIGNATURE_HEADER,
     HTTP_BRIDGE_RESERVATION_KEY_ID_HEADER,
     HTTP_BRIDGE_RESERVATION_MODEL_HEADER,
     HTTP_BRIDGE_SIGNATURE_HEADER,
@@ -26,6 +29,7 @@ from app.modules.proxy.http_bridge_forwarding import (
     HTTPBridgeForwardContext,
     HTTPBridgeOwnerClient,
     _bridge_forward_signature,
+    _bridge_forward_unanchored_signature,
     _owner_forward_receive_timeout,
     _owner_forward_timeout,
     build_owner_forward_headers,
@@ -276,6 +280,84 @@ def test_build_owner_forward_headers_preserves_original_affinity_key() -> None:
 
     assert headers[HTTP_BRIDGE_AFFINITY_KIND_HEADER] == "session_header"
     assert headers[HTTP_BRIDGE_AFFINITY_KEY_HEADER] == "sid-123"
+
+
+def test_parse_forwarded_request_preserves_signed_original_unanchored_status() -> None:
+    payload = _payload()
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=True,
+        downstream_turn_state="http_turn_generated",
+        original_request_unanchored=True,
+        original_affinity_kind="session_header",
+        original_affinity_key="sid-123",
+    )
+
+    headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
+    forwarded, error = parse_forwarded_request(
+        headers,
+        payload=payload,
+        current_instance="instance-b",
+    )
+
+    assert headers[HTTP_BRIDGE_ORIGINAL_UNANCHORED_HEADER] == "1"
+    assert headers[HTTP_BRIDGE_ORIGINAL_UNANCHORED_SIGNATURE_HEADER] == _bridge_forward_unanchored_signature(
+        payload=payload,
+        context=context,
+    )
+    assert error is None
+    assert forwarded is not None
+    assert forwarded.context == context
+
+
+def test_original_unanchored_marker_preserves_legacy_main_signature() -> None:
+    payload = _payload()
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=True,
+        downstream_turn_state="http_turn_generated",
+        original_request_unanchored=True,
+        original_affinity_kind="session_header",
+        original_affinity_key="sid-123",
+    )
+
+    assert _bridge_forward_signature(
+        payload=payload,
+        context=context,
+        include_client_ip=False,
+    ) == _bridge_forward_signature(
+        payload=payload,
+        context=replace(context, original_request_unanchored=False),
+        include_client_ip=False,
+    )
+
+
+def test_parse_forwarded_request_rejects_unsigned_original_unanchored_status() -> None:
+    payload = _payload()
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=True,
+        downstream_turn_state="http_turn_generated",
+        original_request_unanchored=True,
+        original_affinity_kind="session_header",
+        original_affinity_key="sid-123",
+    )
+    headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
+    headers.pop(HTTP_BRIDGE_ORIGINAL_UNANCHORED_SIGNATURE_HEADER)
+
+    forwarded, error = parse_forwarded_request(
+        headers,
+        payload=payload,
+        current_instance="instance-b",
+    )
+
+    assert forwarded is None
+    assert error is not None
+    assert error.status_code == 400
+    assert error.payload["error"]["code"] == "bridge_forward_invalid"
 
 
 def test_parse_forwarded_request_rejects_missing_signature() -> None:

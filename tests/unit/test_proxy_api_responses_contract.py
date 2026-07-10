@@ -1021,7 +1021,8 @@ async def test_internal_bridge_responses_disables_openai_sdk_contract(
         origin_instance="origin-a",
         target_instance="owner-b",
         codex_session_affinity=True,
-        downstream_turn_state=None,
+        downstream_turn_state="http_turn_generated",
+        original_request_unanchored=True,
         original_affinity_kind="session",
         original_affinity_key="sid-abc",
         reservation=None,
@@ -1048,7 +1049,7 @@ async def test_internal_bridge_responses_disables_openai_sdk_contract(
     class _StubRequest:
         @property
         def headers(self) -> dict[str, str]:
-            return {}
+            return {"x-codex-turn-state": "http_turn_generated"}
 
     response = await proxy_api_module.internal_bridge_responses(
         request=cast(Any, _StubRequest()),
@@ -1068,3 +1069,7 @@ async def test_internal_bridge_responses_disables_openai_sdk_contract(
     assert kwargs.get("enforce_openai_sdk_contract") is False, (
         f"internal_bridge_responses must pass enforce_openai_sdk_contract=False; got kwargs={kwargs!r}"
     )
+    assert kwargs.get("forwarded_downstream_turn_state") == "http_turn_generated"
+    forwarded_headers = kwargs.get("forwarded_headers")
+    assert isinstance(forwarded_headers, dict)
+    assert "x-codex-turn-state" not in forwarded_headers

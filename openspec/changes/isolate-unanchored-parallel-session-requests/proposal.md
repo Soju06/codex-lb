@@ -15,6 +15,7 @@ model metadata while the foreground request is still active.
   session is creating, already serving a visible request, or belongs to another
   model class.
 - Reserve an idle canonical bridge across the lookup-to-submit boundary.
+- Preserve the origin request's unanchored status through signed owner forwarding and cancellation.
 - Keep `previous_response_id` and turn-state requests on their hard continuity
   session.
 - Keep durable aliases derived from a forked lane hard owner- and account-bound.

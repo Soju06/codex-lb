@@ -288,6 +288,10 @@ class _HTTPBridgeOwnerForwardingMixin:
             reservation=api_key_reservation,
             codex_session_affinity=codex_session_affinity,
             downstream_turn_state=forwarded_turn_state,
+            original_request_unanchored=(
+                _header_value_case_insensitive(headers, "x-codex-turn-state") is None
+                and payload.previous_response_id is None
+            ),
             original_affinity_kind=owner_forward.key.affinity_kind,
             original_affinity_key=owner_forward.key.affinity_key,
             client_ip=client_ip,

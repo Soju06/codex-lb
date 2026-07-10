@@ -842,7 +842,7 @@ def _http_bridge_has_durable_recovery_anchor(
         return True
     if durable_lookup is None or durable_lookup.latest_response_id is None:
         return False
-    return durable_lookup.canonical_kind in {"turn_state_header", "session_header"}
+    return durable_lookup.canonical_kind in _HARD_HTTP_BRIDGE_AFFINITY_KINDS
 
 
 def _http_bridge_can_local_recover_without_ring(

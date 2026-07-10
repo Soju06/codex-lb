@@ -78,6 +78,7 @@ from app.modules.proxy._service.http_bridge.registry import (
     unregister_turn_states_locked,
 )
 from app.modules.proxy._service.http_bridge.service_stubs import (
+    _call_with_supported_optional_kwargs,
     _classify_upstream_close,
     _count_external_image_urls,
     _enforce_response_create_size_limit,
@@ -1349,6 +1350,32 @@ class _HTTPBridgeRequestSubmitMixin:
             request_state,
             require_security_work_authorized=True,
         )
+
+    async def _claim_http_bridge_replacement_before_swap(
+        self: Any,
+        session: "_HTTPBridgeSession",
+        *,
+        account_id: str,
+        upstream: Any,
+        release_selected_account_lease: Any,
+    ) -> None:
+        if account_id == session.account.id or session.durable_session_id is None:
+            return
+        try:
+            await _call_with_supported_optional_kwargs(
+                self._claim_durable_http_bridge_session,
+                session,
+                optional_kwargs={"claim_account_id": account_id},
+                allow_takeover=True,
+                force_owner_epoch_advance=True,
+            )
+        except BaseException:
+            try:
+                await upstream.close()
+            except Exception:
+                logger.debug("Failed to close unclaimed HTTP bridge replacement websocket", exc_info=True)
+            await release_selected_account_lease()
+            raise
 
     async def _retry_http_bridge_owner_failover_request(
         self: Any,

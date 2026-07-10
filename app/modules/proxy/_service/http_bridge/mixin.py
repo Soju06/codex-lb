@@ -2368,28 +2368,12 @@ class _HTTPBridgeMixin(
                     continue
                 await release_selected_account_lease()
                 raise
-        # Commit a cross-account migration to durable state before exposing
-        # the replacement upstream to other bridge operations. A rejected
-        # durable claim leaves the current owner/session untouched.
-        if account.id != old_account_id and session.durable_session_id is not None:
-            try:
-                await _call_with_supported_optional_kwargs(
-                    self._claim_durable_http_bridge_session,
-                    session,
-                    optional_kwargs={"claim_account_id": account.id},
-                    allow_takeover=True,
-                    force_owner_epoch_advance=True,
-                )
-            except BaseException:
-                try:
-                    await upstream.close()
-                except Exception:
-                    logger.debug(
-                        "Failed to close unclaimed HTTP bridge replacement websocket",
-                        exc_info=True,
-                    )
-                await release_selected_account_lease()
-                raise
+        await self._claim_http_bridge_replacement_before_swap(
+            session,
+            account_id=account.id,
+            upstream=upstream,
+            release_selected_account_lease=release_selected_account_lease,
+        )
         try:
             await old_upstream.close()
         except Exception:

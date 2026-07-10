@@ -348,6 +348,78 @@ class _FakeBridgeUpstreamWebSocket:
         return None
 
 
+class _InterruptedCustomToolUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
+    """First response completes with an unresolved ``custom_tool_call``."""
+
+    async def send_text(self, text: str) -> None:
+        self.sent_text.append(text)
+        response_id = f"resp_bridge_custom_{len(self.sent_text)}"
+        await self._messages.put(
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "response.created",
+                        "response": {"id": response_id, "object": "response", "status": "in_progress"},
+                    },
+                    separators=(",", ":"),
+                ),
+            )
+        )
+        if len(self.sent_text) == 1:
+            await self._messages.put(
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.output_item.done",
+                            "response_id": response_id,
+                            "item": {
+                                "id": "ctc_shell",
+                                "type": "custom_tool_call",
+                                "status": "completed",
+                                "call_id": "call_custom_shell",
+                                "name": "shell",
+                                "input": "pwd",
+                            },
+                            "output_index": 0,
+                        },
+                        separators=(",", ":"),
+                    ),
+                )
+            )
+        await self._messages.put(
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "response.completed",
+                        "response": {
+                            "id": response_id,
+                            "object": "response",
+                            "status": "completed",
+                            "output": [
+                                {
+                                    "type": "message",
+                                    "role": "assistant",
+                                    "content": [{"type": "output_text", "text": "OK"}],
+                                }
+                            ],
+                            "usage": {
+                                "input_tokens": 24,
+                                "output_tokens": 2,
+                                "total_tokens": 26,
+                                "input_tokens_details": {"cached_tokens": 20},
+                                "output_tokens_details": {"reasoning_tokens": 0},
+                            },
+                        },
+                    },
+                    separators=(",", ":"),
+                ),
+            )
+        )
+
+
 class _ClosingBridgeUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
     async def send_text(self, text: str) -> None:
         await super().send_text(text)
@@ -3832,6 +3904,126 @@ async def test_v1_responses_http_bridge_reuses_upstream_websocket_and_preserves_
     assert first_upstream_payload["client_metadata"]["x-codex-installation-id"] == account.codex_installation_id
     assert first_upstream_payload["client_metadata"]["x-codex-installation-id"] != "client-spoofed-installation-id"
     assert json.loads(fake_upstream.sent_text[1])["previous_response_id"] == "resp_bridge_1"
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_http_bridge_injects_interrupted_custom_tool_output_on_followup(
+    async_client,
+    monkeypatch,
+):
+    _install_bridge_settings(monkeypatch, enabled=True)
+    account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_custom_interrupt",
+        "http-bridge-custom-interrupt@example.com",
+    )
+    account = await _get_account(account_id)
+    fake_upstream = _InterruptedCustomToolUpstreamWebSocket()
+
+    async def fake_select_account_with_budget(
+        self,
+        deadline,
+        *,
+        request_id,
+        kind,
+        request_stage="first_turn",
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset_accounts,
+        routing_strategy,
+        model,
+        exclude_account_ids=None,
+        additional_limit_name=None,
+        api_key=None,
+        preferred_account_id=None,
+    ):
+        del preferred_account_id
+        del (
+            self,
+            deadline,
+            request_id,
+            kind,
+            request_stage,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset_accounts,
+            routing_strategy,
+            model,
+            exclude_account_ids,
+            additional_limit_name,
+        )
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        return fake_upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    interrupted_user_message = {
+        "role": "user",
+        "content": [
+            {
+                "type": "input_text",
+                "text": "<turn_aborted>\nThe user interrupted the previous turn on purpose.\n</turn_aborted>",
+            }
+        ],
+    }
+    first = await async_client.post(
+        "/v1/responses",
+        json={
+            "model": "gpt-5.1",
+            "instructions": "Use the shell tool.",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "run the shell tool"}]}],
+            "prompt_cache_key": "http-bridge-custom-interrupt-1",
+        },
+    )
+    assert first.status_code == 200
+    first_body = first.json()
+    assert first_body["id"] == "resp_bridge_custom_1"
+
+    second = await async_client.post(
+        "/v1/responses",
+        json={
+            "model": "gpt-5.1",
+            "instructions": "Use the shell tool.",
+            "previous_response_id": first_body["id"],
+            "input": [interrupted_user_message],
+            "prompt_cache_key": "http-bridge-custom-interrupt-1",
+        },
+    )
+    assert second.status_code == 200
+    assert second.json()["id"] == "resp_bridge_custom_2"
+
+    assert len(fake_upstream.sent_text) == 2
+    second_upstream_payload = json.loads(fake_upstream.sent_text[1])
+    assert second_upstream_payload["previous_response_id"] == "resp_bridge_custom_1"
+    interrupted_tool_output = (
+        "Tool call was not executed because the previous turn was interrupted before tool output was available."
+    )
+    assert second_upstream_payload["input"][0] == {
+        "type": "custom_tool_call_output",
+        "call_id": "call_custom_shell",
+        "output": interrupted_tool_output,
+    }
+    assert second_upstream_payload["input"][1] == interrupted_user_message
 
 
 @pytest.mark.asyncio

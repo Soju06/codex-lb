@@ -1,0 +1,5 @@
+- [x] 1. Record completed `custom_tool_call` / `apply_patch_call` items (with item type) in the pending tool-call trackers on both the WebSocket route and the HTTP bridge upstream readers.
+- [x] 2. Synthesize the matching interrupted output item type per pending call type on the WebSocket route injection path.
+- [x] 3. Inject synthetic interrupted outputs on the HTTP bridge when a follow-up anchors on the session's last completed response id.
+- [x] 4. Extend `_is_missing_tool_output_error` to match the custom tool call and apply patch call message variants.
+- [x] 5. Add regression tests at the WebSocket route and HTTP bridge surfaces plus a classifier unit test.

@@ -459,11 +459,13 @@ def _record_websocket_continuity_completion(
         continuity_state.last_completed_input_count = 0
         continuity_state.last_completed_input_prefix_fingerprint = None
         continuity_state.last_pending_function_call_ids = []
+        continuity_state.last_pending_tool_call_types = {}
         return
     continuity_state.last_completed_response_id = response_id
     continuity_state.last_completed_input_count = request_state.input_item_count
     continuity_state.last_completed_input_prefix_fingerprint = request_state.input_full_fingerprint
     continuity_state.last_pending_function_call_ids = list(request_state.pending_function_call_ids)
+    continuity_state.last_pending_tool_call_types = dict(request_state.pending_tool_call_types)
 
 
 def _record_websocket_responses_lite_acceptance(

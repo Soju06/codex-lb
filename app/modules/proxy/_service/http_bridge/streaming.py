@@ -89,10 +89,12 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
     _fingerprint_input_items,
     _header_value_case_insensitive,
     _http_bridge_startup_keepalive_grace_seconds,
+    _inject_missing_interrupted_function_call_outputs,
     _input_prefix_matches_stored_context,
     _is_previous_response_not_found_error,
     _maybe_log_proxy_request_payload,
     _maybe_log_proxy_request_shape,
+    _missing_function_call_outputs_for_previous_response,
     _normalize_service_tier_value,
     _normalize_session_id,
     _openai_error_envelope_from_response_failed_payload,
@@ -265,6 +267,57 @@ async def _iter_account_capacity_wait_sse(
         )
         await asyncio.sleep(chunk_seconds)
         remaining_sleep_seconds -= chunk_seconds
+
+
+def _http_bridge_text_with_interrupted_tool_outputs(
+    session: _HTTPBridgeSession,
+    *,
+    request_state: _WebSocketRequestState,
+    text_data: str,
+    request_id: str,
+) -> str:
+    """Prepend synthetic interrupted tool outputs to an anchored bridge request.
+
+    When the session's last completed response left tool-call items pending
+    (the turn was interrupted before their outputs were sent) and the outgoing
+    request anchors on that response id without supplying those outputs,
+    upstream rejects it with ``No tool output found for ... call_``. Mirror
+    the direct WebSocket route by injecting synthetic outputs of the matching
+    item type instead.
+    """
+    if not session.last_pending_tool_calls or session.last_completed_response_id is None:
+        return text_data
+    try:
+        payload = json.loads(text_data)
+    except (TypeError, ValueError):
+        return text_data
+    if not isinstance(payload, dict):
+        return text_data
+    if payload.get("previous_response_id") != session.last_completed_response_id:
+        return text_data
+    input_items = payload.get("input")
+    if not isinstance(input_items, list):
+        return text_data
+    missing_call_ids = _missing_function_call_outputs_for_previous_response(
+        input_items,
+        pending_call_ids=list(session.last_pending_tool_calls),
+    )
+    if not missing_call_ids:
+        return text_data
+    payload["input"] = _inject_missing_interrupted_function_call_outputs(
+        input_items,
+        missing_call_ids=missing_call_ids,
+        pending_call_types=session.last_pending_tool_calls,
+    )
+    updated_text = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+    request_state.request_text = updated_text
+    logger.warning(
+        "http_bridge_interrupted_tool_outputs_injected request_id=%s previous_response_id=%s missing_call_count=%s",
+        request_id,
+        session.last_completed_response_id,
+        len(missing_call_ids),
+    )
+    return updated_text
 
 
 class _HTTPBridgeStreamingMixin:
@@ -966,6 +1019,11 @@ class _HTTPBridgeStreamingMixin:
             and durable_lookup is not None
             and durable_lookup.latest_response_id is not None
         ):
+            if durable_lookup.latest_response_id != session.last_completed_response_id:
+                # The pending tool calls were recorded for the session's own
+                # last completed response; a durable anchor pointing elsewhere
+                # must not trigger interrupted-output injection.
+                session.last_pending_tool_calls = {}
             session.last_completed_response_id = durable_lookup.latest_response_id
             session.last_completed_input_count = durable_full_resend_anchor_count
             session.last_completed_input_prefix_fingerprint = durable_full_resend_anchor_fingerprint
@@ -1093,6 +1151,12 @@ class _HTTPBridgeStreamingMixin:
                     stored_count,
                     effective_payload.previous_response_id,
                 )
+        text_data = _http_bridge_text_with_interrupted_tool_outputs(
+            session,
+            request_state=request_state,
+            text_data=text_data,
+            request_id=request_id,
+        )
         session_events: AsyncGenerator[str, None] = self._stream_http_bridge_session_events(
             session,
             request_state=request_state,

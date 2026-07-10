@@ -10968,6 +10968,84 @@ async def test_process_http_bridge_upstream_text_masks_unmatched_missing_tool_ou
 
 
 @pytest.mark.asyncio
+async def test_process_http_bridge_upstream_text_masks_missing_custom_tool_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    finalize_request_state = AsyncMock()
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize_request_state)
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-missing-custom-tool",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        previous_response_id="resp_missing_custom_tool",
+        event_queue=asyncio.Queue(),
+        transport="http",
+        skip_request_log=True,
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-custom-123", None),
+        headers={"x-codex-session-id": "sid-custom-123"},
+        affinity=proxy_service._AffinityPolicy(
+            key="sid-custom-123",
+            kind=proxy_service.StickySessionKind.CODEX_SESSION,
+        ),
+        request_model="gpt-5.4",
+        account=cast(Any, SimpleNamespace(id="acc-1", status=AccountStatus.ACTIVE)),
+        upstream=cast(UpstreamResponsesWebSocket, SimpleNamespace(close=AsyncMock())),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=1.0,
+        idle_ttl_seconds=120.0,
+    )
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {
+                "type": "error",
+                "status": 400,
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "invalid_request_error",
+                    "message": "No tool output found for custom tool call call_missing_custom_output.",
+                    "param": "input",
+                },
+            },
+            separators=(",", ":"),
+        ),
+    )
+
+    event_queue = request_state.event_queue
+    assert event_queue is not None
+    event_block = await event_queue.get()
+    assert event_block is not None
+    assert await event_queue.get() is None
+    payload = proxy_service.parse_sse_data_json(event_block)
+    assert isinstance(payload, dict)
+    response = payload.get("response")
+    assert isinstance(response, dict)
+    error = response.get("error")
+    assert isinstance(error, dict)
+    assert payload["type"] == "response.failed"
+    assert error["code"] == "stream_incomplete"
+    assert "call_missing_custom_output" not in json.dumps(payload)
+    assert request_state.error_http_status_override == 502
+
+    assert session.upstream_control.reconnect_requested is True
+    assert session.pending_requests == deque()
+    assert finalize_request_state.await_count == 1
+
+
+@pytest.mark.asyncio
 async def test_process_http_bridge_upstream_text_does_not_mask_unmatched_missing_tool_output_across_chains(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

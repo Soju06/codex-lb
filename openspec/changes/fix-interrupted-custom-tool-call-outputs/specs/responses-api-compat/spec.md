@@ -1,0 +1,32 @@
+## ADDED Requirements
+
+### Requirement: Interrupted tool calls receive synthetic outputs on anchored follow-ups
+The service MUST track tool-call items completed by a streamed response that may still require a tool output — `function_call`, `custom_tool_call`, and `apply_patch_call` — together with each call's item type. When a follow-up `response.create` anchors on that completed response via `previous_response_id` and its input omits an output item for a tracked call id, the service MUST prepend a synthetic interrupted output item whose type matches the originating call type (`function_call` -> `function_call_output`, `custom_tool_call` -> `custom_tool_call_output`, `apply_patch_call` -> `apply_patch_call_output`) before forwarding the request upstream. This applies to the direct WebSocket route and to the HTTP responses bridge session path.
+
+#### Scenario: interrupted custom tool call on the WebSocket route
+- **GIVEN** a WebSocket `response.create` turn completes with a `custom_tool_call` item whose output was never sent (the turn was interrupted)
+- **WHEN** the next `response.create` on the same session references that response via `previous_response_id` without a `custom_tool_call_output` for the pending call id
+- **THEN** the service prepends a synthetic `custom_tool_call_output` item for that call id to the upstream input
+- **AND** the follow-up does not fail with an upstream `No tool output found for custom tool call` error
+
+#### Scenario: interrupted custom tool call on the HTTP bridge
+- **GIVEN** an HTTP bridge session completes a response containing a `custom_tool_call` item whose output was never sent
+- **WHEN** the next bridge request anchors on that response id (client-sent or proxy-injected `previous_response_id`) without an output item for the pending call id
+- **THEN** the service prepends a synthetic `custom_tool_call_output` item for that call id to the upstream input
+
+#### Scenario: interrupted function call keeps existing output type
+- **WHEN** the pending tool call recorded from the previous response is a `function_call`
+- **THEN** the synthetic interrupted output item is a `function_call_output` (existing behavior preserved)
+
+#### Scenario: follow-up that carries the tool output is not modified
+- **WHEN** the anchored follow-up input already contains a `function_call_output`, `custom_tool_call_output`, or `apply_patch_call_output` item for a pending call id
+- **THEN** the service does not inject a synthetic output for that call id
+
+### Requirement: Missing-tool-output classification covers all tool call variants
+The service MUST classify an upstream `invalid_request_error` with `param=input` whose message starts with `No tool output found for function call call_`, `No tool output found for custom tool call call_`, or `No tool output found for apply patch call call_` as a missing-tool-output continuity error, so the existing masking and retry recovery paths engage instead of forwarding the raw upstream 400 downstream.
+
+#### Scenario: custom tool call variant is masked on the HTTP bridge
+- **WHEN** upstream emits `invalid_request_error` with `param=input` and message `No tool output found for custom tool call call_x`
+- **AND** the pending bridge request carries `previous_response_id`
+- **THEN** the service rewrites the error to a retryable `stream_incomplete` continuity failure
+- **AND** the raw upstream message and call id are not exposed downstream

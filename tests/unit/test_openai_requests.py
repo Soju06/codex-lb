@@ -1077,6 +1077,40 @@ def test_compact_trimming_preserves_codex_goal_context_anchor_from_middle():
     assert dumped_input[-1] == input_items[-1]
 
 
+def test_compact_trimming_preserves_non_message_developer_directive_from_middle():
+    developer_directive = {
+        "type": "future_directive",
+        "role": "developer",
+        "directive": {"mode": "strict", "budget": 3},
+    }
+    input_items = [
+        {"role": "user", "content": "initial instructions"},
+        {"role": "assistant", "content": "x" * 300_000},
+        developer_directive,
+        # Large enough to exhaust the tail budget on its own, so the directive
+        # in the middle survives only if it is treated as a trim anchor.
+        {"role": "assistant", "content": "y" * 500_000},
+        {"role": "user", "content": "latest request"},
+    ]
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": input_items,
+    }
+
+    request = ResponsesCompactRequest.model_validate(payload)
+    dumped = request.to_payload()
+    dumped_input = dumped["input"]
+
+    assert isinstance(dumped_input, list)
+    assert dumped_input[0] == input_items[0]
+    assert developer_directive in dumped_input
+    assert dumped_input[-1] == input_items[-1]
+    # Trimming actually occurred: the oversized filler items were dropped.
+    assert input_items[1] not in dumped_input
+    assert input_items[3] not in dumped_input
+
+
 def test_compact_trimming_preserves_plan_and_goal_tool_call_outputs():
     update_plan_call = {
         "type": "function_call",

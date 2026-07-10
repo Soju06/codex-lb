@@ -11,9 +11,12 @@ field. Any `system`/`developer`-role input item carrying any other `type`
 value, including item types the service does not model, MUST be forwarded
 upstream unchanged and in its original input position. This preservation MUST
 hold both when the request is validated and when the request is serialized for
-upstream delivery. Requests whose input contains an `additional_tools` item
-remain governed by the Responses Lite rule that leaves the entire input array
-and top-level `instructions` unchanged.
+upstream delivery. When compact requests exceed the upstream input budget and
+the service trims the input middle, preserved non-message `system`/`developer`
+items MUST be treated as trim anchors and retained in the trimmed payload
+rather than replaced by the trim marker. Requests whose input contains an
+`additional_tools` item remain governed by the Responses Lite rule that leaves
+the entire input array and top-level `instructions` unchanged.
 
 #### Scenario: unknown non-message developer input item survives normalization
 
@@ -24,6 +27,15 @@ and top-level `instructions` unchanged.
 - **AND** the `future_directive` item remains in `input` unchanged, in its
   original position
 - **AND** the upstream-serialized payload retains the item unchanged
+
+#### Scenario: preserved directive survives compact input trimming
+
+- **WHEN** a compact request is large enough to trigger upstream input
+  trimming and its input middle contains a typed, non-message
+  `system`/`developer` item such as
+  `{"type": "future_directive", "role": "developer", ...}`
+- **THEN** the trimmed upstream payload retains the item unchanged
+- **AND** the item is not replaced by the trim marker
 
 #### Scenario: typeless system messages keep hoisting behavior
 

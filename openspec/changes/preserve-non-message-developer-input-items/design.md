@@ -20,3 +20,10 @@ when a Lite tool bundle is present, the entire input array (including the
 adjacent developer instructions message) is deliberately left untouched so the
 native Codex wire shape reaches upstream byte-for-byte. The per-item type guard
 is the general safety net for every other non-message typed item.
+
+Compact upstream trimming applies the same rule: `_compact_state_anchor_indices()`
+treats any `system`/`developer`-role item whose `type` is present and not
+`"message"` as a trim anchor, so a preserved directive sitting in the trimmed
+middle of an oversized compact request is kept in place instead of being
+replaced by the trim marker. Existing anchors (`additional_tools`, compact
+state items, and reconciled tool calls) are unaffected.

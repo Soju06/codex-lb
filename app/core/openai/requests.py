@@ -894,6 +894,8 @@ def _compact_state_anchor_indices(input_value: list[JsonValue]) -> set[int]:
                     developer_type = developer_item.get("type")
                     if developer_type is None or developer_type == "message":
                         preserved_indices.add(developer_index)
+        if _compact_item_is_preserved_non_message_directive(item_mapping):
+            preserved_indices.add(index)
         if _compact_item_is_state_anchor(item_mapping):
             preserved_indices.add(index)
             call_id = item_mapping.get("call_id")
@@ -995,6 +997,17 @@ def _compact_reconciled_tool_call_indices(
             if not add_indices(matched_output_indices):
                 remove_indices([call_index, *matched_output_indices])
     return reconciled
+
+
+def _compact_item_is_preserved_non_message_directive(item: Mapping[str, JsonValue]) -> bool:
+    # Mirror the instruction-normalization guard: any system/developer-role item
+    # whose type is present and not "message" is preserved verbatim during
+    # normalization, so compact trimming must anchor it in place instead of
+    # replacing it with the trim marker.
+    if item.get("role") not in ("system", "developer"):
+        return False
+    item_type = item.get("type")
+    return item_type is not None and item_type != "message"
 
 
 def _compact_item_is_state_anchor(item: Mapping[str, JsonValue]) -> bool:

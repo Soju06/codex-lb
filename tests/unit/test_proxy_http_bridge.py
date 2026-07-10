@@ -658,8 +658,10 @@ async def test_http_bridge_activity_snapshot_counts_closed_admission_waiter_as_r
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("downstream_visible", [False, True])
 async def test_response_create_gate_timeout_retires_session_with_old_pending_visible_request(
     monkeypatch: pytest.MonkeyPatch,
+    downstream_visible: bool,
 ) -> None:
     settings = _make_app_settings(
         proxy_admission_wait_timeout_seconds=0.001,
@@ -680,7 +682,9 @@ async def test_response_create_gate_timeout_retires_session_with_old_pending_vis
         transport="http",
         response_create_gate_acquired=True,
         awaiting_response_created=True,
-        downstream_visible=False,
+        # HTTP status/keepalive delivery can make the downstream visible before
+        # upstream response.created.  That must not exempt a stale gate holder.
+        downstream_visible=downstream_visible,
     )
     waiter = proxy_service._WebSocketRequestState(
         request_id="req-visible-waiter",

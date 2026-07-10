@@ -72,6 +72,10 @@ from app.modules.usage.repository import AdditionalUsageRepository, UsageReposit
 pytestmark = pytest.mark.unit
 
 
+def test_compact_wire_budget_rejection_is_account_neutral() -> None:
+    assert proxy_service._is_account_neutral_error_code("responses_compact_input_too_large") is True
+
+
 def test_websocket_archive_request_context_clears_unmatched_frame_request_id():
     token = set_request_id("req_previous_response")
     try:
@@ -6888,6 +6892,69 @@ async def test_compact_responses_derives_lite_http_header_from_additional_tools(
     upstream_payload = cast(dict[str, object], session.calls[0]["json"])
     assert cast(list[object], upstream_payload["input"])[0] == additional_tools
     assert cast(list[object], upstream_payload["input"])[1] == developer_instructions
+
+
+@pytest.mark.asyncio
+async def test_compact_responses_rejects_image_inlining_that_exceeds_wire_budget(monkeypatch):
+    class Settings:
+        upstream_base_url = "https://chatgpt.com/backend-api"
+        upstream_connect_timeout_seconds = 1.0
+        upstream_compact_timeout_seconds = 12.0
+        image_inline_fetch_enabled = True
+        log_upstream_request_payload = False
+
+    async def fake_inline(payload_dict, session, connect_timeout):
+        del payload_dict, session, connect_timeout
+        return {
+            "model": "gpt-5.1",
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_image",
+                            "image_url": "data:image/png;base64," + "A" * 500_000,
+                        }
+                    ],
+                }
+            ],
+            "parallel_tool_calls": False,
+        }
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
+    monkeypatch.setattr(proxy_module, "_inline_input_image_urls", fake_inline)
+
+    payload = proxy_module.ResponsesCompactRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "compact this image",
+            "input": [
+                {
+                    "role": "user",
+                    "content": [{"type": "input_image", "image_url": "https://example.com/image.png"}],
+                }
+            ],
+        }
+    )
+    session = _CompactSession(
+        _JsonCompactResponse(
+            {"object": "response.compaction", "compaction_summary": {"encrypted_content": "unexpected"}}
+        )
+    )
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await proxy_module.compact_responses(
+            payload,
+            headers={},
+            access_token="token",
+            account_id="acc_1",
+            session=cast(proxy_module.aiohttp.ClientSession, session),
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.payload["error"]["code"] == "responses_compact_input_too_large"
+    assert exc_info.value.payload["error"]["param"] == "input"
+    assert session.calls == []
 
 
 @pytest.mark.asyncio

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Mapping, cast
 
 import pytest
@@ -7,6 +8,8 @@ from pydantic import ValidationError
 
 from app.core.openai.exceptions import ClientPayloadError
 from app.core.openai.requests import (
+    _ESTIMATED_CHARS_PER_TOKEN,
+    _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS,
     ResponsesCompactRequest,
     ResponsesRequest,
     _input_image_file_reference,
@@ -902,6 +905,23 @@ def test_compact_does_not_trim_many_small_input_items_for_upstream():
     assert dumped_input == input_items
 
 
+def test_compact_many_small_items_include_array_wire_framing_in_budget():
+    input_items = [{"role": "user", "content": ""} for _ in range(14_285)]
+
+    dumped_input = ResponsesCompactRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": input_items,
+        }
+    ).to_payload()["input"]
+
+    assert isinstance(dumped_input, list)
+    assert len(dumped_input) < len(input_items)
+    wire_bytes = len(json.dumps(dumped_input, ensure_ascii=True, sort_keys=True).encode("utf-8"))
+    assert wire_bytes <= _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS * _ESTIMATED_CHARS_PER_TOKEN
+
+
 def test_compact_trims_oversized_input_by_estimated_tokens_with_head_tail_and_marker():
     input_items = [
         {"role": "user", "content": "initial goal and instructions"},
@@ -973,6 +993,34 @@ def test_compact_trimming_preserves_oversized_responses_lite_prefix():
     assert dumped_input[-1] == input_items[-1]
 
 
+def test_compact_trimming_preserves_role_only_responses_lite_developer_message():
+    additional_tools = {
+        "type": "additional_tools",
+        "role": "developer",
+        "tools": [{"type": "custom", "name": "exec"}],
+    }
+    developer_message = {
+        "role": "developer",
+        "content": "developer instructions",
+    }
+    payload = {
+        "model": "gpt-5.6-sol",
+        "instructions": "",
+        "input": [
+            additional_tools,
+            developer_message,
+            {"role": "assistant", "content": "y" * 500_000},
+            {"role": "user", "content": "latest request"},
+        ],
+    }
+
+    dumped_input = ResponsesCompactRequest.model_validate(payload).to_payload()["input"]
+
+    assert isinstance(dumped_input, list)
+    assert additional_tools in dumped_input
+    assert developer_message in dumped_input
+
+
 def test_compact_rejects_responses_lite_prelude_that_exceeds_upstream_limit():
     payload = {
         "model": "gpt-5.6-sol",
@@ -1011,31 +1059,34 @@ def test_compact_rejects_responses_lite_prelude_that_exceeds_upstream_limit():
     assert raised.value.code == "responses_compact_input_too_large"
 
 
-def test_compact_rejects_anchor_selection_that_still_exceeds_upstream_limit():
+def test_compact_drops_optional_head_context_when_required_selection_fits():
+    input_items = [
+        {
+            "type": "additional_tools",
+            "role": "developer",
+            "tools": [{"type": "custom", "name": "exec", "description": "a" * 4_000}],
+        },
+        {"type": "message", "role": "developer", "content": "prelude"},
+        {"type": "message", "role": "user", "content": "h" * 32_000},
+        {"type": "message", "role": "assistant", "content": "m" * 80_000},
+        {"type": "message", "role": "developer", "content": "d" * 360_000},
+        {"type": "message", "role": "user", "content": "z" * 4_000},
+    ]
     payload = {
         "model": "gpt-5.6-sol",
         "instructions": "",
-        "input": [
-            {
-                "type": "additional_tools",
-                "role": "developer",
-                "tools": [{"type": "custom", "name": "exec", "description": "a" * 4_000}],
-            },
-            {"type": "message", "role": "developer", "content": "prelude"},
-            {"type": "message", "role": "user", "content": "h" * 32_000},
-            {"type": "message", "role": "assistant", "content": "m" * 80_000},
-            {"type": "message", "role": "developer", "content": "d" * 360_000},
-            {"type": "message", "role": "user", "content": "z" * 4_000},
-        ],
+        "input": input_items,
     }
 
     request = ResponsesCompactRequest.model_validate(payload)
+    dumped_input = request.to_payload()["input"]
 
-    with pytest.raises(ClientPayloadError, match="still exceeds the upstream size limit") as raised:
-        request.to_payload()
-
-    assert raised.value.param == "input"
-    assert raised.value.code == "responses_compact_input_too_large"
+    assert isinstance(dumped_input, list)
+    assert input_items[2] not in dumped_input
+    for required_item in (input_items[0], input_items[1], input_items[4], input_items[5]):
+        assert required_item in dumped_input
+    wire_bytes = len(json.dumps(dumped_input, ensure_ascii=True, sort_keys=True).encode("utf-8"))
+    assert wire_bytes <= _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS * _ESTIMATED_CHARS_PER_TOKEN
 
 
 def test_compact_trimming_drops_oversized_leading_item():
@@ -1076,7 +1127,7 @@ def test_compact_trimming_rejects_oversized_latest_item():
 
     request = ResponsesCompactRequest.model_validate(payload)
 
-    with pytest.raises(ClientPayloadError, match="still exceeds the upstream size limit") as raised:
+    with pytest.raises(ClientPayloadError, match="exceeds the upstream size limit") as raised:
         request.to_payload()
 
     assert raised.value.param == "input"
@@ -1095,7 +1146,7 @@ def test_compact_rejects_unicode_item_that_expands_past_wire_budget():
 
     assert request_with_content("x" * 40_000).to_payload()["input"]
 
-    with pytest.raises(ClientPayloadError, match="still exceeds the upstream size limit") as raised:
+    with pytest.raises(ClientPayloadError, match="exceeds the upstream size limit") as raised:
         request_with_content("😀" * 40_000).to_payload()
 
     assert raised.value.param == "input"

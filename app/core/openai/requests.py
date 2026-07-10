@@ -346,51 +346,6 @@ def responses_input_uses_lite_tools(input_value: JsonValue) -> bool:
     return is_json_list(input_value) and _is_responses_lite_input(input_value)
 
 
-def responses_lite_continuity_delta_input(
-    input_items: list[JsonValue],
-    *,
-    stored_count: int,
-) -> list[JsonValue]:
-    stored_prefix = input_items[:stored_count]
-    lite_prelude: list[JsonValue] = []
-    lite_started = False
-    for item in stored_prefix:
-        item_mapping = _json_mapping_or_none(item)
-        if item_mapping is None:
-            if lite_started:
-                break
-            continue
-        item_type = item_mapping.get("type")
-        if item_type == "additional_tools":
-            lite_started = True
-            lite_prelude.append(item)
-            continue
-        if (
-            lite_started
-            and item_type in {None, "message"}
-            and item_mapping.get("role")
-            in {
-                "system",
-                "developer",
-            }
-        ):
-            lite_prelude.append(item)
-            continue
-        if lite_started:
-            break
-    return [*lite_prelude, *input_items[stored_count:]]
-
-
-def _is_responses_instruction_message_item(item: Mapping[str, JsonValue]) -> bool:
-    role = item.get("role")
-    if role not in ("system", "developer"):
-        return False
-    item_type = item.get("type")
-    # Responses Lite encodes tool declarations as developer input items with
-    # type=additional_tools. Only role messages should be folded into the
-    # top-level instructions field.
-    return item_type is None or item_type == "message"
-
 def _merge_responses_instructions(existing: str, extra_parts: list[str]) -> str:
     extra = "\n".join(part for part in extra_parts if part)
     if not extra:
@@ -900,15 +855,18 @@ def _trim_compact_input_for_upstream(payload: MutableJsonObject) -> None:
     input_value = payload.get("input")
     if not is_json_list(input_value):
         return
-    token_counts = [_estimated_json_tokens(item) for item in input_value]
-    total_tokens = sum(token_counts)
+    token_counts = [_estimated_json_array_item_tokens(item) for item in input_value]
+    total_tokens = _estimated_json_tokens(input_value)
     if total_tokens <= _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS:
         return
 
     head_count = _compact_trim_prefix_count(token_counts)
     preserved_indices = _compact_state_anchor_indices(input_value)
-    required_input = _compact_trimmed_input_with_markers(input_value, token_counts, preserved_indices)
-    required_tokens = sum(_estimated_json_tokens(item) for item in required_input)
+    required_indices = set(preserved_indices)
+    if input_value:
+        required_indices.add(len(input_value) - 1)
+    required_input = _compact_trimmed_input_with_markers(input_value, token_counts, required_indices)
+    required_tokens = _estimated_json_tokens(required_input)
     if required_tokens > _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS:
         raise ClientPayloadError(
             "Compact input exceeds the upstream size limit and cannot be trimmed "
@@ -918,7 +876,7 @@ def _trim_compact_input_for_upstream(payload: MutableJsonObject) -> None:
         )
     selected_indices = set(preserved_indices)
     selected_indices.update(range(head_count))
-    marker_tokens = _estimated_json_tokens(_compact_trim_marker(omitted_items=0, omitted_tokens=0))
+    marker_tokens = _estimated_json_array_item_tokens(_compact_trim_marker(omitted_items=0, omitted_tokens=0))
     selected_tokens = sum(token_counts[index] for index in selected_indices)
     tail_budget = max(0, _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS - selected_tokens - marker_tokens)
     selected_indices.update(
@@ -929,18 +887,25 @@ def _trim_compact_input_for_upstream(payload: MutableJsonObject) -> None:
             token_budget=tail_budget,
         )
     )
+    selected_indices.update(required_indices)
     selected_indices = _compact_reconciled_tool_call_indices(
         input_value,
         selected_indices,
         token_counts=token_counts,
         token_budget=max(0, _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS - marker_tokens),
     )
+    selected_indices = _compact_fit_selected_indices_to_wire_budget(
+        input_value,
+        token_counts,
+        selected_indices=selected_indices,
+        required_indices=required_indices,
+    )
     trimmed_input = (
         input_value
         if len(selected_indices) == len(input_value)
         else _compact_trimmed_input_with_markers(input_value, token_counts, selected_indices)
     )
-    trimmed_tokens = sum(_estimated_json_tokens(item) for item in trimmed_input)
+    trimmed_tokens = _estimated_json_tokens(trimmed_input)
     if trimmed_tokens > _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS:
         raise ClientPayloadError(
             "Compact input still exceeds the upstream size limit after retaining required compact context.",
@@ -950,6 +915,59 @@ def _trim_compact_input_for_upstream(payload: MutableJsonObject) -> None:
     if trimmed_input is input_value:
         return
     payload["input"] = trimmed_input
+
+
+def _compact_fit_selected_indices_to_wire_budget(
+    input_value: list[JsonValue],
+    token_counts: list[int],
+    *,
+    selected_indices: set[int],
+    required_indices: set[int],
+) -> set[int]:
+    """Drop best-effort middle context until the exact serialized input fits."""
+
+    selected = set(selected_indices)
+    optional_indices = sorted(
+        selected - required_indices,
+        key=lambda index: (min(index, len(input_value) - 1 - index), index),
+        reverse=True,
+    )
+    marker_budget = max(
+        0,
+        _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS
+        - _estimated_json_array_item_tokens(_compact_trim_marker(omitted_items=0, omitted_tokens=0)),
+    )
+    for index in optional_indices:
+        candidate_input = _compact_trimmed_input_with_markers(input_value, token_counts, selected)
+        if _estimated_json_tokens(candidate_input) <= _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS:
+            break
+        trial = set(selected)
+        trial.remove(index)
+        trial = _compact_reconciled_tool_call_indices(
+            input_value,
+            trial,
+            token_counts=token_counts,
+            token_budget=marker_budget,
+        )
+        if required_indices <= trial and trial != selected:
+            selected = trial
+    return selected
+
+
+def validate_compact_input_wire_budget(payload: Mapping[str, JsonValue]) -> None:
+    """Reject compact input that exceeds the upstream budget after transformations."""
+
+    input_value = payload.get("input")
+    if not is_json_list(input_value):
+        return
+    if _estimated_json_tokens(input_value) <= _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS:
+        return
+    raise ClientPayloadError(
+        "Compact input exceeds the upstream size limit after preparing the final wire payload.",
+        param="input",
+        code="responses_compact_input_too_large",
+        error_type="invalid_request_error",
+    )
 
 
 def _compact_state_anchor_indices(input_value: list[JsonValue]) -> set[int]:
@@ -1075,7 +1093,7 @@ def _compact_item_is_state_anchor(item: Mapping[str, JsonValue]) -> bool:
     item_type = item.get("type")
     if item_type == "additional_tools":
         return True
-    if item_type == "message" and item.get("role") in {"system", "developer"}:
+    if item_type in {None, "message"} and item.get("role") in {"system", "developer"}:
         return True
     if item_type == "function_call":
         name = item.get("name")
@@ -1189,11 +1207,20 @@ def _compact_trim_marker(*, omitted_items: int, omitted_tokens: int) -> JsonObje
 
 
 def _estimated_json_tokens(value: JsonValue) -> int:
-    # Match the stdlib/aiohttp wire escaping used by compact HTTP requests so
-    # non-ASCII text cannot look small here and then expand past the upstream
-    # request-body limit when serialized as ``\uXXXX`` sequences.
-    serialized = json.dumps(value, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+    # Match stdlib/aiohttp's default JSON wire escaping and separators. Calling
+    # this on the whole input list also counts brackets, commas, and inter-item
+    # whitespace, so many individually small items cannot bypass the cap.
+    serialized = json.dumps(value, ensure_ascii=True, sort_keys=True)
     return max(1, (len(serialized) + _ESTIMATED_CHARS_PER_TOKEN - 1) // _ESTIMATED_CHARS_PER_TOKEN)
+
+
+def _estimated_json_array_item_tokens(value: JsonValue) -> int:
+    serialized = json.dumps(value, ensure_ascii=True, sort_keys=True)
+    # Every retained item also needs the array's comma-space delimiter. The
+    # final whole-array validation below accounts exactly for brackets and the
+    # missing delimiter after the last item.
+    wire_chars = len(serialized) + 2
+    return max(1, (wire_chars + _ESTIMATED_CHARS_PER_TOKEN - 1) // _ESTIMATED_CHARS_PER_TOKEN)
 
 
 def _sanitize_interleaved_reasoning_input(payload: MutableJsonObject) -> None:

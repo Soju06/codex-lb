@@ -1956,7 +1956,10 @@ class ProxyService(
 
 
 def _is_account_neutral_error_code(code: str | None) -> bool:
-    return is_local_overload_error_code(code) or code == "proxy_unavailable"
+    return is_local_overload_error_code(code) or code in {
+        "proxy_unavailable",
+        "responses_compact_input_too_large",
+    }
 
 
 def _is_local_account_cap_code(code: str | None) -> bool:

@@ -3,8 +3,11 @@ name: CI
 on:
   push:
     branches: ["main"]
+  # No `edited` type: PR title/body edits (often made by tooling right after a
+  # push) raced the `synchronize` run for the same head SHA, so every push
+  # produced a duplicate run that concurrency immediately cancelled.
   pull_request:
-    types: [opened, reopened, synchronize, edited, ready_for_review]
+    types: [opened, reopened, synchronize, ready_for_review]
   merge_group:
 
 concurrency:
@@ -217,7 +220,7 @@ jobs:
         run: make frontend-typecheck
 
   frontend-test:
-    name: Frontend tests (vitest + coverage)
+    name: Frontend tests (vitest)
     runs-on: ubuntu-24.04
     needs: changes
     if: needs.changes.outputs.frontend == 'true'
@@ -243,7 +246,14 @@ jobs:
           restore-keys: |
             bun-1.3.14-${{ runner.os }}-${{ runner.arch }}-
 
+      # PRs run vitest without coverage instrumentation for a faster signal;
+      # main pushes and the merge queue keep the full coverage run.
+      - name: Run frontend tests
+        if: github.event_name == 'pull_request'
+        run: make frontend-test-fast
+
       - name: Run frontend tests with coverage
+        if: github.event_name != 'pull_request'
         run: make frontend-test
 
   frontend-build:
@@ -328,7 +338,12 @@ jobs:
       matrix:
         slice:
           - name: unit
-          - name: integration-core
+          # integration-core is split into deterministic shards; the make
+          # target verifies the shards partition the full selection before
+          # running pytest (see .github/scripts/pytest_shards.py).
+          - name: integration-core-1
+          - name: integration-core-2
+          - name: integration-core-3
           - name: integration-bridge
           - name: e2e
     env:

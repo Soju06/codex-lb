@@ -1,5 +1,6 @@
 PYTEST_ARGS := -q -ra -o faulthandler_timeout=300 -o faulthandler_exit_on_timeout=true --timeout=180 --timeout-method=thread --durations=20
 POSTGRES_TEST_DATABASE_URL ?= postgresql+asyncpg://codex_lb:codex_lb@127.0.0.1:5432/codex_lb
+INTEGRATION_CORE_SHARD_COUNT := 3
 POSTGRES_PYTEST_TARGETS := \
 	tests/integration/test_migrations.py::test_postgresql_migration_contract_policy_and_drift_match \
 	tests/integration/test_migrations.py::test_postgresql_upgrade_head_from_empty_database \
@@ -24,7 +25,7 @@ help:
 	  '  make ci-fast                 lint/type/frontend/unit/package' \
 	  '  make ci                      full local CI gate'
 
-.PHONY: frontend-install frontend-lint frontend-typecheck frontend-test frontend-build
+.PHONY: frontend-install frontend-lint frontend-typecheck frontend-test frontend-test-fast frontend-build
 frontend-install:
 	cd frontend && bun install --frozen-lockfile
 
@@ -36,6 +37,9 @@ frontend-typecheck: frontend-install
 
 frontend-test: frontend-install
 	cd frontend && bun run test:coverage
+
+frontend-test-fast: frontend-install
+	cd frontend && bun run test
 
 frontend-build: frontend-install
 	cd frontend && bun run build
@@ -52,7 +56,9 @@ typecheck:
 	uv sync --dev --frozen
 	uv run ty check
 
-.PHONY: test-unit test-integration-core test-integration-bridge test-e2e test-postgres
+.PHONY: test-unit test-integration-core test-integration-core-shard \
+	test-integration-core-1 test-integration-core-2 test-integration-core-3 \
+	test-integration-bridge test-e2e test-postgres
 test-unit: frontend-build
 	uv sync --dev --frozen
 	PYTHONFAULTHANDLER=1 uv run pytest $(PYTEST_ARGS) tests/unit tests/test_request_logs_options_api.py
@@ -62,6 +68,24 @@ test-integration-core: frontend-build
 	PYTHONFAULTHANDLER=1 uv run pytest $(PYTEST_ARGS) tests/integration \
 	  --ignore=tests/integration/test_http_responses_bridge.py \
 	  --ignore=tests/integration/test_proxy_websocket_responses.py
+
+# CI splits integration-core into deterministic shards (test-count-weighted
+# greedy assignment; see .github/scripts/pytest_shards.py). The --verify call
+# guards that the shards always partition the full selection exactly.
+test-integration-core-shard: frontend-build
+	uv sync --dev --frozen
+	python .github/scripts/pytest_shards.py --shard-count $(INTEGRATION_CORE_SHARD_COUNT) --verify
+	PYTHONFAULTHANDLER=1 uv run pytest $(PYTEST_ARGS) \
+	  $$(python .github/scripts/pytest_shards.py --shard-count $(INTEGRATION_CORE_SHARD_COUNT) --shard $(SHARD))
+
+test-integration-core-1:
+	$(MAKE) test-integration-core-shard SHARD=1
+
+test-integration-core-2:
+	$(MAKE) test-integration-core-shard SHARD=2
+
+test-integration-core-3:
+	$(MAKE) test-integration-core-shard SHARD=3
 
 test-integration-bridge: frontend-build
 	uv sync --dev --frozen

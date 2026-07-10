@@ -12759,7 +12759,7 @@ async def test_http_bridge_reader_failed_precreated_replay_retires_registered_se
 
 
 @pytest.mark.asyncio
-async def test_http_bridge_reader_retirement_rejects_concurrent_gate_waiter(
+async def test_http_bridge_reader_retirement_recovers_concurrent_gate_waiter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
@@ -12829,6 +12829,8 @@ async def test_http_bridge_reader_retirement_rejects_concurrent_gate_waiter(
 
     monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
     monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", fail_replay)
+    reconnect_waiter = AsyncMock(return_value=True)
+    monkeypatch.setattr(service, "_retry_http_bridge_request_on_fresh_upstream", reconnect_waiter)
 
     submit_task = asyncio.create_task(
         service._submit_http_bridge_request(
@@ -12845,19 +12847,29 @@ async def test_http_bridge_reader_retirement_rejects_concurrent_gate_waiter(
 
         await service._relay_http_bridge_upstream_messages(session)
 
-        with pytest.raises(proxy_service.ProxyResponseError) as exc_info:
-            await submit_task
+        await submit_task
 
-        assert exc_info.value.status_code == 502
-        assert exc_info.value.payload["error"]["code"] == "upstream_unavailable"
-        assert send_text.await_count == 0
-        assert list(session.pending_requests) == []
-        assert session.queued_request_count == 0
-        assert session.closed is True
-        assert key not in service._http_bridge_sessions
-        assert new_request_state.response_create_gate is None
-        assert new_request_state.response_create_gate_acquired is False
-        assert gate.locked() is False
+        reconnect_waiter.assert_awaited_once_with(
+            session,
+            request_state=new_request_state,
+            text_data=new_request_state.request_text,
+            send_request=False,
+        )
+        send_text.assert_awaited_once_with(new_request_state.request_text)
+        assert await old_event_queue.get() is not None
+        assert await old_event_queue.get() is None
+        assert list(session.pending_requests) == [new_request_state]
+        assert session.queued_request_count == 1
+        assert session.admission_waiter_count == 0
+        assert session.closed is False
+        assert service._http_bridge_sessions[key] is session
+        await service._cleanup_http_bridge_submit_interruption(
+            session,
+            request_state=new_request_state,
+            gate_acquired=True,
+            request_enqueued=True,
+            counted_in_queue=True,
+        )
     finally:
         if not submit_task.done():
             submit_task.cancel()

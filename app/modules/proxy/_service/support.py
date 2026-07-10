@@ -445,6 +445,7 @@ class _HTTPBridgeSession:
     queued_request_count: int
     last_used_at: float
     idle_ttl_seconds: float
+    admission_waiter_count: int = 0
     request_service_tier: str | None = None
     lifecycle_lock: anyio.Lock = field(default_factory=anyio.Lock)
     api_key: ApiKeyData | None = None

@@ -41,12 +41,13 @@ namespace and call ID so distinct calls and their matching outputs survive.
 Stable namespaced identities remain tracked across intervening side-effect,
 read-only tool, ordinary assistant-output, and unmatched tool-output items
 until an explicit developer, system, or user input segment boundary. Those
-intervening items clear only legacy argument-based entries. Flat legacy
-side-effect calls continue to use consecutive argument-based replay identity
-and reset when a different side effect, read-only call, or output item
-intervenes; this preserves protection for reconnects that replay shell, patch,
-or terminal operations under a new call ID without collapsing intentional
-later repetitions.
+different side-effect, read-only tool, and unmatched tool-output items clear
+only legacy argument-based entries; ordinary assistant output preserves the
+existing consecutive legacy state. Flat legacy side-effect calls continue to
+use consecutive argument-based replay identity and reset at those legacy tool
+boundaries, preserving protection for reconnects that replay shell, patch, or
+terminal operations under a new call ID without collapsing intentional later
+repetitions.
 
 Nested `multi_tool_use.parallel` behavior is unchanged. Its existing entries
 use an explicit empty namespace slot in the expanded cache-key shape.

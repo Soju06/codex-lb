@@ -32,6 +32,17 @@ The service MUST track tool-call items completed by a streamed response that may
 - **WHEN** an HTTP bridge follow-up gains synthetic interrupted outputs
 - **THEN** the input item count, input fingerprint, and request usage budget recorded for the request are computed from the injected upstream-shaped input, so later full-resend/anchor comparisons on the same bridge session match what upstream actually stored
 
+#### Scenario: owner-forward failover recovery injects from local session state when available
+- **GIVEN** a multi-instance bridge where an anchored follow-up is forwarded to the remote owner instance and the relay fails before yielding any bytes
+- **WHEN** the local instance recovers by rebinding a local bridge session and resubmitting the anchored request
+- **THEN** the service injects synthetic interrupted outputs when the rebound local session still holds the pending tool-call state for the anchored response id (for example after ownership flapped back to this instance)
+
+#### Scenario: owner-forward failover recovery without local pending state is a known bounded gap
+- **GIVEN** the same owner-forward failure, where the pending tool-call metadata exists only in the remote owner instance's memory (the durable bridge store does not persist pending call ids)
+- **WHEN** the local recovery rebinds a fresh session that has no pending tool-call state
+- **THEN** the anchored recovery request is resubmitted unmodified, without fabricated tool outputs (matching pre-injection behavior)
+- **AND** if upstream rejects it with a missing-tool-output error, the extended classifier masks it as a retryable continuity failure instead of surfacing the raw upstream 400
+
 ### Requirement: Missing-tool-output classification covers all tool call variants
 The service MUST classify an upstream `invalid_request_error` with `param=input` whose message starts with `No tool output found for function call call_`, `No tool output found for custom tool call call_`, or `No tool output found for apply patch call call_` as a missing-tool-output continuity error, so the existing masking and retry recovery paths engage instead of forwarding the raw upstream 400 downstream.
 

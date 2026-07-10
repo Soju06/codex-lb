@@ -949,6 +949,24 @@ class _HTTPBridgeStreamingMixin:
                     else "owner_forward_bootstrap",
                     outcome="success",
                 )
+                # Best-effort synthetic interrupted-output injection for the
+                # local recovery request. The pending tool-call metadata lives
+                # in the owning instance's in-memory session state, so after an
+                # owner-forward failure it is only available when the rebound
+                # local session still carries it (for example when ownership
+                # flapped back to this instance). A fresh local rebind cannot
+                # know the interrupted call ids; in that case the anchored
+                # request is resubmitted unmodified (matching pre-injection
+                # behavior) and an upstream missing-tool-output error is
+                # classified and masked as a retryable continuity failure.
+                recovery_payload = effective_payload
+                recovery_injected_input = _http_bridge_interrupted_tool_outputs_input(
+                    session,
+                    payload=recovery_payload,
+                    request_id=request_id,
+                )
+                if recovery_injected_input is not None:
+                    recovery_payload = recovery_payload.model_copy(update={"input": recovery_injected_input})
                 retry_request_state: _WebSocketRequestState | None = None
                 try:
                     retry_api_key_reservation = api_key_reservation
@@ -956,16 +974,16 @@ class _HTTPBridgeStreamingMixin:
                     if api_key is not None and api_key_reservation is not None:
                         retry_api_key_reservation = await self._reserve_websocket_api_key_usage(
                             api_key,
-                            request_model=effective_payload.model,
+                            request_model=recovery_payload.model,
                             request_service_tier=_normalize_service_tier_value(
-                                dict(effective_payload.to_payload()).get("service_tier"),
+                                dict(recovery_payload.to_payload()).get("service_tier"),
                             ),
-                            request_usage_budget=estimate_api_key_request_usage(effective_payload),
+                            request_usage_budget=estimate_api_key_request_usage(recovery_payload),
                         )
                         retry_reservation_reacquired = True
 
                     retry_request_state, retry_text_data = prepare_bridge_request(
-                        effective_payload,
+                        recovery_payload,
                         reservation=retry_api_key_reservation,
                     )
                     retry_request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract

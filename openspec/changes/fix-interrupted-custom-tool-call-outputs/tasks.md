@@ -4,3 +4,4 @@
 - [x] 4. Extend `_is_missing_tool_output_error` to match the custom tool call and apply patch call message variants.
 - [x] 5. Add regression tests at the WebSocket route and HTTP bridge surfaces plus a classifier unit test.
 - [x] 6. Inject HTTP bridge synthetic outputs into the payload before request preparation so the `response.create` slim/size guard, the stored input context (item count/fingerprint), and the usage budget observe the injected upstream-shaped input, with bridge-route regression coverage for the size guard and stored context.
+- [x] 7. Apply best-effort synthetic-output injection on the owner-forward failure recovery path from the rebound local session's pending state, and document the bounded gap when that state lives only in the remote owner instance's memory (recovery resubmits unmodified; the extended classifier masks the upstream missing-tool-output error), with unit coverage for both recovery shapes.

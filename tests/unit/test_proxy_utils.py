@@ -11056,6 +11056,9 @@ async def test_http_bridge_retries_security_work_warning_on_authorized_account(m
     assert list(session.pending_requests) == [request_state]
     assert session.queued_request_count == 1
     assert request_state.replay_count == 1
+    assert request_state.preferred_account_id is None
+    assert request_state.require_security_work_authorized is True
+    assert request_state.excluded_account_ids == {regular_account.id}
     assert request_state.response_id is None
     assert request_state.awaiting_response_created is True
     assert request_state.event_queue is not None
@@ -11066,6 +11069,66 @@ async def test_http_bridge_retries_security_work_warning_on_authorized_account(m
     assert warning["warning"]["code"] == "security_work_authorization_required"
     assert warning["warning"]["action"] == "retry_security_work_authorized"
     assert request_state.event_queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_owner_error_replays_validated_full_resend_on_security_account(monkeypatch):
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    owner = _make_account("acc_bridge_owner_unavailable")
+    trusted = _make_account("acc_bridge_owner_trusted")
+    trusted.security_work_authorized = True
+    sent: list[str] = []
+
+    async def fake_reconnect(session, *, request_state, restart_reader=False, require_security_work_authorized=False):
+        assert restart_reader is False
+        assert require_security_work_authorized is True
+        assert request_state.preferred_account_id is None
+        assert request_state.excluded_account_ids == {owner.id}
+        session.account = trusted
+
+        async def send_text(text: str) -> None:
+            sent.append(text)
+
+        session.upstream = cast(proxy_service.UpstreamResponsesWebSocket, SimpleNamespace(send_text=send_text))
+
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", fake_reconnect)
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+    state = proxy_service._WebSocketRequestState(
+        request_id="bridge_owner_retry",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        transport="http",
+        request_text='{"type":"response.create","previous_response_id":"resp_anchor","input":[]}',
+        previous_response_id="resp_anchor",
+        preferred_account_id=owner.id,
+        fresh_upstream_request_text='{"type":"response.create","input":[]}',
+        fresh_upstream_request_is_retry_safe=True,
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "owner-retry", None),
+        headers={}, affinity=proxy_service._AffinityPolicy(), request_model="gpt-5.6-sol",
+        account=owner, upstream=cast(proxy_service.UpstreamResponsesWebSocket, SimpleNamespace()),
+        upstream_control=proxy_service._WebSocketUpstreamControl(), pending_requests=deque([state]),
+        pending_lock=anyio.Lock(), response_create_gate=asyncio.Semaphore(1), queued_request_count=1,
+        last_used_at=1.0, idle_ttl_seconds=300.0,
+    )
+    payload = json.dumps({"type":"response.failed","response":{"status":"failed","error":{
+        "code":"usage_limit_reached","type":"usage_limit_reached","message":"The usage limit has been reached"}}})
+
+    await service._process_http_bridge_upstream_text(session, payload)
+
+    assert sent == ['{"type":"response.create","input":[]}']
+    assert state.previous_response_id is None
+    assert state.preferred_account_id is None
+    assert state.require_security_work_authorized is True
+    assert state.excluded_account_ids == {owner.id}
+    assert state.replay_count == 1
+    assert state.event_queue.empty()
 
 
 @pytest.mark.asyncio

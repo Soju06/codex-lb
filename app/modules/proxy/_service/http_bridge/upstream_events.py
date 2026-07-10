@@ -685,6 +685,10 @@ class _HTTPBridgeUpstreamEventsMixin:
             )
             if status_request_state is not None:
                 setattr(status_request_state, "account_health_error_handled", True)
+            if status_request_state is not None:
+                retried = await self._retry_http_bridge_security_work_request(session, status_request_state)
+                if retried:
+                    return
             if (
                 status_request_state is not None
                 and status_request_state.previous_response_id is not None
@@ -838,7 +842,6 @@ class _HTTPBridgeUpstreamEventsMixin:
                     and terminal_request_state.response_id is None
                     and terminal_request_state.replay_count < 1
                     and bool(terminal_request_state.request_text)
-                    and terminal_request_state.preferred_account_id != session.account.id
                     and (
                         terminal_request_state.previous_response_id is None
                         or (

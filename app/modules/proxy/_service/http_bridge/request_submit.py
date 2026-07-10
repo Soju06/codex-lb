@@ -1353,6 +1353,11 @@ class _HTTPBridgeRequestSubmitMixin:
                 return False
             retry_text = request_state.fresh_upstream_request_text
 
+        owner_account_id = session.account.id
+        request_state.preferred_account_id = None
+        request_state.require_security_work_authorized = True
+        request_state.excluded_account_ids.add(owner_account_id)
+
         request_state.replay_count += 1
         request_state.response_id = None
         request_state.awaiting_response_created = True
@@ -1360,6 +1365,7 @@ class _HTTPBridgeRequestSubmitMixin:
             request_state.previous_response_id = None
             request_state.proxy_injected_previous_response_id = False
             request_state.request_text = retry_text
+            request_state.responses_lite_model = request_state.fresh_upstream_request_responses_lite_model
 
         async with session.pending_lock:
             if request_state not in session.pending_requests:

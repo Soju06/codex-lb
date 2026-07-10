@@ -14,9 +14,13 @@ hold both when the request is validated and when the request is serialized for
 upstream delivery. When compact requests exceed the upstream input budget and
 the service trims the input middle, preserved non-message `system`/`developer`
 items MUST be treated as trim anchors and retained in the trimmed payload
-rather than replaced by the trim marker. Requests whose input contains an
-`additional_tools` item remain governed by the Responses Lite rule that leaves
-the entire input array and top-level `instructions` unchanged.
+rather than replaced by the trim marker. When a non-message
+`system`/`developer` item is preserved and the request carries no top-level
+`instructions` and no hoistable instruction messages, the service MUST default
+`instructions` to the empty string so the request still validates and
+forwards. Requests whose input contains an `additional_tools` item remain
+governed by the Responses Lite rule that leaves the entire input array and
+top-level `instructions` unchanged.
 
 #### Scenario: unknown non-message developer input item survives normalization
 
@@ -27,6 +31,16 @@ the entire input array and top-level `instructions` unchanged.
 - **AND** the `future_directive` item remains in `input` unchanged, in its
   original position
 - **AND** the upstream-serialized payload retains the item unchanged
+
+#### Scenario: directive-only request without instructions still validates
+
+- **WHEN** a Responses or compact request omits top-level `instructions` and
+  its `input` contains only a typed, non-message `system`/`developer` item
+  (such as `{"type": "future_directive", "role": "developer", ...}`) alongside
+  user messages
+- **THEN** the request validates with `instructions` defaulted to `""`
+- **AND** the directive item remains in `input` unchanged, including in the
+  upstream-serialized payload
 
 #### Scenario: preserved directive survives compact input trimming
 

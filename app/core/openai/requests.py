@@ -313,6 +313,10 @@ def _normalize_responses_input_instructions(data: JsonValue) -> JsonValue:
         item_type = item_mapping.get("type")
         if item_type is not None and item_type != "message":
             input_items.append(item)
+            # Still counts as a normalization outcome: directive-only inputs
+            # must default top-level ``instructions`` (to "") so the request
+            # validates instead of failing on the required field.
+            changed = True
             continue
         instruction_text, preserved_content = _split_responses_instruction_item_content(item_mapping)
         if instruction_text:

@@ -15,6 +15,14 @@ compatibility is unaffected. The guard lives in the shared normalizer, so both
 compact `to_payload()` path (which re-runs the normalizer via
 `_strip_compact_unsupported_fields`) applies the same rule.
 
+Preserving a directive counts as a normalization outcome (`changed = True`):
+the normalizer then merges instructions as usual, which defaults the top-level
+`instructions` field to `""` when the request carries none and no instruction
+messages are hoisted. Without this, a directive-only input would leave the
+payload untouched and fail validation on the required `instructions` field —
+the pre-change path implicitly set `instructions` to `""` while dropping the
+directive.
+
 The Responses Lite `additional_tools` early return stays in front of the loop:
 when a Lite tool bundle is present, the entire input array (including the
 adjacent developer instructions message) is deliberately left untouched so the

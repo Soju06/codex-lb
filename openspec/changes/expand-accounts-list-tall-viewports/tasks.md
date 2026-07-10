@@ -6,6 +6,7 @@
 
 - [x] 2.1 Replace the 32rem rows ceiling with the existing dynamic viewport bound.
 - [x] 2.2 Keep search, filters, Add account, and internal row scrolling unchanged.
+- [x] 2.3 Let the left card remain content-sized instead of stretching to the detail column.
 
 ## 3. Verification
 

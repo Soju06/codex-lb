@@ -891,6 +891,104 @@ def test_apply_api_key_enforcement_normalizes_minimal_without_api_key():
     assert payload.reasoning.effort == "low"
 
 
+def test_normalize_unsupported_reasoning_effort_aliases_ultra_to_max(caplog):
+    # The reference Codex client never sends ``ultra`` on the wire; it
+    # rewrites it to ``max`` (``reasoning_effort_for_request`` in codex-rs
+    # ``core/src/client.rs`` at rust-v0.144.1). The proxy must mirror that
+    # aliasing so catalog-advertised ``ultra`` stays wire-safe.
+    from app.core.openai.requests import ResponsesReasoning
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "hello",
+            "input": [],
+        }
+    )
+    payload.reasoning = ResponsesReasoning(effort="ultra")
+    registry = _build_registry_with_model("gpt-5.6-sol", ["low", "medium", "high", "xhigh", "max", "ultra"])
+
+    with caplog.at_level(logging.INFO, logger="app.modules.proxy.request_policy"):
+        proxy_request_policy.normalize_unsupported_reasoning_effort(payload, registry=registry)
+
+    assert payload.reasoning is not None
+    assert payload.reasoning.effort == "max"
+    assert any("reasoning_effort_wire_aliased" in record.message for record in caplog.records)
+
+
+def test_normalize_unsupported_reasoning_effort_preserves_max():
+    # ``max`` and ``xhigh`` are sent verbatim by the reference client; no
+    # ``max`` -> ``xhigh`` aliasing exists upstream.
+    from app.core.openai.requests import ResponsesReasoning
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "hello",
+            "input": [],
+        }
+    )
+    payload.reasoning = ResponsesReasoning(effort="max")
+    registry = _build_registry_with_model("gpt-5.6-sol", ["low", "medium", "high", "xhigh", "max", "ultra"])
+
+    proxy_request_policy.normalize_unsupported_reasoning_effort(payload, registry=registry)
+
+    assert payload.reasoning.effort == "max"
+
+
+def test_apply_api_key_enforcement_aliases_enforced_ultra_to_max():
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "hello",
+            "input": [],
+        }
+    )
+    api_key = proxy_service.ApiKeyData(
+        id="key_ultra",
+        name="ultra-key",
+        key_prefix="sk-clb-test",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort="ultra",
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+
+    proxy_request_policy.apply_api_key_enforcement(payload, api_key)
+
+    assert payload.reasoning is not None
+    assert payload.reasoning.effort == "max"
+
+
+def test_apply_api_key_enforcement_to_chat_payload_aliases_ultra_to_max():
+    payload: dict[str, JsonValue] = {
+        "model": "source-reasoning-model",
+        "messages": [{"role": "user", "content": "hi"}],
+    }
+    api_key = proxy_service.ApiKeyData(
+        id="key_ultra_chat",
+        name="ultra-chat-key",
+        key_prefix="sk-clb-test",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort="ultra",
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+
+    proxy_request_policy.apply_api_key_enforcement_to_chat_payload(payload, api_key)
+
+    assert payload["reasoning_effort"] == "max"
+    assert payload["reasoning"] == {"effort": "max"}
+
+
 def test_normalize_responses_request_payload_preserves_backend_codex_image_generation_with_function_tools():
     function_tool = {
         "type": "function",

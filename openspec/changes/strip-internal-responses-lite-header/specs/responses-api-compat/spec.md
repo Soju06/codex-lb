@@ -45,7 +45,11 @@ response ID without repeating that prefix.
 A transparent fresh full-resend replay that clears `previous_response_id` (for
 example after an upstream previous-response miss) severs that linkage, so the
 replayed request MUST NOT carry the reserved marker unless its own input
-contains the `additional_tools` prefix.
+contains the `additional_tools` prefix. Acceptance of such a replay MUST
+reflect the replayed body: a marker-stripped replay MUST NOT be recorded as a
+Lite acceptance (later frames referencing the replay's response ID are not
+trusted), while a replay whose input retains the `additional_tools` prefix
+MUST re-establish trusted Lite continuity.
 Otherwise, the proxy MUST strip the reserved client-metadata marker. The
 HTTP-to-websocket bridge MUST preserve its internally derived canonical marker
 when it trims an already-stored input prefix or rebuilds the request during
@@ -119,8 +123,13 @@ item.
 - **WHEN** upstream reports the referenced previous response as not found and
   the proxy replays the request without `previous_response_id`
 - **THEN** the replayed request omits the reserved client-metadata marker
+- **AND** the accepted replay is not recorded as a Lite acceptance, so a later
+  same-model frame carrying the marker with `previous_response_id` referencing
+  the replay's response is not trusted and has its marker stripped
 - **BUT WHEN** the replayed input itself contains the `additional_tools` prefix
 - **THEN** the replayed request retains the canonical marker
+- **AND** the accepted replay re-establishes trusted Lite continuity for later
+  frames referencing its response ID
 
 #### Scenario: Accepted Lite prewarm authorizes incremental reuse
 

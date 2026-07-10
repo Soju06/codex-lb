@@ -981,7 +981,10 @@ def test_backend_responses_websocket_lite_fresh_replay_drops_marker_after_previo
     )
     recovered_upstream = _SequencedUpstreamWebSocket(
         [],
-        deferred_message_batches=[_response_batch("resp_ws_lite_replay")],
+        deferred_message_batches=[
+            _response_batch("resp_ws_lite_replay"),
+            _response_batch("resp_ws_lite_b2"),
+        ],
     )
     connect_count = 0
 
@@ -1070,8 +1073,20 @@ def test_backend_responses_websocket_lite_fresh_replay_drops_marker_after_previo
             "client_metadata": {marker: "true"},
             "stream": True,
         },
+        # The marker-stripped replay was accepted as a non-Lite request, so a
+        # later frame referencing the replay's response id must NOT be trusted.
+        {
+            "type": "response.create",
+            "model": "gpt-5.6-sol",
+            "instructions": "",
+            "previous_response_id": "resp_ws_lite_replay",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "after replay"}]}],
+            "client_metadata": {marker: "true"},
+            "stream": True,
+        },
     ]
 
+    all_events = []
     with TestClient(app_instance) as client:
         with client.websocket_connect(
             "/backend-api/codex/responses",
@@ -1086,10 +1101,10 @@ def test_backend_responses_websocket_lite_fresh_replay_drops_marker_after_previo
                 websocket.send_text(json.dumps(request))
                 events = [json.loads(websocket.receive_text()) for _ in range(2)]
                 assert [event["type"] for event in events] == ["response.created", "response.completed"]
-                final_events = events
+                all_events.append(events)
 
-    assert final_events[0]["response"]["id"] == "resp_ws_lite_replay"
-    assert "previous_response_not_found" not in json.dumps(final_events)
+    assert all_events[2][0]["response"]["id"] == "resp_ws_lite_replay"
+    assert "previous_response_not_found" not in json.dumps(all_events)
     assert connect_count == 2
 
     first_payloads = [json.loads(text) for text in first_upstream.sent_text]
@@ -1097,10 +1112,195 @@ def test_backend_responses_websocket_lite_fresh_replay_drops_marker_after_previo
     assert cast(dict[str, object], first_payloads[2]["client_metadata"])[marker] == "true"
     assert first_payloads[2]["previous_response_id"] == "resp_ws_lite_a2"
 
-    replay_payload = json.loads(recovered_upstream.sent_text[-1])
+    recovered_payloads = [json.loads(text) for text in recovered_upstream.sent_text]
+    assert len(recovered_payloads) == 2
+    replay_payload = recovered_payloads[0]
     assert "previous_response_id" not in replay_payload
     assert replay_payload["input"] == [user_continue, assistant_ok, user_more]
     assert marker not in cast(dict[str, object], replay_payload.get("client_metadata", {}))
+    after_replay_payload = recovered_payloads[1]
+    assert after_replay_payload["previous_response_id"] == "resp_ws_lite_replay"
+    assert marker not in cast(dict[str, object], after_replay_payload.get("client_metadata", {}))
+
+
+def test_backend_responses_websocket_body_lite_fresh_replay_keeps_marker_and_continuity(
+    app_instance,
+    monkeypatch,
+):
+    def _response_batch(response_id: str) -> list[_FakeUpstreamMessage]:
+        return [
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {"type": "response.created", "response": {"id": response_id, "status": "in_progress"}},
+                    separators=(",", ":"),
+                ),
+            ),
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "response.completed",
+                        "response": {
+                            "id": response_id,
+                            "status": "completed",
+                            "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                        },
+                    },
+                    separators=(",", ":"),
+                ),
+            ),
+        ]
+
+    first_upstream = _SequencedUpstreamWebSocket(
+        [],
+        deferred_message_batches=[
+            _response_batch("resp_ws_lite_a1"),
+            [
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "error",
+                            "status": 400,
+                            "error": {
+                                "type": "invalid_request_error",
+                                "code": "previous_response_not_found",
+                                "message": "Previous response with id 'resp_ws_lite_a1' not found.",
+                                "param": "previous_response_id",
+                            },
+                        },
+                        separators=(",", ":"),
+                    ),
+                )
+            ],
+        ],
+    )
+    recovered_upstream = _SequencedUpstreamWebSocket(
+        [],
+        deferred_message_batches=[
+            _response_batch("resp_ws_lite_replay"),
+            _response_batch("resp_ws_lite_b2"),
+        ],
+    )
+    connect_count = 0
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
+        return None
+
+    async def fake_connect_proxy_websocket(
+        self,
+        headers,
+        *,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset,
+        prefer_earlier_reset_window,
+        routing_strategy,
+        model,
+        request_state,
+        api_key,
+        client_send_lock,
+        websocket,
+    ):
+        del self, headers, sticky_key, sticky_kind, reallocate_sticky, sticky_max_age_seconds
+        del prefer_earlier_reset, prefer_earlier_reset_window, routing_strategy, model
+        del request_state, api_key, client_send_lock, websocket
+        nonlocal connect_count
+        connect_count += 1
+        if connect_count == 1:
+            return SimpleNamespace(id="acct_ws_lite_body_replay"), first_upstream
+        return SimpleNamespace(id="acct_ws_lite_body_replay"), recovered_upstream
+
+    async def fake_write_request_log(self, **kwargs):
+        del self, kwargs
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+    monkeypatch.setattr(proxy_module.ProxyService, "_write_request_log", fake_write_request_log)
+
+    marker = "ws_request_header_x_openai_internal_codex_responses_lite"
+    additional_tools = {
+        "type": "additional_tools",
+        "role": "developer",
+        "tools": [{"type": "custom", "name": "shell"}],
+    }
+    user_hi = {"role": "user", "content": [{"type": "input_text", "text": "hi"}]}
+    assistant_ok = {"role": "assistant", "content": [{"type": "output_text", "text": "ok"}]}
+    user_continue = {"role": "user", "content": [{"type": "input_text", "text": "continue"}]}
+    body_lite_full_resend = [additional_tools, user_hi, assistant_ok, user_continue]
+    requests = [
+        {
+            "type": "response.create",
+            "model": "gpt-5.6-sol",
+            "instructions": "",
+            "input": [additional_tools, user_hi],
+            "stream": True,
+        },
+        # Body-Lite full resend: its fresh replay keeps the additional_tools
+        # prefix, so the replay retains the canonical marker and its
+        # acceptance re-establishes trusted Lite continuity.
+        {
+            "type": "response.create",
+            "model": "gpt-5.6-sol",
+            "instructions": "",
+            "previous_response_id": "resp_ws_lite_a1",
+            "input": body_lite_full_resend,
+            "client_metadata": {marker: "stale"},
+            "stream": True,
+        },
+        {
+            "type": "response.create",
+            "model": "gpt-5.6-sol",
+            "instructions": "",
+            "previous_response_id": "resp_ws_lite_replay",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "after replay"}]}],
+            "client_metadata": {marker: "true"},
+            "stream": True,
+        },
+    ]
+
+    all_events = []
+    with TestClient(app_instance) as client:
+        with client.websocket_connect(
+            "/backend-api/codex/responses",
+            headers={
+                "Authorization": "Bearer external-token",
+                "chatgpt-account-id": "external-account",
+                "session_id": "thread-ws-lite-body-replay",
+                "openai-beta": "responses_websockets=2026-02-06",
+            },
+        ) as websocket:
+            for request in requests:
+                websocket.send_text(json.dumps(request))
+                events = [json.loads(websocket.receive_text()) for _ in range(2)]
+                assert [event["type"] for event in events] == ["response.created", "response.completed"]
+                all_events.append(events)
+
+    assert all_events[1][0]["response"]["id"] == "resp_ws_lite_replay"
+    assert "previous_response_not_found" not in json.dumps(all_events)
+    assert connect_count == 2
+
+    recovered_payloads = [json.loads(text) for text in recovered_upstream.sent_text]
+    assert len(recovered_payloads) == 2
+    replay_payload = recovered_payloads[0]
+    assert "previous_response_id" not in replay_payload
+    assert replay_payload["input"] == body_lite_full_resend
+    assert cast(dict[str, object], replay_payload["client_metadata"])[marker] == "true"
+    after_replay_payload = recovered_payloads[1]
+    assert after_replay_payload["previous_response_id"] == "resp_ws_lite_replay"
+    assert cast(dict[str, object], after_replay_payload["client_metadata"])[marker] == "true"
 
 
 def test_backend_responses_websocket_keeps_same_response_distinct_tool_call_ids(

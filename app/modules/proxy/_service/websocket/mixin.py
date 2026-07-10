@@ -1454,6 +1454,9 @@ class _WebSocketMixin:
             )
             if not request_state.fresh_upstream_request_is_retry_safe:
                 request_state.fresh_upstream_request_text = None
+            request_state.fresh_upstream_request_responses_lite_model = (
+                responses_payload.model if body_uses_responses_lite else None
+            )
             _facade().logger.info(
                 "websocket_session_anchor_injected request_id=%s response_id=%s original_items=%s trimmed_to=%s",
                 request_state.request_id,
@@ -1486,6 +1489,12 @@ class _WebSocketMixin:
                 transport=_REQUEST_TRANSPORT_WEBSOCKET,
             )
             request_state.fresh_upstream_request_is_retry_safe = request_state.fresh_upstream_request_text is not None
+            # A marker-only trusted incremental frame yields a fresh body with
+            # the reserved marker stripped, so the replay must not be treated
+            # as a Lite request when it is accepted upstream.
+            request_state.fresh_upstream_request_responses_lite_model = (
+                responses_payload.model if body_uses_responses_lite else None
+            )
             if request_state.fresh_upstream_request_is_retry_safe:
                 _facade().logger.info(
                     (
@@ -1558,6 +1567,7 @@ class _WebSocketMixin:
         if responses_payload.previous_response_id is None and not request_state.proxy_injected_previous_response_id:
             request_state.fresh_upstream_request_text = text_data
             request_state.fresh_upstream_request_is_retry_safe = True
+            request_state.fresh_upstream_request_responses_lite_model = next_responses_lite_model
 
         return _PreparedWebSocketRequest(
             text_data=text_data,
@@ -3132,6 +3142,7 @@ class _WebSocketMixin:
                     request_state.previous_response_id = None
                     request_state.proxy_injected_previous_response_id = False
                     request_state.fresh_upstream_request_is_retry_safe = False
+                    request_state.responses_lite_model = request_state.fresh_upstream_request_responses_lite_model
                     request_state.replay_count += 1
                     request_state.awaiting_response_created = True
                     request_state.response_id = None
@@ -3213,6 +3224,9 @@ class _WebSocketMixin:
                             request_state.previous_response_id = None
                             request_state.proxy_injected_previous_response_id = False
                             request_state.request_text = retry_text
+                            request_state.responses_lite_model = (
+                                request_state.fresh_upstream_request_responses_lite_model
+                            )
                         upstream_control.reconnect_requested = True
                         upstream_control.suppress_downstream_event = True
                         await _release_websocket_response_create_gate(request_state, response_create_gate)

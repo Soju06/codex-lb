@@ -12140,6 +12140,10 @@ async def test_websocket_lite_fresh_replay_strips_trusted_marker(monkeypatch):
     assert "previous_response_id" not in replay_payload
     assert replay_payload["input"] == trusted_payload["input"]
     assert replay_payload["client_metadata"] == {"keep": "yes"}
+    # The marker-stripped fresh body is non-Lite, so swapping to it for a
+    # transparent replay must also clear the Lite acceptance flag.
+    assert trusted.request_state.responses_lite_model == "gpt-5.6-sol"
+    assert trusted.request_state.fresh_upstream_request_responses_lite_model is None
 
     body_lite = await service._prepare_websocket_response_create_request(
         cast(
@@ -12175,6 +12179,7 @@ async def test_websocket_lite_fresh_replay_strips_trusted_marker(monkeypatch):
     body_lite_replay = json.loads(body_lite.request_state.fresh_upstream_request_text)
     assert "previous_response_id" not in body_lite_replay
     assert body_lite_replay["client_metadata"][marker] == "true"
+    assert body_lite.request_state.fresh_upstream_request_responses_lite_model == "gpt-5.6-sol"
 
 
 @pytest.mark.asyncio

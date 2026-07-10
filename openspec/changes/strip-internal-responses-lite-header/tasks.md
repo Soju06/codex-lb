@@ -13,3 +13,4 @@
 - [x] 11. Establish Lite continuity from accepted prewarms and cover empty and nonempty incremental reuse.
 - [x] 12. Require incremental Lite trust to reference the accepted Lite response via `previous_response_id`, keep non-Lite acceptances from clobbering recorded Lite continuity, and cover trusted and untrusted linkage paths.
 - [x] 13. Strip the trusted marker from transparent fresh full-resend replays that clear `previous_response_id` without an `additional_tools` prefix, with unit and websocket-route regression coverage.
+- [x] 14. Record the fresh replay body's Lite state on the request and swap it onto the acceptance flag at replay time, so marker-stripped replays are not recorded as Lite acceptances while body-Lite replays re-establish trusted continuity, with regression coverage.

@@ -82,6 +82,7 @@ from app.modules.proxy._service.compact import (
 from app.modules.proxy._service.compact import (
     _sticky_key_from_compact_payload as _sticky_key_from_compact_payload,
 )
+from app.modules.proxy._service.http_bridge.protocol import _HTTPBridgeServiceProtocol
 from app.modules.proxy._service.observability import (
     _hash_identifier as _hash_identifier,
 )
@@ -645,6 +646,18 @@ def _http_bridge_unanchored_parallel_fork_key(
     return fork_key
 
 
+def _http_bridge_request_needs_unanchored_handoff(
+    key: "_HTTPBridgeSessionKey",
+    incoming_turn_state: str | None,
+    previous_response_id: str | None,
+    forwarded_request: bool,
+    forwarded_original_request_unanchored: bool,
+) -> bool:
+    if forwarded_request:
+        return forwarded_original_request_unanchored
+    return key.affinity_kind == "session_header" and incoming_turn_state is None and previous_response_id is None
+
+
 def _reserve_http_bridge_unanchored_handoff(
     session: "_HTTPBridgeSession",
     *,
@@ -670,6 +683,33 @@ def _release_http_bridge_unanchored_handoff(
 ) -> None:
     if session.unanchored_reservation_id == request_scope_id:
         session.unanchored_reservation_id = None
+
+
+async def _refresh_reused_http_bridge_session_with_handoff(
+    service: "_HTTPBridgeServiceProtocol",
+    session: "_HTTPBridgeSession",
+    *,
+    key: "_HTTPBridgeSessionKey",
+    request_scope_id: str,
+    reserve_handoff: bool,
+) -> None:
+    if reserve_handoff:
+        _reserve_http_bridge_unanchored_handoff(session, request_scope_id=request_scope_id)
+    try:
+        await service._refresh_durable_http_bridge_session(session)
+        _log_http_bridge_event(
+            "reuse",
+            key,
+            account_id=session.account.id,
+            model=session.request_model,
+            pending_count=service._http_bridge_pending_count_nowait(session, context="reuse_log"),
+            cache_key_family=key.affinity_kind,
+            model_class=_extract_model_class(session.request_model) if session.request_model else None,
+        )
+    except BaseException:
+        if reserve_handoff:
+            _release_http_bridge_unanchored_handoff(session, request_scope_id=request_scope_id)
+        raise
 
 
 def _http_bridge_session_retiring_with_visible_requests(session: "_HTTPBridgeSession") -> bool:

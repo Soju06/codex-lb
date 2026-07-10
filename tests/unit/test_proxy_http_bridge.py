@@ -29,6 +29,7 @@ from app.core.errors import openai_error
 from app.core.utils.request_id import get_request_id, reset_request_scope_id, set_request_scope_id
 from app.db.models import AccountStatus, HttpBridgeSessionState
 from app.modules.proxy import service as proxy_service
+from app.modules.proxy._service.http_bridge import helpers as http_bridge_helpers_module
 from app.modules.proxy._service.http_bridge import mixin as http_bridge_mixin_module
 from app.modules.proxy._service.http_bridge import streaming as http_bridge_streaming_module
 from app.modules.proxy.account_cache import clear_account_routing_unavailable, mark_account_routing_unavailable
@@ -80,16 +81,16 @@ def _make_bridge_session(
 
 
 def test_forwarded_fork_keeps_authenticated_original_unanchored_state() -> None:
-    assert http_bridge_streaming_module._http_bridge_original_request_unanchored(
-        bridge_session_key=proxy_service._HTTPBridgeSessionKey(
+    assert http_bridge_helpers_module._http_bridge_request_needs_unanchored_handoff(
+        proxy_service._HTTPBridgeSessionKey(
             "internal_unanchored_parallel",
             "fork-key",
             None,
         ),
-        headers={"x-codex-turn-state": "http_turn_generated"},
-        previous_response_id=None,
-        forwarded_request=True,
-        forwarded_original_request_unanchored=True,
+        "http_turn_generated",
+        None,
+        True,
+        True,
     )
 
 

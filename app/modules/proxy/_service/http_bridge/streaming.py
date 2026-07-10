@@ -71,6 +71,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_payload_looks_like_full_resend,
     _http_bridge_payload_without_previous_response_id,
     _http_bridge_request_budget_seconds,
+    _http_bridge_request_needs_unanchored_handoff,
     _http_bridge_request_stage,
     _http_bridge_runtime_config,
     _http_bridge_should_attempt_local_bootstrap_rebind,
@@ -707,12 +708,12 @@ class _HTTPBridgeStreamingMixin:
         )
         if legacy_anchor_lookup is not None:
             incoming_turn_state_header = _sticky_key_from_turn_state_header(headers)
-        original_request_unanchored = _http_bridge_original_request_unanchored(
-            bridge_session_key=bridge_session_key,
-            headers=headers,
-            previous_response_id=payload.previous_response_id,
-            forwarded_request=forwarded_request,
-            forwarded_original_request_unanchored=forwarded_original_request_unanchored,
+        original_request_unanchored = _http_bridge_request_needs_unanchored_handoff(
+            bridge_session_key,
+            _sticky_key_from_turn_state_header(headers),
+            payload.previous_response_id,
+            forwarded_request,
+            forwarded_original_request_unanchored,
         )
         if legacy_anchor_lookup is not None:
             durable_lookup = legacy_anchor_lookup

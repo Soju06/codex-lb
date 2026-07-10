@@ -19,6 +19,13 @@ When multiple Responses requests share a process-level session header but carry 
 - **THEN** the second request uses a distinct server-scoped bridge lane
 - **AND** it does not reuse the reserved canonical bridge
 
+#### Scenario: Durable refresh publishes the handoff reservation
+
+- **GIVEN** an unanchored request reuses an idle durable canonical bridge
+- **WHEN** refreshing the durable lease yields before lookup returns
+- **THEN** the canonical bridge is already reserved for that request
+- **AND** a concurrent unanchored request uses a distinct server-scoped lane
+
 #### Scenario: Cancelled pre-submit handoff does not strand a reservation
 
 - **GIVEN** an unanchored request is reusing an idle canonical bridge

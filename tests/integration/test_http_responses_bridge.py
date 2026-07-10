@@ -7095,6 +7095,100 @@ async def test_v1_responses_http_bridge_reserved_handoff_forks_before_submit(
 
 
 @pytest.mark.asyncio
+async def test_v1_responses_http_bridge_reused_unanchored_refresh_reserves_canonical_handoff(
+    app_instance,
+    monkeypatch,
+):
+    service = get_proxy_service_for_app(app_instance)
+    service._http_bridge_sessions.clear()
+    service._http_bridge_inflight_sessions.clear()
+    service._http_bridge_turn_state_index.clear()
+
+    _install_proxy_settings(
+        monkeypatch,
+        app_settings=_make_app_settings(
+            enabled=True,
+            max_sessions=8,
+            admission_wait_timeout_seconds=1.0,
+            codex_idle_ttl_seconds=120.0,
+            instance_id="instance-a",
+            instance_ring=[],
+        ),
+        dashboard_settings=_make_dashboard_settings(),
+    )
+
+    shared_key = proxy_module._HTTPBridgeSessionKey("session_header", "shared-codex-process", None)
+    canonical = _make_dummy_bridge_session(shared_key)
+    canonical.request_model = "gpt-5.6-sol"
+    canonical.durable_session_id = "durable-shared"
+    canonical.durable_owner_epoch = 1
+    service._http_bridge_sessions[shared_key] = canonical
+    refresh_started = asyncio.Event()
+    allow_refresh = asyncio.Event()
+
+    async def blocked_refresh(session):
+        assert session is canonical
+        refresh_started.set()
+        await allow_refresh.wait()
+
+    async def fake_create_http_bridge_session(self, key, **kwargs):
+        del self
+        session = _make_dummy_bridge_session(key)
+        session.request_model = kwargs["request_model"]
+        return session
+
+    monkeypatch.setattr(service, "_refresh_durable_http_bridge_session", blocked_refresh)
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_create_http_bridge_session",
+        fake_create_http_bridge_session,
+    )
+    monkeypatch.setattr(proxy_module.ProxyService, "_claim_durable_http_bridge_session", AsyncMock())
+
+    async def get_session(request_scope_id: str) -> proxy_module._HTTPBridgeSession:
+        request_id_token = set_request_id("duplicate-client-request-id")
+        request_scope_token = set_request_scope_id(request_scope_id)
+        try:
+            return await service._get_or_create_http_bridge_session(
+                shared_key,
+                headers={"session_id": "shared-codex-process"},
+                affinity=proxy_module._AffinityPolicy(
+                    key="shared-codex-process",
+                    kind=proxy_module.StickySessionKind.CODEX_SESSION,
+                ),
+                api_key=None,
+                request_model="gpt-5.6-sol",
+                idle_ttl_seconds=120.0,
+                max_sessions=8,
+            )
+        finally:
+            reset_request_scope_id(request_scope_token)
+            reset_request_id(request_id_token)
+
+    first_task = asyncio.create_task(get_session("refresh-request-a"))
+    await _wait_for_event(refresh_started)
+    assert canonical.unanchored_reservation_id == "refresh-request-a"
+
+    second_task = asyncio.create_task(get_session("refresh-request-b"))
+    await asyncio.sleep(0)
+    assert not second_task.done()
+    allow_refresh.set()
+
+    first, second = await asyncio.gather(first_task, second_task)
+    try:
+        assert first is canonical
+        assert second is not canonical
+        assert second.key.affinity_kind == "internal_unanchored_parallel"
+        assert second.unanchored_reservation_id == "refresh-request-b"
+    finally:
+        _release_http_bridge_unanchored_handoff(first, request_scope_id="refresh-request-a")
+        _release_http_bridge_unanchored_handoff(second, request_scope_id="refresh-request-b")
+        service._http_bridge_sessions.clear()
+        service._http_bridge_inflight_sessions.clear()
+        service._http_bridge_turn_state_index.clear()
+
+
+@pytest.mark.asyncio
 async def test_v1_responses_http_bridge_cancellation_during_durable_refresh_releases_reservation(
     app_instance,
     monkeypatch,
@@ -7148,6 +7242,7 @@ async def test_v1_responses_http_bridge_cancellation_during_durable_refresh_rele
             )
         )
         await _wait_for_event(refresh_started)
+        assert canonical.unanchored_reservation_id == "cancelled-request-scope"
         lookup_task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await lookup_task

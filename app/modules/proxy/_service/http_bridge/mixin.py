@@ -88,6 +88,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_owner_lookup_unavailable_error_envelope,
     _http_bridge_previous_response_alias_key,
     _http_bridge_request_budget_seconds,
+    _http_bridge_request_needs_unanchored_handoff,
     _http_bridge_session_account_active,
     _http_bridge_session_allows_api_key,
     _http_bridge_session_matches_preferred_account,
@@ -104,6 +105,8 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _record_bridge_drain_recovery_allowed,
     _record_bridge_first_turn_timeout,
     _record_bridge_reattach,
+    _refresh_reused_http_bridge_session_with_handoff,
+    _reserve_http_bridge_unanchored_handoff,
 )
 from app.modules.proxy._service.http_bridge.owner_forwarding import _HTTPBridgeOwnerForwardingMixin
 from app.modules.proxy._service.http_bridge.protocol import _HTTPBridgeServiceProtocol
@@ -485,6 +488,9 @@ class _HTTPBridgeMixin(
         api_key_id = api_key.id if api_key is not None else None
         incoming_turn_state = _sticky_key_from_turn_state_header(headers)
         incoming_session_key = _sticky_key_from_session_header(headers)
+        original_request_unanchored = _http_bridge_request_needs_unanchored_handoff(
+            key, incoming_turn_state, previous_response_id, forwarded_request, forwarded_original_request_unanchored
+        )
         if await _http_bridge_should_wait_for_registration(self, key, settings):
             skip_registration_gate = False
             async with self._http_bridge_lock:
@@ -549,7 +555,6 @@ class _HTTPBridgeMixin(
                 preferred_account_id is not None
                 and (key.strength == "hard" or not fallback_on_preferred_account_unavailable)
             )
-
             async with self._http_bridge_lock:
                 if (
                     incoming_turn_state is not None
@@ -684,20 +689,12 @@ class _HTTPBridgeMixin(
                         existing.request_model = request_model
                         existing.request_service_tier = request_service_tier
                         existing.last_used_at = _service_time().monotonic()
-                        await self._refresh_durable_http_bridge_session(existing)
-                        _log_http_bridge_event(
-                            "reuse",
-                            key,
-                            account_id=existing.account.id,
-                            model=existing.request_model,
-                            pending_count=self._http_bridge_pending_count_nowait(
-                                existing,
-                                context="reuse_log",
-                            ),
-                            cache_key_family=key.affinity_kind,
-                            model_class=_extract_model_class(existing.request_model)
-                            if existing.request_model
-                            else None,
+                        await _refresh_reused_http_bridge_session_with_handoff(
+                            self,
+                            existing,
+                            key=key,
+                            request_scope_id=request_scope_id,
+                            reserve_handoff=original_request_unanchored,
                         )
                         return existing
                     old_account_id = existing.account.id
@@ -1431,6 +1428,8 @@ class _HTTPBridgeMixin(
                     current_future = self._http_bridge_inflight_sessions.get(key)
                     if current_future is inflight_future:
                         self._http_bridge_inflight_sessions.pop(key, None)
+                        if original_request_unanchored:
+                            _reserve_http_bridge_unanchored_handoff(created_session, request_scope_id=request_scope_id)
                         self._http_bridge_sessions[key] = created_session
                         session_registered = True
                         if inflight_future is not None and not inflight_future.done():

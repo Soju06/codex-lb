@@ -10,3 +10,4 @@
 - [x] 8. Run focused, full-suite, lint, type, and strict OpenSpec validation.
 - [x] 9. Preserve legacy primary HMAC compatibility for explicitly anchored forwards during rolling upgrades.
 - [x] 10. Keep owner-side forks local, normalize blank anchors, preserve forwarded reservations, and reject ambiguous legacy fields.
+- [x] 11. Bind v2 client-IP presence in the primary HMAC and cover removal, blanking, mutation, and no-IP paths.

@@ -2,7 +2,7 @@
 
 ### Requirement: Unanchored process-session concurrency uses independent bridge lanes
 
-When multiple Responses requests share a process-level session header but carry neither `previous_response_id` nor non-blank turn-state continuity, the service MUST NOT queue an independent request behind an active response-create gate. If the canonical bridge is still being created, reserved by another request before submit, already has a visible request, or belongs to a different model class, the service MUST create a server request-scoped bridge lane. The lane identity MUST NOT depend on a client-controlled request ID. The fork MUST leave the canonical bridge and its model metadata unchanged. Sequential idle requests of the same model class MAY keep reusing the canonical bridge. A pre-submit handoff reservation MUST protect its bridge from idle pruning and capacity eviction, and an aborted handoff MUST NOT leave its canonical bridge reserved. Owner forwarding MUST preserve whether the originating request was unanchored instead of treating a proxy-generated downstream turn-state as an explicit client anchor, and MUST fail closed when a mixed-version hop cannot authenticate that state. When the canonical owner itself creates a fork for a forwarded request, it MUST own that fork locally instead of re-hashing it into another forwarding hop. Explicitly anchored owner forwards MUST retain the legacy-compatible primary signature during rolling upgrades, and a receiving instance MUST reject ambiguous delimiter-bearing legacy fields. Durable aliases derived from the forked lane MUST retain hard owner and account continuity.
+When multiple Responses requests share a process-level session header but carry neither `previous_response_id` nor non-blank turn-state continuity, the service MUST NOT queue an independent request behind an active response-create gate. If the canonical bridge is still being created, reserved by another request before submit, already has a visible request, or belongs to a different model class, the service MUST create a server request-scoped bridge lane. The lane identity MUST NOT depend on a client-controlled request ID. The fork MUST leave the canonical bridge and its model metadata unchanged. Sequential idle requests of the same model class MAY keep reusing the canonical bridge. A pre-submit handoff reservation MUST protect its bridge from idle pruning and capacity eviction, and an aborted handoff MUST NOT leave its canonical bridge reserved. Owner forwarding MUST preserve whether the originating request was unanchored instead of treating a proxy-generated downstream turn-state as an explicit client anchor, and MUST fail closed when a mixed-version hop cannot authenticate that state. The v2 primary signature MUST bind whether client-IP metadata was present, while the companion signature MUST bind its value. When the canonical owner itself creates a fork for a forwarded request, it MUST own that fork locally instead of re-hashing it into another forwarding hop. Explicitly anchored owner forwards MUST retain the legacy-compatible primary signature during rolling upgrades, and a receiving instance MUST reject ambiguous delimiter-bearing legacy fields. Durable aliases derived from the forked lane MUST retain hard owner and account continuity.
 
 #### Scenario: Background requests do not block behind a foreground turn
 
@@ -70,6 +70,13 @@ When multiple Responses requests share a process-level session header but carry 
 - **WHEN** field boundaries are repacked without changing the legacy joined byte string
 - **THEN** a current owner rejects the forwarding context as invalid
 - **AND** the repacked affinity kind cannot weaken hard continuity
+
+#### Scenario: V2 client-IP metadata cannot be removed or blanked
+
+- **GIVEN** an unanchored v2 owner-forward request carries signed client-IP metadata
+- **WHEN** both client-IP headers are removed, the value is blanked, or the value is changed
+- **THEN** the owner rejects the forwarding context as invalid
+- **AND** a genuinely no-IP v2 request remains valid
 
 #### Scenario: Durable fork continuation remains owner-bound
 

@@ -56,7 +56,10 @@ cannot authenticate their boundaries safely.
 The v2 HMAC input uses a domain-separated canonical JSON object rather than the
 legacy delimiter-joined field list. This prevents signed v2 fields from being
 repacked into attacker-controlled affinity values to produce the same bytes
-under legacy validation.
+under legacy validation. The primary signature also binds whether client-IP
+metadata exists; when present, the companion signature continues to bind the
+actual address. Removing both headers therefore cannot silently erase owner-log
+attribution.
 
 Forked lanes use hard continuity strength. They are independent at creation,
 but any durable turn-state or previous-response alias derived from that lane

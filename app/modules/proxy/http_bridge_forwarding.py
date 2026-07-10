@@ -424,6 +424,7 @@ def _bridge_forward_signature(
             {
                 "body_digest": body_digest,
                 "client_ip": context.client_ip if include_client_ip else None,
+                "client_ip_present": context.client_ip is not None,
                 "codex_session_affinity": context.codex_session_affinity,
                 "downstream_turn_state": context.downstream_turn_state,
                 "include_client_ip": include_client_ip,

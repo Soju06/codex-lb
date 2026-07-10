@@ -150,6 +150,56 @@ def test_build_owner_forward_headers_uses_v2_signature_with_client_ip_header() -
     )
 
 
+@pytest.mark.parametrize("tamper", ["remove", "blank", "mutate"])
+def test_parse_forwarded_request_v2_binds_client_ip_presence_and_value(tamper: str) -> None:
+    payload = _payload()
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=True,
+        downstream_turn_state="http_turn_generated",
+        original_request_unanchored=True,
+        original_affinity_kind="session_header",
+        original_affinity_key="sid-123",
+        client_ip="203.0.113.42",
+    )
+    headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
+    if tamper == "remove":
+        headers.pop(HTTP_BRIDGE_CLIENT_IP_HEADER)
+        headers.pop(HTTP_BRIDGE_CLIENT_IP_SIGNATURE_HEADER)
+    elif tamper == "blank":
+        headers[HTTP_BRIDGE_CLIENT_IP_HEADER] = "   "
+    else:
+        headers[HTTP_BRIDGE_CLIENT_IP_HEADER] = "198.51.100.44"
+
+    forwarded, error = parse_forwarded_request(headers, payload=payload, current_instance="instance-b")
+
+    assert forwarded is None
+    assert error is not None
+    assert error.status_code == 400
+    assert error.payload["error"]["code"] == "bridge_forward_invalid"
+
+
+def test_parse_forwarded_request_accepts_v2_without_client_ip_metadata() -> None:
+    payload = _payload()
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=True,
+        downstream_turn_state="http_turn_generated",
+        original_request_unanchored=True,
+        original_affinity_kind="session_header",
+        original_affinity_key="sid-123",
+    )
+    headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
+
+    forwarded, error = parse_forwarded_request(headers, payload=payload, current_instance="instance-b")
+
+    assert error is None
+    assert forwarded is not None
+    assert forwarded.context.client_ip is None
+
+
 def test_build_owner_forward_headers_keeps_anchored_primary_signature_legacy_compatible() -> None:
     payload = _payload()
     context = HTTPBridgeForwardContext(

@@ -1158,7 +1158,13 @@ async def test_backend_codex_responses_routes_responses_capable_model_source(asy
     async with async_client.stream(
         "POST",
         "/backend-api/codex/responses",
-        json={"model": model, "instructions": "hi", "input": []},
+        json={
+            "model": model,
+            "instructions": "hi",
+            "input": [],
+            "reasoningEffort": "ultra",
+            "thinking": "ultra",
+        },
     ) as response:
         assert response.status_code == 200
         lines = [line async for line in response.aiter_lines() if line]
@@ -1167,6 +1173,9 @@ async def test_backend_codex_responses_routes_responses_capable_model_source(asy
     forwarded_payload = cast("dict[str, object]", observed["payload"])
     assert forwarded_payload["model"] == model
     assert forwarded_payload["stream"] is True
+    assert forwarded_payload["reasoning"] == {"effort": "max"}
+    assert "reasoningEffort" not in forwarded_payload
+    assert "thinking" not in forwarded_payload
     assert any("resp_source" in line for line in lines)
 
 
@@ -1468,6 +1477,19 @@ async def test_api_key_create_accepts_uppercase_enforced_reasoning(async_client)
 
 
 @pytest.mark.asyncio
+async def test_api_key_create_accepts_extended_enforced_reasoning(async_client):
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "extended-enforcement",
+            "enforcedReasoningEffort": "ULTRA",
+        },
+    )
+    assert created.status_code == 200
+    assert created.json()["enforcedReasoningEffort"] == "ultra"
+
+
+@pytest.mark.asyncio
 async def test_api_key_update_accepts_uppercase_enforced_reasoning(async_client):
     created = await async_client.post(
         "/api/api-keys/",
@@ -1486,6 +1508,27 @@ async def test_api_key_update_accepts_uppercase_enforced_reasoning(async_client)
     )
     assert updated.status_code == 200
     assert updated.json()["enforcedReasoningEffort"] == "high"
+
+
+@pytest.mark.asyncio
+async def test_api_key_update_accepts_extended_enforced_reasoning(async_client):
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "extended-enforcement-update",
+        },
+    )
+    assert created.status_code == 200
+    key_id = created.json()["id"]
+
+    updated = await async_client.patch(
+        f"/api/api-keys/{key_id}",
+        json={
+            "enforcedReasoningEffort": "MAX",
+        },
+    )
+    assert updated.status_code == 200
+    assert updated.json()["enforcedReasoningEffort"] == "max"
 
 
 @pytest.mark.asyncio

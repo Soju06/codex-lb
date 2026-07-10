@@ -26,7 +26,34 @@ EXPECTED_CORE_MODEL_PLANS = {
     "enterprise_cbp_usage_based",
 }
 
+EXPECTED_GPT56_MODEL_PLANS = {
+    "business",
+    "edu",
+    "edu_plus",
+    "edu_pro",
+    "education",
+    "enterprise",
+    "enterprise_cbp_automation",
+    "enterprise_cbp_usage_based",
+    "finserv",
+    "free",
+    "free_workspace",
+    "go",
+    "hc",
+    "k12",
+    "plus",
+    "pro",
+    "prolite",
+    "quorum",
+    "sci",
+    "self_serve_business_usage_based",
+    "team",
+}
+
 EXPECTED_BOOTSTRAP_MINIMAL_CLIENT_VERSIONS = {
+    "gpt-5.6-sol": "0.144.0",
+    "gpt-5.6-terra": "0.144.0",
+    "gpt-5.6-luna": "0.144.0",
     "gpt-5.5": "0.124.0",
     "gpt-5.4": "0.98.0",
     "gpt-5.4-mini": "0.98.0",
@@ -35,6 +62,40 @@ EXPECTED_BOOTSTRAP_MINIMAL_CLIENT_VERSIONS = {
     "gpt-5.2": "0.0.1",
     "codex-auto-review": "0.98.0",
 }
+
+
+def _expected_gpt56_raw(*, multi_agent_version: str, availability_nux: object) -> dict[str, object]:
+    return {
+        "shell_type": "shell_command",
+        "visibility": "list",
+        "availability_nux": availability_nux,
+        "max_context_window": 372_000,
+        "apply_patch_tool_type": "freeform",
+        "web_search_tool_type": "text_and_image",
+        "supports_image_detail_original": True,
+        "truncation_policy": {"mode": "tokens", "limit": 10_000},
+        "tool_mode": "code_mode_only",
+        "multi_agent_version": multi_agent_version,
+        "use_responses_lite": True,
+        "include_skills_usage_instructions": False,
+        "auto_review_model_override": None,
+        "auto_compact_token_limit": None,
+        "comp_hash": "3000",
+        "reasoning_summary_format": "experimental",
+        "default_reasoning_summary": "none",
+        "upgrade": None,
+        "experimental_supported_tools": [],
+        "supports_search_tool": True,
+        "default_service_tier": None,
+        "service_tiers": [
+            {
+                "id": "priority",
+                "name": "Fast",
+                "description": "1.5x speed, increased usage",
+            }
+        ],
+        "additional_speed_tiers": ["fast"],
+    }
 
 
 def _model(slug: str) -> UpstreamModel:
@@ -138,6 +199,9 @@ async def test_prefers_websockets_does_not_use_bootstrap_after_snapshot():
 def test_prefers_websockets_uses_bootstrap_fallback_when_uninitialized():
     registry = ModelRegistry(ttl_seconds=60.0)
 
+    assert registry.prefers_websockets("gpt-5.6-sol") is True
+    assert registry.prefers_websockets("gpt-5.6-terra") is True
+    assert registry.prefers_websockets("gpt-5.6-luna") is True
     assert registry.prefers_websockets("gpt-5.4") is True
     assert registry.prefers_websockets("gpt-5.4-2026") is True
     assert registry.prefers_websockets("gpt-5.3-codex") is True
@@ -154,6 +218,51 @@ def test_bootstrap_models_include_representative_upstream_metadata():
     assert set(models) == set(EXPECTED_BOOTSTRAP_MINIMAL_CLIENT_VERSIONS)
     for slug, expected_version in EXPECTED_BOOTSTRAP_MINIMAL_CLIENT_VERSIONS.items():
         assert models[slug].minimal_client_version == expected_version
+
+    sol = models["gpt-5.6-sol"]
+    assert sol.display_name == "GPT-5.6-Sol"
+    assert sol.context_window == 372_000
+    assert sol.default_reasoning_level == "low"
+    assert {level.effort for level in sol.supported_reasoning_levels} == {
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra",
+    }
+    assert sol.available_in_plans == EXPECTED_GPT56_MODEL_PLANS
+    assert sol.raw == _expected_gpt56_raw(
+        multi_agent_version="v2",
+        availability_nux={
+            "message": (
+                "Our most capable model yet. GPT-5.6 Sol can tackle complex code changes, dig into research, "
+                "produce polished documents, and take on your most ambitious work. Sol is highly capable at "
+                "lower reasoning efforts—try starting lower, then turn it up for harder jobs."
+            )
+        },
+    )
+
+    terra = models["gpt-5.6-terra"]
+    assert terra.display_name == "GPT-5.6-Terra"
+    assert terra.default_reasoning_level == "medium"
+    assert {level.effort for level in terra.supported_reasoning_levels} == {
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra",
+    }
+    assert terra.available_in_plans == EXPECTED_GPT56_MODEL_PLANS
+    assert terra.raw == _expected_gpt56_raw(multi_agent_version="v2", availability_nux=None)
+
+    luna = models["gpt-5.6-luna"]
+    assert luna.display_name == "GPT-5.6-Luna"
+    assert luna.default_reasoning_level == "medium"
+    assert {level.effort for level in luna.supported_reasoning_levels} == {"low", "medium", "high", "xhigh", "max"}
+    assert luna.available_in_plans == EXPECTED_GPT56_MODEL_PLANS
+    assert luna.raw == _expected_gpt56_raw(multi_agent_version="v1", availability_nux=None)
 
     gpt54 = models["gpt-5.4"]
     assert gpt54.minimal_client_version == "0.98.0"

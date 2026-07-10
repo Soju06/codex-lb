@@ -20,7 +20,11 @@ from app.core.clients.proxy import compact_responses as core_compact_responses
 from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.openai.model_registry import get_model_registry
-from app.core.openai.requests import ResponsesCompactRequest, ResponsesReasoning
+from app.core.openai.requests import (
+    ResponsesCompactRequest,
+    ResponsesReasoning,
+    normalize_reasoning_effort_for_wire,
+)
 from app.core.upstream_proxy import ResolvedUpstreamRoute, resolve_upstream_route
 from app.core.utils.time import naive_utc_to_epoch, utcnow
 from app.db.models import Account, AccountStatus
@@ -1148,7 +1152,11 @@ class AutomationsService:
                     model=run_model,
                     input=run_prompt,
                     instructions="Automation ping",
-                    reasoning=ResponsesReasoning(effort=run_reasoning_effort) if run_reasoning_effort else None,
+                    reasoning=(
+                        ResponsesReasoning(effort=normalize_reasoning_effort_for_wire(run_reasoning_effort))
+                        if run_reasoning_effort
+                        else None
+                    ),
                 )
                 request_started_at = time.monotonic()
                 compact_response = await asyncio.wait_for(
@@ -2123,7 +2131,7 @@ def _normalize_reasoning_effort(value: str | None, *, model_slug: str) -> str | 
     normalized = value.strip().lower()
     if not normalized:
         return None
-    allowed = {"minimal", "low", "medium", "high", "xhigh"}
+    allowed = {"minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
     if normalized not in allowed:
         raise AutomationValidationError(
             f"Unsupported reasoning effort: {value}",

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from app.core.openai.model_registry import ReasoningLevel, UpstreamModel, get_model_registry
@@ -8,6 +10,9 @@ from app.core.types import JsonValue
 pytestmark = pytest.mark.integration
 
 BOOTSTRAP_MODEL_SLUGS = {
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
     "gpt-5.5",
     "gpt-5.4",
     "gpt-5.4-mini",
@@ -34,7 +39,34 @@ EXPECTED_CORE_MODEL_PLANS = {
     "enterprise_cbp_usage_based",
 }
 
+EXPECTED_GPT56_MODEL_PLANS = {
+    "business",
+    "edu",
+    "edu_plus",
+    "edu_pro",
+    "education",
+    "enterprise",
+    "enterprise_cbp_automation",
+    "enterprise_cbp_usage_based",
+    "finserv",
+    "free",
+    "free_workspace",
+    "go",
+    "hc",
+    "k12",
+    "plus",
+    "pro",
+    "prolite",
+    "quorum",
+    "sci",
+    "self_serve_business_usage_based",
+    "team",
+}
+
 EXPECTED_BOOTSTRAP_MINIMAL_CLIENT_VERSIONS = {
+    "gpt-5.6-sol": "0.144.0",
+    "gpt-5.6-terra": "0.144.0",
+    "gpt-5.6-luna": "0.144.0",
     "gpt-5.5": "0.124.0",
     "gpt-5.4": "0.98.0",
     "gpt-5.4-mini": "0.98.0",
@@ -43,6 +75,49 @@ EXPECTED_BOOTSTRAP_MINIMAL_CLIENT_VERSIONS = {
     "gpt-5.2": "0.0.1",
     "codex-auto-review": "0.98.0",
 }
+
+
+def _expected_gpt56_extra(*, multi_agent_version: str, availability_nux: object) -> dict[str, object]:
+    return {
+        "shell_type": "shell_command",
+        "availability_nux": availability_nux,
+        "max_context_window": 372_000,
+        "apply_patch_tool_type": "freeform",
+        "web_search_tool_type": "text_and_image",
+        "supports_image_detail_original": True,
+        "truncation_policy": {"mode": "tokens", "limit": 10_000},
+        "tool_mode": "code_mode_only",
+        "multi_agent_version": multi_agent_version,
+        "use_responses_lite": True,
+        "include_skills_usage_instructions": False,
+        "auto_review_model_override": None,
+        "auto_compact_token_limit": None,
+        "comp_hash": "3000",
+        "reasoning_summary_format": "experimental",
+        "default_reasoning_summary": "none",
+        "upgrade": None,
+        "experimental_supported_tools": [],
+        "supports_search_tool": True,
+        "default_service_tier": None,
+        "service_tiers": [
+            {
+                "id": "priority",
+                "name": "Fast",
+                "description": "1.5x speed, increased usage",
+            }
+        ],
+        "additional_speed_tiers": ["fast"],
+    }
+
+
+def _assert_gpt56_extra(entry: dict[str, object], *, multi_agent_version: str, availability_nux: object) -> None:
+    expected = _expected_gpt56_extra(
+        multi_agent_version=multi_agent_version,
+        availability_nux=availability_nux,
+    )
+    for key, value in expected.items():
+        assert entry[key] == value
+    assert "effective_context_window_percent" not in entry
 
 
 def _make_upstream_model(
@@ -204,6 +279,56 @@ async def test_backend_codex_models_uses_bootstrap_upstream_metadata(async_clien
     assert set(entries) == set(EXPECTED_BOOTSTRAP_MINIMAL_CLIENT_VERSIONS)
     for slug, expected_version in EXPECTED_BOOTSTRAP_MINIMAL_CLIENT_VERSIONS.items():
         assert entries[slug]["minimal_client_version"] == expected_version
+
+    sol = entries["gpt-5.6-sol"]
+    assert sol["display_name"] == "GPT-5.6-Sol"
+    assert sol["context_window"] == 372_000
+    assert sol["default_reasoning_level"] == "low"
+    assert {level["effort"] for level in sol["supported_reasoning_levels"]} == {
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra",
+    }
+    assert set(sol["available_in_plans"]) == EXPECTED_GPT56_MODEL_PLANS
+    _assert_gpt56_extra(
+        sol,
+        multi_agent_version="v2",
+        availability_nux={
+            "message": (
+                "Our most capable model yet. GPT-5.6 Sol can tackle complex code changes, dig into research, "
+                "produce polished documents, and take on your most ambitious work. Sol is highly capable at "
+                "lower reasoning efforts—try starting lower, then turn it up for harder jobs."
+            )
+        },
+    )
+
+    terra = entries["gpt-5.6-terra"]
+    assert terra["default_reasoning_level"] == "medium"
+    assert {level["effort"] for level in terra["supported_reasoning_levels"]} == {
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra",
+    }
+    assert set(terra["available_in_plans"]) == EXPECTED_GPT56_MODEL_PLANS
+    _assert_gpt56_extra(terra, multi_agent_version="v2", availability_nux=None)
+
+    luna = entries["gpt-5.6-luna"]
+    assert luna["default_reasoning_level"] == "medium"
+    assert {level["effort"] for level in luna["supported_reasoning_levels"]} == {
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+    }
+    assert set(luna["available_in_plans"]) == EXPECTED_GPT56_MODEL_PLANS
+    _assert_gpt56_extra(luna, multi_agent_version="v1", availability_nux=None)
 
     gpt54 = entries["gpt-5.4"]
     assert gpt54["minimal_client_version"] == "0.98.0"
@@ -1030,6 +1155,36 @@ async def test_model_sets_are_consistent_across_api_endpoints(async_client):
     assert "gpt-hidden" not in codex_slugs
     assert dashboard_ids == v1_ids
     assert dashboard_ids.issubset(codex_slugs)
+
+
+@pytest.mark.asyncio
+async def test_dashboard_models_exposes_extended_reasoning_efforts(async_client):
+    registry = get_model_registry()
+    models = [
+        _make_upstream_model(
+            "gpt-5.6-sol",
+            raw={
+                "shell_type": "shell_command",
+                "visibility": "list",
+            },
+        )
+    ]
+    models[0] = replace(
+        models[0],
+        supported_reasoning_levels=tuple(
+            ReasoningLevel(effort=effort, description=effort)
+            for effort in ("low", "medium", "high", "xhigh", "max", "ultra")
+        ),
+        default_reasoning_level="low",
+    )
+    await registry.update({"plus": models, "pro": models})
+
+    response = await async_client.get("/api/models")
+
+    assert response.status_code == 200
+    model = next(item for item in response.json()["models"] if item["id"] == "gpt-5.6-sol")
+    assert model["supportedReasoningEfforts"] == ["low", "medium", "high", "xhigh", "max", "ultra"]
+    assert model["defaultReasoningEffort"] == "low"
 
 
 @pytest.mark.asyncio

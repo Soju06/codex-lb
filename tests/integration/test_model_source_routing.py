@@ -1355,6 +1355,77 @@ async def test_source_chat_payload_keeps_reasoning_toggles_for_optin_model(async
 
 
 @pytest.mark.asyncio
+async def test_source_chat_payload_maps_ultra_to_wire_max(async_client, source_upstream):
+    captured: dict[str, object] = {}
+
+    async def capture(request: web.Request) -> web.Response:
+        captured.update(await request.json())
+        return web.json_response(_chat_completion_body("reasoning-ultra-model"))
+
+    base_url = await source_upstream(capture)
+    model = "reasoning-ultra-model"
+    await _create_model_source(
+        async_client,
+        name="reasoning-ultra",
+        model=model,
+        base_url=base_url,
+        raw_metadata_json='{"supports_reasoning": true}',
+    )
+
+    response = await async_client.post(
+        "/v1/chat/completions",
+        json={
+            "model": model,
+            "messages": [{"role": "user", "content": "hi"}],
+            "reasoning": {"effort": "ultra", "summary": "auto"},
+            "reasoning_effort": "ultra",
+            "reasoningEffort": "ultra",
+            "thinking": "ultra",
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["reasoning"] == {"effort": "max", "summary": "auto"}
+    assert captured["reasoning_effort"] == "max"
+    assert "reasoningEffort" not in captured
+    assert "thinking" not in captured
+
+
+@pytest.mark.asyncio
+async def test_source_chat_explicit_reasoning_effort_overrides_thinking_alias(async_client, source_upstream):
+    captured: dict[str, object] = {}
+
+    async def capture(request: web.Request) -> web.Response:
+        captured.update(await request.json())
+        return web.json_response(_chat_completion_body("reasoning-precedence-model"))
+
+    base_url = await source_upstream(capture)
+    model = "reasoning-precedence-model"
+    await _create_model_source(
+        async_client,
+        name="reasoning-precedence",
+        model=model,
+        base_url=base_url,
+        raw_metadata_json='{"supports_reasoning": true}',
+    )
+
+    response = await async_client.post(
+        "/v1/chat/completions",
+        json={
+            "model": model,
+            "messages": [{"role": "user", "content": "hi"}],
+            "reasoning_effort": "high",
+            "thinking": "ultra",
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["reasoning_effort"] == "high"
+    assert captured["reasoning"] == {"effort": "high"}
+    assert "thinking" not in captured
+
+
+@pytest.mark.asyncio
 async def test_source_chat_payload_overrides_enforced_reasoning_object(async_client, source_upstream):
     await _enable_api_key_auth(async_client)
     captured: dict[str, object] = {}

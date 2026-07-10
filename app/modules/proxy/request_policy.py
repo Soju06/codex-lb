@@ -8,7 +8,13 @@ from app.core.errors import OpenAIErrorEnvelope, openai_error
 from app.core.exceptions import ProxyModelNotAllowed
 from app.core.openai.exceptions import ClientPayloadError
 from app.core.openai.model_registry import ModelRegistry, get_model_registry
-from app.core.openai.requests import ResponsesCompactRequest, ResponsesReasoning, ResponsesRequest
+from app.core.openai.requests import (
+    ResponsesCompactRequest,
+    ResponsesReasoning,
+    ResponsesRequest,
+    normalize_reasoning_aliases,
+    normalize_reasoning_effort_for_wire,
+)
 from app.core.openai.strict_schema import (
     validate_strict_function_tool_schema,
     validate_strict_json_schema,
@@ -183,6 +189,7 @@ def sanitize_source_chat_payload(
     empty list, so an unfiltered ``model_dump`` forwards ``"tools": []`` and any
     client-side reasoning toggles verbatim.
     """
+    normalize_source_reasoning_payload(payload)
     tools = payload.get("tools")
     if isinstance(tools, list) and not tools:
         payload.pop("tools", None)
@@ -191,6 +198,22 @@ def sanitize_source_chat_payload(
     if not allow_reasoning:
         for key in _SOURCE_REASONING_TOGGLE_KEYS:
             payload.pop(key, None)
+
+
+def normalize_source_reasoning_payload(payload: dict[str, JsonValue]) -> None:
+    """Canonicalize client reasoning aliases on direct model-source egress."""
+    reasoning_effort = payload.get("reasoning_effort")
+    if isinstance(reasoning_effort, str):
+        wire_effort = normalize_reasoning_effort_for_wire(reasoning_effort)
+        payload["reasoning_effort"] = wire_effort
+        reasoning = payload.get("reasoning")
+        if is_json_mapping(reasoning):
+            reasoning_map = dict(reasoning.items())
+            reasoning_map.setdefault("effort", wire_effort)
+            payload["reasoning"] = reasoning_map
+        elif reasoning is None:
+            payload["reasoning"] = {"effort": wire_effort}
+    normalize_reasoning_aliases(payload)
 
 
 def apply_api_key_enforcement_to_chat_payload(
@@ -208,12 +231,13 @@ def apply_api_key_enforcement_to_chat_payload(
         return
 
     if api_key.enforced_reasoning_effort is not None:
-        payload["reasoning_effort"] = api_key.enforced_reasoning_effort
+        wire_effort = normalize_reasoning_effort_for_wire(api_key.enforced_reasoning_effort)
+        payload["reasoning_effort"] = wire_effort
         reasoning = payload.get("reasoning")
         if isinstance(reasoning, dict):
-            payload["reasoning"] = {**reasoning, "effort": api_key.enforced_reasoning_effort}
+            payload["reasoning"] = {**reasoning, "effort": wire_effort}
         else:
-            payload["reasoning"] = {"effort": api_key.enforced_reasoning_effort}
+            payload["reasoning"] = {"effort": wire_effort}
 
     if api_key.enforced_service_tier is not None:
         if api_key.enforced_service_tier in _UPSTREAM_OMIT_SERVICE_TIERS:
@@ -337,6 +361,17 @@ def normalize_unsupported_reasoning_effort(
 
     requested_effort = payload.reasoning.effort
     normalized_effort = requested_effort.strip().lower()
+    wire_effort = normalize_reasoning_effort_for_wire(requested_effort)
+    if wire_effort != normalized_effort:
+        payload.reasoning.effort = wire_effort
+        logger.info(
+            "reasoning_effort_normalized request_id=%s model=%s requested_effort=%s normalized_effort=%s",
+            get_request_id(),
+            payload.model,
+            requested_effort,
+            wire_effort,
+        )
+        return
     if normalized_effort not in _UNSUPPORTED_UPSTREAM_REASONING_EFFORTS:
         return
 

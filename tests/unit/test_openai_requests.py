@@ -264,6 +264,30 @@ def test_provider_thinking_aliases_are_normalized():
     assert "enable_thinking" not in dumped
 
 
+@pytest.mark.parametrize(
+    ("thinking", "expected_effort"),
+    [
+        ("max", "max"),
+        ("ultra", "max"),
+        ({"effort": "max"}, "max"),
+        ({"effort": "ultra"}, "max"),
+    ],
+)
+def test_provider_thinking_extended_efforts_use_wire_max(thinking: JsonValue, expected_effort: str):
+    payload: dict[str, JsonValue] = {
+        "model": "gpt-5.6-sol",
+        "instructions": "hi",
+        "input": [],
+        "thinking": thinking,
+    }
+    request = ResponsesRequest.model_validate(payload)
+
+    dumped = request.to_payload()
+
+    assert dumped["reasoning"] == {"effort": expected_effort}
+    assert "thinking" not in dumped
+
+
 def test_explicit_reasoning_wins_over_provider_thinking_aliases():
     payload = {
         "model": "gpt-5.1",

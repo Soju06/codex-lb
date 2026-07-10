@@ -726,6 +726,12 @@ _POISONED_LOCAL_COMPACT_FALLBACK_TEXT = "Local compact fallback preserved the la
 _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS = 100_000
 _COMPACT_UPSTREAM_HEAD_ESTIMATED_TOKENS = 12_000
 _ESTIMATED_CHARS_PER_TOKEN = 4
+_REASONING_EFFORT_WIRE_ALIASES = {"ultra": "max"}
+
+
+def normalize_reasoning_effort_for_wire(effort: str) -> str:
+    normalized = effort.strip().lower()
+    return _REASONING_EFFORT_WIRE_ALIASES.get(normalized, normalized)
 
 
 def _strip_unsupported_fields(payload: MutableJsonObject) -> MutableJsonObject:
@@ -1127,7 +1133,7 @@ def normalize_reasoning_aliases(payload: MutableJsonObject) -> None:
         reasoning_map = {}
 
     if isinstance(reasoning_effort, str) and "effort" not in reasoning_map:
-        reasoning_map["effort"] = reasoning_effort
+        reasoning_map["effort"] = normalize_reasoning_effort_for_wire(reasoning_effort)
     if isinstance(reasoning_summary, str) and "summary" not in reasoning_map:
         reasoning_map["summary"] = reasoning_summary
 
@@ -1140,6 +1146,10 @@ def normalize_reasoning_aliases(payload: MutableJsonObject) -> None:
             reasoning_map["effort"] = provider_reasoning["effort"]
         if "summary" not in reasoning_map and "summary" in provider_reasoning:
             reasoning_map["summary"] = provider_reasoning["summary"]
+
+    effective_effort = reasoning_map.get("effort")
+    if isinstance(effective_effort, str):
+        reasoning_map["effort"] = normalize_reasoning_effort_for_wire(effective_effort)
 
     if reasoning_map:
         payload["reasoning"] = reasoning_map
@@ -1154,8 +1164,8 @@ def _normalize_thinking_alias(
         return {"effort": "medium"} if thinking else None
     if isinstance(thinking, str):
         normalized = thinking.strip().lower()
-        if normalized in {"low", "medium", "high", "xhigh"}:
-            return {"effort": normalized}
+        if normalized in {"low", "medium", "high", "xhigh", "max", "ultra"}:
+            return {"effort": normalize_reasoning_effort_for_wire(normalized)}
         if normalized in {"enabled", "true", "on"}:
             return {"effort": "medium"}
         if normalized in {"disabled", "false", "off"}:
@@ -1166,7 +1176,7 @@ def _normalize_thinking_alias(
         effort = thinking_mapping.get("effort")
         summary = thinking_mapping.get("summary")
         if isinstance(effort, str) and effort.strip():
-            normalized["effort"] = effort.strip().lower()
+            normalized["effort"] = normalize_reasoning_effort_for_wire(effort)
         if isinstance(summary, str) and summary.strip():
             normalized["summary"] = summary.strip()
         if normalized:

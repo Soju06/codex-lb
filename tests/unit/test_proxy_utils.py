@@ -707,6 +707,34 @@ def test_apply_api_key_enforcement_to_chat_payload_overrides_reasoning_object():
     assert payload["reasoning_effort"] == "high"
 
 
+def test_apply_api_key_enforcement_to_chat_payload_maps_ultra_to_wire_max():
+    payload: dict[str, JsonValue] = {
+        "model": "gpt-5.6-sol",
+        "messages": [{"role": "user", "content": "hi"}],
+        "reasoning": {"effort": "low", "summary": "auto"},
+        "reasoning_effort": "low",
+    }
+    api_key = proxy_service.ApiKeyData(
+        id="key_ultra_chat",
+        name="ultra-chat-key",
+        key_prefix="sk-clb-test",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort="ultra",
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+
+    proxy_request_policy.apply_api_key_enforcement_to_chat_payload(payload, api_key)
+
+    assert api_key.enforced_reasoning_effort == "ultra"
+    assert payload["reasoning"] == {"effort": "max", "summary": "auto"}
+    assert payload["reasoning_effort"] == "max"
+
+
 def _service_tier_enforcement_key(enforced: str) -> proxy_service.ApiKeyData:
     return proxy_service.ApiKeyData(
         id="key_default",
@@ -873,6 +901,24 @@ def test_normalize_unsupported_reasoning_effort_preserves_supported_effort():
     assert payload.reasoning.effort == "high"
 
 
+def test_normalize_unsupported_reasoning_effort_maps_ultra_to_wire_max():
+    from app.core.openai.requests import ResponsesReasoning
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "hello",
+            "input": [],
+        }
+    )
+    payload.reasoning = ResponsesReasoning(effort="ultra")
+
+    proxy_request_policy.normalize_unsupported_reasoning_effort(payload)
+
+    assert payload.reasoning is not None
+    assert payload.reasoning.effort == "max"
+
+
 def test_apply_api_key_enforcement_normalizes_minimal_without_api_key():
     from app.core.openai.requests import ResponsesReasoning
 
@@ -889,6 +935,36 @@ def test_apply_api_key_enforcement_normalizes_minimal_without_api_key():
 
     assert payload.reasoning is not None
     assert payload.reasoning.effort == "low"
+
+
+def test_apply_api_key_enforcement_maps_enforced_ultra_to_wire_max():
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "hello",
+            "input": [],
+            "reasoning": {"effort": "low"},
+        }
+    )
+    api_key = proxy_service.ApiKeyData(
+        id="key_ultra",
+        name="ultra-key",
+        key_prefix="sk-clb-test",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort="ultra",
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+
+    proxy_request_policy.apply_api_key_enforcement(payload, api_key)
+
+    assert api_key.enforced_reasoning_effort == "ultra"
+    assert payload.reasoning is not None
+    assert payload.reasoning.effort == "max"
 
 
 def test_normalize_responses_request_payload_preserves_backend_codex_image_generation_with_function_tools():

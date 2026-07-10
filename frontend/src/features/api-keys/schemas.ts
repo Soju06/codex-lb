@@ -37,6 +37,9 @@ export const TRAFFIC_CLASSES = ["foreground", "opportunistic"] as const;
 export type TrafficClass = (typeof TRAFFIC_CLASSES)[number];
 export const TRANSPORT_POLICY_OVERRIDES = ["smart", "always_http", "always_websocket"] as const;
 export type TransportPolicyOverride = (typeof TRANSPORT_POLICY_OVERRIDES)[number];
+export const REASONING_EFFORTS = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const;
+export type ReasoningEffortType = (typeof REASONING_EFFORTS)[number];
+export const ENFORCED_REASONING_EFFORTS = ["none", ...REASONING_EFFORTS] as const;
 
 export const ApiKeySchema = z.object({
   id: z.string(),
@@ -49,10 +52,7 @@ export const ApiKeySchema = z.object({
     .enum(TRAFFIC_CLASSES)
     .default("foreground"),
   transportPolicyOverride: z.enum(TRANSPORT_POLICY_OVERRIDES).nullable().default(null),
-  enforcedReasoningEffort: z
-    .enum(["none", "minimal", "low", "medium", "high", "xhigh"])
-    .nullable()
-    .default(null),
+  enforcedReasoningEffort: z.enum(ENFORCED_REASONING_EFFORTS).nullable().default(null),
   enforcedServiceTier: z
     .enum(SERVICE_TIERS)
     .nullable()
@@ -88,10 +88,7 @@ export const ApiKeyCreateRequestSchema = z.object({
   trafficClass: z.enum(TRAFFIC_CLASSES).optional(),
   transportPolicyOverride: z.enum(TRANSPORT_POLICY_OVERRIDES).nullable().optional(),
   enforcedModel: z.string().min(1).nullable().optional(),
-  enforcedReasoningEffort: z
-    .enum(["none", "minimal", "low", "medium", "high", "xhigh"])
-    .nullable()
-    .optional(),
+  enforcedReasoningEffort: z.enum(ENFORCED_REASONING_EFFORTS).nullable().optional(),
   enforcedServiceTier: z
     .enum(SERVICE_TIERS)
     .nullable()
@@ -115,10 +112,7 @@ export const ApiKeyUpdateRequestSchema = z.object({
   trafficClass: z.enum(TRAFFIC_CLASSES).optional(),
   transportPolicyOverride: z.enum(TRANSPORT_POLICY_OVERRIDES).nullable().optional(),
   enforcedModel: z.string().min(1).nullable().optional(),
-  enforcedReasoningEffort: z
-    .enum(["none", "minimal", "low", "medium", "high", "xhigh"])
-    .nullable()
-    .optional(),
+  enforcedReasoningEffort: z.enum(ENFORCED_REASONING_EFFORTS).nullable().optional(),
   enforcedServiceTier: z
     .enum(SERVICE_TIERS)
     .nullable()
@@ -146,11 +140,8 @@ export const ModelItemSchema = z.object({
   id: z.string(),
   name: z.string(),
   sourceOnly: z.boolean().default(false),
-  supportedReasoningEfforts: z.array(z.enum(["minimal", "low", "medium", "high", "xhigh"])).default([]),
-  defaultReasoningEffort: z
-    .enum(["minimal", "low", "medium", "high", "xhigh"])
-    .nullable()
-    .optional(),
+  supportedReasoningEfforts: z.array(z.enum(REASONING_EFFORTS)).default([]),
+  defaultReasoningEffort: z.enum(REASONING_EFFORTS).nullable().optional(),
 });
 export const ModelsResponseSchema = z.object({ models: z.array(ModelItemSchema) });
 export type ModelItem = z.infer<typeof ModelItemSchema>;

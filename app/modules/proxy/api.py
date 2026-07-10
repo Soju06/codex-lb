@@ -165,6 +165,7 @@ from app.modules.proxy.request_policy import (
     enforce_strict_function_tools_format,
     enforce_strict_text_format,
     normalize_responses_request_payload,
+    normalize_source_reasoning_payload,
     openai_client_payload_error,
     openai_validation_error,
     resolve_model_alias,
@@ -3194,6 +3195,7 @@ async def _source_responses_response(
     )
     source_payload = payload.model_dump(mode="json", exclude_none=True)
     source_payload["stream"] = bool(payload.stream)
+    normalize_source_reasoning_payload(source_payload)
 
     if payload.stream:
         try:

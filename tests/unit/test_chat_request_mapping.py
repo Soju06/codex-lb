@@ -347,6 +347,23 @@ def test_chat_anthropic_thinking_alias_maps_to_default_reasoning_effort():
     assert reasoning_map.get("effort") == "medium"
 
 
+def test_chat_ultra_thinking_alias_maps_to_wire_max():
+    payload = {
+        "model": "gpt-5.6-sol",
+        "messages": [{"role": "user", "content": "hi"}],
+        "thinking": "ultra",
+    }
+    req = ChatCompletionsRequest.model_validate(payload)
+    responses = req.to_responses_request()
+    dumped = responses.to_payload()
+
+    assert "thinking" not in dumped
+    reasoning = dumped.get("reasoning")
+    assert isinstance(reasoning, Mapping)
+    reasoning_map = cast(Mapping[str, JsonValue], reasoning)
+    assert reasoning_map.get("effort") == "max"
+
+
 def test_chat_service_tier_is_preserved_in_responses_payload():
     payload = {
         "model": "gpt-5.2",

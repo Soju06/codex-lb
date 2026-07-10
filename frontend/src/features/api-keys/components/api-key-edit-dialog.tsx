@@ -34,6 +34,7 @@ import type {
   ApiKeyUpdateRequest,
   LimitRuleCreate,
   LimitType,
+  ReasoningEffortType,
   ServiceTierType,
   TrafficClass,
   TransportPolicyOverride,
@@ -160,7 +161,8 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
       allowedModels: draft.selectedModels.length > 0 ? draft.selectedModels : null,
       applyToCodexModel: draft.applyToCodexModel,
       enforcedModel: draft.enforcedModel.trim() ? draft.enforcedModel.trim() : null,
-      enforcedReasoningEffort: draft.enforcedReasoningEffort === "none" ? null : draft.enforcedReasoningEffort as "minimal" | "low" | "medium" | "high" | "xhigh",
+      enforcedReasoningEffort:
+        draft.enforcedReasoningEffort === "none" ? null : draft.enforcedReasoningEffort as ReasoningEffortType,
       enforcedServiceTier: draft.enforcedServiceTier === "none" ? null : draft.enforcedServiceTier as ServiceTierType,
       trafficClass: draft.trafficClass,
       transportPolicyOverride: draft.transportPolicyOverride,
@@ -284,6 +286,8 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
                   <SelectItem value="medium">Medium</SelectItem>
                   <SelectItem value="high">High</SelectItem>
                   <SelectItem value="xhigh">XHigh</SelectItem>
+                  <SelectItem value="max">Max</SelectItem>
+                  <SelectItem value="ultra">Ultra</SelectItem>
                 </SelectContent>
               </Select>
             </div>

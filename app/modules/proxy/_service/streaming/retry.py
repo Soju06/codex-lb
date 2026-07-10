@@ -20,7 +20,7 @@ from app.core.upstream_proxy import UpstreamProxyRouteError
 from app.core.utils.request_id import ensure_request_id
 from app.core.utils.retry import backoff_seconds
 from app.core.utils.sse import format_sse_event
-from app.db.models import StickySessionKind
+from app.db.models import Account, StickySessionKind
 from app.modules.api_keys.service import ApiKeyData, ApiKeyUsageReservationData
 from app.modules.proxy._service.observability import (
     _maybe_log_proxy_request_shape,
@@ -109,6 +109,55 @@ def _resolved_configured_stream_transport(dashboard_settings: Any, base_settings
     if configured == "default":
         configured = getattr(base_settings, "upstream_stream_transport", "auto")
     return configured, configured in ("http", "websocket")
+
+
+async def _iter_account_capacity_recovery_wait(
+    *,
+    request_id: str,
+    model: str | None,
+    account_id: str | None,
+    error_message: str | None,
+    recovery_sleep_seconds: float,
+    deadline: float,
+    emit_keepalives: bool,
+    stage: str,
+) -> AsyncIterator[str]:
+    remaining_budget_seconds = _facade()._remaining_budget_seconds(deadline)
+    if remaining_budget_seconds <= 0:
+        return
+    wait_started_at = time.monotonic()
+    remaining_sleep_seconds = min(recovery_sleep_seconds, remaining_budget_seconds)
+    _facade().logger.info(
+        "Waiting for account capacity before retrying stream request_id=%s model=%s account_id=%s "
+        "stage=%s sleep_seconds=%.1f recovery_hint_seconds=%.1f error=%s",
+        request_id,
+        model,
+        account_id,
+        stage,
+        remaining_sleep_seconds,
+        recovery_sleep_seconds,
+        error_message,
+    )
+    while remaining_sleep_seconds > 0:
+        if emit_keepalives:
+            yield format_sse_event(
+                cast(
+                    Mapping[str, Any],
+                    _account_capacity_wait_payload(
+                        None,
+                        request_id=request_id,
+                        reason=error_message,
+                        retry_after_seconds=remaining_sleep_seconds,
+                        started_at=wait_started_at,
+                    ),
+                )
+            )
+        chunk_seconds = min(
+            remaining_sleep_seconds,
+            _ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS,
+        )
+        await asyncio.sleep(chunk_seconds)
+        remaining_sleep_seconds -= chunk_seconds
 
 
 def _payload_size_estimate_bytes(payload: ResponsesRequest) -> int:
@@ -246,6 +295,76 @@ class _StreamingRetryMixin:
             except ValueError:
                 pass
             await proxy._load_balancer.release_account_lease(lease)
+
+        async def _stream_post_refresh_with_capacity_recovery(
+            account: Account,
+            *,
+            settlement: _StreamSettlement,
+            can_try_other_account: bool,
+            tool_call_dedupe: _WebSocketUpstreamControl,
+        ) -> AsyncIterator[str]:
+            nonlocal last_transient_exc
+            while True:
+                stream_timeout_tokens = _facade()._push_stream_attempt_timeout_overrides(
+                    _facade()._remaining_budget_seconds(deadline)
+                )
+                try:
+                    async for line in proxy._stream_once(
+                        account,
+                        payload,
+                        headers,
+                        request_id,
+                        False,
+                        request_started_at=start,
+                        api_key=api_key,
+                        api_key_reservation=api_key_reservation,
+                        settlement=settlement,
+                        suppress_text_done_events=suppress_text_done_events,
+                        upstream_stream_transport=upstream_stream_transport,
+                        request_transport=request_transport,
+                        useragent=useragent,
+                        useragent_group=useragent_group,
+                        client_ip=client_ip,
+                        tool_call_dedupe=tool_call_dedupe,
+                        enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+                    ):
+                        yield line
+                    return
+                except ProxyResponseError as exc:
+                    error = _parse_openai_error(exc.payload)
+                    error_code = _normalize_error_code(
+                        error.code if error else None,
+                        error.type if error else None,
+                    )
+                    if error_code != "account_response_create_cap":
+                        raise
+                    last_transient_exc = exc
+                    if can_try_other_account:
+                        raise
+                    recovery_sleep_seconds = _account_selection_recovery_sleep_seconds(
+                        AccountSelection(
+                            account=None,
+                            error_message=error.message if error else None,
+                            error_code=error_code,
+                        )
+                    )
+                    if recovery_sleep_seconds is None or _facade()._remaining_budget_seconds(deadline) <= 0:
+                        raise
+                    async for wait_event in _iter_account_capacity_recovery_wait(
+                        request_id=request_id,
+                        model=payload.model,
+                        account_id=account.id,
+                        error_message=error.message if error else None,
+                        recovery_sleep_seconds=recovery_sleep_seconds,
+                        deadline=deadline,
+                        emit_keepalives=not propagate_http_errors,
+                        stage="post_refresh_response_create",
+                    ):
+                        yield wait_event
+                    if _facade()._remaining_budget_seconds(deadline) <= 0:
+                        raise
+                finally:
+                    pop_stream_timeout_overrides(stream_timeout_tokens)
 
         def _record_upstream_transport_metric_once(status: str) -> None:
             nonlocal upstream_transport_metric_recorded
@@ -452,36 +571,17 @@ class _StreamingRetryMixin:
                             remaining_budget_seconds = _facade()._remaining_budget_seconds(deadline)
                             if remaining_budget_seconds <= 0:
                                 break
-                            wait_started_at = time.monotonic()
-                            remaining_sleep_seconds = min(recovery_sleep_seconds, remaining_budget_seconds)
-                            _facade().logger.info(
-                                "Waiting for an account to recover before retrying stream selection "
-                                "request_id=%s model=%s sleep_seconds=%.1f recovery_hint_seconds=%.1f error=%s",
-                                request_id,
-                                payload.model,
-                                remaining_sleep_seconds,
-                                recovery_sleep_seconds,
-                                selection.error_message,
-                            )
-                            while remaining_sleep_seconds > 0:
-                                yield format_sse_event(
-                                    cast(
-                                        Mapping[str, Any],
-                                        _account_capacity_wait_payload(
-                                            None,
-                                            request_id=request_id,
-                                            reason=selection.error_message,
-                                            retry_after_seconds=remaining_sleep_seconds,
-                                            started_at=wait_started_at,
-                                        ),
-                                    )
-                                )
-                                chunk_seconds = min(
-                                    remaining_sleep_seconds,
-                                    _ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS,
-                                )
-                                await asyncio.sleep(chunk_seconds)
-                                remaining_sleep_seconds -= chunk_seconds
+                            async for wait_event in _iter_account_capacity_recovery_wait(
+                                request_id=request_id,
+                                model=payload.model,
+                                account_id=None,
+                                error_message=selection.error_message,
+                                recovery_sleep_seconds=recovery_sleep_seconds,
+                                deadline=deadline,
+                                emit_keepalives=not propagate_http_errors,
+                                stage="selection",
+                            ):
+                                yield wait_event
                             continue
                     break
                 if not account:
@@ -965,43 +1065,22 @@ class _StreamingRetryMixin:
                                             current_account_lease = None
                                             excluded_account_ids.add(account.id)
                                             break
-                                        if propagate_http_errors:
-                                            raise
                                         remaining_budget_seconds = _facade()._remaining_budget_seconds(deadline)
                                         if remaining_budget_seconds <= 0:
                                             raise
-                                        wait_started_at = time.monotonic()
-                                        remaining_sleep_seconds = min(recovery_sleep_seconds, remaining_budget_seconds)
-                                        _facade().logger.info(
-                                            "Waiting for response-create capacity before retrying stream "
-                                            "request_id=%s model=%s account_id=%s sleep_seconds=%.1f "
-                                            "recovery_hint_seconds=%.1f error=%s",
-                                            request_id,
-                                            payload.model,
-                                            account.id,
-                                            remaining_sleep_seconds,
-                                            recovery_sleep_seconds,
-                                            error_message,
-                                        )
-                                        while remaining_sleep_seconds > 0:
-                                            yield format_sse_event(
-                                                cast(
-                                                    Mapping[str, Any],
-                                                    _account_capacity_wait_payload(
-                                                        None,
-                                                        request_id=request_id,
-                                                        reason=error_message,
-                                                        retry_after_seconds=remaining_sleep_seconds,
-                                                        started_at=wait_started_at,
-                                                    ),
-                                                )
-                                            )
-                                            chunk_seconds = min(
-                                                remaining_sleep_seconds,
-                                                _ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS,
-                                            )
-                                            await asyncio.sleep(chunk_seconds)
-                                            remaining_sleep_seconds -= chunk_seconds
+                                        async for wait_event in _iter_account_capacity_recovery_wait(
+                                            request_id=request_id,
+                                            model=payload.model,
+                                            account_id=account.id,
+                                            error_message=error_message,
+                                            recovery_sleep_seconds=recovery_sleep_seconds,
+                                            deadline=deadline,
+                                            emit_keepalives=not propagate_http_errors,
+                                            stage="response_create",
+                                        ):
+                                            yield wait_event
+                                        if _facade()._remaining_budget_seconds(deadline) <= 0:
+                                            raise
                                         continue
                                     last_transient_exc = tex
                                     await _release_tracked_stream_lease(current_account_lease)
@@ -1268,28 +1347,16 @@ class _StreamingRetryMixin:
                             )
                             yield format_sse_event(_facade()._proxy_request_timeout_event(request_id))
                             return
-                        stream_timeout_tokens = _facade()._push_stream_attempt_timeout_overrides(
-                            effective_attempt_timeout
-                        )
                         try:
-                            async for line in proxy._stream_once(
+                            async for line in _stream_post_refresh_with_capacity_recovery(
                                 account,
-                                payload,
-                                headers,
-                                request_id,
-                                False,
-                                request_started_at=start,
-                                api_key=api_key,
-                                api_key_reservation=api_key_reservation,
                                 settlement=settlement,
-                                suppress_text_done_events=suppress_text_done_events,
-                                upstream_stream_transport=upstream_stream_transport,
-                                request_transport=request_transport,
-                                useragent=useragent,
-                                useragent_group=useragent_group,
-                                client_ip=client_ip,
+                                can_try_other_account=(
+                                    not require_preferred_account
+                                    and account.id != file_preferred_account_id
+                                    and attempt < max_attempts - 1
+                                ),
                                 tool_call_dedupe=tool_call_dedupe,
-                                enforce_openai_sdk_contract=enforce_openai_sdk_contract,
                             ):
                                 yield line
                         except ProxyResponseError as retry_exc:
@@ -1394,8 +1461,6 @@ class _StreamingRetryMixin:
                             _apply_error_metadata(event["response"]["error"], error)
                             yield format_sse_event(event)
                             return
-                        finally:
-                            pop_stream_timeout_overrides(stream_timeout_tokens)
                         if settlement.account_health_error:
                             await proxy._handle_stream_error(
                                 account,

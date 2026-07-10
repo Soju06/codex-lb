@@ -371,6 +371,7 @@ class _WebSocketRequestState:
     preferred_account_id: str | None = None
     require_security_work_authorized: bool = False
     file_required_preferred_account: bool = False
+    bridge_soft_capacity_reroute_allowed: bool = False
     error_code_override: str | None = None
     error_message_override: str | None = None
     error_type_override: str | None = None

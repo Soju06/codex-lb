@@ -1410,6 +1410,114 @@ async def test_stream_responses_streams_post_startup_proxy_error_as_sse(monkeypa
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("startup_surface", ["responses_route", "prime_helper"])
+@pytest.mark.parametrize("capacity_recovers", [True, False])
+async def test_external_stream_startup_waits_for_single_account_response_create_capacity(
+    monkeypatch: pytest.MonkeyPatch,
+    startup_surface: str,
+    capacity_recovers: bool,
+) -> None:
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    settings.http_responses_stream_request_budget_seconds = 1.0 if capacity_recovers else 0.01
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_route_response_create_capacity")
+    stream_once_calls = 0
+
+    async def skip_limits(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    async def no_rate_limit_headers(*_args: object, **_kwargs: object) -> dict[str, str]:
+        return {}
+
+    async def fake_stream_once(*_args: object, **_kwargs: object):
+        nonlocal stream_once_calls
+        stream_once_calls += 1
+        if capacity_recovers and stream_once_calls > 1:
+            yield 'data: {"type":"response.completed","response":{"id":"resp_route_capacity_ok"}}\n\n'
+            return
+        raise proxy_module.ProxyResponseError(
+            429,
+            proxy_module.openai_error(
+                "account_response_create_cap",
+                "Account response-create concurrency limit reached",
+                error_type="rate_limit_error",
+            ),
+        )
+        yield ""
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_api, "_enforce_request_limits", skip_limits)
+    monkeypatch.setattr(proxy_api, "_rate_limit_headers_for_request", no_rate_limit_headers)
+    monkeypatch.setattr(
+        streaming_retry_module,
+        "_account_selection_recovery_sleep_seconds",
+        lambda _selection: 0.001,
+    )
+    monkeypatch.setattr(streaming_retry_module, "_ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS", 0.001)
+    monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value=account.id))
+    monkeypatch.setattr(
+        service,
+        "_select_account_with_budget_compatible",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=account))
+    monkeypatch.setattr(service, "_stream_once", fake_stream_once)
+
+    request = Request({"type": "http", "method": "POST", "path": "/v1/responses", "headers": []})
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "test",
+            "input": "hello",
+            "previous_response_id": "resp_route_capacity_existing",
+            "stream": True,
+        }
+    )
+
+    if startup_surface == "responses_route":
+        response = await proxy_api._stream_responses(
+            request,
+            payload,
+            context=cast(proxy_api.ProxyContext, SimpleNamespace(service=service)),
+            api_key=None,
+        )
+        if capacity_recovers:
+            assert isinstance(response, StreamingResponse)
+            chunks = [chunk async for chunk in response.body_iterator]
+            body = "".join(chunk.decode() if isinstance(chunk, bytes) else str(chunk) for chunk in chunks)
+        else:
+            assert not isinstance(response, StreamingResponse)
+            body = bytes(response.body).decode()
+            assert response.status_code == 429
+    else:
+        upstream = service.stream_responses(
+            payload,
+            request.headers,
+            propagate_http_errors=True,
+        )
+        primed, error_response = await proxy_api._prime_upstream_stream(request, upstream, {})
+        if capacity_recovers:
+            assert error_response is None
+            assert primed is not None
+            body = "".join([chunk async for chunk in primed])
+        else:
+            assert primed is None
+            assert error_response is not None
+            assert error_response.status_code == 429
+            body = bytes(error_response.body).decode()
+
+    assert stream_once_calls > 1
+    assert "waiting_for_account_capacity" not in body
+    if capacity_recovers:
+        assert "response.completed" in body
+        assert "resp_route_capacity_ok" in body
+    else:
+        error_payload = json.loads(body)
+        assert error_payload["error"]["code"] == "account_response_create_cap"
+
+
+@pytest.mark.asyncio
 async def test_opportunistic_admission_uses_api_key_enforced_model():
     api_key = ApiKeyData(
         id="key_opportunistic_enforced_model",
@@ -8529,6 +8637,13 @@ async def test_stream_with_retry_waits_when_response_create_cap_fires_after_sele
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     account = _make_account("acc_response_create_capacity_recovers")
+    stream_lease = AccountLease(
+        lease_id="lease_response_create_capacity_recovers",
+        account_id=account.id,
+        kind="stream",
+        acquired_at=time.monotonic(),
+    )
+    release_account_lease = AsyncMock()
     monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value=account.id))
     selections: list[dict[str, object]] = []
     stream_once_calls = 0
@@ -8544,11 +8659,12 @@ async def test_stream_with_retry_waits_when_response_create_cap_fires_after_sele
 
     async def select_account(_deadline: float, **kwargs: object) -> AccountSelection:
         selections.append(kwargs)
-        return AccountSelection(account=account, error_message=None)
+        return AccountSelection(account=account, error_message=None, lease=stream_lease)
 
     async def fake_stream_once(*_args: object, **_kwargs: object):
         nonlocal stream_once_calls
         stream_once_calls += 1
+        assert release_account_lease.await_count == 0
         if stream_once_calls == 1:
             raise proxy_module.ProxyResponseError(
                 429,
@@ -8563,6 +8679,7 @@ async def test_stream_with_retry_waits_when_response_create_cap_fires_after_sele
     monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
     monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=account))
     monkeypatch.setattr(service, "_stream_once", fake_stream_once)
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release_account_lease)
 
     payload = ResponsesRequest.model_validate(
         {
@@ -8598,6 +8715,92 @@ async def test_stream_with_retry_waits_when_response_create_cap_fires_after_sele
     assert completed["type"] == "response.completed"
     assert len(selections) == 1
     assert stream_once_calls == 2
+    release_account_lease.assert_awaited_once_with(stream_lease)
+
+
+@pytest.mark.asyncio
+async def test_stream_with_retry_post_refresh_response_create_cap_waits_with_stream_lease(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_post_refresh_capacity_recovers")
+    stream_lease = AccountLease(
+        lease_id="lease_post_refresh_capacity_recovers",
+        account_id=account.id,
+        kind="stream",
+        acquired_at=time.monotonic(),
+    )
+    release_account_lease = AsyncMock()
+    stream_once_calls = 0
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value=account.id))
+    monkeypatch.setattr(
+        streaming_retry_module,
+        "_account_selection_recovery_sleep_seconds",
+        lambda _selection: 0.001,
+    )
+    monkeypatch.setattr(streaming_retry_module, "_ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS", 0.001)
+    select_account = AsyncMock(return_value=AccountSelection(account=account, error_message=None, lease=stream_lease))
+    ensure_fresh = AsyncMock(side_effect=[account, account])
+
+    async def fake_stream_once(*_args: object, **_kwargs: object):
+        nonlocal stream_once_calls
+        stream_once_calls += 1
+        assert release_account_lease.await_count == 0
+        if stream_once_calls == 1:
+            raise proxy_module.ProxyResponseError(
+                401,
+                proxy_module.openai_error("invalid_api_key", "expired", error_type="invalid_request_error"),
+            )
+        if stream_once_calls == 2:
+            raise proxy_module.ProxyResponseError(
+                429,
+                proxy_module.openai_error(
+                    "account_response_create_cap",
+                    "Account response-create concurrency limit reached",
+                    error_type="rate_limit_error",
+                ),
+            )
+        yield 'data: {"type":"response.completed","response":{"id":"resp_post_refresh_capacity_ok"}}\n\n'
+
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", ensure_fresh)
+    monkeypatch.setattr(service, "_stream_once", fake_stream_once)
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release_account_lease)
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [],
+            "stream": True,
+            "previous_response_id": "resp_post_refresh_existing",
+        }
+    )
+
+    chunks = [
+        chunk
+        async for chunk in service._stream_with_retry(
+            payload,
+            {"session_id": "sid-post-refresh-capacity-recovers"},
+            codex_session_affinity=False,
+            propagate_http_errors=True,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            request_transport="http",
+            upstream_stream_transport_override="http",
+        )
+    ]
+
+    assert [json.loads(chunk.split("data: ", 1)[1])["type"] for chunk in chunks] == ["response.completed"]
+    assert stream_once_calls == 3
+    assert select_account.await_count == 1
+    assert ensure_fresh.await_count == 2
+    assert ensure_fresh.await_args_list[1].kwargs["force"] is True
+    release_account_lease.assert_awaited_once_with(stream_lease)
 
 
 @pytest.mark.asyncio
@@ -8686,6 +8889,7 @@ async def test_stream_with_retry_raises_response_create_cap_when_propagation_exh
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     account = _make_account("acc_response_create_capacity_propagates")
+    stream_once_calls = 0
     monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value=account.id))
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
@@ -8710,6 +8914,8 @@ async def test_stream_with_retry_raises_response_create_cap_when_propagation_exh
     monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=account))
 
     async def fake_stream_once(*_args: object, **_kwargs: object):
+        nonlocal stream_once_calls
+        stream_once_calls += 1
         raise proxy_module.ProxyResponseError(
             429,
             proxy_module.openai_error(
@@ -8732,26 +8938,27 @@ async def test_stream_with_retry_raises_response_create_cap_when_propagation_exh
         }
     )
 
+    chunks: list[str] = []
     with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
-        _ = [
-            chunk
-            async for chunk in service._stream_with_retry(
-                payload,
-                {"session_id": "sid-response-create-capacity-propagates"},
-                codex_session_affinity=False,
-                propagate_http_errors=True,
-                openai_cache_affinity=False,
-                api_key=None,
-                api_key_reservation=None,
-                suppress_text_done_events=False,
-                request_transport="http",
-                upstream_stream_transport_override="http",
-            )
-        ]
+        async for chunk in service._stream_with_retry(
+            payload,
+            {"session_id": "sid-response-create-capacity-propagates"},
+            codex_session_affinity=False,
+            propagate_http_errors=True,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            request_transport="http",
+            upstream_stream_transport_override="http",
+        ):
+            chunks.append(chunk)
 
     error = proxy_service._parse_openai_error(exc_info.value.payload)
     assert error is not None
     assert error.code == "account_response_create_cap"
+    assert stream_once_calls > 1
+    assert chunks == []
 
 
 @pytest.mark.asyncio
@@ -11802,7 +12009,22 @@ async def test_select_websocket_connect_account_stream_cap_is_local_overload(mon
 
 
 @pytest.mark.asyncio
-async def test_select_websocket_connect_account_sends_capacity_keepalive_and_retries(monkeypatch):
+@pytest.mark.parametrize(
+    ("error_code", "error_message"),
+    [
+        ("no_accounts", "Rate limit exceeded. Try again in 120s"),
+        ("account_stream_cap", "Account stream capacity is exhausted; per-account limit is 8."),
+        (
+            "account_response_create_cap",
+            "Account response-create concurrency limit reached; per-account limit is 4.",
+        ),
+    ],
+)
+async def test_select_websocket_connect_account_sends_capacity_keepalive_and_retries(
+    monkeypatch,
+    error_code: str,
+    error_message: str,
+):
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     request_state = proxy_service._WebSocketRequestState(
         request_id="ws_req_capacity_wait",
@@ -11817,8 +12039,8 @@ async def test_select_websocket_connect_account_sends_capacity_keepalive_and_ret
         side_effect=[
             AccountSelection(
                 account=None,
-                error_message="Rate limit exceeded. Try again in 120s",
-                error_code="no_accounts",
+                error_message=error_message,
+                error_code=error_code,
             ),
             AccountSelection(account=selected_account, error_message=None),
         ]

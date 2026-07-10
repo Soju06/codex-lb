@@ -2123,7 +2123,7 @@ def _normalize_reasoning_effort(value: str | None, *, model_slug: str) -> str | 
     normalized = value.strip().lower()
     if not normalized:
         return None
-    allowed = {"minimal", "low", "medium", "high", "xhigh"}
+    allowed = {"minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
     if normalized not in allowed:
         raise AutomationValidationError(
             f"Unsupported reasoning effort: {value}",

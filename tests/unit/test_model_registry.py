@@ -27,6 +27,9 @@ EXPECTED_CORE_MODEL_PLANS = {
 }
 
 EXPECTED_BOOTSTRAP_MINIMAL_CLIENT_VERSIONS = {
+    "gpt-5.6-sol": None,
+    "gpt-5.6-terra": None,
+    "gpt-5.6-luna": None,
     "gpt-5.5": "0.124.0",
     "gpt-5.4": "0.98.0",
     "gpt-5.4-mini": "0.98.0",
@@ -138,6 +141,9 @@ async def test_prefers_websockets_does_not_use_bootstrap_after_snapshot():
 def test_prefers_websockets_uses_bootstrap_fallback_when_uninitialized():
     registry = ModelRegistry(ttl_seconds=60.0)
 
+    assert registry.prefers_websockets("gpt-5.6-sol") is True
+    assert registry.prefers_websockets("gpt-5.6-terra") is True
+    assert registry.prefers_websockets("gpt-5.6-luna") is True
     assert registry.prefers_websockets("gpt-5.4") is True
     assert registry.prefers_websockets("gpt-5.4-2026") is True
     assert registry.prefers_websockets("gpt-5.3-codex") is True
@@ -154,6 +160,37 @@ def test_bootstrap_models_include_representative_upstream_metadata():
     assert set(models) == set(EXPECTED_BOOTSTRAP_MINIMAL_CLIENT_VERSIONS)
     for slug, expected_version in EXPECTED_BOOTSTRAP_MINIMAL_CLIENT_VERSIONS.items():
         assert models[slug].minimal_client_version == expected_version
+
+    sol = models["gpt-5.6-sol"]
+    assert sol.display_name == "GPT-5.6-Sol"
+    assert sol.context_window == 372_000
+    assert sol.default_reasoning_level == "low"
+    assert {level.effort for level in sol.supported_reasoning_levels} == {
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra",
+    }
+    assert sol.raw["additional_speed_tiers"] == ["fast"]
+
+    terra = models["gpt-5.6-terra"]
+    assert terra.display_name == "GPT-5.6-Terra"
+    assert terra.default_reasoning_level == "medium"
+    assert {level.effort for level in terra.supported_reasoning_levels} == {
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra",
+    }
+
+    luna = models["gpt-5.6-luna"]
+    assert luna.display_name == "GPT-5.6-Luna"
+    assert luna.default_reasoning_level == "medium"
+    assert {level.effort for level in luna.supported_reasoning_levels} == {"low", "medium", "high", "xhigh", "max"}
 
     gpt54 = models["gpt-5.4"]
     assert gpt54.minimal_client_version == "0.98.0"

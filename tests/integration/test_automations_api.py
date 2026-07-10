@@ -115,6 +115,7 @@ def _make_upstream_model(slug: str, *, reasoning_efforts: tuple[str, ...]) -> Up
 async def _populate_automation_reasoning_models() -> None:
     models = [
         _make_upstream_model("automation-reasoning-xhigh", reasoning_efforts=("low", "medium", "high", "xhigh")),
+        _make_upstream_model("automation-reasoning-ultra", reasoning_efforts=("low", "max", "ultra")),
         _make_upstream_model("automation-reasoning-medium", reasoning_efforts=("medium",)),
     ]
     await get_model_registry().update({"plus": models, "pro": models})
@@ -343,6 +344,39 @@ async def test_automations_patch_model_rejects_retained_unsupported_reasoning_ef
     payload = valid_update.json()
     assert payload["model"] == "automation-reasoning-medium"
     assert payload["reasoningEffort"] is None
+
+
+@pytest.mark.asyncio
+async def test_automations_api_accepts_extended_reasoning_efforts(async_client):
+    await _populate_automation_reasoning_models()
+    accounts = await _create_accounts("auto-reasoning-ultra")
+
+    create_response = await async_client.post(
+        "/api/automations",
+        json={
+            "name": "Extended reasoning",
+            "enabled": True,
+            "schedule": {
+                "type": "daily",
+                "time": "05:00",
+                "timezone": "UTC",
+                "days": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+            },
+            "model": "automation-reasoning-ultra",
+            "reasoningEffort": "ultra",
+            "prompt": "ping",
+            "accountIds": [accounts[0].id],
+        },
+    )
+    assert create_response.status_code == 200
+    assert create_response.json()["reasoningEffort"] == "ultra"
+
+    update_response = await async_client.patch(
+        f"/api/automations/{create_response.json()['id']}",
+        json={"reasoningEffort": "max"},
+    )
+    assert update_response.status_code == 200
+    assert update_response.json()["reasoningEffort"] == "max"
 
 
 @pytest.mark.asyncio

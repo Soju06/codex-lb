@@ -57,7 +57,13 @@ class ModelRegistrySnapshot:
     fetched_at: float
 
 
-_BOOTSTRAP_WEBSOCKET_PREFERRED_MODEL_PATTERNS = ("gpt-5.5", "gpt-5.5-*", "gpt-5.4", "gpt-5.4-*")
+_BOOTSTRAP_WEBSOCKET_PREFERRED_MODEL_PATTERNS = (
+    "gpt-5.6-*",
+    "gpt-5.5",
+    "gpt-5.5-*",
+    "gpt-5.4",
+    "gpt-5.4-*",
+)
 
 _REASONING_LEVELS_STANDARD = (
     ReasoningLevel(effort="low", description="Low reasoning effort"),
@@ -71,6 +77,27 @@ _REASONING_LEVELS_EXTENDED = (
     ReasoningLevel(effort="high", description="High reasoning effort"),
     ReasoningLevel(effort="xhigh", description="Extra high reasoning effort"),
 )
+
+_REASONING_LEVELS_MAX = (
+    ReasoningLevel(effort="low", description="Fast responses with lighter reasoning"),
+    ReasoningLevel(effort="medium", description="Balances speed and reasoning depth for everyday tasks"),
+    ReasoningLevel(effort="high", description="Greater reasoning depth for complex problems"),
+    ReasoningLevel(effort="xhigh", description="Extra high reasoning depth for complex problems"),
+    ReasoningLevel(effort="max", description="Maximum reasoning depth for the hardest problems"),
+)
+
+_REASONING_LEVELS_ULTRA = (
+    *_REASONING_LEVELS_MAX,
+    ReasoningLevel(effort="ultra", description="Maximum reasoning with automatic task delegation"),
+)
+
+_BOOTSTRAP_FAST_SERVICE_TIERS: list[JsonValue] = [
+    {
+        "id": "priority",
+        "name": "Fast",
+        "description": "1.5x speed, increased usage",
+    }
+]
 
 _BOOTSTRAP_AVAILABLE_IN_PLANS = frozenset(
     {
@@ -105,6 +132,7 @@ def _bootstrap_model(
     *,
     prefer_websockets: bool,
     minimal_client_version: str | None,
+    description: str | None = None,
     reasoning_levels: tuple[ReasoningLevel, ...] = _REASONING_LEVELS_EXTENDED,
     context_window: int = 272_000,
     input_modalities: tuple[str, ...] = ("text", "image"),
@@ -114,6 +142,7 @@ def _bootstrap_model(
     available_in_plans: frozenset[str] = _BOOTSTRAP_AVAILABLE_IN_PLANS,
     visibility: str = "list",
     shell_type: str = "shell_command",
+    priority: int = 0,
     raw: dict[str, JsonValue] | None = None,
 ) -> UpstreamModel:
     raw_fields: dict[str, JsonValue] = {
@@ -127,7 +156,7 @@ def _bootstrap_model(
     return UpstreamModel(
         slug=slug,
         display_name=display_name,
-        description=display_name,
+        description=description or display_name,
         context_window=context_window,
         input_modalities=input_modalities,
         supported_reasoning_levels=reasoning_levels,
@@ -139,10 +168,21 @@ def _bootstrap_model(
         supports_parallel_tool_calls=True,
         supported_in_api=supported_in_api,
         minimal_client_version=minimal_client_version,
-        priority=0,
+        priority=priority,
         available_in_plans=available_in_plans,
         raw=raw_fields,
     )
+
+
+def _gpt56_raw() -> dict[str, JsonValue]:
+    return {
+        "additional_speed_tiers": ["fast"],
+        "service_tiers": _BOOTSTRAP_FAST_SERVICE_TIERS,
+        "effective_context_window_percent": 95,
+        "truncation_policy": {"mode": "tokens", "limit": 10_000},
+        "supports_search_tool": True,
+        "use_responses_lite": True,
+    }
 
 
 # Static bundled fallback models used before the first upstream registry refresh.
@@ -152,6 +192,42 @@ def _bootstrap_model(
 # explicit rather than inherited from helper defaults; every slug must exist
 # upstream, and live upstream data always takes precedence once available.
 _BOOTSTRAP_STATIC_MODELS: tuple[UpstreamModel, ...] = (
+    _bootstrap_model(
+        "gpt-5.6-sol",
+        "GPT-5.6-Sol",
+        description="Latest frontier agentic coding model.",
+        prefer_websockets=True,
+        minimal_client_version=None,
+        reasoning_levels=_REASONING_LEVELS_ULTRA,
+        context_window=372_000,
+        default_reasoning_level="low",
+        priority=1,
+        raw=_gpt56_raw(),
+    ),
+    _bootstrap_model(
+        "gpt-5.6-terra",
+        "GPT-5.6-Terra",
+        description="Balanced agentic coding model for everyday work.",
+        prefer_websockets=True,
+        minimal_client_version=None,
+        reasoning_levels=_REASONING_LEVELS_ULTRA,
+        context_window=372_000,
+        default_reasoning_level="medium",
+        priority=2,
+        raw=_gpt56_raw(),
+    ),
+    _bootstrap_model(
+        "gpt-5.6-luna",
+        "GPT-5.6-Luna",
+        description="Fast and affordable agentic coding model.",
+        prefer_websockets=True,
+        minimal_client_version=None,
+        reasoning_levels=_REASONING_LEVELS_MAX,
+        context_window=372_000,
+        default_reasoning_level="medium",
+        priority=3,
+        raw=_gpt56_raw(),
+    ),
     _bootstrap_model(
         "gpt-5.5",
         "GPT-5.5",

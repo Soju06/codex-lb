@@ -212,32 +212,38 @@ class _HTTPBridgeUpstreamEventsMixin:
     ) -> bool:
         session.closed = True
         async with session.pending_lock:
-            failed_pending_count = len(session.pending_requests)
-            session.queued_request_count = max(0, session.queued_request_count - failed_pending_count)
-        await self._fail_pending_websocket_requests(
-            account=session.account,
-            account_id_value=session.account.id,
-            pending_requests=session.pending_requests,
-            pending_lock=session.pending_lock,
-            error_code=error_code,
-            error_message=error_message,
-            api_key=None,
-            response_create_gate=session.response_create_gate,
-        )
-        if session.admission_waiter_count > 0:
-            _log_http_bridge_event(
-                "retire_deferred_for_admission_waiter",
-                session.key,
-                account_id=session.account.id,
-                model=session.request_model,
-                pending_count=session.admission_waiter_count,
-                detail=error_code,
-                cache_key_family=session.key.affinity_kind,
-                model_class=_extract_model_class(session.request_model) if session.request_model else None,
+            failed_pending_count = sum(
+                1
+                for request_state in session.pending_requests
+                if _http_bridge_request_counts_against_queue(request_state)
             )
-            return False
-        await self._retire_stale_pending_http_bridge_session(session, detail=error_code)
-        return True
+            session.queued_request_count = max(0, session.queued_request_count - failed_pending_count)
+        try:
+            await self._fail_pending_websocket_requests(
+                account=session.account,
+                account_id_value=session.account.id,
+                pending_requests=session.pending_requests,
+                pending_lock=session.pending_lock,
+                error_code=error_code,
+                error_message=error_message,
+                api_key=None,
+                response_create_gate=session.response_create_gate,
+            )
+        finally:
+            if session.admission_waiter_count > 0:
+                _log_http_bridge_event(
+                    "retire_deferred_for_admission_waiter",
+                    session.key,
+                    account_id=session.account.id,
+                    model=session.request_model,
+                    pending_count=session.admission_waiter_count,
+                    detail=error_code,
+                    cache_key_family=session.key.affinity_kind,
+                    model_class=_extract_model_class(session.request_model) if session.request_model else None,
+                )
+            else:
+                await self._retire_stale_pending_http_bridge_session(session, detail=error_code)
+        return session.admission_waiter_count == 0
 
     async def _relay_http_bridge_upstream_messages(
         self: Any,

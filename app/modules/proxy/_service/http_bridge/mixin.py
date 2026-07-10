@@ -660,6 +660,12 @@ class _HTTPBridgeMixin(
                 existing = self._http_bridge_sessions.get(key)
                 if (
                     existing is not None
+                    and existing.closed
+                    and getattr(existing, "admission_waiter_count", 0) > 0
+                ):
+                    return existing
+                if (
+                    existing is not None
                     and not existing.closed
                     and _http_bridge_session_account_active(existing)
                     and _http_bridge_session_allows_api_key(existing, api_key)
@@ -2129,6 +2135,7 @@ class _HTTPBridgeMixin(
         request_state: _WebSocketRequestState,
         restart_reader: bool = False,
         require_security_work_authorized: bool = False,
+        require_same_account: bool = False,
     ) -> None:
         old_account_id = session.account.id
         old_upstream = session.upstream
@@ -2152,7 +2159,9 @@ class _HTTPBridgeMixin(
         settings = await _service_get_settings_cache().get()
         session.api_key = request_state.api_key
         close_skips_account = session.last_upstream_close_code in _UPSTREAM_CLOSE_CODES_SKIP_SAME_ACCOUNT_RETRY
-        hard_close_account_bound = session.key.strength == "hard" and close_skips_account
+        hard_close_account_bound = session.key.strength == "hard" and (
+            close_skips_account or require_same_account
+        )
         skip_same_account = session.key.strength != "hard" and close_skips_account
         forced_refresh_account_id = request_state.force_refresh_account_id
         excluded_account_ids: set[str] = set(request_state.excluded_account_ids)

@@ -545,6 +545,7 @@ class _HTTPBridgeRequestSubmitMixin:
                         request_state=request_state,
                         text_data=text_data,
                         send_request=False,
+                        require_same_account=_http_bridge_key_strength(session.key) == "hard",
                     )
                     if recovered:
                         session.closed = False
@@ -639,6 +640,7 @@ class _HTTPBridgeRequestSubmitMixin:
                         request_state=request_state,
                         text_data=text_data,
                         send_request=False,
+                        require_same_account=_http_bridge_key_strength(session.key) == "hard",
                     )
                     if recovered:
                         session.closed = False
@@ -1095,6 +1097,7 @@ class _HTTPBridgeRequestSubmitMixin:
         request_state: _WebSocketRequestState,
         text_data: str,
         send_request: bool = True,
+        require_same_account: bool = False,
     ) -> bool:
         retry_text_data = text_data
         using_fresh_replay = False
@@ -1135,6 +1138,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 session,
                 request_state=request_state,
                 restart_reader=True,
+                require_same_account=require_same_account,
             )
             if send_request:
                 retry_text_data = self._http_bridge_text_with_account_installation_id(

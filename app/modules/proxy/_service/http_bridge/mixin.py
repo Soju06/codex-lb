@@ -708,7 +708,8 @@ class _HTTPBridgeMixin(
                         existing.request_model = request_model
                         existing.request_service_tier = request_service_tier
                         existing.requires_security_work_authorized = (
-                            existing.requires_security_work_authorized or require_security_work_authorized
+                            bool(getattr(existing, "requires_security_work_authorized", False))
+                            or require_security_work_authorized
                         )
                         existing.last_used_at = _service_time().monotonic()
                         await _refresh_reused_http_bridge_session_with_handoff(

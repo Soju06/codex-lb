@@ -182,7 +182,7 @@ test("accounts list keeps many rows in an internal scroll region", async ({ page
     style.textContent = css;
     (document.head ?? document.documentElement).appendChild(style);
   }, DISABLE_ANIMATIONS_CSS);
-  await page.setViewportSize({ width: 1440, height: 720 });
+  await page.setViewportSize({ width: 1440, height: 1200 });
   await page.goto("http://localhost:4173/accounts", { waitUntil: "networkidle" });
   await page.waitForSelector('[data-testid="account-list-scroll-region"]', { timeout: 10_000 });
 
@@ -190,7 +190,12 @@ test("accounts list keeps many rows in an internal scroll region", async ({ page
   const addAccountButton = page.getByRole("button", { name: "Add account" });
 
   await expect(addAccountButton).toBeVisible();
-  expect(await scrollRegion.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
+  const initialDimensions = await scrollRegion.evaluate((element) => ({
+    clientHeight: element.clientHeight,
+    scrollHeight: element.scrollHeight,
+  }));
+  expect(initialDimensions.clientHeight).toBeGreaterThan(512);
+  expect(initialDimensions.scrollHeight).toBeGreaterThan(initialDimensions.clientHeight);
   expect(await scrollRegion.evaluate((element) => element.scrollTop)).toBe(0);
 
   const reachedBottom = await scrollRegion.evaluate((element) => {

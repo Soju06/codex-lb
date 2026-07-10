@@ -411,6 +411,7 @@ class _HTTPBridgeMixin(
         gateway_safe_mode: bool = False,
         allow_forward_to_owner: Literal[False] = False,
         forwarded_request: bool = False,
+        forwarded_original_request_unanchored: bool = False,
         forwarded_affinity_kind: str | None = None,
         forwarded_affinity_key: str | None = None,
         allow_previous_response_recovery_rebind: bool = False,
@@ -439,6 +440,7 @@ class _HTTPBridgeMixin(
         gateway_safe_mode: bool = False,
         allow_forward_to_owner: Literal[True],
         forwarded_request: bool = False,
+        forwarded_original_request_unanchored: bool = False,
         forwarded_affinity_kind: str | None = None,
         forwarded_affinity_key: str | None = None,
         allow_previous_response_recovery_rebind: bool = False,
@@ -466,6 +468,7 @@ class _HTTPBridgeMixin(
         gateway_safe_mode: bool = False,
         allow_forward_to_owner: bool = False,
         forwarded_request: bool = False,
+        forwarded_original_request_unanchored: bool = False,
         forwarded_affinity_kind: str | None = None,
         forwarded_affinity_key: str | None = None,
         allow_previous_response_recovery_rebind: bool = False,
@@ -521,6 +524,7 @@ class _HTTPBridgeMixin(
         )
         old_account_id: str | None = None
         force_durable_takeover_after_detach = False
+        own_forwarded_unanchored_fork_locally = False
         while True:
             inflight_future: asyncio.Future[_HTTPBridgeSession] | None = None
             capacity_wait_future: asyncio.Future[_HTTPBridgeSession] | None = None
@@ -649,6 +653,8 @@ class _HTTPBridgeMixin(
                     key = fork_key
                     durable_lookup = None
                     force_durable_takeover_after_detach = False
+                    if forwarded_request and forwarded_original_request_unanchored:
+                        own_forwarded_unanchored_fork_locally = True
                     continue
                 if (
                     existing is not None
@@ -741,35 +747,38 @@ class _HTTPBridgeMixin(
                     hard_continuity_lookup = owner_check_required or previous_response_id is not None
                     ring_lookup_failed = False
                     if owner_instance is None:
-                        try:
-                            owner_instance = await _http_bridge_owner_instance(key, settings, self._ring_membership)
-                        except Exception as exc:
-                            ring_lookup_failed = True
-                            if hard_continuity_lookup:
-                                _record_continuity_fail_closed(
-                                    surface="http_bridge",
-                                    reason="owner_metadata_unavailable",
+                        if own_forwarded_unanchored_fork_locally:
+                            owner_instance = settings.http_responses_session_bridge_instance_id
+                        else:
+                            try:
+                                owner_instance = await _http_bridge_owner_instance(key, settings, self._ring_membership)
+                            except Exception as exc:
+                                ring_lookup_failed = True
+                                if hard_continuity_lookup:
+                                    _record_continuity_fail_closed(
+                                        surface="http_bridge",
+                                        reason="owner_metadata_unavailable",
+                                        previous_response_id=previous_response_id,
+                                        session_id=incoming_turn_state or incoming_session_key,
+                                        upstream_error_code="owner_lookup_failed",
+                                    )
+                                    raise ProxyResponseError(
+                                        502,
+                                        _http_bridge_owner_lookup_unavailable_error_envelope(),
+                                    ) from exc
+                                if _http_bridge_can_local_recover_without_ring(
+                                    key=key,
+                                    headers=headers,
                                     previous_response_id=previous_response_id,
-                                    session_id=incoming_turn_state or incoming_session_key,
-                                    upstream_error_code="owner_lookup_failed",
-                                )
-                                raise ProxyResponseError(
-                                    502,
-                                    _http_bridge_owner_lookup_unavailable_error_envelope(),
-                                ) from exc
-                            if _http_bridge_can_local_recover_without_ring(
-                                key=key,
-                                headers=headers,
-                                previous_response_id=previous_response_id,
-                                durable_lookup=durable_lookup,
-                            ):
-                                logger.warning(
-                                    "Bridge owner lookup failed; allowing local recovery path",
-                                    exc_info=True,
-                                )
-                                owner_instance = settings.http_responses_session_bridge_instance_id
-                            else:
-                                raise
+                                    durable_lookup=durable_lookup,
+                                ):
+                                    logger.warning(
+                                        "Bridge owner lookup failed; allowing local recovery path",
+                                        exc_info=True,
+                                    )
+                                    owner_instance = settings.http_responses_session_bridge_instance_id
+                                else:
+                                    raise
                     try:
                         current_instance, ring = await _active_http_bridge_instance_ring(
                             settings, self._ring_membership

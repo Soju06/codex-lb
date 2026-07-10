@@ -9,3 +9,4 @@
 - [x] 7. Own the complete pre-submit reservation handoff through every cancellation and early error.
 - [x] 8. Run focused, full-suite, lint, type, and strict OpenSpec validation.
 - [x] 9. Preserve legacy primary HMAC compatibility for explicitly anchored forwards during rolling upgrades.
+- [x] 10. Keep owner-side forks local, normalize blank anchors, preserve forwarded reservations, and reject ambiguous legacy fields.

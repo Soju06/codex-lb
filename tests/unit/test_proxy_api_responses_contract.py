@@ -1070,6 +1070,7 @@ async def test_internal_bridge_responses_disables_openai_sdk_contract(
         f"internal_bridge_responses must pass enforce_openai_sdk_contract=False; got kwargs={kwargs!r}"
     )
     assert kwargs.get("forwarded_downstream_turn_state") == "http_turn_generated"
+    assert kwargs.get("forwarded_original_request_unanchored") is True
     forwarded_headers = kwargs.get("forwarded_headers")
     assert isinstance(forwarded_headers, dict)
     assert "x-codex-turn-state" not in forwarded_headers

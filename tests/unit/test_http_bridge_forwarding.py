@@ -447,6 +447,28 @@ def test_parse_forwarded_request_rejects_v2_fields_repacked_as_legacy_affinity()
     assert error.payload["error"]["code"] == "bridge_forward_invalid"
 
 
+def test_parse_forwarded_request_rejects_genuine_legacy_delimiter_repacking() -> None:
+    payload = _payload()
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=True,
+        downstream_turn_state="http_turn_explicit",
+        original_affinity_kind="session_header",
+        original_affinity_key="left|right",
+    )
+    headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
+    headers[HTTP_BRIDGE_AFFINITY_KIND_HEADER] = "session_header|left"
+    headers[HTTP_BRIDGE_AFFINITY_KEY_HEADER] = "right"
+
+    forwarded, error = parse_forwarded_request(headers, payload=payload, current_instance="instance-b")
+
+    assert forwarded is None
+    assert error is not None
+    assert error.status_code == 400
+    assert error.payload["error"]["code"] == "bridge_forward_invalid"
+
+
 def test_v2_forward_fails_legacy_signature_validation() -> None:
     payload = _payload()
     context = HTTPBridgeForwardContext(

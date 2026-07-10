@@ -42,6 +42,7 @@ _BRIDGE_UNSAFE_HEADER_NAMES = frozenset(
     }
 )
 _OWNER_FORWARD_SKIP_AUTO_HEADERS = frozenset({aiohttp.hdrs.ACCEPT, aiohttp.hdrs.ACCEPT_ENCODING})
+_LEGACY_SIGNATURE_DELIMITER = "|"
 
 HTTP_BRIDGE_INTERNAL_FORWARD_PATH = "/internal/bridge/responses"
 HTTP_BRIDGE_FORWARDED_HEADER = "x-codex-bridge-forwarded"
@@ -267,6 +268,8 @@ def parse_forwarded_request(
         client_ip=client_ip,
         reservation=_reservation_from_headers(headers),
     )
+    if signature_version is None and _legacy_signature_context_has_ambiguous_delimiter(context):
+        return None, _invalid_bridge_forward_signature_error()
     signature = _optional_header(headers.get(HTTP_BRIDGE_SIGNATURE_HEADER))
     client_ip_signature = _optional_header(headers.get(HTTP_BRIDGE_CLIENT_IP_SIGNATURE_HEADER))
     expected_signature = _bridge_forward_signature(
@@ -319,6 +322,28 @@ def _invalid_bridge_forward_signature_error() -> ProxyResponseError:
             error_type="invalid_request_error",
         ),
     )
+
+
+def _legacy_signature_context_has_ambiguous_delimiter(context: HTTPBridgeForwardContext) -> bool:
+    """Reject legacy fields whose boundaries cannot be authenticated safely."""
+
+    values = [
+        context.origin_instance,
+        context.target_instance,
+        context.downstream_turn_state,
+        context.original_affinity_kind,
+        context.original_affinity_key,
+        context.client_ip,
+    ]
+    if context.reservation is not None:
+        values.extend(
+            (
+                context.reservation.reservation_id,
+                context.reservation.key_id,
+                context.reservation.model,
+            )
+        )
+    return any(_LEGACY_SIGNATURE_DELIMITER in value for value in values if value is not None)
 
 
 def _owner_forward_timeout(*, connect_timeout_seconds: float, idle_timeout_seconds: float) -> aiohttp.ClientTimeout:
@@ -390,7 +415,7 @@ def _bridge_forward_signature(
         if include_client_ip:
             fields.append(context.client_ip or "")
         fields.extend((*reservation_fields, body_digest))
-        signing_payload = "|".join(fields)
+        signing_payload = _LEGACY_SIGNATURE_DELIMITER.join(fields)
     else:
         # Versioned signatures use an explicit domain and canonical structured
         # encoding. Object boundaries make field re-packing impossible, and

@@ -318,6 +318,23 @@ def _http_bridge_interrupted_tool_outputs_input(
     )
 
 
+def _http_bridge_original_request_unanchored(
+    *,
+    bridge_session_key: _HTTPBridgeSessionKey,
+    headers: Mapping[str, str],
+    previous_response_id: str | None,
+    forwarded_request: bool,
+    forwarded_original_request_unanchored: bool,
+) -> bool:
+    if forwarded_request:
+        return forwarded_original_request_unanchored
+    return (
+        bridge_session_key.affinity_kind == "session_header"
+        and _sticky_key_from_turn_state_header(headers) is None
+        and previous_response_id is None
+    )
+
+
 class _HTTPBridgeStreamingMixin:
     def stream_http_responses(
         self: Any,
@@ -332,6 +349,7 @@ class _HTTPBridgeStreamingMixin:
         suppress_text_done_events: bool = False,
         downstream_turn_state: str | None = None,
         forwarded_request: bool = False,
+        forwarded_original_request_unanchored: bool = False,
         forwarded_affinity_kind: str | None = None,
         forwarded_affinity_key: str | None = None,
         client_ip: str | None = None,
@@ -351,6 +369,7 @@ class _HTTPBridgeStreamingMixin:
             suppress_text_done_events=suppress_text_done_events,
             downstream_turn_state=downstream_turn_state,
             forwarded_request=forwarded_request,
+            forwarded_original_request_unanchored=forwarded_original_request_unanchored,
             proxy_api_authorization=proxy_api_authorization,
             forwarded_affinity_kind=forwarded_affinity_kind,
             forwarded_affinity_key=forwarded_affinity_key,
@@ -371,6 +390,7 @@ class _HTTPBridgeStreamingMixin:
         suppress_text_done_events: bool,
         downstream_turn_state: str | None = None,
         forwarded_request: bool = False,
+        forwarded_original_request_unanchored: bool = False,
         proxy_api_authorization: str | None = None,
         forwarded_affinity_kind: str | None = None,
         forwarded_affinity_key: str | None = None,
@@ -442,6 +462,7 @@ class _HTTPBridgeStreamingMixin:
             prompt_cache_idle_ttl_seconds=runtime_config.prompt_cache_idle_ttl_seconds,
             downstream_turn_state=downstream_turn_state,
             forwarded_request=forwarded_request,
+            forwarded_original_request_unanchored=forwarded_original_request_unanchored,
             proxy_api_authorization=proxy_api_authorization,
             forwarded_affinity_kind=forwarded_affinity_kind,
             forwarded_affinity_key=forwarded_affinity_key,
@@ -469,6 +490,7 @@ class _HTTPBridgeStreamingMixin:
         prompt_cache_idle_ttl_seconds: float | None = None,
         downstream_turn_state: str | None = None,
         forwarded_request: bool = False,
+        forwarded_original_request_unanchored: bool = False,
         proxy_api_authorization: str | None = None,
         forwarded_affinity_kind: str | None = None,
         forwarded_affinity_key: str | None = None,
@@ -554,10 +576,12 @@ class _HTTPBridgeStreamingMixin:
             forwarded_affinity_kind=forwarded_affinity_kind,
             forwarded_affinity_key=forwarded_affinity_key,
         )
-        original_request_unanchored = (
-            bridge_session_key.affinity_kind == "session_header"
-            and _sticky_key_from_turn_state_header(headers) is None
-            and payload.previous_response_id is None
+        original_request_unanchored = _http_bridge_original_request_unanchored(
+            bridge_session_key=bridge_session_key,
+            headers=headers,
+            previous_response_id=payload.previous_response_id,
+            forwarded_request=forwarded_request,
+            forwarded_original_request_unanchored=forwarded_original_request_unanchored,
         )
         try:
             durable_lookup = await self._durable_bridge.lookup_request_targets(
@@ -756,6 +780,7 @@ class _HTTPBridgeStreamingMixin:
                     gateway_safe_mode=runtime_config.gateway_safe_mode,
                     allow_forward_to_owner=True,
                     forwarded_request=forwarded_request,
+                    forwarded_original_request_unanchored=original_request_unanchored,
                     forwarded_affinity_kind=forwarded_affinity_kind,
                     forwarded_affinity_key=forwarded_affinity_key,
                     durable_lookup=durable_lookup,

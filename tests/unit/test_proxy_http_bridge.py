@@ -79,6 +79,20 @@ def _make_bridge_session(
     )
 
 
+def test_forwarded_fork_keeps_authenticated_original_unanchored_state() -> None:
+    assert http_bridge_streaming_module._http_bridge_original_request_unanchored(
+        bridge_session_key=proxy_service._HTTPBridgeSessionKey(
+            "internal_unanchored_parallel",
+            "fork-key",
+            None,
+        ),
+        headers={"x-codex-turn-state": "http_turn_generated"},
+        previous_response_id=None,
+        forwarded_request=True,
+        forwarded_original_request_unanchored=True,
+    )
+
+
 @pytest.mark.asyncio
 async def test_submit_http_bridge_request_cancellation_releases_published_handoff(
     monkeypatch: pytest.MonkeyPatch,
@@ -5896,6 +5910,22 @@ async def test_http_bridge_waits_for_registration_for_hard_keys_before_startup_c
         (
             {
                 "x-codex-session-id": "sid-123",
+                "x-codex-turn-state": "",
+            },
+            "http_turn_generated",
+            True,
+        ),
+        (
+            {
+                "x-codex-session-id": "sid-123",
+                "x-codex-turn-state": "   ",
+            },
+            "http_turn_generated",
+            True,
+        ),
+        (
+            {
+                "x-codex-session-id": "sid-123",
                 "x-codex-turn-state": "http_turn_client",
             },
             "http_turn_client",
@@ -7897,7 +7927,7 @@ async def test_get_or_create_http_bridge_session_forwards_durable_parallel_lane_
 
 
 @pytest.mark.asyncio
-async def test_forwarded_unanchored_request_forks_from_active_canonical_owner_lane(
+async def test_forwarded_unanchored_request_keeps_owner_side_fork_local_when_hash_moves(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
@@ -7912,7 +7942,8 @@ async def test_forwarded_unanchored_request_forks_from_active_canonical_owner_la
     monkeypatch.setattr(service, "_create_http_bridge_session", create_session)
     monkeypatch.setattr(service, "_claim_durable_http_bridge_session", AsyncMock())
     monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
-    monkeypatch.setattr(proxy_service, "_http_bridge_owner_instance", AsyncMock(return_value="instance-a"))
+    owner_instance = AsyncMock(return_value="instance-b")
+    monkeypatch.setattr(proxy_service, "_http_bridge_owner_instance", owner_instance)
     monkeypatch.setattr(
         proxy_service,
         "_active_http_bridge_instance_ring",
@@ -7931,6 +7962,7 @@ async def test_forwarded_unanchored_request_forks_from_active_canonical_owner_la
         idle_ttl_seconds=120.0,
         max_sessions=8,
         forwarded_request=True,
+        forwarded_original_request_unanchored=True,
         forwarded_affinity_kind="session_header",
         forwarded_affinity_key="sid-forwarded",
     )
@@ -7939,6 +7971,7 @@ async def test_forwarded_unanchored_request_forks_from_active_canonical_owner_la
     assert resolved.key.affinity_kind == "internal_unanchored_parallel"
     assert resolved.key.strength == "hard"
     assert canonical.request_model == "gpt-5.2"
+    owner_instance.assert_not_awaited()
 
 
 @pytest.mark.asyncio

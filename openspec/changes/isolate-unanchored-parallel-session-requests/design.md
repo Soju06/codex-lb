@@ -37,7 +37,10 @@ eviction both skip a session while this handoff lease is owned.
 Unanchored owner forwarding uses protocol v2, whose main HMAC binds the
 unanchored boolean in both true and false forms. The owner still receives the
 generated downstream turn-state for response aliasing, but removes that value
-from bridge lookup when the originating request was unanchored. A v2 origin
+from bridge lookup when the originating request was unanchored. The authenticated
+boolean is carried through the owner request path even after a fork has changed
+the current affinity kind, so the lookup-to-submit reservation still applies.
+Empty and whitespace-only turn-state headers normalize to no anchor. A v2 origin
 therefore cannot be downgraded by changing or stripping the boolean. A legacy
 unanchored forward fails closed on a v2 owner, while a v2 signature fails
 legacy validation on an old owner; mixed-version deployments never silently
@@ -46,7 +49,9 @@ fall back to the shared canonical response-create gate.
 Explicitly anchored forwards retain the legacy-compatible primary HMAC (and
 the existing client-IP companion HMAC) so ordinary continuity traffic keeps
 working in both directions during a rolling upgrade. Only the newly introduced
-unanchored state requires the incompatible v2 primary signature.
+unanchored state requires the incompatible v2 primary signature. Current owners
+reject delimiter-bearing legacy signed fields because the old joined encoding
+cannot authenticate their boundaries safely.
 
 The v2 HMAC input uses a domain-separated canonical JSON object rather than the
 legacy delimiter-joined field list. This prevents signed v2 fields from being
@@ -55,7 +60,9 @@ under legacy validation.
 
 Forked lanes use hard continuity strength. They are independent at creation,
 but any durable turn-state or previous-response alias derived from that lane
-must retain its account and owner binding on later requests.
+must retain its account and owner binding on later requests. If a forwarded
+request reaches the canonical owner and collides there, that owner keeps the
+new fork local and durably claims it instead of rendezvous-hashing a second hop.
 
 ## Capacity and observability
 

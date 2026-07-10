@@ -9,6 +9,13 @@
 - [x] Extend backend reasoning effort validation for `max` and `ultra`.
 - [x] Alias `ultra` -> `max` on the upstream wire (request policy + chat
       enforcement) with unit and route-level regression tests.
+- [x] Apply the same `ultra` -> `max` wire aliasing to automation compact
+      pings (which bypass the proxy request-policy rewrite) with an
+      automations API regression test.
+- [x] Extend the Cursor-style model alias normalizer to the GPT-5.6
+      personality slugs (`gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`) with
+      alias and allowlist regression tests; keep `ultra`/`max` out of the
+      suffix grammar (not every GPT-5-family base supports them).
 - [x] Accept `max`/`ultra` in the OpenAI-compatible `thinking` string alias.
 - [x] Raise the fallback `model_registry_client_version` to 0.144.0.
 - [x] Extend frontend model/API-key/automation schemas and controls.

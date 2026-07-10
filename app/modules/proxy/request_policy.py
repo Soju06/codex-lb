@@ -46,6 +46,9 @@ _REASONING_EFFORT_WIRE_ALIASES: dict[str, str] = {"ultra": "max"}
 # Keep this deliberately narrow: only strip known Cursor-style suffix tokens
 # from known GPT-5 base model slugs, and leave every other model untouched.
 _GPT5_ALIAS_BASE_MODELS: tuple[str, ...] = (
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
     "gpt-5.4-mini",
     "gpt-5.3-codex",
     "gpt-5.2-codex",
@@ -90,6 +93,19 @@ _MODEL_ALIAS_TOKENS: frozenset[str] = frozenset(
 # ``service_tier`` instead of sending a literal that fails upstream. See
 # https://github.com/Soju06/codex-lb/issues/546
 _UPSTREAM_OMIT_SERVICE_TIERS: frozenset[str] = frozenset({"auto", "default"})
+
+
+def resolve_wire_reasoning_effort(effort: str) -> str:
+    """Return the wire-safe value for a client-plane reasoning effort.
+
+    The reference Codex client rewrites client-plane efforts (``ultra`` ->
+    ``max``) before building the upstream Responses request; every codex-lb
+    code path that builds an upstream payload directly (proxy enforcement,
+    automation compact pings) applies the same aliasing so the upstream
+    backend never sees a client-plane literal. Unknown values pass through
+    unchanged.
+    """
+    return _REASONING_EFFORT_WIRE_ALIASES.get(effort.strip().lower(), effort)
 
 
 def validate_model_access(api_key: ApiKeyData | None, model: str | None) -> None:
@@ -217,10 +233,7 @@ def apply_api_key_enforcement_to_chat_payload(
         return
 
     if api_key.enforced_reasoning_effort is not None:
-        enforced_effort = _REASONING_EFFORT_WIRE_ALIASES.get(
-            api_key.enforced_reasoning_effort.strip().lower(),
-            api_key.enforced_reasoning_effort,
-        )
+        enforced_effort = resolve_wire_reasoning_effort(api_key.enforced_reasoning_effort)
         payload["reasoning_effort"] = enforced_effort
         reasoning = payload.get("reasoning")
         if isinstance(reasoning, dict):

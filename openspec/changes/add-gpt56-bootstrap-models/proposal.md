@@ -28,6 +28,13 @@ unparseable client-side.
 - Alias `ultra` to `max` on the upstream wire (requested or enforced), exactly
   like the reference Codex client (`reasoning_effort_for_request`, codex-rs
   `core/src/client.rs` at rust-v0.144.1); `ultra` itself is never forwarded.
+  Automation compact pings, which build upstream payloads directly and bypass
+  the proxy request-policy rewrite, apply the same aliasing.
+- Recognize Cursor-style suffixed labels for the GPT-5.6 personality slugs
+  (e.g. `gpt-5.6-sol-extra-high-fast` normalizes to `gpt-5.6-sol` plus derived
+  reasoning/service-tier fields) in the model alias normalizer; `ultra`/`max`
+  stay outside the suffix grammar because not every GPT-5-family base supports
+  them.
 - Raise the fallback Codex client version (`model_registry_client_version`)
   from 0.101.0 to 0.144.0 so a degraded-startup registry refresh still
   receives GPT-5.6 from upstream.

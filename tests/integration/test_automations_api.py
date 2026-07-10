@@ -466,6 +466,74 @@ async def test_automations_run_history_keeps_claimed_model_snapshot(async_client
 
 
 @pytest.mark.asyncio
+async def test_automations_run_now_aliases_ultra_reasoning_to_max_on_wire(async_client, monkeypatch):
+    started_at = utcnow()
+    accounts = await _create_accounts("auto-ultra-wire-alias")
+    compact_requests = []
+
+    async def _fake_compact(request, *_args, **_kwargs):
+        compact_requests.append(request)
+        return SimpleNamespace(id="resp-ultra-wire-alias")
+
+    monkeypatch.setattr("app.modules.automations.service.core_compact_responses", _fake_compact)
+
+    # ``gpt-5.6-sol`` comes from the bootstrap catalog (registry snapshot is
+    # reset per test) and advertises the client-plane ``ultra`` effort.
+    create_response = await async_client.post(
+        "/api/automations",
+        json={
+            "name": "Ultra wire alias",
+            "enabled": False,
+            "schedule": {
+                "type": "daily",
+                "time": "05:00",
+                "timezone": "UTC",
+                "days": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+            },
+            "model": "gpt-5.6-sol",
+            "reasoningEffort": "ultra",
+            "prompt": "ultra ping",
+            "accountIds": [accounts[0].id],
+        },
+    )
+    assert create_response.status_code == 200
+    automation_id = create_response.json()["id"]
+    assert create_response.json()["reasoningEffort"] == "ultra"
+
+    run_response = await async_client.post(f"/api/automations/{automation_id}/run-now")
+    assert run_response.status_code == 202
+    assert run_response.json()["status"] == "success"
+
+    # The configured client-plane effort is preserved in run history...
+    runs_response = await async_client.get(f"/api/automations/{automation_id}/runs")
+    assert runs_response.status_code == 200
+    run_item = runs_response.json()["items"][0]
+    assert run_item["reasoningEffort"] == "ultra"
+
+    # ...but the compact request sent upstream carries the wire-safe alias.
+    assert len(compact_requests) == 1
+    assert compact_requests[0].model == "gpt-5.6-sol"
+    assert compact_requests[0].reasoning is not None
+    assert compact_requests[0].reasoning.effort == "max"
+
+    async with SessionLocal() as session:
+        request_logs_repository = RequestLogsRepository(session)
+        recent_logs, _ = await request_logs_repository.list_recent(limit=200, since=started_at)
+        matching_logs = [
+            log
+            for log in recent_logs
+            if (
+                log.transport == "automation"
+                and log.account_id == accounts[0].id
+                and log.request_id == "resp-ultra-wire-alias"
+            )
+        ]
+        assert len(matching_logs) == 1
+        assert matching_logs[0].model == "gpt-5.6-sol"
+        assert matching_logs[0].reasoning_effort == "max"
+
+
+@pytest.mark.asyncio
 async def test_automations_api_accepts_server_default_timezone(async_client, monkeypatch):
     accounts = await _create_accounts("auto-server-default")
     started_at = utcnow()

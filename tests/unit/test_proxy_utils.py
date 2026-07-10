@@ -12983,7 +12983,10 @@ def test_record_websocket_continuity_completion_keeps_anchor_fields_in_sync():
         response_id="resp_new_without_fingerprint",
     )
 
-    assert continuity_state.last_completed_response_id is None
+    # The completed response id is recorded even without a usable input
+    # fingerprint, but the stale count/fingerprint pair from the previous
+    # turn must not survive attached to the new response id.
+    assert continuity_state.last_completed_response_id == "resp_new_without_fingerprint"
     assert continuity_state.last_completed_input_count == 0
     assert continuity_state.last_completed_input_prefix_fingerprint is None
 
@@ -13007,6 +13010,52 @@ def test_record_websocket_continuity_completion_keeps_anchor_fields_in_sync():
     assert continuity_state.last_completed_response_id == "resp_new"
     assert continuity_state.last_completed_input_count == 3
     assert continuity_state.last_completed_input_prefix_fingerprint == "new-fingerprint"
+
+
+def test_record_websocket_continuity_completion_keeps_pending_tool_calls_for_string_input():
+    continuity_state = proxy_service._WebSocketContinuityState(
+        last_completed_input_count=2,
+        last_completed_response_id="resp_old",
+        last_completed_input_prefix_fingerprint="old-fingerprint",
+    )
+    string_input_state = proxy_service._WebSocketRequestState(
+        request_id="ws_string_input_continuity",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        input_item_count=0,
+        input_full_fingerprint=None,
+    )
+    string_input_state.pending_function_call_ids = ["call_custom_shell"]
+    string_input_state.pending_tool_call_types = {"call_custom_shell": "custom_tool_call"}
+
+    proxy_service._record_websocket_continuity_completion(
+        continuity_state,
+        request_state=string_input_state,
+        response_id="resp_string_input",
+    )
+
+    # A valid string-input Responses turn must still record the completed
+    # response id and its pending tool-call metadata so an anchored follow-up
+    # can receive synthetic interrupted outputs; only the prefix-anchoring
+    # count/fingerprint pair is cleared.
+    assert continuity_state.last_completed_response_id == "resp_string_input"
+    assert continuity_state.last_completed_input_count == 0
+    assert continuity_state.last_completed_input_prefix_fingerprint is None
+    assert continuity_state.last_pending_function_call_ids == ["call_custom_shell"]
+    assert continuity_state.last_pending_tool_call_types == {"call_custom_shell": "custom_tool_call"}
+
+    proxy_service._record_websocket_continuity_completion(
+        continuity_state,
+        request_state=string_input_state,
+        response_id=None,
+    )
+
+    assert continuity_state.last_completed_response_id is None
+    assert continuity_state.last_pending_function_call_ids == []
+    assert continuity_state.last_pending_tool_call_types == {}
 
 
 @pytest.mark.asyncio

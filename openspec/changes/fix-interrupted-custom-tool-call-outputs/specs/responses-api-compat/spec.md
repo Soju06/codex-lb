@@ -32,6 +32,12 @@ The service MUST track tool-call items completed by a streamed response that may
 - **WHEN** an HTTP bridge follow-up gains synthetic interrupted outputs
 - **THEN** the input item count, input fingerprint, and request usage budget recorded for the request are computed from the injected upstream-shaped input, so later full-resend/anchor comparisons on the same bridge session match what upstream actually stored
 
+#### Scenario: unfingerprinted input turns keep the WebSocket continuity anchor
+- **GIVEN** a WebSocket turn whose request input yields no prefix fingerprint (a string input — normalized to a single user message at request validation — or an empty input list)
+- **WHEN** the response completes with pending tool-call items
+- **THEN** the continuity state still records the completed response id and the pending tool-call metadata for all tracked call types, clearing only the prefix count/fingerprint pair
+- **AND** a follow-up that anchors on that response id receives the synthetic interrupted outputs instead of leaking the upstream missing-tool-output 400
+
 #### Scenario: local previous-response recovery retry keeps injected outputs
 - **GIVEN** an HTTP bridge submit whose payload gained synthetic interrupted outputs and which fails before yielding with a previous-response continuity error
 - **WHEN** the local recovery path re-prepares the anchored retry request

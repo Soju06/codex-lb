@@ -359,6 +359,7 @@ def _prepare_websocket_request_state_for_visible_output_replay(
     request_state.awaiting_response_created = True
     request_state.response_id = None
     request_state.response_event_count = 0
+    request_state.request_stage = "reattach"
     request_state.replay_downstream_response_id = downstream_response_id
     request_state.suppress_next_created_downstream = downstream_response_id is not None
     _clear_websocket_request_error_overrides(request_state)
@@ -748,6 +749,7 @@ def _prepare_websocket_request_state_for_auth_replay(
     request_state.awaiting_response_created = True
     request_state.response_id = None
     request_state.response_event_count = 0
+    request_state.request_stage = "reattach"
     _clear_websocket_request_error_overrides(request_state)
     return request_text
 

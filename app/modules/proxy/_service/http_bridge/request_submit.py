@@ -1415,6 +1415,22 @@ class _HTTPBridgeRequestSubmitMixin:
                 # A claimed production lineage must be durably marked before
                 # it can move accounts. Fail closed if its record disappeared.
                 return False
+
+        # The retry state must remain atomic from the caller's perspective.
+        # In particular, the terminal-event handler needs the original owner
+        # affinity to rewrite a failed migration as owner-unavailable.  Do not
+        # leave a failed reconnect looking like a successful fresh replay.
+        previous_response_id = request_state.previous_response_id
+        previous_proxy_injected_response_id = request_state.proxy_injected_previous_response_id
+        previous_request_text = request_state.request_text
+        previous_responses_lite_model = request_state.responses_lite_model
+        previous_preferred_account_id = request_state.preferred_account_id
+        previous_excluded_account_ids = set(request_state.excluded_account_ids)
+        previous_replay_count = request_state.replay_count
+        previous_awaiting_response_created = request_state.awaiting_response_created
+        previous_force_refresh_account_id = request_state.force_refresh_account_id
+        previous_request_security_requirement = request_state.require_security_work_authorized
+        previous_session_security_requirement = session.requires_security_work_authorized
         if require_security_work_authorized:
             session.requires_security_work_authorized = True
             request_state.require_security_work_authorized = True
@@ -1430,10 +1446,12 @@ class _HTTPBridgeRequestSubmitMixin:
             request_state.request_text = retry_text
             request_state.responses_lite_model = request_state.fresh_upstream_request_responses_lite_model
 
+        appended_pending_request = False
         async with session.pending_lock:
             if request_state not in session.pending_requests:
                 session.pending_requests.append(request_state)
                 session.queued_request_count += 1
+                appended_pending_request = True
 
         _log_http_bridge_event(
             ("retry_security_work_authorized" if require_security_work_authorized else "retry_owner_failover"),
@@ -1444,12 +1462,14 @@ class _HTTPBridgeRequestSubmitMixin:
             cache_key_family=session.key.affinity_kind,
             model_class=_extract_model_class(session.request_model) if session.request_model else None,
         )
+        reconnected = False
         try:
             await self._reconnect_http_bridge_session(
                 session,
                 request_state=request_state,
                 require_security_work_authorized=require_security_work_authorized,
             )
+            reconnected = True
             retry_text = self._http_bridge_text_with_account_installation_id(session, request_state, retry_text)
             await _send_http_bridge_request_text_with_archive_id(session, request_state, retry_text)
             session.last_used_at = _service_time().monotonic()
@@ -1460,6 +1480,23 @@ class _HTTPBridgeRequestSubmitMixin:
                 require_security_work_authorized,
                 exc_info=True,
             )
+            # A failed connect leaves the original owner socket live, so
+            # restore its continuity state and let the caller emit the
+            # owner-unavailable rewrite. After a successful reconnect the old
+            # socket is already retired; a later send failure cannot safely
+            # pretend that the owner state is still current.
+            if not reconnected:
+                request_state.previous_response_id = previous_response_id
+                request_state.proxy_injected_previous_response_id = previous_proxy_injected_response_id
+                request_state.request_text = previous_request_text
+                request_state.responses_lite_model = previous_responses_lite_model
+                request_state.preferred_account_id = previous_preferred_account_id
+                request_state.excluded_account_ids = previous_excluded_account_ids
+                request_state.replay_count = previous_replay_count
+                request_state.awaiting_response_created = previous_awaiting_response_created
+                request_state.force_refresh_account_id = previous_force_refresh_account_id
+                request_state.require_security_work_authorized = previous_request_security_requirement
+                session.requires_security_work_authorized = previous_session_security_requirement
             if isinstance(exc, ProxyResponseError):
                 error = _parse_openai_error(exc.payload)
                 code = _normalize_error_code(error.code if error else None, error.type if error else None)
@@ -1479,7 +1516,7 @@ class _HTTPBridgeRequestSubmitMixin:
                         )
                     )
             async with session.pending_lock:
-                if request_state in session.pending_requests:
+                if appended_pending_request and request_state in session.pending_requests:
                     session.pending_requests.remove(request_state)
                     session.queued_request_count = max(0, session.queued_request_count - 1)
             return False

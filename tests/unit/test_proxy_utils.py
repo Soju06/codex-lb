@@ -11632,7 +11632,7 @@ async def test_http_bridge_reports_missing_security_work_pool_before_original_wa
 
     assert list(session.pending_requests) == []
     assert session.queued_request_count == 0
-    assert request_state.replay_count == 1
+    assert request_state.replay_count == 0
     assert request_state.event_queue is not None
     retry_warning_block = await request_state.event_queue.get()
     missing_pool_warning_block = await request_state.event_queue.get()
@@ -13027,6 +13027,45 @@ async def test_select_websocket_connect_account_replays_full_resend_on_available
     assert retry_call.kwargs["require_security_work_authorized"] is False
     assert retry_call.kwargs["exclude_account_ids"] == {"acc_owner"}
     websocket_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_select_websocket_connect_account_forwards_reattach_stage(monkeypatch):
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_ws_reattach")
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_reattach",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        request_stage="reattach",
+    )
+    select_account = AsyncMock(return_value=AccountSelection(account=account, error_message=None))
+    monkeypatch.setattr(service, "_select_account_with_budget", select_account)
+
+    selected = await service._select_websocket_connect_account(
+        time.monotonic() + 10.0,
+        sticky_key=None,
+        sticky_kind=None,
+        prefer_earlier_reset=False,
+        prefer_earlier_reset_window="secondary",
+        routing_strategy="usage_weighted",
+        model="gpt-5.6-sol",
+        request_state=request_state,
+        api_key=None,
+        client_send_lock=anyio.Lock(),
+        websocket=cast(WebSocket, SimpleNamespace(send_text=AsyncMock())),
+        reallocate_sticky=False,
+        sticky_max_age_seconds=None,
+        exclude_account_ids=set(),
+        preferred_account_id=None,
+    )
+
+    assert selected is account
+    assert select_account.await_args is not None
+    assert select_account.await_args.kwargs["request_stage"] == "reattach"
 
 
 @pytest.mark.asyncio
@@ -15644,7 +15683,46 @@ async def test_next_websocket_receive_timeout_bounds_precreated_upstream_wait(mo
     assert timeout is not None
     assert timeout.timeout_seconds == pytest.approx(2.0)
     assert timeout.error_code == "response_created_timeout"
-    assert timeout.fail_all_pending is True
+    assert timeout.fail_all_pending is False
+    assert timeout.response_created_request_ids == frozenset({"req_precreated_stuck"})
+
+
+@pytest.mark.asyncio
+async def test_next_websocket_receive_timeout_keeps_healthy_siblings_out_of_startup_timeout(monkeypatch):
+    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 100.0)
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    expired_uncreated = proxy_service._WebSocketRequestState(
+        request_id="req_precreated_expired",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        upstream_sent_at=88.0,
+        awaiting_response_created=True,
+    )
+    healthy_stream = proxy_service._WebSocketRequestState(
+        request_id="req_healthy_stream",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        response_id="resp_healthy_stream",
+    )
+
+    timeout = await service._next_websocket_receive_timeout(
+        deque([expired_uncreated, healthy_stream]),
+        pending_lock=anyio.Lock(),
+        proxy_request_budget_seconds=7200.0,
+        stream_idle_timeout_seconds=7200.0,
+        response_created_timeout_seconds=12.0,
+    )
+
+    assert timeout is not None
+    assert timeout.error_code == "response_created_timeout"
+    assert timeout.fail_all_pending is False
+    assert timeout.response_created_request_ids == frozenset({expired_uncreated.request_id})
 
 
 @pytest.mark.asyncio

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import deque
 from typing import Any, TypeVar
 
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
@@ -275,9 +276,33 @@ class _HTTPBridgeUpstreamEventsMixin:
                 except asyncio.TimeoutError:
                     if receive_timeout is None:
                         raise
-                    retried = await self._retry_http_bridge_precreated_request(session)
-                    if retried:
-                        continue
+                    retried_startup_request = False
+                    if receive_timeout.response_created_request_ids:
+                        async with session.pending_lock:
+                            has_pending_sibling = any(
+                                request_state.request_id not in receive_timeout.response_created_request_ids
+                                for request_state in session.pending_requests
+                            )
+                        if not has_pending_sibling:
+                            retried_startup_request = True
+                            retried = await self._retry_http_bridge_precreated_request(session)
+                            if retried:
+                                continue
+                        await self._fail_response_created_timeout_requests(
+                            session,
+                            request_ids=receive_timeout.response_created_request_ids,
+                            timeout_seconds=(
+                                runtime_settings.http_responses_session_bridge_response_created_timeout_seconds
+                            ),
+                            error_code=receive_timeout.error_code,
+                            error_message=receive_timeout.error_message,
+                        )
+                        if has_pending_sibling:
+                            continue
+                    if not retried_startup_request:
+                        retried = await self._retry_http_bridge_precreated_request(session)
+                        if retried:
+                            continue
                     async with session.lifecycle_lock:
                         await self._fail_http_bridge_reader_and_maybe_retire(
                             session,
@@ -325,6 +350,50 @@ class _HTTPBridgeUpstreamEventsMixin:
         finally:
             if session.upstream is relay_upstream:
                 session.closed = True
+
+    async def _fail_response_created_timeout_requests(
+        self: Any,
+        session: "_HTTPBridgeSession",
+        *,
+        request_ids: frozenset[str],
+        timeout_seconds: float,
+        error_code: str,
+        error_message: str,
+    ) -> tuple["_WebSocketRequestState", ...]:
+        now = _service_time().monotonic()
+        async with session.pending_lock:
+            expired_requests = tuple(
+                request_state
+                for request_state in session.pending_requests
+                if request_state.request_id in request_ids
+                and request_state.upstream_sent_at is not None
+                and request_state.response_id is None
+                and request_state.awaiting_response_created
+                and _http_bridge_request_counts_against_queue(request_state)
+                and now >= request_state.upstream_sent_at + timeout_seconds
+            )
+            for request_state in expired_requests:
+                session.pending_requests.remove(request_state)
+            session.queued_request_count = max(
+                0,
+                session.queued_request_count
+                - sum(
+                    1 for request_state in expired_requests if _http_bridge_request_counts_against_queue(request_state)
+                ),
+            )
+        if not expired_requests:
+            return ()
+        await self._fail_pending_websocket_requests(
+            account=session.account,
+            account_id_value=session.account.id,
+            pending_requests=deque(expired_requests),
+            pending_lock=asyncio.Lock(),
+            error_code=error_code,
+            error_message=error_message,
+            api_key=None,
+            response_create_gate=session.response_create_gate,
+        )
+        return expired_requests
 
     async def _process_http_bridge_upstream_text(
         self: Any,

@@ -704,6 +704,7 @@ class _WebSocketReceiveTimeout:
     error_code: str
     error_message: str
     fail_all_pending: bool = False
+    response_created_request_ids: frozenset[str] = frozenset()
 
 
 def _event_type_from_payload(event: OpenAIEvent | None, payload: dict[str, JsonValue] | None) -> str | None:

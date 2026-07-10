@@ -289,6 +289,63 @@ async def test_http_bridge_security_retry_never_marks_or_migrates_file_pinned_ow
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("require_security_work_authorized", [False, True])
+async def test_http_bridge_failed_owner_failover_restores_original_continuity_state(
+    monkeypatch: pytest.MonkeyPatch,
+    require_security_work_authorized: bool,
+) -> None:
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    owner_account = _make_account("acc_http_owner")
+    session = _make_bridge_session()
+    session.account = owner_account
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="http-owner-failover-restore",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        transport="http",
+        previous_response_id="resp-owner",
+        proxy_injected_previous_response_id=True,
+        preferred_account_id=owner_account.id,
+        excluded_account_ids={"acc-already-excluded"},
+        request_text='{"type":"response.create","previous_response_id":"resp-owner","input":["follow-up"]}',
+        responses_lite_model="gpt-5.6-sol",
+        fresh_upstream_request_text='{"type":"response.create","input":["full-history"]}',
+        fresh_upstream_request_is_retry_safe=True,
+        fresh_upstream_request_responses_lite_model="gpt-5.6-sol-mini",
+    )
+    session.pending_requests.append(request_state)
+    session.queued_request_count = 1
+    reconnect = AsyncMock(side_effect=RuntimeError("replacement connect failed"))
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+
+    assert not await service._retry_http_bridge_owner_failover_request(
+        session,
+        request_state,
+        require_security_work_authorized=require_security_work_authorized,
+    )
+
+    reconnect.assert_awaited_once()
+    assert reconnect.await_args is not None
+    assert reconnect.await_args.kwargs["require_security_work_authorized"] is require_security_work_authorized
+    assert request_state.previous_response_id == "resp-owner"
+    assert request_state.proxy_injected_previous_response_id is True
+    assert request_state.preferred_account_id == owner_account.id
+    assert request_state.excluded_account_ids == {"acc-already-excluded"}
+    assert request_state.request_text == (
+        '{"type":"response.create","previous_response_id":"resp-owner","input":["follow-up"]}'
+    )
+    assert request_state.responses_lite_model == "gpt-5.6-sol"
+    assert request_state.replay_count == 0
+    assert request_state.require_security_work_authorized is False
+    assert session.requires_security_work_authorized is False
+    assert list(session.pending_requests) == [request_state]
+    assert session.queued_request_count == 1
+
+
+@pytest.mark.asyncio
 async def test_process_websocket_security_retry_releases_response_create_gate() -> None:
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     account = _make_account("acc_ws_security_gate_regular")

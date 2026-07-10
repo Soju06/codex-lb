@@ -1780,6 +1780,7 @@ class _WebSocketMixin:
                     prefer_earlier_reset_window=prefer_earlier_reset_window,
                     routing_strategy=routing_strategy,
                     model=model,
+                    request_stage=request_state.request_stage,
                     service_tier=request_state.requested_service_tier,
                     exclude_account_ids=exclude_account_ids,
                     preferred_account_id=preferred_account_id,
@@ -3369,7 +3370,10 @@ class _WebSocketMixin:
                 if _http_bridge_request_counts_against_queue(request_state)
             ]
             response_created_deadlines = [
-                request_state.upstream_sent_at + response_created_timeout_seconds
+                (
+                    request_state.upstream_sent_at + response_created_timeout_seconds,
+                    request_state.request_id,
+                )
                 for request_state in pending_requests
                 if response_created_timeout_seconds is not None
                 and request_state.upstream_sent_at is not None
@@ -3384,11 +3388,16 @@ class _WebSocketMixin:
         )
         if not response_created_deadlines:
             return receive_timeout
+        next_response_created_deadline = min(deadline for deadline, _request_id in response_created_deadlines)
         response_created_timeout = _WebSocketReceiveTimeout(
-            timeout_seconds=max(0.0, min(response_created_deadlines) - time.monotonic()),
+            timeout_seconds=max(0.0, next_response_created_deadline - time.monotonic()),
             error_code="response_created_timeout",
             error_message="Upstream did not create a response within the startup window",
-            fail_all_pending=True,
+            response_created_request_ids=frozenset(
+                request_id
+                for deadline, request_id in response_created_deadlines
+                if deadline == next_response_created_deadline
+            ),
         )
         if receive_timeout is None or response_created_timeout.timeout_seconds < receive_timeout.timeout_seconds:
             return response_created_timeout

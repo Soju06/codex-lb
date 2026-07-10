@@ -322,23 +322,6 @@ def _http_bridge_interrupted_tool_outputs_input(
     )
 
 
-def _http_bridge_original_request_unanchored(
-    *,
-    bridge_session_key: _HTTPBridgeSessionKey,
-    headers: Mapping[str, str],
-    previous_response_id: str | None,
-    forwarded_request: bool,
-    forwarded_original_request_unanchored: bool,
-) -> bool:
-    if forwarded_request:
-        return forwarded_original_request_unanchored
-    return (
-        bridge_session_key.affinity_kind == "session_header"
-        and _sticky_key_from_turn_state_header(headers) is None
-        and previous_response_id is None
-    )
-
-
 def _legacy_forward_upgrade_required_error() -> ProxyResponseError:
     return ProxyResponseError(
         409,

@@ -5,11 +5,13 @@ import json
 import time
 from collections import deque
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import AsyncMock
 
 import anyio
 import pytest
 
+from app.core.clients.proxy_websocket import UpstreamResponsesWebSocket
 from app.modules.proxy import service as proxy_service
 from tests.unit.test_proxy_http_bridge import _make_app_settings, _make_bridge_session
 from tests.unit.test_proxy_utils import _make_account, _repo_factory, _RequestLogsRecorder
@@ -45,7 +47,7 @@ async def test_http_bridge_reconnect_selects_security_work_authorized_account(mo
     authorized_account.security_work_authorized = True
     session = _make_bridge_session()
     session.account = regular_account
-    session.upstream = SimpleNamespace(close=AsyncMock())
+    session.upstream = cast(UpstreamResponsesWebSocket, SimpleNamespace(close=AsyncMock()))
     request_state = proxy_service._WebSocketRequestState(
         request_id="security_reconnect",
         model="gpt-5.6-sol",
@@ -58,7 +60,7 @@ async def test_http_bridge_reconnect_selects_security_work_authorized_account(mo
     )
     selection = proxy_service.AccountSelection(account=authorized_account, error_message=None, error_code=None)
     select_account = AsyncMock(return_value=selection)
-    new_upstream = SimpleNamespace(close=AsyncMock())
+    new_upstream = cast(UpstreamResponsesWebSocket, SimpleNamespace(close=AsyncMock()))
     monkeypatch.setattr(service, "_select_account_with_budget_for_stream", select_account)
     monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=authorized_account))
     monkeypatch.setattr(service, "_open_upstream_websocket_with_budget", AsyncMock(return_value=new_upstream))
@@ -77,7 +79,9 @@ async def test_http_bridge_reconnect_selects_security_work_authorized_account(mo
         require_security_work_authorized=True,
     )
 
-    assert select_account.await_args.kwargs["require_security_work_authorized"] is True
+    select_args = select_account.await_args
+    assert select_args is not None
+    assert select_args.kwargs["require_security_work_authorized"] is True
     assert session.account is authorized_account
     assert session.upstream is new_upstream
 

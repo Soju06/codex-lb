@@ -323,6 +323,39 @@ async def test_chat_startup_probe_timeout_consumes_abandoned_first_task_exceptio
     assert captured == []
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("surface", ["responses", "chat"])
+async def test_startup_probe_waits_for_late_capacity_marker(surface: str) -> None:
+    capacity_wait_event = asyncio.Event()
+
+    async def delayed_capacity_error() -> AsyncIterator[str]:
+        await asyncio.sleep(0.02)
+        capacity_wait_event.set()
+        await asyncio.sleep(0.01)
+        raise proxy_module.ProxyResponseError(
+            429,
+            openai_error("account_stream_cap", "Account stream concurrency limit reached"),
+        )
+        yield ""
+
+    if surface == "responses":
+        _stream, startup_error = await proxy_api._probe_stream_startup_error(
+            delayed_capacity_error(),
+            timeout_seconds=0.001,
+            capacity_wait_event=capacity_wait_event,
+        )
+    else:
+        _stream, startup_error = await proxy_api._probe_chat_stream_startup_error(
+            delayed_capacity_error(),
+            timeout_seconds=0.001,
+            max_startup_events=1,
+            capacity_wait_event=capacity_wait_event,
+        )
+
+    assert isinstance(startup_error, proxy_module.ProxyResponseError)
+    assert startup_error.status_code == 429
+
+
 def test_relative_availability_settings_default_when_stored_values_are_null():
     settings = cast(Any, SimpleNamespace(relative_availability_power=None, relative_availability_top_k=None))
 
@@ -1518,11 +1551,18 @@ async def test_external_stream_startup_waits_for_single_account_response_create_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("request_budget_seconds", "recovery_sleep_seconds", "minimum_selection_calls"),
+    [(0.2, 0.1, 2), (0.1, 0.3, 1)],
+)
 async def test_responses_route_preserves_selection_cap_429_after_startup_wait(
     monkeypatch: pytest.MonkeyPatch,
+    request_budget_seconds: float,
+    recovery_sleep_seconds: float,
+    minimum_selection_calls: int,
 ) -> None:
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
-    settings.http_responses_stream_request_budget_seconds = 0.2
+    settings.http_responses_stream_request_budget_seconds = request_budget_seconds
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     selection_calls = 0
 
@@ -1548,7 +1588,7 @@ async def test_responses_route_preserves_selection_cap_429_after_startup_wait(
     monkeypatch.setattr(
         streaming_retry_module,
         "_account_selection_recovery_sleep_seconds",
-        lambda _selection: 0.1,
+        lambda _selection: recovery_sleep_seconds,
     )
     monkeypatch.setattr(streaming_retry_module, "_ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS", 0.1)
     monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
@@ -1569,7 +1609,10 @@ async def test_responses_route_preserves_selection_cap_429_after_startup_wait(
     assert response.status_code == 429
     body = bytes(response.body).decode()
     assert "account_stream_cap" in body
-    assert selection_calls > 1
+    if recovery_sleep_seconds > request_budget_seconds:
+        assert selection_calls == minimum_selection_calls
+    else:
+        assert selection_calls >= minimum_selection_calls
 
 
 @pytest.mark.asyncio
@@ -8802,6 +8845,7 @@ async def test_stream_with_retry_post_refresh_response_create_cap_waits_with_str
     async def fake_stream_once(*_args: object, **_kwargs: object):
         nonlocal stream_once_calls
         stream_once_calls += 1
+        settlement = cast(proxy_service._StreamSettlement, _kwargs["settlement"])
         assert release_account_lease.await_count == 0
         if stream_once_calls == 1:
             raise proxy_module.ProxyResponseError(
@@ -8809,6 +8853,7 @@ async def test_stream_with_retry_post_refresh_response_create_cap_waits_with_str
                 proxy_module.openai_error("invalid_api_key", "expired", error_type="invalid_request_error"),
             )
         if stream_once_calls == 2:
+            settlement.record_success = False
             raise proxy_module.ProxyResponseError(
                 429,
                 proxy_module.openai_error(
@@ -8817,6 +8862,7 @@ async def test_stream_with_retry_post_refresh_response_create_cap_waits_with_str
                     error_type="rate_limit_error",
                 ),
             )
+        assert settlement.record_success is True
         yield 'data: {"type":"response.completed","response":{"id":"resp_post_refresh_capacity_ok"}}\n\n'
 
     monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
@@ -9156,7 +9202,7 @@ async def test_stream_with_retry_capacity_wait_keeps_original_request_deadline(m
 
     assert sleeps == [1.0]
     assert keepalive["retry_after_seconds"] == 1
-    assert deadlines == [1001.0, 1001.0]
+    assert deadlines == [1001.0]
 
 
 @pytest.mark.asyncio

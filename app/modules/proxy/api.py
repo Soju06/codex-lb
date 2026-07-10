@@ -305,6 +305,7 @@ _UNAVAILABLE_SELECTION_ERROR_CODES = {
     "no_additional_quota_eligible_accounts",
 }
 _STREAM_STARTUP_ERROR_PROBE_SECONDS = 0.05
+_CAPACITY_WAIT_MARKER_GRACE_SECONDS = 0.025
 # Keep bridge startup probing above tiny event-loop scheduling jitter:
 # PostgreSQL-backed failures may need a DB round trip before the first item.
 _HTTP_BRIDGE_STARTUP_ERROR_PROBE_SECONDS = 2.0
@@ -3038,7 +3039,16 @@ async def v1_chat_completions(
         if cursor_compat_client
         else _CHAT_COMPLETIONS_STARTUP_ERROR_PROBE_SECONDS
     )
-    stream, startup_error = await _probe_chat_stream_startup_error(stream, timeout_seconds=startup_probe_timeout)
+    capacity_wait_event = asyncio.Event()
+    capacity_wait_token = _bind_propagated_capacity_startup_wait(capacity_wait_event)
+    try:
+        stream, startup_error = await _probe_chat_stream_startup_error(
+            stream,
+            timeout_seconds=startup_probe_timeout,
+            capacity_wait_event=capacity_wait_event,
+        )
+    finally:
+        _reset_propagated_capacity_startup_wait(capacity_wait_token)
     if startup_error is not None:
         if cursor_compat_client and _is_context_length_startup_error(startup_error):
             await _release_reservation(reservation)
@@ -4688,6 +4698,33 @@ def _create_first_stream_probe_task(stream: AsyncIterator[str]) -> asyncio.Task[
     return task
 
 
+async def _wait_for_first_stream_probe(
+    first_task: asyncio.Task[str],
+    *,
+    timeout_seconds: float,
+    capacity_wait_event: asyncio.Event | None,
+) -> bool:
+    done, _pending = await asyncio.wait({first_task}, timeout=timeout_seconds)
+    if done or capacity_wait_event is None:
+        return bool(done)
+
+    marker_task = asyncio.create_task(capacity_wait_event.wait())
+    try:
+        done, _pending = await asyncio.wait(
+            {first_task, marker_task},
+            timeout=_CAPACITY_WAIT_MARKER_GRACE_SECONDS,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if marker_task in done and capacity_wait_event.is_set():
+            await asyncio.wait({first_task})
+            return True
+        return first_task in done
+    finally:
+        if not marker_task.done():
+            marker_task.cancel()
+        await asyncio.gather(marker_task, return_exceptions=True)
+
+
 async def _probe_stream_startup_error(
     stream: AsyncIterator[str],
     *,
@@ -4698,16 +4735,12 @@ async def _probe_stream_startup_error(
     if timeout_seconds is None:
         timeout_seconds = _STREAM_STARTUP_ERROR_PROBE_SECONDS
     first_task = _create_first_stream_probe_task(stream)
-    done, _pending = await asyncio.wait({first_task}, timeout=timeout_seconds)
-    if not done and capacity_wait_event is not None:
-        # Let the producer publish a local-capacity wait marker before
-        # committing the streaming response. Once capacity recovery starts,
-        # keep startup propagation open until the bounded retry yields an
-        # upstream event or raises its structured error.
-        await asyncio.sleep(0)
-        if capacity_wait_event.is_set():
-            done, _pending = await asyncio.wait({first_task})
-    if not done:
+    probe_done = await _wait_for_first_stream_probe(
+        first_task,
+        timeout_seconds=timeout_seconds,
+        capacity_wait_event=capacity_wait_event,
+    )
+    if not probe_done:
         # Probe window elapsed before the first item arrived. Hand the still-
         # running task off to be consumed by the streamed response. asyncio.wait
         # (rather than wait_for + shield) never cancels the task on timeout,
@@ -5017,12 +5050,17 @@ async def _probe_chat_stream_startup_error(
     *,
     timeout_seconds: float = _CHAT_COMPLETIONS_STARTUP_ERROR_PROBE_SECONDS,
     max_startup_events: int = 8,
+    capacity_wait_event: asyncio.Event | None = None,
 ) -> tuple[AsyncIterator[str], ProxyResponseError | OpenAIErrorEnvelopeModel | None]:
     buffered: list[str] = []
     for _ in range(max_startup_events):
         first_task = _create_first_stream_probe_task(stream)
-        done, _pending = await asyncio.wait({first_task}, timeout=timeout_seconds)
-        if not done:
+        probe_done = await _wait_for_first_stream_probe(
+            first_task,
+            timeout_seconds=timeout_seconds,
+            capacity_wait_event=capacity_wait_event,
+        )
+        if not probe_done:
             return _prepend_items(buffered, _prepend_first_task(first_task, stream)), None
         try:
             first = first_task.result()

@@ -308,6 +308,7 @@ class _StreamingRetryMixin:
         ) -> AsyncIterator[str]:
             nonlocal last_transient_exc
             while True:
+                settlement.reset()
                 stream_timeout_tokens = _facade()._push_stream_attempt_timeout_overrides(
                     _facade()._remaining_budget_seconds(deadline)
                 )
@@ -585,6 +586,8 @@ class _StreamingRetryMixin:
                                 stage="selection",
                             ):
                                 yield wait_event
+                            if _facade()._remaining_budget_seconds(deadline) <= 0:
+                                break
                             continue
                     break
                 if not account:

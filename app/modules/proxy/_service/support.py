@@ -288,6 +288,10 @@ class _StreamSettlement:
     response_id: str | None = None
     usage_settlement_transferred: bool = False
 
+    def reset(self) -> None:
+        fresh = type(self)()
+        self.__dict__.update(fresh.__dict__)
+
 
 def _stream_settlement_error_payload(settlement: _StreamSettlement) -> UpstreamError:
     if settlement.error is not None:

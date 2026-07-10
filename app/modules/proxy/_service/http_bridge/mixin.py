@@ -643,7 +643,6 @@ class _HTTPBridgeMixin(
                         else:
                             key = _HTTPBridgeSessionKey("turn_state_header", incoming_turn_state, api_key_id)
                             missing_turn_state_alias = True
-
                 pruned_sessions = self._prune_http_bridge_sessions_locked()
                 if pruned_sessions:
                     if any(session.key == key for session in pruned_sessions):
@@ -652,7 +651,6 @@ class _HTTPBridgeMixin(
                         pruned_sessions,
                         reason="registry_detach",
                     )
-
                 existing = self._http_bridge_sessions.get(key)
                 fork_key = _http_bridge_unanchored_parallel_fork_key(
                     key=key,
@@ -725,7 +723,6 @@ class _HTTPBridgeMixin(
                         if not retiring_with_visible_requests:
                             self._schedule_http_bridge_session_closes([detached], reason="registry_detach")
                     existing = None
-
                 if shutdown_state.is_bridge_drain_active() and not _http_bridge_can_recover_during_drain(
                     key=key,
                     headers=headers,
@@ -742,7 +739,6 @@ class _HTTPBridgeMixin(
                     )
                 if shutdown_state.is_bridge_drain_active():
                     _record_bridge_drain_recovery_allowed()
-
                 owner_check_required = _http_bridge_owner_check_required(
                     key,
                     gateway_safe_mode=gateway_safe_mode,
@@ -1074,7 +1070,6 @@ class _HTTPBridgeMixin(
                                     bridge_soft_local_rebind_total.inc()
                                 if bridge_local_rebind_total is not None:
                                     bridge_local_rebind_total.labels(reason="prompt_cache_locality_miss").inc()
-
                 if existing is not None:
                     old_account_id = existing.account.id
                     _log_http_bridge_event(
@@ -1531,9 +1526,8 @@ class _HTTPBridgeMixin(
             if session.closed:
                 stale_keys.append(key)
                 continue
-            # A request owns this otherwise-idle session from lookup until
-            # submit makes queued activity visible. Pruning it during an
-            # admission or durable-refresh await would invalidate that handoff.
+            # The request owns this idle session until submit makes activity visible;
+            # pruning it during admission or durable refresh would invalidate the handoff.
             if getattr(session, "unanchored_reservation_id", None) is not None:
                 continue
             pending_count = self._http_bridge_pending_count_nowait(

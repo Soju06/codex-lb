@@ -35,6 +35,7 @@ from app.modules.proxy._service.support import (
     _account_selection_recovery_sleep_seconds,
     _request_log_useragent_fields,
     _RetryableStreamError,
+    _signal_propagated_capacity_startup_wait,
     _stream_settlement_error_payload,
     _StreamSettlement,
     _TerminalStreamError,
@@ -122,6 +123,8 @@ async def _iter_account_capacity_recovery_wait(
     emit_keepalives: bool,
     stage: str,
 ) -> AsyncIterator[str]:
+    if not emit_keepalives:
+        _signal_propagated_capacity_startup_wait()
     remaining_budget_seconds = _facade()._remaining_budget_seconds(deadline)
     if remaining_budget_seconds <= 0:
         return

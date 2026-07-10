@@ -137,6 +137,7 @@ from app.modules.proxy._service.support import (
     _HTTPBridgeOwnerForward,
     _HTTPBridgeSession,
     _HTTPBridgeSessionKey,
+    _signal_propagated_capacity_startup_wait,
     _WebSocketRequestState,
 )
 from app.modules.proxy._service.support import (
@@ -247,6 +248,8 @@ async def _iter_account_capacity_wait_sse(
     sleep_seconds: float,
     emit_keepalives: bool,
 ) -> AsyncIterator[str]:
+    if not emit_keepalives:
+        _signal_propagated_capacity_startup_wait()
     wait_started_at = _service_time().monotonic()
     remaining_sleep_seconds = sleep_seconds
     while remaining_sleep_seconds > 0:

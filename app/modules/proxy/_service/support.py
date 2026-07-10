@@ -7,6 +7,7 @@ import re
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable, Coroutine, Mapping
+from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -42,6 +43,24 @@ _ACCOUNT_SELECTION_RECOVERY_MAX_SLEEP_SECONDS = 300.0
 _ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS = 10.0
 _ACCOUNT_SELECTION_RETRY_HINT_RE = re.compile(r"try again in\s+([0-9]+(?:\.[0-9]+)?)s", re.IGNORECASE)
 _LOCAL_ACCOUNT_CAP_ERROR_CODES = frozenset({"account_response_create_cap", "account_stream_cap"})
+_PROPAGATED_CAPACITY_STARTUP_WAIT: ContextVar[asyncio.Event | None] = ContextVar(
+    "propagated_capacity_startup_wait",
+    default=None,
+)
+
+
+def _bind_propagated_capacity_startup_wait(event: asyncio.Event) -> Token[asyncio.Event | None]:
+    return _PROPAGATED_CAPACITY_STARTUP_WAIT.set(event)
+
+
+def _reset_propagated_capacity_startup_wait(token: Token[asyncio.Event | None]) -> None:
+    _PROPAGATED_CAPACITY_STARTUP_WAIT.reset(token)
+
+
+def _signal_propagated_capacity_startup_wait() -> None:
+    event = _PROPAGATED_CAPACITY_STARTUP_WAIT.get()
+    if event is not None:
+        event.set()
 
 
 def _account_selection_recovery_sleep_seconds_from_message(

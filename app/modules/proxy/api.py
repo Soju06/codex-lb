@@ -161,6 +161,10 @@ from app.modules.model_sources.repository import ModelSourcesRepository
 from app.modules.proxy import affinity as proxy_affinity_module
 from app.modules.proxy import images_service as images_service_module
 from app.modules.proxy import service as proxy_service_module
+from app.modules.proxy._service.support import (
+    _bind_propagated_capacity_startup_wait,
+    _reset_propagated_capacity_startup_wait,
+)
 from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
 from app.modules.proxy.helpers import _rate_limit_details
@@ -4138,13 +4142,19 @@ async def _stream_responses(
             client_ip=client_ip,
             enforce_openai_sdk_contract=enforce_openai_sdk_contract,
         )
-    stream, startup_error = await _probe_stream_startup_error(
-        stream,
-        convert_event_errors=bridge_active and enforce_openai_sdk_contract,
-        timeout_seconds=(
-            _HTTP_BRIDGE_STARTUP_ERROR_PROBE_SECONDS if prefer_http_bridge else _STREAM_STARTUP_ERROR_PROBE_SECONDS
-        ),
-    )
+    capacity_wait_event = asyncio.Event()
+    capacity_wait_token = _bind_propagated_capacity_startup_wait(capacity_wait_event)
+    try:
+        stream, startup_error = await _probe_stream_startup_error(
+            stream,
+            convert_event_errors=bridge_active and enforce_openai_sdk_contract,
+            timeout_seconds=(
+                _HTTP_BRIDGE_STARTUP_ERROR_PROBE_SECONDS if prefer_http_bridge else _STREAM_STARTUP_ERROR_PROBE_SECONDS
+            ),
+            capacity_wait_event=capacity_wait_event,
+        )
+    finally:
+        _reset_propagated_capacity_startup_wait(capacity_wait_token)
     if startup_error is not None:
         if owns_reservation:
             await _release_reservation(reservation)
@@ -4683,11 +4693,20 @@ async def _probe_stream_startup_error(
     *,
     convert_event_errors: bool = False,
     timeout_seconds: float | None = None,
+    capacity_wait_event: asyncio.Event | None = None,
 ) -> tuple[AsyncIterator[str], ProxyResponseError | OpenAIErrorEnvelopeModel | None]:
     if timeout_seconds is None:
         timeout_seconds = _STREAM_STARTUP_ERROR_PROBE_SECONDS
     first_task = _create_first_stream_probe_task(stream)
     done, _pending = await asyncio.wait({first_task}, timeout=timeout_seconds)
+    if not done and capacity_wait_event is not None:
+        # Let the producer publish a local-capacity wait marker before
+        # committing the streaming response. Once capacity recovery starts,
+        # keep startup propagation open until the bounded retry yields an
+        # upstream event or raises its structured error.
+        await asyncio.sleep(0)
+        if capacity_wait_event.is_set():
+            done, _pending = await asyncio.wait({first_task})
     if not done:
         # Probe window elapsed before the first item arrived. Hand the still-
         # running task off to be consumed by the streamed response. asyncio.wait

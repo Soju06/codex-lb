@@ -1418,7 +1418,7 @@ async def test_external_stream_startup_waits_for_single_account_response_create_
     capacity_recovers: bool,
 ) -> None:
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
-    settings.http_responses_stream_request_budget_seconds = 1.0 if capacity_recovers else 0.01
+    settings.http_responses_stream_request_budget_seconds = 1.0 if capacity_recovers else 0.2
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     account = _make_account("acc_route_response_create_capacity")
     stream_once_calls = 0
@@ -1452,9 +1452,9 @@ async def test_external_stream_startup_waits_for_single_account_response_create_
     monkeypatch.setattr(
         streaming_retry_module,
         "_account_selection_recovery_sleep_seconds",
-        lambda _selection: 0.001,
+        lambda _selection: 0.1,
     )
-    monkeypatch.setattr(streaming_retry_module, "_ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS", 0.001)
+    monkeypatch.setattr(streaming_retry_module, "_ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS", 0.1)
     monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value=account.id))
     monkeypatch.setattr(
         service,

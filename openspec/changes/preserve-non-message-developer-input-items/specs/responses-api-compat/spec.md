@@ -11,7 +11,10 @@ field. Any `system`/`developer`-role input item carrying any other `type`
 value, including item types the service does not model, MUST be forwarded
 upstream unchanged and in its original input position. This preservation MUST
 hold both when the request is validated and when the request is serialized for
-upstream delivery. When compact requests exceed the upstream input budget and
+upstream delivery, and it exempts the item from input sanitization: keys such
+as `reasoning_content`, `reasoning_details`, `tool_calls`, and `function_call`
+MUST NOT be stripped from a preserved item. When compact requests exceed the
+upstream input budget and
 the service trims the input middle, preserved non-message `system`/`developer`
 items MUST be treated as trim anchors and retained in the trimmed payload
 rather than replaced by the trim marker. When a non-message
@@ -31,6 +34,15 @@ top-level `instructions` unchanged.
 - **AND** the `future_directive` item remains in `input` unchanged, in its
   original position
 - **AND** the upstream-serialized payload retains the item unchanged
+
+#### Scenario: preserved directive keeps reasoning and tool-call keys
+
+- **WHEN** a Responses or compact request `input` contains a typed,
+  non-message `system`/`developer` item carrying keys the interleaved
+  reasoning sanitizer strips from message items (such as
+  `reasoning_content`, `reasoning_details`, `tool_calls`, or `function_call`)
+- **THEN** the item is retained byte-identical after validation
+- **AND** the upstream-serialized payload retains the item byte-identical
 
 #### Scenario: directive-only request without instructions still validates
 

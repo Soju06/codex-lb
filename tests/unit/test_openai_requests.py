@@ -647,6 +647,35 @@ def test_responses_input_non_message_system_and_developer_items_are_preserved(re
 
 
 @pytest.mark.parametrize("request_type", [ResponsesRequest, ResponsesCompactRequest])
+def test_responses_input_preserved_directive_keeps_reasoning_and_tool_call_keys(request_type):
+    developer_directive = {
+        "type": "future_directive",
+        "role": "developer",
+        "reasoning_content": "directive-level reasoning",
+        "reasoning_details": [{"type": "spec", "detail": "keep me"}],
+        "tool_calls": [{"id": "call_1", "name": "future_tool"}],
+        "function_call": {"name": "future_tool", "arguments": "{}"},
+        "content": [{"type": "reasoning", "text": "also keep me"}],
+    }
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "primary",
+        "input": [
+            developer_directive,
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+        ],
+    }
+
+    request = request_type.model_validate(payload)
+
+    assert request.input == [
+        developer_directive,
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+    ]
+    assert request.to_payload()["input"] == request.input
+
+
+@pytest.mark.parametrize("request_type", [ResponsesRequest, ResponsesCompactRequest])
 def test_responses_input_directive_only_request_defaults_instructions(request_type):
     developer_directive = {
         "type": "future_directive",

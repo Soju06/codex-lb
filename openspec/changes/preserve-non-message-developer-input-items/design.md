@@ -29,9 +29,21 @@ adjacent developer instructions message) is deliberately left untouched so the
 native Codex wire shape reaches upstream byte-for-byte. The per-item type guard
 is the general safety net for every other non-message typed item.
 
-Compact upstream trimming applies the same rule: `_compact_state_anchor_indices()`
-treats any `system`/`developer`-role item whose `type` is present and not
-`"message"` as a trim anchor, so a preserved directive sitting in the trimmed
-middle of an oversized compact request is kept in place instead of being
-replaced by the trim marker. Existing anchors (`additional_tools`, compact
-state items, and reconciled tool calls) are unaffected.
+The preservation rule lives in a single predicate,
+`_is_preserved_non_message_directive()` (system/developer role, `type` present
+and not `"message"`), shared by three normalization stages:
+
+- Instruction hoisting (`_normalize_responses_input_instructions()`) passes
+  matching items through untouched.
+- Input sanitization (`_sanitize_input_items()`) skips matching items so the
+  interleaved-reasoning sanitizer — which targets assistant-message echo
+  fields — cannot strip top-level `reasoning_content`, `reasoning_details`,
+  `tool_calls`, or `function_call` keys (or reasoning-typed content parts)
+  from a preserved directive. This cannot regress prior behavior: before this
+  change, such items were dropped entirely, so nothing depended on their
+  sanitized shape.
+- Compact upstream trimming (`_compact_state_anchor_indices()`) treats
+  matching items as trim anchors, so a preserved directive sitting in the
+  trimmed middle of an oversized compact request is kept in place instead of
+  being replaced by the trim marker. Existing anchors (`additional_tools`,
+  compact state items, and reconciled tool calls) are unaffected.

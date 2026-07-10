@@ -1390,6 +1390,7 @@ class _WebSocketMixin:
                         "input": _facade()._inject_missing_interrupted_function_call_outputs(
                             input_items,
                             missing_call_ids=missing_call_ids,
+                            pending_call_types=continuity_state.last_pending_tool_call_types,
                         )
                     }
                 )
@@ -2889,12 +2890,12 @@ class _WebSocketMixin:
                 if actual_service_tier is not None:
                     request_state.actual_service_tier = actual_service_tier
                     request_state.service_tier = actual_service_tier
-                completed_function_call_id = _facade()._response_output_item_done_function_call_id(payload)
-                if (
-                    completed_function_call_id is not None
-                    and completed_function_call_id not in request_state.pending_function_call_ids
-                ):
-                    request_state.pending_function_call_ids.append(completed_function_call_id)
+                completed_tool_call = _facade()._response_output_item_done_tool_call(payload)
+                if completed_tool_call is not None:
+                    completed_call_id, completed_call_type = completed_tool_call
+                    if completed_call_id not in request_state.pending_function_call_ids:
+                        request_state.pending_function_call_ids.append(completed_call_id)
+                    request_state.pending_tool_call_types[completed_call_id] = completed_call_type
                 if mark_duplicate_tool_call_downstream_event(
                     payload,
                     seen_tool_call_keys=request_state.seen_tool_call_keys,

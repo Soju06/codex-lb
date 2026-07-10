@@ -260,6 +260,62 @@ async def test_backend_responses_preserves_responses_lite_tools_and_outputs(asyn
 
 
 @pytest.mark.asyncio
+async def test_backend_responses_preserves_non_message_developer_directive(async_client, monkeypatch):
+    raw_account_id = "acc_future_directive"
+    auth_json = _make_auth_json(raw_account_id, "future-directive@example.com")
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    developer_directive = {
+        "type": "future_directive",
+        "role": "developer",
+        "directive": {"mode": "strict", "budget": 3},
+        "reasoning_content": "directive-level reasoning",
+        "tool_calls": [{"id": "call_1", "name": "future_tool"}],
+    }
+    seen_payload: dict[str, object] = {}
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
+        del headers, access_token, account_id, base_url, raise_for_status, kwargs
+        seen_payload.update(payload.to_payload())
+        yield (
+            'data: {"type":"response.completed","response":{"id":"resp_future_directive",'
+            '"object":"response","status":"completed","usage":{"input_tokens":2,"output_tokens":1}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    request_payload = {
+        "model": "gpt-5.6-sol",
+        "input": [
+            developer_directive,
+            {"type": "message", "role": "developer", "content": "follow the directive"},
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+        ],
+        "stream": True,
+    }
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        json=request_payload,
+    ) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    event = _extract_first_event(lines)
+    assert event["type"] == "response.completed"
+    # The plain developer message is still hoisted into instructions, while the
+    # typed directive is forwarded upstream byte-identical (including keys the
+    # interleaved-reasoning sanitizer strips from message items).
+    assert seen_payload["instructions"] == "follow the directive"
+    assert seen_payload["input"] == [
+        developer_directive,
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+    ]
+
+
+@pytest.mark.asyncio
 async def test_proxy_responses_repeated_401_after_refresh_fails_over(async_client, monkeypatch):
     for raw_account_id, email in (
         ("acc_stream_invalidated_a", "stream-invalidated-a@example.com"),

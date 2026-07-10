@@ -3346,11 +3346,48 @@ def _source_tool_type_supported(tool_type: JsonValue | None, supported_tool_type
     return isinstance(tool_type, str) and tool_type in supported_tool_types
 
 
+def _normalize_source_allowed_tool_choice_aliases(payload: dict[str, JsonValue]) -> None:
+    """Normalize legacy tool-type aliases nested under ``allowed_tools``.
+
+    Request validation normalizes the ``tools`` list and the top-level
+    ``tool_choice`` type (``web_search_preview`` -> ``web_search``) but leaves
+    entries nested under an ``allowed_tools`` choice untouched. Sources that
+    reject the legacy alias or validate the forced choice against the
+    (normalized) tools list would fail such requests, so source-bound payloads
+    always get the same alias normalization applied to the nested entries.
+    """
+    tool_choice = payload.get("tool_choice")
+    if not is_json_mapping(tool_choice):
+        return
+    if tool_choice.get("type") != "allowed_tools":
+        return
+    allowed = tool_choice.get("tools")
+    if not is_json_list(allowed):
+        return
+    normalized_allowed: list[JsonValue] = []
+    changed = False
+    for entry in allowed:
+        if is_json_mapping(entry):
+            entry_type = entry.get("type")
+            if isinstance(entry_type, str):
+                normalized_type = normalize_tool_type(entry_type)
+                if normalized_type != entry_type:
+                    entry = {**entry, "type": normalized_type}
+                    changed = True
+        normalized_allowed.append(entry)
+    if not changed:
+        return
+    updated_choice: dict[str, JsonValue] = dict(tool_choice)
+    updated_choice["tools"] = normalized_allowed
+    payload["tool_choice"] = updated_choice
+
+
 def _drop_unsupported_source_response_tools(
     payload: dict[str, JsonValue],
     *,
     supported_tool_types: frozenset[str],
 ) -> None:
+    _normalize_source_allowed_tool_choice_aliases(payload)
     tools = payload.get("tools")
     if not is_json_list(tools):
         return
@@ -3384,9 +3421,10 @@ def _drop_dangling_source_tool_choice(payload: dict[str, JsonValue], kept_types:
     falls back to the provider default by removing the key. ``function``-typed
     choices always stay: function tools are never dropped by the filter.
 
-    Entries under ``allowed_tools`` get the same tool-type alias normalization
-    as the ``tools`` list (``web_search_preview`` -> ``web_search``) so a
-    legacy-alias forced choice keeps matching the normalized tool it targets.
+    Entries under ``allowed_tools`` carry the same tool-type alias
+    normalization as the ``tools`` list by the time this runs (see
+    ``_normalize_source_allowed_tool_choice_aliases``), so a legacy-alias
+    forced choice keeps matching the normalized tool it targets.
     """
     tool_choice = payload.get("tool_choice")
     if not is_json_mapping(tool_choice):
@@ -3398,20 +3436,12 @@ def _drop_dangling_source_tool_choice(payload: dict[str, JsonValue], kept_types:
         allowed = tool_choice.get("tools")
         if not is_json_list(allowed):
             return
-        kept_allowed: list[JsonValue] = []
-        for entry in allowed:
-            if not is_json_mapping(entry):
-                continue
-            entry_type = entry.get("type")
-            if isinstance(entry_type, str):
-                normalized_type = normalize_tool_type(entry_type)
-                if normalized_type != entry_type:
-                    entry = {**entry, "type": normalized_type}
-                    entry_type = normalized_type
-            if not _source_tool_type_supported(entry_type, kept_types):
-                continue
-            kept_allowed.append(entry)
-        if kept_allowed == list(allowed):
+        kept_allowed: list[JsonValue] = [
+            entry
+            for entry in allowed
+            if is_json_mapping(entry) and _source_tool_type_supported(entry.get("type"), kept_types)
+        ]
+        if len(kept_allowed) == len(allowed):
             return
         if not kept_allowed:
             payload.pop("tool_choice", None)

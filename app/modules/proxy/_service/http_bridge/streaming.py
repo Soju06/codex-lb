@@ -83,6 +83,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _record_bridge_reattach,
     _record_continuity_fail_closed,
     _release_http_bridge_unanchored_handoff,
+    _release_http_bridge_unanchored_handoffs_for_request,
     _reserve_http_bridge_unanchored_handoff,
     _trim_http_bridge_previous_response_input_items,
 )
@@ -565,32 +566,40 @@ class _HTTPBridgeStreamingMixin:
                 yield line
             return
 
-        async for line in self._stream_via_http_bridge(
-            payload,
-            headers,
-            codex_session_affinity=codex_session_affinity,
-            propagate_http_errors=propagate_http_errors,
-            openai_cache_affinity=openai_cache_affinity,
-            api_key=api_key,
-            api_key_reservation=api_key_reservation,
-            suppress_text_done_events=suppress_text_done_events,
-            idle_ttl_seconds=runtime_config.idle_ttl_seconds,
-            codex_idle_ttl_seconds=runtime_config.codex_idle_ttl_seconds,
-            max_sessions=runtime_config.max_sessions,
-            queue_limit=runtime_config.queue_limit,
-            prompt_cache_idle_ttl_seconds=runtime_config.prompt_cache_idle_ttl_seconds,
-            downstream_turn_state=downstream_turn_state,
-            forwarded_request=forwarded_request,
-            forwarded_original_request_unanchored=forwarded_original_request_unanchored,
-            forwarded_legacy_signature=forwarded_legacy_signature,
-            proxy_api_authorization=proxy_api_authorization,
-            forwarded_affinity_kind=forwarded_affinity_kind,
-            forwarded_affinity_key=forwarded_affinity_key,
-            rewritten_file_account_id=rewritten_file_account_id,
-            client_ip=client_ip,
-            enforce_openai_sdk_contract=enforce_openai_sdk_contract,
-        ):
-            yield line
+        request_scope_id = ensure_request_scope_id()
+        try:
+            async for line in self._stream_via_http_bridge(
+                payload,
+                headers,
+                codex_session_affinity=codex_session_affinity,
+                propagate_http_errors=propagate_http_errors,
+                openai_cache_affinity=openai_cache_affinity,
+                api_key=api_key,
+                api_key_reservation=api_key_reservation,
+                suppress_text_done_events=suppress_text_done_events,
+                idle_ttl_seconds=runtime_config.idle_ttl_seconds,
+                codex_idle_ttl_seconds=runtime_config.codex_idle_ttl_seconds,
+                max_sessions=runtime_config.max_sessions,
+                queue_limit=runtime_config.queue_limit,
+                prompt_cache_idle_ttl_seconds=runtime_config.prompt_cache_idle_ttl_seconds,
+                downstream_turn_state=downstream_turn_state,
+                forwarded_request=forwarded_request,
+                forwarded_original_request_unanchored=forwarded_original_request_unanchored,
+                forwarded_legacy_signature=forwarded_legacy_signature,
+                proxy_api_authorization=proxy_api_authorization,
+                forwarded_affinity_kind=forwarded_affinity_kind,
+                forwarded_affinity_key=forwarded_affinity_key,
+                rewritten_file_account_id=rewritten_file_account_id,
+                client_ip=client_ip,
+                enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+            ):
+                yield line
+        finally:
+            with anyio.CancelScope(shield=True):
+                await _release_http_bridge_unanchored_handoffs_for_request(
+                    self,
+                    request_scope_id=request_scope_id,
+                )
 
     async def _stream_via_http_bridge(
         self: Any,

@@ -1029,6 +1029,105 @@ def _http_bridge_durable_lease_ttl_seconds() -> float:
     return float(RING_STALE_THRESHOLD_SECONDS)
 
 
+async def _release_http_bridge_unanchored_handoffs_for_request(
+    service: _HTTPBridgeServiceProtocol,
+    *,
+    request_scope_id: str,
+) -> None:
+    """Fail-safe cleanup for reservations published before request submission."""
+
+    async with service._http_bridge_lock:
+        for session in service._http_bridge_sessions.values():
+            _release_http_bridge_unanchored_handoff(session, request_scope_id=request_scope_id)
+
+
+async def _persist_http_bridge_turn_state_alias(
+    service: _HTTPBridgeServiceProtocol,
+    session: _HTTPBridgeSession,
+    *,
+    turn_state: str,
+    instance_id: str,
+    lease_ttl_seconds: float,
+) -> None:
+    owner_epoch = session.durable_owner_epoch
+    try:
+        registered = await service._durable_bridge.register_turn_state(
+            session_id=session.durable_session_id,
+            api_key_id=session.key.api_key_id,
+            instance_id=instance_id,
+            owner_epoch=owner_epoch,
+            turn_state=turn_state,
+            lease_ttl_seconds=lease_ttl_seconds,
+        )
+    except Exception:
+        logger.warning("Failed to persist durable HTTP bridge turn-state alias", exc_info=True)
+        return
+    if registered is not False:
+        return
+
+    async with service._http_bridge_lock:
+        if session.durable_owner_epoch != owner_epoch:
+            return
+        session.downstream_turn_state_aliases.discard(turn_state)
+        if session.downstream_turn_state == turn_state:
+            session.downstream_turn_state = None
+        alias_key = _http_bridge_turn_state_alias_key(turn_state, session.key.api_key_id)
+        current_session = service._http_bridge_sessions.get(session.key)
+        current_generation_owns_alias = (
+            current_session is not None
+            and current_session is not session
+            and turn_state in current_session.downstream_turn_state_aliases
+        )
+        if not current_generation_owns_alias and service._http_bridge_turn_state_index.get(alias_key) == session.key:
+            service._http_bridge_turn_state_index.pop(alias_key, None)
+
+
+async def _persist_http_bridge_previous_response_alias(
+    service: _HTTPBridgeServiceProtocol,
+    session: _HTTPBridgeSession,
+    *,
+    response_id: str,
+    input_item_count: int | None,
+    input_full_fingerprint: str | None,
+    instance_id: str,
+    lease_ttl_seconds: float,
+) -> None:
+    owner_epoch = session.durable_owner_epoch
+    try:
+        registered = await service._durable_bridge.register_previous_response_id(
+            session_id=session.durable_session_id,
+            api_key_id=session.key.api_key_id,
+            instance_id=instance_id,
+            owner_epoch=owner_epoch,
+            response_id=response_id,
+            lease_ttl_seconds=lease_ttl_seconds,
+            input_item_count=input_item_count,
+            input_full_fingerprint=input_full_fingerprint,
+        )
+    except Exception:
+        logger.warning("Failed to persist durable HTTP bridge previous_response_id alias", exc_info=True)
+        return
+    if registered is not False:
+        return
+
+    async with service._http_bridge_lock:
+        if session.durable_owner_epoch != owner_epoch:
+            return
+        session.previous_response_ids.discard(response_id)
+        alias_key = _http_bridge_previous_response_alias_key(response_id, session.key.api_key_id)
+        current_session = service._http_bridge_sessions.get(session.key)
+        current_generation_owns_alias = (
+            current_session is not None
+            and current_session is not session
+            and response_id in current_session.previous_response_ids
+        )
+        if (
+            not current_generation_owns_alias
+            and service._http_bridge_previous_response_index.get(alias_key) == session.key
+        ):
+            service._http_bridge_previous_response_index.pop(alias_key, None)
+
+
 def _forwarded_http_bridge_session_key(
     headers: Mapping[str, str],
     api_key: ApiKeyData | None,

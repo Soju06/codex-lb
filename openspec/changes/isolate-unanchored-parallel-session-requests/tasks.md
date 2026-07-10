@@ -11,3 +11,4 @@
 - [x] 9. Preserve legacy primary HMAC compatibility for explicitly anchored forwards during rolling upgrades.
 - [x] 10. Keep owner-side forks local, normalize blank anchors, preserve forwarded reservations, and reject ambiguous legacy fields.
 - [x] 11. Bind v2 client-IP presence in the primary HMAC and cover removal, blanking, mutation, and no-IP paths.
+- [x] 12. Release request-scope reservations on pre-submit failures, keep prompt-cache forwards legacy-compatible, and roll back locally fenced aliases.

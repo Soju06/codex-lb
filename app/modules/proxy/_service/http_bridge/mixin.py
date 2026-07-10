@@ -101,6 +101,8 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _is_missing_durable_bridge_table_error,
     _log_http_bridge_event,
     _log_http_bridge_startup_wait_timeout,
+    _persist_http_bridge_previous_response_alias,
+    _persist_http_bridge_turn_state_alias,
     _preferred_http_bridge_reconnect_turn_state,
     _record_bridge_drain_recovery_allowed,
     _record_bridge_first_turn_timeout,
@@ -1632,17 +1634,13 @@ class _HTTPBridgeMixin(
                     session.key
                 )
         if session.durable_session_id is not None and session.durable_owner_epoch is not None:
-            try:
-                await self._durable_bridge.register_turn_state(
-                    session_id=session.durable_session_id,
-                    api_key_id=session.key.api_key_id,
-                    instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
-                    owner_epoch=session.durable_owner_epoch,
-                    turn_state=turn_state,
-                    lease_ttl_seconds=_http_bridge_durable_lease_ttl_seconds(),
-                )
-            except Exception:
-                logger.warning("Failed to persist durable HTTP bridge turn-state alias", exc_info=True)
+            await _persist_http_bridge_turn_state_alias(
+                self,
+                session,
+                turn_state=turn_state,
+                instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                lease_ttl_seconds=_http_bridge_durable_lease_ttl_seconds(),
+            )
 
     async def _register_http_bridge_previous_response_id(
         self,
@@ -1667,19 +1665,15 @@ class _HTTPBridgeMixin(
             self._http_bridge_previous_response_index[alias_key] = session.key
             session.previous_response_ids.add(stripped_response_id)
         if session.durable_session_id is not None and session.durable_owner_epoch is not None:
-            try:
-                await self._durable_bridge.register_previous_response_id(
-                    session_id=session.durable_session_id,
-                    api_key_id=session.key.api_key_id,
-                    instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
-                    owner_epoch=session.durable_owner_epoch,
-                    response_id=stripped_response_id,
-                    lease_ttl_seconds=_http_bridge_durable_lease_ttl_seconds(),
-                    input_item_count=input_item_count,
-                    input_full_fingerprint=input_full_fingerprint,
-                )
-            except Exception:
-                logger.warning("Failed to persist durable HTTP bridge previous_response_id alias", exc_info=True)
+            await _persist_http_bridge_previous_response_alias(
+                self,
+                session,
+                response_id=stripped_response_id,
+                input_item_count=input_item_count,
+                input_full_fingerprint=input_full_fingerprint,
+                instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                lease_ttl_seconds=_http_bridge_durable_lease_ttl_seconds(),
+            )
 
     async def _unregister_http_bridge_turn_states(self, session: "_HTTPBridgeSession") -> None:
         async with self._http_bridge_lock:

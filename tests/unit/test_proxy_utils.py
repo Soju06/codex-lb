@@ -1518,6 +1518,61 @@ async def test_external_stream_startup_waits_for_single_account_response_create_
 
 
 @pytest.mark.asyncio
+async def test_responses_route_preserves_selection_cap_429_after_startup_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    settings.http_responses_stream_request_budget_seconds = 0.2
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    selection_calls = 0
+
+    async def skip_limits(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    async def no_rate_limit_headers(*_args: object, **_kwargs: object) -> dict[str, str]:
+        return {}
+
+    async def select_account(*_args: object, **_kwargs: object) -> AccountSelection:
+        nonlocal selection_calls
+        selection_calls += 1
+        return AccountSelection(
+            account=None,
+            error_message="Account stream concurrency limit reached",
+            error_code="account_stream_cap",
+        )
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_api, "_enforce_request_limits", skip_limits)
+    monkeypatch.setattr(proxy_api, "_rate_limit_headers_for_request", no_rate_limit_headers)
+    monkeypatch.setattr(
+        streaming_retry_module,
+        "_account_selection_recovery_sleep_seconds",
+        lambda _selection: 0.1,
+    )
+    monkeypatch.setattr(streaming_retry_module, "_ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS", 0.1)
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+
+    request = Request({"type": "http", "method": "POST", "path": "/v1/responses", "headers": []})
+    payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.1", "instructions": "test", "input": "hello", "stream": True}
+    )
+
+    response = await proxy_api._stream_responses(
+        request,
+        payload,
+        context=cast(proxy_api.ProxyContext, SimpleNamespace(service=service)),
+        api_key=None,
+    )
+
+    assert not isinstance(response, StreamingResponse)
+    assert response.status_code == 429
+    body = bytes(response.body).decode()
+    assert "account_stream_cap" in body
+    assert selection_calls > 1
+
+
+@pytest.mark.asyncio
 async def test_opportunistic_admission_uses_api_key_enforced_model():
     api_key = ApiKeyData(
         id="key_opportunistic_enforced_model",

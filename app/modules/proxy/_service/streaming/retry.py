@@ -14,7 +14,7 @@ from app.core.auth.refresh import RefreshError
 from app.core.balancer import failover_decision
 from app.core.balancer.types import UpstreamError
 from app.core.clients.proxy import ProxyResponseError, _resolve_stream_transport, pop_stream_timeout_overrides
-from app.core.errors import response_failed_event
+from app.core.errors import openai_error, response_failed_event
 from app.core.openai.requests import ResponsesRequest
 from app.core.upstream_proxy import UpstreamProxyRouteError
 from app.core.utils.request_id import ensure_request_id
@@ -597,7 +597,6 @@ class _StreamingRetryMixin:
                             error_type="rate_limit_error",
                             response_id=request_id,
                         )
-                        yield format_sse_event(event)
                         await proxy._write_request_log(
                             account_id=None,
                             api_key=api_key,
@@ -616,6 +615,16 @@ class _StreamingRetryMixin:
                             useragent_group=useragent_group,
                             client_ip=client_ip,
                         )
+                        if propagate_http_errors:
+                            raise ProxyResponseError(
+                                429,
+                                openai_error(
+                                    error_code,
+                                    no_accounts_msg,
+                                    error_type="rate_limit_error",
+                                ),
+                            )
+                        yield format_sse_event(event)
                         return
                     if require_preferred_account and preferred_account_id is not None:
                         message = "Previous response owner account is unavailable; retry later."

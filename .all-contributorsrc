@@ -947,6 +947,16 @@
       "contributions": [
         "code"
       ]
+    },
+    {
+      "login": "zepx",
+      "name": "Choong Jun Jin",
+      "avatar_url": "https://avatars.githubusercontent.com/u/1377772?v=4",
+      "profile": "https://github.com/zepx",
+      "contributions": [
+        "code",
+        "test"
+      ]
     }
   ],
   "contributorsPerLine": 7,

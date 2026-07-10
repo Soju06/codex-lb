@@ -185,6 +185,35 @@ async def test_v1_models_with_client_version_returns_codex_catalog(async_client)
 
 
 @pytest.mark.asyncio
+async def test_v1_models_with_client_version_includes_model_messages(async_client):
+    """The Codex model picker needs `model_messages` from the live catalog to
+    display models absent from its bundled metadata; the catalog served on the
+    `client_version` path must preserve the field verbatim."""
+    registry = get_model_registry()
+    model_messages: dict[str, JsonValue] = {
+        "instructions_template": "You are a coding assistant.",
+        "instructions_variables": {"personality_default": ""},
+        "approvals": None,
+    }
+    models = [
+        _make_upstream_model(
+            "gpt-5.3-codex",
+            raw={
+                "shell_type": "shell_command",
+                "visibility": "list",
+                "model_messages": model_messages,
+            },
+        ),
+    ]
+    await registry.update({"plus": models, "pro": models})
+
+    resp = await async_client.get("/v1/models", params={"client_version": "0.144.1"})
+    assert resp.status_code == 200
+    entries = {entry["slug"]: entry for entry in resp.json()["models"]}
+    assert entries["gpt-5.3-codex"]["model_messages"] == model_messages
+
+
+@pytest.mark.asyncio
 async def test_v1_models_with_empty_client_version_keeps_openai_shape(async_client):
     await _populate_test_registry()
     resp = await async_client.get("/v1/models?client_version=")

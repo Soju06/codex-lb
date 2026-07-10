@@ -9,11 +9,14 @@ requests the missing current-head Codex review.
 
 ## What Changes
 
-- Treat the workflow run containing the most recent `CI Required` check as the
-  authoritative GitHub Actions CI suite for that head.
-- Ignore non-required GitHub Actions checks from superseded workflow runs while
-  preserving required check contexts and non-Actions status evidence.
-- Keep failures from the authoritative CI workflow blocking.
+- Identify the GitHub Actions CI workflow from the most recent `CI Required`
+  check, then treat the newest same-head run of that workflow as the
+  authoritative CI suite — keeping a newer run pending until its own
+  `CI Required` completes.
+- Ignore GitHub Actions checks (including stale required contexts) only from
+  superseded runs of that workflow, while preserving non-Actions status
+  evidence and checks from independent workflows.
+- Keep failures from the authoritative CI run blocking.
 - Add regression coverage for the cancelled matrix-placeholder shape observed
   on a real current-head pull request.
 

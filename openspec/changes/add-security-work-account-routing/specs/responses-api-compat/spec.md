@@ -20,11 +20,14 @@ The classifier MUST recognize both the legacy cybersecurity-risk message and the
 - **THEN** codex-lb emits a non-terminal `codex_lb.warning` with `code="no_security_work_authorized_accounts"`
 - **AND** codex-lb either continues normal account failover when safe or returns the original security-work authorization error when normal failover is exhausted or unsafe
 
-#### Scenario: Pinned requests are not moved to another account
+#### Scenario: Pinned requests move only with a self-contained fresh replay
 
 - **WHEN** a security-work authorization error occurs for a request pinned by file ownership or previous-response ownership
+- **AND** the request does not carry a validated self-contained full resend without account-scoped files
 - **THEN** codex-lb MUST NOT replay the request on a different account
-- **AND** the client receives the original security-work authorization failure.
+- **AND** the client receives the original security-work authorization failure
+- **BUT WHEN** a previous-response owner is unavailable and the WebSocket request carries a validated self-contained fresh replay
+- **THEN** codex-lb drops the unusable anchor and retries that fresh body on a security-work-authorized account
 
 #### Scenario: WebSocket replay releases the response-create gate
 

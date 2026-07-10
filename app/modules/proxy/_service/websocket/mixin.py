@@ -369,6 +369,7 @@ from app.modules.proxy._service.websocket.helpers import (
     _pop_replayable_precreated_websocket_request_state,
     _pop_terminal_websocket_request_state,
     _prepare_websocket_request_state_for_auth_replay,
+    _prepare_websocket_request_state_for_owner_failover,
     _record_websocket_continuity_completion,
     _record_websocket_responses_lite_acceptance,
     _release_websocket_response_create_gate,
@@ -1803,7 +1804,31 @@ class _WebSocketMixin:
                 raise
 
             account = selection.account
-            if account is not None:
+            owner_unavailable = (
+                require_preferred_account
+                and preferred_account_id is not None
+                and (account is None or account.id != preferred_account_id)
+            )
+            if owner_unavailable:
+                if _prepare_websocket_request_state_for_owner_failover(
+                    request_state,
+                    owner_account_id=preferred_account_id,
+                    exclude_account_ids=exclude_account_ids,
+                ):
+                    await proxy._load_balancer.release_account_lease(selection.lease)
+                    preferred_account_id = None
+                    require_preferred_account = False
+                    require_security_work_authorized = True
+                    reallocate_sticky = True
+                    _facade().logger.info(
+                        "websocket_owner_unavailable_fresh_security_replay request_id=%s model=%s",
+                        request_state.request_log_id or request_state.request_id,
+                        model,
+                    )
+                    continue
+                if account is not None:
+                    break
+            elif account is not None:
                 break
 
             async def _heartbeat(remaining_seconds: float) -> None:

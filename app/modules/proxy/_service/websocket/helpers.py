@@ -365,6 +365,26 @@ def _prepare_websocket_request_state_for_visible_output_replay(
     return request_text
 
 
+def _prepare_websocket_request_state_for_owner_failover(
+    request_state: "_WebSocketRequestState",
+    *,
+    owner_account_id: str,
+    exclude_account_ids: set[str],
+) -> bool:
+    if request_state.file_required_preferred_account:
+        return False
+    if not (
+        request_state.fresh_upstream_request_is_retry_safe and request_state.fresh_upstream_request_text
+    ):
+        return False
+    request_state.preferred_account_id = None
+    request_state.require_security_work_authorized = True
+    if _prepare_websocket_request_state_for_visible_output_replay(request_state) is None:
+        return False
+    exclude_account_ids.add(owner_account_id)
+    return True
+
+
 def _websocket_continuity_anchor_for_payload(
     continuity_state: _WebSocketContinuityState | None,
     *,

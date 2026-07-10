@@ -12813,6 +12813,69 @@ async def test_select_websocket_connect_account_preferred_owner_missing_fails_cl
 
 
 @pytest.mark.asyncio
+async def test_select_websocket_connect_account_replays_full_resend_on_security_account_when_owner_missing(
+    monkeypatch,
+):
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    approved = _make_account("acc_security_replay")
+    approved.security_work_authorized = True
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_owner_missing_security_replay",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        previous_response_id="resp_prev_owner",
+        preferred_account_id="acc_owner",
+        session_id="turn_ws_owner_missing_security_replay",
+        request_text='{"type":"response.create","previous_response_id":"resp_prev_owner","input":[]}',
+        fresh_upstream_request_text='{"type":"response.create","input":[]}',
+        fresh_upstream_request_is_retry_safe=True,
+    )
+    select_account = AsyncMock(
+        side_effect=[
+            AccountSelection(account=None, error_message="No active accounts available", error_code="no_accounts"),
+            AccountSelection(account=approved, error_message=None),
+        ]
+    )
+    monkeypatch.setattr(service, "_select_account_with_budget", select_account)
+    websocket_send = AsyncMock()
+
+    result = await service._select_websocket_connect_account(
+        time.monotonic() + 10_000.0,
+        sticky_key="sticky-session",
+        sticky_kind=proxy_service.StickySessionKind.CODEX_SESSION,
+        prefer_earlier_reset=False,
+        prefer_earlier_reset_window="secondary",
+        routing_strategy="usage_weighted",
+        model="gpt-5.6-sol",
+        request_state=request_state,
+        api_key=None,
+        client_send_lock=anyio.Lock(),
+        websocket=cast(WebSocket, SimpleNamespace(send_text=websocket_send)),
+        reallocate_sticky=False,
+        sticky_max_age_seconds=None,
+        exclude_account_ids=set(),
+        preferred_account_id="acc_owner",
+        require_preferred_account=True,
+    )
+
+    assert result is approved
+    assert request_state.previous_response_id is None
+    assert request_state.preferred_account_id is None
+    assert request_state.require_security_work_authorized is True
+    assert request_state.request_text == '{"type":"response.create","input":[]}'
+    assert request_state.replay_count == 1
+    assert select_account.await_count == 2
+    retry_call = select_account.await_args_list[1]
+    assert retry_call.kwargs["preferred_account_id"] is None
+    assert retry_call.kwargs["require_security_work_authorized"] is True
+    assert retry_call.kwargs["exclude_account_ids"] == {"acc_owner"}
+    websocket_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_select_websocket_connect_account_stream_cap_is_local_overload(monkeypatch):
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     request_state = proxy_service._WebSocketRequestState(

@@ -98,7 +98,7 @@ from app.core.resilience.overload import is_local_overload_error_code, merge_ret
 from app.core.runtime_logging import log_error_response
 from app.core.types import JsonValue
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError, resolve_upstream_route
-from app.core.utils.json_guards import is_json_mapping
+from app.core.utils.json_guards import is_json_list, is_json_mapping
 from app.core.utils.request_id import ensure_request_id, get_request_id
 from app.core.utils.sse import (
     CODEX_KEEPALIVE_FRAME,
@@ -130,6 +130,7 @@ from app.modules.model_sources.catalog import (
     source_model_audio_cost_usd,
     source_model_cost_usd,
     source_model_request_overrides,
+    source_model_supported_tool_types,
     source_model_supports_reasoning,
     source_models_to_upstream_models,
 )
@@ -3196,7 +3197,10 @@ async def _source_responses_response(
     source_payload = payload.model_dump(mode="json", exclude_none=True)
     source_payload["stream"] = bool(payload.stream)
     _apply_source_response_request_overrides(source_payload, source_model_request_overrides(source, payload.model))
-    _drop_unsupported_source_response_tools(source_payload)
+    _drop_unsupported_source_response_tools(
+        source_payload,
+        supported_tool_types=source_model_supported_tool_types(source, payload.model),
+    )
 
     if payload.stream:
         try:
@@ -3309,12 +3313,18 @@ async def _source_responses_response(
     return JSONResponse(content=result.payload, status_code=200, headers=rate_limit_headers)
 
 
+# Keys that source_request_overrides must never clobber: the routed model slug
+# is owned by source selection, and the stream flag drives SSE-vs-JSON response
+# handling on the proxy side.
+_SOURCE_RESPONSE_OVERRIDE_PROTECTED_KEYS = frozenset({"model", "stream"})
+
+
 def _apply_source_response_request_overrides(
     payload: dict[str, JsonValue],
     overrides: Mapping[str, JsonValue],
 ) -> None:
     for key, value in overrides.items():
-        if key == "model":
+        if key in _SOURCE_RESPONSE_OVERRIDE_PROTECTED_KEYS:
             continue
         if key == "options" and isinstance(value, Mapping):
             existing_options = payload.get("options")
@@ -3325,19 +3335,76 @@ def _apply_source_response_request_overrides(
         payload[key] = value
 
 
-def _drop_unsupported_source_response_tools(payload: dict[str, JsonValue]) -> None:
+def _source_tool_type_supported(tool_type: JsonValue | None, supported_tool_types: frozenset[str]) -> bool:
+    if tool_type == "function":
+        return True
+    return isinstance(tool_type, str) and tool_type in supported_tool_types
+
+
+def _drop_unsupported_source_response_tools(
+    payload: dict[str, JsonValue],
+    *,
+    supported_tool_types: frozenset[str],
+) -> None:
     tools = payload.get("tools")
-    if not isinstance(tools, list):
+    if not is_json_list(tools):
         return
-    supported_tools = [tool for tool in tools if isinstance(tool, Mapping) and tool.get("type") == "function"]
-    if len(supported_tools) == len(tools):
+    kept_tools: list[JsonValue] = []
+    kept_types: set[str] = set()
+    for tool in tools:
+        if not is_json_mapping(tool):
+            continue
+        tool_type = tool.get("type")
+        if not _source_tool_type_supported(tool_type, supported_tool_types):
+            continue
+        kept_tools.append(tool)
+        if isinstance(tool_type, str):
+            kept_types.add(tool_type)
+    if len(kept_tools) == len(tools):
         return
-    if supported_tools:
-        payload["tools"] = supported_tools
+    if not kept_tools:
+        payload.pop("tools", None)
+        payload.pop("tool_choice", None)
+        payload.pop("parallel_tool_calls", None)
         return
-    payload.pop("tools", None)
-    payload.pop("tool_choice", None)
-    payload.pop("parallel_tool_calls", None)
+    payload["tools"] = kept_tools
+    _drop_dangling_source_tool_choice(payload, frozenset(kept_types))
+
+
+def _drop_dangling_source_tool_choice(payload: dict[str, JsonValue], kept_types: frozenset[str]) -> None:
+    """Keep tool_choice consistent with the tools that survived filtering.
+
+    A forced tool_choice that references a dropped hosted tool (for example
+    ``{"type": "web_search"}``) would make the source reject the request, so it
+    falls back to the provider default by removing the key. ``function``-typed
+    choices always stay: function tools are never dropped by the filter.
+    """
+    tool_choice = payload.get("tool_choice")
+    if not is_json_mapping(tool_choice):
+        return
+    choice_type = tool_choice.get("type")
+    if choice_type == "function":
+        return
+    if choice_type == "allowed_tools":
+        allowed = tool_choice.get("tools")
+        if not is_json_list(allowed):
+            return
+        kept_allowed: list[JsonValue] = [
+            entry
+            for entry in allowed
+            if is_json_mapping(entry) and _source_tool_type_supported(entry.get("type"), kept_types)
+        ]
+        if len(kept_allowed) == len(allowed):
+            return
+        if not kept_allowed:
+            payload.pop("tool_choice", None)
+            return
+        updated_choice: dict[str, JsonValue] = dict(tool_choice)
+        updated_choice["tools"] = kept_allowed
+        payload["tool_choice"] = updated_choice
+        return
+    if not _source_tool_type_supported(choice_type, kept_types):
+        payload.pop("tool_choice", None)
 
 
 async def _source_chat_completion_response(

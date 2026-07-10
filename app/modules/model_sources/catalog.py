@@ -7,10 +7,15 @@ from app.core.openai.model_registry import (
     UpstreamModel,
 )
 from app.core.types import JsonValue
+from app.core.utils.json_guards import is_json_list, is_json_mapping
 from app.db.models import ModelSource, ModelSourceModel
 
-
 DEFAULT_SOURCE_CONTEXT_WINDOW = 128_000
+
+# ``web_search_preview`` is the legacy alias for ``web_search``; request
+# validation normalizes it, but accept both here so operator opt-in covers
+# payloads regardless of normalization order.
+_SEARCH_TOOL_TYPES = frozenset({"web_search", "web_search_preview"})
 
 
 def source_models_to_upstream_models(sources: list[ModelSource]) -> list[UpstreamModel]:
@@ -29,6 +34,10 @@ def source_models_to_upstream_models(sources: list[ModelSource]) -> list[Upstrea
 
 def _to_upstream_model(source: ModelSource, source_model: ModelSourceModel) -> UpstreamModel:
     raw = _raw_metadata(source_model)
+    # Operator-side request override config is applied server-side at forwarding
+    # time (see source_model_request_overrides); it must never reach the
+    # client-visible catalog payloads built from UpstreamModel.raw.
+    raw.pop("source_request_overrides", None)
     context_window = source_model.context_window or DEFAULT_SOURCE_CONTEXT_WINDOW
     raw.setdefault("visibility", "list")
     raw.setdefault("shell_type", "shell_command")
@@ -90,6 +99,13 @@ def source_model_supports_reasoning(source: ModelSource, model: str) -> bool:
 
 
 def source_model_request_overrides(source: ModelSource, model: str) -> dict[str, JsonValue]:
+    """Operator-configured request overrides for a source model.
+
+    Overrides live under ``"source_request_overrides"`` in
+    ``raw_metadata_json`` and are applied server-side when forwarding; they are
+    stripped from the client-visible catalog metadata (see
+    ``_to_upstream_model``).
+    """
     entry = next(
         (candidate for candidate in source.models if candidate.model == model and candidate.is_enabled),
         None,
@@ -97,7 +113,33 @@ def source_model_request_overrides(source: ModelSource, model: str) -> dict[str,
     if entry is None:
         return {}
     value = _raw_metadata(entry).get("source_request_overrides")
-    return value if isinstance(value, dict) else {}
+    if not is_json_mapping(value):
+        return {}
+    return dict(value)
+
+
+def source_model_supported_tool_types(source: ModelSource, model: str) -> frozenset[str]:
+    """Non-function Responses tool types the source model declares support for.
+
+    Function tools are always forwarded to OpenAI-compatible sources; hosted
+    tool types are dropped unless the model opts in via
+    ``"supports_search_tool": true`` (web search) or lists the tool type in
+    ``"experimental_supported_tools"`` in ``raw_metadata_json``.
+    """
+    entry = next(
+        (candidate for candidate in source.models if candidate.model == model and candidate.is_enabled),
+        None,
+    )
+    if entry is None:
+        return frozenset()
+    raw = _raw_metadata(entry)
+    supported: set[str] = set()
+    if raw.get("supports_search_tool") is True:
+        supported |= _SEARCH_TOOL_TYPES
+    experimental = raw.get("experimental_supported_tools")
+    if is_json_list(experimental):
+        supported.update(item for item in experimental if isinstance(item, str))
+    return frozenset(supported)
 
 
 def source_model_cost_usd(

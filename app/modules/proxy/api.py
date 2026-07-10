@@ -5820,6 +5820,10 @@ def _could_be_blank_html_comment_line(text: str) -> bool:
     return not remainder[3:].strip(" \t\r")
 
 
+def _is_reasoning_summary_interleavable_event(event_type: JsonValue | None) -> bool:
+    return isinstance(event_type, str) and (event_type == "response.in_progress" or event_type.startswith("codex."))
+
+
 async def _normalize_reasoning_summary_stream(stream: AsyncIterator[str]) -> AsyncIterator[str]:
     pending: dict[tuple[str | None, int | None, int | None], list[dict[str, JsonValue]]] = {}
 
@@ -5842,8 +5846,12 @@ async def _normalize_reasoning_summary_stream(stream: AsyncIterator[str]) -> Asy
             continue
         event_type = payload.get("type")
         event_key = _reasoning_summary_delta_key(payload)
-        if pending and not (
-            event_type in _REASONING_SUMMARY_DELTA_TYPES | _REASONING_SUMMARY_DONE_TYPES and event_key in pending
+        if (
+            pending
+            and not _is_reasoning_summary_interleavable_event(event_type)
+            and not (
+                event_type in _REASONING_SUMMARY_DELTA_TYPES | _REASONING_SUMMARY_DONE_TYPES and event_key in pending
+            )
         ):
             for pending_key in tuple(pending):
                 for buffered in flush(pending_key):

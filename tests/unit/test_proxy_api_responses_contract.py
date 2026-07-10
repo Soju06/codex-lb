@@ -101,7 +101,7 @@ async def test_normalize_reasoning_summary_stream_does_not_delay_less_than_text(
 
 
 @pytest.mark.asyncio
-async def test_normalize_reasoning_summary_stream_flushes_partial_less_than_before_unrelated_event() -> None:
+async def test_normalize_reasoning_summary_stream_keeps_candidate_across_telemetry() -> None:
     first = proxy_api_module.format_sse_event(
         {
             "type": "response.reasoning_summary_text.delta",
@@ -117,7 +117,44 @@ async def test_normalize_reasoning_summary_stream_flushes_partial_less_than_befo
         block async for block in proxy_api_module._normalize_reasoning_summary_stream(_iter_blocks(first, second))
     ]
 
-    assert blocks == [first, second]
+    assert blocks == [second, first]
+
+
+@pytest.mark.asyncio
+async def test_normalize_reasoning_summary_stream_removes_split_placeholder_across_telemetry() -> None:
+    first = proxy_api_module.format_sse_event(
+        {
+            "type": "response.reasoning_summary_text.delta",
+            "item_id": "rs_1",
+            "output_index": 0,
+            "summary_index": 0,
+            "delta": "Plan\n\n<!",
+        }
+    )
+    telemetry = proxy_api_module.format_sse_event({"type": "codex.rate_limits", "limits": {}})
+    progress = proxy_api_module.format_sse_event({"type": "response.in_progress", "response": {"id": "resp_1"}})
+    final = proxy_api_module.format_sse_event(
+        {
+            "type": "response.reasoning_summary_text.delta",
+            "item_id": "rs_1",
+            "output_index": 0,
+            "summary_index": 0,
+            "delta": "-- -->",
+        }
+    )
+
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_reasoning_summary_stream(
+            _iter_blocks(first, telemetry, progress, final)
+        )
+    ]
+
+    assert blocks[:2] == [telemetry, progress]
+    payload = proxy_api_module._parse_sse_payload(blocks[-1])
+    assert payload is not None
+    assert payload["delta"] == "Plan"
+    assert "<!-- -->" not in "".join(blocks)
 
 
 @pytest.mark.asyncio

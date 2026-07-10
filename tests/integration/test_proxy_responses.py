@@ -2077,6 +2077,7 @@ async def test_backend_codex_responses_strips_split_blank_comment_from_reasoning
             'data: {"type":"response.reasoning_summary_text.delta","item_id":"rs_split",'
             '"output_index":0,"summary_index":0,"delta":"**Planning fix**\\n\\n<!"}\n\n'
         )
+        yield ('data: {"type":"codex.rate_limits","plan_type":"pro","rate_limits":{"allowed":true}}\n\n')
         yield (
             'data: {"type":"response.reasoning_summary_text.delta","item_id":"rs_split",'
             '"output_index":0,"summary_index":0,"delta":"-- -->"}\n\n'

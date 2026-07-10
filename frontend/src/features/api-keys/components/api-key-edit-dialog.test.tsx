@@ -347,6 +347,43 @@ describe("ApiKeyEditDialog", () => {
     expect(payload.assignedAccountIds).toEqual([]);
   });
 
+  it("keeps the dialog open while selecting a model and submits the selection", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const onOpenChange = vi.fn();
+    server.use(
+      http.get("/api/models", () =>
+        HttpResponse.json({
+          models: [
+            { id: "gpt-5.5", name: "GPT 5.5" },
+            { id: "gpt-5.6-sol", name: "GPT 5.6 SOL" },
+          ],
+        }),
+      ),
+    );
+
+    renderWithProviders(
+      <ApiKeyEditDialog
+        open
+        busy={false}
+        apiKey={createApiKey({ allowedModels: ["gpt-5.5"] })}
+        onOpenChange={onOpenChange}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "1 model selected" }));
+    await user.click(screen.getByRole("menuitemcheckbox", { name: "gpt-5.6-sol" }));
+
+    expect(screen.getByRole("dialog", { name: "Edit API key" })).toBeInTheDocument();
+    expect(onOpenChange).not.toHaveBeenCalledWith(false);
+
+    await user.keyboard("{Escape}");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(onSubmit.mock.calls[0][0].allowedModels).toEqual(["gpt-5.5", "gpt-5.6-sol"]);
+  });
+
   it("keeps a deny-all source scope when editing an unrelated field", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn().mockResolvedValue(undefined);

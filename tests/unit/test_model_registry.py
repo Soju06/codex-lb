@@ -27,6 +27,9 @@ EXPECTED_CORE_MODEL_PLANS = {
 }
 
 EXPECTED_BOOTSTRAP_MINIMAL_CLIENT_VERSIONS = {
+    "gpt-5.6-sol": "0.144.0",
+    "gpt-5.6-terra": "0.144.0",
+    "gpt-5.6-luna": "0.144.0",
     "gpt-5.5": "0.124.0",
     "gpt-5.4": "0.98.0",
     "gpt-5.4-mini": "0.98.0",
@@ -138,6 +141,8 @@ async def test_prefers_websockets_does_not_use_bootstrap_after_snapshot():
 def test_prefers_websockets_uses_bootstrap_fallback_when_uninitialized():
     registry = ModelRegistry(ttl_seconds=60.0)
 
+    assert registry.prefers_websockets("gpt-5.6-sol") is True
+    assert registry.prefers_websockets("gpt-5.6-luna") is True
     assert registry.prefers_websockets("gpt-5.4") is True
     assert registry.prefers_websockets("gpt-5.4-2026") is True
     assert registry.prefers_websockets("gpt-5.3-codex") is True
@@ -178,6 +183,24 @@ def test_bootstrap_models_include_representative_upstream_metadata():
     assert auto_review.raw["shell_type"] == "shell_command"
     assert auto_review.raw["max_context_window"] == 1_000_000
     assert auto_review.minimal_client_version == "0.98.0"
+
+    # GPT-5.6 Responses Lite models expose max reasoning and ship with the
+    # additional_tools tool bundle (issue #1157).
+    for slug in ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"):
+        gpt56 = models[slug]
+        assert gpt56.prefer_websockets is True
+        assert gpt56.context_window == 372_000
+        assert gpt56.minimal_client_version == "0.144.0"
+        assert gpt56.input_modalities == ("text", "image")
+        assert {level.effort for level in gpt56.supported_reasoning_levels} == {
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+        }
+        assert gpt56.raw["use_responses_lite"] is True
+        assert gpt56.raw["tool_mode"] == "code_mode_only"
     assert auto_review.available_in_plans == EXPECTED_CORE_MODEL_PLANS
     assert models["gpt-5.3-codex"].available_in_plans == EXPECTED_CORE_MODEL_PLANS
 

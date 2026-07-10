@@ -134,9 +134,16 @@ model_provider = "codex-lb"
 name = "openai"  # required — enables remote /responses/compact. Lowercase since Codex 2026-05-23; older "OpenAI" stops resolving gpt-5.5
 base_url = "http://127.0.0.1:2455/backend-api/codex"
 wire_api = "responses"
+http_headers = { "x-openai-actor-authorization" = "codex-lb" }
 supports_websockets = true
 requires_openai_auth = true # required for codex app
 ```
+
+The `x-openai-actor-authorization` header is required for Codex's built-in
+`$imagegen` tool when using the custom `codex-lb` provider. Its static
+`codex-lb` value is a non-secret capability marker for the Codex client gateway;
+it does not authenticate requests to codex-lb or replace API key auth. Existing
+users should add the line to their provider table and start a new Codex session.
 
 Optional: enable native upstream WebSockets for Codex streaming while keeping `codex-lb` pooling:
 
@@ -173,6 +180,7 @@ name = "openai"
 base_url = "http://127.0.0.1:2455/backend-api/codex"
 wire_api = "responses"
 env_key = "CODEX_LB_API_KEY"
+http_headers = { "x-openai-actor-authorization" = "codex-lb" }
 supports_websockets = true
 requires_openai_auth = true # required for codex app
 ```

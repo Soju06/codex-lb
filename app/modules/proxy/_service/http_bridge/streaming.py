@@ -994,27 +994,14 @@ class _HTTPBridgeStreamingMixin:
                     retry_request_state.request_stage = "reattach"
                     retry_request_state.preferred_account_id = request_state.preferred_account_id
 
-                    await self._submit_http_bridge_request(
+                    async for event_block in self._stream_http_bridge_session_events(
                         session,
                         request_state=retry_request_state,
                         text_data=retry_text_data,
                         queue_limit=queue_limit,
-                    )
-                    if downstream_turn_state is not None:
-                        await self._register_http_bridge_turn_state(session, downstream_turn_state)
-                    event_queue = retry_request_state.event_queue
-                    assert event_queue is not None
-                    while True:
-                        event_block = await event_queue.get()
-                        if event_block is None:
-                            break
-                        if retry_request_state.latency_first_token_ms is None:
-                            block_payload = parse_sse_data_json(event_block)
-                            block_event_type = _event_type_from_payload(None, block_payload)
-                            if block_event_type in _TEXT_DELTA_EVENT_TYPES:
-                                retry_request_state.latency_first_token_ms = int(
-                                    (_service_time().monotonic() - retry_request_state.started_at) * 1000
-                                )
+                        propagate_http_errors=propagate_http_errors,
+                        downstream_turn_state=downstream_turn_state,
+                    ):
                         yield event_block
                 except BaseException:
                     if retry_reservation_reacquired and retry_api_key_reservation is not None:

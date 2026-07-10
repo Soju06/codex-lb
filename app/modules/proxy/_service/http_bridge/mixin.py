@@ -1521,7 +1521,7 @@ class _HTTPBridgeMixin(
         for key, session in self._http_bridge_sessions.items():
             # An admitted request waiting for the response-create gate owns the
             # session handoff even when the old upstream reader just closed.
-            if session.admission_waiter_count > 0:
+            if getattr(session, "admission_waiter_count", 0) > 0:
                 continue
             if session.closed:
                 stale_keys.append(key)

@@ -48,7 +48,14 @@ class ModelRegistrySnapshot:
     fetched_at: float
 
 
-_BOOTSTRAP_WEBSOCKET_PREFERRED_MODEL_PATTERNS = ("gpt-5.5", "gpt-5.5-*", "gpt-5.4", "gpt-5.4-*")
+_BOOTSTRAP_WEBSOCKET_PREFERRED_MODEL_PATTERNS = (
+    "gpt-5.6",
+    "gpt-5.6-*",
+    "gpt-5.5",
+    "gpt-5.5-*",
+    "gpt-5.4",
+    "gpt-5.4-*",
+)
 
 _REASONING_LEVELS_STANDARD = (
     ReasoningLevel(effort="low", description="Low reasoning effort"),
@@ -61,6 +68,15 @@ _REASONING_LEVELS_EXTENDED = (
     ReasoningLevel(effort="medium", description="Medium reasoning effort"),
     ReasoningLevel(effort="high", description="High reasoning effort"),
     ReasoningLevel(effort="xhigh", description="Extra high reasoning effort"),
+)
+
+_REASONING_LEVELS_56 = (
+    ReasoningLevel(effort="low", description="Fast responses with lighter reasoning"),
+    ReasoningLevel(effort="medium", description="Balances speed and reasoning depth for everyday tasks"),
+    ReasoningLevel(effort="high", description="Greater reasoning depth for complex problems"),
+    ReasoningLevel(effort="xhigh", description="Extra high reasoning depth for complex problems"),
+    ReasoningLevel(effort="max", description="Maximum reasoning depth for the hardest problems"),
+    ReasoningLevel(effort="ultra", description="Maximum reasoning with automatic task delegation"),
 )
 
 _BOOTSTRAP_AVAILABLE_IN_PLANS = frozenset(
@@ -87,6 +103,10 @@ _BOOTSTRAP_AVAILABLE_IN_PLANS = frozenset(
 
 _BOOTSTRAP_CORE_AVAILABLE_IN_PLANS = frozenset(
     plan for plan in _BOOTSTRAP_AVAILABLE_IN_PLANS if plan not in {"free", "free_workspace", "k12"}
+)
+
+_BOOTSTRAP_56_PAID_AVAILABLE_IN_PLANS = frozenset(
+    plan for plan in _BOOTSTRAP_AVAILABLE_IN_PLANS if plan not in {"free", "free_workspace", "go", "k12"}
 )
 
 
@@ -143,6 +163,29 @@ def _bootstrap_model(
 # explicit rather than inherited from helper defaults; every slug must exist
 # upstream, and live upstream data always takes precedence once available.
 _BOOTSTRAP_STATIC_MODELS: tuple[UpstreamModel, ...] = (
+    _bootstrap_model(
+        "gpt-5.6-sol",
+        "GPT-5.6 Sol",
+        prefer_websockets=True,
+        minimal_client_version="0.144.0",
+        reasoning_levels=_REASONING_LEVELS_56,
+        available_in_plans=_BOOTSTRAP_56_PAID_AVAILABLE_IN_PLANS,
+    ),
+    _bootstrap_model(
+        "gpt-5.6-terra",
+        "GPT-5.6 Terra",
+        prefer_websockets=True,
+        minimal_client_version="0.144.0",
+        reasoning_levels=_REASONING_LEVELS_56,
+    ),
+    _bootstrap_model(
+        "gpt-5.6-luna",
+        "GPT-5.6 Luna",
+        prefer_websockets=True,
+        minimal_client_version="0.144.0",
+        reasoning_levels=_REASONING_LEVELS_56,
+        available_in_plans=_BOOTSTRAP_56_PAID_AVAILABLE_IN_PLANS,
+    ),
     _bootstrap_model(
         "gpt-5.5",
         "GPT-5.5",
@@ -213,7 +256,7 @@ class ModelRegistry:
     def get_models_with_fallback(self) -> dict[str, UpstreamModel]:
         snapshot = self._snapshot
         if snapshot is not None:
-            return snapshot.models
+            return {**self._bootstrap_models, **snapshot.models}
         return self._bootstrap_models
 
     def plan_types_for_model(self, slug: str) -> frozenset[str] | None:
@@ -221,7 +264,11 @@ class ModelRegistry:
         if self._snapshot is None:
             model = self._bootstrap_models.get(slug) or self._bootstrap_models.get(normalized_slug)
             return model.available_in_plans if model is not None else None
-        return self._snapshot.model_plans.get(slug) or self._snapshot.model_plans.get(normalized_slug, frozenset())
+        snapshot_plans = self._snapshot.model_plans.get(slug) or self._snapshot.model_plans.get(normalized_slug)
+        if snapshot_plans:
+            return snapshot_plans
+        model = self._bootstrap_models.get(slug) or self._bootstrap_models.get(normalized_slug)
+        return model.available_in_plans if model is not None else frozenset()
 
     def prefers_websockets(self, slug: str | None) -> bool:
         if not isinstance(slug, str):

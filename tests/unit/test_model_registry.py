@@ -27,6 +27,9 @@ EXPECTED_CORE_MODEL_PLANS = {
 }
 
 EXPECTED_BOOTSTRAP_MINIMAL_CLIENT_VERSIONS = {
+    "gpt-5.6-sol": "0.144.0",
+    "gpt-5.6-terra": "0.144.0",
+    "gpt-5.6-luna": "0.144.0",
     "gpt-5.5": "0.124.0",
     "gpt-5.4": "0.98.0",
     "gpt-5.4-mini": "0.98.0",
@@ -144,6 +147,19 @@ def test_bootstrap_models_include_representative_upstream_metadata():
     for slug, expected_version in EXPECTED_BOOTSTRAP_MINIMAL_CLIENT_VERSIONS.items():
         assert models[slug].minimal_client_version == expected_version
 
+    for slug in ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"):
+        model = models[slug]
+        assert model.prefer_websockets is True
+        assert model.default_reasoning_level == "medium"
+        assert {level.effort for level in model.supported_reasoning_levels} == {
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+            "ultra",
+        }
+
     gpt54 = models["gpt-5.4"]
     assert gpt54.minimal_client_version == "0.98.0"
     assert gpt54.raw["max_context_window"] == 1_000_000
@@ -186,6 +202,10 @@ async def test_update_merges_models_across_plans():
     assert set(snapshot.models.keys()) == {"shared", "plus-only", "pro-only"}
     assert snapshot.plan_models["plus"] == frozenset({"shared", "plus-only"})
     assert snapshot.plan_models["pro"] == frozenset({"shared", "pro-only"})
+
+    models = registry.get_models_with_fallback()
+    assert models["shared"].slug == "shared"
+    assert models["gpt-5.6-sol"].slug == "gpt-5.6-sol"
 
 
 @pytest.mark.asyncio

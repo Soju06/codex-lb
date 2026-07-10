@@ -6869,6 +6869,8 @@ async def _run_owner_forward_recovery_with_session(
     *,
     recovery_session: "proxy_service._HTTPBridgeSession",
     input_items: list[dict[str, Any]],
+    capacity_error_on_first_submit: bool = False,
+    submit_attempts: list[str] | None = None,
 ) -> list[Any]:
     """Drive owner-forward failure -> local recovery; return prepared inputs.
 
@@ -6933,6 +6935,16 @@ async def _run_owner_forward_recovery_with_session(
         queue_limit: int,
     ) -> None:
         del _session, text_data, queue_limit
+        if submit_attempts is not None:
+            submit_attempts.append(request_state.request_id)
+        if capacity_error_on_first_submit and submit_attempts is not None and len(submit_attempts) == 1:
+            raise ProxyResponseError(
+                429,
+                proxy_service.openai_error(
+                    "account_response_create_cap",
+                    "Account response-create concurrency limit reached",
+                ),
+            )
         event_queue = request_state.event_queue
         assert event_queue is not None
         await event_queue.put('data: {"type":"response.completed"}\n\n')
@@ -6958,6 +6970,7 @@ async def _run_owner_forward_recovery_with_session(
         ),
     )
     monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(http_bridge_streaming_module, "_http_bridge_account_capacity_wait_seconds", lambda _exc: 0.001)
     monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=None))
     monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value="acc-1"))
     monkeypatch.setattr(service, "_prepare_http_bridge_request", fake_prepare)
@@ -6983,7 +6996,14 @@ async def _run_owner_forward_recovery_with_session(
             queue_limit=4,
         )
     ]
-    assert chunks == ['data: {"type":"response.completed"}\n\n']
+    if capacity_error_on_first_submit:
+        keepalive = proxy_service.parse_sse_data_json(chunks[0])
+        assert keepalive is not None
+        assert keepalive["type"] == "codex.keepalive"
+        assert keepalive["status"] == "waiting_for_account_capacity"
+        assert chunks[-1] == 'data: {"type":"response.completed"}\n\n'
+    else:
+        assert chunks == ['data: {"type":"response.completed"}\n\n']
     assert get_or_create.await_count == 2
     return prepared_inputs
 
@@ -7007,6 +7027,23 @@ def _make_owner_forward_recovery_session() -> "proxy_service._HTTPBridgeSession"
         last_used_at=2.0,
         idle_ttl_seconds=120.0,
     )
+
+
+@pytest.mark.asyncio
+async def test_stream_via_http_bridge_owner_forward_recovery_waits_for_local_submit_capacity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    submit_attempts: list[str] = []
+
+    await _run_owner_forward_recovery_with_session(
+        monkeypatch,
+        recovery_session=_make_owner_forward_recovery_session(),
+        input_items=[{"role": "user", "content": "continue"}],
+        capacity_error_on_first_submit=True,
+        submit_attempts=submit_attempts,
+    )
+
+    assert submit_attempts == ["req-2", "req-2"]
 
 
 @pytest.mark.asyncio

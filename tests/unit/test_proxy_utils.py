@@ -356,6 +356,34 @@ async def test_startup_probe_waits_for_late_capacity_marker(surface: str) -> Non
     assert startup_error.status_code == 429
 
 
+@pytest.mark.asyncio
+async def test_chat_startup_probe_consumes_capacity_marker_after_startup_event() -> None:
+    capacity_wait_event = asyncio.Event()
+    release_next_event = asyncio.Event()
+
+    async def delayed_chat_stream() -> AsyncIterator[str]:
+        capacity_wait_event.set()
+        yield 'data: {"type":"response.created"}\n\n'
+        await release_next_event.wait()
+        yield 'data: {"type":"response.output_text.delta","delta":"hello"}\n\n'
+
+    probe_task = asyncio.create_task(
+        proxy_api._probe_chat_stream_startup_error(
+            delayed_chat_stream(),
+            timeout_seconds=0.001,
+            capacity_wait_event=capacity_wait_event,
+        )
+    )
+    try:
+        stream, startup_error = await asyncio.wait_for(probe_task, timeout=0.1)
+    finally:
+        release_next_event.set()
+
+    assert startup_error is None
+    assert capacity_wait_event.is_set() is False
+    assert await anext(stream) == 'data: {"type":"response.created"}\n\n'
+
+
 def test_relative_availability_settings_default_when_stored_values_are_null():
     settings = cast(Any, SimpleNamespace(relative_availability_power=None, relative_availability_top_k=None))
 

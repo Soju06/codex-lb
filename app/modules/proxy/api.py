@@ -4705,7 +4705,11 @@ async def _wait_for_first_stream_probe(
     capacity_wait_event: asyncio.Event | None,
 ) -> bool:
     done, _pending = await asyncio.wait({first_task}, timeout=timeout_seconds)
-    if done or capacity_wait_event is None:
+    if done:
+        if capacity_wait_event is not None and capacity_wait_event.is_set():
+            capacity_wait_event.clear()
+        return True
+    if capacity_wait_event is None:
         return bool(done)
 
     marker_task = asyncio.create_task(capacity_wait_event.wait())
@@ -4716,6 +4720,11 @@ async def _wait_for_first_stream_probe(
             return_when=asyncio.FIRST_COMPLETED,
         )
         if marker_task in done and capacity_wait_event.is_set():
+            # The marker extends this probe only. Chat-completions may probe
+            # several buffered startup events, so leaving the Event set would
+            # turn every later probe into an unbounded wait. A later capacity
+            # wait can set the shared marker again.
+            capacity_wait_event.clear()
             await asyncio.wait({first_task})
             return True
         return first_task in done

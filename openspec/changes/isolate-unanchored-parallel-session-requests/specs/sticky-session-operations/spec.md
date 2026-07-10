@@ -64,6 +64,39 @@ When multiple Responses requests share a process-level session header but carry 
 - **THEN** the primary signature remains valid under the legacy contract
 - **AND** the anchored request can continue without weakening unanchored fail-closed behavior
 
+#### Scenario: Legacy session-header canonical lane proves its turn-state anchor
+
+- **GIVEN** a legacy-signed owner forward has no previous-response ID and its durable canonical key is still `session_header`
+- **WHEN** its forwarded turn state is a registered durable alias for that exact canonical lane
+- **THEN** the current owner accepts it as anchored continuity
+- **AND** an unknown turn state or an alias for another canonical lane fails closed with `bridge_forward_upgrade_required`
+
+#### Scenario: Legacy proof precedes compact and bridge fallback branches
+
+- **GIVEN** a legacy-signed owner forward requires turn-state anchor proof
+- **WHEN** the request contains a terminal compaction trigger or bypasses the websocket bridge
+- **THEN** exact alias proof runs before compact, HTTP fallback, admission, or upstream work
+
+#### Scenario: Current origin proves a turn-state alias before legacy owner forwarding
+
+- **GIVEN** a current origin resolves a nonblank turn state only through a shared `session_header` durable lane
+- **WHEN** that request would be forwarded to another owner with the legacy signature contract
+- **THEN** the origin proves an exact turn-state alias row for that canonical lane before sending the owner request
+- **AND** an unknown alias fails closed with `bridge_forward_upgrade_required`
+
+#### Scenario: Latest-state metadata is not proof of alias registration
+
+- **GIVEN** a durable session records a latest turn state but has no matching turn-state alias row
+- **WHEN** that value is presented by a legacy-signed owner forward
+- **THEN** the owner rejects it with `bridge_forward_upgrade_required`
+
+#### Scenario: Stale owners cannot register proof aliases after takeover
+
+- **GIVEN** durable ownership advanced to a new owner epoch
+- **WHEN** the stale owner attempts to register a turn-state alias with its old epoch
+- **THEN** alias registration writes nothing
+- **AND** the stale value cannot satisfy legacy anchor proof
+
 #### Scenario: Ambiguous legacy signature fields fail closed
 
 - **GIVEN** a legacy owner-forward signature contains a delimiter in any signed header field

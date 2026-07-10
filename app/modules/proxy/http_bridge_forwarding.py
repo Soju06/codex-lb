@@ -73,6 +73,7 @@ class HTTPBridgeForwardContext:
     original_affinity_key: str | None = None
     client_ip: str | None = None
     reservation: ApiKeyUsageReservationData | None = None
+    signature_version: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -267,6 +268,7 @@ def parse_forwarded_request(
         original_affinity_key=_optional_header(headers.get(HTTP_BRIDGE_AFFINITY_KEY_HEADER)),
         client_ip=client_ip,
         reservation=_reservation_from_headers(headers),
+        signature_version=signature_version,
     )
     if signature_version is None and _legacy_signature_context_has_ambiguous_delimiter(context):
         return None, _invalid_bridge_forward_signature_error()
@@ -297,19 +299,6 @@ def parse_forwarded_request(
     )
     if not signature_valid:
         return None, _invalid_bridge_forward_signature_error()
-    if (
-        signature_version is None
-        and context.original_affinity_kind == "session_header"
-        and payload.previous_response_id is None
-    ):
-        return None, ProxyResponseError(
-            409,
-            openai_error(
-                "bridge_forward_upgrade_required",
-                "Unanchored owner forwarding requires bridge signature protocol v2",
-                error_type="server_error",
-            ),
-        )
     return HTTPBridgeForwardedRequest(context=context), None
 
 

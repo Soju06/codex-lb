@@ -183,6 +183,7 @@ from app.modules.proxy.affinity import (
     _sticky_key_from_turn_state_header,
 )
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
+from app.modules.proxy.durable_bridge_coordinator import DurableBridgeLookup
 from app.modules.proxy.helpers import (
     _normalize_error_code,
 )
@@ -335,7 +336,121 @@ def _http_bridge_original_request_unanchored(
     )
 
 
+def _legacy_forward_upgrade_required_error() -> ProxyResponseError:
+    return ProxyResponseError(
+        409,
+        openai_error(
+            "bridge_forward_upgrade_required",
+            "Legacy owner forwarding requires a registered turn-state continuity anchor",
+            error_type="server_error",
+        ),
+    )
+
+
+async def _legacy_forward_anchor_lookup(
+    *,
+    durable_bridge: Any,
+    bridge_session_key: _HTTPBridgeSessionKey,
+    turn_state: str | None,
+    api_key: ApiKeyData | None,
+    previous_response_id: str | None,
+    forwarded_request: bool,
+    forwarded_legacy_signature: bool,
+) -> DurableBridgeLookup | None:
+    if not (
+        forwarded_request
+        and forwarded_legacy_signature
+        and bridge_session_key.affinity_kind == "session_header"
+        and previous_response_id is None
+    ):
+        return None
+
+    return await _registered_turn_state_anchor_lookup(
+        durable_bridge=durable_bridge,
+        bridge_session_key=bridge_session_key,
+        turn_state=turn_state,
+        api_key=api_key,
+    )
+
+
+async def _current_origin_legacy_owner_anchor_lookup(
+    *,
+    durable_bridge: Any,
+    bridge_session_key: _HTTPBridgeSessionKey,
+    turn_state: str | None,
+    api_key: ApiKeyData | None,
+    previous_response_id: str | None,
+    forwarded_request: bool,
+) -> DurableBridgeLookup | None:
+    """Prove a current-origin turn state before using legacy owner forwarding."""
+
+    if (
+        forwarded_request
+        or bridge_session_key.affinity_kind != "session_header"
+        or turn_state is None
+        or previous_response_id is not None
+    ):
+        return None
+    return await _registered_turn_state_anchor_lookup(
+        durable_bridge=durable_bridge,
+        bridge_session_key=bridge_session_key,
+        turn_state=turn_state,
+        api_key=api_key,
+    )
+
+
+async def _registered_turn_state_anchor_lookup(
+    *,
+    durable_bridge: Any,
+    bridge_session_key: _HTTPBridgeSessionKey,
+    turn_state: str | None,
+    api_key: ApiKeyData | None,
+) -> DurableBridgeLookup:
+    if turn_state is None:
+        raise _legacy_forward_upgrade_required_error()
+    try:
+        lookup = await durable_bridge.lookup_turn_state_target(
+            turn_state=turn_state,
+            api_key_id=api_key.id if api_key is not None else None,
+        )
+    except Exception as exc:
+        logger.warning("Legacy owner-forward turn-state proof lookup failed", exc_info=True)
+        raise _legacy_forward_upgrade_required_error() from exc
+    if (
+        lookup is None
+        or lookup.canonical_kind != bridge_session_key.affinity_kind
+        or lookup.canonical_key != bridge_session_key.affinity_key
+    ):
+        raise _legacy_forward_upgrade_required_error()
+    return lookup
+
+
 class _HTTPBridgeStreamingMixin:
+    async def validate_http_bridge_legacy_forward_anchor(
+        self: Any,
+        *,
+        original_affinity_kind: str | None,
+        original_affinity_key: str | None,
+        downstream_turn_state: str | None,
+        previous_response_id: str | None,
+        api_key: ApiKeyData | None,
+    ) -> DurableBridgeLookup | None:
+        """Prove a legacy forwarded anchor before any compact or fallback branch."""
+
+        return await _legacy_forward_anchor_lookup(
+            durable_bridge=self._durable_bridge,
+            bridge_session_key=_HTTPBridgeSessionKey(
+                original_affinity_kind or "",
+                original_affinity_key or "",
+                api_key.id if api_key is not None else None,
+            ),
+            turn_state=downstream_turn_state,
+            api_key=api_key,
+            previous_response_id=previous_response_id,
+            forwarded_request=True,
+            forwarded_legacy_signature=True,
+        )
+
     def stream_http_responses(
         self: Any,
         payload: ResponsesRequest,
@@ -350,6 +465,7 @@ class _HTTPBridgeStreamingMixin:
         downstream_turn_state: str | None = None,
         forwarded_request: bool = False,
         forwarded_original_request_unanchored: bool = False,
+        forwarded_legacy_signature: bool = False,
         forwarded_affinity_kind: str | None = None,
         forwarded_affinity_key: str | None = None,
         client_ip: str | None = None,
@@ -370,6 +486,7 @@ class _HTTPBridgeStreamingMixin:
             downstream_turn_state=downstream_turn_state,
             forwarded_request=forwarded_request,
             forwarded_original_request_unanchored=forwarded_original_request_unanchored,
+            forwarded_legacy_signature=forwarded_legacy_signature,
             proxy_api_authorization=proxy_api_authorization,
             forwarded_affinity_kind=forwarded_affinity_kind,
             forwarded_affinity_key=forwarded_affinity_key,
@@ -391,6 +508,7 @@ class _HTTPBridgeStreamingMixin:
         downstream_turn_state: str | None = None,
         forwarded_request: bool = False,
         forwarded_original_request_unanchored: bool = False,
+        forwarded_legacy_signature: bool = False,
         proxy_api_authorization: str | None = None,
         forwarded_affinity_kind: str | None = None,
         forwarded_affinity_key: str | None = None,
@@ -463,6 +581,7 @@ class _HTTPBridgeStreamingMixin:
             downstream_turn_state=downstream_turn_state,
             forwarded_request=forwarded_request,
             forwarded_original_request_unanchored=forwarded_original_request_unanchored,
+            forwarded_legacy_signature=forwarded_legacy_signature,
             proxy_api_authorization=proxy_api_authorization,
             forwarded_affinity_kind=forwarded_affinity_kind,
             forwarded_affinity_key=forwarded_affinity_key,
@@ -491,6 +610,7 @@ class _HTTPBridgeStreamingMixin:
         downstream_turn_state: str | None = None,
         forwarded_request: bool = False,
         forwarded_original_request_unanchored: bool = False,
+        forwarded_legacy_signature: bool = False,
         proxy_api_authorization: str | None = None,
         forwarded_affinity_kind: str | None = None,
         forwarded_affinity_key: str | None = None,
@@ -576,6 +696,17 @@ class _HTTPBridgeStreamingMixin:
             forwarded_affinity_kind=forwarded_affinity_kind,
             forwarded_affinity_key=forwarded_affinity_key,
         )
+        legacy_anchor_lookup = await _legacy_forward_anchor_lookup(
+            durable_bridge=self._durable_bridge,
+            bridge_session_key=bridge_session_key,
+            turn_state=_sticky_key_from_turn_state_header(headers),
+            api_key=api_key,
+            previous_response_id=payload.previous_response_id,
+            forwarded_request=forwarded_request,
+            forwarded_legacy_signature=forwarded_legacy_signature,
+        )
+        if legacy_anchor_lookup is not None:
+            incoming_turn_state_header = _sticky_key_from_turn_state_header(headers)
         original_request_unanchored = _http_bridge_original_request_unanchored(
             bridge_session_key=bridge_session_key,
             headers=headers,
@@ -583,18 +714,24 @@ class _HTTPBridgeStreamingMixin:
             forwarded_request=forwarded_request,
             forwarded_original_request_unanchored=forwarded_original_request_unanchored,
         )
-        try:
-            durable_lookup = await self._durable_bridge.lookup_request_targets(
-                session_key_kind=bridge_session_key.affinity_kind,
-                session_key_value=bridge_session_key.affinity_key,
-                api_key_id=bridge_session_key.api_key_id,
-                turn_state=incoming_turn_state_header,
-                session_header=incoming_session_header,
-                previous_response_id=payload.previous_response_id,
-            )
-        except Exception:
-            logger.warning("Durable bridge lookup failed; falling back to non-durable request handling", exc_info=True)
-            durable_lookup = None
+        if legacy_anchor_lookup is not None:
+            durable_lookup = legacy_anchor_lookup
+        else:
+            try:
+                durable_lookup = await self._durable_bridge.lookup_request_targets(
+                    session_key_kind=bridge_session_key.affinity_kind,
+                    session_key_value=bridge_session_key.affinity_key,
+                    api_key_id=bridge_session_key.api_key_id,
+                    turn_state=incoming_turn_state_header,
+                    session_header=incoming_session_header,
+                    previous_response_id=payload.previous_response_id,
+                )
+            except Exception:
+                logger.warning(
+                    "Durable bridge lookup failed; falling back to non-durable request handling",
+                    exc_info=True,
+                )
+                durable_lookup = None
         effective_payload = payload
         untrimmed_effective_payload = payload
         proxy_injected_previous_response_id = False
@@ -859,6 +996,14 @@ class _HTTPBridgeStreamingMixin:
                 continue
             break
         if isinstance(session_or_forward, _HTTPBridgeOwnerForward):
+            await _current_origin_legacy_owner_anchor_lookup(
+                durable_bridge=self._durable_bridge,
+                bridge_session_key=session_or_forward.key,
+                turn_state=incoming_turn_state_header,
+                api_key=api_key,
+                previous_response_id=effective_payload.previous_response_id,
+                forwarded_request=forwarded_request,
+            )
             forwarded_any = False
             try:
                 async for line in self._forward_http_bridge_request_to_owner(

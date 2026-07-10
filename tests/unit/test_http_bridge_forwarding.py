@@ -129,6 +129,7 @@ def test_build_owner_forward_headers_uses_v2_signature_with_client_ip_header() -
         original_request_unanchored=True,
         original_affinity_kind="session_header",
         original_affinity_key="sid-123",
+        signature_version="2",
         client_ip="203.0.113.42",
     )
 
@@ -374,6 +375,7 @@ def test_parse_forwarded_request_preserves_signed_original_unanchored_status() -
         original_request_unanchored=True,
         original_affinity_kind="session_header",
         original_affinity_key="sid-123",
+        signature_version="2",
     )
 
     headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
@@ -539,7 +541,7 @@ def test_v2_forward_fails_legacy_signature_validation() -> None:
     )
 
 
-def test_legacy_unanchored_forward_fails_closed_on_v2_owner() -> None:
+def test_parse_legacy_forward_defers_ambiguous_anchor_proof_to_bridge_service() -> None:
     payload = _payload()
     context = HTTPBridgeForwardContext(
         origin_instance="instance-a",
@@ -554,10 +556,9 @@ def test_legacy_unanchored_forward_fails_closed_on_v2_owner() -> None:
 
     forwarded, error = parse_forwarded_request(headers, payload=payload, current_instance="instance-b")
 
-    assert forwarded is None
-    assert error is not None
-    assert error.status_code == 409
-    assert error.payload["error"]["code"] == "bridge_forward_upgrade_required"
+    assert error is None
+    assert forwarded is not None
+    assert forwarded.context.signature_version is None
 
 
 def test_parse_forwarded_request_rejects_missing_signature() -> None:

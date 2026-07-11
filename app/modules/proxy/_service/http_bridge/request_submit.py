@@ -545,6 +545,7 @@ class _HTTPBridgeRequestSubmitMixin:
                         request_state=request_state,
                         text_data=text_data,
                         send_request=False,
+                        require_same_account=_http_bridge_key_strength(session.key) == "hard",
                     )
                     if recovered:
                         session.closed = False
@@ -576,6 +577,7 @@ class _HTTPBridgeRequestSubmitMixin:
         )
         gate_acquired = False
         request_enqueued = False
+        admission_waiter_registered = False
         async with session.pending_lock:
             if session.queued_request_count >= queue_limit:
                 _log_http_bridge_event(
@@ -596,6 +598,8 @@ class _HTTPBridgeRequestSubmitMixin:
                     ),
                 )
             session.queued_request_count += 1
+            session.admission_waiter_count += 1
+            admission_waiter_registered = True
         try:
             text_data = await self._inline_http_bridge_image_urls(text_data, request_state)
             text_data = self._http_bridge_text_with_account_installation_id(session, request_state, text_data)
@@ -630,6 +634,16 @@ class _HTTPBridgeRequestSubmitMixin:
                     current_session = http_bridge_sessions.get(session.key)
                 session_unregistered = current_session is None and _http_bridge_key_strength(session.key) == "hard"
                 session_replaced = current_session is not None and current_session is not session
+                if session.closed and current_session is session:
+                    recovered = await self._retry_http_bridge_request_on_fresh_upstream(
+                        session,
+                        request_state=request_state,
+                        text_data=text_data,
+                        send_request=False,
+                        require_same_account=_http_bridge_key_strength(session.key) == "hard",
+                    )
+                    if recovered:
+                        session.closed = False
                 if session.closed or session_unregistered or session_replaced:
                     _log_http_bridge_event(
                         "submit_on_closed",
@@ -654,6 +668,8 @@ class _HTTPBridgeRequestSubmitMixin:
                     )
                 async with session.pending_lock:
                     session.pending_requests.append(request_state)
+                    session.admission_waiter_count = max(0, session.admission_waiter_count - 1)
+                    admission_waiter_registered = False
                 request_enqueued = True
                 await _send_http_bridge_request_text_with_archive_id(session, request_state, text_data)
                 session.last_used_at = _service_time().monotonic()
@@ -664,6 +680,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 gate_acquired=gate_acquired,
                 request_enqueued=request_enqueued,
                 counted_in_queue=True,
+                admission_waiter_registered=admission_waiter_registered,
             )
             raise
         except asyncio.CancelledError:
@@ -673,6 +690,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 gate_acquired=gate_acquired,
                 request_enqueued=request_enqueued,
                 counted_in_queue=True,
+                admission_waiter_registered=admission_waiter_registered,
             )
             raise
         except Exception as exc:
@@ -698,6 +716,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 gate_acquired=gate_acquired,
                 request_enqueued=request_enqueued,
                 counted_in_queue=True,
+                admission_waiter_registered=admission_waiter_registered,
             )
             await self._fail_pending_websocket_requests(
                 account=session.account,
@@ -942,12 +961,17 @@ class _HTTPBridgeRequestSubmitMixin:
         gate_acquired: bool,
         request_enqueued: bool,
         counted_in_queue: bool,
+        admission_waiter_registered: bool = False,
     ) -> None:
+        retire_closed_session = False
         async with session.pending_lock:
             if request_enqueued and request_state in session.pending_requests:
                 session.pending_requests.remove(request_state)
             if counted_in_queue:
                 session.queued_request_count = max(0, session.queued_request_count - 1)
+            if admission_waiter_registered:
+                session.admission_waiter_count = max(0, session.admission_waiter_count - 1)
+            retire_closed_session = session.closed and session.admission_waiter_count == 0
         self._cancel_request_state_api_key_reservation_heartbeat(request_state)
         if request_state.response_create_gate is not None:
             if gate_acquired or request_state.response_create_gate_acquired:
@@ -967,6 +991,11 @@ class _HTTPBridgeRequestSubmitMixin:
                 request_state.response_create_gate_acquired = False
         elif gate_acquired:
             await _release_websocket_response_create_gate(request_state, session.response_create_gate)
+        if retire_closed_session:
+            await self._retire_stale_pending_http_bridge_session(
+                session,
+                detail="last_admission_waiter_cancelled",
+            )
 
     async def _detach_http_bridge_request(
         self: Any,
@@ -1068,6 +1097,7 @@ class _HTTPBridgeRequestSubmitMixin:
         request_state: _WebSocketRequestState,
         text_data: str,
         send_request: bool = True,
+        require_same_account: bool = False,
     ) -> bool:
         retry_text_data = text_data
         using_fresh_replay = False
@@ -1108,6 +1138,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 session,
                 request_state=request_state,
                 restart_reader=True,
+                require_same_account=require_same_account,
             )
             if send_request:
                 retry_text_data = self._http_bridge_text_with_account_installation_id(

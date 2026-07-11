@@ -367,9 +367,10 @@ def http_bridge_activity_snapshot_nowait(service: Any) -> dict[str, int | bool]:
     pending_unknown_sessions = 0
 
     for session in list(service._http_bridge_sessions.values()):
-        if session.closed:
+        if session.closed and not _http_bridge_session_has_admission_waiter(session):
             continue
-        live_sessions += 1
+        if not session.closed:
+            live_sessions += 1
         pending_count = _http_bridge_pending_count_nowait(session, context="drain_status")
         if pending_count is None:
             pending_unknown_sessions += 1
@@ -588,6 +589,11 @@ def _http_bridge_request_counts_against_queue(request_state: _WebSocketRequestSt
     return not request_state.draining_until_terminal
 
 
+def _http_bridge_session_has_admission_waiter(session: object | None) -> bool:
+    """Keep a closed bridge registered while an unsent request owns its handoff."""
+    return session is not None and bool(getattr(session, "admission_waiter_count", 0))
+
+
 def _http_bridge_session_has_visible_requests(session: "_HTTPBridgeSession") -> bool:
     return session.queued_request_count > 0 or any(
         _http_bridge_request_counts_against_queue(request_state) for request_state in session.pending_requests
@@ -672,6 +678,65 @@ def _http_bridge_session_matches_preferred_account(
     if previous_response_id is None and not require_preferred_account:
         return True
     return session.account.id == preferred_account_id
+
+
+def _http_bridge_session_reusable_for_lookup(
+    *,
+    session: "_HTTPBridgeSession",
+    key: "_HTTPBridgeSessionKey",
+    api_key: ApiKeyData | None,
+    incoming_turn_state: str | None,
+    previous_response_id: str | None,
+    preferred_account_id: str | None,
+    require_preferred_account: bool,
+    service_tier_supported: bool,
+    allow_closed_admission_handoff: bool,
+) -> bool:
+    live_or_retained = _http_bridge_session_account_active(session) and (
+        not session.closed or (allow_closed_admission_handoff and _http_bridge_session_has_admission_waiter(session))
+    )
+    return (
+        live_or_retained
+        and _http_bridge_session_allows_api_key(session, api_key)
+        and _http_bridge_session_reusable_for_request(
+            session=session,
+            key=key,
+            incoming_turn_state=incoming_turn_state,
+            previous_response_id=previous_response_id,
+        )
+        and _http_bridge_session_matches_preferred_account(
+            session=session,
+            previous_response_id=previous_response_id,
+            preferred_account_id=preferred_account_id,
+            require_preferred_account=require_preferred_account,
+        )
+        and service_tier_supported
+    )
+
+
+def _require_http_bridge_bound_account_not_excluded(
+    hard_account_bound: bool,
+    account_id: str,
+    excluded_account_ids: set[str],
+) -> None:
+    if hard_account_bound and account_id in excluded_account_ids:
+        raise ProxyResponseError(
+            502,
+            openai_error(
+                "upstream_unavailable",
+                "HTTP responses session bridge continuity account is excluded",
+            ),
+        )
+
+
+def _raise_http_bridge_incompatible_admission_handoff() -> None:
+    raise ProxyResponseError(
+        503,
+        openai_error(
+            "upstream_unavailable",
+            "HTTP responses session bridge is preserving an incompatible admission handoff",
+        ),
+    )
 
 
 def _make_http_bridge_session_key(

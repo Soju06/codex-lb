@@ -203,36 +203,189 @@ def test_settings_default_prompt_cache_affinity_ttl_is_1800():
     assert settings.openai_cache_affinity_max_age_seconds == 1800
 
 
-def test_responses_to_payload_canonicalizes_tool_order_and_object_keys():
+def test_responses_to_payload_preserves_tool_order_and_object_keys():
+    # Wire payload byte-preservation (issue #1184): the client's tool array
+    # order and per-object key order must reach upstream untouched. The
+    # previously asserted wire canonicalization is now cache-affinity-only.
+    client_tools: list[JsonValue] = [
+        {
+            "type": "function",
+            "name": "zeta",
+            "parameters": {"required": [], "type": "object", "properties": {}},
+            "description": "later",
+        },
+        {
+            "description": "first",
+            "parameters": {"properties": {}, "required": [], "type": "object"},
+            "type": "function",
+            "name": "alpha",
+        },
+    ]
     request = ResponsesRequest.model_validate(
         {
             "model": "gpt-5.1",
             "instructions": "hi",
             "input": [],
-            "tools": [
-                {
-                    "type": "function",
-                    "name": "zeta",
-                    "parameters": {"required": [], "type": "object", "properties": {}},
-                    "description": "later",
-                },
-                {
-                    "description": "first",
-                    "parameters": {"properties": {}, "required": [], "type": "object"},
-                    "type": "function",
-                    "name": "alpha",
-                },
-            ],
+            "tools": client_tools,
         }
     )
 
     dumped = request.to_payload()
-    tools = cast(list[JsonValue], dumped["tools"])
-    first_tool = cast(Mapping[str, JsonValue], tools[0])
-    parameters = cast(Mapping[str, JsonValue], first_tool["parameters"])
-    assert first_tool["name"] == "alpha"
-    assert list(first_tool.keys()) == ["description", "name", "parameters", "type"]
-    assert list(parameters.keys()) == ["properties", "required", "type"]
+    assert json.dumps(dumped["tools"], ensure_ascii=True, separators=(",", ":")) == json.dumps(
+        client_tools, ensure_ascii=True, separators=(",", ":")
+    )
+
+
+def test_responses_to_payload_omits_unset_tools():
+    # Codex Responses-Lite clients omit top-level ``tools`` entirely; the
+    # proxy must not synthesize ``"tools": []`` from the model default
+    # (issue #1184).
+    request = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6",
+            "instructions": "",
+            "input": [
+                {
+                    "type": "additional_tools",
+                    "role": "developer",
+                    "tools": [{"type": "custom", "name": "shell"}],
+                },
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+            ],
+            "stream": True,
+        }
+    )
+
+    assert "tools" not in request.to_payload()
+
+
+def test_responses_to_payload_omits_unset_tool_choice_and_parallel_tool_calls():
+    # Sibling-field audit for issue #1184: ``tool_choice`` and
+    # ``parallel_tool_calls`` default to ``None`` and are dropped by
+    # ``model_dump(exclude_none=True)`` when the client omits them, while
+    # explicit values (including ``false``) keep forwarding.
+    unset = ResponsesRequest.model_validate({"model": "gpt-5.6", "instructions": "hi", "input": []})
+    explicit = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6",
+            "instructions": "hi",
+            "input": [],
+            "tool_choice": "auto",
+            "parallel_tool_calls": False,
+        }
+    )
+
+    unset_payload = unset.to_payload()
+    explicit_payload = explicit.to_payload()
+
+    assert "tool_choice" not in unset_payload
+    assert "parallel_tool_calls" not in unset_payload
+    assert explicit_payload["tool_choice"] == "auto"
+    assert explicit_payload["parallel_tool_calls"] is False
+
+
+def test_responses_to_payload_preserves_explicit_empty_tools():
+    request = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [],
+            "tools": [],
+        }
+    )
+
+    assert request.to_payload()["tools"] == []
+
+
+def test_responses_to_payload_preserves_reserved_namespace_tool_byte_identical():
+    # gpt-5.6 ``multi_agent_version: v2`` reserved collaboration tool shape
+    # (codex-rs rust-v0.144.1): namespace-typed entry with nested function
+    # entries, unknown keys (``encrypted``), non-alphabetical ``required``
+    # array order, leading whitespace in descriptions, and ``strict: false``.
+    reserved_namespace_tool: JsonValue = {
+        "type": "namespace",
+        "name": "collaboration",
+        "description": "Tools for spawning and managing sub-agents.",
+        "tools": [
+            {
+                "type": "function",
+                "name": "spawn_agent",
+                "strict": False,
+                "description": "\n        \n        Spawn a sub-agent for the given task.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "message": {"type": "string", "encrypted": True},
+                        "task_name": {"type": "string"},
+                    },
+                    "required": ["task_name", "message"],
+                    "additionalProperties": False,
+                },
+            }
+        ],
+    }
+    client_tools: list[JsonValue] = [reserved_namespace_tool]
+    request = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6",
+            "instructions": "hi",
+            "input": [],
+            "tools": client_tools,
+        }
+    )
+
+    dumped = request.to_payload()
+    assert json.dumps(dumped["tools"], ensure_ascii=True, separators=(",", ":")) == json.dumps(
+        client_tools, ensure_ascii=True, separators=(",", ":")
+    )
+
+
+def test_canonicalized_tools_is_order_insensitive_and_non_mutating():
+    from app.core.openai.requests import canonicalized_tools
+
+    tools_one: list[JsonValue] = [
+        {"type": "function", "name": "zeta", "parameters": {"required": ["b", "a"], "type": "object"}},
+        {"name": "alpha", "type": "function"},
+    ]
+    tools_two: list[JsonValue] = [
+        {"type": "function", "name": "alpha"},
+        {"parameters": {"type": "object", "required": ["b", "a"]}, "type": "function", "name": "zeta"},
+    ]
+    snapshot = json.dumps(tools_one, ensure_ascii=True, separators=(",", ":"))
+
+    canonical_one = json.dumps(canonicalized_tools(tools_one), sort_keys=True, separators=(",", ":"))
+    canonical_two = json.dumps(canonicalized_tools(tools_two), sort_keys=True, separators=(",", ":"))
+
+    assert canonical_one == canonical_two
+    # Array values (e.g. ``required``) must never be reordered.
+    assert '"required": ["b", "a"]' in json.dumps(canonicalized_tools(tools_one))
+    # The input list is left untouched.
+    assert json.dumps(tools_one, ensure_ascii=True, separators=(",", ":")) == snapshot
+
+
+def test_v1_responses_to_responses_request_propagates_unset_tools():
+    request = V1ResponsesRequest.model_validate(
+        {"model": "gpt-5.6", "input": [{"type": "message", "role": "user", "content": "hi"}]}
+    )
+
+    converted = request.to_responses_request()
+
+    assert "tools" not in converted.model_fields_set
+    assert "tools" not in converted.to_payload()
+
+
+def test_v1_responses_to_responses_request_preserves_explicit_empty_tools():
+    request = V1ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6",
+            "input": [{"type": "message", "role": "user", "content": "hi"}],
+            "tools": [],
+        }
+    )
+
+    converted = request.to_responses_request()
+
+    assert converted.to_payload()["tools"] == []
 
 
 def test_openai_compatible_reasoning_aliases_are_normalized():

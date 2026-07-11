@@ -42,6 +42,7 @@ from app.modules.proxy.affinity import (
     _prompt_cache_key_from_request_model,
     _resolve_prompt_cache_key,
     _sticky_key_from_session_header,
+    _sticky_key_from_turn_state_header,
 )
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
 from app.modules.proxy.helpers import _header_account_id, _normalize_error_code, _parse_openai_error
@@ -386,6 +387,12 @@ def _sticky_key_for_compact_request(
         openai_cache_affinity=openai_cache_affinity,
         api_key=api_key,
     )
+    turn_state_key = _sticky_key_from_turn_state_header(headers)
+    if turn_state_key:
+        return _AffinityPolicy(
+            key=turn_state_key,
+            kind=StickySessionKind.CODEX_SESSION,
+        )
     if codex_session_affinity:
         session_key = _sticky_key_from_session_header(headers)
         if session_key:
@@ -463,7 +470,9 @@ class _CompactMixin:
         )
         sticky_key_source = "none"
         if affinity.kind == StickySessionKind.CODEX_SESSION:
-            sticky_key_source = "session_header"
+            sticky_key_source = (
+                "turn_state_header" if _sticky_key_from_turn_state_header(headers) is not None else "session_header"
+            )
         elif affinity.key:
             sticky_key_source = "payload" if had_prompt_cache_key else "derived"
         _maybe_log_proxy_request_shape(

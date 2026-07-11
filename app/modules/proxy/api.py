@@ -4375,7 +4375,7 @@ async def _collect_responses(
             request,
             status_code,
             error.model_dump(mode="json", exclude_none=True),
-            headers={**turn_state_headers, **captured_turn_state_headers, **rate_limit_headers},
+            headers={**captured_turn_state_headers, **rate_limit_headers},
         )
     if isinstance(response_payload, OpenAIResponsePayload):
         if response_payload.status == "failed":

@@ -58,8 +58,12 @@ async def _request_actor(
     validation_key: object,
     jwks_failure: bool = False,
     client_host: str = "127.0.0.1",
+    required: bool = False,
 ) -> str | None:
     _configure_access(monkeypatch)
+    if required:
+        monkeypatch.setenv("CODEX_LB_DASHBOARD_ACCESS_JWT_REQUIRED", "true")
+        get_settings.cache_clear()
     jwks_client = _FailingJwksClient() if jwks_failure else _StaticJwksClient(validation_key)
     monkeypatch.setattr(jwt, "PyJWKClient", lambda *_args, **_kwargs: jwks_client)
     app = FastAPI()
@@ -80,6 +84,8 @@ async def _request_actor(
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.get("/actor", headers=headers)
     get_settings.cache_clear()
+    if required and response.status_code == 401:
+        return None
     assert response.status_code == 200
     payload = response.json()
     assert payload["forwarded_header"] is None
@@ -152,6 +158,33 @@ async def test_access_jwt_rejects_missing_forged_and_jwks_failure(monkeypatch: p
             assertion=_token(private_key),
             validation_key=private_key.public_key(),
             jwks_failure=True,
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_required_access_jwt_blocks_missing_assertion_before_fallback_auth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+
+    assert (
+        await _request_actor(
+            monkeypatch,
+            assertion=None,
+            validation_key=private_key.public_key(),
+            required=True,
+        )
+        is None
+    )
+    assert (
+        await _request_actor(
+            monkeypatch,
+            assertion=_token(private_key),
+            validation_key=private_key.public_key(),
+            jwks_failure=True,
+            required=True,
         )
         is None
     )

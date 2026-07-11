@@ -33,10 +33,11 @@ class RequestLogsRepository:
         """Hard-delete request metadata older than the exclusive cutoff."""
 
         async with sqlite_writer_section():
-            result = await self._session.execute(
-                delete(RequestLog).where(RequestLog.requested_at < cutoff).returning(RequestLog.id)
+            count_result = await self._session.execute(
+                select(func.count(RequestLog.id)).where(RequestLog.requested_at < cutoff)
             )
-            deleted = len(result.scalars().all())
+            deleted = int(count_result.scalar_one())
+            await self._session.execute(delete(RequestLog).where(RequestLog.requested_at < cutoff))
             await self._session.commit()
         return deleted
 

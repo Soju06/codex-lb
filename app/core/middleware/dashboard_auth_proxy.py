@@ -6,6 +6,7 @@ from typing import Any, cast
 
 import jwt
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.core.auth.dashboard_mode import DashboardAuthMode, DashboardRequestAuth
@@ -25,6 +26,7 @@ class DashboardAuthProxyHeaderSanitizerMiddleware:
         self._trusted_header_name = settings.dashboard_auth_proxy_header.lower().encode("latin-1")
         self._access_assertion_header_name = settings.dashboard_access_jwt_header.lower().encode("latin-1")
         self._access_jwt_issuer = settings.dashboard_access_jwt_issuer
+        self._access_jwt_required = settings.dashboard_access_jwt_required
         self._access_jwt_audiences = tuple(settings.dashboard_access_jwt_audiences)
         self._access_allowed_email_domains = frozenset(
             domain.strip().lower().lstrip("@")
@@ -75,6 +77,13 @@ class DashboardAuthProxyHeaderSanitizerMiddleware:
                     actor=actor,
                 )
                 next_scope["state"] = state
+            elif self._access_jwt_required:
+                response = JSONResponse(
+                    status_code=401,
+                    content={"detail": "A valid Cloudflare Access assertion is required"},
+                )
+                await response(next_scope, receive, send)
+                return
             await self.app(next_scope, receive, send)
             return
 

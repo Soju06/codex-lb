@@ -22,3 +22,9 @@ validated token and MUST NOT be taken from a separate identity header.
   audience, has a disallowed email domain, or its signing keys cannot be loaded
 - **THEN** trusted-header dashboard authentication does not succeed
 - **AND** an unvalidated identity header cannot authenticate the request
+
+#### Scenario: Required Access assertion blocks fallback authentication
+
+- **GIVEN** Access JWT validation is configured as required
+- **WHEN** the assertion is missing or invalid
+- **THEN** the request is rejected before password-session or other fallback dashboard authentication

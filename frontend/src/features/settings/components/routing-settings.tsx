@@ -322,6 +322,19 @@ export function RoutingSettings({
 
           <div className="flex items-center justify-between gap-4 p-3">
             <div>
+              <p className="text-sm font-medium">{t("settings.routing.fastMode.label")}</p>
+              <p className="text-xs text-muted-foreground">{t("settings.routing.fastMode.description")}</p>
+            </div>
+            <Switch
+              checked={settings.prohibitFastMode}
+              disabled={busy}
+              onCheckedChange={(prohibitFastMode) => save({ prohibitFastMode })}
+              aria-label={t("settings.routing.fastMode.ariaLabel")}
+            />
+          </div>
+
+          <div className="flex items-center justify-between gap-4 p-3">
+            <div>
               <p className="text-sm font-medium">{t("settings.routing.httpDownstream.label")}</p>
               <p className="text-xs text-muted-foreground">
                 {t("settings.routing.httpDownstream.description")}

@@ -13,6 +13,11 @@ bodies, and direct HTTP stream requests). An explicit client-sent
 an explicit client-sent `parallel_tool_calls: false` MUST reach upstream.
 The OpenAI-compatible `/v1/responses` conversion MUST propagate `tools`
 omission into the native request so both routes behave identically.
+Field omission MUST survive every re-serialization hop: the multi-instance
+owner-forward body (internal bridge forward) MUST NOT contain fields the
+client omitted, the owner instance receiving a forwarded request MUST NOT
+re-mark `tools` as explicitly set, and model-source Responses egress payloads
+MUST likewise omit fields the client never sent.
 
 #### Scenario: Responses Lite request reaches upstream without a tools key
 
@@ -31,6 +36,23 @@ omission into the native request so both routes behave identically.
 
 - **WHEN** a client omits `tool_choice` and `parallel_tool_calls`
 - **THEN** the upstream payload contains neither field
+
+#### Scenario: Owner-forwarded request keeps tools omitted across instances
+
+- **WHEN** a request that omits top-level `tools` is forwarded to its owner
+  instance over the internal HTTP bridge (multi-instance owner forward)
+- **THEN** the owner-forward request body contains no top-level `tools` key
+- **AND** the owner instance parses the forwarded body without marking
+  `tools` as explicitly set, so its upstream payload contains no top-level
+  `tools` key
+- **AND** the owner-forward signature still verifies on the owner instance
+
+#### Scenario: Model-source Responses egress omits unsent tools
+
+- **WHEN** a Responses request that omits top-level `tools` is routed to an
+  openai-compatible model source
+- **THEN** the payload sent to the model source contains no top-level
+  `tools` key
 
 ### Requirement: Client tool entries are forwarded byte-preserved
 

@@ -38,6 +38,14 @@ reserved tool entry.
   affinity/observability consumer, which stays order-insensitive.
 - Regression coverage at the product paths: websocket `response.create`
   frame, HTTP-bridge body, and legacy HTTP stream path.
+- Follow-up (salvaged from #1187): field omission survives re-serialization
+  hops. `ResponsesRequest.model_dump_for_forwarding()` extracts the
+  omission logic from `to_payload()` and is used by the multi-instance
+  owner-forward body (`HTTPBridgeOwnerClient.stream_responses`) and
+  model-source Responses egress (`_source_responses_response`), so a
+  forwarded body never re-marks `tools` as explicitly set on the owner
+  instance and openai-compatible sources never see a synthesized
+  `"tools": []`.
 
 ## Sibling-field audit
 

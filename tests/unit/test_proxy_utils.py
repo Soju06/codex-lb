@@ -27353,7 +27353,7 @@ async def test_retry_http_bridge_request_on_fresh_upstream_uses_archive_request_
 
 
 @pytest.mark.asyncio
-async def test_retry_http_bridge_precreated_request_retries_clean_close(monkeypatch):
+async def test_retry_http_bridge_precreated_request_rejects_clean_startup_close(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     send_text = AsyncMock()
@@ -27388,10 +27388,10 @@ async def test_retry_http_bridge_precreated_request_retries_clean_close(monkeypa
 
     retried = await service._retry_http_bridge_precreated_request(session)
 
-    assert retried is True
-    reconnect.assert_awaited_once_with(session, request_state=request_state)
-    send_text.assert_awaited_once()
-    assert request_state.error_code_override is None
+    assert retried is False
+    reconnect.assert_not_awaited()
+    send_text.assert_not_awaited()
+    assert request_state.error_code_override == "upstream_rejected_input"
 
 
 @pytest.mark.asyncio

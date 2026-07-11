@@ -41,6 +41,16 @@ absent; otherwise, in the window after an account is added but before the next
 scheduled refresh, model/plan filtering would be skipped (an unsupported plan
 could be selected) and `/v1/models` would report no models.
 
+Carrying a plan's catalog forward when its refresh does not complete MUST NOT
+re-advertise a model that no currently-active account of that plan advertises,
+per the last-known per-account catalogs. This drop invariant MUST hold
+regardless of whether the previous snapshot was authoritative: the authoritative
+distinction governs whether per-account routing is trusted, not whether a dead
+model is dropped from discovery. When a carried-forward model has no per-account
+provenance at all (an older or plan-only snapshot that never captured per-account
+catalogs), the system MUST preserve it rather than drop it, degrading safe when a
+model cannot be attributed to any account.
+
 #### Scenario: Catalog fetch partially fails after restart
 
 - **GIVEN** there is no previous registry snapshot
@@ -80,4 +90,18 @@ could be selected) and `/v1/models` would report no models.
 - **WHEN** the stale plan's retained catalog is merged into discovery
 - **THEN** the model advertised only by the removed account leaves discovery
 - **AND** the models still advertised by the remaining active account are retained
+
+#### Scenario: Sole advertiser removed under a non-authoritative previous snapshot
+
+- **GIVEN** a first refresh recorded a model advertised by one account of a plan
+- **AND** a same-plan account had no catalog, so the snapshot is non-authoritative
+- **WHEN** that sole advertiser is removed while another same-plan account stays active
+- **AND** the plan's refresh does not complete in a later cycle
+- **THEN** the model advertised only by the removed account still leaves discovery
+
+#### Scenario: Carried-forward model has unknown per-account provenance
+
+- **GIVEN** a plan-only snapshot carried a model with no per-account provenance
+- **WHEN** the plan is stale in a later refresh that knows the active account set
+- **THEN** the model is preserved in discovery rather than dropped
 

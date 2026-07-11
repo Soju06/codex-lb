@@ -604,6 +604,82 @@ async def test_stale_plan_drops_models_only_removed_account_advertised():
 
 
 @pytest.mark.asyncio
+async def test_stale_plan_drops_removed_advertiser_model_when_previous_non_authoritative():
+    # Regression for the third Codex P2: the drop-dead-model carryover invariant must
+    # hold even when the PREVIOUS snapshot was NON-authoritative. First refresh: pro
+    # account-a succeeds advertising a private model gpt-5.6-sol, while same-plan
+    # account-b fails (no per-account catalog) -> snapshot is non-authoritative. Then
+    # account-a is removed while account-b stays active and pro fails again during
+    # plus's refresh. account-a's exclusive model must leave discovery: per last-known
+    # per-account catalogs, no currently-active account advertises it.
+    registry = ModelRegistry(ttl_seconds=60.0)
+    sol = _model("gpt-5.6-sol")
+    shared = _model("gpt-5.4")
+
+    await registry.update(
+        {"pro": [sol], "plus": [shared]},
+        # account-b (pro) failed this pass -> not in per_account_results, so coverage
+        # is incomplete and the snapshot is non-authoritative.
+        per_account_results={
+            "account-a": ("pro", [sol]),
+            "account-plus": ("plus", [shared]),
+        },
+        active_account_plans={"account-a": "pro", "account-b": "pro", "account-plus": "plus"},
+    )
+    first = registry.get_snapshot()
+    assert first is not None
+    assert first.account_catalogs_authoritative is False
+    assert "gpt-5.6-sol" in first.models
+
+    # Second refresh: account-a is removed; account-b (pro) stays active but pro is
+    # not refreshed (stale); plus refreshes.
+    await registry.update(
+        {"plus": [shared]},
+        per_account_results={"account-plus": ("plus", [shared])},
+        active_account_plans={"account-b": "pro", "account-plus": "plus"},
+    )
+
+    snapshot = registry.get_snapshot()
+    assert snapshot is not None
+    assert "gpt-5.6-sol" not in snapshot.models
+    assert "gpt-5.6-sol" not in snapshot.plan_models.get("pro", frozenset())
+    assert registry.plan_types_for_model("gpt-5.6-sol") == frozenset()
+
+
+@pytest.mark.asyncio
+async def test_stale_plan_preserves_models_with_unknown_account_provenance():
+    # Degrade-safe carve-out: when a stale plan's model has NO per-account provenance
+    # (an older/plan-only snapshot that never captured per-account catalogs), it must
+    # be preserved on carryover rather than dropped, even though we now know the active
+    # account set. Here the first refresh is plan-only (no per_account_results), so
+    # model_accounts is empty; a later refresh of another plan (with active_account_plans)
+    # must not drop the pro-only model whose provenance is unknown.
+    registry = ModelRegistry(ttl_seconds=60.0)
+    pro_only = _model("pro-only")
+    shared = _model("gpt-5.4")
+
+    # Plan-only refresh: no per-account catalogs captured -> model_accounts empty.
+    await registry.update({"pro": [pro_only], "plus": [shared]})
+    first = registry.get_snapshot()
+    assert first is not None
+    assert first.model_accounts == {}
+
+    # Refresh plus with active-account coverage; pro is stale and account-pro is active.
+    await registry.update(
+        {"plus": [shared]},
+        per_account_results={"account-plus": ("plus", [shared])},
+        active_account_plans={"account-pro": "pro", "account-plus": "plus"},
+    )
+
+    snapshot = registry.get_snapshot()
+    assert snapshot is not None
+    # Unknown provenance -> preserved (degrade safe), not dropped.
+    assert "pro-only" in snapshot.models
+    assert "pro" in snapshot.model_plans.get("pro-only", frozenset())
+    assert "pro" in registry.plan_types_for_model("pro-only")
+
+
+@pytest.mark.asyncio
 async def test_clear_falls_back_to_bootstrap_floor():
     # Regression for the follow-on Codex P2: clearing on zero active accounts must
     # NOT publish an authoritative-empty snapshot that suppresses bootstrap. It must

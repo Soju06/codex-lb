@@ -647,16 +647,27 @@ class ModelRegistry:
                             if plan_type in stale_plans
                         }
 
-                    # When per-account coverage is authoritative, a stale plan may
-                    # only carry forward the models still advertised by at least one
-                    # ACTIVE account of that plan. An active account whose refresh
-                    # transiently failed keeps its last-known models (it is in
-                    # stale_account_ids); a removed/paused account is absent from the
-                    # active set, so a model that only it advertised leaves discovery
-                    # instead of being re-advertised as a dead model no active account
-                    # can serve.
+                    # Carryover invariant: never carry forward a stale-plan model
+                    # that no currently-active account of that plan advertises, per
+                    # the last-known per-account catalogs in ``previous.model_accounts``.
+                    #
+                    # This runs whenever we know the active account set
+                    # (``active_account_plans`` is not None), REGARDLESS of whether the
+                    # previous snapshot was authoritative. The authoritative flag governs
+                    # whether per-account *routing* is trusted (see ``account_ids_for_model``),
+                    # not whether a dead model is dropped from discovery: a first-refresh
+                    # (non-authoritative) snapshot can still record that a private model
+                    # was advertised only by an account that is now removed/paused, and
+                    # that model must not linger in discovery once no active account serves it.
+                    #
+                    # An active account whose refresh transiently failed keeps its
+                    # last-known models (it is in ``stale_account_ids`` and still appears
+                    # in ``previous.model_accounts``). A model with NO per-account
+                    # provenance at all (an older/plan-only snapshot that never captured
+                    # per-account catalogs) is preserved rather than dropped, so we
+                    # degrade safe when we cannot attribute a model to any account.
                     supported_stale_slugs: dict[str, set[str]] | None = None
-                    if active_account_plans is not None and previous.account_catalogs_authoritative:
+                    if active_account_plans is not None:
                         supported_stale_slugs = {}
                         for slug, account_ids in previous.model_accounts.items():
                             for account_id in account_ids:
@@ -672,7 +683,14 @@ class ModelRegistry:
                         stale_slugs: Iterable[str] = previous.plan_models.get(plan_type, frozenset())
                         if supported_stale_slugs is not None:
                             supported = supported_stale_slugs.get(plan_type, set())
-                            stale_slugs = [slug for slug in stale_slugs if slug in supported]
+                            stale_slugs = [
+                                slug
+                                for slug in stale_slugs
+                                # Unknown per-account provenance -> keep (degrade safe).
+                                if not previous.model_accounts.get(slug)
+                                # Known provenance -> keep only with an active advertiser.
+                                or slug in supported
+                            ]
                         for slug in stale_slugs:
                             if slug not in models and slug in previous.models:
                                 models[slug] = previous.models[slug]

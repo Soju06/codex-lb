@@ -20,6 +20,7 @@ from app.core.utils.sse import CODEX_KEEPALIVE_FRAME, SSE_KEEPALIVE_FRAME
 from app.db.models import Account, AccountStatus, RequestLog
 from app.db.session import SessionLocal
 from app.dependencies import ProxyContext
+from app.modules.proxy._service.support import _signal_propagated_capacity_startup_ready
 
 pytestmark = pytest.mark.integration
 
@@ -1017,6 +1018,9 @@ async def test_stream_responses_starts_sse_keepalive_before_first_upstream_event
             del args
             seen_client_ip.append(kwargs.get("client_ip"))
             upstream_started.set()
+            # The real service signals this after local admission. Preserve
+            # that contract while this fake deliberately stalls upstream I/O.
+            _signal_propagated_capacity_startup_ready()
             await release_upstream.wait()
             event = {"type": "response.completed", "response": {"id": "resp_delayed"}}
             yield _sse_event(event)
@@ -1024,6 +1028,7 @@ async def test_stream_responses_starts_sse_keepalive_before_first_upstream_event
     settings = SimpleNamespace(
         http_responses_session_bridge_enabled=False,
         sse_keepalive_interval_seconds=0.01,
+        proxy_account_stream_recovery_reserve=1,
     )
     monkeypatch.setattr(proxy_api_module, "get_settings", lambda: settings)
     monkeypatch.setattr(proxy_api_module.proxy_service_module, "get_settings", lambda: settings)
@@ -1114,6 +1119,7 @@ async def test_codex_route_stream_responses_starts_event_keepalive_before_first_
         async def stream_responses(self, *args, **kwargs):
             del args, kwargs
             upstream_started.set()
+            _signal_propagated_capacity_startup_ready()
             await release_upstream.wait()
             event = {"type": "response.completed", "response": {"id": "resp_delayed"}}
             yield _sse_event(event)
@@ -1121,6 +1127,7 @@ async def test_codex_route_stream_responses_starts_event_keepalive_before_first_
     settings = SimpleNamespace(
         http_responses_session_bridge_enabled=False,
         sse_keepalive_interval_seconds=0.01,
+        proxy_account_stream_recovery_reserve=1,
     )
     monkeypatch.setattr(proxy_api_module, "get_settings", lambda: settings)
     monkeypatch.setattr(proxy_api_module.proxy_service_module, "get_settings", lambda: settings)

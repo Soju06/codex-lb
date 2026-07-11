@@ -277,6 +277,7 @@ from app.modules.proxy._service.support import (
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
     _event_type_from_payload,
     _RequestLogFailureMetadata,
+    _signal_propagated_capacity_startup_ready,
     _StreamSettlement,
     _WebSocketRequestState,
 )
@@ -396,6 +397,14 @@ from app.modules.proxy.load_balancer import AccountSelection
 
 def _facade() -> Any:
     return sys.modules["app.modules.proxy.service"]
+
+
+def _stream_iterator_after_capacity_admission(
+    stream: AsyncIterator[str],
+) -> AsyncIterator[str]:
+    """Expose a slow stream once local response-create admission has succeeded."""
+    _signal_propagated_capacity_startup_ready()
+    return stream.__aiter__()
 
 
 _REQUEST_TRANSPORT_HTTP = "http"

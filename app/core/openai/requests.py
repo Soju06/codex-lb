@@ -699,9 +699,33 @@ class ResponsesRequest(BaseModel):
             raise ValueError("Provide either 'conversation' or 'previous_response_id', not both.")
         return self
 
-    def to_payload(self) -> JsonObject:
+    def model_dump_for_forwarding(self) -> MutableJsonObject:
+        """Dump the request for re-serialization onto another wire.
+
+        Like ``model_dump(mode="json", exclude_none=True)`` but without
+        synthesizing fields the client never sent. Used by every path that
+        forwards this request as a JSON body — the multi-instance owner
+        forward (``HTTPBridgeOwnerClient``) and model-source Responses
+        egress — so that field omission survives the hop and the receiving
+        side does not re-mark ``tools`` as explicitly set.
+        """
         payload: MutableJsonObject = self.model_dump(mode="json", exclude_none=True)
-        return _strip_unsupported_fields(payload)
+        if "tools" not in self.model_fields_set:
+            # ``tools`` is declared with ``default_factory=list``, so
+            # ``model_dump(exclude_none=True)`` synthesizes an explicit
+            # ``"tools": []`` even when the client omitted the field. Codex
+            # Responses-Lite clients omit top-level ``tools`` entirely (the
+            # bundle rides in the ``additional_tools`` input item), and models
+            # with reserved model tools (e.g. ``collaboration.spawn_agent`` on
+            # gpt-5.6 ``multi_agent_version: v2``) reject any explicit
+            # ``tools`` param that cannot match the reserved schema. Only
+            # forward the field when the client actually sent it — including
+            # an explicit client-sent ``[]``. See issue #1184.
+            payload.pop("tools", None)
+        return payload
+
+    def to_payload(self) -> JsonObject:
+        return _strip_unsupported_fields(self.model_dump_for_forwarding())
 
 
 class ResponsesCompactRequest(BaseModel):
@@ -777,7 +801,11 @@ def _strip_unsupported_fields(payload: MutableJsonObject) -> MutableJsonObject:
     _normalize_service_tier_aliases(payload)
     _sanitize_interleaved_reasoning_input(payload)
     _strip_poisoned_local_compact_fallback_items(payload)
-    _canonicalize_tools(payload)
+    # ``tools`` is deliberately NOT canonicalized here: the wire payload must
+    # forward client tool entries byte-preserved (array order, key order, and
+    # unknown keys untouched) so reserved model tools survive upstream
+    # byte/structural-equality checks. Order-insensitive canonicalization is
+    # cache-affinity/observability-only; see ``canonicalized_tools``.
     for key in _UNSUPPORTED_UPSTREAM_FIELDS:
         payload.pop(key, None)
     return payload
@@ -828,15 +856,18 @@ def _is_poisoned_local_compact_fallback_message(item: JsonValue) -> bool:
     return False
 
 
-def _canonicalize_tools(payload: MutableJsonObject) -> None:
-    tools = payload.get("tools")
-    if not is_json_list(tools):
-        return
-    tool_list = tools
-    if not tool_list:
-        return
-    sorted_tools = sorted(tool_list, key=_tool_sort_key)
-    payload["tools"] = [_sort_keys_recursive(t) for t in sorted_tools]
+def canonicalized_tools(tools: list[JsonValue]) -> list[JsonValue]:
+    """Return an order- and key-order-insensitive canonical form of ``tools``.
+
+    Used only for prompt-cache affinity/observability hashing (change #228):
+    two requests that differ solely in tool array order or object key order
+    hash identically. The result MUST NOT feed the upstream wire payload —
+    outgoing requests forward the client's tool entries byte-preserved (see
+    issue #1184). Array values (e.g. ``parameters.required``) are never
+    reordered; only mapping keys are sorted.
+    """
+    sorted_tools = sorted(tools, key=_tool_sort_key)
+    return [_sort_keys_recursive(t) for t in sorted_tools]
 
 
 def _tool_sort_key(tool: JsonValue) -> str:

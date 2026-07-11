@@ -141,6 +141,11 @@
         "http": "Responses",
         "websocket": "WebSockets"
       },
+      "fastMode": {
+        "label": "Prohibit Fast Mode",
+        "description": "Send qualified Codex Fast Mode model aliases to OpenAI without the priority tier.",
+        "ariaLabel": "Prohibit Fast Mode"
+      },
       "httpDownstream": {
         "label": "HTTP client routing",
         "description": "Choose how browser and SSE callers use persistent upstream sessions.",

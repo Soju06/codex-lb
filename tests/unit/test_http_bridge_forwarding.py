@@ -19,13 +19,18 @@ from app.modules.proxy.http_bridge_forwarding import (
     HTTP_BRIDGE_CODEX_AFFINITY_HEADER,
     HTTP_BRIDGE_FORWARDED_HEADER,
     HTTP_BRIDGE_ORIGIN_INSTANCE_HEADER,
+    HTTP_BRIDGE_ORIGINAL_UNANCHORED_HEADER,
+    HTTP_BRIDGE_RESERVATION_ID_HEADER,
     HTTP_BRIDGE_RESERVATION_KEY_ID_HEADER,
     HTTP_BRIDGE_RESERVATION_MODEL_HEADER,
     HTTP_BRIDGE_SIGNATURE_HEADER,
+    HTTP_BRIDGE_SIGNATURE_V2_HEADER,
+    HTTP_BRIDGE_SIGNATURE_VERSION_HEADER,
     HTTP_BRIDGE_TARGET_INSTANCE_HEADER,
     HTTPBridgeForwardContext,
     HTTPBridgeOwnerClient,
     _bridge_forward_signature,
+    _bridge_forward_tools_bound_signature,
     _owner_forward_receive_timeout,
     _owner_forward_timeout,
     build_owner_forward_headers,
@@ -43,6 +48,31 @@ def _temp_bridge_key(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterato
 
 def _payload() -> ResponsesRequest:
     return ResponsesRequest.model_validate({"model": "gpt-5.4", "instructions": "hi", "input": "hi"})
+
+
+def _use_legacy_forward_signature(
+    headers: dict[str, str],
+    *,
+    payload: ResponsesRequest,
+    context: HTTPBridgeForwardContext,
+) -> None:
+    headers.pop(HTTP_BRIDGE_SIGNATURE_VERSION_HEADER, None)
+    headers.pop(HTTP_BRIDGE_ORIGINAL_UNANCHORED_HEADER, None)
+    # A genuinely pre-#1203 origin sends no tamper-proofing header, so the
+    # receiver must exercise the primary-signature fallback rather than the
+    # tamper-proofing fast path.
+    headers.pop(HTTP_BRIDGE_SIGNATURE_V2_HEADER, None)
+    headers[HTTP_BRIDGE_SIGNATURE_HEADER] = _bridge_forward_signature(
+        payload=payload,
+        context=context,
+        include_client_ip=False,
+    )
+    if context.client_ip is not None:
+        headers[HTTP_BRIDGE_CLIENT_IP_SIGNATURE_HEADER] = _bridge_forward_signature(
+            payload=payload,
+            context=context,
+            include_client_ip=True,
+        )
 
 
 def test_parse_forwarded_request_accepts_signed_internal_forward() -> None:
@@ -96,19 +126,301 @@ def test_parse_forwarded_request_accepts_signed_internal_forward_with_client_ip(
     assert forwarded.context.client_ip == "203.0.113.42"
 
 
-def test_build_owner_forward_headers_uses_legacy_signature_with_client_ip_header() -> None:
+def test_parse_forwarded_request_rejects_body_with_injected_empty_tools() -> None:
+    payload = _payload()
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=False,
+        downstream_turn_state=None,
+    )
+    headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
+    body = payload.model_dump_for_forwarding()
+    assert "tools" not in body
+
+    # The tamper-proofing signature must be computed over the tools-less
+    # forwarding dump that is actually posted: signing a body that carries an
+    # explicit empty tools list must yield a different signature, otherwise a
+    # body rewritten in transit to inject ``"tools": []`` would still verify.
+    tampered_body = dict(body)
+    tampered_body["tools"] = []
+    tampered_payload = ResponsesRequest.model_validate(tampered_body)
+    assert "tools" in tampered_payload.model_fields_set
+    assert headers[HTTP_BRIDGE_SIGNATURE_V2_HEADER] == _bridge_forward_tools_bound_signature(
+        payload=payload,
+        context=context,
+    )
+    assert headers[HTTP_BRIDGE_SIGNATURE_V2_HEADER] != _bridge_forward_tools_bound_signature(
+        payload=tampered_payload,
+        context=context,
+    )
+
+    # Honest round-trip of the posted body still verifies (new -> new).
+    honest_payload = ResponsesRequest.model_validate(body)
+    forwarded, error = parse_forwarded_request(
+        headers,
+        payload=honest_payload,
+        current_instance="instance-b",
+    )
+    assert error is None
+    assert forwarded is not None
+
+    # A tampered body with injected ``"tools": []`` fails the tamper-proofing
+    # verification. Without the primary shim signature headers (the post-shim
+    # contract), the forward is rejected outright, so the owner instance never
+    # re-marks ``tools`` as explicitly set.
+    tools_bound_only_headers = {
+        key: value
+        for key, value in headers.items()
+        if key not in (HTTP_BRIDGE_SIGNATURE_HEADER, HTTP_BRIDGE_CLIENT_IP_SIGNATURE_HEADER)
+    }
+    forwarded, error = parse_forwarded_request(
+        tools_bound_only_headers,
+        payload=tampered_payload,
+        current_instance="instance-b",
+    )
+    assert forwarded is None
+    assert error is not None
+    assert error.status_code == 400
+
+    # ROLLOUT SHIM residual (documented; flips to rejected when tasks.md
+    # task 13 removes the shim): while the primary signature is still sent for
+    # pre-#1203 owners, the same tampered body downgrades to the plain-dump
+    # digest — which cannot distinguish synthesized from injected empty tools
+    # — and is accepted. This is exactly as strong as every pre-#1203 release
+    # was.
+    forwarded, error = parse_forwarded_request(
+        headers,
+        payload=tampered_payload,
+        current_instance="instance-b",
+    )
+    assert error is None
+    assert forwarded is not None
+
+    # Generic body tampering (not the synthesized-tools equivalence class)
+    # breaks both the tamper-proofing and primary digests and is rejected even
+    # with the shim headers present.
+    generic_tampered = ResponsesRequest.model_validate({**body, "instructions": "own the fleet"})
+    forwarded, error = parse_forwarded_request(
+        headers,
+        payload=generic_tampered,
+        current_instance="instance-b",
+    )
+    assert forwarded is None
+    assert error is not None
+    assert error.status_code == 400
+
+
+def test_parse_forwarded_request_accepts_legacy_forward_with_spoofed_v2_header() -> None:
+    # An external client can plant a garbage tamper-proofing header on an
+    # honestly primary-signed forward. The tamper-proofing signature must be
+    # authoritative only when it VALIDATES — a present-but-invalid header
+    # falls through to the primary verification instead of denying the
+    # legitimate forward.
+    old_origin_payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.4", "instructions": "hi", "input": "hi", "tools": []}
+    )
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=False,
+        downstream_turn_state=None,
+    )
+    headers = build_owner_forward_headers(headers={}, payload=old_origin_payload, context=context)
+    headers[HTTP_BRIDGE_SIGNATURE_V2_HEADER] = "spoofed-by-external-client"
+
+    forwarded, error = parse_forwarded_request(
+        headers,
+        payload=old_origin_payload,
+        current_instance="instance-b",
+    )
+    assert error is None
+    assert forwarded is not None
+    assert forwarded.context == context
+
+
+def test_build_owner_forward_headers_drops_client_supplied_bridge_headers() -> None:
+    # Upgraded origins must never relay externally injected
+    # ``x-codex-bridge-*`` headers: the signature headers are recomputed from
+    # the trusted context and unknown bridge headers are dropped outright.
+    payload = _payload()
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=False,
+        downstream_turn_state=None,
+    )
+    inbound = {
+        "x-codex-bridge-signature-v2": "client-spoofed",
+        "x-codex-bridge-signature": "client-spoofed",
+        "x-codex-bridge-future-unknown": "client-spoofed",
+        "x-openai-client-version": "1.2.3",
+    }
+    headers = build_owner_forward_headers(headers=inbound, payload=payload, context=context)
+
+    assert headers[HTTP_BRIDGE_SIGNATURE_V2_HEADER] == _bridge_forward_tools_bound_signature(
+        payload=payload,
+        context=context,
+    )
+    assert headers[HTTP_BRIDGE_SIGNATURE_HEADER] != "client-spoofed"
+    assert "x-codex-bridge-future-unknown" not in headers
+    assert headers["x-openai-client-version"] == "1.2.3"
+
+
+def test_owner_forward_primary_signature_verifiable_by_pre_1203_owner() -> None:
+    # ROLLOUT SHIM coverage (new origin -> pre-#1203 owner): an owner running
+    # code that predates the tamper-proofing header recomputes the primary
+    # digest from a plain ``model_dump`` of the parsed body, which
+    # re-synthesizes ``"tools": []`` for a tools-less body. The forward must
+    # keep the primary signature header equal to that recomputation so such
+    # owners verify it unchanged.
+    payload = _payload()
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=False,
+        downstream_turn_state=None,
+    )
+    headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
+    body = payload.model_dump_for_forwarding()
+    assert "tools" not in body
+
+    # Old code's plain ``model_dump`` of the parsed tools-less body is
+    # byte-identical to the dump of the same body with an explicit
+    # ``"tools": []`` — simulate the old recomputation with the latter.
+    old_owner_view = ResponsesRequest.model_validate({**body, "tools": []})
+    assert headers[HTTP_BRIDGE_SIGNATURE_HEADER] == _bridge_forward_signature(
+        payload=old_owner_view,
+        context=context,
+        include_client_ip=False,
+    )
+
+
+def test_parse_forwarded_request_falls_back_to_legacy_signature_without_v2() -> None:
+    # ROLLOUT SHIM coverage (old origin -> new owner): a pre-v2 origin posts
+    # a body with the synthesized ``"tools": []`` and signs only the legacy
+    # headers. A new-code owner must fall back to legacy verification when
+    # the v2 header is absent.
+    old_origin_payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.4", "instructions": "hi", "input": "hi", "tools": []}
+    )
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=False,
+        downstream_turn_state=None,
+    )
+    headers = build_owner_forward_headers(headers={}, payload=old_origin_payload, context=context)
+    del headers[HTTP_BRIDGE_SIGNATURE_V2_HEADER]
+
+    forwarded, error = parse_forwarded_request(
+        headers,
+        payload=old_origin_payload,
+        current_instance="instance-b",
+    )
+    assert error is None
+    assert forwarded is not None
+    assert forwarded.context == context
+
+
+def test_build_owner_forward_headers_uses_v2_signature_with_client_ip_header() -> None:
     payload = _payload()
     context = HTTPBridgeForwardContext(
         origin_instance="instance-a",
         target_instance="instance-b",
         codex_session_affinity=True,
         downstream_turn_state="http_turn_123",
+        original_request_unanchored=True,
+        original_affinity_kind="session_header",
+        original_affinity_key="sid-123",
+        signature_version="2",
         client_ip="203.0.113.42",
     )
 
     headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
 
     assert headers[HTTP_BRIDGE_CLIENT_IP_HEADER] == "203.0.113.42"
+    assert headers[HTTP_BRIDGE_SIGNATURE_VERSION_HEADER] == "2"
+    assert headers[HTTP_BRIDGE_SIGNATURE_HEADER] == _bridge_forward_signature(
+        payload=payload,
+        context=context,
+        include_client_ip=False,
+        signature_version="2",
+    )
+    assert headers[HTTP_BRIDGE_CLIENT_IP_SIGNATURE_HEADER] == _bridge_forward_signature(
+        payload=payload,
+        context=context,
+        include_client_ip=True,
+        signature_version="2",
+    )
+
+
+@pytest.mark.parametrize("tamper", ["remove", "blank", "mutate"])
+def test_parse_forwarded_request_v2_binds_client_ip_presence_and_value(tamper: str) -> None:
+    payload = _payload()
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=True,
+        downstream_turn_state="http_turn_generated",
+        original_request_unanchored=True,
+        original_affinity_kind="session_header",
+        original_affinity_key="sid-123",
+        client_ip="203.0.113.42",
+    )
+    headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
+    if tamper == "remove":
+        headers.pop(HTTP_BRIDGE_CLIENT_IP_HEADER)
+        headers.pop(HTTP_BRIDGE_CLIENT_IP_SIGNATURE_HEADER)
+    elif tamper == "blank":
+        headers[HTTP_BRIDGE_CLIENT_IP_HEADER] = "   "
+    else:
+        headers[HTTP_BRIDGE_CLIENT_IP_HEADER] = "198.51.100.44"
+
+    forwarded, error = parse_forwarded_request(headers, payload=payload, current_instance="instance-b")
+
+    assert forwarded is None
+    assert error is not None
+    assert error.status_code == 400
+    assert error.payload["error"]["code"] == "bridge_forward_invalid"
+
+
+def test_parse_forwarded_request_accepts_v2_without_client_ip_metadata() -> None:
+    payload = _payload()
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=True,
+        downstream_turn_state="http_turn_generated",
+        original_request_unanchored=True,
+        original_affinity_kind="session_header",
+        original_affinity_key="sid-123",
+    )
+    headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
+
+    forwarded, error = parse_forwarded_request(headers, payload=payload, current_instance="instance-b")
+
+    assert error is None
+    assert forwarded is not None
+    assert forwarded.context.client_ip is None
+
+
+def test_build_owner_forward_headers_keeps_anchored_primary_signature_legacy_compatible() -> None:
+    payload = _payload()
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=True,
+        downstream_turn_state="explicit_turn_state",
+        original_affinity_kind="turn_state_header",
+        original_affinity_key="explicit_turn_state",
+        client_ip="203.0.113.42",
+    )
+
+    headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
+
+    assert HTTP_BRIDGE_SIGNATURE_VERSION_HEADER not in headers
+    assert HTTP_BRIDGE_ORIGINAL_UNANCHORED_HEADER not in headers
     assert headers[HTTP_BRIDGE_SIGNATURE_HEADER] == _bridge_forward_signature(
         payload=payload,
         context=context,
@@ -130,11 +442,7 @@ def test_parse_forwarded_request_accepts_legacy_signature_without_client_ip_head
         downstream_turn_state="http_turn_123",
     )
     headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
-    headers[HTTP_BRIDGE_SIGNATURE_HEADER] = _bridge_forward_signature(
-        payload=payload,
-        context=context,
-        include_client_ip=False,
-    )
+    _use_legacy_forward_signature(headers, payload=payload, context=context)
 
     forwarded, error = parse_forwarded_request(
         headers,
@@ -157,16 +465,7 @@ def test_parse_forwarded_request_accepts_legacy_signature_with_bound_client_ip_h
         client_ip="203.0.113.9",
     )
     headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
-    headers[HTTP_BRIDGE_SIGNATURE_HEADER] = _bridge_forward_signature(
-        payload=payload,
-        context=context,
-        include_client_ip=False,
-    )
-    headers[HTTP_BRIDGE_CLIENT_IP_SIGNATURE_HEADER] = _bridge_forward_signature(
-        payload=payload,
-        context=context,
-        include_client_ip=True,
-    )
+    _use_legacy_forward_signature(headers, payload=payload, context=context)
     assert headers[HTTP_BRIDGE_CLIENT_IP_HEADER] == "203.0.113.9"
 
     forwarded, error = parse_forwarded_request(
@@ -190,11 +489,7 @@ def test_parse_forwarded_request_rejects_legacy_signature_with_unbound_client_ip
         client_ip="203.0.113.9",
     )
     headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
-    headers[HTTP_BRIDGE_SIGNATURE_HEADER] = _bridge_forward_signature(
-        payload=payload,
-        context=context,
-        include_client_ip=False,
-    )
+    _use_legacy_forward_signature(headers, payload=payload, context=context)
     headers.pop(HTTP_BRIDGE_CLIENT_IP_SIGNATURE_HEADER, None)
 
     forwarded, error = parse_forwarded_request(
@@ -243,12 +538,8 @@ def test_parse_forwarded_request_accepts_legacy_signature_when_client_ip_header_
         client_ip="203.0.113.9",
     )
     headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
+    _use_legacy_forward_signature(headers, payload=payload, context=context)
     headers[HTTP_BRIDGE_CLIENT_IP_HEADER] = "   "
-    headers[HTTP_BRIDGE_SIGNATURE_HEADER] = _bridge_forward_signature(
-        payload=payload,
-        context=context,
-        include_client_ip=False,
-    )
 
     forwarded, error = parse_forwarded_request(
         headers,
@@ -276,6 +567,202 @@ def test_build_owner_forward_headers_preserves_original_affinity_key() -> None:
 
     assert headers[HTTP_BRIDGE_AFFINITY_KIND_HEADER] == "session_header"
     assert headers[HTTP_BRIDGE_AFFINITY_KEY_HEADER] == "sid-123"
+
+
+def test_parse_forwarded_request_preserves_signed_original_unanchored_status() -> None:
+    payload = _payload()
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=True,
+        downstream_turn_state="http_turn_generated",
+        original_request_unanchored=True,
+        original_affinity_kind="session_header",
+        original_affinity_key="sid-123",
+        signature_version="2",
+    )
+
+    headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
+    forwarded, error = parse_forwarded_request(
+        headers,
+        payload=payload,
+        current_instance="instance-b",
+    )
+
+    assert headers[HTTP_BRIDGE_ORIGINAL_UNANCHORED_HEADER] == "1"
+    assert headers[HTTP_BRIDGE_SIGNATURE_VERSION_HEADER] == "2"
+    assert error is None
+    assert forwarded is not None
+    assert forwarded.context == context
+
+
+def test_v2_signature_binds_original_unanchored_boolean() -> None:
+    payload = _payload()
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=True,
+        downstream_turn_state="http_turn_generated",
+        original_request_unanchored=True,
+        original_affinity_kind="session_header",
+        original_affinity_key="sid-123",
+    )
+
+    assert _bridge_forward_signature(
+        payload=payload,
+        context=context,
+        include_client_ip=False,
+        signature_version="2",
+    ) != _bridge_forward_signature(
+        payload=payload,
+        context=HTTPBridgeForwardContext(
+            origin_instance=context.origin_instance,
+            target_instance=context.target_instance,
+            codex_session_affinity=context.codex_session_affinity,
+            downstream_turn_state=context.downstream_turn_state,
+            original_request_unanchored=False,
+            original_affinity_kind=context.original_affinity_kind,
+            original_affinity_key=context.original_affinity_key,
+        ),
+        include_client_ip=False,
+        signature_version="2",
+    )
+
+
+def test_parse_forwarded_request_rejects_original_unanchored_downgrade_to_false() -> None:
+    payload = _payload()
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=True,
+        downstream_turn_state="http_turn_generated",
+        original_request_unanchored=True,
+        original_affinity_kind="session_header",
+        original_affinity_key="sid-123",
+    )
+    headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
+    headers[HTTP_BRIDGE_ORIGINAL_UNANCHORED_HEADER] = "0"
+
+    forwarded, error = parse_forwarded_request(
+        headers,
+        payload=payload,
+        current_instance="instance-b",
+    )
+
+    assert forwarded is None
+    assert error is not None
+    assert error.status_code == 400
+    assert error.payload["error"]["code"] == "bridge_forward_invalid"
+
+
+def test_parse_forwarded_request_rejects_stripped_v2_unanchored_marker() -> None:
+    payload = _payload()
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=True,
+        downstream_turn_state="http_turn_generated",
+        original_request_unanchored=True,
+        original_affinity_kind="session_header",
+        original_affinity_key="sid-123",
+    )
+    headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
+    headers.pop(HTTP_BRIDGE_ORIGINAL_UNANCHORED_HEADER)
+
+    forwarded, error = parse_forwarded_request(headers, payload=payload, current_instance="instance-b")
+
+    assert forwarded is None
+    assert error is not None
+    assert error.payload["error"]["code"] == "bridge_forward_invalid"
+
+
+def test_parse_forwarded_request_rejects_v2_fields_repacked_as_legacy_affinity() -> None:
+    payload = _payload()
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=True,
+        downstream_turn_state="http_turn_generated",
+        original_request_unanchored=True,
+        original_affinity_kind="session_header",
+        original_affinity_key="sid-123",
+    )
+    headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
+    headers.pop(HTTP_BRIDGE_SIGNATURE_VERSION_HEADER)
+    headers.pop(HTTP_BRIDGE_ORIGINAL_UNANCHORED_HEADER)
+    # This preserved the old delimiter-joined byte string while moving the v2
+    # fields into attacker-controlled affinity values.
+    headers[HTTP_BRIDGE_AFFINITY_KIND_HEADER] = "session_header|sid-123"
+    headers[HTTP_BRIDGE_AFFINITY_KEY_HEADER] = "signature_version=2|original_request_unanchored=1"
+
+    forwarded, error = parse_forwarded_request(headers, payload=payload, current_instance="instance-b")
+
+    assert forwarded is None
+    assert error is not None
+    assert error.status_code == 400
+    assert error.payload["error"]["code"] == "bridge_forward_invalid"
+
+
+def test_parse_forwarded_request_rejects_genuine_legacy_delimiter_repacking() -> None:
+    payload = _payload()
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=True,
+        downstream_turn_state="http_turn_explicit",
+        original_affinity_kind="session_header",
+        original_affinity_key="left|right",
+    )
+    headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
+    headers[HTTP_BRIDGE_AFFINITY_KIND_HEADER] = "session_header|left"
+    headers[HTTP_BRIDGE_AFFINITY_KEY_HEADER] = "right"
+
+    forwarded, error = parse_forwarded_request(headers, payload=payload, current_instance="instance-b")
+
+    assert forwarded is None
+    assert error is not None
+    assert error.status_code == 400
+    assert error.payload["error"]["code"] == "bridge_forward_invalid"
+
+
+def test_v2_forward_fails_legacy_signature_validation() -> None:
+    payload = _payload()
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=True,
+        downstream_turn_state="http_turn_generated",
+        original_request_unanchored=True,
+        original_affinity_kind="session_header",
+        original_affinity_key="sid-123",
+    )
+    headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
+
+    assert headers[HTTP_BRIDGE_SIGNATURE_HEADER] != _bridge_forward_signature(
+        payload=payload,
+        context=context,
+        include_client_ip=False,
+    )
+
+
+def test_parse_legacy_forward_defers_ambiguous_anchor_proof_to_bridge_service() -> None:
+    payload = _payload()
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=True,
+        downstream_turn_state="http_turn_generated",
+        original_affinity_kind="session_header",
+        original_affinity_key="sid-123",
+    )
+    headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
+    _use_legacy_forward_signature(headers, payload=payload, context=context)
+
+    forwarded, error = parse_forwarded_request(headers, payload=payload, current_instance="instance-b")
+
+    assert error is None
+    assert forwarded is not None
+    assert forwarded.context.signature_version is None
 
 
 def test_parse_forwarded_request_rejects_missing_signature() -> None:
@@ -315,6 +802,36 @@ def test_parse_forwarded_request_rejects_tampered_signature() -> None:
     headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
     headers[HTTP_BRIDGE_SIGNATURE_HEADER] = "bad-signature"
 
+    # A validating v2 signature is authoritative, so a corrupted legacy
+    # header alone does not reject.
+    forwarded, error = parse_forwarded_request(
+        headers,
+        payload=payload,
+        current_instance="instance-b",
+    )
+    assert error is None
+    assert forwarded is not None
+
+    # Without the v2 header (pre-v2 origin), the tampered legacy signature
+    # is rejected by the fallback verification.
+    headers.pop(HTTP_BRIDGE_SIGNATURE_V2_HEADER, None)
+    forwarded, error = parse_forwarded_request(
+        headers,
+        payload=payload,
+        current_instance="instance-b",
+    )
+
+    assert forwarded is None
+    assert error is not None
+    assert error.status_code == 400
+    assert error.payload["error"]["code"] == "bridge_forward_invalid"
+
+    # An invalid v2 signature falls through to the legacy verification (see
+    # the spoofed-v2 test); when the legacy signature is tampered too, the
+    # forward is rejected.
+    headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
+    headers[HTTP_BRIDGE_SIGNATURE_V2_HEADER] = "bad-signature"
+    headers[HTTP_BRIDGE_SIGNATURE_HEADER] = "bad-signature"
     forwarded, error = parse_forwarded_request(
         headers,
         payload=payload,
@@ -508,6 +1025,7 @@ async def test_owner_forward_uses_direct_session_without_env_proxy(monkeypatch: 
     get_settings.cache_clear()
 
     client = HTTPBridgeOwnerClient()
+    ready_calls: list[bool] = []
     payload = _payload()
     context = HTTPBridgeForwardContext(
         origin_instance="instance-a",
@@ -524,12 +1042,14 @@ async def test_owner_forward_uses_direct_session_without_env_proxy(monkeypatch: 
             headers={"Authorization": "Bearer proxy-key"},
             context=context,
             request_started_at=10.0,
+            on_response_ready=lambda: ready_calls.append(True),
         )
     ]
 
     assert len(events) == 1
     assert '"type":"response.failed"' in events[0]
     assert '"code":"stream_incomplete"' in events[0]
+    assert ready_calls == [True]
     assert captured["trust_env"] is False
     skip_auto_headers = captured["skip_auto_headers"]
     assert isinstance(skip_auto_headers, frozenset)
@@ -608,6 +1128,19 @@ async def test_owner_forward_allows_json_content_type_for_internal_post(
     assert len(events) == 1
     assert '"code":"stream_incomplete"' in events[0]
     headers = cast(dict[str, str], captured["headers"])
+    forwarded_json = cast(dict[str, object], captured["json"])
+    assert "tools" not in forwarded_json
+    forwarded_payload = ResponsesRequest.model_validate(forwarded_json)
+    assert "tools" not in forwarded_payload.model_fields_set
+    assert "tools" not in forwarded_payload.to_payload()
+    forwarded, error = parse_forwarded_request(
+        headers,
+        payload=forwarded_payload,
+        current_instance="instance-b",
+    )
+    assert error is None
+    assert forwarded is not None
+    assert forwarded.context == context
     assert isinstance(headers, dict)
     assert "Content-Type" not in headers
     assert "content-type" not in headers
@@ -649,6 +1182,29 @@ def test_build_owner_forward_headers_strips_hop_by_hop_headers() -> None:
     assert headers.get("x-request-id") == "req-123"
     assert HTTP_BRIDGE_FORWARDED_HEADER in headers
     assert HTTP_BRIDGE_TARGET_INSTANCE_HEADER in headers
+
+
+def test_build_owner_forward_headers_strips_inbound_internal_bridge_headers() -> None:
+    payload = _payload()
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=False,
+        downstream_turn_state=None,
+    )
+    inbound = {
+        HTTP_BRIDGE_SIGNATURE_VERSION_HEADER: "2",
+        HTTP_BRIDGE_ORIGINAL_UNANCHORED_HEADER: "1",
+        HTTP_BRIDGE_RESERVATION_ID_HEADER: "spoofed-reservation",
+        "x-codex-bridge-future-internal": "spoofed",
+    }
+
+    headers = build_owner_forward_headers(headers=inbound, payload=payload, context=context)
+
+    assert HTTP_BRIDGE_SIGNATURE_VERSION_HEADER not in headers
+    assert HTTP_BRIDGE_ORIGINAL_UNANCHORED_HEADER not in headers
+    assert HTTP_BRIDGE_RESERVATION_ID_HEADER not in headers
+    assert "x-codex-bridge-future-internal" not in headers
 
 
 def test_build_owner_forward_headers_preserves_authorization_strips_host() -> None:

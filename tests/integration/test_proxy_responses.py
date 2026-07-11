@@ -136,6 +136,7 @@ def _disable_http_bridge(monkeypatch: pytest.MonkeyPatch) -> None:
         id=1,
         sticky_threads_enabled=False,
         upstream_stream_transport="auto",
+        prohibit_fast_mode=False,
         prefer_earlier_reset_accounts=False,
         routing_strategy="usage_weighted",
         openai_cache_affinity_max_age_seconds=300,
@@ -174,6 +175,98 @@ async def test_proxy_responses_no_accounts(async_client):
     assert event["response"]["status"] == "failed"
     assert event["response"]["id"] == request_id
     assert event["response"]["error"]["code"] == "no_accounts"
+
+
+@pytest.mark.asyncio
+async def test_backend_responses_prohibits_fast_model_alias_priority_tier(async_client, monkeypatch):
+    raw_account_id = "acc_prohibit_fast_mode"
+    auth_json = _make_auth_json(raw_account_id, "prohibit-fast-mode@example.com")
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    response = await async_client.put("/api/settings", json={"prohibitFastMode": True})
+    assert response.status_code == 200
+
+    seen_payload: dict[str, object] = {}
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
+        del headers, access_token, account_id, base_url, raise_for_status, kwargs
+        seen_payload.update(payload.to_payload())
+        yield (
+            'data: {"type":"response.completed","response":{"id":"resp_prohibit_fast_mode",'
+            '"object":"response","status":"completed","output":[]}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        json={"model": "gpt-5.6-sol-xhigh-fast", "instructions": "", "input": [], "stream": True},
+    ) as response:
+        assert response.status_code == 200
+        _ = [line async for line in response.aiter_lines() if line]
+
+    assert seen_payload["model"] == "gpt-5.6-sol"
+    assert seen_payload["reasoning"] == {"effort": "high"}
+    assert "service_tier" not in seen_payload
+
+
+@pytest.mark.parametrize(("path", "stream"), [("/backend-api/codex/responses", True), ("/v1/responses", False)])
+@pytest.mark.asyncio
+async def test_responses_prohibits_enforced_fast_model_alias_priority_tier(
+    async_client,
+    monkeypatch,
+    path: str,
+    stream: bool,
+):
+    raw_account_id = f"acc_prohibit_enforced_fast_{stream}"
+    auth_json = _make_auth_json(raw_account_id, f"prohibit-enforced-fast-{stream}@example.com")
+    response = await async_client.post(
+        "/api/accounts/import",
+        files={"auth_json": ("auth.json", json.dumps(auth_json), "application/json")},
+    )
+    assert response.status_code == 200
+
+    response = await async_client.put(
+        "/api/settings",
+        json={"apiKeyAuthEnabled": True, "prohibitFastMode": True},
+    )
+    assert response.status_code == 200
+    response = await async_client.post(
+        "/api/api-keys/",
+        json={"name": f"prohibit-enforced-fast-{stream}", "enforcedModel": "gpt-5.6-sol-xhigh-fast"},
+    )
+    assert response.status_code == 200
+    api_key = response.json()["key"]
+
+    seen_payload: dict[str, object] = {}
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
+        del headers, access_token, account_id, base_url, raise_for_status, kwargs
+        seen_payload.update(payload.to_payload())
+        yield (
+            'data: {"type":"response.completed","response":{"id":"resp_prohibit_enforced_fast",'
+            '"object":"response","status":"completed","output":[],"usage":'
+            '{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    request_payload = {"model": "gpt-5.4", "input": "hello", "stream": stream}
+    headers = {"Authorization": f"Bearer {api_key}"}
+    if stream:
+        async with async_client.stream("POST", path, json=request_payload, headers=headers) as response:
+            assert response.status_code == 200
+            _ = [line async for line in response.aiter_lines() if line]
+    else:
+        response = await async_client.post(path, json=request_payload, headers=headers)
+        assert response.status_code == 200
+
+    assert seen_payload["model"] == "gpt-5.6-sol"
+    assert seen_payload["reasoning"] == {"effort": "high"}
+    assert "service_tier" not in seen_payload
 
 
 @pytest.mark.asyncio
@@ -237,6 +330,9 @@ async def test_backend_responses_preserves_responses_lite_tools_and_outputs(asyn
     event = _extract_first_event(lines)
     assert event["type"] == "response.completed"
     assert seen_payload["instructions"] == ""
+    # The Lite client omitted top-level ``tools``; the proxy must not
+    # synthesize ``"tools": []`` from the model default (issue #1184).
+    assert "tools" not in seen_payload
     assert seen_payload["input"] == [
         additional_tools,
         {"type": "message", "role": "developer", "content": "use repository tools"},
@@ -258,6 +354,49 @@ async def test_backend_responses_preserves_responses_lite_tools_and_outputs(asyn
         cast("Mapping[str, JsonValue]", seen_payload),
     )
     assert upstream_headers == {proxy_client_module.CODEX_RESPONSES_LITE_HEADER: "true"}
+
+
+@pytest.mark.asyncio
+async def test_backend_responses_forwards_explicit_empty_tools(async_client, monkeypatch):
+    # An explicit client-sent ``"tools": []`` is a real request field and must
+    # keep reaching upstream as ``[]`` (issue #1184 only suppresses the
+    # synthesized default for clients that omitted the field).
+    raw_account_id = "acc_responses_explicit_empty_tools"
+    auth_json = _make_auth_json(raw_account_id, "responses-explicit-empty-tools@example.com")
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    seen_payload: dict[str, object] = {}
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
+        del headers, access_token, account_id, base_url, raise_for_status, kwargs
+        seen_payload.update(payload.to_payload())
+        yield (
+            'data: {"type":"response.completed","response":{"id":"resp_explicit_empty_tools",'
+            '"object":"response","status":"completed","usage":{"input_tokens":2,"output_tokens":1}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    request_payload = {
+        "model": "gpt-5.6",
+        "instructions": "hi",
+        "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+        "tools": [],
+        "stream": True,
+    }
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        json=request_payload,
+    ) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    event = _extract_first_event(lines)
+    assert event["type"] == "response.completed"
+    assert seen_payload["tools"] == []
 
 
 @pytest.mark.asyncio
@@ -2189,7 +2328,8 @@ async def test_v1_responses_non_streaming_reconstructs_reasoning_output(async_cl
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kw):
         yield (
             'data: {"type":"response.output_item.done","output_index":0,"item":{"id":"rs_1",'
-            '"type":"reasoning","summary":[{"type":"summary_text","text":"Need more steps"}],'
+            '"type":"reasoning","summary":[{"type":"summary_text",'
+            '"text":"Need more steps\\n\\n<!-- -->"}],'
             '"reasoning_details":{"tokens":4}}}\n\n'
         )
         yield (
@@ -2213,6 +2353,78 @@ async def test_v1_responses_non_streaming_reconstructs_reasoning_output(async_cl
             "reasoning_details": {"tokens": 4},
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_backend_codex_responses_strips_blank_html_comment_from_reasoning_summary(async_client, monkeypatch):
+    email = "responses-reasoning-summary-comment@example.com"
+    raw_account_id = "acc_responses_reasoning_summary_comment"
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kw):
+        yield (
+            'data: {"type":"response.output_item.done","output_index":0,"item":{"id":"rs_1",'
+            '"type":"reasoning","summary":[{"type":"summary_text",'
+            '"text":"**Planning fix**\\n\\n<!-- -->"}]}}\n\n'
+        )
+        yield (
+            'data: {"type":"response.completed","response":{"id":"resp_reasoning_comment_1",'
+            '"object":"response","status":"completed","output":[],'
+            '"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {"model": "gpt-5.1", "input": [{"role": "user", "content": "hi"}], "stream": True}
+    async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
+        assert resp.status_code == 200
+        body = "\n".join([line async for line in resp.aiter_lines() if line])
+
+    assert "<!-- -->" not in body
+    assert "**Planning fix**" in body
+
+
+@pytest.mark.asyncio
+async def test_backend_codex_responses_strips_split_blank_comment_from_reasoning_delta(async_client, monkeypatch):
+    email = "responses-reasoning-delta-comment@example.com"
+    raw_account_id = "acc_responses_reasoning_delta_comment"
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kw):
+        yield (
+            'data: {"type":"response.reasoning_summary_text.delta","item_id":"rs_split",'
+            '"output_index":0,"summary_index":0,"delta":"**Planning fix**\\n\\n<!"}\n\n'
+        )
+        yield ('data: {"type":"codex.rate_limits","plan_type":"pro","rate_limits":{"allowed":true}}\n\n')
+        yield (
+            'data: {"type":"response.reasoning_summary_text.delta","item_id":"rs_split",'
+            '"output_index":0,"summary_index":0,"delta":"-- -->"}\n\n'
+        )
+        yield (
+            'data: {"type":"response.reasoning_summary_text.done","item_id":"rs_split",'
+            '"output_index":0,"summary_index":0,"text":"**Planning fix**\\n\\n<!-- -->"}\n\n'
+        )
+        yield (
+            'data: {"type":"response.completed","response":{"id":"resp_reasoning_delta_comment_1",'
+            '"object":"response","status":"completed","output":[],"usage":{}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {"model": "gpt-5.1", "input": [{"role": "user", "content": "hi"}], "stream": True}
+    async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
+        assert resp.status_code == 200
+        body = "\n".join([line async for line in resp.aiter_lines() if line])
+
+    assert "<!-- -->" not in body
+    assert "**Planning fix**" in body
+    assert "response.reasoning_summary_text.delta" in body
 
 
 @pytest.mark.asyncio

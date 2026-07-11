@@ -11,6 +11,7 @@ from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, StickySessionKind
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
+from app.modules.proxy.durable_bridge_coordinator import DurableBridgeSessionCoordinator
 from app.modules.proxy.durable_bridge_repository import DurableBridgeRepository
 from app.modules.settings.repository import SettingsRepository
 from app.modules.sticky_sessions.cleanup_scheduler import StickySessionCleanupScheduler
@@ -136,6 +137,111 @@ async def _insert_http_bridge_session(
             },
         )
         await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_durable_bridge_owned_alias_registration_is_epoch_fenced(db_setup):
+    del db_setup
+    coordinator = DurableBridgeSessionCoordinator(SessionLocal)
+    claimed = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-owned-alias-fence",
+        api_key_id=None,
+        instance_id="instance-a",
+        lease_ttl_seconds=60.0,
+        account_id=None,
+        model="gpt-5.6-sol",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    replaced = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-owned-alias-fence",
+        api_key_id=None,
+        instance_id="instance-a",
+        lease_ttl_seconds=60.0,
+        account_id=None,
+        model="gpt-5.6-sol",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+        force_owner_epoch_advance=True,
+    )
+
+    stale_turn_registered = await coordinator.register_turn_state(
+        session_id=claimed.session_id,
+        api_key_id=None,
+        instance_id="instance-a",
+        owner_epoch=claimed.owner_epoch,
+        turn_state="http_turn_stale_epoch",
+        lease_ttl_seconds=60.0,
+    )
+    stale_response_registered = await coordinator.register_previous_response_id(
+        session_id=claimed.session_id,
+        api_key_id=None,
+        instance_id="instance-a",
+        owner_epoch=claimed.owner_epoch,
+        response_id="resp_stale_epoch",
+        lease_ttl_seconds=60.0,
+    )
+    current_turn_registered = await coordinator.register_turn_state(
+        session_id=replaced.session_id,
+        api_key_id=None,
+        instance_id="instance-a",
+        owner_epoch=replaced.owner_epoch,
+        turn_state="http_turn_current_epoch",
+        lease_ttl_seconds=60.0,
+    )
+    current_response_registered = await coordinator.register_previous_response_id(
+        session_id=replaced.session_id,
+        api_key_id=None,
+        instance_id="instance-a",
+        owner_epoch=replaced.owner_epoch,
+        response_id="resp_current_epoch",
+        lease_ttl_seconds=60.0,
+    )
+
+    assert stale_turn_registered is False
+    assert stale_response_registered is False
+    assert current_turn_registered is True
+    assert current_response_registered is True
+    assert (
+        await coordinator.lookup_turn_state_target(
+            turn_state="http_turn_stale_epoch",
+            api_key_id=None,
+        )
+        is None
+    )
+    assert (
+        await coordinator.lookup_request_targets(
+            session_key_kind="request",
+            session_key_value="req-stale-epoch",
+            api_key_id=None,
+            turn_state=None,
+            session_header=None,
+            previous_response_id="resp_stale_epoch",
+        )
+        is None
+    )
+    by_current_turn = await coordinator.lookup_turn_state_target(
+        turn_state="http_turn_current_epoch",
+        api_key_id=None,
+    )
+    by_current_response = await coordinator.lookup_request_targets(
+        session_key_kind="request",
+        session_key_value="req-current-epoch",
+        api_key_id=None,
+        turn_state=None,
+        session_header=None,
+        previous_response_id="resp_current_epoch",
+    )
+    assert by_current_turn is not None
+    assert by_current_turn.owner_epoch == replaced.owner_epoch
+    assert by_current_response is not None
+    assert by_current_response.owner_epoch == replaced.owner_epoch
 
 
 @pytest.mark.asyncio

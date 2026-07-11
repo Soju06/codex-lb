@@ -17,6 +17,178 @@ async def _iter_blocks(*blocks: str) -> AsyncIterator[str]:
         yield block
 
 
+def test_strip_blank_reasoning_comment_preserves_unmatched_whitespace_and_inline_comments() -> None:
+    assert proxy_api_module._strip_blank_html_comment_lines("Need more steps\n") == "Need more steps\n"
+    assert proxy_api_module._strip_blank_html_comment_lines("Hard break  \n") == "Hard break  \n"
+    assert proxy_api_module._strip_blank_html_comment_lines("<!-- -->some text") == "<!-- -->some text"
+    assert proxy_api_module._strip_blank_html_comment_lines("Plan\n\n<!-- -->") == "Plan"
+
+
+@pytest.mark.asyncio
+async def test_normalize_reasoning_summary_stream_removes_split_placeholder_delta() -> None:
+    source = _iter_blocks(
+        proxy_api_module.format_sse_event(
+            {"type": "response.created", "response": {"id": "resp_1", "status": "in_progress", "output": []}}
+        ),
+        proxy_api_module.format_sse_event(
+            {
+                "type": "response.reasoning_summary_text.delta",
+                "item_id": "rs_1",
+                "output_index": 0,
+                "summary_index": 0,
+                "delta": "Plan\n\n<!",
+            }
+        ),
+        proxy_api_module.format_sse_event(
+            {
+                "type": "response.reasoning_summary_text.delta",
+                "item_id": "rs_1",
+                "output_index": 0,
+                "summary_index": 0,
+                "delta": "-- -->",
+            }
+        ),
+        proxy_api_module.format_sse_event(
+            {
+                "type": "response.reasoning_summary_text.done",
+                "item_id": "rs_1",
+                "output_index": 0,
+                "summary_index": 0,
+                "text": "Plan\n\n<!-- -->",
+            }
+        ),
+        proxy_api_module.format_sse_event(
+            {"type": "response.completed", "response": {"id": "resp_1", "status": "completed", "output": []}}
+        ),
+    )
+
+    blocks = [block async for block in proxy_api_module._normalize_public_responses_stream(source)]
+    payloads = [proxy_api_module._parse_sse_payload(block) for block in blocks]
+    deltas = [
+        payload for payload in payloads if payload and payload.get("type") == "response.reasoning_summary_text.delta"
+    ]
+
+    assert [payload["delta"] for payload in deltas] == ["Plan"]
+    assert "<!-- -->" not in "".join(blocks)
+
+
+@pytest.mark.asyncio
+async def test_normalize_reasoning_summary_stream_does_not_delay_less_than_text() -> None:
+    first = proxy_api_module.format_sse_event(
+        {
+            "type": "response.reasoning_summary_text.delta",
+            "item_id": "rs_1",
+            "output_index": 0,
+            "summary_index": 0,
+            "delta": "x < y",
+        }
+    )
+    second = proxy_api_module.format_sse_event(
+        {
+            "type": "response.reasoning_summary_part.added",
+            "item_id": "rs_1",
+            "output_index": 0,
+            "summary_index": 1,
+            "part": {"type": "summary_text", "text": "next"},
+        }
+    )
+
+    blocks = [
+        block async for block in proxy_api_module._normalize_reasoning_summary_stream(_iter_blocks(first, second))
+    ]
+
+    assert blocks == [first, second]
+
+
+@pytest.mark.asyncio
+async def test_normalize_reasoning_summary_stream_keeps_candidate_across_telemetry() -> None:
+    first = proxy_api_module.format_sse_event(
+        {
+            "type": "response.reasoning_summary_text.delta",
+            "item_id": "rs_1",
+            "output_index": 0,
+            "summary_index": 0,
+            "delta": "<",
+        }
+    )
+    second = proxy_api_module.format_sse_event({"type": "codex.rate_limits", "limits": {}})
+
+    blocks = [
+        block async for block in proxy_api_module._normalize_reasoning_summary_stream(_iter_blocks(first, second))
+    ]
+
+    assert blocks == [second, first]
+
+
+@pytest.mark.asyncio
+async def test_normalize_reasoning_summary_stream_removes_split_placeholder_across_telemetry() -> None:
+    first = proxy_api_module.format_sse_event(
+        {
+            "type": "response.reasoning_summary_text.delta",
+            "item_id": "rs_1",
+            "output_index": 0,
+            "summary_index": 0,
+            "delta": "Plan\n\n<!",
+        }
+    )
+    telemetry = proxy_api_module.format_sse_event({"type": "codex.rate_limits", "limits": {}})
+    progress = proxy_api_module.format_sse_event({"type": "response.in_progress", "response": {"id": "resp_1"}})
+    final = proxy_api_module.format_sse_event(
+        {
+            "type": "response.reasoning_summary_text.delta",
+            "item_id": "rs_1",
+            "output_index": 0,
+            "summary_index": 0,
+            "delta": "-- -->",
+        }
+    )
+
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_reasoning_summary_stream(
+            _iter_blocks(first, telemetry, progress, final)
+        )
+    ]
+
+    assert blocks[:2] == [telemetry, progress]
+    payload = proxy_api_module._parse_sse_payload(blocks[-1])
+    assert payload is not None
+    assert payload["delta"] == "Plan"
+    assert "<!-- -->" not in "".join(blocks)
+
+
+@pytest.mark.asyncio
+async def test_normalize_reasoning_summary_stream_cleans_complete_marker_inside_one_delta() -> None:
+    source = proxy_api_module.format_sse_event(
+        {
+            "type": "response.reasoning_summary_text.delta",
+            "item_id": "rs_1",
+            "output_index": 0,
+            "summary_index": 0,
+            "delta": "Plan\n<!-- -->\nNext",
+        }
+    )
+
+    blocks = [block async for block in proxy_api_module._normalize_reasoning_summary_stream(_iter_blocks(source))]
+    payload = proxy_api_module._parse_sse_payload(blocks[0])
+
+    assert payload is not None
+    assert payload["delta"] == "Plan\nNext"
+
+
+def test_normalize_reasoning_summary_part_removes_only_standalone_placeholder() -> None:
+    payload, violation = proxy_api_module._normalize_public_stream_payload(
+        {
+            "type": "response.reasoning_summary_part.done",
+            "part": {"type": "summary_text", "text": "Plan\n\n<!-- -->"},
+        }
+    )
+
+    assert violation is None
+    assert payload is not None
+    assert payload["part"] == {"type": "summary_text", "text": "Plan"}
+
+
 def test_compact_response_output_item_accepts_modeled_output_field() -> None:
     class ModeledCompactPayload(CompactResponsePayload):
         output: list[dict[str, JsonValue]] | None = None
@@ -1021,10 +1193,12 @@ async def test_internal_bridge_responses_disables_openai_sdk_contract(
         origin_instance="origin-a",
         target_instance="owner-b",
         codex_session_affinity=True,
-        downstream_turn_state=None,
+        downstream_turn_state="http_turn_generated",
+        original_request_unanchored=True,
         original_affinity_kind="session",
         original_affinity_key="sid-abc",
         reservation=None,
+        signature_version="2",
     )
     fake_forwarded = bridge_module.HTTPBridgeForwardedRequest(context=fake_context)
 
@@ -1048,7 +1222,7 @@ async def test_internal_bridge_responses_disables_openai_sdk_contract(
     class _StubRequest:
         @property
         def headers(self) -> dict[str, str]:
-            return {}
+            return {"x-codex-turn-state": "http_turn_generated"}
 
     response = await proxy_api_module.internal_bridge_responses(
         request=cast(Any, _StubRequest()),
@@ -1067,4 +1241,94 @@ async def test_internal_bridge_responses_disables_openai_sdk_contract(
     # original route's policy.
     assert kwargs.get("enforce_openai_sdk_contract") is False, (
         f"internal_bridge_responses must pass enforce_openai_sdk_contract=False; got kwargs={kwargs!r}"
+    )
+    assert kwargs.get("forwarded_downstream_turn_state") == "http_turn_generated"
+    assert kwargs.get("forwarded_original_request_unanchored") is True
+    assert kwargs.get("forwarded_legacy_signature") is False
+    forwarded_headers = kwargs.get("forwarded_headers")
+    assert isinstance(forwarded_headers, dict)
+    assert "x-codex-turn-state" not in forwarded_headers
+
+
+@pytest.mark.asyncio
+async def test_internal_bridge_rejects_unknown_legacy_anchor_before_terminal_compaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from app.core.clients.proxy import ProxyResponseError
+    from app.core.openai.requests import ResponsesRequest
+    from app.modules.proxy import http_bridge_forwarding as bridge_module
+
+    fake_context = bridge_module.HTTPBridgeForwardContext(
+        origin_instance="origin-old",
+        target_instance="owner-current",
+        codex_session_affinity=True,
+        downstream_turn_state="http_turn_unknown",
+        original_affinity_kind="session_header",
+        original_affinity_key="sid-shared",
+        signature_version=None,
+    )
+    monkeypatch.setattr(
+        proxy_api_module,
+        "parse_forwarded_request",
+        lambda headers, *, payload, current_instance: (
+            bridge_module.HTTPBridgeForwardedRequest(context=fake_context),
+            None,
+        ),
+    )
+    monkeypatch.setattr(
+        proxy_api_module,
+        "_validate_internal_bridge_api_key",
+        AsyncMock(return_value=(None, None)),
+    )
+    unexpected_stream = AsyncMock(side_effect=AssertionError("streaming must not start before legacy proof"))
+    monkeypatch.setattr(proxy_api_module, "_stream_responses", unexpected_stream)
+    service = SimpleNamespace(
+        validate_http_bridge_legacy_forward_anchor=AsyncMock(
+            side_effect=ProxyResponseError(
+                409,
+                {
+                    "error": {
+                        "message": "Legacy owner forwarding requires a registered turn-state continuity anchor",
+                        "type": "server_error",
+                        "code": "bridge_forward_upgrade_required",
+                    }
+                },
+            )
+        )
+    )
+    request = cast(
+        Any,
+        SimpleNamespace(
+            headers={"x-codex-turn-state": "http_turn_unknown"},
+            method="POST",
+            url=SimpleNamespace(path="/internal/responses"),
+            client=None,
+        ),
+    )
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.5",
+            "instructions": "compact",
+            "input": [{"role": "user", "content": "hi"}, {"type": "compaction_trigger"}],
+        }
+    )
+
+    response = await proxy_api_module.internal_bridge_responses(
+        request=request,
+        payload=payload,
+        context=cast(Any, SimpleNamespace(service=service)),
+    )
+
+    assert response.status_code == 409
+    assert b'"code":"bridge_forward_upgrade_required"' in response.body
+    unexpected_stream.assert_not_awaited()
+    service.validate_http_bridge_legacy_forward_anchor.assert_awaited_once_with(
+        original_affinity_kind="session_header",
+        original_affinity_key="sid-shared",
+        downstream_turn_state="http_turn_unknown",
+        previous_response_id=None,
+        api_key=None,
     )

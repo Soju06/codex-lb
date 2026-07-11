@@ -448,6 +448,12 @@ class DashboardSettings(Base):
         server_default=text("'default'"),
         nullable=False,
     )
+    prohibit_fast_mode: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=false(),
+        nullable=False,
+    )
     http_downstream_transport_policy: Mapped[str] = mapped_column(
         String,
         default="smart",

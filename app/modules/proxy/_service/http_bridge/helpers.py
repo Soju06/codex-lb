@@ -82,6 +82,7 @@ from app.modules.proxy._service.compact import (
 from app.modules.proxy._service.compact import (
     _sticky_key_from_compact_payload as _sticky_key_from_compact_payload,
 )
+from app.modules.proxy._service.http_bridge.protocol import _HTTPBridgeServiceProtocol
 from app.modules.proxy._service.observability import (
     _hash_identifier as _hash_identifier,
 )
@@ -367,9 +368,10 @@ def http_bridge_activity_snapshot_nowait(service: Any) -> dict[str, int | bool]:
     pending_unknown_sessions = 0
 
     for session in list(service._http_bridge_sessions.values()):
-        if session.closed:
+        if session.closed and not _http_bridge_session_has_admission_waiter(session):
             continue
-        live_sessions += 1
+        if not session.closed:
+            live_sessions += 1
         pending_count = _http_bridge_pending_count_nowait(session, context="drain_status")
         if pending_count is None:
             pending_unknown_sessions += 1
@@ -588,10 +590,132 @@ def _http_bridge_request_counts_against_queue(request_state: _WebSocketRequestSt
     return not request_state.draining_until_terminal
 
 
+def _http_bridge_session_has_admission_waiter(session: object | None) -> bool:
+    """Keep a closed bridge registered while an unsent request owns its handoff."""
+    return session is not None and bool(getattr(session, "admission_waiter_count", 0))
+
+
 def _http_bridge_session_has_visible_requests(session: "_HTTPBridgeSession") -> bool:
     return session.queued_request_count > 0 or any(
         _http_bridge_request_counts_against_queue(request_state) for request_state in session.pending_requests
     )
+
+
+def _http_bridge_unanchored_parallel_fork_key(
+    *,
+    key: "_HTTPBridgeSessionKey",
+    session: "_HTTPBridgeSession | None",
+    inflight_creation: bool,
+    incoming_turn_state: str | None,
+    previous_response_id: str | None,
+    request_model: str | None,
+    request_scope_id: str,
+) -> "_HTTPBridgeSessionKey | None":
+    """Give independent process-session requests separate websocket lanes."""
+
+    if key.affinity_kind != "session_header" or incoming_turn_state is not None or previous_response_id is not None:
+        return None
+    reason: str | None = None
+    if inflight_creation:
+        reason = "session_creation_inflight"
+    elif session is not None and not session.closed:
+        if _http_bridge_session_has_visible_requests(session):
+            reason = "active_request"
+        elif (
+            reservation_id := getattr(session, "unanchored_reservation_id", None)
+        ) is not None and reservation_id != request_scope_id:
+            reason = "session_reserved"
+        elif (
+            request_model is not None
+            and session.request_model is not None
+            and _extract_model_class(request_model) != _extract_model_class(session.request_model)
+        ):
+            reason = "model_class_change"
+    if reason is None:
+        return None
+
+    fork_key = _HTTPBridgeSessionKey(
+        "internal_unanchored_parallel",
+        sha256(f"{key.affinity_key}\0{request_scope_id}".encode()).hexdigest(),
+        key.api_key_id,
+    )
+    _log_http_bridge_event(
+        "unanchored_parallel_fork",
+        key,
+        account_id=None,
+        model=request_model,
+        detail=f"reason={reason}",
+        cache_key_family=key.affinity_kind,
+        model_class=_extract_model_class(request_model) if request_model else None,
+        owner_check_applied=False,
+    )
+    return fork_key
+
+
+def _http_bridge_request_needs_unanchored_handoff(
+    key: "_HTTPBridgeSessionKey",
+    incoming_turn_state: str | None,
+    previous_response_id: str | None,
+    forwarded_request: bool,
+    forwarded_original_request_unanchored: bool,
+) -> bool:
+    if forwarded_request:
+        return forwarded_original_request_unanchored
+    return key.affinity_kind == "session_header" and incoming_turn_state is None and previous_response_id is None
+
+
+def _reserve_http_bridge_unanchored_handoff(
+    session: "_HTTPBridgeSession",
+    *,
+    request_scope_id: str,
+) -> None:
+    current_reservation = getattr(session, "unanchored_reservation_id", None)
+    if current_reservation is not None and current_reservation != request_scope_id:
+        raise ProxyResponseError(
+            409,
+            openai_error(
+                "bridge_session_reserved",
+                "HTTP responses session bridge is reserved by another request",
+                error_type="server_error",
+            ),
+        )
+    session.unanchored_reservation_id = request_scope_id
+
+
+def _release_http_bridge_unanchored_handoff(
+    session: "_HTTPBridgeSession",
+    *,
+    request_scope_id: str,
+) -> None:
+    if session.unanchored_reservation_id == request_scope_id:
+        session.unanchored_reservation_id = None
+
+
+async def _refresh_reused_http_bridge_session_with_handoff(
+    service: "_HTTPBridgeServiceProtocol",
+    session: "_HTTPBridgeSession",
+    *,
+    key: "_HTTPBridgeSessionKey",
+    request_scope_id: str,
+    reserve_handoff: bool,
+) -> None:
+    if reserve_handoff:
+        _reserve_http_bridge_unanchored_handoff(session, request_scope_id=request_scope_id)
+    try:
+        await service._refresh_durable_http_bridge_session(session)
+        _log_http_bridge_event(
+            "reuse",
+            key,
+            account_id=session.account.id,
+            model=session.request_model,
+            pending_count=service._http_bridge_pending_count_nowait(session, context="reuse_log"),
+            cache_key_family=key.affinity_kind,
+            model_class=_extract_model_class(session.request_model) if session.request_model else None,
+        )
+    except BaseException:
+        if reserve_handoff:
+            _release_http_bridge_unanchored_handoff(session, request_scope_id=request_scope_id)
+        raise
 
 
 def _http_bridge_session_retiring_with_visible_requests(session: "_HTTPBridgeSession") -> bool:
@@ -674,6 +798,65 @@ def _http_bridge_session_matches_preferred_account(
     return session.account.id == preferred_account_id
 
 
+def _http_bridge_session_reusable_for_lookup(
+    *,
+    session: "_HTTPBridgeSession",
+    key: "_HTTPBridgeSessionKey",
+    api_key: ApiKeyData | None,
+    incoming_turn_state: str | None,
+    previous_response_id: str | None,
+    preferred_account_id: str | None,
+    require_preferred_account: bool,
+    service_tier_supported: bool,
+    allow_closed_admission_handoff: bool,
+) -> bool:
+    live_or_retained = _http_bridge_session_account_active(session) and (
+        not session.closed or (allow_closed_admission_handoff and _http_bridge_session_has_admission_waiter(session))
+    )
+    return (
+        live_or_retained
+        and _http_bridge_session_allows_api_key(session, api_key)
+        and _http_bridge_session_reusable_for_request(
+            session=session,
+            key=key,
+            incoming_turn_state=incoming_turn_state,
+            previous_response_id=previous_response_id,
+        )
+        and _http_bridge_session_matches_preferred_account(
+            session=session,
+            previous_response_id=previous_response_id,
+            preferred_account_id=preferred_account_id,
+            require_preferred_account=require_preferred_account,
+        )
+        and service_tier_supported
+    )
+
+
+def _require_http_bridge_bound_account_not_excluded(
+    hard_account_bound: bool,
+    account_id: str,
+    excluded_account_ids: set[str],
+) -> None:
+    if hard_account_bound and account_id in excluded_account_ids:
+        raise ProxyResponseError(
+            502,
+            openai_error(
+                "upstream_unavailable",
+                "HTTP responses session bridge continuity account is excluded",
+            ),
+        )
+
+
+def _raise_http_bridge_incompatible_admission_handoff() -> None:
+    raise ProxyResponseError(
+        503,
+        openai_error(
+            "upstream_unavailable",
+            "HTTP responses session bridge is preserving an incompatible admission handoff",
+        ),
+    )
+
+
 def _make_http_bridge_session_key(
     payload: ResponsesRequest,
     *,
@@ -681,6 +864,7 @@ def _make_http_bridge_session_key(
     affinity: _AffinityPolicy,
     api_key: ApiKeyData | None,
     request_id: str,
+    explicit_prompt_cache_key: str | None = None,
     allow_forwarded_affinity_headers: bool = False,
     forwarded_affinity_kind: str | None = None,
     forwarded_affinity_key: str | None = None,
@@ -705,7 +889,18 @@ def _make_http_bridge_session_key(
     else:
         session_key = _sticky_key_from_session_header(headers)
         if session_key is not None:
-            affinity_key = session_key
+            # One Codex process session can host several independent agent
+            # threads. Codex keeps the process-level session header shared but
+            # gives every thread a stable explicit prompt_cache_key. Keying
+            # only by the header makes a later, non-overlapping child reuse the
+            # parent's upstream conversation and receive the wrong history.
+            session_header_key = _make_http_bridge_session_header_fallback_key(
+                headers=headers,
+                api_key=api_key,
+                explicit_prompt_cache_key=explicit_prompt_cache_key,
+            )
+            assert session_header_key is not None
+            affinity_key = session_header_key.affinity_key
             affinity_kind = "session_header"
             strength = "hard"
         else:
@@ -717,6 +912,27 @@ def _make_http_bridge_session_key(
         affinity_key=affinity_key,
         api_key_id=api_key.id if api_key is not None else None,
         strength=strength,
+    )
+
+
+def _make_http_bridge_session_header_fallback_key(
+    *,
+    headers: Mapping[str, str],
+    api_key: ApiKeyData | None,
+    explicit_prompt_cache_key: str | None,
+) -> _HTTPBridgeSessionKey | None:
+    session_key = _sticky_key_from_session_header(headers)
+    if session_key is None:
+        return None
+    affinity_key = (
+        sha256(f"{session_key}\0{explicit_prompt_cache_key.strip()}".encode()).hexdigest()
+        if isinstance(explicit_prompt_cache_key, str) and explicit_prompt_cache_key.strip()
+        else session_key
+    )
+    return _HTTPBridgeSessionKey(
+        "session_header",
+        affinity_key,
+        api_key.id if api_key is not None else None,
     )
 
 
@@ -791,7 +1007,7 @@ def _http_bridge_has_durable_recovery_anchor(
         return True
     if durable_lookup is None or durable_lookup.latest_response_id is None:
         return False
-    return durable_lookup.canonical_kind in {"turn_state_header", "session_header"}
+    return durable_lookup.canonical_kind in _HARD_HTTP_BRIDGE_AFFINITY_KINDS
 
 
 def _http_bridge_can_local_recover_without_ring(
@@ -911,6 +1127,121 @@ def _http_bridge_durable_lease_ttl_seconds() -> float:
     return float(RING_STALE_THRESHOLD_SECONDS)
 
 
+async def _release_http_bridge_unanchored_handoffs_for_request(
+    service: _HTTPBridgeServiceProtocol,
+    *,
+    request_scope_id: str,
+) -> None:
+    """Fail-safe cleanup for reservations published before request submission."""
+
+    async with service._http_bridge_lock:
+        for session in service._http_bridge_sessions.values():
+            _release_http_bridge_unanchored_handoff(session, request_scope_id=request_scope_id)
+
+
+def _track_alias_registration(session: _HTTPBridgeSession, alias: str, *, turn_state: bool) -> int:
+    session.alias_registration_generation += 1
+    generation = session.alias_registration_generation
+    registrations = (
+        session.turn_state_alias_registration_generations
+        if turn_state
+        else session.previous_response_alias_registration_generations
+    )
+    registrations[alias] = generation
+    return generation
+
+
+async def _persist_http_bridge_turn_state_alias(
+    service: _HTTPBridgeServiceProtocol,
+    session: _HTTPBridgeSession,
+    *,
+    turn_state: str,
+    registration_generation: int,
+    instance_id: str,
+    lease_ttl_seconds: float,
+) -> None:
+    owner_epoch = session.durable_owner_epoch
+    try:
+        registered = await service._durable_bridge.register_turn_state(
+            session_id=session.durable_session_id,
+            api_key_id=session.key.api_key_id,
+            instance_id=instance_id,
+            owner_epoch=owner_epoch,
+            turn_state=turn_state,
+            lease_ttl_seconds=lease_ttl_seconds,
+        )
+    except Exception:
+        logger.warning("Failed to persist durable HTTP bridge turn-state alias", exc_info=True)
+        return
+    if registered is not False:
+        return
+
+    async with service._http_bridge_lock:
+        if session.turn_state_alias_registration_generations.get(turn_state) != registration_generation:
+            return
+        session.turn_state_alias_registration_generations.pop(turn_state, None)
+        session.downstream_turn_state_aliases.discard(turn_state)
+        if session.downstream_turn_state == turn_state:
+            session.downstream_turn_state = None
+        alias_key = _http_bridge_turn_state_alias_key(turn_state, session.key.api_key_id)
+        current_session = service._http_bridge_sessions.get(session.key)
+        current_generation_owns_alias = (
+            current_session is not None
+            and current_session is not session
+            and turn_state in current_session.downstream_turn_state_aliases
+        )
+        if not current_generation_owns_alias and service._http_bridge_turn_state_index.get(alias_key) == session.key:
+            service._http_bridge_turn_state_index.pop(alias_key, None)
+
+
+async def _persist_http_bridge_previous_response_alias(
+    service: _HTTPBridgeServiceProtocol,
+    session: _HTTPBridgeSession,
+    *,
+    response_id: str,
+    registration_generation: int,
+    input_item_count: int | None,
+    input_full_fingerprint: str | None,
+    instance_id: str,
+    lease_ttl_seconds: float,
+) -> None:
+    owner_epoch = session.durable_owner_epoch
+    try:
+        registered = await service._durable_bridge.register_previous_response_id(
+            session_id=session.durable_session_id,
+            api_key_id=session.key.api_key_id,
+            instance_id=instance_id,
+            owner_epoch=owner_epoch,
+            response_id=response_id,
+            lease_ttl_seconds=lease_ttl_seconds,
+            input_item_count=input_item_count,
+            input_full_fingerprint=input_full_fingerprint,
+        )
+    except Exception:
+        logger.warning("Failed to persist durable HTTP bridge previous_response_id alias", exc_info=True)
+        return
+    if registered is not False:
+        return
+
+    async with service._http_bridge_lock:
+        if session.previous_response_alias_registration_generations.get(response_id) != registration_generation:
+            return
+        session.previous_response_alias_registration_generations.pop(response_id, None)
+        session.previous_response_ids.discard(response_id)
+        alias_key = _http_bridge_previous_response_alias_key(response_id, session.key.api_key_id)
+        current_session = service._http_bridge_sessions.get(session.key)
+        current_generation_owns_alias = (
+            current_session is not None
+            and current_session is not session
+            and response_id in current_session.previous_response_ids
+        )
+        if (
+            not current_generation_owns_alias
+            and service._http_bridge_previous_response_index.get(alias_key) == session.key
+        ):
+            service._http_bridge_previous_response_index.pop(alias_key, None)
+
+
 def _forwarded_http_bridge_session_key(
     headers: Mapping[str, str],
     api_key: ApiKeyData | None,
@@ -923,7 +1254,7 @@ def _forwarded_http_bridge_session_key(
     if affinity_kind is None or affinity_key is None:
         return None
     strength: Literal["hard", "soft"]
-    if affinity_kind in {"turn_state_header", "session_header"}:
+    if affinity_kind in _HARD_HTTP_BRIDGE_AFFINITY_KINDS:
         strength = "hard"
     else:
         strength = "soft"

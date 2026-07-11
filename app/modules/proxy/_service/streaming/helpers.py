@@ -453,7 +453,7 @@ def _classify_upstream_close(
     *,
     response_events_seen: int,
 ) -> Literal["transient", "rejected"]:
-    if close_code in {1003, 1007, 1008} and response_events_seen == 0:
+    if close_code in {1000, 1003, 1007, 1008} and response_events_seen == 0:
         return "rejected"
     return "transient"
 

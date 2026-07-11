@@ -42,9 +42,7 @@ logger = logging.getLogger(__name__)
 
 
 class _OAuthClientPort(Protocol):
-    async def exchange_authorization_code(
-        self, *, code: str, code_verifier: str, redirect_uri: str
-    ) -> Any: ...
+    async def exchange_authorization_code(self, *, code: str, code_verifier: str, redirect_uri: str) -> Any: ...
 
 
 class _AuthManagerPort(Protocol):
@@ -227,10 +225,7 @@ class ClaudeOAuthService:
             authorization_url=authorization_url,
             state_token=state_token,
             expires_in_seconds=expires_in_seconds,
-            callback_instructions=(
-                "Open the URL, authorize, then copy the code from claude.ai "
-                "and paste it here."
-            ),
+            callback_instructions=("Open the URL, authorize, then copy the code from claude.ai and paste it here."),
             redirect_uri=redirect_uri,
         )
 
@@ -281,9 +276,7 @@ class ClaudeOAuthService:
         self._maybe_expire_locked(flow)
         if flow.status != "pending":
             if flow.error_code == "flow_expired":
-                raise ClaudeOauthFlowError(
-                    "flow_expired", flow.error_message or "Flow expired.", http_status=410
-                )
+                raise ClaudeOauthFlowError("flow_expired", flow.error_message or "Flow expired.", http_status=410)
             raise ClaudeOauthFlowError(
                 "flow_not_pending",
                 flow.error_message or "Flow is not pending.",
@@ -313,9 +306,7 @@ class ClaudeOAuthService:
                 "claude.oauth.flow.callback",
                 extra={"flow_id": flow.flow_id, "status": "error", "error_code": flow.error_code},
             )
-            raise ClaudeOauthFlowError(
-                "invalid_grant", "Anthropic rejected the code.", http_status=502
-            ) from exc
+            raise ClaudeOauthFlowError("invalid_grant", "Anthropic rejected the code.", http_status=502) from exc
         except ClaudeUpstreamError as exc:
             flow.status = "error"
             flow.error_code = "anthropic_unreachable"
@@ -331,8 +322,7 @@ class ClaudeOAuthService:
             flow.status = "error"
             flow.error_code = "id_token_missing"
             flow.error_message = (
-                "Anthropic did not return an id_token. Use the manual paste "
-                "option to add this account."
+                "Anthropic did not return an id_token. Use the manual paste option to add this account."
             )
             flow.finished_at = self._now()
             raise ClaudeOauthFlowError(
@@ -422,9 +412,7 @@ class ClaudeOAuthService:
         if expired and flow.status == "pending":
             flow.status = "error"
             flow.error_code = "flow_expired"
-            flow.error_message = (
-                "Authorization request expired; please start a new flow."
-            )
+            flow.error_message = "Authorization request expired; please start a new flow."
             flow.finished_at = self._now()
 
 
@@ -446,6 +434,7 @@ def _serialize_claude_account(account: Any) -> dict[str, Any]:
     so the OAuth callback response shape matches the manual-paste response shape.
     Plaintext tokens SHALL NOT be serialized.
     """
+
     def _iso(value: Any) -> str | None:
         if value is None:
             return None

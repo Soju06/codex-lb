@@ -116,9 +116,7 @@ def make_stubbed_oauth(app_instance):
             try:
                 repo = SqlClaudeAccountRepository(session)
                 manager = ClaudeAuthManager(repo=repo)
-                oauth_client = ClaudeOAuthClient(
-                    transport=transport, settings=current_settings
-                )
+                oauth_client = ClaudeOAuthClient(transport=transport, settings=current_settings)
                 try:
                     yield ClaudeOAuthService(
                         settings=current_settings,
@@ -144,16 +142,12 @@ def make_stubbed_oauth(app_instance):
                 except Exception:
                     pass
 
-        app_instance.dependency_overrides[
-            oauth_api_module.get_claude_oauth_service
-        ] = _override_service
+        app_instance.dependency_overrides[oauth_api_module.get_claude_oauth_service] = _override_service
         return transport
 
     yield _install
 
-    app_instance.dependency_overrides.pop(
-        oauth_api_module.get_claude_oauth_service, None
-    )
+    app_instance.dependency_overrides.pop(oauth_api_module.get_claude_oauth_service, None)
     _ = base_settings  # silence linter
 
 
@@ -178,9 +172,7 @@ def _assert_error_envelope(body: dict[str, Any], expected_code: str) -> None:
     if isinstance(detail, dict) and "error" in detail:
         err = detail.get("error")
         if isinstance(err, dict) and "code" in err:
-            assert err.get("code") == expected_code, (
-                f"expected code={expected_code}, got {err!r} in {body!r}"
-            )
+            assert err.get("code") == expected_code, f"expected code={expected_code}, got {err!r} in {body!r}"
             return
     # Fallback: the dashboard middleware normalizes the envelope to
     # ``{"error": {"code": "http_XXX", "message": "..."}}`` for any plain
@@ -189,9 +181,7 @@ def _assert_error_envelope(body: dict[str, Any], expected_code: str) -> None:
     err = body.get("error")
     assert isinstance(err, dict), f"missing error envelope: {body!r}"
     assert "code" in err, f"missing error.code in envelope: {body!r}"
-    assert err.get("code") == expected_code, (
-        f"expected code={expected_code}, got {err!r} in {body!r}"
-    )
+    assert err.get("code") == expected_code, f"expected code={expected_code}, got {err!r} in {body!r}"
 
 
 def _stub_success(uuid: str) -> _StubOAuthTransport:
@@ -294,11 +284,7 @@ async def test_callback_id_token_claims_incomplete_returns_400(async_client, mak
 
 @pytest.mark.asyncio
 async def test_callback_invalid_grant_returns_502(async_client, make_stubbed_oauth):
-    make_stubbed_oauth(
-        _StubOAuthTransport(
-            ClaudeAuthError("invalid_grant: {'error': 'invalid_grant'}")
-        )
-    )
+    make_stubbed_oauth(_StubOAuthTransport(ClaudeAuthError("invalid_grant: {'error': 'invalid_grant'}")))
     flow = await _start_flow(async_client)
 
     resp = await async_client.post(
@@ -316,9 +302,7 @@ async def test_callback_invalid_grant_returns_502(async_client, make_stubbed_oau
 
 @pytest.mark.asyncio
 async def test_callback_anthropic_unreachable_returns_502(async_client, make_stubbed_oauth):
-    make_stubbed_oauth(
-        _StubOAuthTransport(ClaudeUpstreamError("upstream 503: outage"))
-    )
+    make_stubbed_oauth(_StubOAuthTransport(ClaudeUpstreamError("upstream 503: outage")))
     flow = await _start_flow(async_client)
 
     resp = await async_client.post(
@@ -404,9 +388,7 @@ async def test_callback_flow_expired_returns_410(async_client, make_stubbed_oaut
 
 
 @pytest.mark.asyncio
-async def test_callback_account_already_exists_returns_409(
-    async_client, make_stubbed_oauth
-):
+async def test_callback_account_already_exists_returns_409(async_client, make_stubbed_oauth):
     """Seed the pool with the same UUID the stub will return, then complete
     a fresh OAuth flow — the callback MUST refuse with 409."""
     seed = await async_client.post(

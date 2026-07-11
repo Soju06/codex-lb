@@ -114,12 +114,14 @@ def _make_service(
 
 def _b64u(payload: str) -> str:
     import base64
+
     return base64.urlsafe_b64encode(payload.encode()).rstrip(b"=").decode("ascii")
 
 
 def _id_token(payload: dict) -> str:
     import base64
     import json
+
     header = base64.urlsafe_b64encode(b'{"alg":"none"}').rstrip(b"=").decode("ascii")
     body = base64.urlsafe_b64encode(json.dumps(payload).encode()).rstrip(b"=").decode("ascii")
     return f"{header}.{body}.fakesig"
@@ -136,9 +138,7 @@ async def test_start_oauth_returns_authorization_url_with_pkce() -> None:
 
     assert resp.flow_id
     assert resp.state_token  # exposed to dashboard session
-    assert resp.authorization_url.startswith(
-        "https://auth.example.test/oauth/authorize?"
-    )
+    assert resp.authorization_url.startswith("https://auth.example.test/oauth/authorize?")
     assert "code_challenge=" in resp.authorization_url
     assert "code_challenge_method=S256" in resp.authorization_url
     assert "state=" in resp.authorization_url
@@ -195,11 +195,13 @@ async def test_complete_oauth_happy_path_creates_account() -> None:
     client.next_result = ClaudeAuthorizationCodeResult(
         access_token="AT",
         refresh_token="RT",
-        id_token=_id_token({
-            "account_id": "acct-1",
-            "email": "u@example.test",
-            "scope": "user:inference",
-        }),
+        id_token=_id_token(
+            {
+                "account_id": "acct-1",
+                "email": "u@example.test",
+                "scope": "user:inference",
+            }
+        ),
         expires_in=3600,
         scope="user:inference",
     )
@@ -246,9 +248,7 @@ async def test_complete_oauth_state_mismatch_returns_error_code() -> None:
 async def test_complete_oauth_flow_not_found() -> None:
     svc, _, _ = _make_service()
     with pytest.raises(service_module.ClaudeOauthFlowError) as exc:
-        await svc.complete_oauth(
-            flow_id="nope", code="c", state="s"
-        )
+        await svc.complete_oauth(flow_id="nope", code="c", state="s")
     assert exc.value.code == "flow_not_found"
 
 
@@ -258,9 +258,7 @@ async def test_complete_oauth_invalid_grant_propagates_as_upstream_error() -> No
     client.next_error = ClaudeAuthError("invalid_grant: bad")
 
     with pytest.raises(service_module.ClaudeOauthFlowError) as exc:
-        await svc.complete_oauth(
-            flow_id=started.flow_id, code="C", state=started.state_token
-        )
+        await svc.complete_oauth(flow_id=started.flow_id, code="C", state=started.state_token)
     assert exc.value.code == "invalid_grant"
 
 
@@ -270,9 +268,7 @@ async def test_complete_oauth_anthropic_5xx_propagates_as_unreachable() -> None:
     client.next_error = ClaudeUpstreamError("upstream 503")
 
     with pytest.raises(service_module.ClaudeOauthFlowError) as exc:
-        await svc.complete_oauth(
-            flow_id=started.flow_id, code="C", state=started.state_token
-        )
+        await svc.complete_oauth(flow_id=started.flow_id, code="C", state=started.state_token)
     assert exc.value.code == "anthropic_unreachable"
 
 
@@ -280,16 +276,16 @@ async def test_complete_oauth_account_already_exists_returns_409_error() -> None
     svc, client, mgr = _make_service()
     started = await svc.start_oauth()
     client.next_result = ClaudeAuthorizationCodeResult(
-        access_token="AT", refresh_token="RT",
+        access_token="AT",
+        refresh_token="RT",
         id_token=_id_token({"account_id": "dup"}),
-        expires_in=3600, scope="x",
+        expires_in=3600,
+        scope="x",
     )
     mgr.next_error = ClaudeAccountAlreadyExists("dup")
 
     with pytest.raises(service_module.ClaudeOauthFlowError) as exc:
-        await svc.complete_oauth(
-            flow_id=started.flow_id, code="C", state=started.state_token
-        )
+        await svc.complete_oauth(flow_id=started.flow_id, code="C", state=started.state_token)
     assert exc.value.code == "account_already_exists"
 
 
@@ -297,14 +293,15 @@ async def test_complete_oauth_id_token_missing_returns_error_code() -> None:
     svc, client, _ = _make_service()
     started = await svc.start_oauth()
     client.next_result = ClaudeAuthorizationCodeResult(
-        access_token="AT", refresh_token="RT", id_token=None,
-        expires_in=3600, scope="x",
+        access_token="AT",
+        refresh_token="RT",
+        id_token=None,
+        expires_in=3600,
+        scope="x",
     )
 
     with pytest.raises(service_module.ClaudeOauthFlowError) as exc:
-        await svc.complete_oauth(
-            flow_id=started.flow_id, code="C", state=started.state_token
-        )
+        await svc.complete_oauth(flow_id=started.flow_id, code="C", state=started.state_token)
     assert exc.value.code == "id_token_missing"
 
 
@@ -313,15 +310,15 @@ async def test_complete_oauth_id_token_claims_incomplete_returns_error_code() ->
     started = await svc.start_oauth()
     # id_token present but no claude_account_uuid-derivable claim
     client.next_result = ClaudeAuthorizationCodeResult(
-        access_token="AT", refresh_token="RT",
+        access_token="AT",
+        refresh_token="RT",
         id_token=_id_token({"email": "only@example.test"}),
-        expires_in=3600, scope="x",
+        expires_in=3600,
+        scope="x",
     )
 
     with pytest.raises(service_module.ClaudeOauthFlowError) as exc:
-        await svc.complete_oauth(
-            flow_id=started.flow_id, code="C", state=started.state_token
-        )
+        await svc.complete_oauth(flow_id=started.flow_id, code="C", state=started.state_token)
     assert exc.value.code == "id_token_claims_incomplete"
 
 
@@ -329,17 +326,17 @@ async def test_complete_oauth_flow_already_terminal_returns_not_pending() -> Non
     svc, client, _ = _make_service()
     started = await svc.start_oauth()
     client.next_result = ClaudeAuthorizationCodeResult(
-        access_token="AT", refresh_token="RT",
+        access_token="AT",
+        refresh_token="RT",
         id_token=_id_token({"account_id": "x"}),
-        expires_in=3600, scope="x",
+        expires_in=3600,
+        scope="x",
     )
     await svc.complete_oauth(flow_id=started.flow_id, code="C", state=started.state_token)
 
     # Second callback against the same flow.
     with pytest.raises(service_module.ClaudeOauthFlowError) as exc:
-        await svc.complete_oauth(
-            flow_id=started.flow_id, code="C2", state=started.state_token
-        )
+        await svc.complete_oauth(flow_id=started.flow_id, code="C2", state=started.state_token)
     assert exc.value.code == "flow_not_pending"
 
 
@@ -352,7 +349,8 @@ async def test_complete_oauth_logs_no_secrets(caplog: pytest.LogCaptureFixture) 
         access_token="SECRET_AT",
         refresh_token="SECRET_RT",
         id_token=_id_token({"account_id": "x"}),
-        expires_in=3600, scope="x",
+        expires_in=3600,
+        scope="x",
     )
     await svc.complete_oauth(flow_id=started.flow_id, code="SECRET_CODE", state=started.state_token)
 

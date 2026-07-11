@@ -58,9 +58,7 @@ class _FakeService:
         assert self.status_payload is not None
         return self.status_payload
 
-    async def complete_oauth(
-        self, *, flow_id: str, code: str, state: str
-    ) -> ClaudeOauthCallbackResponse:
+    async def complete_oauth(self, *, flow_id: str, code: str, state: str) -> ClaudeOauthCallbackResponse:
         self.last_callback_flow_id = flow_id
         self.last_callback_code = code
         self.last_callback_state = state
@@ -158,13 +156,15 @@ def test_callback_happy_path(app_with_fake_service) -> None:
     client, fake = app_with_fake_service
     fake.callback_payload = ClaudeOauthCallbackResponse(
         status="success",
-        account=ClaudeAccountResponse.model_validate({
-            "id": "claude-uuid-1",
-            "claude_account_uuid": "uuid-1",
-            "user_email": "u@example.test",
-            "is_active": True,
-            "created_at": datetime.now(timezone.utc),
-        }),
+        account=ClaudeAccountResponse.model_validate(
+            {
+                "id": "claude-uuid-1",
+                "claude_account_uuid": "uuid-1",
+                "user_email": "u@example.test",
+                "is_active": True,
+                "created_at": datetime.now(timezone.utc),
+            }
+        ),
     )
     resp = client.post(
         "/api/claude/oauth/callback",

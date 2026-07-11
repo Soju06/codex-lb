@@ -165,15 +165,11 @@ def stubbed_oauth_transport(app_instance):
             except Exception:
                 pass
 
-    app_instance.dependency_overrides[
-        oauth_api_module.get_claude_oauth_service
-    ] = _override_service
+    app_instance.dependency_overrides[oauth_api_module.get_claude_oauth_service] = _override_service
     try:
         yield transport
     finally:
-        app_instance.dependency_overrides.pop(
-            oauth_api_module.get_claude_oauth_service, None
-        )
+        app_instance.dependency_overrides.pop(oauth_api_module.get_claude_oauth_service, None)
 
 
 # ---------------------------------------------------------------------------
@@ -182,18 +178,14 @@ def stubbed_oauth_transport(app_instance):
 
 
 @pytest.mark.asyncio
-async def test_oauth_link_flow_creates_account_and_does_not_leak_tokens(
-    async_client, stubbed_oauth_transport
-):
+async def test_oauth_link_flow_creates_account_and_does_not_leak_tokens(async_client, stubbed_oauth_transport):
     # 1) Start the flow.
     start = await async_client.post("/api/claude/oauth/start", json={})
     assert start.status_code == 200
     start_payload = start.json()
     assert start_payload["flowId"]
     assert start_payload["stateToken"]
-    assert start_payload["authorizationUrl"].startswith(
-        "https://platform.claude.com/oauth/authorize"
-    )
+    assert start_payload["authorizationUrl"].startswith("https://platform.claude.com/oauth/authorize")
     assert start_payload["expiresInSeconds"] > 0
     assert start_payload["callbackInstructions"]
     assert start_payload["redirectUri"]
@@ -204,9 +196,7 @@ async def test_oauth_link_flow_creates_account_and_does_not_leak_tokens(
     state_token = start_payload["stateToken"]
 
     # 2) Status is pending mid-flight.
-    status = await async_client.get(
-        "/api/claude/oauth/status", params={"flowId": flow_id}
-    )
+    status = await async_client.get("/api/claude/oauth/status", params={"flowId": flow_id})
     assert status.status_code == 200
     status_payload = status.json()
     assert status_payload["status"] == "pending"
@@ -229,9 +219,9 @@ async def test_oauth_link_flow_creates_account_and_does_not_leak_tokens(
     listing = await async_client.get("/api/claude/accounts")
     assert listing.status_code == 200
     listing_payload = listing.json()
-    assert any(
-        row["claudeAccountUuid"] == "acct-integration" for row in listing_payload
-    ), f"new account missing from listing: {listing_payload!r}"
+    assert any(row["claudeAccountUuid"] == "acct-integration" for row in listing_payload), (
+        f"new account missing from listing: {listing_payload!r}"
+    )
 
     # 4a) Token-leak regression guard: the literal paste-time values MUST
     # NOT appear anywhere in the admin responses.
@@ -260,9 +250,7 @@ async def test_oauth_link_flow_creates_account_and_does_not_leak_tokens(
 async def test_oauth_flow_status_unknown_id_returns_error_code(async_client):
     """The contract says an unknown flow id returns 200 with
     ``status: "error", error_code: "flow_not_found"`` — NOT a 404."""
-    status = await async_client.get(
-        "/api/claude/oauth/status", params={"flowId": "does-not-exist"}
-    )
+    status = await async_client.get("/api/claude/oauth/status", params={"flowId": "does-not-exist"})
     assert status.status_code == 200
     payload = status.json()
     assert payload["status"] == "error"

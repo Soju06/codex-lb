@@ -64,12 +64,14 @@ def _make_jwt(payload: dict) -> str:
 
 
 def test_decode_id_token_account_id_claim() -> None:
-    jwt = _make_jwt({
-        "account_id": "acct-uuid-1",
-        "email": "a@example.test",
-        "organization_id": "org-uuid-1",
-        "scope": "user:profile user:inference",
-    })
+    jwt = _make_jwt(
+        {
+            "account_id": "acct-uuid-1",
+            "email": "a@example.test",
+            "organization_id": "org-uuid-1",
+            "scope": "user:profile user:inference",
+        }
+    )
     claims = decode_id_token(jwt)
     assert isinstance(claims, ClaudeOauthClaims)
     assert claims.claude_account_uuid == "acct-uuid-1"
@@ -79,12 +81,14 @@ def test_decode_id_token_account_id_claim() -> None:
 
 
 def test_decode_id_token_namespaced_claim_fallback() -> None:
-    jwt = _make_jwt({
-        "https://api.anthropic.com/account_id": "acct-uuid-2",
-        "https://api.anthropic.com/email": "b@example.test",
-        "https://api.anthropic.com/organization_id": "org-uuid-2",
-        "scp": "user:inference",
-    })
+    jwt = _make_jwt(
+        {
+            "https://api.anthropic.com/account_id": "acct-uuid-2",
+            "https://api.anthropic.com/email": "b@example.test",
+            "https://api.anthropic.com/organization_id": "org-uuid-2",
+            "scp": "user:inference",
+        }
+    )
     claims = decode_id_token(jwt)
     assert claims.claude_account_uuid == "acct-uuid-2"
     assert claims.user_email == "b@example.test"

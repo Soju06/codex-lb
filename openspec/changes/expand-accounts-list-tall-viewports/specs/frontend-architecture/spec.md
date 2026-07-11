@@ -3,18 +3,22 @@
 ### Requirement: Accounts list uses available tall-viewport space
 
 The Accounts page MUST size its scrollable account rows from the available
-viewport height without imposing a smaller fixed height ceiling. The search,
-filter, sort, help, and Add account controls MUST remain outside the rows scroll
-region, and a list longer than the available region MUST continue to scroll
-internally. When the controls and rows require less height than the selected
-account details, the left card MUST remain content-sized instead of stretching
-an empty bordered area to the bottom of the details column.
+viewport height without imposing a smaller fixed height ceiling. The bound MUST
+leave the page controls and fixed status bar visible, so account rows cannot
+extend below the viewport even when the selected-account detail panel makes the
+page taller. The search, filter, sort, help, and Add account controls MUST
+remain outside the rows scroll region, and a list longer than the available
+region MUST continue to scroll internally. When the controls and rows require
+less height than the selected account details, the left card MUST remain
+content-sized instead of stretching an empty bordered area to the bottom of the
+details column.
 
 #### Scenario: Tall desktop viewport expands the rows region
 
 - **WHEN** the Accounts page renders a long account list in a 1200px-tall desktop viewport
 - **THEN** the account rows region is taller than 32rem
 - **AND** the region uses the otherwise-empty space beneath the list controls
+- **AND** the final visible account row region ends above the fixed status bar
 
 #### Scenario: Shorter account list does not stretch its card
 

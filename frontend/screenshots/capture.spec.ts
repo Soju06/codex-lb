@@ -189,6 +189,7 @@ test("accounts list keeps many rows in an internal scroll region", async ({ page
   const scrollRegion = page.getByTestId("account-list-scroll-region");
   const listCard = page.getByTestId("accounts-list-card");
   const addAccountButton = page.getByRole("button", { name: "Add account" });
+  const statusBar = page.locator("footer");
 
   await expect(addAccountButton).toBeVisible();
   const initialDimensions = await scrollRegion.evaluate((element) => ({
@@ -199,11 +200,13 @@ test("accounts list keeps many rows in an internal scroll region", async ({ page
   expect(initialDimensions.scrollHeight).toBeGreaterThan(initialDimensions.clientHeight);
   const listCardBox = await listCard.boundingBox();
   const scrollRegionBox = await scrollRegion.boundingBox();
-  if (!listCardBox || !scrollRegionBox) {
-    throw new Error("Accounts list card or scroll region is not measurable");
+  const statusBarBox = await statusBar.boundingBox();
+  if (!listCardBox || !scrollRegionBox || !statusBarBox) {
+    throw new Error("Accounts list card, scroll region, or status bar is not measurable");
   }
   const bottomGap = listCardBox.y + listCardBox.height - (scrollRegionBox.y + scrollRegionBox.height);
   expect(bottomGap).toBeLessThanOrEqual(18);
+  expect(scrollRegionBox.y + scrollRegionBox.height).toBeLessThanOrEqual(statusBarBox.y - 8);
   expect(await scrollRegion.evaluate((element) => element.scrollTop)).toBe(0);
 
   const reachedBottom = await scrollRegion.evaluate((element) => {

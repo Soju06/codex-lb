@@ -480,7 +480,7 @@ describe("AccountList", () => {
 
     expect(screen.getByTestId("account-list-scroll-region")).toHaveClass(
       "overflow-y-auto",
-      "max-h-[calc(100dvh-16rem)]",
+      "max-h-[calc(100dvh-23rem)]",
     );
     expect(screen.getByTestId("account-list-scroll-region")).not.toHaveClass(
       "lg:max-h-none",

@@ -749,7 +749,6 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_insta
                     custom_tool_output,
                     {"role": "user", "content": [{"type": "input_text", "text": "hi"}]},
                 ],
-                "tools": [],
                 "reasoning": {"effort": "high"},
                 "client_metadata": {
                     "x-codex-turn-metadata": '{"turn_id":"turn_123","sandbox":"workspace-write"}',
@@ -775,6 +774,147 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_insta
     assert log["status"] == "success"
     assert log["input_tokens"] == 3
     assert log["output_tokens"] == 5
+
+
+def test_backend_responses_websocket_forwards_client_tools_byte_identical(app_instance, monkeypatch):
+    # Regression for issue #1184: client-sent top-level tools must reach the
+    # upstream ``response.create`` frame byte-identical — array order, object
+    # key order, unknown keys, and array-value order all preserved. The
+    # fixture mirrors the gpt-5.6 ``multi_agent_version: v2`` reserved
+    # collaboration namespace tool (codex-rs rust-v0.144.1): ``strict: false``,
+    # a non-standard ``encrypted`` marker, non-alphabetical ``required`` order,
+    # and leading whitespace in the description.
+    upstream_messages = [
+        _FakeUpstreamMessage(
+            "text",
+            text=json.dumps(
+                {
+                    "type": "response.created",
+                    "response": {"id": "resp_ws_tools_bytes", "object": "response", "status": "in_progress"},
+                },
+                separators=(",", ":"),
+            ),
+        ),
+        _FakeUpstreamMessage(
+            "text",
+            text=json.dumps(
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_ws_tools_bytes",
+                        "object": "response",
+                        "status": "completed",
+                        "usage": {"input_tokens": 3, "output_tokens": 5, "total_tokens": 8},
+                    },
+                },
+                separators=(",", ":"),
+            ),
+        ),
+    ]
+    fake_upstream = _FakeUpstreamWebSocket(upstream_messages)
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(authorization: str | None, *, request: object | None = None):
+        del authorization, request
+        return None
+
+    async def fake_connect_proxy_websocket(
+        self,
+        headers,
+        *,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset,
+        prefer_earlier_reset_window,
+        routing_strategy,
+        model,
+        request_state,
+        api_key,
+        client_send_lock,
+        websocket,
+    ):
+        del (
+            self,
+            headers,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset,
+            prefer_earlier_reset_window,
+            routing_strategy,
+            model,
+            request_state,
+            api_key,
+            client_send_lock,
+            websocket,
+        )
+        return SimpleNamespace(id="acct_ws_tools_bytes", codex_installation_id="account-installation"), fake_upstream
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+
+    client_tools = [
+        {
+            "type": "namespace",
+            "name": "collaboration",
+            "description": "Tools for spawning and managing sub-agents.",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "spawn_agent",
+                    "strict": False,
+                    "description": "\n        \n        Spawn a sub-agent for the given task.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "message": {"type": "string", "encrypted": True},
+                            "task_name": {"type": "string"},
+                        },
+                        "required": ["task_name", "message"],
+                        "additionalProperties": False,
+                    },
+                }
+            ],
+        },
+        {
+            "type": "function",
+            "name": "zeta_tool",
+            "parameters": {"required": [], "type": "object", "properties": {}},
+            "description": "later",
+        },
+    ]
+    request_payload = {
+        "type": "response.create",
+        "model": "gpt-5.6",
+        "instructions": "hi",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+        "tools": client_tools,
+        "stream": True,
+    }
+
+    with TestClient(app_instance) as client:
+        with client.websocket_connect("/backend-api/codex/responses") as websocket:
+            websocket.send_text(json.dumps(request_payload))
+            first = json.loads(websocket.receive_text())
+            second = json.loads(websocket.receive_text())
+
+    assert first["type"] == "response.created"
+    assert second["type"] == "response.completed"
+    assert len(fake_upstream.sent_text) == 1
+    frame = fake_upstream.sent_text[0]
+    expected_tools_bytes = '"tools":' + json.dumps(client_tools, ensure_ascii=True, separators=(",", ":"))
+    assert expected_tools_bytes in frame
 
 
 def test_backend_responses_websocket_lite_marker_requires_previous_response_linkage(app_instance, monkeypatch):
@@ -2109,7 +2249,6 @@ def test_v1_responses_websocket_reuses_upstream_for_sequential_requests(app_inst
                 "model": "gpt-5.4",
                 "instructions": "",
                 "input": [{"role": "user", "content": [{"type": "input_text", "text": "first"}]}],
-                "tools": [],
                 "store": False,
                 "include": [],
                 "prompt_cache_key": "thread_a",
@@ -2119,7 +2258,6 @@ def test_v1_responses_websocket_reuses_upstream_for_sequential_requests(app_inst
                 "model": "gpt-5.5",
                 "instructions": "",
                 "input": [{"role": "user", "content": [{"type": "input_text", "text": "second"}]}],
-                "tools": [],
                 "store": False,
                 "include": [],
                 "prompt_cache_key": "thread_b",
@@ -2637,7 +2775,6 @@ def test_backend_responses_websocket_forwards_previous_response_id(app_instance,
                 "model": "gpt-5.4",
                 "instructions": "",
                 "input": [{"role": "user", "content": [{"type": "input_text", "text": "continue"}]}],
-                "tools": [],
                 "store": False,
                 "include": [],
                 "previous_response_id": "resp_prev_123",
@@ -2822,7 +2959,6 @@ def test_backend_responses_websocket_injects_interrupted_custom_tool_output_on_f
                 "model": "gpt-5.4",
                 "instructions": "",
                 "input": [first_user_message],
-                "tools": [],
                 "store": False,
                 "include": [],
                 "type": "response.create",
@@ -2838,7 +2974,6 @@ def test_backend_responses_websocket_injects_interrupted_custom_tool_output_on_f
                     },
                     interrupted_user_message,
                 ],
-                "tools": [],
                 "store": False,
                 "include": [],
                 "previous_response_id": "resp_ws_custom_interrupt",
@@ -3050,7 +3185,6 @@ def test_backend_responses_websocket_injects_interrupted_custom_tool_output_afte
                 "model": "gpt-5.4",
                 "instructions": "",
                 "input": expected_first_upstream_input,
-                "tools": [],
                 "store": False,
                 "include": [],
                 "type": "response.create",
@@ -3066,7 +3200,6 @@ def test_backend_responses_websocket_injects_interrupted_custom_tool_output_afte
                     },
                     interrupted_user_message,
                 ],
-                "tools": [],
                 "store": False,
                 "include": [],
                 "previous_response_id": first_response_id,
@@ -3271,7 +3404,6 @@ def test_v1_responses_websocket_forwards_previous_response_id(app_instance, monk
                 "model": "gpt-5.4",
                 "instructions": "",
                 "input": [{"role": "user", "content": [{"type": "input_text", "text": "continue"}]}],
-                "tools": [],
                 "store": False,
                 "include": [],
                 "previous_response_id": "resp_prev_v1_123",
@@ -6964,7 +7096,6 @@ def test_backend_responses_websocket_reconnects_after_account_health_failure(app
                 "model": "gpt-5.1",
                 "instructions": "",
                 "input": [{"role": "user", "content": [{"type": "input_text", "text": "first"}]}],
-                "tools": [],
                 "store": False,
                 "include": [],
                 "type": "response.create",
@@ -6978,7 +7109,6 @@ def test_backend_responses_websocket_reconnects_after_account_health_failure(app
                 "model": "gpt-5.2",
                 "instructions": "",
                 "input": [{"role": "user", "content": [{"type": "input_text", "text": "second"}]}],
-                "tools": [],
                 "store": False,
                 "include": [],
                 "type": "response.create",

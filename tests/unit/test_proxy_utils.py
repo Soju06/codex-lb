@@ -3955,6 +3955,48 @@ def test_log_proxy_request_shape_includes_affinity_metadata(monkeypatch, caplog)
     assert "tools_hash=sha256:" in caplog.text
 
 
+def test_tools_hash_is_insensitive_to_tool_and_key_order():
+    # Wire payloads forward client tool entries byte-preserved (issue #1184),
+    # so the affinity/observability hash must canonicalize locally: tool array
+    # order and object key order must not change the hash (change #228).
+    base = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
+    }
+    payload_one = ResponsesRequest.model_validate(
+        {
+            **base,
+            "tools": [
+                {"type": "function", "name": "b_tool", "parameters": {"type": "object", "properties": {}}},
+                {"type": "function", "name": "a_tool"},
+            ],
+        }
+    )
+    payload_two = ResponsesRequest.model_validate(
+        {
+            **base,
+            "tools": [
+                {"name": "a_tool", "type": "function"},
+                {"parameters": {"properties": {}, "type": "object"}, "name": "b_tool", "type": "function"},
+            ],
+        }
+    )
+    payload_other = ResponsesRequest.model_validate(
+        {
+            **base,
+            "tools": [{"type": "function", "name": "c_tool"}],
+        }
+    )
+
+    hash_one = proxy_service._tools_hash(payload_one)
+    hash_two = proxy_service._tools_hash(payload_two)
+
+    assert hash_one is not None
+    assert hash_one == hash_two
+    assert hash_one != proxy_service._tools_hash(payload_other)
+
+
 def test_log_proxy_request_shape_hashes_prompt_cache_key_without_raw_value(monkeypatch, caplog):
     payload = ResponsesRequest.model_validate(
         {

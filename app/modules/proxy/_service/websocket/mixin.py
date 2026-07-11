@@ -2791,10 +2791,11 @@ class _WebSocketMixin:
                     error_code="stream_incomplete",
                     error_message=_upstream_websocket_disconnect_message(message),
                     api_key=api_key,
-                    websocket=None if sequenced_downstream_replay_refused else websocket,
-                    client_send_lock=None if sequenced_downstream_replay_refused else client_send_lock,
+                    websocket=websocket,
+                    client_send_lock=client_send_lock,
                     response_create_gate=response_create_gate,
                     downstream_activity=downstream_activity,
+                    suppress_sequenced_downstream_errors=sequenced_downstream_replay_refused,
                 )
                 if sequenced_downstream_replay_refused:
                     downstream_activity.mark_disconnected()
@@ -3794,6 +3795,7 @@ class _WebSocketMixin:
         downstream_activity: _DownstreamWebSocketActivity | None = None,
         status: str = "error",
         penalize_account: bool = True,
+        suppress_sequenced_downstream_errors: bool = False,
     ) -> None:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
@@ -3871,7 +3873,13 @@ class _WebSocketMixin:
                     )
                 )
                 await request_state.event_queue.put(None)
-            if websocket is not None and client_send_lock is not None:
+            if (
+                websocket is not None
+                and client_send_lock is not None
+                and not (
+                    suppress_sequenced_downstream_errors and request_state.last_downstream_sequence_number is not None
+                )
+            ):
                 await proxy._emit_websocket_terminal_error(
                     websocket,
                     client_send_lock=client_send_lock,

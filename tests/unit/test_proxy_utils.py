@@ -15644,6 +15644,51 @@ async def test_fail_pending_websocket_requests_penalizes_upstream_stream_drop(mo
     assert request_logs.calls[0]["error_code"] == "stream_incomplete"
 
 
+@pytest.mark.asyncio
+async def test_fail_pending_websocket_requests_only_suppresses_sequenced_downstream_error(monkeypatch):
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    emit_terminal_error = AsyncMock()
+    monkeypatch.setattr(service, "_emit_websocket_terminal_error", emit_terminal_error)
+    monkeypatch.setattr(service, "_release_websocket_request_state_reservation", AsyncMock())
+
+    sequenced = proxy_service._WebSocketRequestState(
+        request_id="ws_req_sequenced_drop",
+        response_id="resp_sequenced_drop",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        last_downstream_sequence_number=5,
+        skip_request_log=True,
+    )
+    unsequenced = proxy_service._WebSocketRequestState(
+        request_id="ws_req_unsequenced_drop",
+        response_id="resp_unsequenced_drop",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        skip_request_log=True,
+    )
+
+    await service._fail_pending_websocket_requests(
+        account_id_value=None,
+        pending_requests=deque([sequenced, unsequenced]),
+        pending_lock=anyio.Lock(),
+        error_code="stream_incomplete",
+        error_message="upstream closed",
+        api_key=None,
+        websocket=cast(WebSocket, SimpleNamespace()),
+        client_send_lock=anyio.Lock(),
+        suppress_sequenced_downstream_errors=True,
+    )
+
+    emit_terminal_error.assert_awaited_once()
+    assert emit_terminal_error.await_args.kwargs["request_state"] is unsequenced
+
+
 async def test_fail_pending_websocket_requests_does_not_penalize_rejected_input_override(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))

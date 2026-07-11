@@ -17,6 +17,178 @@ async def _iter_blocks(*blocks: str) -> AsyncIterator[str]:
         yield block
 
 
+def test_strip_blank_reasoning_comment_preserves_unmatched_whitespace_and_inline_comments() -> None:
+    assert proxy_api_module._strip_blank_html_comment_lines("Need more steps\n") == "Need more steps\n"
+    assert proxy_api_module._strip_blank_html_comment_lines("Hard break  \n") == "Hard break  \n"
+    assert proxy_api_module._strip_blank_html_comment_lines("<!-- -->some text") == "<!-- -->some text"
+    assert proxy_api_module._strip_blank_html_comment_lines("Plan\n\n<!-- -->") == "Plan"
+
+
+@pytest.mark.asyncio
+async def test_normalize_reasoning_summary_stream_removes_split_placeholder_delta() -> None:
+    source = _iter_blocks(
+        proxy_api_module.format_sse_event(
+            {"type": "response.created", "response": {"id": "resp_1", "status": "in_progress", "output": []}}
+        ),
+        proxy_api_module.format_sse_event(
+            {
+                "type": "response.reasoning_summary_text.delta",
+                "item_id": "rs_1",
+                "output_index": 0,
+                "summary_index": 0,
+                "delta": "Plan\n\n<!",
+            }
+        ),
+        proxy_api_module.format_sse_event(
+            {
+                "type": "response.reasoning_summary_text.delta",
+                "item_id": "rs_1",
+                "output_index": 0,
+                "summary_index": 0,
+                "delta": "-- -->",
+            }
+        ),
+        proxy_api_module.format_sse_event(
+            {
+                "type": "response.reasoning_summary_text.done",
+                "item_id": "rs_1",
+                "output_index": 0,
+                "summary_index": 0,
+                "text": "Plan\n\n<!-- -->",
+            }
+        ),
+        proxy_api_module.format_sse_event(
+            {"type": "response.completed", "response": {"id": "resp_1", "status": "completed", "output": []}}
+        ),
+    )
+
+    blocks = [block async for block in proxy_api_module._normalize_public_responses_stream(source)]
+    payloads = [proxy_api_module._parse_sse_payload(block) for block in blocks]
+    deltas = [
+        payload for payload in payloads if payload and payload.get("type") == "response.reasoning_summary_text.delta"
+    ]
+
+    assert [payload["delta"] for payload in deltas] == ["Plan"]
+    assert "<!-- -->" not in "".join(blocks)
+
+
+@pytest.mark.asyncio
+async def test_normalize_reasoning_summary_stream_does_not_delay_less_than_text() -> None:
+    first = proxy_api_module.format_sse_event(
+        {
+            "type": "response.reasoning_summary_text.delta",
+            "item_id": "rs_1",
+            "output_index": 0,
+            "summary_index": 0,
+            "delta": "x < y",
+        }
+    )
+    second = proxy_api_module.format_sse_event(
+        {
+            "type": "response.reasoning_summary_part.added",
+            "item_id": "rs_1",
+            "output_index": 0,
+            "summary_index": 1,
+            "part": {"type": "summary_text", "text": "next"},
+        }
+    )
+
+    blocks = [
+        block async for block in proxy_api_module._normalize_reasoning_summary_stream(_iter_blocks(first, second))
+    ]
+
+    assert blocks == [first, second]
+
+
+@pytest.mark.asyncio
+async def test_normalize_reasoning_summary_stream_keeps_candidate_across_telemetry() -> None:
+    first = proxy_api_module.format_sse_event(
+        {
+            "type": "response.reasoning_summary_text.delta",
+            "item_id": "rs_1",
+            "output_index": 0,
+            "summary_index": 0,
+            "delta": "<",
+        }
+    )
+    second = proxy_api_module.format_sse_event({"type": "codex.rate_limits", "limits": {}})
+
+    blocks = [
+        block async for block in proxy_api_module._normalize_reasoning_summary_stream(_iter_blocks(first, second))
+    ]
+
+    assert blocks == [second, first]
+
+
+@pytest.mark.asyncio
+async def test_normalize_reasoning_summary_stream_removes_split_placeholder_across_telemetry() -> None:
+    first = proxy_api_module.format_sse_event(
+        {
+            "type": "response.reasoning_summary_text.delta",
+            "item_id": "rs_1",
+            "output_index": 0,
+            "summary_index": 0,
+            "delta": "Plan\n\n<!",
+        }
+    )
+    telemetry = proxy_api_module.format_sse_event({"type": "codex.rate_limits", "limits": {}})
+    progress = proxy_api_module.format_sse_event({"type": "response.in_progress", "response": {"id": "resp_1"}})
+    final = proxy_api_module.format_sse_event(
+        {
+            "type": "response.reasoning_summary_text.delta",
+            "item_id": "rs_1",
+            "output_index": 0,
+            "summary_index": 0,
+            "delta": "-- -->",
+        }
+    )
+
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_reasoning_summary_stream(
+            _iter_blocks(first, telemetry, progress, final)
+        )
+    ]
+
+    assert blocks[:2] == [telemetry, progress]
+    payload = proxy_api_module._parse_sse_payload(blocks[-1])
+    assert payload is not None
+    assert payload["delta"] == "Plan"
+    assert "<!-- -->" not in "".join(blocks)
+
+
+@pytest.mark.asyncio
+async def test_normalize_reasoning_summary_stream_cleans_complete_marker_inside_one_delta() -> None:
+    source = proxy_api_module.format_sse_event(
+        {
+            "type": "response.reasoning_summary_text.delta",
+            "item_id": "rs_1",
+            "output_index": 0,
+            "summary_index": 0,
+            "delta": "Plan\n<!-- -->\nNext",
+        }
+    )
+
+    blocks = [block async for block in proxy_api_module._normalize_reasoning_summary_stream(_iter_blocks(source))]
+    payload = proxy_api_module._parse_sse_payload(blocks[0])
+
+    assert payload is not None
+    assert payload["delta"] == "Plan\nNext"
+
+
+def test_normalize_reasoning_summary_part_removes_only_standalone_placeholder() -> None:
+    payload, violation = proxy_api_module._normalize_public_stream_payload(
+        {
+            "type": "response.reasoning_summary_part.done",
+            "part": {"type": "summary_text", "text": "Plan\n\n<!-- -->"},
+        }
+    )
+
+    assert violation is None
+    assert payload is not None
+    assert payload["part"] == {"type": "summary_text", "text": "Plan"}
+
+
 def test_compact_response_output_item_accepts_modeled_output_field() -> None:
     class ModeledCompactPayload(CompactResponsePayload):
         output: list[dict[str, JsonValue]] | None = None

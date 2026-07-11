@@ -11,6 +11,7 @@ import pytest
 from fastapi.responses import JSONResponse
 from sqlalchemy import select, update
 
+import app.core.clients.proxy as core_proxy_module
 import app.modules.api_keys.repository as api_keys_repository_module
 import app.modules.proxy.api as proxy_api
 import app.modules.proxy.load_balancer as load_balancer_module
@@ -2673,6 +2674,75 @@ async def test_api_key_reservation_released_on_compact_upstream_failure(async_cl
     async with SessionLocal() as session:
         repo = ApiKeysRepository(session)
         limits = await repo.get_limits_by_key(key_id)
+        assert len(limits) == 1
+        assert limits[0].current_value == 0
+
+
+@pytest.mark.asyncio
+async def test_api_key_reservation_released_when_compact_image_inlining_exceeds_wire_budget(
+    async_client,
+    monkeypatch,
+):
+    enable = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert enable.status_code == 200
+
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "compact-inline-too-large",
+            "limits": [
+                {"limitType": "total_tokens", "limitWindow": "weekly", "maxValue": 100},
+            ],
+        },
+    )
+    assert created.status_code == 200
+    key = created.json()["key"]
+    key_id = created.json()["id"]
+    await _import_account(async_client, "acc_compact_inline_too_large", "compact-inline-too-large@example.com")
+
+    async def fake_inline(payload_dict, session, connect_timeout):
+        del payload_dict, session, connect_timeout
+        return {
+            "model": _TEST_MODELS[0],
+            "input": [{"role": "user", "content": "data:image/png;base64," + "A" * 500_000}],
+            "parallel_tool_calls": False,
+        }
+
+    def unexpected_upstream_start(**kwargs):
+        del kwargs
+        pytest.fail("oversized transformed compact input must not reach upstream")
+
+    monkeypatch.setattr(core_proxy_module, "_inline_input_image_urls", fake_inline)
+    monkeypatch.setattr(core_proxy_module, "_maybe_log_upstream_request_start", unexpected_upstream_start)
+
+    response = await async_client.post(
+        "/v1/responses/compact",
+        headers={"Authorization": f"Bearer {key}"},
+        json={
+            "model": _TEST_MODELS[0],
+            "instructions": "compact this image",
+            "input": [
+                {
+                    "role": "user",
+                    "content": [{"type": "input_image", "image_url": "https://example.com/image.png"}],
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "responses_compact_input_too_large"
+    assert response.json()["error"]["param"] == "input"
+    async with SessionLocal() as session:
+        limits = await ApiKeysRepository(session).get_limits_by_key(key_id)
         assert len(limits) == 1
         assert limits[0].current_value == 0
 

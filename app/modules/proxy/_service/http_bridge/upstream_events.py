@@ -203,11 +203,54 @@ def _archive_http_bridge_upstream_message(
 
 
 class _HTTPBridgeUpstreamEventsMixin:
+    async def _fail_http_bridge_reader_and_maybe_retire(
+        self: Any,
+        session: "_HTTPBridgeSession",
+        *,
+        error_code: str,
+        error_message: str,
+    ) -> bool:
+        session.closed = True
+        async with session.pending_lock:
+            failed_pending_count = sum(
+                1
+                for request_state in session.pending_requests
+                if _http_bridge_request_counts_against_queue(request_state)
+            )
+            session.queued_request_count = max(0, session.queued_request_count - failed_pending_count)
+        try:
+            await self._fail_pending_websocket_requests(
+                account=session.account,
+                account_id_value=session.account.id,
+                pending_requests=session.pending_requests,
+                pending_lock=session.pending_lock,
+                error_code=error_code,
+                error_message=error_message,
+                api_key=None,
+                response_create_gate=session.response_create_gate,
+            )
+        finally:
+            if session.admission_waiter_count > 0:
+                _log_http_bridge_event(
+                    "retire_deferred_for_admission_waiter",
+                    session.key,
+                    account_id=session.account.id,
+                    model=session.request_model,
+                    pending_count=session.admission_waiter_count,
+                    detail=error_code,
+                    cache_key_family=session.key.affinity_kind,
+                    model_class=_extract_model_class(session.request_model) if session.request_model else None,
+                )
+            else:
+                await self._retire_stale_pending_http_bridge_session(session, detail=error_code)
+        return session.admission_waiter_count == 0
+
     async def _relay_http_bridge_upstream_messages(
         self: Any,
         session: "_HTTPBridgeSession",
     ) -> None:
         runtime_settings = _service_get_settings()
+        relay_upstream = session.upstream
         try:
             while True:
                 receive_timeout = await self._next_websocket_receive_timeout(
@@ -233,25 +276,11 @@ class _HTTPBridgeUpstreamEventsMixin:
                     if retried:
                         continue
                     async with session.lifecycle_lock:
-                        try:
-                            session.closed = True
-                            async with session.pending_lock:
-                                session.queued_request_count = 0
-                            await self._fail_pending_websocket_requests(
-                                account=session.account,
-                                account_id_value=session.account.id,
-                                pending_requests=session.pending_requests,
-                                pending_lock=session.pending_lock,
-                                error_code=receive_timeout.error_code,
-                                error_message=receive_timeout.error_message,
-                                api_key=None,
-                                response_create_gate=session.response_create_gate,
-                            )
-                        finally:
-                            await self._retire_stale_pending_http_bridge_session(
-                                session,
-                                detail=receive_timeout.error_code,
-                            )
+                        await self._fail_http_bridge_reader_and_maybe_retire(
+                            session,
+                            error_code=receive_timeout.error_code,
+                            error_message=receive_timeout.error_message,
+                        )
                     break
 
                 if message.kind == "text" and message.text is not None:
@@ -269,25 +298,11 @@ class _HTTPBridgeUpstreamEventsMixin:
                 if retried:
                     continue
                 async with session.lifecycle_lock:
-                    try:
-                        session.closed = True
-                        async with session.pending_lock:
-                            session.queued_request_count = 0
-                        await self._fail_pending_websocket_requests(
-                            account=session.account,
-                            account_id_value=session.account.id,
-                            pending_requests=session.pending_requests,
-                            pending_lock=session.pending_lock,
-                            error_code="stream_incomplete",
-                            error_message=_upstream_websocket_disconnect_message(message),
-                            api_key=None,
-                            response_create_gate=session.response_create_gate,
-                        )
-                    finally:
-                        await self._retire_stale_pending_http_bridge_session(
-                            session,
-                            detail="stream_incomplete",
-                        )
+                    await self._fail_http_bridge_reader_and_maybe_retire(
+                        session,
+                        error_code="stream_incomplete",
+                        error_message=_upstream_websocket_disconnect_message(message),
+                    )
                 break
         except asyncio.CancelledError:
             raise
@@ -299,27 +314,14 @@ class _HTTPBridgeUpstreamEventsMixin:
                 exc_info=True,
             )
             async with session.lifecycle_lock:
-                try:
-                    session.closed = True
-                    async with session.pending_lock:
-                        session.queued_request_count = 0
-                    await self._fail_pending_websocket_requests(
-                        account=session.account,
-                        account_id_value=session.account.id,
-                        pending_requests=session.pending_requests,
-                        pending_lock=session.pending_lock,
-                        error_code="stream_incomplete",
-                        error_message="HTTP bridge upstream reader crashed before response.completed",
-                        api_key=None,
-                        response_create_gate=session.response_create_gate,
-                    )
-                finally:
-                    await self._retire_stale_pending_http_bridge_session(
-                        session,
-                        detail="reader_crash",
-                    )
+                await self._fail_http_bridge_reader_and_maybe_retire(
+                    session,
+                    error_code="stream_incomplete",
+                    error_message="HTTP bridge upstream reader crashed before response.completed",
+                )
         finally:
-            session.closed = True
+            if session.upstream is relay_upstream:
+                session.closed = True
 
     async def _process_http_bridge_upstream_text(
         self: Any,

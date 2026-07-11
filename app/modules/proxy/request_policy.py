@@ -8,7 +8,12 @@ from app.core.errors import OpenAIErrorEnvelope, openai_error
 from app.core.exceptions import ProxyModelNotAllowed
 from app.core.openai.exceptions import ClientPayloadError
 from app.core.openai.model_registry import ModelRegistry, get_model_registry
-from app.core.openai.requests import ResponsesCompactRequest, ResponsesReasoning, ResponsesRequest
+from app.core.openai.requests import (
+    ResponsesCompactRequest,
+    ResponsesReasoning,
+    ResponsesRequest,
+    responses_input_uses_lite_tools,
+)
 from app.core.openai.strict_schema import (
     validate_strict_function_tool_schema,
     validate_strict_json_schema,
@@ -123,6 +128,8 @@ def validate_model_access(api_key: ApiKeyData | None, model: str | None) -> None
 def apply_api_key_enforcement(
     payload: ResponsesRequest | ResponsesCompactRequest,
     api_key: ApiKeyData | None,
+    *,
+    registry: ModelRegistry | None = None,
 ) -> None:
     normalize_upstream_model_alias(payload)
 
@@ -130,16 +137,30 @@ def apply_api_key_enforcement(
         normalize_unsupported_reasoning_effort(payload)
         return
 
-    if api_key.enforced_model and payload.model != api_key.enforced_model:
-        logger.info(
-            "api_key_model_enforced request_id=%s key_id=%s requested_model=%s enforced_model=%s",
-            get_request_id(),
-            api_key.id,
-            payload.model,
-            api_key.enforced_model,
-        )
+    if api_key.enforced_model:
+        requested_model = payload.model
+        if requested_model != api_key.enforced_model:
+            logger.info(
+                "api_key_model_enforced request_id=%s key_id=%s requested_model=%s enforced_model=%s",
+                get_request_id(),
+                api_key.id,
+                requested_model,
+                api_key.enforced_model,
+            )
         payload.model = api_key.enforced_model
         normalize_upstream_model_alias(payload)
+        if (
+            responses_input_uses_lite_tools(payload.input)
+            and _model_responses_lite_capability(
+                payload.model,
+                registry=registry or get_model_registry(),
+            )
+            is False
+        ):
+            raise ProxyModelNotAllowed(
+                f"API key enforced model '{payload.model}' does not support Responses Lite",
+                code="responses_lite_model_mismatch",
+            )
 
     if api_key.enforced_reasoning_effort is not None:
         requested_effort = payload.reasoning.effort if payload.reasoning else None
@@ -182,6 +203,20 @@ def apply_api_key_enforcement(
                 api_key.enforced_service_tier,
                 effective_service_tier,
             )
+
+
+def _model_responses_lite_capability(
+    model: str,
+    *,
+    registry: ModelRegistry,
+) -> bool | None:
+    normalized_model = model.strip().lower()
+    models = registry.get_models_with_fallback()
+    model_entry = models.get(model) or models.get(normalized_model)
+    if model_entry is None:
+        return None
+    capability = model_entry.raw.get("use_responses_lite")
+    return capability if isinstance(capability, bool) else None
 
 
 # Non-standard reasoning toggles some OpenAI-compatible clients attach

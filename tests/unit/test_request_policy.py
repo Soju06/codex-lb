@@ -6,6 +6,7 @@ from typing import cast
 import pytest
 
 from app.core.exceptions import ProxyModelNotAllowed
+from app.core.openai.model_registry import ModelRegistry
 from app.core.openai.requests import ResponsesRequest
 from app.modules.api_keys.service import ApiKeyData
 from app.modules.proxy.request_policy import apply_api_key_enforcement, validate_model_access
@@ -106,6 +107,79 @@ def test_gpt56_ultra_suffix_is_not_rewritten() -> None:
     assert request.model == "gpt-5.6-sol-ultra"
     assert request.reasoning is None
     assert request.service_tier is None
+
+
+def test_enforced_non_lite_model_rejects_responses_lite_payload() -> None:
+    request = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "",
+            "input": [
+                {
+                    "type": "additional_tools",
+                    "role": "developer",
+                    "tools": [{"type": "custom", "name": "exec"}],
+                }
+            ],
+        }
+    )
+    api_key = cast(
+        ApiKeyData,
+        SimpleNamespace(
+            id="key-enforced-non-lite",
+            enforced_model="gpt-5.5",
+            enforced_reasoning_effort=None,
+            enforced_service_tier=None,
+        ),
+    )
+    registry = cast(
+        ModelRegistry,
+        SimpleNamespace(
+            get_models_with_fallback=lambda: {"gpt-5.5": SimpleNamespace(raw={"use_responses_lite": False})}
+        ),
+    )
+
+    with pytest.raises(ProxyModelNotAllowed, match="does not support Responses Lite") as raised:
+        apply_api_key_enforcement(request, api_key, registry=registry)
+
+    assert raised.value.code == "responses_lite_model_mismatch"
+
+
+def test_alias_equivalent_enforced_non_lite_model_rejects_responses_lite_payload() -> None:
+    request = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.5-extra-high-fast",
+            "instructions": "",
+            "input": [
+                {
+                    "type": "additional_tools",
+                    "role": "developer",
+                    "tools": [{"type": "custom", "name": "exec"}],
+                }
+            ],
+        }
+    )
+    api_key = cast(
+        ApiKeyData,
+        SimpleNamespace(
+            id="key-enforced-alias-equivalent-non-lite",
+            enforced_model="gpt-5.5",
+            enforced_reasoning_effort=None,
+            enforced_service_tier=None,
+        ),
+    )
+    registry = cast(
+        ModelRegistry,
+        SimpleNamespace(
+            get_models_with_fallback=lambda: {"gpt-5.5": SimpleNamespace(raw={"use_responses_lite": False})}
+        ),
+    )
+
+    with pytest.raises(ProxyModelNotAllowed, match="does not support Responses Lite") as raised:
+        apply_api_key_enforcement(request, api_key, registry=registry)
+
+    assert request.model == "gpt-5.5"
+    assert raised.value.code == "responses_lite_model_mismatch"
 
 
 def test_model_access_accepts_allowed_canonical_model_alias() -> None:

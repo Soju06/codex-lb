@@ -7,6 +7,7 @@ from typing import cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.core.openai.exceptions import ClientPayloadError
 from app.core.types import JsonObject, JsonValue
 from app.core.utils.json_guards import is_json_list, is_json_mapping
 
@@ -268,9 +269,27 @@ def extract_input_image_file_references(input_value: JsonValue) -> list[InputIma
     return references
 
 
+def _is_preserved_non_message_directive(item: Mapping[str, JsonValue]) -> bool:
+    # Shared preservation rule: any system/developer-role input item whose type
+    # is present and not "message" must reach upstream byte-identical. It gates
+    # instruction hoisting, input sanitization, and compact trim anchoring.
+    if item.get("role") not in ("system", "developer"):
+        return False
+    item_type = item.get("type")
+    return item_type is not None and item_type != "message"
+
+
 def _sanitize_input_items(input_items: list[JsonValue]) -> list[JsonValue]:
     sanitized_input: list[JsonValue] = []
     for item in input_items:
+        item_mapping = _json_mapping_or_none(item)
+        if item_mapping is not None and _is_preserved_non_message_directive(item_mapping):
+            # Preserved directives are forwarded unchanged; the interleaved
+            # reasoning sanitizer targets assistant-message echo fields and
+            # must not strip keys such as tool_calls or reasoning_content
+            # from a typed directive.
+            sanitized_input.append(item)
+            continue
         sanitized_item = _sanitize_interleaved_reasoning_input_item(item)
         if sanitized_item is None:
             continue
@@ -287,10 +306,7 @@ def _normalize_responses_input_instructions(data: JsonValue) -> JsonValue:
     # Codex deliberately places the Lite tool bundle and base instructions in
     # the input prefix. Keep that wire shape intact instead of lifting its
     # developer message into the top-level ``instructions`` field.
-    if any(
-        (item_mapping := _json_mapping_or_none(item)) is not None and item_mapping.get("type") == "additional_tools"
-        for item in input_value
-    ):
+    if responses_input_uses_lite_tools(input_value):
         return data
 
     instruction_parts: list[str] = []
@@ -300,6 +316,18 @@ def _normalize_responses_input_instructions(data: JsonValue) -> JsonValue:
         item_mapping = _json_mapping_or_none(item)
         if item_mapping is None:
             input_items.append(item)
+            continue
+        # Only hoist actual message items (type omitted or "message"). Non-message
+        # typed system/developer items (e.g. the Codex responses-lite
+        # {"type": "additional_tools", "role": "developer", "tools": [...]} bundle, or
+        # any future typed item) carry no instruction content; hoisting used to drop
+        # them entirely, so pass them through untouched regardless of role.
+        if _is_preserved_non_message_directive(item_mapping):
+            input_items.append(item)
+            # Still counts as a normalization outcome: directive-only inputs
+            # must default top-level ``instructions`` (to "") so the request
+            # validates instead of failing on the required field.
+            changed = True
             continue
         role = item_mapping.get("role")
         if role not in ("system", "developer"):
@@ -327,6 +355,22 @@ def _normalize_responses_input_instructions(data: JsonValue) -> JsonValue:
     normalized["instructions"] = merged_instructions
     normalized["input"] = input_items
     return normalized
+
+
+def _is_responses_lite_input(input_value: list[JsonValue]) -> bool:
+    # Responses Lite requests carry their tool bundle as an input item with
+    # type=additional_tools and deliberately place base instructions as a
+    # developer message in input (with empty top-level instructions). That
+    # shape is exactly what the lite upstream expects, so the instruction
+    # lift must leave the whole request untouched.
+    return any(
+        (mapping := _json_mapping_or_none(item)) is not None and mapping.get("type") == "additional_tools"
+        for item in input_value
+    )
+
+
+def responses_input_uses_lite_tools(input_value: JsonValue) -> bool:
+    return is_json_list(input_value) and _is_responses_lite_input(input_value)
 
 
 def _merge_responses_instructions(existing: str, extra_parts: list[str]) -> str:
@@ -657,6 +701,18 @@ class ResponsesRequest(BaseModel):
 
     def to_payload(self) -> JsonObject:
         payload: MutableJsonObject = self.model_dump(mode="json", exclude_none=True)
+        if "tools" not in self.model_fields_set:
+            # ``tools`` is declared with ``default_factory=list``, so
+            # ``model_dump(exclude_none=True)`` synthesizes an explicit
+            # ``"tools": []`` even when the client omitted the field. Codex
+            # Responses-Lite clients omit top-level ``tools`` entirely (the
+            # bundle rides in the ``additional_tools`` input item), and models
+            # with reserved model tools (e.g. ``collaboration.spawn_agent`` on
+            # gpt-5.6 ``multi_agent_version: v2``) reject any explicit
+            # ``tools`` param that cannot match the reserved schema. Only
+            # forward the field when the client actually sent it — including
+            # an explicit client-sent ``[]``. See issue #1184.
+            payload.pop("tools", None)
         return _strip_unsupported_fields(payload)
 
 
@@ -733,7 +789,11 @@ def _strip_unsupported_fields(payload: MutableJsonObject) -> MutableJsonObject:
     _normalize_service_tier_aliases(payload)
     _sanitize_interleaved_reasoning_input(payload)
     _strip_poisoned_local_compact_fallback_items(payload)
-    _canonicalize_tools(payload)
+    # ``tools`` is deliberately NOT canonicalized here: the wire payload must
+    # forward client tool entries byte-preserved (array order, key order, and
+    # unknown keys untouched) so reserved model tools survive upstream
+    # byte/structural-equality checks. Order-insensitive canonicalization is
+    # cache-affinity/observability-only; see ``canonicalized_tools``.
     for key in _UNSUPPORTED_UPSTREAM_FIELDS:
         payload.pop(key, None)
     return payload
@@ -784,15 +844,18 @@ def _is_poisoned_local_compact_fallback_message(item: JsonValue) -> bool:
     return False
 
 
-def _canonicalize_tools(payload: MutableJsonObject) -> None:
-    tools = payload.get("tools")
-    if not is_json_list(tools):
-        return
-    tool_list = tools
-    if not tool_list:
-        return
-    sorted_tools = sorted(tool_list, key=_tool_sort_key)
-    payload["tools"] = [_sort_keys_recursive(t) for t in sorted_tools]
+def canonicalized_tools(tools: list[JsonValue]) -> list[JsonValue]:
+    """Return an order- and key-order-insensitive canonical form of ``tools``.
+
+    Used only for prompt-cache affinity/observability hashing (change #228):
+    two requests that differ solely in tool array order or object key order
+    hash identically. The result MUST NOT feed the upstream wire payload —
+    outgoing requests forward the client's tool entries byte-preserved (see
+    issue #1184). Array values (e.g. ``parameters.required``) are never
+    reordered; only mapping keys are sorted.
+    """
+    sorted_tools = sorted(tools, key=_tool_sort_key)
+    return [_sort_keys_recursive(t) for t in sorted_tools]
 
 
 def _tool_sort_key(tool: JsonValue) -> str:
@@ -838,16 +901,35 @@ def _trim_compact_input_for_upstream(payload: MutableJsonObject) -> None:
     input_value = payload.get("input")
     if not is_json_list(input_value):
         return
-    token_counts = [_estimated_json_tokens(item) for item in input_value]
-    total_tokens = sum(token_counts)
+    token_counts = [_estimated_json_array_item_tokens(item) for item in input_value]
+    total_tokens = _estimated_json_tokens(input_value)
     if total_tokens <= _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS:
         return
 
     head_count = _compact_trim_prefix_count(token_counts)
     preserved_indices = _compact_state_anchor_indices(input_value)
+    required_indices = set(preserved_indices)
+    if input_value:
+        required_indices.add(len(input_value) - 1)
+    required_indices = _compact_reconciled_tool_call_indices(
+        input_value,
+        required_indices,
+        token_counts=token_counts,
+        token_budget=sum(token_counts),
+        required_indices=required_indices,
+    )
+    required_input = _compact_trimmed_input_with_markers(input_value, token_counts, required_indices)
+    required_tokens = _estimated_json_tokens(required_input)
+    if required_tokens > _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS:
+        raise ClientPayloadError(
+            "Compact input exceeds the upstream size limit and cannot be trimmed "
+            "without removing required state anchors.",
+            param="input",
+            code="responses_compact_input_too_large",
+        )
     selected_indices = set(preserved_indices)
     selected_indices.update(range(head_count))
-    marker_tokens = _estimated_json_tokens(_compact_trim_marker(omitted_items=0, omitted_tokens=0))
+    marker_tokens = _estimated_json_array_item_tokens(_compact_trim_marker(omitted_items=0, omitted_tokens=0))
     selected_tokens = sum(token_counts[index] for index in selected_indices)
     tail_budget = max(0, _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS - selected_tokens - marker_tokens)
     selected_indices.update(
@@ -858,20 +940,96 @@ def _trim_compact_input_for_upstream(payload: MutableJsonObject) -> None:
             token_budget=tail_budget,
         )
     )
+    selected_indices.update(required_indices)
     selected_indices = _compact_reconciled_tool_call_indices(
         input_value,
         selected_indices,
         token_counts=token_counts,
         token_budget=max(0, _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS - marker_tokens),
+        required_indices=required_indices,
     )
-    if len(selected_indices) == len(input_value):
+    selected_indices = _compact_fit_selected_indices_to_wire_budget(
+        input_value,
+        token_counts,
+        selected_indices=selected_indices,
+        required_indices=required_indices,
+    )
+    trimmed_input = (
+        input_value
+        if len(selected_indices) == len(input_value)
+        else _compact_trimmed_input_with_markers(input_value, token_counts, selected_indices)
+    )
+    trimmed_tokens = _estimated_json_tokens(trimmed_input)
+    if trimmed_tokens > _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS:
+        raise ClientPayloadError(
+            "Compact input still exceeds the upstream size limit after retaining required compact context.",
+            param="input",
+            code="responses_compact_input_too_large",
+        )
+    if trimmed_input is input_value:
         return
-    payload["input"] = _compact_trimmed_input_with_markers(input_value, token_counts, selected_indices)
+    payload["input"] = trimmed_input
+
+
+def _compact_fit_selected_indices_to_wire_budget(
+    input_value: list[JsonValue],
+    token_counts: list[int],
+    *,
+    selected_indices: set[int],
+    required_indices: set[int],
+) -> set[int]:
+    """Drop best-effort middle context until the exact serialized input fits."""
+
+    selected = set(selected_indices)
+    optional_indices = sorted(
+        selected - required_indices,
+        key=lambda index: (min(index, len(input_value) - 1 - index), index),
+        reverse=True,
+    )
+    marker_budget = max(
+        0,
+        _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS
+        - _estimated_json_array_item_tokens(_compact_trim_marker(omitted_items=0, omitted_tokens=0)),
+    )
+    for index in optional_indices:
+        candidate_input = _compact_trimmed_input_with_markers(input_value, token_counts, selected)
+        if _estimated_json_tokens(candidate_input) <= _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS:
+            break
+        if index not in selected:
+            continue
+        trial = set(selected)
+        trial.remove(index)
+        trial = _compact_reconciled_tool_call_indices(
+            input_value,
+            trial,
+            token_counts=token_counts,
+            token_budget=marker_budget,
+            required_indices=required_indices,
+            allow_pair_additions=False,
+        )
+        if required_indices <= trial and trial != selected:
+            selected = trial
+    return selected
+
+
+def validate_compact_input_wire_budget(payload: Mapping[str, JsonValue]) -> None:
+    """Reject compact input that exceeds the upstream budget after transformations."""
+
+    input_value = payload.get("input")
+    if not is_json_list(input_value):
+        return
+    if _estimated_json_tokens(input_value) <= _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS:
+        return
+    raise ClientPayloadError(
+        "Compact input exceeds the upstream size limit after preparing the final wire payload.",
+        param="input",
+        code="responses_compact_input_too_large",
+        error_type="invalid_request_error",
+    )
 
 
 def _compact_state_anchor_indices(input_value: list[JsonValue]) -> set[int]:
     preserved_indices: set[int] = set()
-    preserved_call_ids: set[str] = set()
     for index, item in enumerate(input_value):
         if not is_json_mapping(item):
             continue
@@ -885,22 +1043,9 @@ def _compact_state_anchor_indices(input_value: list[JsonValue]) -> set[int]:
                     developer_type = developer_item.get("type")
                     if developer_type is None or developer_type == "message":
                         preserved_indices.add(developer_index)
-        if _compact_item_is_state_anchor(item_mapping):
+        if _is_preserved_non_message_directive(item_mapping):
             preserved_indices.add(index)
-            call_id = item_mapping.get("call_id")
-            if isinstance(call_id, str) and call_id:
-                preserved_call_ids.add(call_id)
-
-    if not preserved_call_ids:
-        return preserved_indices
-    for index, item in enumerate(input_value):
-        if index in preserved_indices or not is_json_mapping(item):
-            continue
-        item_mapping = item
-        if item_mapping.get("type") != "function_call_output":
-            continue
-        call_id = item_mapping.get("call_id")
-        if isinstance(call_id, str) and call_id in preserved_call_ids:
+        if _compact_item_is_state_anchor(item_mapping):
             preserved_indices.add(index)
     return preserved_indices
 
@@ -911,6 +1056,8 @@ def _compact_reconciled_tool_call_indices(
     *,
     token_counts: list[int],
     token_budget: int,
+    required_indices: set[int] | None = None,
+    allow_pair_additions: bool = True,
 ) -> set[int]:
     call_indices_by_id: dict[str, list[int]] = {}
     output_indices_by_id: dict[str, list[int]] = {}
@@ -927,6 +1074,7 @@ def _compact_reconciled_tool_call_indices(
             output_indices_by_id.setdefault(call_id, []).append(index)
 
     reconciled = set(selected_indices)
+    protected_indices = required_indices or set()
     selected_tokens = sum(token_counts[index] for index in reconciled)
 
     def add_indices(indices: Iterable[int]) -> bool:
@@ -942,7 +1090,7 @@ def _compact_reconciled_tool_call_indices(
     def remove_indices(indices: Iterable[int]) -> None:
         nonlocal selected_tokens
         for index in indices:
-            if index in reconciled:
+            if index in reconciled and index not in protected_indices:
                 reconciled.remove(index)
                 selected_tokens -= token_counts[index]
 
@@ -972,6 +1120,8 @@ def _compact_reconciled_tool_call_indices(
             call_index = matching_call_index(call_indices, output_index)
             if call_index is None:
                 remove_indices([output_index])
+            elif not allow_pair_additions and call_index not in reconciled:
+                remove_indices([output_index])
             elif not add_indices([call_index]):
                 remove_indices([output_index])
     for call_id, call_indices in call_indices_by_id.items():
@@ -983,6 +1133,9 @@ def _compact_reconciled_tool_call_indices(
             if not matched_output_indices:
                 remove_indices([call_index])
                 continue
+            if not allow_pair_additions and any(index not in reconciled for index in matched_output_indices):
+                remove_indices([call_index, *matched_output_indices])
+                continue
             if not add_indices(matched_output_indices):
                 remove_indices([call_index, *matched_output_indices])
     return reconciled
@@ -990,6 +1143,10 @@ def _compact_reconciled_tool_call_indices(
 
 def _compact_item_is_state_anchor(item: Mapping[str, JsonValue]) -> bool:
     item_type = item.get("type")
+    if item_type == "additional_tools":
+        return True
+    if item_type in {None, "message"} and item.get("role") in {"system", "developer"}:
+        return True
     if item_type == "function_call":
         name = item.get("name")
         if isinstance(name, str) and name in _COMPACT_STATE_TOOL_NAMES:
@@ -1102,8 +1259,20 @@ def _compact_trim_marker(*, omitted_items: int, omitted_tokens: int) -> JsonObje
 
 
 def _estimated_json_tokens(value: JsonValue) -> int:
-    serialized = json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    # Match stdlib/aiohttp's default JSON wire escaping and separators. Calling
+    # this on the whole input list also counts brackets, commas, and inter-item
+    # whitespace, so many individually small items cannot bypass the cap.
+    serialized = json.dumps(value, ensure_ascii=True, sort_keys=True)
     return max(1, (len(serialized) + _ESTIMATED_CHARS_PER_TOKEN - 1) // _ESTIMATED_CHARS_PER_TOKEN)
+
+
+def _estimated_json_array_item_tokens(value: JsonValue) -> int:
+    serialized = json.dumps(value, ensure_ascii=True, sort_keys=True)
+    # Every retained item also needs the array's comma-space delimiter. The
+    # final whole-array validation below accounts exactly for brackets and the
+    # missing delimiter after the last item.
+    wire_chars = len(serialized) + 2
+    return max(1, (wire_chars + _ESTIMATED_CHARS_PER_TOKEN - 1) // _ESTIMATED_CHARS_PER_TOKEN)
 
 
 def _sanitize_interleaved_reasoning_input(payload: MutableJsonObject) -> None:

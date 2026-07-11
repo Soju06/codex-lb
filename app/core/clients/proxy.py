@@ -55,6 +55,7 @@ from app.core.errors import (
     openai_error,
     response_failed_event,
 )
+from app.core.openai.exceptions import ClientPayloadError
 from app.core.openai.model_registry import get_model_registry
 from app.core.openai.models import CompactResponsePayload, OpenAIError
 from app.core.openai.parsing import (
@@ -62,7 +63,11 @@ from app.core.openai.parsing import (
     parse_error_payload,
     parse_sse_event,
 )
-from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
+from app.core.openai.requests import (
+    ResponsesCompactRequest,
+    ResponsesRequest,
+    validate_compact_input_wire_budget,
+)
 from app.core.resilience.circuit_breaker import (
     CircuitBreaker,
     CircuitBreakerOpenError,
@@ -565,9 +570,8 @@ def _is_native_codex_request(headers: Mapping[str, str]) -> bool:
 def _normalize_non_native_upstream_fingerprint(headers: dict[str, str]) -> None:
     """Rewrite a non-native request's outbound fingerprint to the Codex CLI
     persona in place: set ``User-Agent`` to a ``codex_cli_rs`` string, strip
-    SDK-only ``x-openai-client-*`` and ``x-stainless-*`` headers, and strip any
-    inbound ``originator`` header (the real Codex CLI omits it for the default
-    originator and lets the backend read it from the User-Agent prefix)."""
+    SDK-only ``x-openai-client-*`` and ``x-stainless-*`` headers, and replace
+    any inbound ``originator`` or ``version`` with the canonical Codex values."""
     version = get_codex_version_cache().cached_version_or_default()
     codex_user_agent = build_codex_user_agent(version)
     for key in list(headers.keys()):
@@ -577,9 +581,12 @@ def _normalize_non_native_upstream_fingerprint(headers: dict[str, str]) -> None:
             or lowered in _SDK_FINGERPRINT_HEADER_KEYS
             or lowered.startswith(_SDK_FINGERPRINT_HEADER_PREFIXES)
             or lowered == "originator"
+            or lowered == "version"
         ):
             del headers[key]
     headers["User-Agent"] = codex_user_agent
+    headers["originator"] = _CODEX_CLI_ORIGINATOR
+    headers["version"] = version
 
 
 def _build_upstream_headers(
@@ -3268,6 +3275,17 @@ class _CompactCommandTransport:
                 effective_connect_timeout,
             )
         _apply_responses_lite_http_header(upstream_headers, payload_dict)
+        try:
+            validate_compact_input_wire_budget(payload_dict)
+        except ClientPayloadError as exc:
+            error = openai_error(
+                exc.code or "invalid_request_error",
+                str(exc),
+                error_type=exc.error_type or "invalid_request_error",
+            )
+            if exc.param is not None:
+                error["error"]["param"] = exc.param
+            raise ProxyResponseError(400, error) from exc
         now = time.monotonic()
         compact_timeout_seconds = _remaining_total_timeout(
             compact_timeout_seconds,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Mapping, cast
 
 import pytest
@@ -7,6 +8,8 @@ from pydantic import ValidationError
 
 from app.core.openai.exceptions import ClientPayloadError
 from app.core.openai.requests import (
+    _ESTIMATED_CHARS_PER_TOKEN,
+    _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS,
     ResponsesCompactRequest,
     ResponsesRequest,
     _input_image_file_reference,
@@ -200,36 +203,189 @@ def test_settings_default_prompt_cache_affinity_ttl_is_1800():
     assert settings.openai_cache_affinity_max_age_seconds == 1800
 
 
-def test_responses_to_payload_canonicalizes_tool_order_and_object_keys():
+def test_responses_to_payload_preserves_tool_order_and_object_keys():
+    # Wire payload byte-preservation (issue #1184): the client's tool array
+    # order and per-object key order must reach upstream untouched. The
+    # previously asserted wire canonicalization is now cache-affinity-only.
+    client_tools: list[JsonValue] = [
+        {
+            "type": "function",
+            "name": "zeta",
+            "parameters": {"required": [], "type": "object", "properties": {}},
+            "description": "later",
+        },
+        {
+            "description": "first",
+            "parameters": {"properties": {}, "required": [], "type": "object"},
+            "type": "function",
+            "name": "alpha",
+        },
+    ]
     request = ResponsesRequest.model_validate(
         {
             "model": "gpt-5.1",
             "instructions": "hi",
             "input": [],
-            "tools": [
-                {
-                    "type": "function",
-                    "name": "zeta",
-                    "parameters": {"required": [], "type": "object", "properties": {}},
-                    "description": "later",
-                },
-                {
-                    "description": "first",
-                    "parameters": {"properties": {}, "required": [], "type": "object"},
-                    "type": "function",
-                    "name": "alpha",
-                },
-            ],
+            "tools": client_tools,
         }
     )
 
     dumped = request.to_payload()
-    tools = cast(list[JsonValue], dumped["tools"])
-    first_tool = cast(Mapping[str, JsonValue], tools[0])
-    parameters = cast(Mapping[str, JsonValue], first_tool["parameters"])
-    assert first_tool["name"] == "alpha"
-    assert list(first_tool.keys()) == ["description", "name", "parameters", "type"]
-    assert list(parameters.keys()) == ["properties", "required", "type"]
+    assert json.dumps(dumped["tools"], ensure_ascii=True, separators=(",", ":")) == json.dumps(
+        client_tools, ensure_ascii=True, separators=(",", ":")
+    )
+
+
+def test_responses_to_payload_omits_unset_tools():
+    # Codex Responses-Lite clients omit top-level ``tools`` entirely; the
+    # proxy must not synthesize ``"tools": []`` from the model default
+    # (issue #1184).
+    request = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6",
+            "instructions": "",
+            "input": [
+                {
+                    "type": "additional_tools",
+                    "role": "developer",
+                    "tools": [{"type": "custom", "name": "shell"}],
+                },
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+            ],
+            "stream": True,
+        }
+    )
+
+    assert "tools" not in request.to_payload()
+
+
+def test_responses_to_payload_omits_unset_tool_choice_and_parallel_tool_calls():
+    # Sibling-field audit for issue #1184: ``tool_choice`` and
+    # ``parallel_tool_calls`` default to ``None`` and are dropped by
+    # ``model_dump(exclude_none=True)`` when the client omits them, while
+    # explicit values (including ``false``) keep forwarding.
+    unset = ResponsesRequest.model_validate({"model": "gpt-5.6", "instructions": "hi", "input": []})
+    explicit = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6",
+            "instructions": "hi",
+            "input": [],
+            "tool_choice": "auto",
+            "parallel_tool_calls": False,
+        }
+    )
+
+    unset_payload = unset.to_payload()
+    explicit_payload = explicit.to_payload()
+
+    assert "tool_choice" not in unset_payload
+    assert "parallel_tool_calls" not in unset_payload
+    assert explicit_payload["tool_choice"] == "auto"
+    assert explicit_payload["parallel_tool_calls"] is False
+
+
+def test_responses_to_payload_preserves_explicit_empty_tools():
+    request = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [],
+            "tools": [],
+        }
+    )
+
+    assert request.to_payload()["tools"] == []
+
+
+def test_responses_to_payload_preserves_reserved_namespace_tool_byte_identical():
+    # gpt-5.6 ``multi_agent_version: v2`` reserved collaboration tool shape
+    # (codex-rs rust-v0.144.1): namespace-typed entry with nested function
+    # entries, unknown keys (``encrypted``), non-alphabetical ``required``
+    # array order, leading whitespace in descriptions, and ``strict: false``.
+    reserved_namespace_tool: JsonValue = {
+        "type": "namespace",
+        "name": "collaboration",
+        "description": "Tools for spawning and managing sub-agents.",
+        "tools": [
+            {
+                "type": "function",
+                "name": "spawn_agent",
+                "strict": False,
+                "description": "\n        \n        Spawn a sub-agent for the given task.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "message": {"type": "string", "encrypted": True},
+                        "task_name": {"type": "string"},
+                    },
+                    "required": ["task_name", "message"],
+                    "additionalProperties": False,
+                },
+            }
+        ],
+    }
+    client_tools: list[JsonValue] = [reserved_namespace_tool]
+    request = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6",
+            "instructions": "hi",
+            "input": [],
+            "tools": client_tools,
+        }
+    )
+
+    dumped = request.to_payload()
+    assert json.dumps(dumped["tools"], ensure_ascii=True, separators=(",", ":")) == json.dumps(
+        client_tools, ensure_ascii=True, separators=(",", ":")
+    )
+
+
+def test_canonicalized_tools_is_order_insensitive_and_non_mutating():
+    from app.core.openai.requests import canonicalized_tools
+
+    tools_one: list[JsonValue] = [
+        {"type": "function", "name": "zeta", "parameters": {"required": ["b", "a"], "type": "object"}},
+        {"name": "alpha", "type": "function"},
+    ]
+    tools_two: list[JsonValue] = [
+        {"type": "function", "name": "alpha"},
+        {"parameters": {"type": "object", "required": ["b", "a"]}, "type": "function", "name": "zeta"},
+    ]
+    snapshot = json.dumps(tools_one, ensure_ascii=True, separators=(",", ":"))
+
+    canonical_one = json.dumps(canonicalized_tools(tools_one), sort_keys=True, separators=(",", ":"))
+    canonical_two = json.dumps(canonicalized_tools(tools_two), sort_keys=True, separators=(",", ":"))
+
+    assert canonical_one == canonical_two
+    # Array values (e.g. ``required``) must never be reordered.
+    assert '"required": ["b", "a"]' in json.dumps(canonicalized_tools(tools_one))
+    # The input list is left untouched.
+    assert json.dumps(tools_one, ensure_ascii=True, separators=(",", ":")) == snapshot
+
+
+def test_v1_responses_to_responses_request_propagates_unset_tools():
+    request = V1ResponsesRequest.model_validate(
+        {"model": "gpt-5.6", "input": [{"type": "message", "role": "user", "content": "hi"}]}
+    )
+
+    converted = request.to_responses_request()
+
+    assert "tools" not in converted.model_fields_set
+    assert "tools" not in converted.to_payload()
+
+
+def test_v1_responses_to_responses_request_preserves_explicit_empty_tools():
+    request = V1ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6",
+            "input": [{"type": "message", "role": "user", "content": "hi"}],
+            "tools": [],
+        }
+    )
+
+    converted = request.to_responses_request()
+
+    assert converted.to_payload()["tools"] == []
 
 
 def test_openai_compatible_reasoning_aliases_are_normalized():
@@ -631,6 +787,93 @@ def test_responses_input_additional_tools_item_is_preserved(request_type):
     assert request.to_payload()["input"] == request.input
 
 
+@pytest.mark.parametrize("request_type", [ResponsesRequest, ResponsesCompactRequest])
+def test_responses_input_non_message_system_and_developer_items_are_preserved(request_type):
+    developer_directive = {
+        "type": "future_directive",
+        "role": "developer",
+        "directive": {"mode": "strict", "budget": 3},
+    }
+    system_directive = {
+        "type": "future_directive",
+        "role": "system",
+        "directive": {"mode": "audit"},
+    }
+    payload = {
+        "model": "gpt-5.1",
+        "input": [
+            developer_directive,
+            {"type": "message", "role": "developer", "content": "dev"},
+            system_directive,
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+        ],
+    }
+
+    request = request_type.model_validate(payload)
+
+    assert request.instructions == "dev"
+    assert request.input == [
+        developer_directive,
+        system_directive,
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+    ]
+    assert request.to_payload()["input"] == request.input
+
+
+@pytest.mark.parametrize("request_type", [ResponsesRequest, ResponsesCompactRequest])
+def test_responses_input_preserved_directive_keeps_reasoning_and_tool_call_keys(request_type):
+    developer_directive = {
+        "type": "future_directive",
+        "role": "developer",
+        "reasoning_content": "directive-level reasoning",
+        "reasoning_details": [{"type": "spec", "detail": "keep me"}],
+        "tool_calls": [{"id": "call_1", "name": "future_tool"}],
+        "function_call": {"name": "future_tool", "arguments": "{}"},
+        "content": [{"type": "reasoning", "text": "also keep me"}],
+    }
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "primary",
+        "input": [
+            developer_directive,
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+        ],
+    }
+
+    request = request_type.model_validate(payload)
+
+    assert request.input == [
+        developer_directive,
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+    ]
+    assert request.to_payload()["input"] == request.input
+
+
+@pytest.mark.parametrize("request_type", [ResponsesRequest, ResponsesCompactRequest])
+def test_responses_input_directive_only_request_defaults_instructions(request_type):
+    developer_directive = {
+        "type": "future_directive",
+        "role": "developer",
+        "directive": {"mode": "strict", "budget": 3},
+    }
+    payload = {
+        "model": "gpt-5.1",
+        "input": [
+            developer_directive,
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+        ],
+    }
+
+    request = request_type.model_validate(payload)
+
+    assert request.instructions == ""
+    assert request.input == [
+        developer_directive,
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+    ]
+    assert request.to_payload()["input"] == request.input
+
+
 def test_responses_input_system_message_keeps_user_text_parts():
     payload = {
         "model": "gpt-5.1",
@@ -902,6 +1145,23 @@ def test_compact_does_not_trim_many_small_input_items_for_upstream():
     assert dumped_input == input_items
 
 
+def test_compact_many_small_items_include_array_wire_framing_in_budget():
+    input_items = [{"role": "user", "content": ""} for _ in range(14_285)]
+
+    dumped_input = ResponsesCompactRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": input_items,
+        }
+    ).to_payload()["input"]
+
+    assert isinstance(dumped_input, list)
+    assert len(dumped_input) < len(input_items)
+    wire_bytes = len(json.dumps(dumped_input, ensure_ascii=True, sort_keys=True).encode("utf-8"))
+    assert wire_bytes <= _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS * _ESTIMATED_CHARS_PER_TOKEN
+
+
 def test_compact_trims_oversized_input_by_estimated_tokens_with_head_tail_and_marker():
     input_items = [
         {"role": "user", "content": "initial goal and instructions"},
@@ -973,6 +1233,102 @@ def test_compact_trimming_preserves_oversized_responses_lite_prefix():
     assert dumped_input[-1] == input_items[-1]
 
 
+def test_compact_trimming_preserves_role_only_responses_lite_developer_message():
+    additional_tools = {
+        "type": "additional_tools",
+        "role": "developer",
+        "tools": [{"type": "custom", "name": "exec"}],
+    }
+    developer_message = {
+        "role": "developer",
+        "content": "developer instructions",
+    }
+    payload = {
+        "model": "gpt-5.6-sol",
+        "instructions": "",
+        "input": [
+            additional_tools,
+            developer_message,
+            {"role": "assistant", "content": "y" * 500_000},
+            {"role": "user", "content": "latest request"},
+        ],
+    }
+
+    dumped_input = ResponsesCompactRequest.model_validate(payload).to_payload()["input"]
+
+    assert isinstance(dumped_input, list)
+    assert additional_tools in dumped_input
+    assert developer_message in dumped_input
+
+
+def test_compact_rejects_responses_lite_prelude_that_exceeds_upstream_limit():
+    payload = {
+        "model": "gpt-5.6-sol",
+        "instructions": "",
+        "input": [
+            {
+                "type": "additional_tools",
+                "role": "developer",
+                "tools": [
+                    {
+                        "type": "custom",
+                        "name": "exec",
+                        "format": {
+                            "type": "grammar",
+                            "syntax": "lark",
+                            "definition": "x" * 500_000,
+                        },
+                    }
+                ],
+            },
+            {
+                "type": "message",
+                "role": "developer",
+                "content": [{"type": "input_text", "text": "dev instructions"}],
+            },
+            {"type": "message", "role": "user", "content": "latest request"},
+        ],
+    }
+
+    request = ResponsesCompactRequest.model_validate(payload)
+
+    with pytest.raises(ClientPayloadError, match="cannot be trimmed without removing required state anchors") as raised:
+        request.to_payload()
+
+    assert raised.value.param == "input"
+    assert raised.value.code == "responses_compact_input_too_large"
+
+
+def test_compact_drops_optional_head_context_when_required_selection_fits():
+    input_items = [
+        {
+            "type": "additional_tools",
+            "role": "developer",
+            "tools": [{"type": "custom", "name": "exec", "description": "a" * 4_000}],
+        },
+        {"type": "message", "role": "developer", "content": "prelude"},
+        {"type": "message", "role": "user", "content": "h" * 32_000},
+        {"type": "message", "role": "assistant", "content": "m" * 80_000},
+        {"type": "message", "role": "developer", "content": "d" * 360_000},
+        {"type": "message", "role": "user", "content": "z" * 4_000},
+    ]
+    payload = {
+        "model": "gpt-5.6-sol",
+        "instructions": "",
+        "input": input_items,
+    }
+
+    request = ResponsesCompactRequest.model_validate(payload)
+    dumped_input = request.to_payload()["input"]
+
+    assert isinstance(dumped_input, list)
+    assert input_items[2] not in dumped_input
+    for required_item in (input_items[0], input_items[1], input_items[4], input_items[5]):
+        assert required_item in dumped_input
+    wire_bytes = len(json.dumps(dumped_input, ensure_ascii=True, sort_keys=True).encode("utf-8"))
+    assert wire_bytes <= _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS * _ESTIMATED_CHARS_PER_TOKEN
+
+
 def test_compact_trimming_drops_oversized_leading_item():
     input_items = [
         {"role": "assistant", "content": "x" * 500_000},
@@ -997,7 +1353,7 @@ def test_compact_trimming_drops_oversized_leading_item():
     assert content[0]["text"].startswith("[compact trim] Omitted 1 input items")
 
 
-def test_compact_trimming_preserves_oversized_latest_item():
+def test_compact_trimming_rejects_oversized_latest_item():
     input_items = [
         {"role": "user", "content": "initial instructions"},
         {"role": "assistant", "content": "middle context " + "y" * 500_000},
@@ -1010,17 +1366,82 @@ def test_compact_trimming_preserves_oversized_latest_item():
     }
 
     request = ResponsesCompactRequest.model_validate(payload)
-    dumped = request.to_payload()
-    dumped_input = dumped["input"]
+
+    with pytest.raises(ClientPayloadError, match="exceeds the upstream size limit") as raised:
+        request.to_payload()
+
+    assert raised.value.param == "input"
+    assert raised.value.code == "responses_compact_input_too_large"
+
+
+def test_compact_trimming_preserves_latest_unmatched_tool_call():
+    latest_call = {
+        "type": "function_call",
+        "name": "exec",
+        "call_id": "call-latest",
+        "arguments": "{}",
+    }
+    payload = {
+        "model": "gpt-5.6-sol",
+        "instructions": "",
+        "input": [
+            {"role": "assistant", "content": "x" * 500_000},
+            latest_call,
+        ],
+    }
+
+    dumped_input = ResponsesCompactRequest.model_validate(payload).to_payload()["input"]
 
     assert isinstance(dumped_input, list)
-    assert dumped_input[0] == input_items[0]
-    assert dumped_input[-1] == input_items[-1]
-    assert input_items[1] not in dumped_input
-    marker = cast(Mapping[str, object], dumped_input[1])
-    assert marker["type"] == "message"
-    content = cast(list[Mapping[str, str]], marker["content"])
-    assert content[0]["text"].startswith("[compact trim] Omitted 1 input items")
+    assert latest_call in dumped_input
+
+
+def test_compact_trimming_rejects_latest_tool_output_when_matching_call_cannot_fit():
+    payload = {
+        "model": "gpt-5.6-sol",
+        "instructions": "",
+        "input": [
+            {
+                "type": "function_call",
+                "name": "exec",
+                "call_id": "call-pair",
+                "arguments": "x" * 450_000,
+            },
+            {"role": "assistant", "content": "middle"},
+            {
+                "type": "function_call_output",
+                "call_id": "call-pair",
+                "output": "latest result",
+            },
+        ],
+    }
+
+    request = ResponsesCompactRequest.model_validate(payload)
+
+    with pytest.raises(ClientPayloadError, match="cannot be trimmed without removing required state anchors") as raised:
+        request.to_payload()
+
+    assert raised.value.param == "input"
+    assert raised.value.code == "responses_compact_input_too_large"
+
+
+def test_compact_rejects_unicode_item_that_expands_past_wire_budget():
+    def request_with_content(content: str) -> ResponsesCompactRequest:
+        return ResponsesCompactRequest.model_validate(
+            {
+                "model": "gpt-5.1",
+                "instructions": "hi",
+                "input": [{"role": "user", "content": content}],
+            }
+        )
+
+    assert request_with_content("x" * 40_000).to_payload()["input"]
+
+    with pytest.raises(ClientPayloadError, match="exceeds the upstream size limit") as raised:
+        request_with_content("😀" * 40_000).to_payload()
+
+    assert raised.value.param == "input"
+    assert raised.value.code == "responses_compact_input_too_large"
 
 
 def test_compact_trimming_preserves_codex_goal_context_anchor_from_middle():
@@ -1062,6 +1483,40 @@ def test_compact_trimming_preserves_codex_goal_context_anchor_from_middle():
     assert dumped_input[-1] == input_items[-1]
 
 
+def test_compact_trimming_preserves_non_message_developer_directive_from_middle():
+    developer_directive = {
+        "type": "future_directive",
+        "role": "developer",
+        "directive": {"mode": "strict", "budget": 3},
+    }
+    input_items = [
+        {"role": "user", "content": "initial instructions"},
+        {"role": "assistant", "content": "x" * 300_000},
+        developer_directive,
+        # Large enough to exhaust the tail budget on its own, so the directive
+        # in the middle survives only if it is treated as a trim anchor.
+        {"role": "assistant", "content": "y" * 500_000},
+        {"role": "user", "content": "latest request"},
+    ]
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": input_items,
+    }
+
+    request = ResponsesCompactRequest.model_validate(payload)
+    dumped = request.to_payload()
+    dumped_input = dumped["input"]
+
+    assert isinstance(dumped_input, list)
+    assert dumped_input[0] == input_items[0]
+    assert developer_directive in dumped_input
+    assert dumped_input[-1] == input_items[-1]
+    # Trimming actually occurred: the oversized filler items were dropped.
+    assert input_items[1] not in dumped_input
+    assert input_items[3] not in dumped_input
+
+
 def test_compact_trimming_preserves_plan_and_goal_tool_call_outputs():
     update_plan_call = {
         "type": "function_call",
@@ -1101,6 +1556,123 @@ def test_compact_trimming_preserves_plan_and_goal_tool_call_outputs():
     assert update_plan_call in dumped_input
     assert update_plan_output in dumped_input
     assert unrelated_output not in dumped_input
+
+
+def test_compact_state_anchor_matches_duplicate_call_id_by_occurrence():
+    historical_call = {
+        "type": "function_call",
+        "name": "exec",
+        "call_id": "call-reused",
+        "arguments": "{}",
+    }
+    historical_output = {
+        "type": "function_call_output",
+        "call_id": "call-reused",
+        "output": "historical " + "z" * 500_000,
+    }
+    state_call = {
+        "type": "function_call",
+        "name": "update_plan",
+        "call_id": "call-reused",
+        "arguments": "{}",
+    }
+    state_output = {
+        "type": "function_call_output",
+        "call_id": "call-reused",
+        "output": "Plan updated",
+    }
+    latest = {"role": "user", "content": "continue"}
+    payload = {
+        "model": "gpt-5.6-sol",
+        "instructions": "",
+        "input": [historical_call, historical_output, state_call, state_output, latest],
+    }
+
+    dumped_input = ResponsesCompactRequest.model_validate(payload).to_payload()["input"]
+
+    assert isinstance(dumped_input, list)
+    assert historical_output not in dumped_input
+    assert state_call in dumped_input
+    assert state_output in dumped_input
+    assert latest in dumped_input
+
+
+def test_compact_backtracking_drops_optional_tool_pair_when_markers_exceed_budget():
+    optional_call = {
+        "type": "function_call",
+        "name": "exec",
+        "call_id": "call-optional",
+        "arguments": "{}",
+    }
+    optional_output = {
+        "type": "function_call_output",
+        "call_id": "call-optional",
+        "output": "o" * 2_000,
+    }
+    omitted = {"role": "assistant", "content": "x" * 500_000}
+    first_anchor = {
+        "role": "user",
+        "content": '<codex_internal_context source="goal">\n' + "a" * 198_535,
+    }
+    second_anchor = {
+        "role": "user",
+        "content": "<collaboration_mode># Plan Mode\n" + "b" * 198_535,
+    }
+    latest = {"role": "user", "content": "continue"}
+    payload = {
+        "model": "gpt-5.6-sol",
+        "instructions": "",
+        "input": [optional_call, optional_output, omitted, first_anchor, omitted, second_anchor, latest],
+    }
+
+    dumped_input = ResponsesCompactRequest.model_validate(payload).to_payload()["input"]
+
+    assert isinstance(dumped_input, list)
+    assert optional_call not in dumped_input
+    assert optional_output not in dumped_input
+    assert first_anchor in dumped_input
+    assert second_anchor in dumped_input
+    assert latest in dumped_input
+    wire_bytes = len(json.dumps(dumped_input, ensure_ascii=True, sort_keys=True).encode("utf-8"))
+    assert wire_bytes <= _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS * _ESTIMATED_CHARS_PER_TOKEN
+
+
+def test_compact_backtracking_skips_pair_mate_removed_by_cascade():
+    optional_head = {"role": "user", "content": "h" * 2_300}
+    optional_call = {
+        "type": "function_call",
+        "name": "exec",
+        "call_id": "call-optional",
+        "arguments": "{}",
+    }
+    optional_output = {
+        "type": "function_call_output",
+        "call_id": "call-optional",
+        "output": "ok",
+    }
+    omitted = {"role": "assistant", "content": "x" * 500_000}
+    anchors = [
+        {
+            "role": "user",
+            "content": '<codex_internal_context source="goal">\n' + chr(ord("a") + index) * 39_375,
+        }
+        for index in range(10)
+    ]
+    latest = {"role": "user", "content": "continue"}
+    input_items: list[JsonValue] = [optional_head, optional_call, optional_output, omitted]
+    for anchor in anchors:
+        input_items.extend([anchor, omitted])
+    input_items.append(latest)
+    payload = {"model": "gpt-5.6-sol", "instructions": "", "input": input_items}
+
+    dumped_input = ResponsesCompactRequest.model_validate(payload).to_payload()["input"]
+
+    assert isinstance(dumped_input, list)
+    assert optional_head not in dumped_input
+    assert optional_call not in dumped_input
+    assert optional_output not in dumped_input
+    assert all(anchor in dumped_input for anchor in anchors)
+    assert latest in dumped_input
 
 
 def test_compact_trimming_keeps_selected_tool_outputs_with_matching_calls():

@@ -142,6 +142,8 @@ from app.modules.proxy._service.support import (
     _HTTPBridgeOwnerForward,
     _HTTPBridgeSession,
     _HTTPBridgeSessionKey,
+    _signal_propagated_capacity_startup_ready,
+    _signal_propagated_capacity_startup_wait,
     _WebSocketRequestState,
 )
 from app.modules.proxy._service.support import (
@@ -223,7 +225,7 @@ def _proxy_error_code_message(exc: ProxyResponseError) -> tuple[str | None, str 
 
 def _http_bridge_account_capacity_wait_seconds(exc: ProxyResponseError) -> float | None:
     code, message = _proxy_error_code_message(exc)
-    if code in {"account_response_create_cap", "account_stream_cap", "capacity_exhausted_active_sessions"}:
+    if code == "capacity_exhausted_active_sessions":
         return None
     return _account_selection_recovery_sleep_seconds_from_message(
         message,
@@ -251,22 +253,26 @@ async def _iter_account_capacity_wait_sse(
     request_id: str,
     reason: str | None,
     sleep_seconds: float,
+    emit_keepalives: bool,
 ) -> AsyncIterator[str]:
+    if not emit_keepalives:
+        _signal_propagated_capacity_startup_wait()
     wait_started_at = _service_time().monotonic()
     remaining_sleep_seconds = sleep_seconds
     while remaining_sleep_seconds > 0:
-        yield format_sse_event(
-            cast(
-                Mapping[str, JsonValue],
-                _account_capacity_wait_payload(
-                    None,
-                    request_id=request_id,
-                    reason=reason,
-                    retry_after_seconds=remaining_sleep_seconds,
-                    started_at=wait_started_at,
-                ),
+        if emit_keepalives:
+            yield format_sse_event(
+                cast(
+                    Mapping[str, JsonValue],
+                    _account_capacity_wait_payload(
+                        None,
+                        request_id=request_id,
+                        reason=reason,
+                        retry_after_seconds=remaining_sleep_seconds,
+                        started_at=wait_started_at,
+                    ),
+                )
             )
-        )
         chunk_seconds = min(
             remaining_sleep_seconds,
             _ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS,
@@ -961,6 +967,7 @@ class _HTTPBridgeStreamingMixin:
                             request_id=request_id,
                             reason=message,
                             sleep_seconds=bounded_wait_seconds,
+                            emit_keepalives=not propagate_http_errors,
                         ):
                             yield line
                         if _service_time().monotonic() >= request_deadline:
@@ -1125,6 +1132,7 @@ class _HTTPBridgeStreamingMixin:
                             request_id=request_id,
                             reason=message,
                             sleep_seconds=bounded_wait_seconds,
+                            emit_keepalives=not propagate_http_errors,
                         ):
                             yield line
                         if _service_time().monotonic() >= request_deadline:
@@ -1188,12 +1196,45 @@ class _HTTPBridgeStreamingMixin:
                     retry_request_state.request_stage = "reattach"
                     retry_request_state.preferred_account_id = request_state.preferred_account_id
 
-                    await self._submit_http_bridge_request(
-                        session,
-                        request_state=retry_request_state,
-                        text_data=retry_text_data,
-                        queue_limit=queue_limit,
-                    )
+                    while True:
+                        try:
+                            await self._submit_http_bridge_request(
+                                session,
+                                request_state=retry_request_state,
+                                text_data=retry_text_data,
+                                queue_limit=queue_limit,
+                            )
+                        except ProxyResponseError as capacity_exc:
+                            wait_plan = _http_bridge_capacity_wait_plan(
+                                capacity_exc,
+                                request_deadline=request_deadline,
+                            )
+                            if wait_plan is None:
+                                raise
+                            bounded_wait_seconds, account_capacity_wait_seconds, message = wait_plan
+                            logger.info(
+                                "Waiting for account capacity before retrying HTTP bridge owner-forward recovery "
+                                "submit request_id=%s model=%s account_id=%s sleep_seconds=%.1f "
+                                "recovery_hint_seconds=%.1f error=%s",
+                                retry_request_state.request_id,
+                                retry_request_state.model,
+                                session.account.id,
+                                bounded_wait_seconds,
+                                account_capacity_wait_seconds,
+                                message,
+                            )
+                            async for line in _iter_account_capacity_wait_sse(
+                                request_id=retry_request_state.request_id,
+                                reason=message,
+                                sleep_seconds=bounded_wait_seconds,
+                                emit_keepalives=not propagate_http_errors,
+                            ):
+                                yield line
+                            if _service_time().monotonic() >= request_deadline:
+                                raise
+                            continue
+                        break
+                    _signal_propagated_capacity_startup_ready()
                     if downstream_turn_state is not None:
                         await self._register_http_bridge_turn_state(session, downstream_turn_state)
                     event_queue = retry_request_state.event_queue
@@ -1405,6 +1446,13 @@ class _HTTPBridgeStreamingMixin:
             queue_limit=queue_limit,
             propagate_http_errors=propagate_http_errors,
             downstream_turn_state=downstream_turn_state,
+            request_deadline=request_deadline,
+        )
+        request_state.file_required_preferred_account = file_required_preferred_account
+        request_state.bridge_soft_capacity_reroute_allowed = (
+            bridge_session_key.strength == "soft"
+            and request_state.previous_response_id is None
+            and not file_required_preferred_account
         )
         try:
             yielded_any = False
@@ -1489,6 +1537,7 @@ class _HTTPBridgeStreamingMixin:
                             request_id=request_id,
                             reason=message,
                             sleep_seconds=bounded_wait_seconds,
+                            emit_keepalives=not propagate_http_errors,
                         ):
                             yield line
                         if _service_time().monotonic() >= request_deadline:
@@ -1502,7 +1551,9 @@ class _HTTPBridgeStreamingMixin:
                     queue_limit=queue_limit,
                     propagate_http_errors=propagate_http_errors,
                     downstream_turn_state=downstream_turn_state,
+                    request_deadline=request_deadline,
                 )
+                request_state.bridge_soft_capacity_reroute_allowed = False
                 try:
                     async for event_block in retry_events:
                         yield event_block
@@ -1673,6 +1724,7 @@ class _HTTPBridgeStreamingMixin:
                         request_id=request_id,
                         reason=message,
                         sleep_seconds=bounded_wait_seconds,
+                        emit_keepalives=not propagate_http_errors,
                     ):
                         yield line
                     if _service_time().monotonic() >= request_deadline:
@@ -1719,6 +1771,7 @@ class _HTTPBridgeStreamingMixin:
                     queue_limit=queue_limit,
                     propagate_http_errors=propagate_http_errors,
                     downstream_turn_state=downstream_turn_state,
+                    request_deadline=request_deadline,
                 )
                 try:
                     async for event_block in retry_events:
@@ -1782,13 +1835,47 @@ class _HTTPBridgeStreamingMixin:
         queue_limit: int,
         propagate_http_errors: bool,
         downstream_turn_state: str | None,
+        request_deadline: float | None = None,
     ) -> AsyncGenerator[str, None]:
-        await self._submit_http_bridge_request(
-            session,
-            request_state=request_state,
-            text_data=text_data,
-            queue_limit=queue_limit,
-        )
+        if request_deadline is None:
+            request_deadline = request_state.started_at + _http_bridge_request_budget_seconds(_service_get_settings())
+        while True:
+            try:
+                await self._submit_http_bridge_request(
+                    session,
+                    request_state=request_state,
+                    text_data=text_data,
+                    queue_limit=queue_limit,
+                )
+            except ProxyResponseError as exc:
+                if request_state.bridge_soft_capacity_reroute_allowed:
+                    raise
+                wait_plan = _http_bridge_capacity_wait_plan(exc, request_deadline=request_deadline)
+                if wait_plan is None:
+                    raise
+                bounded_wait_seconds, account_capacity_wait_seconds, message = wait_plan
+                logger.info(
+                    "Waiting for account capacity before retrying HTTP bridge submit request_id=%s model=%s "
+                    "account_id=%s sleep_seconds=%.1f recovery_hint_seconds=%.1f error=%s",
+                    request_state.request_id,
+                    request_state.model,
+                    session.account.id,
+                    bounded_wait_seconds,
+                    account_capacity_wait_seconds,
+                    message,
+                )
+                async for line in _iter_account_capacity_wait_sse(
+                    request_id=request_state.request_id,
+                    reason=message,
+                    sleep_seconds=bounded_wait_seconds,
+                    emit_keepalives=not propagate_http_errors,
+                ):
+                    yield line
+                if _service_time().monotonic() >= request_deadline:
+                    raise
+                continue
+            break
+        _signal_propagated_capacity_startup_ready()
         if downstream_turn_state is not None:
             await self._register_http_bridge_turn_state(session, downstream_turn_state)
 

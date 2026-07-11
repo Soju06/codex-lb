@@ -3,6 +3,14 @@ name: CI
 on:
   push:
     branches: ["main"]
+  # `edited` must stay: release-guard evidence (validation checklist + exact
+  # head SHA) is added by editing the release PR body, and CI Required only
+  # reruns for that PR via an `edited` event (scripts/guard_beta_release.py).
+  # Known cost: a body edit right after a push starts a duplicate run for the
+  # same head SHA and concurrency cancels the older one. Do NOT "fix" this by
+  # skipping edited runs for non-release PRs: skipped or all-skipped
+  # "CI Required" check runs still satisfy branch protection, so a body-only
+  # edit could mint a passing check for a red or untested head.
   pull_request:
     types: [opened, reopened, synchronize, edited, ready_for_review]
   merge_group:
@@ -217,6 +225,10 @@ jobs:
         run: make frontend-typecheck
 
   frontend-test:
+    # Keep this exact job name: the repository ruleset and
+    # .github/scripts/sync_codex_ok_labels.py treat "Frontend tests
+    # (vitest + coverage)" as a required check context. PR runs skip the
+    # coverage instrumentation below, but the check name must not change.
     name: Frontend tests (vitest + coverage)
     runs-on: ubuntu-24.04
     needs: changes
@@ -243,7 +255,14 @@ jobs:
           restore-keys: |
             bun-1.3.14-${{ runner.os }}-${{ runner.arch }}-
 
+      # PRs run vitest without coverage instrumentation for a faster signal;
+      # main pushes and the merge queue keep the full coverage run.
+      - name: Run frontend tests
+        if: github.event_name == 'pull_request'
+        run: make frontend-test-fast
+
       - name: Run frontend tests with coverage
+        if: github.event_name != 'pull_request'
         run: make frontend-test
 
   frontend-build:
@@ -328,7 +347,6 @@ jobs:
       matrix:
         slice:
           - name: unit
-          - name: integration-core
           - name: integration-bridge
           - name: e2e
     env:
@@ -372,6 +390,96 @@ jobs:
       - name: Run tests
         if: needs.changes.outputs.backend == 'true'
         run: make test-${{ matrix.slice.name }}
+
+  # integration-core is split into deterministic shards to shorten the CI
+  # critical path; each shard's make target verifies the shards partition the
+  # full selection before running pytest (see .github/scripts/pytest_shards.py).
+  test-integration-core:
+    name: Tests (pytest, integration-core-${{ matrix.shard }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    needs: changes
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    env:
+      PYTHONFAULTHANDLER: "1"
+
+    steps:
+      - name: Skip backend tests for unrelated changes
+        if: needs.changes.outputs.backend != 'true'
+        run: echo "Backend files unchanged; required pytest context satisfied."
+
+      - name: Checkout repository
+        if: needs.changes.outputs.backend == 'true'
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+
+      - name: Set up Bun
+        if: needs.changes.outputs.backend == 'true'
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: "1.3.14"
+
+      - name: Cache Bun dependencies
+        if: needs.changes.outputs.backend == 'true'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            ~/.bun/install/cache
+            frontend/node_modules
+          key: bun-1.3.14-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('frontend/bun.lock') }}
+          restore-keys: |
+            bun-1.3.14-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Set up uv
+        if: needs.changes.outputs.backend == 'true'
+        uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3
+        with:
+          python-version: "3.13"
+          enable-cache: true
+
+      - name: Run tests
+        if: needs.changes.outputs.backend == 'true'
+        run: make test-integration-core-${{ matrix.shard }}
+
+  # Aggregate for the shards above. Keep this exact job name: the repository
+  # ruleset and .github/scripts/sync_codex_ok_labels.py treat
+  # "Tests (pytest, integration-core)" as a required check context. The shard
+  # jobs never skip at job level (they use the placeholder-step pattern), so
+  # anything other than an all-success matrix result must fail here —
+  # skipped or cancelled shards are not laundered into a passing check.
+  test-integration-core-required:
+    name: Tests (pytest, integration-core)
+    runs-on: ubuntu-24.04
+    if: always()
+    needs:
+      - test-integration-core
+
+    steps:
+      - name: Require every integration-core shard to pass
+        env:
+          NEEDS_JSON: ${{ toJson(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+
+          needs = json.loads(os.environ["NEEDS_JSON"])
+          failed = {
+              name: details["result"]
+              for name, details in sorted(needs.items())
+              if details.get("result") != "success"
+          }
+          if failed:
+              for name, result in failed.items():
+                  print(f"{name}: {result}")
+              sys.exit(1)
+          print("all integration-core shards passed")
+          PY
 
   test-postgres:
     name: Tests (pytest, PostgreSQL)
@@ -698,6 +806,8 @@ jobs:
       - lint
       - typecheck
       - test
+      - test-integration-core
+      - test-integration-core-required
       - test-postgres
       - migration-check
       - migration-check-postgres

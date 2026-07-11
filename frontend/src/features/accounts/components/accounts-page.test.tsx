@@ -181,8 +181,10 @@ describe("AccountsPage", () => {
     expect(screen.getByTestId("accounts-list-panel")).toHaveClass(
       "min-w-0",
       "min-h-0",
-      "h-full",
+      "self-start",
     );
+    expect(screen.getByTestId("accounts-list-panel")).not.toHaveClass("h-full");
+    expect(screen.getByTestId("accounts-list-card")).not.toHaveClass("h-full");
     expect(screen.getByRole("heading", { name: /very\.long\.account/i })).toHaveClass(
       "min-w-0",
       "truncate",

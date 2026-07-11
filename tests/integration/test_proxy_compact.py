@@ -122,6 +122,39 @@ async def test_proxy_compact_no_accounts(async_client):
 
 
 @pytest.mark.asyncio
+async def test_proxy_compact_rejects_untrimmable_lite_prelude_before_account_selection(async_client):
+    payload = {
+        "model": "gpt-5.6-sol",
+        "instructions": "",
+        "input": [
+            {
+                "type": "additional_tools",
+                "role": "developer",
+                "tools": [
+                    {
+                        "type": "custom",
+                        "name": "exec",
+                        "format": {
+                            "type": "grammar",
+                            "syntax": "lark",
+                            "definition": "x" * 500_000,
+                        },
+                    }
+                ],
+            },
+            {"type": "message", "role": "developer", "content": "instructions"},
+        ],
+    }
+
+    response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
+
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["code"] == "responses_compact_input_too_large"
+    assert error["param"] == "input"
+
+
+@pytest.mark.asyncio
 async def test_proxy_compact_strips_tool_fields_before_upstream(async_client, monkeypatch):
     email = "compact-tools@example.com"
     raw_account_id = "acc_compact_tools"

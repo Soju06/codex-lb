@@ -45,6 +45,13 @@ def _service_global(name: str) -> Any:
     return getattr(_service_module(), name)
 
 
+def _response_create_compatibility_metadata_headers() -> tuple[str, ...]:
+    return cast(
+        tuple[str, ...],
+        _service_global("_RESPONSE_CREATE_COMPATIBILITY_METADATA_HEADERS"),
+    )
+
+
 def _service_global_or(name: str, fallback: T) -> T:
     service_module = sys.modules.get("app.modules.proxy.service")
     if service_module is None:
@@ -296,7 +303,12 @@ def _headers_with_turn_state(*args: Any, **kwargs: Any) -> Any:
 
 
 def _websocket_safe_headers_with_turn_state(headers: Mapping[str, str], turn_state: str | None) -> dict[str, str]:
-    return cast(dict[str, str], _headers_with_turn_state(filter_inbound_websocket_headers(dict(headers)), turn_state))
+    filtered = {
+        key: value
+        for key, value in filter_inbound_websocket_headers(dict(headers)).items()
+        if key.lower() not in _response_create_compatibility_metadata_headers()
+    }
+    return cast(dict[str, str], _headers_with_turn_state(filtered, turn_state))
 
 
 def _headers_with_authorization(*args: Any, **kwargs: Any) -> Any:

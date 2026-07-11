@@ -7,6 +7,7 @@ import re
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable, Coroutine, Mapping
+from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -27,6 +28,7 @@ from app.modules.api_keys.service import (
 )
 from app.modules.proxy.affinity import _AffinityPolicy
 from app.modules.proxy.load_balancer import AccountLease, AccountSelection
+from app.modules.proxy.tool_call_dedupe import ToolCallDedupeKey
 from app.modules.proxy.work_admission import AdmissionLease
 
 logger = logging.getLogger(__name__)
@@ -41,6 +43,49 @@ _ACCOUNT_SELECTION_RECOVERY_DEFAULT_SLEEP_SECONDS = 30.0
 _ACCOUNT_SELECTION_RECOVERY_MAX_SLEEP_SECONDS = 300.0
 _ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS = 10.0
 _ACCOUNT_SELECTION_RETRY_HINT_RE = re.compile(r"try again in\s+([0-9]+(?:\.[0-9]+)?)s", re.IGNORECASE)
+_LOCAL_ACCOUNT_CAP_ERROR_CODES = frozenset({"account_response_create_cap", "account_stream_cap"})
+_PROPAGATED_CAPACITY_STARTUP_WAIT: ContextVar[asyncio.Event | None] = ContextVar(
+    "propagated_capacity_startup_wait",
+    default=None,
+)
+_PROPAGATED_CAPACITY_STARTUP_READY: ContextVar[asyncio.Event | None] = ContextVar(
+    "propagated_capacity_startup_ready",
+    default=None,
+)
+
+
+def _bind_propagated_capacity_startup_wait(event: asyncio.Event) -> Token[asyncio.Event | None]:
+    return _PROPAGATED_CAPACITY_STARTUP_WAIT.set(event)
+
+
+def _reset_propagated_capacity_startup_wait(token: Token[asyncio.Event | None]) -> None:
+    _PROPAGATED_CAPACITY_STARTUP_WAIT.reset(token)
+
+
+def _bind_propagated_capacity_startup_ready(event: asyncio.Event) -> Token[asyncio.Event | None]:
+    return _PROPAGATED_CAPACITY_STARTUP_READY.set(event)
+
+
+def _reset_propagated_capacity_startup_ready(token: Token[asyncio.Event | None]) -> None:
+    _PROPAGATED_CAPACITY_STARTUP_READY.reset(token)
+
+
+def _signal_propagated_capacity_startup_wait() -> None:
+    ready_event = _PROPAGATED_CAPACITY_STARTUP_READY.get()
+    if ready_event is not None:
+        ready_event.clear()
+    event = _PROPAGATED_CAPACITY_STARTUP_WAIT.get()
+    if event is not None:
+        event.set()
+
+
+def _signal_propagated_capacity_startup_ready() -> None:
+    wait_event = _PROPAGATED_CAPACITY_STARTUP_WAIT.get()
+    if wait_event is not None:
+        wait_event.clear()
+    event = _PROPAGATED_CAPACITY_STARTUP_READY.get()
+    if event is not None:
+        event.set()
 
 
 def _account_selection_recovery_sleep_seconds_from_message(
@@ -79,6 +124,9 @@ def _account_selection_recovery_sleep_seconds_from_message(
         )
 
     if "hit your spend cap set by the owner of your workspace" in lowered:
+        return _ACCOUNT_SELECTION_RECOVERY_DEFAULT_SLEEP_SECONDS
+
+    if error_code in _LOCAL_ACCOUNT_CAP_ERROR_CODES:
         return _ACCOUNT_SELECTION_RECOVERY_DEFAULT_SLEEP_SECONDS
 
     return None
@@ -265,6 +313,10 @@ class _StreamSettlement:
     response_id: str | None = None
     usage_settlement_transferred: bool = False
 
+    def reset(self) -> None:
+        fresh = type(self)()
+        self.__dict__.update(fresh.__dict__)
+
 
 def _stream_settlement_error_payload(settlement: _StreamSettlement) -> UpstreamError:
     if settlement.error is not None:
@@ -367,6 +419,7 @@ class _WebSocketRequestState:
     preferred_account_id: str | None = None
     require_security_work_authorized: bool = False
     file_required_preferred_account: bool = False
+    bridge_soft_capacity_reroute_allowed: bool = False
     error_code_override: str | None = None
     error_message_override: str | None = None
     error_type_override: str | None = None
@@ -385,7 +438,7 @@ class _WebSocketRequestState:
     suppressed_duplicate_tool_call: bool = False
     pending_function_call_ids: list[str] = field(default_factory=list)
     pending_tool_call_types: dict[str, str] = field(default_factory=dict)
-    seen_tool_call_keys: dict[tuple[str, str, str | None, str | None, str], None] = field(default_factory=dict)
+    seen_tool_call_keys: dict[ToolCallDedupeKey, None] = field(default_factory=dict)
     input_item_count: int = 0
     input_full_fingerprint: str | None = None
     api_key_reservation_last_touch_at: float = field(default_factory=time.monotonic)
@@ -446,6 +499,7 @@ class _HTTPBridgeSession:
     last_used_at: float
     idle_ttl_seconds: float
     unanchored_reservation_id: str | None = None
+    admission_waiter_count: int = 0
     request_service_tier: str | None = None
     lifecycle_lock: anyio.Lock = field(default_factory=anyio.Lock)
     api_key: ApiKeyData | None = None
@@ -470,7 +524,7 @@ class _HTTPBridgeSession:
     closed: bool = False
     account_lease: AccountLease | None = None
     upstream_close_attempted: bool = False
-    seen_tool_call_keys: dict[tuple[str, str, str | None, str | None, str], None] = field(default_factory=dict)
+    seen_tool_call_keys: dict[ToolCallDedupeKey, None] = field(default_factory=dict)
     upstream_proxy_route_mode: str | None = None
     upstream_proxy_pool_id: str | None = None
     upstream_proxy_endpoint_id: str | None = None
@@ -522,7 +576,7 @@ class _WebSocketUpstreamControl:
     suppress_downstream_event: bool = False
     replay_request_state: _WebSocketRequestState | None = None
     downstream_texts: list[str] | None = None
-    seen_tool_call_keys: dict[tuple[str, str, str | None, str | None, str], None] = field(default_factory=dict)
+    seen_tool_call_keys: dict[ToolCallDedupeKey, None] = field(default_factory=dict)
 
 
 @dataclass(slots=True)

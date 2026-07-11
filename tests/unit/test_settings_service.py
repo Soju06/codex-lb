@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+from typing import cast
 
 import pytest
 
 import app.modules.settings.service as settings_service_module
 from app.db.models import DashboardSettings
+from app.modules.settings.repository import SettingsRepository
 from app.modules.settings.service import (
     SettingsService,
     _dump_additional_quota_routing_policies,
@@ -40,7 +42,7 @@ async def test_migrated_null_account_caps_inherit_environment(monkeypatch: pytes
         )(),
     )
 
-    settings = await SettingsService(_Repository()).get_settings()
+    settings = await SettingsService(cast(SettingsRepository, _Repository())).get_settings()
 
     assert settings.proxy_account_response_create_limit == 24
     assert settings.proxy_account_stream_limit == 32

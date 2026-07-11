@@ -427,7 +427,7 @@ from app.modules.proxy.http_bridge_forwarding import (
 from app.modules.proxy.http_bridge_forwarding import (
     OwnerForwardRelayFailure as OwnerForwardRelayFailure,
 )
-from app.modules.proxy.load_balancer import AccountLease
+from app.modules.proxy.load_balancer import AccountLease, effective_account_concurrency_caps
 from app.modules.proxy.request_policy import (
     apply_api_key_enforcement,
     normalize_responses_request_payload,
@@ -624,6 +624,7 @@ class _WebSocketMixin:
         useragent, useragent_group = _request_log_useragent_fields(headers)
         runtime_settings = _facade().get_settings()
         settings = await _facade().get_settings_cache().get()
+        concurrency_caps = effective_account_concurrency_caps(settings)
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
         sticky_threads_enabled = settings.sticky_threads_enabled
         openai_cache_affinity_max_age_seconds = settings.openai_cache_affinity_max_age_seconds
@@ -1130,6 +1131,7 @@ class _WebSocketMixin:
                                 account_id=account.id,
                                 request_id=request_state.request_log_id or request_state.request_id,
                                 surface="websocket",
+                                concurrency_caps=concurrency_caps,
                             )
                         )
                         request_state.account_response_create_release = proxy._load_balancer.release_account_lease

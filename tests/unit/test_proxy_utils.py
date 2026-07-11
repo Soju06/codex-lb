@@ -11,7 +11,7 @@ from collections.abc import Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import Any, AsyncIterator, Iterator, Literal, Protocol, Self, cast
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import ANY, AsyncMock, MagicMock
 
 import aiohttp
 import anyio
@@ -3886,6 +3886,7 @@ async def test_select_codex_control_account_without_budget_uses_balancer(monkeyp
         budget_threshold_pct=95.0,
         secondary_budget_threshold_pct=100.0,
         traffic_class=proxy_service.TRAFFIC_CLASS_FOREGROUND,
+        concurrency_caps=ANY,
     )
 
 

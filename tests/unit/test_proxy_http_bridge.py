@@ -38,6 +38,15 @@ from app.modules.proxy.http_bridge_forwarding import OwnerForwardRelayFailure
 pytestmark = pytest.mark.unit
 
 
+@pytest.fixture(autouse=True)
+def _share_proxy_dashboard_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _SettingsCache:
+        async def get(self) -> object:
+            return proxy_service.get_settings()
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache())
+
+
 def _without_installation_metadata(text: str) -> dict[str, Any]:
     payload = json.loads(text)
     client_metadata = payload.get("client_metadata")
@@ -990,7 +999,8 @@ async def test_http_bridge_submit_waits_for_local_account_capacity(
     submit = AsyncMock(side_effect=[capacity_error, None])
     detach = AsyncMock()
 
-    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    settings = _make_app_settings()
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     monkeypatch.setattr(http_bridge_streaming_module, "_http_bridge_account_capacity_wait_seconds", lambda _exc: 0.001)
     monkeypatch.setattr(http_bridge_streaming_module, "_ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS", 0.001)
     monkeypatch.setattr(service, "_submit_http_bridge_request", submit)
@@ -13949,7 +13959,8 @@ async def test_http_bridge_reader_failed_precreated_replay_retires_registered_se
         request_state.error_message_override = "Upstream closed before response.completed"
         return False
 
-    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    settings = _make_app_settings()
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", fail_replay)
     monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
     write_request_log = AsyncMock()

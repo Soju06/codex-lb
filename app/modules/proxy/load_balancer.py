@@ -136,7 +136,7 @@ class AccountSelection:
 
 
 @dataclass(frozen=True, slots=True)
-class _AccountConcurrencyCaps:
+class AccountConcurrencyCaps:
     response_create_limit: int
     stream_limit: int
 
@@ -190,8 +190,9 @@ class LoadBalancer:
         *,
         kind: AccountLeaseKind,
         estimated_tokens: float = 0.0,
+        concurrency_caps: AccountConcurrencyCaps | None = None,
     ) -> AccountLease | None:
-        caps = await _load_account_concurrency_caps()
+        caps = concurrency_caps or effective_account_concurrency_caps()
         async with self._runtime_lock:
             self._reclaim_stale_account_leases_locked()
             runtime = self._runtime.setdefault(account_id, RuntimeState())
@@ -252,7 +253,7 @@ class LoadBalancer:
         account_id: str,
         *,
         kind: AccountLeaseKind,
-        caps: _AccountConcurrencyCaps,
+        caps: AccountConcurrencyCaps,
         stream_reserve_slots: int = 0,
     ) -> bool:
         runtime = self._runtime.setdefault(account_id, RuntimeState())
@@ -327,6 +328,7 @@ class LoadBalancer:
         estimated_lease_tokens: float = 0.0,
         stream_reserve_slots: int = 0,
         traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
+        concurrency_caps: AccountConcurrencyCaps | None = None,
     ) -> AccountSelection:
         excluded_ids = set(exclude_account_ids or ())
         scoped_account_ids = None if account_ids is None else set(account_ids)
@@ -397,7 +399,7 @@ class LoadBalancer:
             return selection_inputs
 
         selection_inputs = await load_selection_inputs()
-        caps = await _load_account_concurrency_caps()
+        caps = concurrency_caps or effective_account_concurrency_caps()
         circuit_breaker_open = _is_upstream_circuit_breaker_open()
         if circuit_breaker_open:
             set_degraded("upstream circuit breaker is open")
@@ -1018,6 +1020,7 @@ class LoadBalancer:
         prefer_earlier_reset_window: ResetPreferenceWindow = "secondary",
         secondary_budget_threshold_pct: float = 100.0,
         lease_kind: AccountLeaseKind | None = None,
+        concurrency_caps: AccountConcurrencyCaps | None = None,
     ) -> AccountSelection:
         selection_inputs = await self._load_selection_inputs(
             model=model,
@@ -1029,7 +1032,7 @@ class LoadBalancer:
                 error_message=selection_inputs.error_message,
                 error_code=selection_inputs.error_code,
             )
-        caps = await _load_account_concurrency_caps()
+        caps = concurrency_caps or effective_account_concurrency_caps()
         async with self._runtime_lock:
             self._reclaim_stale_account_leases_locked()
             self._prune_runtime(selection_inputs.runtime_accounts or selection_inputs.accounts)
@@ -1744,7 +1747,7 @@ def _filter_states_for_account_caps(
     states: Iterable[AccountState],
     *,
     lease_kind: AccountLeaseKind | None,
-    caps: _AccountConcurrencyCaps,
+    caps: AccountConcurrencyCaps,
     stream_reserve_slots: int = 0,
 ) -> list[AccountState]:
     if lease_kind is None:
@@ -1772,7 +1775,7 @@ def _account_cap_error_code(lease_kind: AccountLeaseKind | None) -> str | None:
     return None
 
 
-def _account_cap_error_message(lease_kind: AccountLeaseKind | None, caps: _AccountConcurrencyCaps) -> str:
+def _account_cap_error_message(lease_kind: AccountLeaseKind | None, caps: AccountConcurrencyCaps) -> str:
     if lease_kind == "response_create":
         cap = caps.response_create_limit
         return f"Account response-create capacity is exhausted; per-account limit is {cap}"
@@ -1785,12 +1788,11 @@ def _account_cap_error_message(lease_kind: AccountLeaseKind | None, caps: _Accou
     return "Account capacity is exhausted"
 
 
-async def _load_account_concurrency_caps() -> _AccountConcurrencyCaps:
-    dashboard_settings = await get_settings_cache().get()
+def effective_account_concurrency_caps(dashboard_settings: object | None = None) -> AccountConcurrencyCaps:
     startup_settings = get_settings()
     response_create_limit = getattr(dashboard_settings, "proxy_account_response_create_limit", None)
     stream_limit = getattr(dashboard_settings, "proxy_account_stream_limit", None)
-    return _AccountConcurrencyCaps(
+    return AccountConcurrencyCaps(
         response_create_limit=max(
             0,
             int(
@@ -1801,11 +1803,7 @@ async def _load_account_concurrency_caps() -> _AccountConcurrencyCaps:
         ),
         stream_limit=max(
             0,
-            int(
-                startup_settings.proxy_account_stream_limit
-                if stream_limit is None
-                else stream_limit
-            ),
+            int(startup_settings.proxy_account_stream_limit if stream_limit is None else stream_limit),
         ),
     )
 

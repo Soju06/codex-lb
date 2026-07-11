@@ -191,6 +191,7 @@ class _StreamingRetryMixin:
         start = time.monotonic()
         base_settings = _facade().get_settings()
         settings = await _facade().get_settings_cache().get()
+        concurrency_caps = _facade().effective_account_concurrency_caps(settings)
         deadline = start + _facade()._stream_request_budget_seconds(
             base_settings,
             request_transport=request_transport,
@@ -328,6 +329,7 @@ class _StreamingRetryMixin:
                         suppress_text_done_events=suppress_text_done_events,
                         upstream_stream_transport=upstream_stream_transport,
                         request_transport=request_transport,
+                        concurrency_caps=concurrency_caps,
                         useragent=useragent,
                         useragent_group=useragent_group,
                         client_ip=client_ip,
@@ -1015,6 +1017,7 @@ class _StreamingRetryMixin:
                                 suppress_text_done_events=suppress_text_done_events,
                                 upstream_stream_transport=upstream_stream_transport,
                                 request_transport=request_transport,
+                                concurrency_caps=concurrency_caps,
                                 useragent=useragent,
                                 useragent_group=useragent_group,
                                 client_ip=client_ip,

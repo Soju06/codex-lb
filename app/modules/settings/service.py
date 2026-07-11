@@ -110,7 +110,9 @@ class SettingsService:
             upstream_stream_transport=row.upstream_stream_transport,
             prohibit_fast_mode=row.prohibit_fast_mode,
             http_downstream_transport_policy=row.http_downstream_transport_policy,
-            proxy_account_response_create_limit=_effective_response_create_limit(row.proxy_account_response_create_limit),
+            proxy_account_response_create_limit=_effective_response_create_limit(
+                row.proxy_account_response_create_limit
+            ),
             proxy_account_stream_limit=_effective_stream_limit(row.proxy_account_stream_limit),
             proxy_account_stream_recovery_reserve=_effective_stream_recovery_reserve(
                 row.proxy_account_stream_recovery_reserve
@@ -209,7 +211,9 @@ class SettingsService:
             upstream_stream_transport=row.upstream_stream_transport,
             prohibit_fast_mode=row.prohibit_fast_mode,
             http_downstream_transport_policy=row.http_downstream_transport_policy,
-            proxy_account_response_create_limit=_effective_response_create_limit(row.proxy_account_response_create_limit),
+            proxy_account_response_create_limit=_effective_response_create_limit(
+                row.proxy_account_response_create_limit
+            ),
             proxy_account_stream_limit=_effective_stream_limit(row.proxy_account_stream_limit),
             proxy_account_stream_recovery_reserve=_effective_stream_recovery_reserve(
                 row.proxy_account_stream_recovery_reserve

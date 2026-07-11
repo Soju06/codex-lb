@@ -14,7 +14,7 @@ import app.modules.proxy.load_balancer as load_balancer_module
 from app.core.crypto import TokenEncryptor
 from app.db.models import Account, AccountStatus, StickySessionKind, UsageHistory
 from app.modules.api_keys.repository import ApiKeysRepository
-from app.modules.proxy.load_balancer import LoadBalancer
+from app.modules.proxy.load_balancer import LoadBalancer, effective_account_concurrency_caps
 from app.modules.proxy.repo_bundle import ProxyRepositories
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.repository import AdditionalUsageRepository
@@ -48,7 +48,7 @@ def _make_account(account_id: str) -> Account:
 
 
 @pytest.mark.asyncio
-async def test_account_lease_uses_updated_dashboard_cap_not_startup_environment(
+async def test_account_lease_uses_explicit_dashboard_cap_snapshot_not_startup_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     startup_settings = SimpleNamespace(
@@ -64,18 +64,25 @@ async def test_account_lease_uses_updated_dashboard_cap_not_startup_environment(
         proxy_account_stream_limit=1,
     )
 
-    class _SettingsCache:
-        async def get(self) -> object:
-            return dashboard_settings
-
     monkeypatch.setattr(load_balancer_module, "get_settings", lambda: startup_settings)
-    monkeypatch.setattr(load_balancer_module, "get_settings_cache", lambda: _SettingsCache())
     balancer = LoadBalancer(lambda: _repo_factory(_StubAccountsRepository([]), _StubUsageRepository({}, {})))
 
-    first = await balancer.acquire_account_lease("acc-dashboard-caps", kind="stream")
+    first = await balancer.acquire_account_lease(
+        "acc-dashboard-caps",
+        kind="stream",
+        concurrency_caps=effective_account_concurrency_caps(dashboard_settings),
+    )
     dashboard_settings.proxy_account_stream_limit = 2
-    second = await balancer.acquire_account_lease("acc-dashboard-caps", kind="stream")
-    third = await balancer.acquire_account_lease("acc-dashboard-caps", kind="stream")
+    second = await balancer.acquire_account_lease(
+        "acc-dashboard-caps",
+        kind="stream",
+        concurrency_caps=effective_account_concurrency_caps(dashboard_settings),
+    )
+    third = await balancer.acquire_account_lease(
+        "acc-dashboard-caps",
+        kind="stream",
+        concurrency_caps=effective_account_concurrency_caps(dashboard_settings),
+    )
 
     assert first is not None
     assert second is not None

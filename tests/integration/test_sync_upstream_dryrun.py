@@ -52,8 +52,7 @@ def _git(*args: str, cwd: Path, env_extra: dict[str, str] | None = None) -> subp
     )
     if res.returncode != 0:
         raise AssertionError(
-            f"git {' '.join(args)} (cwd={cwd}) failed: rc={res.returncode}\n"
-            f"stdout: {res.stdout}\nstderr: {res.stderr}"
+            f"git {' '.join(args)} (cwd={cwd}) failed: rc={res.returncode}\nstdout: {res.stdout}\nstderr: {res.stderr}"
         )
     return res
 
@@ -97,22 +96,28 @@ def test_preflight_no_github_token_exits_1(tmp_path: Path) -> None:
     # GITHUB_TOKEN guard, not the git-repo or claude guards.
     subprocess.run(["git", "init", "--initial-branch=main", str(tmp_path)], check=True, capture_output=True)
     # Inherit full PATH so claude + jq resolve (those guards come BEFORE the
-    # GITHUB_TOKEN guard in the wrapper). We then drop GITHUB_TOKEN so the
-    # guard we want to exercise triggers.
-    env = {**os.environ}
-    env.pop("GITHUB_TOKEN", None)
+    # GITHUB_TOKEN guard in the wrapper). We also merge in GIT_ENV so the
+    # invoked wrapper's git operations have a deterministic identity, and drop
+    # GITHUB_TOKEN via a dict comprehension so the env keeps its narrow
+    # ``dict[str, str]`` type for ``subprocess.run`` overload resolution.
+    env = {**os.environ, **GIT_ENV}
+    env = {k: v for k, v in env.items() if k != "GITHUB_TOKEN"}
     # Sanity: claude and jq must be available so we reach the GITHUB_TOKEN guard.
+    # ``command -v`` is a shell builtin; invoke via bash so subprocess.run can
+    # resolve the executable regardless of the runner image (Ubuntu CI has no
+    # /usr/bin/command).
     if (
-        subprocess.run(["command", "-v", "claude"], env=env, capture_output=True).returncode != 0
-        or subprocess.run(["command", "-v", "jq"], env=env, capture_output=True).returncode != 0
+        subprocess.run(["bash", "-c", "command -v claude"], env=env, capture_output=True).returncode != 0
+        or subprocess.run(["bash", "-c", "command -v jq"], env=env, capture_output=True).returncode != 0
     ):
         pytest.skip("claude or jq not available in test environment")
     result = subprocess.run(
         [str(SYNC_SCRIPT)],
-        cwd=tmp_path,
+        cwd=str(tmp_path),
         capture_output=True,
         text=True,
         env=env,
+        check=False,
     )
     assert result.returncode == 1, f"expected exit 1, got {result.returncode}; stderr={result.stderr!r}"
     assert "GITHUB_TOKEN" in result.stderr
@@ -127,20 +132,23 @@ def test_preflight_missing_claude_exits_4(tmp_path: Path) -> None:
     # while still providing bash via the original /usr/bin:/bin.
     env = {
         **os.environ,
+        **GIT_ENV,
         "PATH": "/usr/bin:/bin",  # bash lives here; claude is not installed on CI
         "GITHUB_TOKEN": "ghp_test",
     }
-    # Sanity: bash must resolve, claude must not.
+    # Sanity: bash must resolve, claude must not. ``command -v`` is a shell
+    # builtin, so invoke via bash (Ubuntu CI ships no /usr/bin/command).
     bash_ok = subprocess.run(["bash", "--version"], env=env, capture_output=True).returncode == 0
-    claude_missing = subprocess.run(["command", "-v", "claude"], env=env, capture_output=True).returncode != 0
+    claude_missing = subprocess.run(["bash", "-c", "command -v claude"], env=env, capture_output=True).returncode != 0
     if not bash_ok or not claude_missing:
         pytest.skip("test environment has bash or claude in unexpected state")
     result = subprocess.run(
         [str(SYNC_SCRIPT)],
-        cwd=tmp_path,
+        cwd=str(tmp_path),
         capture_output=True,
         text=True,
         env=env,
+        check=False,
     )
     assert result.returncode == 4, f"expected exit 4, got {result.returncode}; stderr={result.stderr!r}"
     assert "claude" in result.stderr.lower()
@@ -154,8 +162,10 @@ def test_preflight_missing_claude_exits_4(tmp_path: Path) -> None:
 def test_setup_remote_idempotent(tmp_path: Path) -> None:
     """Re-running the script never mutates the existing correct URL."""
     fake_fork = _clone(_make_bare_with_commit(tmp_path / "u.git", tmp_path / "seed"), tmp_path / "fork")
+
     def run() -> subprocess.CompletedProcess[str]:
         return subprocess.run([str(SETUP_SCRIPT)], cwd=fake_fork, capture_output=True, text=True, check=False)
+
     out1 = run()
     out2 = run()
     assert out1.returncode == 0 and out2.returncode == 0
@@ -225,16 +235,21 @@ def test_clean_fast_forward_merge(tmp_path: Path) -> None:
     _git("push", "origin", "main", cwd=seed2)
     # Now the fork has one commit ahead and one upstream commit behind.
     _git("fetch", "upstream", "main", cwd=fork)
+    # ``--no-ff`` creates a merge commit and therefore needs an identity that
+    # is independent of any host-level ~/.gitconfig. Pass GIT_ENV explicitly
+    # so the merge succeeds on minimal CI runners.
+    merge_env = {**os.environ, **GIT_ENV}
     rc = subprocess.run(
         ["git", "merge", "--no-ff", "upstream/main"],
         cwd=fork,
         capture_output=True,
         text=True,
         check=False,
+        env=merge_env,
     ).returncode
     assert rc == 0, "clean merge should succeed"
     # Merge commit present.
-    log = subprocess.check_output(["git", "log", "--oneline", "-n", "3"], cwd=fork, text=True)
+    log = subprocess.check_output(["git", "log", "--oneline", "-n", "3"], cwd=fork, text=True, env=merge_env)
     assert "Merge branch" in log or "Merge commit" in log or "Merge" in log
 
 
@@ -261,16 +276,20 @@ def test_conflict_in_fork_customized_file_blocks_merge(tmp_path: Path) -> None:
     _seed_file(Path(seed2), "shared.md", "upstream says hello\n", "upstream: edit shared.md")
     _git("push", "origin", "main", cwd=seed2)
     _git("fetch", "upstream", "main", cwd=fork)
+    # Use the same identity-suppressing env as the rest of the test so the
+    # merge behaves the same on minimal CI runners and on developer hosts.
+    merge_env = {**os.environ, **GIT_ENV}
     result = subprocess.run(
         ["git", "merge", "--no-ff", "upstream/main"],
         cwd=fork,
         capture_output=True,
         text=True,
         check=False,
+        env=merge_env,
     )
     assert result.returncode != 0, "conflict merge should fail"
     # ``git status`` must show ``Unmerged paths`` after a conflict.
-    status = subprocess.check_output(["git", "status", "--porcelain"], cwd=fork, text=True)
+    status = subprocess.check_output(["git", "status", "--porcelain"], cwd=fork, text=True, env=merge_env)
     assert "UU " in status or "AA " in status or "shared.md" in status
 
 

@@ -74,6 +74,8 @@ async def test_get_reports_serializes_useragent_breakdown_and_model_request_coun
                     cost_usd=1.2,
                     active_accounts=1,
                     error_count=0,
+                    median_ttft_ms=123.456,
+                    median_tps=78.901,
                 )
             ]
         ),
@@ -132,6 +134,8 @@ async def test_get_reports_serializes_useragent_breakdown_and_model_request_coun
     )
     repo.earliest_report_activity_at.assert_awaited_once_with(None, None, "opencode")
 
+    assert result.daily[0].median_ttft_ms == 123.46
+    assert result.daily[0].median_tps == 78.9
     assert result.by_model[0].model == "gpt-5.1"
     assert result.by_model[0].requests == 2
     assert result.by_useragent[0].useragent == "opencode"

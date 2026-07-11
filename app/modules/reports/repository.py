@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from itertools import batched
+from statistics import median
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import and_, case, func, literal, or_, select, union_all
@@ -32,6 +33,8 @@ class DailyReportAggregateRow:
     cost_usd: float
     active_accounts: int
     error_count: int
+    median_ttft_ms: float
+    median_tps: float
 
 
 @dataclass(frozen=True)
@@ -91,8 +94,17 @@ class ReportsRepository:
         # SQLite caps compound SELECTs at 500 terms, so long report ranges are
         # executed in chunks instead of building a single oversized UNION ALL.
         for day_ranges_batch in batched(day_ranges, _SQLITE_COMPOUND_SELECT_LIMIT):
-            stmt = _daily_rows_stmt(list(day_ranges_batch), account_ids, model, useragent_group)
-            result = await self._session.execute(stmt)
+            day_ranges_list = list(day_ranges_batch)
+            speed_result = await self._session.execute(
+                _daily_speed_values_stmt(day_ranges_list, account_ids, model, useragent_group)
+            )
+            speed_values: dict[str, tuple[list[float], list[float]]] = {}
+            for speed_row in speed_result.all():
+                ttft_values, tps_values = speed_values.setdefault(speed_row.report_date, ([], []))
+                ttft_values.append(float(speed_row.ttft_ms or 0.0))
+                tps_values.append(float(speed_row.tps or 0.0))
+
+            result = await self._session.execute(_daily_rows_stmt(day_ranges_list, account_ids, model, useragent_group))
             rows.extend(
                 DailyReportAggregateRow(
                     date=row.report_date,
@@ -103,6 +115,8 @@ class ReportsRepository:
                     cost_usd=float(row.cost_usd or 0.0),
                     active_accounts=int(row.active_accounts or 0),
                     error_count=int(row.error_count or 0),
+                    median_ttft_ms=_median_or_zero(speed_values.get(row.report_date, ([], []))[0]),
+                    median_tps=_median_or_zero(speed_values.get(row.report_date, ([], []))[1]),
                 )
                 for row in result.all()
             )
@@ -336,13 +350,11 @@ def _normal_traffic_clause():
     )
 
 
-def _daily_rows_stmt(
-    day_ranges: list[tuple[str, datetime, datetime]],
-    account_ids: list[str] | None,
-    model: str | None,
-    useragent_group: str | None,
-):
-    useragent_group_clause = _useragent_group_filter_clause(useragent_group)
+def _median_or_zero(values: list[float]) -> float:
+    return float(median(values)) if values else 0.0
+
+
+def _day_ranges_cte(day_ranges: list[tuple[str, datetime, datetime]]):
     day_range_rows = [
         select(
             literal(report_date).label("report_date"),
@@ -352,7 +364,56 @@ def _daily_rows_stmt(
         for report_date, day_start, day_end in day_ranges
     ]
     day_ranges_query = day_range_rows[0] if len(day_range_rows) == 1 else union_all(*day_range_rows)
-    day_ranges_cte = day_ranges_query.cte("report_days")
+    return day_ranges_query.cte("report_days")
+
+
+def _daily_speed_values_stmt(
+    day_ranges: list[tuple[str, datetime, datetime]],
+    account_ids: list[str] | None,
+    model: str | None,
+    useragent_group: str | None,
+):
+    useragent_group_clause = _useragent_group_filter_clause(useragent_group)
+    day_ranges_cte = _day_ranges_cte(day_ranges)
+    return select(
+        day_ranges_cte.c.report_date,
+        func.coalesce(RequestLog.latency_first_token_ms, 0.0).label("ttft_ms"),
+        case(
+            (
+                and_(
+                    RequestLog.output_tokens.is_not(None),
+                    RequestLog.output_tokens > 0,
+                    RequestLog.latency_ms.is_not(None),
+                    RequestLog.latency_first_token_ms.is_not(None),
+                    RequestLog.latency_ms > RequestLog.latency_first_token_ms,
+                ),
+                RequestLog.output_tokens * 1000.0 / (RequestLog.latency_ms - RequestLog.latency_first_token_ms),
+            ),
+            else_=0.0,
+        ).label("tps"),
+    ).select_from(
+        day_ranges_cte.join(
+            RequestLog,
+            and_(
+                RequestLog.requested_at >= day_ranges_cte.c.day_start,
+                RequestLog.requested_at < day_ranges_cte.c.day_end,
+                _normal_traffic_clause(),
+                *([RequestLog.account_id.in_(account_ids)] if account_ids else []),
+                *([RequestLog.model == model] if model else []),
+                *([useragent_group_clause] if useragent_group_clause is not None else []),
+            ),
+        )
+    )
+
+
+def _daily_rows_stmt(
+    day_ranges: list[tuple[str, datetime, datetime]],
+    account_ids: list[str] | None,
+    model: str | None,
+    useragent_group: str | None,
+):
+    useragent_group_clause = _useragent_group_filter_clause(useragent_group)
+    day_ranges_cte = _day_ranges_cte(day_ranges)
     return (
         select(
             day_ranges_cte.c.report_date,

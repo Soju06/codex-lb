@@ -10,6 +10,8 @@ import { ReportsFilters, type ReportsFiltersState } from "./reports-filters";
 import { ReportsSummaryCards } from "./reports-summary-cards";
 import type { CostPerDayChartProps } from "./cost-per-day-chart";
 import type { TokensPerDayChartProps } from "./tokens-per-day-chart";
+import type { TimeToFirstTokenChartProps } from "./time-to-first-token-chart";
+import type { TokensPerSecondChartProps } from "./tokens-per-second-chart";
 import type { ModelDistributionDonutProps } from "./model-distribution-donut";
 import type { UseragentDistributionDonutProps } from "./useragent-distribution-donut";
 import { DailyDetailTable } from "./daily-detail-table";
@@ -23,6 +25,16 @@ const CostPerDayChart = lazy(() =>
 const TokensPerDayChart = lazy(() =>
   import("./tokens-per-day-chart").then((module) => ({
     default: (props: TokensPerDayChartProps) => <module.TokensPerDayChart {...props} />,
+  })),
+);
+const TimeToFirstTokenChart = lazy(() =>
+  import("./time-to-first-token-chart").then((module) => ({
+    default: (props: TimeToFirstTokenChartProps) => <module.TimeToFirstTokenChart {...props} />,
+  })),
+);
+const TokensPerSecondChart = lazy(() =>
+  import("./tokens-per-second-chart").then((module) => ({
+    default: (props: TokensPerSecondChartProps) => <module.TokensPerSecondChart {...props} />,
   })),
 );
 const ModelDistributionDonut = lazy(() =>
@@ -227,6 +239,20 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
             </Suspense>
             <Suspense fallback={<div className="h-[270px] rounded-xl border bg-card" />}>
               <TokensPerDayChart
+                startDate={filters.startDate}
+                endDate={filters.endDate}
+                data={reportsQuery.data.daily}
+              />
+            </Suspense>
+            <Suspense fallback={<div className="h-[270px] rounded-xl border bg-card" />}>
+              <TimeToFirstTokenChart
+                startDate={filters.startDate}
+                endDate={filters.endDate}
+                data={reportsQuery.data.daily}
+              />
+            </Suspense>
+            <Suspense fallback={<div className="h-[270px] rounded-xl border bg-card" />}>
+              <TokensPerSecondChart
                 startDate={filters.startDate}
                 endDate={filters.endDate}
                 data={reportsQuery.data.daily}

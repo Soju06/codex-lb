@@ -9,6 +9,8 @@ const DailyReportRowSchema = z.object({
   costUsd: z.number(),
   activeAccounts: z.number(),
   errorCount: z.number(),
+  medianTtftMs: z.number().optional().default(0),
+  medianTps: z.number().optional().default(0),
 });
 
 const ModelCostEntrySchema = z.object({
@@ -64,7 +66,7 @@ export const ReportsResponseSchema = z.object({
   byAccount: z.array(AccountCostEntrySchema),
 });
 
-export type DailyReportRow = z.infer<typeof DailyReportRowSchema>;
+export type DailyReportRow = z.input<typeof DailyReportRowSchema>;
 export type ModelCostEntry = z.infer<typeof ModelCostEntrySchema>;
 export type UseragentCostEntry = z.infer<typeof UseragentCostEntrySchema>;
 export type AccountCostEntry = z.infer<typeof AccountCostEntrySchema>;

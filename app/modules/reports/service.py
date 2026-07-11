@@ -75,6 +75,8 @@ class ReportsService:
                 cost_usd=round(row.cost_usd, 4),
                 active_accounts=row.active_accounts,
                 error_count=row.error_count,
+                median_ttft_ms=round(row.median_ttft_ms, 2),
+                median_tps=round(row.median_tps, 2),
             )
             for row in daily_rows
         ]

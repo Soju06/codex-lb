@@ -82,6 +82,8 @@ async def test_reports_api_returns_null_account_bucket(async_client, db_setup):
             "requests": 2,
             "inputTokens": 15,
             "outputTokens": 5,
+            "medianTtftMs": 0.0,
+            "medianTps": 0.0,
         }
     ]
     assert payload["byAccount"] == [
@@ -167,6 +169,8 @@ async def test_reports_api_includes_preserved_deleted_account_history(async_clie
             "requests": 1,
             "inputTokens": 13,
             "outputTokens": 7,
+            "medianTtftMs": 0.0,
+            "medianTps": 0.0,
         }
     ]
     assert payload["byModel"] == [{"model": "gpt-5.1", "costUsd": 0.42, "requests": 1, "percentage": 100.0}]
@@ -306,6 +310,8 @@ async def test_reports_api_interprets_dates_in_requested_timezone(async_client, 
             "requests": 2,
             "inputTokens": 5,
             "outputTokens": 2,
+            "medianTtftMs": 0.0,
+            "medianTps": 0.0,
         }
     ]
 
@@ -552,6 +558,8 @@ async def test_reports_api_default_range_uses_last_seven_calendar_days_in_reques
             "requests": 1,
             "inputTokens": 5,
             "outputTokens": 1,
+            "medianTtftMs": 0.0,
+            "medianTps": 0.0,
         },
         {
             "activeAccounts": 1,
@@ -562,6 +570,8 @@ async def test_reports_api_default_range_uses_last_seven_calendar_days_in_reques
             "requests": 1,
             "inputTokens": 5,
             "outputTokens": 1,
+            "medianTtftMs": 0.0,
+            "medianTps": 0.0,
         },
     ]
 
@@ -647,6 +657,8 @@ async def test_reports_api_uses_dst_aware_boundaries_for_requested_timezone(asyn
             "requests": 2,
             "inputTokens": 5,
             "outputTokens": 2,
+            "medianTtftMs": 0.0,
+            "medianTps": 0.0,
         }
     ]
 
@@ -1414,6 +1426,8 @@ async def test_reports_api_summary_uses_sql_range_totals_not_rounded_daily_rows(
             "requests": 1,
             "inputTokens": 1,
             "outputTokens": 1,
+            "medianTtftMs": 0.0,
+            "medianTps": 0.0,
         },
         {
             "activeAccounts": 1,
@@ -1424,6 +1438,8 @@ async def test_reports_api_summary_uses_sql_range_totals_not_rounded_daily_rows(
             "requests": 1,
             "inputTokens": 1,
             "outputTokens": 1,
+            "medianTtftMs": 0.0,
+            "medianTps": 0.0,
         },
         {
             "activeAccounts": 1,
@@ -1434,5 +1450,7 @@ async def test_reports_api_summary_uses_sql_range_totals_not_rounded_daily_rows(
             "requests": 1,
             "inputTokens": 1,
             "outputTokens": 1,
+            "medianTtftMs": 0.0,
+            "medianTps": 0.0,
         },
     ]

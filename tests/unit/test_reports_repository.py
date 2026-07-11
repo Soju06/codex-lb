@@ -63,6 +63,8 @@ async def test_aggregate_daily_rows_groups_in_sql_and_returns_only_buckets_with_
                 output_tokens=4,
                 cached_input_tokens=2,
                 cost_usd=0.25,
+                latency_ms=1200,
+                latency_first_token_ms=200,
             ),
             RequestLog(
                 account_id=None,
@@ -74,6 +76,8 @@ async def test_aggregate_daily_rows_groups_in_sql_and_returns_only_buckets_with_
                 output_tokens=1,
                 cached_input_tokens=0,
                 cost_usd=0.1,
+                latency_ms=2600,
+                latency_first_token_ms=600,
             ),
         ]
     )
@@ -93,6 +97,8 @@ async def test_aggregate_daily_rows_groups_in_sql_and_returns_only_buckets_with_
     assert rows[0].cost_usd == 0.25
     assert rows[0].active_accounts == 1
     assert rows[0].error_count == 0
+    assert rows[0].median_ttft_ms == 200
+    assert rows[0].median_tps == 4
 
     assert rows[1].requests == 1
     assert rows[1].input_tokens == 5
@@ -101,6 +107,8 @@ async def test_aggregate_daily_rows_groups_in_sql_and_returns_only_buckets_with_
     assert rows[1].cost_usd == 0.1
     assert rows[1].active_accounts == 0
     assert rows[1].error_count == 1
+    assert rows[1].median_ttft_ms == 600
+    assert rows[1].median_tps == 0.5
 
 
 @pytest.mark.asyncio

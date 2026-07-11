@@ -44,5 +44,7 @@ function createZeroRow(date: string): DailyReportRow {
     costUsd: 0,
     activeAccounts: 0,
     errorCount: 0,
+    medianTtftMs: 0,
+    medianTps: 0,
   };
 }

@@ -2,9 +2,9 @@
 
 ## MODIFIED Requirements
 
-### Requirement: WebSocket full-resend previous-response misses retry without stale anchor
+### Requirement: WebSocket full-resend previous-response misses MUST retry without stale anchor
 
-When a direct WebSocket `response.create` request includes both
+When a direct WebSocket `response.create` request includes both, the service MUST
 `previous_response_id` and a self-contained full resend payload, the service
 MUST retain a safe replay body without `previous_response_id`. If upstream
 rejects the anchor with `previous_response_not_found` before
@@ -57,11 +57,9 @@ captured an independently equivalent fresh request body.
 - **THEN** the service may reconnect through another eligible account using the
   retained fresh body
 
-### Requirement: Cross-transport full resends require retained continuity proof
+### Requirement: Cross-transport full resends MUST require retained continuity proof
 
-When an HTTP Responses request references a response completed on a direct
-WebSocket session, the service MAY remove the owner-scoped
-`previous_response_id` after a pre-visible owner failure only when the same
+When an HTTP Responses request references a response completed on a direct WebSocket session, the service MUST remove the owner-scoped `previous_response_id` after a pre-visible owner failure only when the same
 process retains session continuity metadata proving that the resent input
 starts with the exact stored input prefix. The input MUST be self-contained for
 tool semantics and MUST NOT contain an account-scoped file reference. Missing

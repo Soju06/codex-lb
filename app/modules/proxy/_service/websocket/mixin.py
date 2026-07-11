@@ -1079,32 +1079,6 @@ class _WebSocketMixin:
                         # The anchor remains unchanged. The normal connect path
                         # below must select the resolved owner or fail closed.
                         await retire_current_upstream()
-                    else:
-                        can_switch_accounts = bool(
-                            request_state.previous_response_id is None
-                            or (
-                                request_state.proxy_injected_previous_response_id
-                                and request_state.fresh_upstream_request_is_retry_safe
-                                and request_state.fresh_upstream_request_text
-                            )
-                        )
-                        if can_switch_accounts:
-                            validated_account, _, _ = await proxy._revalidate_open_websocket_account(
-                                account,
-                                request_state=request_state,
-                                api_key=request_state.api_key or api_key,
-                            )
-                            if validated_account is not None:
-                                account = validated_account
-                            else:
-                                safe_request_text = _prepare_websocket_request_state_for_account_switch(request_state)
-                                if safe_request_text is None:
-                                    raise AssertionError("safe websocket account switch lost its replay body")
-                                text_data = safe_request_text
-                                payload = _parse_websocket_payload(text_data)
-                                if payload is None:
-                                    raise AssertionError("safe websocket account switch produced invalid payload")
-                                await retire_current_upstream()
 
                 if upstream is None:
                     if text_data is not None and payload is None:

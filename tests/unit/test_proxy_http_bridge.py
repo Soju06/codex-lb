@@ -11517,12 +11517,16 @@ async def test_http_bridge_replays_proxy_verified_full_resend_after_owner_quota(
         queued_request_count=1,
         last_used_at=1.0,
         idle_ttl_seconds=120.0,
+        upstream_turn_state="turn-old-account",
+        downstream_turn_state="turn-client-alias",
     )
     handle_stream_error = AsyncMock()
     release_create_lease = AsyncMock()
 
     async def retry_precreated(retry_session):
         assert retry_session is session
+        assert session.upstream_turn_state is None
+        assert session.downstream_turn_state is None
         assert request_state.previous_response_id is None
         assert request_state.preferred_account_id is None
         assert request_state.request_text == fresh_text

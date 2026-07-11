@@ -694,6 +694,10 @@ class _HTTPBridgeUpstreamEventsMixin:
             ):
                 safe_request_text = _prepare_websocket_request_state_for_account_switch(status_request_state)
                 if safe_request_text is not None:
+                    previous_upstream_turn_state = session.upstream_turn_state
+                    previous_downstream_turn_state = session.downstream_turn_state
+                    session.upstream_turn_state = None
+                    session.downstream_turn_state = None
                     await self._release_request_state_account_response_create_lease(status_request_state)
                     status_request_state.excluded_account_ids.add(session.account.id)
                     status_request_state.affinity_policy = replace(
@@ -710,6 +714,8 @@ class _HTTPBridgeUpstreamEventsMixin:
                     retried = await self._retry_http_bridge_precreated_request(session)
                     if retried:
                         return
+                    session.upstream_turn_state = previous_upstream_turn_state
+                    session.downstream_turn_state = previous_downstream_turn_state
                     async with session.pending_lock:
                         if status_request_state in session.pending_requests:
                             session.pending_requests.remove(status_request_state)

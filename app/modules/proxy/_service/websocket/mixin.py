@@ -398,6 +398,7 @@ from app.modules.proxy._service.websocket.helpers import (
     _websocket_event_error_type,
     _websocket_full_resend_conflicts_with_visible_pending,
     _websocket_input_items_are_self_contained_fresh_replay,
+    _websocket_owner_switch_has_other_pending_requests,
     _websocket_precreated_auth_error_code,
     _websocket_precreated_retry_error_code,
     _websocket_receive_timeout_for_pending_requests,
@@ -1078,6 +1079,37 @@ class _WebSocketMixin:
                 ):
                     required_owner_id = request_state.preferred_account_id
                     if required_owner_id is not None and required_owner_id != account.id:
+                        async with pending_lock:
+                            owner_switch_blocked = _websocket_owner_switch_has_other_pending_requests(
+                                request_state, pending_requests
+                            )
+                            if owner_switch_blocked and request_state in pending_requests:
+                                pending_requests.remove(request_state)
+                        if owner_switch_blocked:
+                            error_message = (
+                                "Previous response owner differs while another response is still streaming; "
+                                "retry after the terminal frame."
+                            )
+                            await proxy._release_websocket_request_state_reservation(request_state)
+                            await proxy._write_websocket_connect_failure(
+                                account_id=account.id,
+                                api_key=api_key,
+                                request_state=request_state,
+                                error_code="previous_response_owner_unavailable",
+                                error_message=error_message,
+                            )
+                            await proxy._emit_websocket_terminal_error(
+                                websocket,
+                                client_send_lock=client_send_lock,
+                                request_state=request_state,
+                                error_code="previous_response_owner_unavailable",
+                                error_message=error_message,
+                                downstream_activity=downstream_activity,
+                            )
+                            request_state = None
+                            text_data = None
+                            payload = None
+                            continue
                         # The anchor remains unchanged. The normal connect path
                         # below must select the resolved owner or fail closed.
                         await retire_current_upstream()

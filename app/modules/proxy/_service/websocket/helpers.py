@@ -366,6 +366,13 @@ def _prepare_websocket_request_state_for_visible_output_replay(
     return request_text
 
 
+def _websocket_owner_switch_has_other_pending_requests(
+    request_state: "_WebSocketRequestState",
+    pending_requests: deque["_WebSocketRequestState"],
+) -> bool:
+    return any(pending is not request_state for pending in pending_requests)
+
+
 def _prepare_websocket_request_state_for_account_switch(
     request_state: "_WebSocketRequestState",
 ) -> str | None:

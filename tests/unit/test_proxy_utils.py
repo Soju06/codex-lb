@@ -173,6 +173,28 @@ def test_websocket_account_switch_keeps_anchor_when_fresh_replay_references_file
     assert request_state.preferred_account_id == "acc_file_owner"
 
 
+def test_websocket_owner_switch_detects_other_pending_request() -> None:
+    current = proxy_service._WebSocketRequestState(
+        request_id="req_owner_switch",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+    )
+    earlier = proxy_service._WebSocketRequestState(
+        request_id="req_streaming",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+    )
+
+    assert websocket_mixin._websocket_owner_switch_has_other_pending_requests(current, deque([earlier, current]))
+    assert not websocket_mixin._websocket_owner_switch_has_other_pending_requests(current, deque([current]))
+
+
 @pytest.mark.asyncio
 async def test_revalidate_open_websocket_account_uses_current_model_and_tier(monkeypatch):
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))

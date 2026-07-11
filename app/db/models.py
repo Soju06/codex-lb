@@ -460,6 +460,18 @@ class DashboardSettings(Base):
         server_default=text("'smart'"),
         nullable=False,
     )
+    proxy_account_response_create_limit: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+    proxy_account_stream_limit: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+    proxy_account_stream_recovery_reserve: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
     prefer_earlier_reset_accounts: Mapped[bool] = mapped_column(
         Boolean, default=True, server_default=true(), nullable=False
     )

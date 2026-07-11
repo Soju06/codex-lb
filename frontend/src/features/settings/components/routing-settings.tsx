@@ -76,6 +76,9 @@ function accountLabel(account: AccountSummary): string {
 type RoutingSettingsDraft = {
   warmupModel: string;
   cacheAffinityTtl: string;
+  proxyAccountResponseCreateLimit: string;
+  proxyAccountStreamLimit: string;
+  proxyAccountStreamRecoveryReserve: string;
   relativeAvailabilityPower: string;
   relativeAvailabilityTopK: string;
   stickyPrimaryThreshold: string;
@@ -92,6 +95,9 @@ function createRoutingSettingsDraft(settings: DashboardSettings): RoutingSetting
   return {
     warmupModel: settings.warmupModel,
     cacheAffinityTtl: String(settings.openaiCacheAffinityMaxAgeSeconds),
+    proxyAccountResponseCreateLimit: String(settings.proxyAccountResponseCreateLimit),
+    proxyAccountStreamLimit: String(settings.proxyAccountStreamLimit),
+    proxyAccountStreamRecoveryReserve: String(settings.proxyAccountStreamRecoveryReserve),
     relativeAvailabilityPower: String(settings.relativeAvailabilityPower),
     relativeAvailabilityTopK: String(settings.relativeAvailabilityTopK),
     stickyPrimaryThreshold: String(settings.stickyReallocationPrimaryBudgetThresholdPct ?? 95),
@@ -110,6 +116,15 @@ function routingSettingsDraftReducer(
   patch: Partial<RoutingSettingsDraft>,
 ): RoutingSettingsDraft {
   return { ...state, ...patch };
+}
+
+function parseNonnegativeInteger(value: string): number | null {
+  const normalized = value.trim();
+  if (!/^\d+$/.test(normalized)) {
+    return null;
+  }
+  const parsed = Number(normalized);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
 }
 
 export function RoutingSettings({
@@ -153,6 +168,22 @@ export function RoutingSettings({
   const cacheAffinityTtlValid = Number.isInteger(parsedCacheAffinityTtl) && parsedCacheAffinityTtl > 0;
   const cacheAffinityTtlChanged =
     cacheAffinityTtlValid && parsedCacheAffinityTtl !== settings.openaiCacheAffinityMaxAgeSeconds;
+  const parsedProxyAccountResponseCreateLimit = parseNonnegativeInteger(draft.proxyAccountResponseCreateLimit);
+  const parsedProxyAccountStreamLimit = parseNonnegativeInteger(draft.proxyAccountStreamLimit);
+  const parsedProxyAccountStreamRecoveryReserve = parseNonnegativeInteger(
+    draft.proxyAccountStreamRecoveryReserve,
+  );
+  const accountCapacityLimitsValid =
+    parsedProxyAccountResponseCreateLimit !== null &&
+    parsedProxyAccountStreamLimit !== null &&
+    parsedProxyAccountStreamRecoveryReserve !== null &&
+    (parsedProxyAccountStreamLimit === 0 ||
+      parsedProxyAccountStreamRecoveryReserve <= parsedProxyAccountStreamLimit);
+  const accountCapacityLimitsChanged =
+    accountCapacityLimitsValid &&
+    (parsedProxyAccountResponseCreateLimit !== settings.proxyAccountResponseCreateLimit ||
+      parsedProxyAccountStreamLimit !== settings.proxyAccountStreamLimit ||
+      parsedProxyAccountStreamRecoveryReserve !== settings.proxyAccountStreamRecoveryReserve);
   const warmupModelChanged = draft.warmupModel.trim() !== settings.warmupModel;
   const warmupModelValid = draft.warmupModel.trim().length > 0 && draft.warmupModel.trim().length <= WARMUP_MODEL_MAX_LENGTH;
   const parsedLimitWarmupCooldown = Number(draft.limitWarmupCooldown);
@@ -634,6 +665,90 @@ export function RoutingSettings({
               ) : null}
             </div>
           ) : null}
+
+          <div className="space-y-3 p-3">
+            <div>
+              <p className="text-sm font-medium">{t("settings.routing.accountCapacity.title")}</p>
+              <p className="text-xs text-muted-foreground">
+                {t("settings.routing.accountCapacity.description")}
+              </p>
+            </div>
+            <div className="grid gap-2 sm:grid-cols-3">
+              <label className="block space-y-1">
+                <span className="block text-[11px] font-medium text-muted-foreground">
+                  {t("settings.routing.accountCapacity.responseCreateLabel")}
+                </span>
+                <Input
+                  aria-label={t("settings.routing.accountCapacity.responseCreateLabel")}
+                  type="number"
+                  min={0}
+                  step={1}
+                  inputMode="numeric"
+                  value={draft.proxyAccountResponseCreateLimit}
+                  disabled={busy}
+                  onChange={(event) => updateDraft({ proxyAccountResponseCreateLimit: event.target.value })}
+                  className="h-8 text-xs"
+                />
+                <span className="block text-[11px] text-muted-foreground">
+                  {t("settings.routing.accountCapacity.responseCreateDescription")}
+                </span>
+              </label>
+              <label className="block space-y-1">
+                <span className="block text-[11px] font-medium text-muted-foreground">
+                  {t("settings.routing.accountCapacity.streamLabel")}
+                </span>
+                <Input
+                  aria-label={t("settings.routing.accountCapacity.streamLabel")}
+                  type="number"
+                  min={0}
+                  step={1}
+                  inputMode="numeric"
+                  value={draft.proxyAccountStreamLimit}
+                  disabled={busy}
+                  onChange={(event) => updateDraft({ proxyAccountStreamLimit: event.target.value })}
+                  className="h-8 text-xs"
+                />
+                <span className="block text-[11px] text-muted-foreground">
+                  {t("settings.routing.accountCapacity.streamDescription")}
+                </span>
+              </label>
+              <label className="block space-y-1">
+                <span className="block text-[11px] font-medium text-muted-foreground">
+                  {t("settings.routing.accountCapacity.streamRecoveryReserveLabel")}
+                </span>
+                <Input
+                  aria-label={t("settings.routing.accountCapacity.streamRecoveryReserveLabel")}
+                  type="number"
+                  min={0}
+                  step={1}
+                  inputMode="numeric"
+                  value={draft.proxyAccountStreamRecoveryReserve}
+                  disabled={busy}
+                  onChange={(event) => updateDraft({ proxyAccountStreamRecoveryReserve: event.target.value })}
+                  className="h-8 text-xs"
+                />
+                <span className="block text-[11px] text-muted-foreground">
+                  {t("settings.routing.accountCapacity.streamRecoveryReserveDescription")}
+                </span>
+              </label>
+            </div>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              className="h-8 text-xs sm:w-40"
+              disabled={busy || !accountCapacityLimitsChanged}
+              onClick={() =>
+                void save({
+                  proxyAccountResponseCreateLimit: parsedProxyAccountResponseCreateLimit!,
+                  proxyAccountStreamLimit: parsedProxyAccountStreamLimit!,
+                  proxyAccountStreamRecoveryReserve: parsedProxyAccountStreamRecoveryReserve!,
+                })
+              }
+            >
+              {t("settings.routing.accountCapacity.save")}
+            </Button>
+          </div>
 
           <div className="flex items-center justify-between p-3">
             <div>

@@ -22,6 +22,15 @@ from app.modules.usage.repository import AdditionalUsageRepository
 pytestmark = pytest.mark.unit
 
 
+@pytest.fixture(autouse=True)
+def _use_dashboard_caps_from_test_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _SettingsCache:
+        async def get(self) -> object:
+            return load_balancer_module.get_settings()
+
+    monkeypatch.setattr(load_balancer_module, "get_settings_cache", lambda: _SettingsCache())
+
+
 def _make_account(account_id: str) -> Account:
     encryptor = TokenEncryptor()
     return Account(
@@ -36,6 +45,41 @@ def _make_account(account_id: str) -> Account:
         status=AccountStatus.ACTIVE,
         deactivation_reason=None,
     )
+
+
+@pytest.mark.asyncio
+async def test_account_lease_uses_updated_dashboard_cap_not_startup_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    startup_settings = SimpleNamespace(
+        proxy_account_lease_ttl_seconds=60.0,
+        proxy_request_budget_seconds=10.0,
+        http_responses_stream_request_budget_seconds=7200.0,
+        http_responses_session_bridge_request_budget_seconds=7200.0,
+        proxy_account_response_create_limit=1,
+        proxy_account_stream_limit=1,
+    )
+    dashboard_settings = SimpleNamespace(
+        proxy_account_response_create_limit=1,
+        proxy_account_stream_limit=1,
+    )
+
+    class _SettingsCache:
+        async def get(self) -> object:
+            return dashboard_settings
+
+    monkeypatch.setattr(load_balancer_module, "get_settings", lambda: startup_settings)
+    monkeypatch.setattr(load_balancer_module, "get_settings_cache", lambda: _SettingsCache())
+    balancer = LoadBalancer(lambda: _repo_factory(_StubAccountsRepository([]), _StubUsageRepository({}, {})))
+
+    first = await balancer.acquire_account_lease("acc-dashboard-caps", kind="stream")
+    dashboard_settings.proxy_account_stream_limit = 2
+    second = await balancer.acquire_account_lease("acc-dashboard-caps", kind="stream")
+    third = await balancer.acquire_account_lease("acc-dashboard-caps", kind="stream")
+
+    assert first is not None
+    assert second is not None
+    assert third is None
 
 
 class _StubAccountsRepository:
@@ -360,7 +404,7 @@ async def test_account_stream_cap_returns_stable_local_reason_until_released() -
     assert capped.error_code == "account_stream_cap"
     assert capped.error_message == (
         "Account stream capacity is exhausted; per-account limit is 8. "
-        "Increase CODEX_LB_PROXY_ACCOUNT_STREAM_LIMIT or wait for active streams to finish."
+        "Increase the dashboard stream limit or wait for active streams to finish."
     )
     assert "all upstream accounts are unavailable" not in capped.error_message
 

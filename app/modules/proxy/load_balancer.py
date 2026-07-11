@@ -136,6 +136,12 @@ class AccountSelection:
 
 
 @dataclass(frozen=True, slots=True)
+class _AccountConcurrencyCaps:
+    response_create_limit: int
+    stream_limit: int
+
+
+@dataclass(frozen=True, slots=True)
 class _AdditionalLimitFilterResult:
     accounts: list[Account]
     latest_primary: dict[str, AdditionalUsageHistory]
@@ -185,16 +191,17 @@ class LoadBalancer:
         kind: AccountLeaseKind,
         estimated_tokens: float = 0.0,
     ) -> AccountLease | None:
+        caps = await _load_account_concurrency_caps()
         async with self._runtime_lock:
             self._reclaim_stale_account_leases_locked()
             runtime = self._runtime.setdefault(account_id, RuntimeState())
             if kind == "response_create":
-                cap = get_settings().proxy_account_response_create_limit
+                cap = caps.response_create_limit
                 if cap > 0 and runtime.inflight_response_creates >= cap:
                     _record_account_cap_rejection("response_create")
                     return None
             else:
-                cap = get_settings().proxy_account_stream_limit
+                cap = caps.stream_limit
                 if cap > 0 and runtime.inflight_streams >= cap:
                     _record_account_cap_rejection("stream")
                     return None
@@ -245,13 +252,14 @@ class LoadBalancer:
         account_id: str,
         *,
         kind: AccountLeaseKind,
+        caps: _AccountConcurrencyCaps,
         stream_reserve_slots: int = 0,
     ) -> bool:
         runtime = self._runtime.setdefault(account_id, RuntimeState())
         if kind == "response_create":
-            cap = get_settings().proxy_account_response_create_limit
+            cap = caps.response_create_limit
             return cap <= 0 or runtime.inflight_response_creates < cap
-        cap = get_settings().proxy_account_stream_limit
+        cap = caps.stream_limit
         effective_cap = max(1, cap - max(0, stream_reserve_slots))
         return cap <= 0 or runtime.inflight_streams < effective_cap
 
@@ -389,6 +397,7 @@ class LoadBalancer:
             return selection_inputs
 
         selection_inputs = await load_selection_inputs()
+        caps = await _load_account_concurrency_caps()
         circuit_breaker_open = _is_upstream_circuit_breaker_open()
         if circuit_breaker_open:
             set_degraded("upstream circuit breaker is open")
@@ -438,11 +447,12 @@ class LoadBalancer:
                     selection_states = _filter_states_for_account_caps(
                         states,
                         lease_kind=lease_kind,
+                        caps=caps,
                         stream_reserve_slots=stream_reserve_slots,
                     )
                     if not selection_states and states:
                         selection_error_code = _account_cap_error_code(lease_kind)
-                        error_message = _account_cap_error_message(lease_kind)
+                        error_message = _account_cap_error_message(lease_kind, caps)
                         result = SelectionResult(None, error_message)
                         logger.warning(
                             "Account cap exhausted during selection lease_kind=%s reason=%s candidates=%s",
@@ -635,12 +645,13 @@ class LoadBalancer:
                     else _filter_states_for_account_caps(
                         states,
                         lease_kind=lease_kind,
+                        caps=caps,
                         stream_reserve_slots=stream_reserve_slots,
                     )
                 )
                 if not selection_states and states:
                     selection_error_code = _account_cap_error_code(lease_kind)
-                    result = SelectionResult(None, _account_cap_error_message(lease_kind))
+                    result = SelectionResult(None, _account_cap_error_message(lease_kind, caps))
                     logger.warning(
                         "Account cap exhausted during sticky selection lease_kind=%s reason=%s candidates=%s",
                         lease_kind,
@@ -704,11 +715,12 @@ class LoadBalancer:
                                 if not self._account_lease_allowed_locked(
                                     selected.id,
                                     kind=lease_kind,
+                                    caps=caps,
                                     stream_reserve_slots=stream_reserve_slots,
                                 ):
                                     selected_snapshot = None
                                     selection_error_code = _account_cap_error_code(lease_kind)
-                                    error_message = _account_cap_error_message(lease_kind)
+                                    error_message = _account_cap_error_message(lease_kind, caps)
                                 else:
                                     selected_lease = self._acquire_account_lease_locked(
                                         selected.id,
@@ -1017,6 +1029,7 @@ class LoadBalancer:
                 error_message=selection_inputs.error_message,
                 error_code=selection_inputs.error_code,
             )
+        caps = await _load_account_concurrency_caps()
         async with self._runtime_lock:
             self._reclaim_stale_account_leases_locked()
             self._prune_runtime(selection_inputs.runtime_accounts or selection_inputs.accounts)
@@ -1029,7 +1042,7 @@ class LoadBalancer:
                 routing_policy_override=selection_inputs.routing_policy_override,
                 ignore_standard_quota_account_ids=selection_inputs.ignore_standard_quota_account_ids,
             )
-            selection_states = _filter_states_for_account_caps(states, lease_kind=lease_kind)
+            selection_states = _filter_states_for_account_caps(states, lease_kind=lease_kind, caps=caps)
             if not selection_states and states:
                 logger.warning(
                     "Account cap exhausted during opportunistic admission lease_kind=%s reason=%s candidates=%s",
@@ -1731,19 +1744,19 @@ def _filter_states_for_account_caps(
     states: Iterable[AccountState],
     *,
     lease_kind: AccountLeaseKind | None,
+    caps: _AccountConcurrencyCaps,
     stream_reserve_slots: int = 0,
 ) -> list[AccountState]:
     if lease_kind is None:
         return list(states)
-    settings = get_settings()
     filtered: list[AccountState] = []
     for state in states:
         if lease_kind == "response_create":
-            cap = settings.proxy_account_response_create_limit
+            cap = caps.response_create_limit
             if cap > 0 and state.inflight_response_creates >= cap:
                 continue
         else:
-            cap = settings.proxy_account_stream_limit
+            cap = caps.stream_limit
             effective_cap = max(1, cap - max(0, stream_reserve_slots))
             if cap > 0 and state.inflight_streams >= effective_cap:
                 continue
@@ -1759,18 +1772,42 @@ def _account_cap_error_code(lease_kind: AccountLeaseKind | None) -> str | None:
     return None
 
 
-def _account_cap_error_message(lease_kind: AccountLeaseKind | None) -> str:
-    settings = get_settings()
+def _account_cap_error_message(lease_kind: AccountLeaseKind | None, caps: _AccountConcurrencyCaps) -> str:
     if lease_kind == "response_create":
-        cap = int(getattr(settings, "proxy_account_response_create_limit", 0))
+        cap = caps.response_create_limit
         return f"Account response-create capacity is exhausted; per-account limit is {cap}"
     if lease_kind == "stream":
-        cap = int(getattr(settings, "proxy_account_stream_limit", 0))
+        cap = caps.stream_limit
         return (
             f"Account stream capacity is exhausted; per-account limit is {cap}. "
-            "Increase CODEX_LB_PROXY_ACCOUNT_STREAM_LIMIT or wait for active streams to finish."
+            "Increase the dashboard stream limit or wait for active streams to finish."
         )
     return "Account capacity is exhausted"
+
+
+async def _load_account_concurrency_caps() -> _AccountConcurrencyCaps:
+    dashboard_settings = await get_settings_cache().get()
+    startup_settings = get_settings()
+    response_create_limit = getattr(dashboard_settings, "proxy_account_response_create_limit", None)
+    stream_limit = getattr(dashboard_settings, "proxy_account_stream_limit", None)
+    return _AccountConcurrencyCaps(
+        response_create_limit=max(
+            0,
+            int(
+                startup_settings.proxy_account_response_create_limit
+                if response_create_limit is None
+                else response_create_limit
+            ),
+        ),
+        stream_limit=max(
+            0,
+            int(
+                startup_settings.proxy_account_stream_limit
+                if stream_limit is None
+                else stream_limit
+            ),
+        ),
+    )
 
 
 def _record_account_lease_acquired(kind: AccountLeaseKind) -> None:

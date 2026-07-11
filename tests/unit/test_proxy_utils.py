@@ -23,9 +23,9 @@ from starlette.requests import Request
 from starlette.responses import StreamingResponse
 
 import app.core.clients.proxy as proxy_module
+import app.modules.proxy.load_balancer as load_balancer_module
 from app.core.clients.proxy import _build_upstream_headers, filter_inbound_headers
 from app.core.config.settings import Settings
-from app.core.config.settings import get_settings as real_get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.errors import openai_error
 from app.core.openai.models import CompactResponsePayload, OpenAIResponsePayload
@@ -71,6 +71,19 @@ from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.fixture(autouse=True)
+def _share_proxy_dashboard_caps_with_load_balancer(monkeypatch: pytest.MonkeyPatch) -> None:
+    original_settings_cache_factory = proxy_service.get_settings_cache
+
+    class _SettingsCache:
+        async def get(self) -> object:
+            if proxy_service.get_settings_cache is original_settings_cache_factory:
+                return proxy_service.get_settings()
+            return await proxy_service.get_settings_cache().get()
+
+    monkeypatch.setattr(load_balancer_module, "get_settings_cache", lambda: _SettingsCache())
 
 
 def test_compact_wire_budget_rejection_is_account_neutral() -> None:
@@ -2064,6 +2077,10 @@ async def test_opportunistic_admission_honors_stream_account_cap(monkeypatch):
     account = _make_account("acc_opportunistic_stream_cap")
     monkeypatch.setattr("app.modules.proxy.load_balancer.get_settings", lambda: settings)
     monkeypatch.setattr(
+        "app.modules.proxy.load_balancer.get_settings_cache",
+        lambda: _SettingsCache(settings),
+    )
+    monkeypatch.setattr(
         service._load_balancer,
         "_load_selection_inputs",
         AsyncMock(
@@ -3480,6 +3497,8 @@ def _make_proxy_settings(*, log_proxy_service_tier_trace: bool) -> SimpleNamespa
         log_proxy_service_tier_trace=log_proxy_service_tier_trace,
         proxy_token_refresh_limit=32,
         proxy_upstream_websocket_connect_limit=64,
+        proxy_account_response_create_limit=4,
+        proxy_account_stream_limit=8,
         proxy_account_stream_recovery_reserve=1,
         proxy_response_create_limit=64,
         proxy_compact_response_create_limit=16,
@@ -23161,6 +23180,7 @@ async def test_compact_responses_does_not_push_timeout_overrides_when_account_cr
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     monkeypatch.setattr("app.modules.proxy.load_balancer.get_settings", lambda: settings)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(
         service._load_balancer,
         "select_account",
@@ -23608,13 +23628,9 @@ async def test_select_account_with_budget_reserves_stream_slot_for_reattach(
     account = _make_account("acc_recovery_reserve")
     select_account = AsyncMock(return_value=AccountSelection(account=account, error_message=None))
 
-    # The reserve knob is env-backed (CODEX_LB_PROXY_ACCOUNT_STREAM_RECOVERY_RESERVE
-    # -> get_settings()), not a dashboard setting, so it is intentionally absent from
-    # the settings-cache stub. Use the real env-backed get_settings with a non-default
-    # value to prove the env knob is honored.
-    monkeypatch.setenv("CODEX_LB_PROXY_ACCOUNT_STREAM_RECOVERY_RESERVE", "3")
-    real_get_settings.cache_clear()
-    monkeypatch.setattr(proxy_service, "get_settings", real_get_settings)
+    settings.proxy_account_response_create_limit = 12
+    settings.proxy_account_stream_limit = 24
+    settings.proxy_account_stream_recovery_reserve = 3
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(service._load_balancer, "select_account", select_account)
     monkeypatch.setattr(proxy_service, "_remaining_budget_seconds", lambda _deadline: 10.0)
@@ -23630,6 +23646,8 @@ async def test_select_account_with_budget_reserves_stream_slot_for_reattach(
 
     assert select_account.await_args is not None
     assert select_account.await_args.kwargs["stream_reserve_slots"] == expected_reserve
+    assert settings.proxy_account_response_create_limit == 12
+    assert settings.proxy_account_stream_limit == 24
 
 
 @pytest.mark.asyncio

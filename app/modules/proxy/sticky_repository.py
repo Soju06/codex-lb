@@ -67,7 +67,7 @@ class StickySessionsRepository:
     async def upsert(
         self,
         key: str,
-        account_id: str,
+        account_id: str | None,
         *,
         kind: StickySessionKind,
         requires_security_work_authorized: bool = False,
@@ -205,6 +205,13 @@ class StickySessionsRepository:
         stmt = delete(StickySession).where(StickySession.updated_at < to_utc_naive(cutoff))
         if kind is not None:
             stmt = stmt.where(StickySession.kind == kind)
+        if kind in {None, StickySessionKind.CODEX_SESSION}:
+            stmt = stmt.where(
+                or_(
+                    StickySession.account_id.is_not(None),
+                    StickySession.requires_security_work_authorized.is_(False),
+                )
+            )
         async with sqlite_writer_section():
             result = await self._session.execute(stmt.returning(StickySession.key))
             deleted = len(result.scalars().all())
@@ -214,7 +221,7 @@ class StickySessionsRepository:
     def _build_upsert_statement(
         self,
         key: str,
-        account_id: str,
+        account_id: str | None,
         kind: StickySessionKind,
         *,
         requires_security_work_authorized: bool,

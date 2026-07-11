@@ -1638,6 +1638,10 @@ class _StreamingRetryMixin:
                             current_account_lease = None
                             excluded_account_ids.add(account.id)
                             require_security_work_authorized = True
+                            last_security_work_retry_error = _RetryableStreamError(
+                                error_code or _facade()._SECURITY_WORK_AUTHORIZATION_REQUIRED_CODE,
+                                _upstream_error_from_openai(error),
+                            )
                             continue
                     if _facade()._should_penalize_stream_error(error_code):
                         await proxy._handle_stream_error(

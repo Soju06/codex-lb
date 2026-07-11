@@ -51,6 +51,7 @@ from app.modules.proxy import service as proxy_service
 from app.modules.proxy._service import compact as proxy_compact_service
 from app.modules.proxy._service import support as proxy_support
 from app.modules.proxy._service.http_bridge import request_submit as proxy_http_bridge_request_submit
+from app.modules.proxy._service.security_lineage import _security_lineage_marker_key
 from app.modules.proxy._service.streaming import retry as streaming_retry_module
 from app.modules.proxy._service.support import (
     _account_capacity_wait_payload,
@@ -24028,9 +24029,9 @@ async def test_security_lineage_marker_survives_routing_row_cleanup():
     request_logs = _RequestLogsRecorder()
     sticky_sessions = AsyncMock()
     marker = StickySession(
-        key="security-work:root-security-lineage-cleanup",
+        key=_security_lineage_marker_key("root-security-lineage-cleanup"),
         kind=StickySessionKind.CODEX_SESSION,
-        account_id="acc_security_lineage_cleanup",
+        account_id=None,
         requires_security_work_authorized=True,
     )
     sticky_sessions.get_entry.side_effect = [marker]
@@ -24055,9 +24056,29 @@ async def test_security_lineage_marker_survives_routing_row_cleanup():
 
     assert required is True
     sticky_sessions.get_entry.assert_awaited_once_with(
-        "security-work:root-security-lineage-cleanup",
+        _security_lineage_marker_key("root-security-lineage-cleanup"),
         kind=StickySessionKind.CODEX_SESSION,
     )
+
+
+@pytest.mark.asyncio
+async def test_security_lineage_reserved_root_does_not_alias_legacy_marker():
+    sticky_sessions = AsyncMock()
+    sticky_sessions.get_entry.side_effect = [None, None]
+
+    class _StickyRepoContext:
+        async def __aenter__(self) -> SimpleNamespace:
+            return SimpleNamespace(sticky_sessions=sticky_sessions)
+
+        async def __aexit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+    service = proxy_service.ProxyService(cast(proxy_service.ProxyRepoFactory, lambda: _StickyRepoContext()))
+
+    required = await service._security_lineage_requires_security_work_authorized("security-work:ordinary-root")
+
+    assert required is False
+    assert sticky_sessions.get_entry.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -24088,8 +24109,8 @@ async def test_mark_security_lineage_requirement_persists_dedicated_marker():
 
     assert sticky_sessions.upsert.await_args_list == [
         mock_call(
-            "security-work:root-security-lineage-marker",
-            "acc_security_lineage_marker",
+            _security_lineage_marker_key("root-security-lineage-marker"),
+            None,
             kind=StickySessionKind.CODEX_SESSION,
             requires_security_work_authorized=True,
         ),

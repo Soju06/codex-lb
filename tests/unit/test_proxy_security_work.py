@@ -81,7 +81,7 @@ async def test_security_lineage_persists_root_requirement_for_child_turn_without
         async def upsert(
             self,
             key: str,
-            account_id: str,
+            account_id: str | None,
             *,
             kind: proxy_service.StickySessionKind,
             requires_security_work_authorized: bool = False,

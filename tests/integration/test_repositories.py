@@ -29,6 +29,7 @@ from app.modules.accounts.repository import (
     _slot_lock_key,
     _slot_lock_keys,
 )
+from app.modules.proxy.sticky_repository import StickySessionsRepository
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.repository import UsageRepository
 
@@ -622,6 +623,28 @@ async def test_accounts_delete_clears_usage_cache_after_commit(db_setup, monkeyp
     assert deleted is True
     assert remaining == []
     assert clear_transaction_states == [False]
+
+
+@pytest.mark.asyncio
+async def test_accounts_delete_preserves_detached_security_lineage_marker(db_setup):
+    marker_key = "@security-work/v2/preserved-after-account-delete"
+    async with SessionLocal() as session:
+        accounts = AccountsRepository(session)
+        sticky_sessions = StickySessionsRepository(session)
+        await accounts.upsert(_make_account("acc_security_marker", "security-marker@example.com"), merge_by_email=False)
+        await sticky_sessions.upsert(
+            marker_key,
+            None,
+            kind=StickySessionKind.CODEX_SESSION,
+            requires_security_work_authorized=True,
+        )
+
+        assert await accounts.delete("acc_security_marker") is True
+        marker = await sticky_sessions.get_entry(marker_key, kind=StickySessionKind.CODEX_SESSION)
+
+    assert marker is not None
+    assert marker.account_id is None
+    assert marker.requires_security_work_authorized is True
 
 
 @pytest.mark.asyncio

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from typing import Any
 
 from app.db.models import StickySession, StickySessionKind
@@ -34,8 +35,21 @@ _SECURITY_WORK_NO_AUTHORIZED_ACCOUNTS_MESSAGE = (
 )
 
 
+_SECURITY_LINEAGE_MARKER_PREFIX = "@security-work/v2/"
+_LEGACY_SECURITY_LINEAGE_MARKER_PREFIX = "security-work:"
+
+
 def _security_lineage_marker_key(security_lineage_id: str) -> str:
-    return f"security-work:{security_lineage_id}"
+    digest = hashlib.sha256(security_lineage_id.encode("utf-8")).hexdigest()
+    return f"{_SECURITY_LINEAGE_MARKER_PREFIX}{digest}"
+
+
+def _legacy_security_lineage_marker_key(security_lineage_id: str) -> str:
+    return f"{_LEGACY_SECURITY_LINEAGE_MARKER_PREFIX}{security_lineage_id}"
+
+
+def _security_lineage_id_uses_reserved_namespace(security_lineage_id: str) -> bool:
+    return security_lineage_id.startswith((_SECURITY_LINEAGE_MARKER_PREFIX, _LEGACY_SECURITY_LINEAGE_MARKER_PREFIX))
 
 
 def _is_security_work_authorization_required_error(code: str | None, message: str | None) -> bool:
@@ -71,6 +85,14 @@ class _SecurityLineageMixin:
             )
             if isinstance(marker_entry, StickySession) and marker_entry.requires_security_work_authorized:
                 return True
+            legacy_marker_entry = await sticky_sessions.get_entry(
+                _legacy_security_lineage_marker_key(security_lineage_id),
+                kind=StickySessionKind.CODEX_SESSION,
+            )
+            if isinstance(legacy_marker_entry, StickySession) and legacy_marker_entry.requires_security_work_authorized:
+                return True
+            if _security_lineage_id_uses_reserved_namespace(security_lineage_id):
+                return False
             entry = await sticky_sessions.get_entry(
                 security_lineage_id,
                 kind=StickySessionKind.CODEX_SESSION,
@@ -92,16 +114,17 @@ class _SecurityLineageMixin:
         async with self._repo_factory() as repos:
             await repos.sticky_sessions.upsert(
                 _security_lineage_marker_key(security_lineage_id),
-                account_id,
+                None,
                 kind=StickySessionKind.CODEX_SESSION,
                 requires_security_work_authorized=True,
             )
-            await repos.sticky_sessions.upsert(
-                security_lineage_id,
-                account_id,
-                kind=StickySessionKind.CODEX_SESSION,
-                requires_security_work_authorized=True,
-            )
+            if not _security_lineage_id_uses_reserved_namespace(security_lineage_id):
+                await repos.sticky_sessions.upsert(
+                    security_lineage_id,
+                    account_id,
+                    kind=StickySessionKind.CODEX_SESSION,
+                    requires_security_work_authorized=True,
+                )
 
     async def _bind_security_lineage_selection(
         self: Any,

@@ -427,7 +427,7 @@ class StickySession(Base):
         server_default=text("'sticky_thread'"),
         nullable=False,
     )
-    account_id: Mapped[str] = mapped_column(String, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False)
+    account_id: Mapped[str | None] = mapped_column(String, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=True)
     # A CODEX_SESSION root that has received a Trusted Access / cyber-policy
     # denial must never silently return to the ordinary account pool.  This
     # lives beside (rather than inside) the per-turn affinity so child turns

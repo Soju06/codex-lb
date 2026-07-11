@@ -542,6 +542,12 @@ def _http_bridge_session_supports_service_tier(
         return True
 
     registry = get_model_registry()
+    # Mirror select_account: only apply model-account filtering when the model has
+    # registry plan-presence. An operator-mapped but unadvertised slug yields an
+    # authoritative-empty account catalog, which must not deny bridge session reuse.
+    plan_types_for_model = getattr(registry, "plan_types_for_model", None)
+    if callable(plan_types_for_model) and not plan_types_for_model(request_model):
+        return True
     account_ids_for_model = getattr(registry, "account_ids_for_model", None)
     model_account_ids = account_ids_for_model(request_model) if callable(account_ids_for_model) else None
     if model_account_ids is not None and session.account.id not in model_account_ids:

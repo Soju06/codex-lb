@@ -26055,6 +26055,34 @@ def test_http_bridge_session_rejects_account_without_requested_model(monkeypatch
     )
 
 
+def test_http_bridge_session_allows_operator_mapped_unadvertised_model(monkeypatch):
+    session = cast(
+        proxy_service._HTTPBridgeSession,
+        SimpleNamespace(account=_make_account("acc_bridge_unadvertised")),
+    )
+
+    class Registry:
+        def plan_types_for_model(self, slug: str) -> frozenset[str] | None:
+            assert slug == "operator-mapped-slug"
+            # Authoritative-empty catalog for an operator-mapped, unadvertised slug.
+            return frozenset()
+
+        def account_ids_for_model(self, slug: str) -> frozenset[str] | None:
+            # Authoritative-empty catalog: no account advertises this slug.
+            return frozenset()
+
+    monkeypatch.setattr(proxy_support, "get_model_registry", lambda: Registry())
+
+    assert (
+        proxy_support._http_bridge_session_supports_service_tier(
+            session,
+            request_model="operator-mapped-slug",
+            request_service_tier=None,
+        )
+        is True
+    )
+
+
 @pytest.mark.asyncio
 async def test_http_bridge_empty_prewarm_completion_does_not_replace_continuity_anchor():
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))

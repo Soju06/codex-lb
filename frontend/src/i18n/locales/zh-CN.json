@@ -141,6 +141,11 @@
         "http": "Responses",
         "websocket": "WebSocket"
       },
+      "fastMode": {
+        "label": "禁用快速模式",
+        "description": "将带有 Codex 快速模式的模型别名发送到 OpenAI，但不使用优先级服务层。",
+        "ariaLabel": "禁用快速模式"
+      },
       "httpDownstream": {
         "label": "HTTP 客户端路由",
         "description": "选择浏览器和 SSE 调用方如何使用持久上游会话。",

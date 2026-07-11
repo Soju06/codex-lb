@@ -56,6 +56,7 @@ export const DashboardSettingsSchema = z
     stickyThreadsEnabled: z.boolean(),
     upstreamStreamTransport:
       UpstreamStreamTransportSchema.optional().default("default"),
+    prohibitFastMode: z.boolean().optional().default(false),
     httpDownstreamTransportPolicy:
       HttpDownstreamTransportPolicySchema.optional().default("smart"),
     upstreamProxyRoutingEnabled: z.boolean().optional().default(false),
@@ -146,6 +147,7 @@ export const DashboardSettingsSchema = z
 export const SettingsUpdateRequestSchema = z.object({
   stickyThreadsEnabled: z.boolean().optional(),
   upstreamStreamTransport: UpstreamStreamTransportSchema.optional(),
+  prohibitFastMode: z.boolean().optional(),
   httpDownstreamTransportPolicy: HttpDownstreamTransportPolicySchema.optional(),
   upstreamProxyRoutingEnabled: z.boolean().optional(),
   upstreamProxyDefaultPoolId: z.string().nullable().optional(),

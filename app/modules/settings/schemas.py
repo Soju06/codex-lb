@@ -34,6 +34,7 @@ class AdditionalQuotaPolicy(DashboardModel):
 class DashboardSettingsResponse(DashboardModel):
     sticky_threads_enabled: bool
     upstream_stream_transport: str = Field(pattern=r"^(default|auto|http|websocket)$")
+    prohibit_fast_mode: bool
     http_downstream_transport_policy: str = Field(pattern=_HTTP_DOWNSTREAM_TRANSPORT_POLICY_PATTERN)
     upstream_proxy_routing_enabled: bool
     upstream_proxy_default_pool_id: str | None = None
@@ -80,6 +81,7 @@ class DashboardSettingsUpdateRequest(DashboardModel):
         default=None,
         pattern=r"^(default|auto|http|websocket)$",
     )
+    prohibit_fast_mode: bool | None = None
     http_downstream_transport_policy: str | None = Field(
         default=None,
         pattern=_HTTP_DOWNSTREAM_TRANSPORT_POLICY_PATTERN,

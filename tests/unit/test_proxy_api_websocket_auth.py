@@ -296,7 +296,8 @@ async def test_stream_responses_prefers_forwarded_downstream_turn_state(monkeypa
     payload = ResponsesRequest.model_validate({"model": "gpt-5.4", "instructions": "hi", "input": "hi"})
     captured: dict[str, object] = {}
 
-    def fake_apply_api_key_enforcement(_payload, _api_key):
+    def fake_apply_api_key_enforcement(_payload, _api_key, *, prohibit_fast_mode=False):
+        assert prohibit_fast_mode is False
         return None
 
     def fake_validate_model_access(_api_key, _model):
@@ -382,7 +383,8 @@ async def test_stream_responses_does_not_release_forwarded_reservation_on_intern
         model="gpt-5.4",
     )
 
-    def fake_apply_api_key_enforcement(_payload, _api_key):
+    def fake_apply_api_key_enforcement(_payload, _api_key, *, prohibit_fast_mode=False):
+        assert prohibit_fast_mode is False
         return None
 
     def fake_validate_model_access(_api_key, _model):

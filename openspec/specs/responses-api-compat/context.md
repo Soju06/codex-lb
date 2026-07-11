@@ -69,6 +69,15 @@ Responses request with:
 Clients that expose Fast Mode as `fast` may keep using that spelling; codex-lb
 normalizes it to `priority` before forwarding.
 
+### Operator Fast Mode prohibition
+
+Operators can enable the Routing setting `prohibitFastMode` when qualified
+Codex harness model aliases such as `gpt-5.6-sol-xhigh-fast` must run at the
+normal OpenAI tier. The alias still supplies its canonical model and reasoning
+effort, but does not derive `service_tier: "priority"`. This policy does not
+rewrite an explicit client tier or an API-key-enforced tier; see
+`openspec/specs/fast-mode-policy/context.md` for scope and operating notes.
+
 API keys can also force the tier for traffic that uses that key. Set the key's
 enforced service tier to `priority` or `fast`; both values are stored and
 returned as `priority`.

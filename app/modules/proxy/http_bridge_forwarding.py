@@ -318,8 +318,17 @@ def _bridge_forward_signature(
     context: HTTPBridgeForwardContext,
     include_client_ip: bool = True,
 ) -> str:
+    # Sign the same forwarding dump that is actually posted as the request
+    # body (``model_dump_for_forwarding``), not a plain ``model_dump`` that
+    # synthesizes ``"tools": []`` for clients that omitted the field. A plain
+    # dump would make the omitted-tools and explicit-``tools: []`` bodies
+    # sign identically, so a body rewritten in transit to inject
+    # ``"tools": []`` would still verify on the owner instance and re-mark
+    # ``tools`` as explicitly set (issue #1184). With the forwarding dump the
+    # receiving side re-serializes the parsed body it actually received, and
+    # any injected or stripped ``tools`` field changes the digest.
     payload_json = json.dumps(
-        payload.model_dump(mode="json", exclude_none=True),
+        payload.model_dump_for_forwarding(),
         ensure_ascii=True,
         sort_keys=True,
         separators=(",", ":"),

@@ -96,6 +96,54 @@ def test_parse_forwarded_request_accepts_signed_internal_forward_with_client_ip(
     assert forwarded.context.client_ip == "203.0.113.42"
 
 
+def test_parse_forwarded_request_rejects_body_with_injected_empty_tools() -> None:
+    payload = _payload()
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=False,
+        downstream_turn_state=None,
+    )
+    headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
+    body = payload.model_dump_for_forwarding()
+    assert "tools" not in body
+
+    # The signature must be computed over the tools-less forwarding dump that
+    # is actually posted: signing a body that carries an explicit empty tools
+    # list must yield a different signature, otherwise a body rewritten in
+    # transit to inject ``"tools": []`` would still verify.
+    tampered_body = dict(body)
+    tampered_body["tools"] = []
+    tampered_payload = ResponsesRequest.model_validate(tampered_body)
+    assert "tools" in tampered_payload.model_fields_set
+    assert headers[HTTP_BRIDGE_SIGNATURE_HEADER] != _bridge_forward_signature(
+        payload=tampered_payload,
+        context=context,
+        include_client_ip=False,
+    )
+
+    # Honest round-trip of the posted body still verifies.
+    honest_payload = ResponsesRequest.model_validate(body)
+    forwarded, error = parse_forwarded_request(
+        headers,
+        payload=honest_payload,
+        current_instance="instance-b",
+    )
+    assert error is None
+    assert forwarded is not None
+
+    # A tampered body with injected ``"tools": []`` fails verification, so
+    # the owner instance never re-marks ``tools`` as explicitly set.
+    forwarded, error = parse_forwarded_request(
+        headers,
+        payload=tampered_payload,
+        current_instance="instance-b",
+    )
+    assert forwarded is None
+    assert error is not None
+    assert error.status_code == 400
+
+
 def test_build_owner_forward_headers_uses_legacy_signature_with_client_ip_header() -> None:
     payload = _payload()
     context = HTTPBridgeForwardContext(

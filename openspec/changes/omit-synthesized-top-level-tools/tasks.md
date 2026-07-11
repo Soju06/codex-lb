@@ -17,3 +17,10 @@
   surfaces: owner-forward JSON body carries no `tools` key for a request
   that omitted it (and the forwarded signature still verifies), and the
   source-bound Responses payload carries no `tools` key.
+- [x] 10. Owner-forward signature integrity (Codex P2 on #1203): sign the
+  forwarding dump actually posted (`model_dump_for_forwarding()`) instead of
+  a plain `model_dump` that synthesizes `"tools": []`, so a body rewritten
+  in transit to inject an explicit empty tools list fails verification
+  instead of re-marking `tools` as set on the owner. Regression test
+  (fail-before/pass-after): tampered body is rejected with a 400
+  invalid-signature error; honest round-trip still verifies.

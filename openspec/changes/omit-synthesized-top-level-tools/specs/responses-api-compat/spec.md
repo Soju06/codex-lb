@@ -17,7 +17,10 @@ Field omission MUST survive every re-serialization hop: the multi-instance
 owner-forward body (internal bridge forward) MUST NOT contain fields the
 client omitted, the owner instance receiving a forwarded request MUST NOT
 re-mark `tools` as explicitly set, and model-source Responses egress payloads
-MUST likewise omit fields the client never sent.
+MUST likewise omit fields the client never sent. The owner-forward signature
+MUST be computed over the same forwarding serialization that is posted as the
+body, so a forwarded body whose `tools` presence differs from the signed body
+MUST fail signature verification.
 
 #### Scenario: Responses Lite request reaches upstream without a tools key
 
@@ -46,6 +49,14 @@ MUST likewise omit fields the client never sent.
   `tools` as explicitly set, so its upstream payload contains no top-level
   `tools` key
 - **AND** the owner-forward signature still verifies on the owner instance
+
+#### Scenario: Owner-forward signature covers the posted body
+
+- **WHEN** an owner-forward body that omitted top-level `tools` is rewritten
+  in transit to carry an injected explicit `"tools": []`
+- **THEN** the owner instance rejects the forwarded request with an invalid
+  bridge-forward-signature error instead of re-marking `tools` as explicitly
+  set
 
 #### Scenario: Model-source Responses egress omits unsent tools
 

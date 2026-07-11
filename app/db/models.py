@@ -1184,6 +1184,22 @@ class QuotaPlannerSettings(Base):
     )
     prewarm_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true(), nullable=False)
     prewarm_lead_minutes: Mapped[int] = mapped_column(Integer, default=300, server_default=text("300"), nullable=False)
+    # Schema-compatibility fields retained for databases that ran the earlier
+    # security-work stack. The focused PR no longer enables the planner policy,
+    # but dropping the persisted settings would make that live schema unsafe to
+    # upgrade or roll forward.
+    auto_redeem_expiring_reset_credits: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=false(),
+        nullable=False,
+    )
+    reset_credit_redeem_lead_minutes: Mapped[int] = mapped_column(
+        Integer,
+        default=30,
+        server_default=text("30"),
+        nullable=False,
+    )
     max_warmups_per_day: Mapped[int] = mapped_column(Integer, default=3, server_default=text("3"), nullable=False)
     max_warmup_credits_per_day: Mapped[float] = mapped_column(
         Float,
@@ -1305,6 +1321,10 @@ class HttpBridgeSessionRecord(Base):
     latest_response_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     latest_input_item_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     latest_input_full_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Retain columns created by the previously deployed aggregate even though
+    # pending-call replay is outside this focused PR's behavior.
+    latest_pending_function_call_ids: Mapped[str | None] = mapped_column(Text, nullable=True)
+    latest_pending_custom_tool_call_ids: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

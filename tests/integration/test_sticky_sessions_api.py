@@ -13,6 +13,7 @@ from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.proxy.durable_bridge_coordinator import DurableBridgeSessionCoordinator
 from app.modules.proxy.durable_bridge_repository import DurableBridgeRepository
+from app.modules.proxy.sticky_repository import StickySessionsRepository
 from app.modules.settings.repository import SettingsRepository
 from app.modules.sticky_sessions.cleanup_scheduler import StickySessionCleanupScheduler
 
@@ -59,6 +60,29 @@ async def _set_affinity_ttl(seconds: int) -> None:
         settings = await SettingsRepository(session).get_or_create()
         settings.openai_cache_affinity_max_age_seconds = seconds
         await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_sticky_session_security_requirement_is_monotonic_across_normal_rebinds(db_setup):
+    accounts = await _create_accounts()
+    root_key = "root-security-lineage"
+
+    async with SessionLocal() as session:
+        repository = StickySessionsRepository(session)
+        await repository.upsert(
+            root_key,
+            accounts[0].id,
+            kind=StickySessionKind.CODEX_SESSION,
+            requires_security_work_authorized=True,
+        )
+        rebound = await repository.upsert(
+            root_key,
+            accounts[1].id,
+            kind=StickySessionKind.CODEX_SESSION,
+        )
+
+    assert rebound.account_id == accounts[1].id
+    assert rebound.requires_security_work_authorized is True
 
 
 async def _insert_sticky_session(

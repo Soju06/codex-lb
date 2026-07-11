@@ -428,6 +428,16 @@ class StickySession(Base):
         nullable=False,
     )
     account_id: Mapped[str] = mapped_column(String, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False)
+    # A CODEX_SESSION root that has received a Trusted Access / cyber-policy
+    # denial must never silently return to the ordinary account pool.  This
+    # lives beside (rather than inside) the per-turn affinity so child turns
+    # with a new x-codex-turn-state inherit the requirement.
+    requires_security_work_authorized: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=false(),
+        nullable=False,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,

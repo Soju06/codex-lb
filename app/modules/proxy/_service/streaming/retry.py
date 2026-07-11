@@ -257,6 +257,7 @@ class _StreamingRetryMixin:
             sticky_threads_enabled=settings.sticky_threads_enabled,
             api_key=api_key,
         )
+        security_lineage_id = _sticky_key_from_session_header(headers)
         sticky_key_source = "none"
         if affinity.kind == StickySessionKind.CODEX_SESSION:
             sticky_key_source = "session_header"
@@ -501,6 +502,7 @@ class _StreamingRetryMixin:
                             exclude_account_ids=excluded_account_ids,
                             preferred_account_id=preferred_account_id,
                             require_security_work_authorized=require_security_work_authorized,
+                            security_lineage_id=security_lineage_id,
                             lease_kind="stream",
                             estimated_lease_tokens=estimated_lease_tokens,
                             fallback_on_preferred_account_unavailable=not file_required_preferred_account,
@@ -546,8 +548,38 @@ class _StreamingRetryMixin:
                         and require_security_work_authorized
                         and selection.error_code == _facade()._NO_SECURITY_WORK_AUTHORIZED_ACCOUNTS_CODE
                     ):
+                        if security_lineage_id:
+                            _facade().logger.info(
+                                "No security-work-authorized account available for classified stream request_id=%s",
+                                request_id,
+                            )
+                            yield format_sse_event(
+                                _facade()._security_work_advisory_event(
+                                    code=_facade()._NO_SECURITY_WORK_AUTHORIZED_ACCOUNTS_CODE,
+                                    message=_facade()._SECURITY_WORK_NO_AUTHORIZED_ACCOUNTS_MESSAGE,
+                                    request_id=request_id,
+                                    action="forward_original_security_work_error",
+                                )
+                            )
+                            if last_security_work_retry_error is not None:
+                                event = response_failed_event(
+                                    last_security_work_retry_error.code,
+                                    str(
+                                        last_security_work_retry_error.error.get("message")
+                                        or "Security work authorization is required"
+                                    ),
+                                    response_id=request_id,
+                                )
+                            else:
+                                event = response_failed_event(
+                                    selection.error_code or _facade()._SECURITY_WORK_AUTHORIZATION_REQUIRED_CODE,
+                                    selection.error_message or "Security work authorization is required",
+                                    response_id=request_id,
+                                )
+                            yield format_sse_event(event)
+                            return
                         _facade().logger.info(
-                            "No security-work-authorized account available for stream retry; "
+                            "No security-work-authorized account available for unrooted stream retry; "
                             "continuing normal account failover request_id=%s",
                             request_id,
                         )
@@ -1088,6 +1120,10 @@ class _StreamingRetryMixin:
                                 )
                                 error_message = error.message if error else None
                                 if _facade()._is_security_work_authorization_required_error(code, error_message):
+                                    await proxy._mark_security_lineage_requirement(
+                                        security_lineage_id,
+                                        account_id=account.id,
+                                    )
                                     if (
                                         account.security_work_authorized
                                         or account.id == file_preferred_account_id
@@ -1260,6 +1296,10 @@ class _StreamingRetryMixin:
                     continue  # outer loop: account failover after transient exhaustion
                 except _RetryableStreamError as exc:
                     if _facade()._is_security_work_authorization_required_error(exc.code, exc.error.get("message")):
+                        await proxy._mark_security_lineage_requirement(
+                            security_lineage_id,
+                            account_id=account.id,
+                        )
                         if (
                             account.security_work_authorized
                             or account.id == file_preferred_account_id
@@ -1567,6 +1607,10 @@ class _StreamingRetryMixin:
                     error_type = error.type if error else None
                     error_param = error.param if error else None
                     if _facade()._is_security_work_authorization_required_error(error_code, error_message):
+                        await proxy._mark_security_lineage_requirement(
+                            security_lineage_id,
+                            account_id=account.id,
+                        )
                         if (
                             not account.security_work_authorized
                             and account.id != file_preferred_account_id

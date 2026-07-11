@@ -186,7 +186,15 @@ class StubStickySessionsRepository(StickySessionsRepository):
     ) -> str | None:
         return None
 
-    async def upsert(self, key: str, account_id: str, *, kind: StickySessionKind) -> StickySession:
+    async def upsert(
+        self,
+        key: str,
+        account_id: str,
+        *,
+        kind: StickySessionKind,
+        requires_security_work_authorized: bool = False,
+    ) -> StickySession:
+        del requires_security_work_authorized
         row = self._build_row(key, account_id, kind)
         self.upserts.append(row)
         return row

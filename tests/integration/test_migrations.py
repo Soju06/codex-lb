@@ -321,6 +321,9 @@ async def test_security_lineage_reconcile_preserves_previously_deployed_aggregat
             dashboard_columns = {
                 str(row[1]) for row in (await session.execute(text("PRAGMA table_info('dashboard_settings')"))).all()
             }
+            sticky_columns = {
+                str(row[1]) for row in (await session.execute(text("PRAGMA table_info('sticky_sessions')"))).all()
+            }
             quota_row = (
                 await session.execute(
                     text(
@@ -332,6 +335,7 @@ async def test_security_lineage_reconcile_preserves_previously_deployed_aggregat
             revision = (await session.execute(text("SELECT version_num FROM alembic_version"))).scalar_one()
 
         assert "prohibit_fast_mode" in dashboard_columns
+        assert "requires_security_work_authorized" in sticky_columns
         assert tuple(quota_row) == (1, 17)
         assert revision == _HEAD_REVISION
         assert await to_thread.run_sync(lambda: check_schema_drift(db_url)) == ()
@@ -346,6 +350,9 @@ async def test_security_lineage_reconcile_preserves_previously_deployed_aggregat
         async with session_factory() as session:
             bridge_columns = {
                 str(row[1]) for row in (await session.execute(text("PRAGMA table_info('http_bridge_sessions')"))).all()
+            }
+            sticky_columns = {
+                str(row[1]) for row in (await session.execute(text("PRAGMA table_info('sticky_sessions')"))).all()
             }
             quota_columns = {
                 str(row[1])
@@ -368,6 +375,7 @@ async def test_security_lineage_reconcile_preserves_previously_deployed_aggregat
             "auto_redeem_expiring_reset_credits",
             "reset_credit_redeem_lead_minutes",
         } <= quota_columns
+        assert "requires_security_work_authorized" not in sticky_columns
         assert tuple(quota_row) == (1, 17)
     finally:
         await engine.dispose()

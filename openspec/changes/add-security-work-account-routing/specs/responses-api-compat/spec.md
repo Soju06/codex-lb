@@ -13,12 +13,19 @@ The classifier MUST recognize both the legacy cybersecurity-risk message and the
 - **THEN** codex-lb emits a non-terminal `codex_lb.warning` with `code="security_work_authorization_required"` and `action="retry_security_work_authorized"`
 - **AND** codex-lb retries the request with account selection restricted to security-work-authorized accounts
 
-#### Scenario: No authorized account is available
+#### Scenario: Classified Codex lineage has no authorized account
 
-- **WHEN** codex-lb attempts a security-work-authorized retry
+- **WHEN** a root Codex session or any of its child turns has been classified as requiring security-work authorization
+- **AND** codex-lb attempts a security-work-authorized retry
 - **AND** no security-work-authorized accounts are available
 - **THEN** codex-lb emits a non-terminal `codex_lb.warning` with `code="no_security_work_authorized_accounts"`
-- **AND** codex-lb either continues normal account failover when safe or returns the original security-work authorization error when normal failover is exhausted or unsafe
+- **AND** codex-lb returns the original security-work authorization error without selecting an ordinary account
+
+#### Scenario: Unrooted request has no authorized account
+
+- **WHEN** an unrooted request attempts a security-work-authorized retry
+- **AND** no security-work-authorized accounts are available
+- **THEN** codex-lb MAY continue normal account failover when safe
 
 #### Scenario: Pinned requests move only with a self-contained fresh replay
 

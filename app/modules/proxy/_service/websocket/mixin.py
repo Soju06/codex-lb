@@ -1435,6 +1435,9 @@ class _WebSocketMixin:
         request_state.useragent = useragent
         request_state.useragent_group = useragent_group
         request_state.client_ip = client_ip
+        # Keep the root independently of per-turn WebSocket affinity. Codex
+        # subagents carry the shared session-id but a distinct turn-state.
+        request_state.security_lineage_id = _sticky_key_from_session_header(headers)
         request_state.responses_lite_model = next_responses_lite_model
         request_state.expose_stale_previous_response_classifier = codex_session_affinity
         original_full_resend_input: JsonValue | None = None
@@ -1784,6 +1787,7 @@ class _WebSocketMixin:
                     exclude_account_ids=exclude_account_ids,
                     preferred_account_id=preferred_account_id,
                     require_security_work_authorized=require_security_work_authorized,
+                    security_lineage_id=request_state.security_lineage_id,
                     lease_kind="stream",
                     estimated_lease_tokens=_facade()._estimated_lease_tokens_from_request_usage_budget(
                         request_state.request_usage_budget
@@ -3209,6 +3213,10 @@ class _WebSocketMixin:
             )
             terminal_error_message = error.message if error else None
             if _facade()._is_security_work_authorization_required_error(terminal_error_code, terminal_error_message):
+                await proxy._mark_security_lineage_requirement(
+                    request_state.security_lineage_id,
+                    account_id=account.id,
+                )
                 can_retry_security_work = (
                     not account.security_work_authorized
                     and not has_other_pending_requests

@@ -12,7 +12,9 @@ import anyio
 import pytest
 
 from app.core.clients.proxy_websocket import UpstreamResponsesWebSocket
+from app.db.models import StickySession
 from app.modules.proxy import service as proxy_service
+from app.modules.proxy.affinity import _sticky_key_from_session_header
 from tests.unit.test_proxy_http_bridge import _make_app_settings, _make_bridge_session
 from tests.unit.test_proxy_utils import _make_account, _repo_factory, _RequestLogsRecorder
 
@@ -37,6 +39,171 @@ pytestmark = pytest.mark.unit
 )
 def test_security_work_denial_classifier_accepts_upstream_variants(message: str) -> None:
     assert proxy_service._is_security_work_authorization_required_error("invalid_request_error", message)
+
+
+def test_security_work_denial_classifier_accepts_literal_cyber_policy_code() -> None:
+    assert proxy_service._is_security_work_authorization_required_error("cyber_policy", None)
+
+
+def test_security_lineage_uses_codex_root_session_before_parent_or_turn_state() -> None:
+    headers = {
+        "session-id": "root-session",
+        "x-codex-parent-thread-id": "root-parent",
+        "thread-id": "child-thread",
+        "x-codex-turn-state": "child-turn-state",
+    }
+
+    assert _sticky_key_from_session_header(headers) == "root-session"
+    assert (
+        _sticky_key_from_session_header({"x-codex-parent-thread-id": "root-parent", "thread-id": "child-thread"})
+        == "root-parent"
+    )
+
+
+@pytest.mark.asyncio
+async def test_security_lineage_persists_root_requirement_for_child_turn_without_poisoning_unrelated_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root_id = "019f4da2-a220-72c2-8807-f02f2237dd2f"
+    ordinary_account = _make_account("acc-lineage-ordinary")
+    trusted_account = _make_account("acc-lineage-trusted")
+    trusted_account.security_work_authorized = True
+
+    class _StickyLineageRepository:
+        def __init__(self) -> None:
+            self.entries: dict[str, StickySession] = {}
+
+        async def get_entry(self, key: str, *, kind: proxy_service.StickySessionKind):
+            assert kind == proxy_service.StickySessionKind.CODEX_SESSION
+            return self.entries.get(key)
+
+        async def upsert(
+            self,
+            key: str,
+            account_id: str,
+            *,
+            kind: proxy_service.StickySessionKind,
+            requires_security_work_authorized: bool = False,
+        ):
+            prior = self.entries.get(key)
+            self.entries[key] = StickySession(
+                key=key,
+                kind=kind,
+                account_id=account_id,
+                requires_security_work_authorized=(
+                    requires_security_work_authorized
+                    or (prior.requires_security_work_authorized if prior is not None else False)
+                ),
+            )
+            return self.entries[key]
+
+    sticky_repo = _StickyLineageRepository()
+
+    class _RepoContext:
+        async def __aenter__(self):
+            return SimpleNamespace(sticky_sessions=sticky_repo)
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    service = proxy_service.ProxyService(lambda: _RepoContext())
+    settings = _make_app_settings()
+    select_account = AsyncMock(
+        side_effect=[
+            proxy_service.AccountSelection(account=trusted_account, error_message=None, error_code=None),
+            proxy_service.AccountSelection(account=ordinary_account, error_message=None, error_code=None),
+        ]
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: SimpleNamespace(get=AsyncMock(return_value=settings)),
+    )
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+
+    # A cyber-policy denial on the ordinary root persists before retry. The
+    # child has a different turn-state but shares session-id=root.
+    await service._mark_security_lineage_requirement(root_id, account_id=ordinary_account.id)
+    child_selection = await service._select_account_with_budget(
+        time.monotonic() + 10,
+        request_id="child-turn",
+        kind="websocket",
+        sticky_key="child-turn-state",
+        sticky_kind=proxy_service.StickySessionKind.CODEX_SESSION,
+        security_lineage_id=root_id,
+    )
+
+    assert child_selection.account is trusted_account
+    assert select_account.await_args_list[0].kwargs["require_security_work_authorized"] is True
+    root_entry = sticky_repo.entries[root_id]
+    assert root_entry.account_id == trusted_account.id
+    assert root_entry.requires_security_work_authorized is True
+
+    unrelated_selection = await service._select_account_with_budget(
+        time.monotonic() + 10,
+        request_id="unrelated-turn",
+        kind="websocket",
+        sticky_key="unrelated-turn-state",
+        sticky_kind=proxy_service.StickySessionKind.CODEX_SESSION,
+        security_lineage_id="unrelated-root",
+    )
+
+    assert unrelated_selection.account is ordinary_account
+    assert select_account.await_args_list[1].kwargs["require_security_work_authorized"] is False
+    assert "unrelated-root" not in sticky_repo.entries
+
+
+@pytest.mark.asyncio
+async def test_approved_account_cyber_denial_persists_root_without_ordinary_replay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    trusted_account = _make_account("acc_ws_trusted_cyber_denial")
+    trusted_account.security_work_authorized = True
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws-approved-cyber-denial",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        awaiting_response_created=True,
+        transport="websocket",
+        request_text='{"type":"response.create","input":[]}',
+        security_lineage_id="root-approved-cyber-denial",
+    )
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    persist_requirement = AsyncMock()
+    monkeypatch.setattr(service, "_mark_security_lineage_requirement", persist_requirement)
+
+    await service._process_upstream_websocket_text(
+        json.dumps(
+            {
+                "type": "response.failed",
+                "response": {
+                    "id": "resp-approved-cyber-denial",
+                    "status": "failed",
+                    "error": {"code": "cyber_policy", "message": "denied by Trusted Access"},
+                },
+            },
+            separators=(",", ":"),
+        ),
+        account=trusted_account,
+        account_id_value=trusted_account.id,
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=upstream_control,
+        response_create_gate=asyncio.Semaphore(1),
+    )
+
+    persist_requirement.assert_awaited_once_with(
+        "root-approved-cyber-denial",
+        account_id=trusted_account.id,
+    )
+    assert upstream_control.replay_request_state is None
+    assert request_state.require_security_work_authorized is False
 
 
 @pytest.mark.asyncio

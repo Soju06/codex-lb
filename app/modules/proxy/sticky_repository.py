@@ -64,8 +64,20 @@ class StickySessionsRepository:
         result = await self._session.execute(statement)
         return result.scalar_one_or_none()
 
-    async def upsert(self, key: str, account_id: str, *, kind: StickySessionKind) -> StickySession:
-        statement = self._build_upsert_statement(key, account_id, kind)
+    async def upsert(
+        self,
+        key: str,
+        account_id: str,
+        *,
+        kind: StickySessionKind,
+        requires_security_work_authorized: bool = False,
+    ) -> StickySession:
+        statement = self._build_upsert_statement(
+            key,
+            account_id,
+            kind,
+            requires_security_work_authorized=requires_security_work_authorized,
+        )
         async with sqlite_writer_section():
             await self._session.execute(statement)
             await self._session.commit()
@@ -199,7 +211,14 @@ class StickySessionsRepository:
             await self._session.commit()
         return deleted
 
-    def _build_upsert_statement(self, key: str, account_id: str, kind: StickySessionKind) -> Insert:
+    def _build_upsert_statement(
+        self,
+        key: str,
+        account_id: str,
+        kind: StickySessionKind,
+        *,
+        requires_security_work_authorized: bool,
+    ) -> Insert:
         dialect = self._session.get_bind().dialect.name
         if dialect == "postgresql":
             insert_fn = pg_insert
@@ -207,11 +226,22 @@ class StickySessionsRepository:
             insert_fn = sqlite_insert
         else:
             raise RuntimeError(f"StickySession upsert unsupported for dialect={dialect!r}")
-        statement = insert_fn(StickySession).values(key=key, account_id=account_id, kind=kind)
+        statement = insert_fn(StickySession).values(
+            key=key,
+            account_id=account_id,
+            kind=kind,
+            requires_security_work_authorized=requires_security_work_authorized,
+        )
         return statement.on_conflict_do_update(
             index_elements=[StickySession.key, StickySession.kind],
             set_={
                 "account_id": account_id,
+                # Security classification is monotonic for the lifetime of
+                # a lineage. Normal affinity refreshes must not clear it.
+                "requires_security_work_authorized": or_(
+                    StickySession.requires_security_work_authorized,
+                    statement.excluded.requires_security_work_authorized,
+                ),
                 "updated_at": func.now(),
             },
         )

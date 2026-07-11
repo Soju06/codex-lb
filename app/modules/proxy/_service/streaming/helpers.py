@@ -730,6 +730,7 @@ async def _select_account_with_budget_for_stream(proxy: Any, deadline: float, **
     selector = proxy._select_account_with_budget_compatible
     optional_kwargs = (
         "require_security_work_authorized",
+        "security_lineage_id",
         "lease_kind",
         "estimated_lease_tokens",
         "fallback_on_preferred_account_unavailable",

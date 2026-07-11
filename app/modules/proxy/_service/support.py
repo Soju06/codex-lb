@@ -398,6 +398,10 @@ class _WebSocketRequestState:
     skip_request_log: bool = False
     previous_response_id: str | None = None
     session_id: str | None = None
+    # Root Codex session from session-id / parent-thread headers.  This is
+    # deliberately distinct from affinity_policy, whose CODEX_SESSION key may
+    # be a per-turn x-codex-turn-state value.
+    security_lineage_id: str | None = None
     proxy_injected_previous_response_id: bool = False
     expose_stale_previous_response_classifier: bool = False
     fresh_upstream_request_text: str | None = None

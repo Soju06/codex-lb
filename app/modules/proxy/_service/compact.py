@@ -63,6 +63,10 @@ class _CompactServiceProtocol(Protocol):
     _encryptor: Any
     _load_balancer: Any
     _repo_factory: Any
+    _http_bridge_lock: Any
+    _http_bridge_sessions: Any
+    _http_bridge_turn_state_index: Any
+    _durable_bridge: Any
 
     def _get_work_admission(self) -> WorkAdmissionController: ...
 
@@ -90,6 +94,13 @@ class _CompactServiceProtocol(Protocol):
         session_id: str | None = None,
         surface: str,
     ) -> str | None: ...
+
+    async def _resolve_compact_turn_state_owner(
+        self,
+        *,
+        turn_state: str,
+        api_key: ApiKeyData | None,
+    ) -> str: ...
 
     async def _ensure_fresh_with_budget(
         self, account: Account, *, force: bool = False, timeout_seconds: float | None = None
@@ -421,6 +432,71 @@ def _service_tier_from_compact_payload(payload: ResponsesCompactRequest) -> str 
 
 
 class _CompactMixin:
+    async def _resolve_compact_turn_state_owner(
+        self,
+        *,
+        turn_state: str,
+        api_key: ApiKeyData | None,
+    ) -> str:
+        """Resolve a turn-state token to its API-key-scoped HTTP bridge owner.
+
+        A compact request cannot safely fall back to generic sticky routing: an
+        opaque turn-state is valid only on the account that created it.  The
+        local alias index is the fast path; the durable lookup covers a request
+        that arrives on another replica.  Both lookup surfaces are keyed by the
+        exact API key id, so a token observed under one key cannot select an
+        account for another key.
+        """
+        proxy = cast(_CompactServiceProtocol, self)
+        normalized_turn_state = turn_state.strip()
+        if not normalized_turn_state:
+            raise ProxyResponseError(
+                502,
+                openai_error(
+                    "turn_state_owner_unavailable",
+                    "Turn-state owner account is unavailable; retry the logical turn.",
+                    error_type="server_error",
+                ),
+            )
+        api_key_id = api_key.id if api_key is not None else None
+        from app.modules.proxy._service.http_bridge.helpers import _http_bridge_turn_state_alias_key
+
+        async with proxy._http_bridge_lock:
+            session_key = proxy._http_bridge_turn_state_index.get(
+                _http_bridge_turn_state_alias_key(normalized_turn_state, api_key_id)
+            )
+            session = proxy._http_bridge_sessions.get(session_key) if session_key is not None else None
+            account = getattr(session, "account", None)
+            account_id = getattr(account, "id", None)
+            if isinstance(account_id, str) and account_id.strip():
+                return account_id
+
+        try:
+            durable_lookup = await proxy._durable_bridge.lookup_turn_state_target(
+                turn_state=normalized_turn_state,
+                api_key_id=api_key_id,
+            )
+        except Exception as exc:
+            raise ProxyResponseError(
+                502,
+                openai_error(
+                    "turn_state_owner_unavailable",
+                    "Turn-state owner account is unavailable; retry the logical turn.",
+                    error_type="server_error",
+                ),
+            ) from exc
+        account_id = getattr(durable_lookup, "account_id", None)
+        if isinstance(account_id, str) and account_id.strip():
+            return account_id
+        raise ProxyResponseError(
+            502,
+            openai_error(
+                "turn_state_owner_unavailable",
+                "Turn-state owner account is unavailable; retry the logical turn.",
+                error_type="server_error",
+            ),
+        )
+
     async def compact_responses(
         self,
         payload: ResponsesCompactRequest,
@@ -484,6 +560,13 @@ class _CompactMixin:
             prompt_cache_key_set=_prompt_cache_key_from_request_model(payload) is not None,
         )
         routing_strategy = _routing_strategy(settings)
+        turn_state_owner_account_id: str | None = None
+        turn_state = _sticky_key_from_turn_state_header(headers)
+        if turn_state is not None:
+            turn_state_owner_account_id = await proxy._resolve_compact_turn_state_owner(
+                turn_state=turn_state,
+                api_key=api_key,
+            )
         previous_response_id = getattr(payload, "previous_response_id", None)
         previous_response_preferred_account_id: str | None = None
         previous_response_lookup_session_id: str | None = None
@@ -527,9 +610,24 @@ class _CompactMixin:
         # returns ``None`` when stronger affinity signals are present
         # (prompt_cache_key / session header / turn_state header /
         # previous_response_id), so existing routing wins.
-        file_preferred_account_id = previous_response_preferred_account_id or rewritten_file_account_id
-        if file_preferred_account_id is None:
-            file_preferred_account_id = await proxy._resolve_file_account_for_responses(payload, headers)
+        if (
+            turn_state_owner_account_id is not None
+            and previous_response_preferred_account_id is not None
+            and turn_state_owner_account_id != previous_response_preferred_account_id
+        ):
+            raise ProxyResponseError(
+                502,
+                openai_error(
+                    "turn_state_owner_conflict",
+                    "Turn-state continuity resolved to conflicting upstream accounts; retry the logical turn.",
+                    error_type="server_error",
+                ),
+            )
+        preferred_account_id = (
+            turn_state_owner_account_id or previous_response_preferred_account_id or rewritten_file_account_id
+        )
+        if preferred_account_id is None:
+            preferred_account_id = await proxy._resolve_file_account_for_responses(payload, headers)
         try:
 
             async def _call_compact(
@@ -698,11 +796,11 @@ class _CompactMixin:
                     model=payload.model,
                     service_tier=payload.service_tier,
                     exclude_account_ids=excluded_account_ids,
-                    preferred_account_id=file_preferred_account_id,
+                    preferred_account_id=preferred_account_id,
                     require_security_work_authorized=require_security_work_authorized,
                     lease_kind="response_create",
                     estimated_lease_tokens=estimated_lease_tokens,
-                    fallback_on_preferred_account_unavailable=file_preferred_account_id is None,
+                    fallback_on_preferred_account_unavailable=preferred_account_id is None,
                 )
                 account = selection.account
                 if not account:
@@ -732,11 +830,11 @@ class _CompactMixin:
                             model=payload.model,
                             service_tier=payload.service_tier,
                             exclude_account_ids=excluded_account_ids,
-                            preferred_account_id=file_preferred_account_id,
+                            preferred_account_id=preferred_account_id,
                             require_security_work_authorized=False,
                             lease_kind="response_create",
                             estimated_lease_tokens=estimated_lease_tokens,
-                            fallback_on_preferred_account_unavailable=file_preferred_account_id is None,
+                            fallback_on_preferred_account_unavailable=preferred_account_id is None,
                         )
                         account = selection.account
                     if account is not None:
@@ -800,7 +898,7 @@ class _CompactMixin:
                     )
                     if not _should_retry_transient_stream_error("upstream_unavailable", message):
                         _raise_proxy_unavailable(message)
-                    if file_preferred_account_id is not None:
+                    if preferred_account_id is not None:
                         _raise_proxy_unavailable(message)
                     await proxy._handle_stream_error(
                         account,
@@ -918,7 +1016,7 @@ class _CompactMixin:
                                         request_service_tier=request_service_tier,
                                     )
                                     _raise_proxy_unavailable(message)
-                                if file_preferred_account_id is not None:
+                                if preferred_account_id is not None:
                                     await proxy._settle_compact_api_key_usage(
                                         api_key=api_key,
                                         api_key_reservation=api_key_reservation,
@@ -983,7 +1081,7 @@ class _CompactMixin:
                         if _is_security_work_authorization_required_error(code, error_message):
                             if (
                                 not account.security_work_authorized
-                                and account.id != file_preferred_account_id
+                                and account.id != preferred_account_id
                                 and _account_attempt < _compact_max_account_attempts() - 1
                             ):
                                 last_exc = exc

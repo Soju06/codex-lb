@@ -252,6 +252,23 @@ async def test_collect_responses_payload_returns_contract_error_on_truncated_str
 
 
 @pytest.mark.asyncio
+async def test_collect_responses_payload_captures_turn_state_metadata_before_failed_response() -> None:
+    captured_headers: dict[str, str] = {}
+
+    result = await proxy_api_module._collect_responses_payload(
+        _iter_blocks(
+            'data: {"type":"response.metadata","headers":{"X-Codex-Turn-State":" turn-owner "}}\n\n',
+            'data: {"type":"response.failed","response":{"error":{"code":"upstream_error",'
+            '"message":"failed","type":"server_error"}}}\n\n',
+        ),
+        captured_turn_state_headers=captured_headers,
+    )
+
+    assert result.error is not None
+    assert captured_headers == {"x-codex-turn-state": "turn-owner"}
+
+
+@pytest.mark.asyncio
 async def test_collect_responses_payload_normalizes_unknown_output_item_to_message() -> None:
     result = await proxy_api_module._collect_responses_payload(
         _iter_blocks(

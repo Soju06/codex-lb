@@ -2770,6 +2770,69 @@ def test_response_create_client_metadata_promotes_multi_agent_headers_per_reques
     }
 
 
+@pytest.mark.asyncio
+async def test_compact_turn_state_owner_lookup_is_api_key_scoped_and_fails_closed() -> None:
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    turn_state = "turn-owner"
+    owner_key = proxy_service._http_bridge_turn_state_alias_key(turn_state, "key-owner")
+    service._http_bridge_turn_state_index[owner_key] = "bridge-owner"  # type: ignore[assignment]
+    service._http_bridge_sessions["bridge-owner"] = SimpleNamespace(account=SimpleNamespace(id="account-owner"))  # type: ignore[index]
+    service._durable_bridge = SimpleNamespace(lookup_turn_state_target=AsyncMock(return_value=None))
+
+    assert (
+        await service._resolve_compact_turn_state_owner(
+            turn_state=turn_state,
+            api_key=cast(Any, SimpleNamespace(id="key-owner")),
+        )
+        == "account-owner"
+    )
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service._resolve_compact_turn_state_owner(
+            turn_state=turn_state,
+            api_key=cast(Any, SimpleNamespace(id="key-other")),
+        )
+
+    assert _proxy_error_code(exc_info.value) == "turn_state_owner_unavailable"
+    service._durable_bridge.lookup_turn_state_target.assert_awaited_once_with(
+        turn_state=turn_state,
+        api_key_id="key-other",
+    )
+
+
+@pytest.mark.asyncio
+async def test_compact_turn_state_owner_is_a_strict_selection_constraint(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    owner = _make_account("acc_compact_turn_owner")
+    turn_state = "turn-compact-owner"
+    alias_key = proxy_service._http_bridge_turn_state_alias_key(turn_state, None)
+    service._http_bridge_turn_state_index[alias_key] = "bridge-owner"  # type: ignore[assignment]
+    service._http_bridge_sessions["bridge-owner"] = SimpleNamespace(account=owner)  # type: ignore[index]
+    seen_selection: dict[str, object] = {}
+
+    async def select_account(_deadline: float, **kwargs: object) -> AccountSelection:
+        seen_selection.update(kwargs)
+        return AccountSelection(account=owner, error_message=None)
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=owner))
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", AsyncMock())
+    monkeypatch.setattr(
+        proxy_service,
+        "core_compact_responses",
+        AsyncMock(return_value=CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})),
+    )
+
+    payload = ResponsesCompactRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
+    await service.compact_responses(payload, {"x-codex-turn-state": turn_state})
+
+    assert seen_selection["preferred_account_id"] == owner.id
+    assert seen_selection["fallback_on_preferred_account_unavailable"] is False
+
+
 def test_response_create_client_metadata_ignores_blank_multi_agent_headers():
     metadata = proxy_service._response_create_client_metadata(
         {},

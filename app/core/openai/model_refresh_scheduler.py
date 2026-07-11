@@ -91,7 +91,8 @@ class ModelRefreshScheduler:
                 detach_session_objects(session)
             grouped = _group_by_plan(accounts)
             if not grouped:
-                logger.debug("No active accounts for model registry refresh")
+                await get_model_registry().clear()
+                logger.info("Model registry cleared because no active accounts remain")
                 return
 
             encryptor = TokenEncryptor()
@@ -250,20 +251,18 @@ def _merge_same_plan_model_results(successful_results: list[list[UpstreamModel]]
     if not successful_results:
         return []
 
-    models_by_slug = [{model.slug: model for model in models} for models in successful_results]
-    common_slugs = set(models_by_slug[0])
-    for models in models_by_slug[1:]:
-        common_slugs.intersection_update(models)
-
-    merged_models: list[UpstreamModel] = []
-    for model in models_by_slug[0].values():
-        if model.slug not in common_slugs:
-            continue
-        merged_model = model
-        for models in models_by_slug[1:]:
-            merged_model = _merge_service_tier_metadata(merged_model, models[model.slug])
-        merged_models.append(merged_model)
-    return merged_models
+    # Catalog visibility can differ between accounts on the same plan because
+    # of staged rollouts, account capabilities, or experiments. Keep the union
+    # here and let ModelRegistry.model_accounts constrain request routing to the
+    # accounts whose own catalog actually advertised each model. Intersecting
+    # the slugs made one ineligible account erase a native model (and all of its
+    # reasoning/service-tier metadata) for every eligible account.
+    merged_by_slug: dict[str, UpstreamModel] = {}
+    for models in successful_results:
+        for model in models:
+            existing = merged_by_slug.get(model.slug)
+            merged_by_slug[model.slug] = model if existing is None else _merge_service_tier_metadata(existing, model)
+    return list(merged_by_slug.values())
 
 
 async def _ensure_fresh_with_transport_recovery(

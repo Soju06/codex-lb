@@ -685,6 +685,14 @@ class _HTTPBridgeUpstreamEventsMixin:
                 setattr(status_request_state, "account_health_error_handled", True)
             if (
                 status_request_state is not None
+                and status_request_state.fresh_upstream_request_is_retry_safe
+                and status_request_state.fresh_upstream_request_text
+            ):
+                retried = await self._retry_http_bridge_precreated_request(session)
+                if retried:
+                    return
+            if (
+                status_request_state is not None
                 and status_request_state.previous_response_id is not None
                 and status_request_state.preferred_account_id is not None
             ):

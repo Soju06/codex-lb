@@ -351,6 +351,10 @@ def _prepare_websocket_request_state_for_visible_output_replay(*args: Any, **kwa
     return _service_global("_prepare_websocket_request_state_for_visible_output_replay")(*args, **kwargs)
 
 
+def _websocket_client_previous_response_full_resend_is_retry_safe(*args: Any, **kwargs: Any) -> Any:
+    return _service_global("_websocket_client_previous_response_full_resend_is_retry_safe")(*args, **kwargs)
+
+
 def _prepare_websocket_request_state_for_auth_replay(*args: Any, **kwargs: Any) -> Any:
     return _service_global("_prepare_websocket_request_state_for_auth_replay")(*args, **kwargs)
 

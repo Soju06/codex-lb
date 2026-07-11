@@ -1076,16 +1076,11 @@ class _HTTPBridgeRequestSubmitMixin:
             # upstream already accepted the continuation. Re-sending the same
             # previous_response_id request can fork continuity with duplicate
             # child responses, so only reconnect-without-resend is allowed.
-            # The single exception is proxy-injected anchors on trim-safe
-            # full-resend payloads: dropping the anchor and replaying the
-            # original unanchored request is equivalent to the client's own
-            # retry. Session-level injections do not opt in because their
-            # payload may depend on the anchor for context preservation.
-            if (
-                not request_state.proxy_injected_previous_response_id
-                or not request_state.fresh_upstream_request_text
-                or not request_state.fresh_upstream_request_is_retry_safe
-            ):
+            # The exception is a verified full-resend payload with a prepared
+            # unanchored body. Dropping the anchor and replaying that body is
+            # equivalent to the client's own fresh retry. Short continuations
+            # do not opt in because they depend on owner-scoped context.
+            if not (request_state.fresh_upstream_request_text and request_state.fresh_upstream_request_is_retry_safe):
                 return False
             retry_text_data = request_state.fresh_upstream_request_text
             using_fresh_replay = True
@@ -1139,15 +1134,13 @@ class _HTTPBridgeRequestSubmitMixin:
                 return False
             request_state = retryable_requests[0]
             if request_state.previous_response_id is not None and not (
-                request_state.proxy_injected_previous_response_id
-                and request_state.fresh_upstream_request_is_retry_safe
-                and request_state.fresh_upstream_request_text
+                request_state.fresh_upstream_request_is_retry_safe and request_state.fresh_upstream_request_text
             ):
                 # Once a continuation is pending upstream, reconnecting without
                 # replay cannot complete the current request, while replaying it
                 # is unsafe without upstream idempotency guarantees. Proxy-
-                # injected retry-safe anchors are equivalent to the client's own
-                # full resend once the anchor is stripped.
+                # retry-safe full resends are equivalent to the client's own
+                # fresh retry once the owner-scoped anchor is stripped.
                 return False
             close_classification = _classify_upstream_close(
                 session.last_upstream_close_code,

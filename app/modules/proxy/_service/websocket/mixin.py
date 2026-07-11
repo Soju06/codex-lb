@@ -36,6 +36,7 @@ from app.core.clients.proxy import (  # noqa: F401  # noqa: F401
     _payload_has_responses_lite_websocket_marker,
     _payload_uses_responses_lite,
     _ws_transport_payload_budget_bytes,
+    apply_codex_installation_headers,
     apply_codex_installation_metadata,
     filter_inbound_headers,
     pop_compact_timeout_overrides,
@@ -580,6 +581,25 @@ def _websocket_enforce_response_create_text_size(
         request_state.request_text = original_request_text
 
 
+def _prepare_websocket_request_state_for_account_switch(
+    request_state: _WebSocketRequestState,
+) -> str | None:
+    """Return an unsent request body that is safe to move to another account."""
+
+    if request_state.previous_response_id is None:
+        return request_state.request_text
+    if not (request_state.fresh_upstream_request_is_retry_safe and request_state.fresh_upstream_request_text):
+        return None
+
+    request_state.request_text = request_state.fresh_upstream_request_text
+    request_state.previous_response_id = None
+    request_state.preferred_account_id = None
+    request_state.proxy_injected_previous_response_id = False
+    request_state.fresh_upstream_request_is_retry_safe = False
+    request_state.responses_lite_model = request_state.fresh_upstream_request_responses_lite_model
+    return request_state.request_text
+
+
 class _WebSocketMixin:
     def _websocket_continuity_state_for_request(
         self,
@@ -649,6 +669,28 @@ class _WebSocketMixin:
             nonlocal account_lease
             await proxy._load_balancer.release_account_lease(account_lease)
             account_lease = None
+
+        async def retire_current_upstream() -> None:
+            nonlocal account, upstream, upstream_control, upstream_reader
+            if upstream_control is not None:
+                # The reader's cancellation finalizer must not close the
+                # downstream socket while the unsent request is still queued.
+                upstream_control.reconnect_requested = True
+            if upstream_reader is not None:
+                await _facade()._await_cancelled_task(
+                    upstream_reader,
+                    label="proxy websocket upstream reader",
+                )
+                upstream_reader = None
+            upstream_control = None
+            if upstream is not None:
+                try:
+                    await upstream.close()
+                except Exception:
+                    _facade().logger.debug("Failed to retire upstream websocket", exc_info=True)
+            upstream = None
+            await release_current_account_lease()
+            account = None
 
         try:
             while True:
@@ -1038,6 +1080,81 @@ class _WebSocketMixin:
                                     pending_requests.remove(request_state)
                         await _release_websocket_response_create_gate(request_state, response_create_gate)
                         raise
+
+                if (
+                    request_state is not None
+                    and request_state_registered
+                    and text_data is not None
+                    and payload is not None
+                    and _is_websocket_response_create(payload)
+                    and upstream is not None
+                    and account is not None
+                ):
+                    (
+                        validated_account,
+                        validation_code,
+                        validation_message,
+                    ) = await proxy._revalidate_open_websocket_account(
+                        account,
+                        request_state=request_state,
+                        api_key=request_state.api_key or api_key,
+                    )
+                    if validated_account is not None:
+                        account = validated_account
+                    else:
+                        current_account_id = account.id
+                        safe_request_text = _prepare_websocket_request_state_for_account_switch(request_state)
+                        await retire_current_upstream()
+                        if safe_request_text is None:
+                            message = "Previous response owner account is unavailable; retry later."
+                            _record_continuity_fail_closed(
+                                surface="websocket_revalidate",
+                                reason=validation_code or "owner_account_unavailable",
+                                previous_response_id=request_state.previous_response_id,
+                                session_id=request_state.session_id,
+                                upstream_error_code="previous_response_owner_unavailable",
+                            )
+                            async with pending_lock:
+                                if request_state in pending_requests:
+                                    pending_requests.remove(request_state)
+                            await proxy._emit_websocket_connect_failure(
+                                websocket,
+                                client_send_lock=client_send_lock,
+                                account_id=current_account_id,
+                                api_key=request_state.api_key or api_key,
+                                request_state=request_state,
+                                status_code=502,
+                                payload=openai_error(
+                                    "previous_response_owner_unavailable",
+                                    message,
+                                    error_type="server_error",
+                                ),
+                                error_code="previous_response_owner_unavailable",
+                                error_message=message,
+                            )
+                            continue
+                        text_data = safe_request_text
+                        payload = _parse_websocket_payload(text_data)
+                        if payload is None:
+                            async with pending_lock:
+                                if request_state in pending_requests:
+                                    pending_requests.remove(request_state)
+                            await proxy._emit_websocket_connect_failure(
+                                websocket,
+                                client_send_lock=client_send_lock,
+                                account_id=current_account_id,
+                                api_key=request_state.api_key or api_key,
+                                request_state=request_state,
+                                status_code=503,
+                                payload=openai_error(
+                                    "websocket_account_unavailable",
+                                    validation_message or "Current websocket account is unavailable",
+                                    error_type="server_error",
+                                ),
+                                error_code="websocket_account_unavailable",
+                                error_message=validation_message or "Current websocket account is unavailable",
+                            )
+                            continue
 
                 if upstream is None:
                     if text_data is not None and payload is None:
@@ -1575,6 +1692,46 @@ class _WebSocketMixin:
             request_state=request_state,
             affinity_policy=affinity_policy,
         )
+
+    async def _revalidate_open_websocket_account(
+        self,
+        account: Account,
+        *,
+        request_state: _WebSocketRequestState,
+        api_key: ApiKeyData | None,
+    ) -> tuple[Account | None, str | None, str | None]:
+        """Revalidate an already-open upstream socket for the next unsent turn."""
+
+        proxy = cast(_WebSocketServiceProtocol, self)
+        preferred_account_id = request_state.preferred_account_id
+        if preferred_account_id is not None and preferred_account_id != account.id:
+            return (
+                None,
+                "preferred_account_mismatch",
+                "Current websocket account does not own this request's continuity state",
+            )
+
+        deadline = _websocket_connect_deadline(
+            request_state,
+            _facade().get_settings().proxy_request_budget_seconds,
+        )
+        selection = await proxy._select_account_with_budget_compatible(
+            deadline,
+            request_id=request_state.request_log_id or request_state.request_id,
+            kind="websocket_revalidate",
+            request_stage=request_state.request_stage,
+            api_key=api_key,
+            model=request_state.model,
+            service_tier=request_state.requested_service_tier,
+            preferred_account_id=account.id,
+            require_security_work_authorized=request_state.require_security_work_authorized,
+            fallback_on_preferred_account_unavailable=False,
+        )
+        await proxy._load_balancer.release_account_lease(selection.lease)
+        selected_account = selection.account
+        if selected_account is None or selected_account.id != account.id:
+            return None, selection.error_code, selection.error_message
+        return selected_account, None, None
 
     async def _connect_proxy_websocket(
         self,
@@ -2266,6 +2423,7 @@ class _WebSocketMixin:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
         access_token = proxy._encryptor.decrypt(account.access_token_encrypted)
+        headers = apply_codex_installation_headers(headers, getattr(account, "codex_installation_id", None))
         account_id = _header_account_id(account.chatgpt_account_id)
         connect_lease = await proxy._get_work_admission().acquire_websocket_connect()
         try:
@@ -3111,11 +3269,19 @@ class _WebSocketMixin:
                 payload=payload,
                 has_other_pending_requests=has_other_pending_requests,
             )
+        retry_safe_owner_replay = bool(
+            retry_error_code in _facade()._WEBSOCKET_TRANSPARENT_REPLAY_ERROR_CODES
+            and request_state.previous_response_id is not None
+            and request_state.preferred_account_id is not None
+            and request_state.fresh_upstream_request_is_retry_safe
+            and request_state.fresh_upstream_request_text
+        )
         if (
             retry_error_code in _facade()._WEBSOCKET_TRANSPARENT_REPLAY_ERROR_CODES
             and request_state.previous_response_id is not None
             and request_state.preferred_account_id is not None
             and not retry_safe_previous_response_not_found
+            and not retry_safe_owner_replay
         ):
             await proxy._handle_stream_error(
                 account,
@@ -3126,6 +3292,12 @@ class _WebSocketMixin:
                 request_state=request_state,
             )
             retry_error_code = None
+        if retry_safe_owner_replay and not retry_safe_previous_response_not_found:
+            safe_request_text = _prepare_websocket_request_state_for_account_switch(request_state)
+            if safe_request_text is None:
+                retry_error_code = None
+            else:
+                request_state.request_text = safe_request_text
         if retry_error_code is not None:
             if retry_is_previous_response_not_found:
                 if not (

@@ -106,6 +106,7 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
     _service_get_settings_cache,
     _service_time,
     _stream_keepalive_max_count,
+    _websocket_client_previous_response_full_resend_is_retry_safe,
     _websocket_downstream_response_id,
     _websocket_event_error_code,
     _websocket_event_error_message,
@@ -568,6 +569,7 @@ class _HTTPBridgeStreamingMixin:
         untrimmed_effective_payload = payload
         proxy_injected_previous_response_id = False
         fresh_upstream_request_text: str | None = None
+        fresh_replay_payload: ResponsesRequest | None = None
         previous_response_trimmed_input_count: int | None = None
         previous_response_trimmed_input_fingerprint: str | None = None
         durable_full_resend_anchor_count: int | None = None
@@ -629,6 +631,14 @@ class _HTTPBridgeStreamingMixin:
                     )
         if effective_payload.previous_response_id is not None and isinstance(effective_payload.input, list):
             previous_response_input_items = cast(list[JsonValue], effective_payload.input)
+            if _websocket_client_previous_response_full_resend_is_retry_safe(
+                previous_response_id=effective_payload.previous_response_id,
+                input_value=effective_payload.input,
+                continuity_state=None,
+            ):
+                fresh_replay_payload = effective_payload.model_copy(update={"previous_response_id": None})
+                _fresh_request_state, fresh_upstream_request_text = prepare_bridge_request(fresh_replay_payload)
+                del _fresh_request_state
             trimmed_input_items = _trim_http_bridge_previous_response_input_items(previous_response_input_items)
             if len(trimmed_input_items) != len(previous_response_input_items):
                 previous_response_trimmed_input_count = len(previous_response_input_items)
@@ -652,6 +662,9 @@ class _HTTPBridgeStreamingMixin:
                 else None,
                 effective_payload.previous_response_id,
             )
+        if fresh_replay_payload is not None and fresh_upstream_request_text is not None:
+            request_state.fresh_upstream_request_text = fresh_upstream_request_text
+            request_state.fresh_upstream_request_is_retry_safe = True
         request_state.transport = _REQUEST_TRANSPORT_HTTP
         request_state.request_stage = _http_bridge_request_stage(
             headers=headers,
@@ -689,18 +702,44 @@ class _HTTPBridgeStreamingMixin:
                 surface="http_bridge",
             )
         if request_state.previous_response_id is not None and request_state.preferred_account_id is None:
-            message = "Previous response owner account is unavailable; retry later."
-            _record_continuity_fail_closed(
-                surface="http_bridge",
-                reason="owner_account_unavailable",
-                previous_response_id=request_state.previous_response_id,
-                session_id=request_state.session_id,
-                upstream_error_code="owner_lookup_miss",
-            )
-            raise ProxyResponseError(
-                502,
-                openai_error("previous_response_owner_unavailable", message),
-            )
+            if fresh_replay_payload is not None:
+                _log_http_bridge_event(
+                    "owner_lookup_miss_fresh_resend",
+                    bridge_session_key,
+                    account_id=None,
+                    model=payload.model,
+                    detail="outcome=fresh_full_resend_without_anchor",
+                    cache_key_family=bridge_session_key.affinity_kind,
+                    model_class=_extract_model_class(payload.model) if payload.model else None,
+                )
+                effective_payload = fresh_replay_payload
+                untrimmed_effective_payload = fresh_replay_payload
+                request_state, text_data = prepare_bridge_request(fresh_replay_payload)
+                request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
+                request_state.affinity_policy = affinity
+                if downstream_turn_state is not None:
+                    request_state.session_id = _normalize_session_id(downstream_turn_state)
+                request_state.transport = _REQUEST_TRANSPORT_HTTP
+                request_state.request_stage = _http_bridge_request_stage(
+                    headers=headers,
+                    payload=fresh_replay_payload,
+                    durable_lookup=None,
+                )
+                fresh_replay_payload = None
+                fresh_upstream_request_text = None
+            else:
+                message = "Previous response owner account is unavailable; retry later."
+                _record_continuity_fail_closed(
+                    surface="http_bridge",
+                    reason="owner_account_unavailable",
+                    previous_response_id=request_state.previous_response_id,
+                    session_id=request_state.session_id,
+                    upstream_error_code="owner_lookup_miss",
+                )
+                raise ProxyResponseError(
+                    502,
+                    openai_error("previous_response_owner_unavailable", message),
+                )
         file_required_preferred_account = False
         if request_state.preferred_account_id is None:
             # ``input_file.file_id`` references must land on the account
@@ -759,13 +798,19 @@ class _HTTPBridgeStreamingMixin:
                     request_deadline=request_deadline,
                 )
             except ProxyResponseError as exc:
-                if not (
+                retry_safe_fresh_resend = bool(
                     _http_bridge_is_previous_response_owner_unavailable(exc)
-                    and proxy_injected_previous_response_id
+                    and fresh_replay_payload is not None
                     and fresh_upstream_request_text is not None
-                    and durable_full_resend_anchor_count is not None
-                    and durable_full_resend_anchor_fingerprint is not None
-                ):
+                    and (
+                        not proxy_injected_previous_response_id
+                        or (
+                            durable_full_resend_anchor_count is not None
+                            and durable_full_resend_anchor_fingerprint is not None
+                        )
+                    )
+                )
+                if not retry_safe_fresh_resend:
                     wait_plan = _http_bridge_capacity_wait_plan(exc, request_deadline=request_deadline)
                     if wait_plan is not None:
                         bounded_wait_seconds, account_capacity_wait_seconds, message = wait_plan
@@ -797,14 +842,15 @@ class _HTTPBridgeStreamingMixin:
                     cache_key_family=bridge_session_key.affinity_kind,
                     model_class=_extract_model_class(payload.model) if payload.model else None,
                 )
-                request_state, text_data = prepare_bridge_request(payload)
+                assert fresh_replay_payload is not None
+                request_state, text_data = prepare_bridge_request(fresh_replay_payload)
                 request_state.affinity_policy = affinity
                 if downstream_turn_state is not None:
                     request_state.session_id = _normalize_session_id(downstream_turn_state)
                 request_state.transport = _REQUEST_TRANSPORT_HTTP
                 request_state.request_stage = _http_bridge_request_stage(
                     headers=headers,
-                    payload=payload,
+                    payload=fresh_replay_payload,
                     durable_lookup=None,
                 )
                 file_required_preferred_account = False
@@ -816,9 +862,11 @@ class _HTTPBridgeStreamingMixin:
                     if resolved_file_account_id is not None:
                         request_state.preferred_account_id = resolved_file_account_id
                         file_required_preferred_account = True
-                effective_payload = payload
-                untrimmed_effective_payload = payload
+                effective_payload = fresh_replay_payload
+                untrimmed_effective_payload = fresh_replay_payload
                 proxy_injected_previous_response_id = False
+                fresh_replay_payload = None
+                fresh_upstream_request_text = None
                 previous_response_trimmed_input_count = None
                 previous_response_trimmed_input_fingerprint = None
                 durable_full_resend_anchor_count = None

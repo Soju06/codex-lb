@@ -302,7 +302,7 @@ async def test_fetch_with_failover_unions_same_plan_tiers(
 
 
 @pytest.mark.asyncio
-async def test_fetch_with_failover_excludes_same_plan_private_model_slug(
+async def test_fetch_with_failover_unions_same_plan_account_specific_model_slug(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     accounts = [_account("account-1"), _account("account-2")]
@@ -319,7 +319,11 @@ async def test_fetch_with_failover_excludes_same_plan_private_model_slug(
     result = await scheduler_module._fetch_with_failover(accounts, encryptor, MagicMock())
 
     assert result is not None
-    assert [model.slug for model in result.models] == ["gpt-5.4"]
+    assert [model.slug for model in result.models] == ["gpt-5.4", "private-alpha"]
+    assert result.account_models == {
+        accounts[0].id: (accounts[0].plan_type, first_models),
+        accounts[1].id: (accounts[1].plan_type, second_models),
+    }
     assert fetch_models_for_plan.await_count == 2
 
 

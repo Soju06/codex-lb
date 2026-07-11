@@ -480,10 +480,17 @@ def _http_bridge_session_supports_service_tier(
     request_model: str | None,
     request_service_tier: str | None,
 ) -> bool:
-    if request_model is None or request_service_tier is None:
+    if request_model is None:
         return True
 
     registry = get_model_registry()
+    account_ids_for_model = getattr(registry, "account_ids_for_model", None)
+    model_account_ids = account_ids_for_model(request_model) if callable(account_ids_for_model) else None
+    if model_account_ids is not None and session.account.id not in model_account_ids:
+        return False
+    if request_service_tier is None:
+        return True
+
     allowed_account_ids = registry.account_ids_for_model_service_tier(request_model, request_service_tier)
     if allowed_account_ids is not None:
         return session.account.id in allowed_account_ids

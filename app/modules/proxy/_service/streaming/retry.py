@@ -230,12 +230,43 @@ class _StreamingRetryMixin:
         preferred_account_id: str | None = None
         file_preferred_account_id: str | None = rewritten_file_account_id
         require_preferred_account = False
+        fresh_replay_payload: ResponsesRequest | None = None
+        if (
+            payload.previous_response_id is not None
+            and rewritten_file_account_id is None
+            and _facade()._websocket_client_previous_response_full_resend_is_retry_safe(
+                previous_response_id=payload.previous_response_id,
+                input_value=payload.input,
+                continuity_state=None,
+            )
+        ):
+            fresh_replay_payload = payload.model_copy(update={"previous_response_id": None})
         last_retryable_stream_error: _RetryableStreamError | None = None
         require_security_work_authorized = False
         account_leases: list[AccountLease] = []
         estimated_lease_tokens = _facade()._estimated_lease_tokens_from_request_usage_budget(
             estimate_api_key_request_usage(payload)
         )
+
+        def activate_fresh_replay() -> bool:
+            nonlocal payload, preferred_account_id, require_preferred_account, fresh_replay_payload
+            if fresh_replay_payload is None or file_preferred_account_id is not None:
+                return False
+            payload = fresh_replay_payload
+            fresh_replay_payload = None
+            preferred_account_id = None
+            require_preferred_account = False
+            return True
+
+        def remember_success_owner(account_id: str) -> None:
+            if not settlement.record_success or settlement.response_id is None:
+                return
+            proxy._remember_websocket_previous_response_owner(
+                previous_response_id=settlement.response_id,
+                api_key_id=api_key.id if api_key is not None else None,
+                account_id=account_id,
+                session_id=_owner_lookup_session_id_from_headers(headers),
+            )
 
         async def _release_tracked_stream_lease(lease: AccountLease | None) -> None:
             if lease is None:
@@ -279,7 +310,7 @@ class _StreamingRetryMixin:
                         additional_limit_name=None,
                         account_ids=None,
                     )
-                    if len(selection_inputs.accounts) != 1:
+                    if len(selection_inputs.accounts) != 1 and not activate_fresh_replay():
                         message = "Previous response owner account is unavailable; retry later."
                         _record_continuity_fail_closed(
                             surface="http_stream",
@@ -490,6 +521,8 @@ class _StreamingRetryMixin:
                             ),
                         )
                     if require_preferred_account and preferred_account_id is not None:
+                        if activate_fresh_replay():
+                            continue
                         message = "Previous response owner account is unavailable; retry later."
                         _record_continuity_fail_closed(
                             surface="http_stream",
@@ -619,6 +652,10 @@ class _StreamingRetryMixin:
                     and preferred_account_id is not None
                     and account.id != preferred_account_id
                 ):
+                    if activate_fresh_replay():
+                        await _release_tracked_stream_lease(current_account_lease)
+                        current_account_lease = None
+                        continue
                     message = "Previous response owner account is unavailable; retry later."
                     _record_continuity_fail_closed(
                         surface="http_stream",
@@ -816,7 +853,9 @@ class _StreamingRetryMixin:
                                 useragent=useragent,
                                 useragent_group=useragent_group,
                                 client_ip=client_ip,
-                                preferred_account_id=preferred_account_id,
+                                preferred_account_id=(
+                                    None if fresh_replay_payload is not None else preferred_account_id
+                                ),
                                 tool_call_dedupe=tool_call_dedupe,
                                 enforce_openai_sdk_contract=enforce_openai_sdk_contract,
                             ):
@@ -953,6 +992,8 @@ class _StreamingRetryMixin:
                                     await _release_tracked_stream_lease(current_account_lease)
                                     current_account_lease = None
                                     excluded_account_ids.add(account.id)
+                                    if require_preferred_account:
+                                        activate_fresh_replay()
                                     break
                                 raise
                             transient_retries += 1
@@ -1010,6 +1051,7 @@ class _StreamingRetryMixin:
                             )
                         elif settlement.record_success:
                             await proxy._load_balancer.record_success(account)
+                            remember_success_owner(account.id)
                         settled = await proxy._settle_stream_api_key_usage(
                             api_key,
                             api_key_reservation,
@@ -1061,6 +1103,8 @@ class _StreamingRetryMixin:
                         await _release_tracked_stream_lease(current_account_lease)
                         current_account_lease = None
                         excluded_account_ids.add(account.id)
+                    if require_preferred_account:
+                        activate_fresh_replay()
                     continue
                 except _TerminalStreamError as exc:
                     if _facade()._should_penalize_stream_error(exc.code):
@@ -1319,6 +1363,7 @@ class _StreamingRetryMixin:
                             )
                         elif settlement.record_success:
                             await proxy._load_balancer.record_success(account)
+                            remember_success_owner(account.id)
                         settled = await proxy._settle_stream_api_key_usage(
                             api_key,
                             api_key_reservation,

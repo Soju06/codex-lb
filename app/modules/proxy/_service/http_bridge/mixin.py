@@ -1363,11 +1363,17 @@ class _HTTPBridgeMixin(
                         preferred_account_id=preferred_account_id,
                         require_preferred_account=require_preferred_account,
                     )
+                    and _http_bridge_session_supports_service_tier(
+                        session,
+                        request_model=request_model,
+                        request_service_tier=request_service_tier,
+                    )
                 ):
                     current_instance = settings.http_responses_session_bridge_instance_id
                     if _durable_bridge_lookup_allows_local_reuse(durable_lookup, current_instance=current_instance):
                         session.api_key = api_key
                         session.request_model = request_model
+                        session.request_service_tier = request_service_tier
                         session.last_used_at = _service_time().monotonic()
                         return session
                 if not session.closed and session.account.status == AccountStatus.ACTIVE:

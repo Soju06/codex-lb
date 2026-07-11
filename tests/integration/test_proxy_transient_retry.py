@@ -393,6 +393,61 @@ async def test_stream_connect_phase_429_usage_limit_transparent_failover(async_c
 
 
 @pytest.mark.asyncio
+async def test_stream_owner_quota_replays_safe_full_resend_without_anchor(async_client, monkeypatch):
+    account_a = await _import_account(async_client, "acc_owner_quota_a", "ownerquotaa@example.com")
+    account_b = await _import_account(async_client, "acc_owner_quota_b", "ownerquotab@example.com")
+
+    async def resolve_owner(self, **kwargs):
+        del self, kwargs
+        return account_a
+
+    seen_requests: list[tuple[str | None, str | None]] = []
+    remembered_owners: list[tuple[str | None, str | None]] = []
+
+    def remember_owner(self, **kwargs):
+        del self
+        remembered_owners.append((kwargs.get("previous_response_id"), kwargs.get("account_id")))
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        del headers, access_token, base_url, raise_for_status
+        seen_requests.append((account_id, payload.previous_response_id))
+        if account_id == "acc_owner_quota_a":
+            raise ProxyResponseError(
+                429,
+                openai_error("usage_limit_reached", "usage limit reached"),
+                failure_phase="status",
+            )
+        yield _success_sse_event("resp_owner_rotated")
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_resolve_websocket_previous_response_owner", resolve_owner)
+    monkeypatch.setattr(proxy_module.ProxyService, "_remember_websocket_previous_response_owner", remember_owner)
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "previous_response_id": "resp_owner",
+        "input": [
+            {"role": "user", "content": [{"type": "input_text", "text": "first"}]},
+            {"role": "assistant", "content": [{"type": "output_text", "text": "answer"}]},
+            {"role": "user", "content": [{"type": "input_text", "text": "continue"}]},
+        ],
+        "stream": True,
+    }
+    async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    events = _extract_events(lines)
+    assert len([event for event in events if event.get("type") == "response.completed"]) == 1
+    assert seen_requests[:2] == [
+        ("acc_owner_quota_a", "resp_owner"),
+        ("acc_owner_quota_b", None),
+    ]
+    assert remembered_owners == [("resp_owner_rotated", account_b)]
+
+
+@pytest.mark.asyncio
 async def test_stream_http_502_unknown_code_fails_over_to_second_account(async_client, monkeypatch):
     await _import_account(async_client, "acc_h502_a", "h502_a@example.com")
     await _import_account(async_client, "acc_h502_b", "h502_b@example.com")

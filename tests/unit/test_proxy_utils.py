@@ -86,6 +86,160 @@ def test_websocket_archive_request_context_clears_unmatched_frame_request_id():
         reset_request_id(token)
 
 
+def test_websocket_account_switch_keeps_fresh_request_body():
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_ws_fresh_switch",
+        model="gpt-5.6-sol",
+        service_tier="priority",
+        reasoning_effort="high",
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        request_text='{"type":"response.create","model":"gpt-5.6-sol"}',
+    )
+
+    assert websocket_mixin._prepare_websocket_request_state_for_account_switch(request_state) == (
+        request_state.request_text
+    )
+
+
+def test_websocket_account_switch_rejects_client_owned_previous_response_chain():
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_ws_hard_chain",
+        model="gpt-5.6-sol",
+        service_tier="priority",
+        reasoning_effort="high",
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        request_text='{"type":"response.create","previous_response_id":"resp_hard"}',
+        previous_response_id="resp_hard",
+        preferred_account_id="acc_owner",
+    )
+
+    assert websocket_mixin._prepare_websocket_request_state_for_account_switch(request_state) is None
+    assert request_state.previous_response_id == "resp_hard"
+    assert request_state.preferred_account_id == "acc_owner"
+
+
+def test_websocket_account_switch_restores_safe_fresh_form_for_proxy_anchor():
+    fresh_text = '{"type":"response.create","model":"gpt-5.6-sol","input":[]}'
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_ws_proxy_chain",
+        model="gpt-5.6-sol",
+        service_tier="priority",
+        reasoning_effort="high",
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        request_text='{"type":"response.create","previous_response_id":"resp_proxy"}',
+        previous_response_id="resp_proxy",
+        preferred_account_id="acc_old",
+        proxy_injected_previous_response_id=True,
+        fresh_upstream_request_is_retry_safe=True,
+        fresh_upstream_request_text=fresh_text,
+        fresh_upstream_request_responses_lite_model="gpt-5.6-sol",
+    )
+
+    assert websocket_mixin._prepare_websocket_request_state_for_account_switch(request_state) == fresh_text
+    assert request_state.previous_response_id is None
+    assert request_state.preferred_account_id is None
+    assert request_state.proxy_injected_previous_response_id is False
+    assert request_state.fresh_upstream_request_is_retry_safe is False
+    assert request_state.responses_lite_model == "gpt-5.6-sol"
+
+
+def test_websocket_account_switch_restores_safe_client_full_resend():
+    fresh_text = '{"type":"response.create","model":"gpt-5.6-sol","input":[{"role":"user"}]}'
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_ws_client_full_resend",
+        model="gpt-5.6-sol",
+        service_tier="priority",
+        reasoning_effort="high",
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        request_text='{"type":"response.create","previous_response_id":"resp_client"}',
+        previous_response_id="resp_client",
+        preferred_account_id="acc_old",
+        fresh_upstream_request_is_retry_safe=True,
+        fresh_upstream_request_text=fresh_text,
+    )
+
+    assert websocket_mixin._prepare_websocket_request_state_for_account_switch(request_state) == fresh_text
+    assert request_state.previous_response_id is None
+    assert request_state.preferred_account_id is None
+
+
+@pytest.mark.asyncio
+async def test_revalidate_open_websocket_account_uses_current_model_and_tier(monkeypatch):
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_ws_revalidate")
+    refreshed_account = _make_account("acc_ws_revalidate")
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_ws_revalidate",
+        request_log_id="log_ws_revalidate",
+        model="gpt-5.6-sol",
+        service_tier="priority",
+        requested_service_tier="priority",
+        reasoning_effort="high",
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        preferred_account_id=account.id,
+    )
+    select_account = AsyncMock(
+        return_value=AccountSelection(
+            account=refreshed_account,
+            error_message=None,
+            error_code=None,
+            lease=None,
+        )
+    )
+    release_lease = AsyncMock()
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release_lease)
+
+    selected, error_code, error_message = await service._revalidate_open_websocket_account(
+        account,
+        request_state=request_state,
+        api_key=None,
+    )
+
+    assert selected is refreshed_account
+    assert error_code is None
+    assert error_message is None
+    assert select_account.await_args is not None
+    assert select_account.await_args.kwargs["preferred_account_id"] == account.id
+    assert select_account.await_args.kwargs["model"] == "gpt-5.6-sol"
+    assert select_account.await_args.kwargs["service_tier"] == "priority"
+    assert select_account.await_args.kwargs["fallback_on_preferred_account_unavailable"] is False
+    release_lease.assert_awaited_once_with(None)
+
+
+@pytest.mark.asyncio
+async def test_revalidate_open_websocket_account_rejects_changed_owner(monkeypatch):
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_ws_current")
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_ws_owner_changed",
+        model="gpt-5.6-sol",
+        service_tier="priority",
+        reasoning_effort="high",
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        preferred_account_id="acc_ws_required_owner",
+    )
+    select_account = AsyncMock()
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+
+    selected, error_code, error_message = await service._revalidate_open_websocket_account(
+        account,
+        request_state=request_state,
+        api_key=None,
+    )
+
+    assert selected is None
+    assert error_code == "preferred_account_mismatch"
+    assert error_message is not None
+    select_account.assert_not_awaited()
+
+
 def test_account_selection_recovery_sleep_uses_retry_hint_with_bounds():
     selection = AccountSelection(
         account=None,
@@ -2253,7 +2407,7 @@ def test_response_create_client_metadata_replaces_installation_id():
         {
             "client_metadata": {
                 "x-codex-installation-id": "client-installation",
-                "x-codex-turn-metadata": '{"turn_id":"payload-turn"}',
+                "x-codex-turn-metadata": '{"installation_id":"client-installation","turn_id":"payload-turn"}',
             }
         },
         headers={},
@@ -2262,7 +2416,23 @@ def test_response_create_client_metadata_replaces_installation_id():
 
     assert metadata == {
         "x-codex-installation-id": "account-installation",
-        "x-codex-turn-metadata": '{"turn_id":"payload-turn"}',
+        "x-codex-turn-metadata": '{"installation_id":"account-installation","turn_id":"payload-turn"}',
+    }
+
+
+def test_installation_headers_rewrite_canonical_turn_metadata():
+    headers = proxy_module.apply_codex_installation_headers(
+        {
+            "x-codex-installation-id": "client-installation",
+            "x-codex-turn-metadata": '{"installation_id":"client-installation","turn_id":"turn-1"}',
+        },
+        "account-installation",
+    )
+
+    assert headers["x-codex-installation-id"] == "account-installation"
+    assert json.loads(headers["x-codex-turn-metadata"]) == {
+        "installation_id": "account-installation",
+        "turn_id": "turn-1",
     }
 
 
@@ -17028,6 +17198,11 @@ async def test_proxy_responses_websocket_replays_precreated_request_after_upstre
         return _make_account("acc_ws_race_2"), second_upstream
 
     monkeypatch.setattr(proxy_service.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+    monkeypatch.setattr(
+        proxy_service.ProxyService,
+        "_revalidate_open_websocket_account",
+        AsyncMock(side_effect=lambda current_account, **_: (current_account, None, None)),
+    )
 
     first_request = {
         "type": "response.create",
@@ -24348,6 +24523,102 @@ async def test_http_bridge_reselects_sticky_session_for_new_service_tier(monkeyp
 
     assert result is replacement
     assert existing.closed is True
+    create_session.assert_awaited_once()
+    assert create_session.await_args is not None
+    assert create_session.await_args.kwargs["request_service_tier"] == "priority"
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_inflight_waiter_reselects_for_new_service_tier(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account_a = _make_account("acc_bridge_inflight_default")
+    account_b = _make_account("acc_bridge_inflight_priority")
+    key = proxy_service._HTTPBridgeSessionKey("prompt_cache", "bridge-inflight-tier-key", None)
+    incompatible = proxy_service._HTTPBridgeSession(
+        key=key,
+        headers={},
+        affinity=proxy_service._AffinityPolicy(key="bridge-inflight-tier-key"),
+        request_model="gpt-5.5",
+        request_service_tier=None,
+        account=account_a,
+        upstream=AsyncMock(),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque(),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=0,
+        last_used_at=0.0,
+        idle_ttl_seconds=30.0,
+    )
+    replacement = proxy_service._HTTPBridgeSession(
+        key=key,
+        headers={},
+        affinity=proxy_service._AffinityPolicy(key="bridge-inflight-tier-key"),
+        request_model="gpt-5.5",
+        request_service_tier="priority",
+        account=account_b,
+        upstream=AsyncMock(),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque(),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=0,
+        last_used_at=0.0,
+        idle_ttl_seconds=30.0,
+    )
+    inflight_future = asyncio.get_running_loop().create_future()
+    service._http_bridge_inflight_sessions[key] = inflight_future
+
+    class Registry:
+        def account_ids_for_model_service_tier(self, slug: str, service_tier: str | None) -> frozenset[str] | None:
+            if slug == "gpt-5.5" and service_tier == "priority":
+                return frozenset({account_b.id})
+            return None
+
+        def plan_types_for_model_service_tier(self, slug: str, service_tier: str | None) -> frozenset[str] | None:
+            return None
+
+    create_session = AsyncMock(return_value=replacement)
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr("app.modules.proxy._service.support.get_model_registry", lambda: Registry())
+    monkeypatch.setattr(
+        "app.modules.proxy._service.http_bridge.mixin._http_bridge_owner_instance",
+        AsyncMock(return_value=settings.http_responses_session_bridge_instance_id),
+    )
+    monkeypatch.setattr(
+        "app.modules.proxy._service.http_bridge.mixin._active_http_bridge_instance_ring",
+        AsyncMock(
+            return_value=(
+                settings.http_responses_session_bridge_instance_id,
+                (settings.http_responses_session_bridge_instance_id,),
+            )
+        ),
+    )
+    monkeypatch.setattr(service, "_create_http_bridge_session", create_session)
+    monkeypatch.setattr(service, "_claim_durable_http_bridge_session", AsyncMock())
+
+    waiter = asyncio.create_task(
+        service._get_or_create_http_bridge_session(
+            key,
+            headers={},
+            affinity=proxy_service._AffinityPolicy(key="bridge-inflight-tier-key"),
+            api_key=None,
+            request_model="gpt-5.5",
+            request_service_tier="priority",
+            idle_ttl_seconds=30.0,
+            max_sessions=10,
+        )
+    )
+    await asyncio.sleep(0)
+    service._http_bridge_sessions[key] = incompatible
+    service._http_bridge_inflight_sessions.pop(key, None)
+    inflight_future.set_result(incompatible)
+
+    result = await waiter
+
+    assert result is replacement
+    assert incompatible.closed is True
     create_session.assert_awaited_once()
     assert create_session.await_args is not None
     assert create_session.await_args.kwargs["request_service_tier"] == "priority"

@@ -2677,6 +2677,38 @@ async def test_select_account_skips_plan_filter_when_registry_snapshot_lacks_mod
 
 
 @pytest.mark.asyncio
+async def test_select_account_rejects_model_absent_from_authoritative_account_catalog(monkeypatch) -> None:
+    account = _make_account("acc-authoritative-registry", "authoritative-registry@example.com")
+    now = utcnow()
+    primary_entry = UsageHistory(
+        id=1,
+        account_id=account.id,
+        recorded_at=now,
+        window="primary",
+        used_percent=5.0,
+        reset_at=int(now.replace(tzinfo=timezone.utc).timestamp()) + 300,
+        window_minutes=5,
+    )
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(primary={account.id: primary_entry}, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+
+    monkeypatch.setattr(
+        "app.modules.proxy.load_balancer.get_model_registry",
+        lambda: SimpleNamespace(
+            plan_types_for_model=lambda _model: frozenset(),
+            account_ids_for_model=lambda _model: frozenset(),
+        ),
+    )
+
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+    selection = await balancer.select_account(model="gpt-5.6-sol")
+
+    assert selection.account is None
+    assert selection.error_code == NO_PLAN_SUPPORT_FOR_MODEL
+
+
+@pytest.mark.asyncio
 async def test_select_account_empty_pool_preserves_no_accounts_for_modeled_request(monkeypatch) -> None:
     accounts_repo = StubAccountsRepository([])
     usage_repo = StubUsageRepository(primary={}, secondary={})

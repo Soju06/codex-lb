@@ -81,6 +81,7 @@ from app.core.utils.request_id import get_request_id
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
 
 CODEX_INSTALLATION_ID_HEADER = "x-codex-installation-id"
+CODEX_TURN_METADATA_HEADER = "x-codex-turn-metadata"
 CODEX_RESPONSES_LITE_HEADER = "x-openai-internal-codex-responses-lite"
 CODEX_RESPONSES_LITE_WEBSOCKET_METADATA_KEY = "ws_request_header_x_openai_internal_codex_responses_lite"
 
@@ -472,19 +473,58 @@ def filter_inbound_headers(headers: Mapping[str, str]) -> dict[str, str]:
     return {key: value for key, value in headers.items() if not _should_drop_inbound_header(key)}
 
 
+def _rewrite_turn_metadata_installation_id(value: JsonValue, codex_installation_id: str | None) -> JsonValue:
+    if not codex_installation_id or not isinstance(value, str):
+        return value
+    try:
+        metadata = json.loads(value)
+    except json.JSONDecodeError:
+        return value
+    if not isinstance(metadata, dict):
+        return value
+    if "installation_id" not in metadata:
+        return value
+    metadata["installation_id"] = codex_installation_id
+    return json.dumps(metadata, ensure_ascii=True, separators=(",", ":"))
+
+
 def apply_codex_installation_metadata(payload: dict[str, JsonValue], codex_installation_id: str | None) -> None:
     raw_metadata = payload.get("client_metadata")
     client_metadata: dict[str, JsonValue] = {}
     if is_json_mapping(raw_metadata):
         for key, value in raw_metadata.items():
-            if isinstance(key, str) and key.lower() != CODEX_INSTALLATION_ID_HEADER:
-                client_metadata[key] = value
+            if not isinstance(key, str) or key.lower() == CODEX_INSTALLATION_ID_HEADER:
+                continue
+            client_metadata[key] = (
+                _rewrite_turn_metadata_installation_id(value, codex_installation_id)
+                if key.lower() == CODEX_TURN_METADATA_HEADER
+                else value
+            )
     if codex_installation_id:
         client_metadata[CODEX_INSTALLATION_ID_HEADER] = codex_installation_id
     if client_metadata:
         payload["client_metadata"] = client_metadata
     else:
         payload.pop("client_metadata", None)
+
+
+def apply_codex_installation_headers(
+    headers: Mapping[str, str],
+    codex_installation_id: str | None,
+) -> dict[str, str]:
+    """Keep canonical turn metadata consistent with the selected account."""
+    updated = dict(headers)
+    if not codex_installation_id:
+        return updated
+    for key, value in list(updated.items()):
+        lowered = key.lower()
+        if lowered == CODEX_INSTALLATION_ID_HEADER:
+            updated[key] = codex_installation_id
+        elif lowered == CODEX_TURN_METADATA_HEADER:
+            rewritten = _rewrite_turn_metadata_installation_id(value, codex_installation_id)
+            if isinstance(rewritten, str):
+                updated[key] = rewritten
+    return updated
 
 
 _NATIVE_CODEX_USER_AGENT_PREFIXES: tuple[str, ...] = (
@@ -2465,6 +2505,7 @@ async def _stream_responses_with_session(
     enforce_openai_sdk_contract: bool = True,
 ) -> AsyncIterator[str]:
     settings = get_settings()
+    headers = apply_codex_installation_headers(headers, codex_installation_id)
     upstream_base = (base_url or settings.upstream_base_url).rstrip("/")
     url = f"{upstream_base}/codex/responses"
     require_route_or_direct_egress_opt_in(

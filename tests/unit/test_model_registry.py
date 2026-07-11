@@ -408,6 +408,37 @@ async def test_account_ids_for_model_service_tier_tracks_account_catalogs():
 
 
 @pytest.mark.asyncio
+async def test_account_ids_for_model_service_tier_is_empty_when_authoritative_catalog_has_no_tier():
+    standard = _model("gpt-5.5")
+    registry = ModelRegistry(ttl_seconds=60.0)
+    await registry.update(
+        {"plus": [standard]},
+        per_account_results={"account-standard": ("plus", [standard])},
+    )
+
+    assert registry.account_ids_for_model_service_tier("gpt-5.5", "priority") == frozenset()
+
+
+@pytest.mark.asyncio
+async def test_account_ids_for_model_tracks_account_catalogs():
+    shared = _model("gpt-5.4")
+    sol = _model("gpt-5.6-sol")
+
+    registry = ModelRegistry(ttl_seconds=60.0)
+    await registry.update(
+        {"pro": [shared, sol]},
+        per_account_results={
+            "account-sol": ("pro", [shared, sol]),
+            "account-default": ("pro", [shared]),
+        },
+    )
+
+    assert registry.account_ids_for_model("gpt-5.6-sol") == frozenset({"account-sol"})
+    assert registry.account_ids_for_model("gpt-5.4") == frozenset({"account-sol", "account-default"})
+    assert registry.account_ids_for_model("unknown") == frozenset()
+
+
+@pytest.mark.asyncio
 async def test_account_ids_for_model_service_tier_preserves_missing_active_accounts():
     fast = replace(_model("gpt-5.5"), raw={"service_tiers": [{"slug": "fast"}], "additional_speed_tiers": ["fast"]})
     no_fast = replace(_model("gpt-5.5"), raw={"service_tiers": [{"slug": "default"}]})
@@ -485,6 +516,59 @@ async def test_partial_update_preserves_stale_plans():
     # plus-new should be present
     assert "plus-new" in snapshot.models
     assert "plus" in snapshot.model_plans["plus-new"]
+
+
+@pytest.mark.asyncio
+async def test_partial_update_drops_stale_plan_with_no_active_accounts():
+    registry = ModelRegistry(ttl_seconds=60.0)
+    sol = _model("gpt-5.6-sol")
+    shared = _model("gpt-5.4")
+    await registry.update(
+        {"pro": [sol], "plus": [shared]},
+        per_account_results={
+            "account-pro": ("pro", [sol]),
+            "account-plus": ("plus", [shared]),
+        },
+        active_account_plans={"account-pro": "pro", "account-plus": "plus"},
+    )
+
+    await registry.update(
+        {"plus": [shared]},
+        per_account_results={"account-plus": ("plus", [shared])},
+        active_account_plans={"account-plus": "plus"},
+    )
+
+    snapshot = registry.get_snapshot()
+    assert snapshot is not None
+    assert "gpt-5.6-sol" not in snapshot.models
+    assert registry.account_ids_for_model("gpt-5.6-sol") == frozenset()
+
+
+@pytest.mark.asyncio
+async def test_clear_publishes_authoritative_empty_snapshot():
+    registry = ModelRegistry(ttl_seconds=60.0)
+    await registry.update({"plus": [_model("gpt-5.4")]})
+
+    await registry.clear()
+
+    assert registry.get_models_with_fallback() == {}
+    assert registry.plan_types_for_model("gpt-5.4") == frozenset()
+    assert registry.account_ids_for_model("gpt-5.4") == frozenset()
+    assert registry.account_ids_for_model_service_tier("gpt-5.4", "priority") == frozenset()
+
+
+@pytest.mark.asyncio
+async def test_empty_per_account_catalog_is_authoritative():
+    registry = ModelRegistry(ttl_seconds=60.0)
+    shared = _model("gpt-5.4")
+
+    await registry.update(
+        {"plus": [shared]},
+        per_account_results={"account-empty": ("plus", [])},
+    )
+
+    assert registry.account_ids_for_model("gpt-5.4") == frozenset()
+    assert registry.account_ids_for_model_service_tier("gpt-5.4", "priority") == frozenset()
 
 
 def test_needs_refresh_true_initially():

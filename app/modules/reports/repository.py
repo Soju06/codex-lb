@@ -372,78 +372,103 @@ def _daily_speed_medians_stmt(
 ):
     useragent_group_clause = _useragent_group_filter_clause(useragent_group)
     day_ranges_cte = _day_ranges_cte(day_ranges)
-    output_tokens = func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens)
-    speed_values_cte = (
+    traffic_join = day_ranges_cte.join(
+        RequestLog,
+        and_(
+            RequestLog.requested_at >= day_ranges_cte.c.day_start,
+            RequestLog.requested_at < day_ranges_cte.c.day_end,
+            _normal_traffic_clause(),
+            *([RequestLog.account_id.in_(account_ids)] if account_ids else []),
+            *([RequestLog.model == model] if model else []),
+            *([useragent_group_clause] if useragent_group_clause is not None else []),
+        ),
+    )
+    token_count = func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens)
+    ttft_values_cte = (
         select(
             day_ranges_cte.c.report_date,
-            func.coalesce(RequestLog.latency_first_token_ms, 0.0).label("ttft_ms"),
-            case(
-                (
-                    and_(
-                        output_tokens.is_not(None),
-                        output_tokens > 0,
-                        RequestLog.latency_ms.is_not(None),
-                        RequestLog.latency_first_token_ms.is_not(None),
-                        RequestLog.latency_ms > RequestLog.latency_first_token_ms,
-                    ),
-                    output_tokens * 1000.0 / (RequestLog.latency_ms - RequestLog.latency_first_token_ms),
-                ),
-                else_=0.0,
-            ).label("tps"),
+            RequestLog.latency_first_token_ms.label("ttft_ms"),
         )
-        .select_from(
-            day_ranges_cte.join(
-                RequestLog,
-                and_(
-                    RequestLog.requested_at >= day_ranges_cte.c.day_start,
-                    RequestLog.requested_at < day_ranges_cte.c.day_end,
-                    _normal_traffic_clause(),
-                    *([RequestLog.account_id.in_(account_ids)] if account_ids else []),
-                    *([RequestLog.model == model] if model else []),
-                    *([useragent_group_clause] if useragent_group_clause is not None else []),
-                ),
-            )
-        )
-        .cte("daily_speed_values")
+        .select_from(traffic_join)
+        .where(RequestLog.latency_first_token_ms.is_not(None))
+        .cte("daily_ttft_values")
     )
-    sample_count = func.count().over(partition_by=speed_values_cte.c.report_date)
-    ranked_speeds_cte = select(
-        speed_values_cte.c.report_date,
-        speed_values_cte.c.ttft_ms,
-        speed_values_cte.c.tps,
-        sample_count.label("sample_count"),
+    tps_values_cte = (
+        select(
+            day_ranges_cte.c.report_date,
+            (token_count * 1000.0 / (RequestLog.latency_ms - RequestLog.latency_first_token_ms)).label("tps"),
+        )
+        .select_from(traffic_join)
+        .where(
+            token_count.is_not(None),
+            token_count > 0,
+            RequestLog.latency_ms.is_not(None),
+            RequestLog.latency_first_token_ms.is_not(None),
+            RequestLog.latency_ms > RequestLog.latency_first_token_ms,
+        )
+        .cte("daily_tps_values")
+    )
+    ttft_count = func.count().over(partition_by=ttft_values_cte.c.report_date)
+    ttft_ranked_cte = select(
+        ttft_values_cte.c.report_date,
+        ttft_values_cte.c.ttft_ms,
+        ttft_count.label("sample_count"),
         func.row_number()
-        .over(partition_by=speed_values_cte.c.report_date, order_by=speed_values_cte.c.ttft_ms)
+        .over(partition_by=ttft_values_cte.c.report_date, order_by=ttft_values_cte.c.ttft_ms)
         .label("ttft_rank"),
+    ).cte("daily_ttft_ranks")
+    tps_count = func.count().over(partition_by=tps_values_cte.c.report_date)
+    tps_ranked_cte = select(
+        tps_values_cte.c.report_date,
+        tps_values_cte.c.tps,
+        tps_count.label("sample_count"),
         func.row_number()
-        .over(partition_by=speed_values_cte.c.report_date, order_by=speed_values_cte.c.tps)
+        .over(partition_by=tps_values_cte.c.report_date, order_by=tps_values_cte.c.tps)
         .label("tps_rank"),
-    ).cte("daily_speed_ranks")
+    ).cte("daily_tps_ranks")
 
     # A median contains the one center row for odd samples and both center rows
     # for even samples. Multiplication avoids dialect-specific integer division.
     ttft_is_middle = and_(
-        ranked_speeds_cte.c.ttft_rank * 2 >= ranked_speeds_cte.c.sample_count,
-        ranked_speeds_cte.c.ttft_rank * 2 <= ranked_speeds_cte.c.sample_count + 2,
+        ttft_ranked_cte.c.ttft_rank * 2 >= ttft_ranked_cte.c.sample_count,
+        ttft_ranked_cte.c.ttft_rank * 2 <= ttft_ranked_cte.c.sample_count + 2,
     )
     tps_is_middle = and_(
-        ranked_speeds_cte.c.tps_rank * 2 >= ranked_speeds_cte.c.sample_count,
-        ranked_speeds_cte.c.tps_rank * 2 <= ranked_speeds_cte.c.sample_count + 2,
+        tps_ranked_cte.c.tps_rank * 2 >= tps_ranked_cte.c.sample_count,
+        tps_ranked_cte.c.tps_rank * 2 <= tps_ranked_cte.c.sample_count + 2,
+    )
+    ttft_medians_cte = (
+        select(
+            ttft_ranked_cte.c.report_date,
+            func.avg(case((ttft_is_middle, ttft_ranked_cte.c.ttft_ms), else_=None)).label("median_ttft_ms"),
+        )
+        .group_by(ttft_ranked_cte.c.report_date)
+        .cte("daily_ttft_medians")
+    )
+    tps_medians_cte = (
+        select(
+            tps_ranked_cte.c.report_date,
+            func.avg(case((tps_is_middle, tps_ranked_cte.c.tps), else_=None)).label("median_tps"),
+        )
+        .group_by(tps_ranked_cte.c.report_date)
+        .cte("daily_tps_medians")
     )
     return (
         select(
-            ranked_speeds_cte.c.report_date,
-            func.coalesce(
-                func.avg(case((ttft_is_middle, ranked_speeds_cte.c.ttft_ms), else_=None)),
-                0.0,
-            ).label("median_ttft_ms"),
-            func.coalesce(
-                func.avg(case((tps_is_middle, ranked_speeds_cte.c.tps), else_=None)),
-                0.0,
-            ).label("median_tps"),
+            day_ranges_cte.c.report_date,
+            func.coalesce(ttft_medians_cte.c.median_ttft_ms, 0.0).label("median_ttft_ms"),
+            func.coalesce(tps_medians_cte.c.median_tps, 0.0).label("median_tps"),
         )
-        .group_by(ranked_speeds_cte.c.report_date)
-        .order_by(ranked_speeds_cte.c.report_date)
+        .select_from(
+            day_ranges_cte.outerjoin(
+                ttft_medians_cte,
+                ttft_medians_cte.c.report_date == day_ranges_cte.c.report_date,
+            ).outerjoin(
+                tps_medians_cte,
+                tps_medians_cte.c.report_date == day_ranges_cte.c.report_date,
+            )
+        )
+        .order_by(day_ranges_cte.c.report_date)
     )
 
 

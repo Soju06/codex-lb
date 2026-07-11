@@ -127,7 +127,7 @@ async def test_aggregate_daily_rows_calculates_sql_medians_for_odd_even_and_inva
     async_session.add(_make_account(account_id, "reports-speed-medians@example.com"))
     async_session.add_all(
         [
-            # Day one has four samples: TTFT [0, 100, 200, 300] and TPS [0, 0, 10, 10].
+            # Day one ignores missing TTFT and invalid TPS samples: TTFT [100, 200, 300], TPS [10, 10].
             # A missing persisted output count falls back to reasoning tokens.
             RequestLog(
                 account_id=account_id,
@@ -172,7 +172,7 @@ async def test_aggregate_daily_rows_calculates_sql_medians_for_odd_even_and_inva
                 latency_ms=200,
                 latency_first_token_ms=200,
             ),
-            # Day two has three samples: TTFT [100, 200, 300] and TPS [0, 4, 20].
+            # Day two also accepts reasoning-only tokens for TPS: TTFT [100, 200, 300, 400], TPS [4, 20, 100].
             # An explicit zero output count wins over a populated reasoning count.
             RequestLog(
                 account_id=account_id,
@@ -205,6 +205,17 @@ async def test_aggregate_daily_rows_calculates_sql_medians_for_odd_even_and_inva
                 latency_ms=700,
                 latency_first_token_ms=300,
             ),
+            RequestLog(
+                account_id=account_id,
+                request_id="report-speed-odd-reasoning-only",
+                requested_at=datetime(2026, 6, 2, 12, 0),
+                model="gpt-5.1",
+                status="success",
+                output_tokens=None,
+                reasoning_tokens=40,
+                latency_ms=800,
+                latency_first_token_ms=400,
+            ),
         ]
     )
     await async_session.commit()
@@ -212,8 +223,8 @@ async def test_aggregate_daily_rows_calculates_sql_medians_for_odd_even_and_inva
     rows = await repo.aggregate_daily_rows(date(2026, 6, 1), date(2026, 6, 2), timezone.utc)
 
     assert [(row.date, row.median_ttft_ms, row.median_tps) for row in rows] == [
-        ("2026-06-01", 150.0, 5.0),
-        ("2026-06-02", 200.0, 4.0),
+        ("2026-06-01", 200.0, 10.0),
+        ("2026-06-02", 250.0, 20.0),
     ]
 
 
@@ -347,7 +358,8 @@ def test_daily_speed_medians_stmt_compiles_to_portable_window_sql() -> None:
 
         assert "row_number() over" in sql
         assert "count(*) over" in sql
-        assert "group by daily_speed_ranks.report_date" in sql
+        assert "group by daily_ttft_ranks.report_date" in sql
+        assert "group by daily_tps_ranks.report_date" in sql
         assert "percentile_cont" not in sql
 
 

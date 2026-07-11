@@ -31,3 +31,16 @@ that was resolved when that connection began.
 - **GIVEN** the operator has not changed the setting
 - **WHEN** a supported qualified model alias contains the `fast` token
 - **THEN** the request continues to derive `service_tier: "priority"`
+
+#### Scenario: Dashboard warmup obeys Fast Mode prohibition
+
+- **GIVEN** `prohibitFastMode` is enabled
+- **AND** the configured warmup model or API-key enforced model is a qualified Fast Mode alias
+- **WHEN** the dashboard submits a warmup request
+- **THEN** the upstream warmup request preserves the canonical model and reasoning effort
+- **AND** the upstream warmup request omits `service_tier`
+
+#### Scenario: Policy changes are audited
+
+- **WHEN** an operator changes `prohibitFastMode`
+- **THEN** the `settings_changed` audit entry includes `prohibit_fast_mode` in `changed_fields`

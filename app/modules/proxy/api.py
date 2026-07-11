@@ -617,6 +617,7 @@ async def responses(
         codex_session_affinity=True,
         openai_cache_affinity=True,
         prefer_http_bridge=True,
+        prohibit_fast_mode=prohibit_fast_mode,
         # The Codex CLI consumes codex.* vendor events and the upstream's
         # native event ordering, while OpenAI SDK clients pointed at this
         # compatibility route need the same SSE contract enforcement as /v1.
@@ -731,6 +732,7 @@ async def v1_responses(
             codex_session_affinity=False,
             openai_cache_affinity=True,
             prefer_http_bridge=True,
+            prohibit_fast_mode=prohibit_fast_mode,
         )
     return await _collect_responses(
         request,
@@ -740,6 +742,7 @@ async def v1_responses(
         codex_session_affinity=False,
         openai_cache_affinity=True,
         prefer_http_bridge=True,
+        prohibit_fast_mode=prohibit_fast_mode,
     )
 
 
@@ -802,6 +805,7 @@ async def internal_bridge_responses(
         # before the origin ever sees the stream. Forward verbatim and let
         # the origin run its own normalization.
         enforce_openai_sdk_contract=False,
+        prohibit_fast_mode=await _prohibit_fast_mode_enabled(),
     )
 
 
@@ -4005,8 +4009,9 @@ async def _stream_responses(
     forwarded_affinity_key: str | None = None,
     forwarded_client_ip: str | None = None,
     enforce_openai_sdk_contract: bool = True,
+    prohibit_fast_mode: bool = False,
 ) -> Response:
-    apply_api_key_enforcement(payload, api_key)
+    apply_api_key_enforcement(payload, api_key, prohibit_fast_mode=prohibit_fast_mode)
     validate_model_access(api_key, payload.model)
     compact_payload: ResponsesCompactRequest | None = None
     if codex_session_affinity:
@@ -4224,8 +4229,9 @@ async def _collect_responses(
     openai_cache_affinity: bool = False,
     suppress_text_done_events: bool = False,
     prefer_http_bridge: bool = False,
+    prohibit_fast_mode: bool = False,
 ) -> Response:
-    apply_api_key_enforcement(payload, api_key)
+    apply_api_key_enforcement(payload, api_key, prohibit_fast_mode=prohibit_fast_mode)
     validate_model_access(api_key, payload.model)
     admission_denial = await _opportunistic_admission_denial(request, context, api_key, model=payload.model)
     if admission_denial is not None:

@@ -711,6 +711,7 @@ async def update_settings(
         for field_name in (
             "sticky_threads_enabled",
             "upstream_stream_transport",
+            "prohibit_fast_mode",
             "http_downstream_transport_policy",
             "upstream_proxy_routing_enabled",
             "upstream_proxy_default_pool_id",

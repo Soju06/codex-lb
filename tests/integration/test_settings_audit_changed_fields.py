@@ -39,6 +39,7 @@ def _default_put_body() -> dict[str, Any]:
     [
         ("stickyThreadsEnabled", False, "sticky_threads_enabled"),
         ("upstreamStreamTransport", "websocket", "upstream_stream_transport"),
+        ("prohibitFastMode", True, "prohibit_fast_mode"),
         ("preferEarlierResetAccounts", False, "prefer_earlier_reset_accounts"),
         ("routingStrategy", "round_robin", "routing_strategy"),
         (

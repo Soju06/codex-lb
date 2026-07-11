@@ -9,6 +9,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
 from fastapi import FastAPI, Request
 from httpx import ASGITransport, AsyncClient
+from starlette.types import Message, Scope
 
 from app.core.auth.dashboard_mode import get_dashboard_request_auth
 from app.core.config.settings import get_settings
@@ -249,6 +250,61 @@ async def test_required_access_jwt_blocks_missing_assertion_before_fallback_auth
         )
         is None
     )
+
+
+@pytest.mark.asyncio
+async def test_required_access_jwt_rejects_websocket_handshake_without_assertion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_access(monkeypatch)
+    monkeypatch.setenv("CODEX_LB_DASHBOARD_ACCESS_JWT_REQUIRED", "true")
+    get_settings.cache_clear()
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    monkeypatch.setattr(jwt, "PyJWKClient", lambda *_args, **_kwargs: _StaticJwksClient(private_key.public_key()))
+    app_called = False
+
+    async def app(_scope: Scope, _receive, _send) -> None:
+        nonlocal app_called
+        app_called = True
+
+    from app.core.middleware.dashboard_auth_proxy import DashboardAuthProxyHeaderSanitizerMiddleware
+
+    middleware = DashboardAuthProxyHeaderSanitizerMiddleware(app)
+    sent: list[Message] = []
+    receive_messages: list[Message] = [{"type": "websocket.connect"}]
+
+    async def receive() -> Message:
+        return receive_messages.pop(0)
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    await middleware(
+        {
+            "type": "websocket",
+            "asgi": {"version": "3.0"},
+            "scheme": "ws",
+            "path": "/backend-api/codex/responses",
+            "raw_path": b"/backend-api/codex/responses",
+            "query_string": b"",
+            "headers": [],
+            "client": ("127.0.0.1", 50000),
+            "server": ("test", 80),
+            "subprotocols": [],
+            "state": {},
+        },
+        receive,
+        send,
+    )
+
+    assert app_called is False
+    assert sent[0] == {
+        "type": "websocket.http.response.start",
+        "status": 401,
+        "headers": [(b"content-type", b"application/json")],
+    }
+    assert sent[1]["type"] == "websocket.http.response.body"
+    get_settings.cache_clear()
     assert (
         await _request_actor(
             monkeypatch,

@@ -121,3 +121,39 @@ def test_cleanup_readiness_ignores_stale_local_state_on_non_leader() -> None:
         cleanup_scheduler._STATE.last_deleted_count = original.last_deleted_count
         cleanup_scheduler._STATE.last_error = original.last_error
         cleanup_scheduler._STATE.currently_responsible = original.currently_responsible
+
+
+@pytest.mark.asyncio
+async def test_cleanup_readiness_fails_when_leader_acquisition_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    original = cleanup_scheduler.RequestLogCleanupState(
+        last_attempt_at=cleanup_scheduler._STATE.last_attempt_at,
+        last_success_at=cleanup_scheduler._STATE.last_success_at,
+        last_deleted_count=cleanup_scheduler._STATE.last_deleted_count,
+        last_error=cleanup_scheduler._STATE.last_error,
+        last_leader_error=cleanup_scheduler._STATE.last_leader_error,
+        currently_responsible=cleanup_scheduler._STATE.currently_responsible,
+    )
+    leader = SimpleNamespace(
+        try_acquire=AsyncMock(return_value=False),
+        last_acquire_error="OperationalError",
+    )
+    scheduler = cleanup_scheduler.RequestLogCleanupScheduler(interval_seconds=60, retention_days=30)
+    monkeypatch.setattr(cleanup_scheduler, "_get_leader_election", lambda: leader)
+    try:
+        assert await scheduler._cleanup_once() == 0
+        assert cleanup_scheduler._STATE.currently_responsible is False
+        assert cleanup_scheduler._STATE.last_leader_error == "OperationalError"
+        assert (
+            cleanup_scheduler.request_log_cleanup_is_ready(
+                interval_seconds=60,
+                leader_election_enabled=True,
+            )
+            is False
+        )
+    finally:
+        cleanup_scheduler._STATE.last_attempt_at = original.last_attempt_at
+        cleanup_scheduler._STATE.last_success_at = original.last_success_at
+        cleanup_scheduler._STATE.last_deleted_count = original.last_deleted_count
+        cleanup_scheduler._STATE.last_error = original.last_error
+        cleanup_scheduler._STATE.last_leader_error = original.last_leader_error
+        cleanup_scheduler._STATE.currently_responsible = original.currently_responsible

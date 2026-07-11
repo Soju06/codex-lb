@@ -211,3 +211,14 @@ def test_dashboard_access_jwt_required_rejects_missing_validation_contract(monke
 
     with pytest.raises(ValidationError, match="requires issuer, audiences, and allowed email domains"):
         Settings()
+
+
+def test_dashboard_access_jwt_contract_rejects_standard_auth_mode(monkeypatch):
+    monkeypatch.setenv("CODEX_LB_DASHBOARD_AUTH_MODE", DashboardAuthMode.STANDARD)
+    monkeypatch.setenv("CODEX_LB_DASHBOARD_ACCESS_JWT_ISSUER", "https://onda.cloudflareaccess.com")
+    monkeypatch.setenv("CODEX_LB_DASHBOARD_ACCESS_JWT_AUDIENCES", "onda-dashboard-aud")
+    monkeypatch.setenv("CODEX_LB_DASHBOARD_ACCESS_ALLOWED_EMAIL_DOMAINS", "onda.lol")
+    monkeypatch.setenv("CODEX_LB_DASHBOARD_ACCESS_JWT_REQUIRED", "true")
+
+    with pytest.raises(ValidationError, match="requires dashboard_auth_mode=trusted_header"):
+        Settings()

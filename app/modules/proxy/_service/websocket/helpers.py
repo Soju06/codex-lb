@@ -611,6 +611,8 @@ def _websocket_precreated_retry_error_code(
 ) -> str | None:
     if request_state is None:
         return None
+    if request_state.last_downstream_sequence_number is not None:
+        return None
     if has_other_pending_requests:
         return None
     if request_state.response_id is not None:
@@ -657,6 +659,8 @@ def _websocket_precreated_auth_error_code(
     has_other_pending_requests: bool,
 ) -> str | None:
     if request_state is None:
+        return None
+    if request_state.last_downstream_sequence_number is not None:
         return None
     if has_other_pending_requests:
         return None
@@ -709,6 +713,8 @@ def _websocket_auth_request_can_switch_account(request_state: _WebSocketRequestS
 def _prepare_websocket_request_state_for_auth_replay(
     request_state: _WebSocketRequestState,
 ) -> str | None:
+    if request_state.last_downstream_sequence_number is not None:
+        return None
     if not _websocket_auth_request_can_switch_account(request_state):
         return None
     if (
@@ -767,12 +773,22 @@ async def _pop_replayable_precreated_websocket_request_state(
     pending_requests: deque[_WebSocketRequestState],
     *,
     pending_lock: anyio.Lock,
+    replay_refusal_reasons: list[str] | None = None,
 ) -> _WebSocketRequestState | None:
     async with pending_lock:
-        if len(pending_requests) != 1:
+        pending_count = len(pending_requests)
+        if pending_count != 1:
+            if replay_refusal_reasons is not None:
+                replay_refusal_reasons.append(
+                    "multiple_pending_requests" if pending_count > 1 else "no_pending_requests"
+                )
+                if any(request_state.last_downstream_sequence_number is not None for request_state in pending_requests):
+                    replay_refusal_reasons.append("sequenced_downstream_frame")
             return None
         request_state = pending_requests[0]
         if not _websocket_request_can_replay_before_visible_output(request_state):
+            if replay_refusal_reasons is not None and request_state.last_downstream_sequence_number is not None:
+                replay_refusal_reasons.append("sequenced_downstream_frame")
             return None
         pending_requests.popleft()
     if _prepare_websocket_request_state_for_visible_output_replay(request_state) is None:

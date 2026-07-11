@@ -453,6 +453,7 @@ class _WebSocketRequestState:
     useragent_group: str | None = None
     client_ip: str | None = None
     downstream_visible: bool = False
+    last_downstream_sequence_number: int | None = None
     suppress_next_created_downstream: bool = False
     replay_downstream_response_id: str | None = None
     draining_until_terminal: bool = False
@@ -576,6 +577,8 @@ class _WebSocketUpstreamControl:
     suppress_downstream_event: bool = False
     replay_request_state: _WebSocketRequestState | None = None
     downstream_texts: list[str] | None = None
+    downstream_sequence_request_state: _WebSocketRequestState | None = None
+    downstream_sequence_number: int | None = None
     seen_tool_call_keys: dict[ToolCallDedupeKey, None] = field(default_factory=dict)
 
 
@@ -612,6 +615,8 @@ def _websocket_request_can_replay_before_visible_output(request_state: _WebSocke
     if not request_state.request_text:
         return False
     if request_state.replay_count >= 1:
+        return False
+    if request_state.last_downstream_sequence_number is not None:
         return False
     if request_state.downstream_visible:
         return False

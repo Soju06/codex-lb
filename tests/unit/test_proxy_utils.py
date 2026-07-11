@@ -11472,6 +11472,74 @@ async def test_websocket_keeps_previous_response_pinned_security_work_error(monk
 
 
 @pytest.mark.asyncio
+async def test_websocket_does_not_retry_security_work_after_exposed_sequence(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    finalize_request_state = AsyncMock()
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize_request_state)
+    account = _make_account("acc_ws_security_sequence")
+    anchored_request_text = '{"type":"response.create","previous_response_id":"resp_proxy_anchor","input":"check api"}'
+    fresh_request_text = '{"type":"response.create","input":"check api with full history"}'
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_security_sequence",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        awaiting_response_created=True,
+        request_text=anchored_request_text,
+        previous_response_id="resp_proxy_anchor",
+        preferred_account_id="acc_previous_owner",
+        proxy_injected_previous_response_id=True,
+        fresh_upstream_request_text=fresh_request_text,
+        fresh_upstream_request_is_retry_safe=True,
+        last_downstream_sequence_number=5,
+    )
+    pending_requests = deque([request_state])
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    cyber_message = (
+        "This chat was flagged for possible cybersecurity risk. "
+        "To get authorized for security work, join the Trusted Access for Cyber program. "
+        "https://chatgpt.com/cyber"
+    )
+    payload = {
+        "type": "response.failed",
+        "sequence_number": 6,
+        "response": {
+            "status": "failed",
+            "error": {
+                "code": "invalid_request_error",
+                "type": "invalid_request_error",
+                "message": cyber_message,
+            },
+        },
+    }
+
+    downstream_text = await service._process_upstream_websocket_text(
+        json.dumps(payload, separators=(",", ":")),
+        account=account,
+        account_id_value=account.id,
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=upstream_control,
+        response_create_gate=asyncio.Semaphore(1),
+    )
+
+    assert '"type":"response.failed"' in downstream_text
+    finalize_request_state.assert_awaited_once()
+    assert upstream_control.reconnect_requested is False
+    assert upstream_control.suppress_downstream_event is False
+    assert upstream_control.replay_request_state is None
+    assert request_state.replay_count == 0
+    assert request_state.request_text == anchored_request_text
+    assert request_state.previous_response_id == "resp_proxy_anchor"
+    assert request_state.fresh_upstream_request_is_retry_safe is True
+    assert pending_requests == deque()
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_reports_missing_security_work_pool_before_original_warning(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
@@ -17376,6 +17444,123 @@ async def test_process_upstream_websocket_text_transparently_retries_precreated_
 
 
 @pytest.mark.asyncio
+async def test_process_upstream_websocket_text_tracks_anonymous_sequence_candidate():
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_ws_anonymous_sequence")
+    pending_request = proxy_service._WebSocketRequestState(
+        request_id="ws_req_anonymous_sequence",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        awaiting_response_created=True,
+        request_text='{"type":"response.create","input":"test"}',
+    )
+    pending_requests = deque([pending_request])
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    upstream_payload = {
+        "type": "codex.rate_limits",
+        "sequence_number": 5,
+        "rate_limits": [],
+    }
+    upstream_text = json.dumps(upstream_payload, separators=(",", ":"))
+
+    downstream_text = await service._process_upstream_websocket_text(
+        upstream_text,
+        account=account,
+        account_id_value=account.id,
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=upstream_control,
+        response_create_gate=asyncio.Semaphore(1),
+    )
+
+    assert downstream_text == upstream_text
+    assert upstream_control.suppress_downstream_event is False
+    assert upstream_control.downstream_sequence_request_state is pending_request
+    assert upstream_control.downstream_sequence_number == 5
+
+
+@pytest.mark.asyncio
+async def test_process_upstream_websocket_text_does_not_retry_after_exposed_sequence(
+    monkeypatch,
+):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    finalize_request_state = AsyncMock()
+    handle_stream_error = AsyncMock()
+    account = _make_account("acc_ws_precreated_sequence")
+
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize_request_state)
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+
+    request_payload = {
+        "type": "response.create",
+        "model": "gpt-5.1",
+        "previous_response_id": "resp_proxy_anchor",
+        "input": "retry me",
+    }
+    fresh_request_text = json.dumps(
+        {"type": "response.create", "model": "gpt-5.1", "input": "full history"},
+        separators=(",", ":"),
+    )
+    pending_request = proxy_service._WebSocketRequestState(
+        request_id="ws_req_precreated_sequence",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        awaiting_response_created=True,
+        request_text=json.dumps(request_payload, separators=(",", ":")),
+        previous_response_id="resp_proxy_anchor",
+        preferred_account_id=account.id,
+        proxy_injected_previous_response_id=True,
+        fresh_upstream_request_text=fresh_request_text,
+        fresh_upstream_request_is_retry_safe=True,
+        last_downstream_sequence_number=5,
+    )
+    pending_requests = deque([pending_request])
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    upstream_payload = {
+        "type": "response.failed",
+        "sequence_number": 6,
+        "response": {
+            "id": "resp_ws_precreated_sequence_fail",
+            "status": "failed",
+            "error": {"code": "usage_limit_reached", "message": "usage limit reached"},
+        },
+    }
+    upstream_text = json.dumps(upstream_payload, separators=(",", ":"))
+
+    downstream_text = await service._process_upstream_websocket_text(
+        upstream_text,
+        account=account,
+        account_id_value=account.id,
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=upstream_control,
+        response_create_gate=asyncio.Semaphore(1),
+    )
+
+    assert downstream_text == upstream_text
+    finalize_request_state.assert_awaited_once()
+    handle_stream_error.assert_not_awaited()
+    assert upstream_control.reconnect_requested is False
+    assert upstream_control.suppress_downstream_event is False
+    assert upstream_control.replay_request_state is None
+    assert pending_request.replay_count == 0
+    assert pending_request.previous_response_id == "resp_proxy_anchor"
+    assert pending_request.preferred_account_id == account.id
+    assert pending_request.fresh_upstream_request_is_retry_safe is True
+    assert pending_requests == deque()
+
+
+@pytest.mark.asyncio
 async def test_process_upstream_websocket_text_transparently_retries_precreated_usage_limit_error_event(
     monkeypatch,
 ):
@@ -20087,6 +20272,72 @@ async def test_pop_replayable_created_without_visible_output_request_state():
     assert pending_request.error_http_status_override is None
 
 
+@pytest.mark.asyncio
+async def test_pop_replayable_created_request_refuses_exposed_sequence():
+    pending_request = proxy_service._WebSocketRequestState(
+        request_id="ws_req_created_sequence_replay",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        request_text='{"type":"response.create","model":"gpt-5.1","input":"retry"}',
+        response_id="resp_created_then_closed",
+        awaiting_response_created=False,
+        response_event_count=1,
+        last_downstream_sequence_number=5,
+    )
+    pending_requests = deque([pending_request])
+    replay_refusal_reasons: list[str] = []
+
+    replayed_request = await proxy_service._pop_replayable_precreated_websocket_request_state(
+        pending_requests,
+        pending_lock=anyio.Lock(),
+        replay_refusal_reasons=replay_refusal_reasons,
+    )
+
+    assert replayed_request is None
+    assert pending_requests == deque([pending_request])
+    assert replay_refusal_reasons == ["sequenced_downstream_frame"]
+
+
+@pytest.mark.asyncio
+async def test_pop_replayable_multiple_requests_reports_exposed_sequence():
+    sequenced_request = proxy_service._WebSocketRequestState(
+        request_id="ws_req_sequenced",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        request_text='{"type":"response.create","input":"first"}',
+        response_id="resp_sequenced",
+        last_downstream_sequence_number=5,
+    )
+    queued_request = proxy_service._WebSocketRequestState(
+        request_id="ws_req_queued",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        request_text='{"type":"response.create","input":"second"}',
+        awaiting_response_created=True,
+    )
+    pending_requests = deque([sequenced_request, queued_request])
+    replay_refusal_reasons: list[str] = []
+
+    replayed_request = await proxy_service._pop_replayable_precreated_websocket_request_state(
+        pending_requests,
+        pending_lock=anyio.Lock(),
+        replay_refusal_reasons=replay_refusal_reasons,
+    )
+
+    assert replayed_request is None
+    assert pending_requests == deque([sequenced_request, queued_request])
+    assert replay_refusal_reasons == ["multiple_pending_requests", "sequenced_downstream_frame"]
+
+
 def test_prepare_websocket_auth_replay_clears_stale_error_overrides():
     request_state = proxy_service._WebSocketRequestState(
         request_id="ws_req_auth_replay_overrides",
@@ -20114,6 +20365,28 @@ def test_prepare_websocket_auth_replay_clears_stale_error_overrides():
     assert request_state.error_type_override is None
     assert request_state.error_param_override is None
     assert request_state.error_http_status_override is None
+
+
+def test_prepare_websocket_auth_replay_refuses_exposed_sequence():
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_auth_sequence",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        request_text='{"type":"response.create","input":"retry"}',
+        awaiting_response_created=True,
+        last_downstream_sequence_number=5,
+    )
+
+    replay_text = proxy_service._prepare_websocket_request_state_for_auth_replay(request_state)
+
+    assert replay_text is None
+    assert request_state.replay_count == 0
+    assert request_state.auth_replay_count == 0
+    assert request_state.awaiting_response_created is True
+    assert request_state.request_text == '{"type":"response.create","input":"retry"}'
 
 
 @pytest.mark.asyncio

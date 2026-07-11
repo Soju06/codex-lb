@@ -1,0 +1,97 @@
+# Responses API compatibility delta
+
+## MODIFIED Requirements
+
+### Requirement: WebSocket full-resend previous-response misses retry without stale anchor
+
+When a direct WebSocket `response.create` request includes both
+`previous_response_id` and a self-contained full resend payload, the service
+MUST retain a safe replay body without `previous_response_id`. If upstream
+rejects the anchor with `previous_response_not_found` before
+`response.created`, the service MUST reconnect and replay the retained full
+payload as a fresh turn instead of forwarding the raw upstream invalid-request
+error. A payload that only carries incremental tool outputs for tool calls that
+are not also present in the same request is not self-contained and MUST NOT be
+replayed as a fresh turn without `previous_response_id`.
+
+For account switching caused by capability revalidation, quota, authentication,
+or another pre-visible account-local failure, a client-owned
+`previous_response_id` MUST remain owner-bound even when the request resembles
+a full resend. The service MAY remove an anchor for account switching only when
+the proxy injected that anchor after verifying retained continuity metadata and
+captured an independently equivalent fresh request body.
+
+#### Scenario: full-resend WebSocket follow-up loses just-completed anchor
+
+- **WHEN** a WebSocket `/v1/responses` or `/backend-api/codex/responses`
+  follow-up has `previous_response_id`
+- **AND** the request payload also carries enough input to be treated as a full
+  resend
+- **AND** upstream emits `previous_response_not_found` before assigning a
+  response id
+- **THEN** the service reconnects the upstream WebSocket
+- **AND** it replays the same request without `previous_response_id`
+- **AND** the downstream client receives recovered response events rather than
+  the raw upstream error
+
+#### Scenario: output-only WebSocket tool delta is not replayed as a fresh turn
+
+- **WHEN** a WebSocket follow-up has `previous_response_id`
+- **AND** its input contains a tool output without the matching tool call
+- **THEN** the service MUST NOT replay it as a fresh turn without the anchor
+- **AND** it emits a retryable continuity failure when the owner cannot serve it
+
+#### Scenario: client-owned full resend hits owner quota
+
+- **WHEN** a client-owned previous-response request resembles a full resend
+- **AND** its owner reports a pre-visible quota failure
+- **THEN** the service keeps the request owner-bound
+- **AND** it does not infer transcript completeness by stripping the anchor
+
+#### Scenario: proxy-verified anchor hits owner quota
+
+- **WHEN** the proxy injected a previous-response anchor after matching retained
+  input fingerprints
+- **AND** it retained the equivalent unanchored request body
+- **AND** the owner reports a pre-visible quota failure
+- **THEN** the service may reconnect through another eligible account using the
+  retained fresh body
+
+### Requirement: Hard continuity owner lookup fails closed
+
+When a request depends on hard continuity ownership, the service MUST fail
+closed if owner or ring lookup errors prevent safe pinning. The service MUST NOT
+continue with account selection that bypasses hard owner enforcement. A direct
+WebSocket continuation already attached to its required open owner socket MUST
+NOT be failed solely because a new per-turn selection attempt temporarily
+excludes that owner.
+
+#### Scenario: websocket previous-response owner lookup errors
+
+- **WHEN** a websocket or HTTP fallback follow-up includes
+  `previous_response_id`
+- **AND** owner lookup errors prevent determining the required owner
+- **THEN** the service returns a retryable OpenAI-format error
+- **AND** it does not continue on an unpinned account
+
+#### Scenario: bridge owner or ring lookup errors for hard continuity keys
+
+- **WHEN** an HTTP bridge request uses a hard continuity key such as turn-state,
+  explicit session affinity, or `previous_response_id`
+- **AND** owner or ring lookup errors prevent proving the correct bridge owner
+- **THEN** the service returns a retryable OpenAI-format error
+- **AND** it does not create or recover a local bridge session on the current
+  replica
+
+#### Scenario: required owner differs from the open WebSocket account
+
+- **WHEN** a direct WebSocket follow-up resolves to an owner different from the
+  currently open upstream account
+- **THEN** the service retires the current upstream socket
+- **AND** reconnects the unchanged anchored request to the required owner
+
+#### Scenario: required owner matches the healthy open WebSocket account
+
+- **WHEN** a direct WebSocket follow-up resolves to the currently open owner
+- **THEN** the service sends it on that socket without a new selector-based
+  eligibility check

@@ -365,6 +365,29 @@ def _prepare_websocket_request_state_for_visible_output_replay(
     return request_text
 
 
+def _prepare_websocket_request_state_for_account_switch(
+    request_state: "_WebSocketRequestState",
+) -> str | None:
+    """Return an unsent request body only when moving accounts is proven safe."""
+    if request_state.previous_response_id is None:
+        return request_state.request_text
+    if not (
+        request_state.proxy_injected_previous_response_id
+        and request_state.fresh_upstream_request_is_retry_safe
+        and request_state.fresh_upstream_request_text
+    ):
+        return None
+
+    request_state.request_text = request_state.fresh_upstream_request_text
+    request_state.previous_response_id = None
+    request_state.preferred_account_id = None
+    request_state.proxy_injected_previous_response_id = False
+    request_state.fresh_upstream_request_is_retry_safe = False
+    request_state.responses_lite_model = request_state.fresh_upstream_request_responses_lite_model
+    _refresh_websocket_request_input_fingerprint_from_text(request_state)
+    return request_state.request_text
+
+
 def _websocket_continuity_anchor_for_payload(
     continuity_state: _WebSocketContinuityState | None,
     *,

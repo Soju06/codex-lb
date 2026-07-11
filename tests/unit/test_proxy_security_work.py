@@ -389,6 +389,7 @@ async def test_http_bridge_stream_reads_sticky_security_requirement_without_dura
 
     assert chunks == []
     sticky_requirement.assert_awaited_once_with("sticky-security-root")
+    assert get_or_create.await_args is not None
     assert get_or_create.await_args.kwargs["durable_lookup"] is None
     assert get_or_create.await_args.kwargs["require_security_work_authorized"] is True
 

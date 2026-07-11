@@ -1193,10 +1193,12 @@ async def test_internal_bridge_responses_disables_openai_sdk_contract(
         origin_instance="origin-a",
         target_instance="owner-b",
         codex_session_affinity=True,
-        downstream_turn_state=None,
+        downstream_turn_state="http_turn_generated",
+        original_request_unanchored=True,
         original_affinity_kind="session",
         original_affinity_key="sid-abc",
         reservation=None,
+        signature_version="2",
     )
     fake_forwarded = bridge_module.HTTPBridgeForwardedRequest(context=fake_context)
 
@@ -1220,7 +1222,7 @@ async def test_internal_bridge_responses_disables_openai_sdk_contract(
     class _StubRequest:
         @property
         def headers(self) -> dict[str, str]:
-            return {}
+            return {"x-codex-turn-state": "http_turn_generated"}
 
     response = await proxy_api_module.internal_bridge_responses(
         request=cast(Any, _StubRequest()),
@@ -1239,4 +1241,94 @@ async def test_internal_bridge_responses_disables_openai_sdk_contract(
     # original route's policy.
     assert kwargs.get("enforce_openai_sdk_contract") is False, (
         f"internal_bridge_responses must pass enforce_openai_sdk_contract=False; got kwargs={kwargs!r}"
+    )
+    assert kwargs.get("forwarded_downstream_turn_state") == "http_turn_generated"
+    assert kwargs.get("forwarded_original_request_unanchored") is True
+    assert kwargs.get("forwarded_legacy_signature") is False
+    forwarded_headers = kwargs.get("forwarded_headers")
+    assert isinstance(forwarded_headers, dict)
+    assert "x-codex-turn-state" not in forwarded_headers
+
+
+@pytest.mark.asyncio
+async def test_internal_bridge_rejects_unknown_legacy_anchor_before_terminal_compaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from app.core.clients.proxy import ProxyResponseError
+    from app.core.openai.requests import ResponsesRequest
+    from app.modules.proxy import http_bridge_forwarding as bridge_module
+
+    fake_context = bridge_module.HTTPBridgeForwardContext(
+        origin_instance="origin-old",
+        target_instance="owner-current",
+        codex_session_affinity=True,
+        downstream_turn_state="http_turn_unknown",
+        original_affinity_kind="session_header",
+        original_affinity_key="sid-shared",
+        signature_version=None,
+    )
+    monkeypatch.setattr(
+        proxy_api_module,
+        "parse_forwarded_request",
+        lambda headers, *, payload, current_instance: (
+            bridge_module.HTTPBridgeForwardedRequest(context=fake_context),
+            None,
+        ),
+    )
+    monkeypatch.setattr(
+        proxy_api_module,
+        "_validate_internal_bridge_api_key",
+        AsyncMock(return_value=(None, None)),
+    )
+    unexpected_stream = AsyncMock(side_effect=AssertionError("streaming must not start before legacy proof"))
+    monkeypatch.setattr(proxy_api_module, "_stream_responses", unexpected_stream)
+    service = SimpleNamespace(
+        validate_http_bridge_legacy_forward_anchor=AsyncMock(
+            side_effect=ProxyResponseError(
+                409,
+                {
+                    "error": {
+                        "message": "Legacy owner forwarding requires a registered turn-state continuity anchor",
+                        "type": "server_error",
+                        "code": "bridge_forward_upgrade_required",
+                    }
+                },
+            )
+        )
+    )
+    request = cast(
+        Any,
+        SimpleNamespace(
+            headers={"x-codex-turn-state": "http_turn_unknown"},
+            method="POST",
+            url=SimpleNamespace(path="/internal/responses"),
+            client=None,
+        ),
+    )
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.5",
+            "instructions": "compact",
+            "input": [{"role": "user", "content": "hi"}, {"type": "compaction_trigger"}],
+        }
+    )
+
+    response = await proxy_api_module.internal_bridge_responses(
+        request=request,
+        payload=payload,
+        context=cast(Any, SimpleNamespace(service=service)),
+    )
+
+    assert response.status_code == 409
+    assert b'"code":"bridge_forward_upgrade_required"' in response.body
+    unexpected_stream.assert_not_awaited()
+    service.validate_http_bridge_legacy_forward_anchor.assert_awaited_once_with(
+        original_affinity_kind="session_header",
+        original_affinity_key="sid-shared",
+        downstream_turn_state="http_turn_unknown",
+        previous_response_id=None,
+        api_key=None,
     )

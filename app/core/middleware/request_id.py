@@ -6,7 +6,14 @@ from uuid import uuid4
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from app.core.utils.request_id import clear_request_id, reset_request_id, set_request_id
+from app.core.utils.request_id import (
+    clear_request_id,
+    clear_request_scope_id,
+    reset_request_id,
+    reset_request_scope_id,
+    set_request_id,
+    set_request_scope_id,
+)
 
 
 def add_request_id_middleware(app: FastAPI) -> None:
@@ -17,11 +24,14 @@ def add_request_id_middleware(app: FastAPI) -> None:
     ) -> JSONResponse:
         inbound_request_id = request.headers.get("x-request-id") or request.headers.get("request-id")
         request_id = inbound_request_id or str(uuid4())
-        token = set_request_id(request_id)
+        request_id_token = set_request_id(request_id)
+        request_scope_token = set_request_scope_id(str(uuid4()))
         try:
             response = await call_next(request)
             response.headers.setdefault("x-request-id", request_id)
             return response
         finally:
-            reset_request_id(token)
+            reset_request_scope_id(request_scope_token)
+            reset_request_id(request_id_token)
+            clear_request_scope_id()
             clear_request_id()

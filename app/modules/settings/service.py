@@ -14,6 +14,7 @@ from app.modules.usage.additional_quota_keys import (
 class DashboardSettingsData:
     sticky_threads_enabled: bool
     upstream_stream_transport: str
+    prohibit_fast_mode: bool
     http_downstream_transport_policy: str
     upstream_proxy_routing_enabled: bool
     upstream_proxy_default_pool_id: str | None
@@ -55,6 +56,7 @@ class DashboardSettingsData:
 class DashboardSettingsUpdateData:
     sticky_threads_enabled: bool
     upstream_stream_transport: str
+    prohibit_fast_mode: bool
     http_downstream_transport_policy: str
     upstream_proxy_routing_enabled: bool
     upstream_proxy_default_pool_id: str | None
@@ -99,6 +101,7 @@ class SettingsService:
         return DashboardSettingsData(
             sticky_threads_enabled=row.sticky_threads_enabled,
             upstream_stream_transport=row.upstream_stream_transport,
+            prohibit_fast_mode=row.prohibit_fast_mode,
             http_downstream_transport_policy=row.http_downstream_transport_policy,
             upstream_proxy_routing_enabled=row.upstream_proxy_routing_enabled,
             upstream_proxy_default_pool_id=row.upstream_proxy_default_pool_id,
@@ -147,6 +150,7 @@ class SettingsService:
         row = await self._repository.update(
             sticky_threads_enabled=payload.sticky_threads_enabled,
             upstream_stream_transport=payload.upstream_stream_transport,
+            prohibit_fast_mode=payload.prohibit_fast_mode,
             http_downstream_transport_policy=payload.http_downstream_transport_policy,
             upstream_proxy_routing_enabled=payload.upstream_proxy_routing_enabled,
             upstream_proxy_default_pool_id=payload.upstream_proxy_default_pool_id,
@@ -188,6 +192,7 @@ class SettingsService:
         return DashboardSettingsData(
             sticky_threads_enabled=row.sticky_threads_enabled,
             upstream_stream_transport=row.upstream_stream_transport,
+            prohibit_fast_mode=row.prohibit_fast_mode,
             http_downstream_transport_policy=row.http_downstream_transport_policy,
             upstream_proxy_routing_enabled=row.upstream_proxy_routing_enabled,
             upstream_proxy_default_pool_id=row.upstream_proxy_default_pool_id,

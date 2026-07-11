@@ -42,7 +42,13 @@ from app.core.openai.requests import (
 )
 from app.core.resilience.overload import is_local_overload_error_code
 from app.core.types import JsonValue
-from app.core.utils.request_id import ensure_request_id, get_request_id, reset_request_id, set_request_id
+from app.core.utils.request_id import (
+    ensure_request_id,
+    ensure_request_scope_id,
+    get_request_id,
+    reset_request_id,
+    set_request_id,
+)
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
 from app.modules.api_keys.service import (
     ApiKeyData,
@@ -65,6 +71,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_request_counts_against_queue,
     _log_http_bridge_event,
     _record_http_bridge_prewarm_outcome,
+    _release_http_bridge_unanchored_handoff,
 )
 from app.modules.proxy._service.http_bridge.service_stubs import (
     _classify_upstream_close,
@@ -474,6 +481,30 @@ class _HTTPBridgeRequestSubmitMixin:
         text_data: str,
         queue_limit: int,
     ) -> None:
+        request_scope_id = ensure_request_scope_id()
+        try:
+            await self._submit_http_bridge_request_with_handoff(
+                session,
+                request_state=request_state,
+                text_data=text_data,
+                queue_limit=queue_limit,
+                request_scope_id=request_scope_id,
+            )
+        finally:
+            _release_http_bridge_unanchored_handoff(
+                session,
+                request_scope_id=request_scope_id,
+            )
+
+    async def _submit_http_bridge_request_with_handoff(
+        self: Any,
+        session: "_HTTPBridgeSession",
+        *,
+        request_state: _WebSocketRequestState,
+        text_data: str,
+        queue_limit: int,
+        request_scope_id: str,
+    ) -> None:
         text_data = self._http_bridge_text_with_account_installation_id(session, request_state, text_data)
         if request_state.response_id is not None or request_state.response_event_count > 0:
             _log_http_bridge_event(
@@ -570,16 +601,23 @@ class _HTTPBridgeRequestSubmitMixin:
             )
         text_data = self._http_bridge_text_with_account_installation_id(session, request_state, text_data)
         request_state.session_previous_gap_ms = int(max(0.0, request_state.started_at - session.last_used_at) * 1000)
-        await self._maybe_prewarm_http_bridge_session(
-            session,
-            request_state=request_state,
-            text_data=text_data,
-        )
+        try:
+            await self._maybe_prewarm_http_bridge_session(
+                session,
+                request_state=request_state,
+                text_data=text_data,
+            )
+        except BaseException:
+            if getattr(session, "unanchored_reservation_id", None) == request_scope_id:
+                session.unanchored_reservation_id = None
+            raise
         gate_acquired = False
         request_enqueued = False
         admission_waiter_registered = False
         async with session.pending_lock:
             if session.queued_request_count >= queue_limit:
+                if getattr(session, "unanchored_reservation_id", None) == request_scope_id:
+                    session.unanchored_reservation_id = None
                 _log_http_bridge_event(
                     "bridge_queue_full",
                     session.key,
@@ -598,6 +636,8 @@ class _HTTPBridgeRequestSubmitMixin:
                     ),
                 )
             session.queued_request_count += 1
+            if getattr(session, "unanchored_reservation_id", None) == request_scope_id:
+                session.unanchored_reservation_id = None
             session.admission_waiter_count += 1
             admission_waiter_registered = True
         try:

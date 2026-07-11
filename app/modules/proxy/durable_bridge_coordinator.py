@@ -95,6 +95,24 @@ class DurableBridgeSessionCoordinator:
                 return None
             return _to_lookup(snapshot)
 
+    async def lookup_turn_state_target(
+        self,
+        *,
+        turn_state: str,
+        api_key_id: str | None,
+    ) -> DurableBridgeLookup | None:
+        """Resolve only a previously registered turn-state continuity anchor."""
+
+        api_key_scope = durable_bridge_api_key_scope(api_key_id)
+        async with self._session() as session:
+            repository = DurableBridgeRepository(session)
+            snapshot = await repository.resolve_alias(
+                alias_kind=_DURABLE_TURN_STATE_ALIAS,
+                alias_value=turn_state,
+                api_key_scope=api_key_scope,
+            )
+            return _to_lookup(snapshot) if snapshot is not None else None
+
     async def claim_live_session(
         self,
         *,
@@ -192,20 +210,16 @@ class DurableBridgeSessionCoordinator:
         owner_epoch: int,
         turn_state: str,
         lease_ttl_seconds: float,
-    ) -> None:
+    ) -> bool:
         api_key_scope = durable_bridge_api_key_scope(api_key_id)
         async with self._session() as session:
-            repository = DurableBridgeRepository(session)
-            await repository.upsert_alias(
+            return await DurableBridgeRepository(session).register_owned_alias(
                 session_id=session_id,
-                alias_kind=_DURABLE_TURN_STATE_ALIAS,
-                alias_value=turn_state,
                 api_key_scope=api_key_scope,
-            )
-            await repository.renew_session(
-                session_id=session_id,
                 instance_id=instance_id,
                 owner_epoch=owner_epoch,
+                alias_kind=_DURABLE_TURN_STATE_ALIAS,
+                alias_value=turn_state,
                 lease_ttl_seconds=lease_ttl_seconds,
                 latest_turn_state=turn_state,
             )
@@ -221,20 +235,16 @@ class DurableBridgeSessionCoordinator:
         lease_ttl_seconds: float,
         input_item_count: int | None = None,
         input_full_fingerprint: str | None = None,
-    ) -> None:
+    ) -> bool:
         api_key_scope = durable_bridge_api_key_scope(api_key_id)
         async with self._session() as session:
-            repository = DurableBridgeRepository(session)
-            await repository.upsert_alias(
+            return await DurableBridgeRepository(session).register_owned_alias(
                 session_id=session_id,
-                alias_kind=_DURABLE_PREVIOUS_RESPONSE_ALIAS,
-                alias_value=response_id,
                 api_key_scope=api_key_scope,
-            )
-            await repository.renew_session(
-                session_id=session_id,
                 instance_id=instance_id,
                 owner_epoch=owner_epoch,
+                alias_kind=_DURABLE_PREVIOUS_RESPONSE_ALIAS,
+                alias_value=response_id,
                 lease_ttl_seconds=lease_ttl_seconds,
                 latest_response_id=response_id,
                 latest_input_item_count=input_item_count,

@@ -23,6 +23,7 @@ class SettingsRepository:
             id=_SETTINGS_ID,
             sticky_threads_enabled=True,
             upstream_stream_transport="default",
+            prohibit_fast_mode=False,
             http_downstream_transport_policy=get_settings().http_downstream_transport_policy,
             upstream_proxy_routing_enabled=False,
             upstream_proxy_default_pool_id=None,
@@ -77,6 +78,7 @@ class SettingsRepository:
         *,
         sticky_threads_enabled: bool | None = None,
         upstream_stream_transport: str | None = None,
+        prohibit_fast_mode: bool | None = None,
         http_downstream_transport_policy: str | None = None,
         upstream_proxy_routing_enabled: bool | None = None,
         upstream_proxy_default_pool_id: str | None = None,
@@ -116,6 +118,8 @@ class SettingsRepository:
             settings.sticky_threads_enabled = sticky_threads_enabled
         if upstream_stream_transport is not None:
             settings.upstream_stream_transport = upstream_stream_transport
+        if prohibit_fast_mode is not None:
+            settings.prohibit_fast_mode = prohibit_fast_mode
         if http_downstream_transport_policy is not None:
             settings.http_downstream_transport_policy = http_downstream_transport_policy
         if upstream_proxy_routing_enabled is not None:

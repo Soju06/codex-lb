@@ -1562,6 +1562,60 @@ async def test_raw_hidden_same_slug_source_does_not_shadow_retained_metadata(asy
 
 
 @pytest.mark.asyncio
+async def test_list_visible_same_slug_source_wins_over_earlier_hidden_source(async_client):
+    registry = get_model_registry()
+    sol = _make_upstream_model("gpt-5.6-sol", base_instructions="retained sol metadata")
+    terra = _make_upstream_model("gpt-5.6-terra")
+    await registry.update({"plus": [sol, terra]})
+    await registry.update({"plus": [terra]})
+    await _create_model_source(
+        async_client,
+        name="first-hidden-same-slug-source",
+        model="gpt-5.6-sol",
+        supports_responses=True,
+        raw_metadata_json=json.dumps({"visibility": "hide", "use_responses_lite": False}),
+    )
+    await _create_model_source(
+        async_client,
+        name="second-visible-same-slug-source",
+        model="gpt-5.6-sol",
+        supports_responses=True,
+        raw_metadata_json=json.dumps({"visibility": "list", "use_responses_lite": True}),
+    )
+    enable = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert enable.status_code == 200
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "visible-source-precedence",
+            "allowedModels": ["gpt-5.6-sol"],
+            "applyToCodexModel": True,
+        },
+    )
+    assert created.status_code == 200
+
+    response = await async_client.get(
+        "/backend-api/codex/models",
+        headers={"Authorization": f"Bearer {created.json()['key']}"},
+    )
+
+    assert response.status_code == 200
+    entries = [item for item in response.json()["models"] if item["slug"] == "gpt-5.6-sol"]
+    assert len(entries) == 1
+    assert entries[0]["visibility"] == "list"
+    assert entries[0]["use_responses_lite"] is True
+    assert "gpt-5.6-sol" in {item["id"] for item in response.json()["data"]}
+
+
+@pytest.mark.asyncio
 async def test_first_partial_refresh_serves_hidden_bootstrap_metadata(async_client):
     registry = get_model_registry()
     await registry.update({"plus": [_make_upstream_model("gpt-5.6-terra")]})

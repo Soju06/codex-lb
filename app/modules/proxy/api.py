@@ -2661,6 +2661,16 @@ async def _build_codex_models_response(api_key: ApiKeyData | None) -> Response:
             elif not is_public_model(source_model, allowed_models):
                 continue
         visible_source_models.append(source_model)
+    visible_source_models.sort(
+        key=lambda model: (
+            _effective_source_codex_visibility(
+                model,
+                visibility_allowed_models=visibility_allowed_models,
+                exact_source_allowed_models=exact_source_allowed_models,
+            )
+            != "list"
+        )
+    )
     source_model_slugs = {
         model.slug
         for model in visible_source_models

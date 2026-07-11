@@ -41,3 +41,11 @@ shadow the retained metadata.
 - **AND** that source entry is hidden from the effective Codex catalog by raw visibility or an API key's exact source allowlist
 - **WHEN** a client calls `GET /backend-api/codex/models` with that API key
 - **THEN** the hidden Sol catalog entry uses the retained Codex metadata
+
+#### Scenario: Visible same-slug source follows an earlier hidden source
+
+- **GIVEN** multiple enabled sources expose the same model slug
+- **AND** an earlier source is hidden while a later source is list-visible
+- **WHEN** the Codex catalog is rendered
+- **THEN** the list-visible source entry MUST take precedence for that slug
+- **AND** the earlier hidden source MUST NOT suppress or replace it

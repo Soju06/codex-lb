@@ -78,6 +78,12 @@ def app_with_fake_service(monkeypatch: pytest.MonkeyPatch):
         yield fake
 
     app = FastAPI()
+    # Register the project's dashboard exception handlers so Dashboard*Error
+    # exceptions surface as `{"error": {"code": ..., "message": ...}}` rather
+    # than FastAPI's default 500 with a `detail` wrapper.
+    from app.core.handlers.exceptions import add_exception_handlers
+
+    add_exception_handlers(app)
     app.include_router(router)
     # Skip dashboard auth + write access for unit tests via FastAPI's
     # dependency_overrides (Depends() captures the callable reference at
@@ -201,13 +207,10 @@ def test_callback_error_mapping(
     )
     assert resp.status_code == http_status, f"error {code}: got {resp.status_code}"
     body = resp.json()
-    # The error envelope MUST carry the error_code for the dashboard.
-    inner = body.get("detail") or body
-    err = inner.get("error") if isinstance(inner, dict) and "error" in inner else inner
-    if isinstance(err, dict):
-        assert err.get("code") == code or err.get("errorCode") == code, body
-    else:
-        assert inner.get("code") == code or inner.get("errorCode") == code, body
+    # Dashboard exception handlers emit `{"error": {"code": ..., "message": ...}}`
+    # directly (no `detail` wrapper). The error.code MUST equal the service-layer
+    # error_code so the dialog can render a friendly message.
+    assert body.get("error", {}).get("code") == code, body
 
 
 def test_callback_rejects_empty_code(app_with_fake_service) -> None:

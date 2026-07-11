@@ -26,6 +26,13 @@ from app.core.auth.dependencies import (
     validate_dashboard_session,
 )
 from app.core.config.settings import get_settings
+from app.core.exceptions import (
+    DashboardBadRequestError,
+    DashboardConflictError,
+    DashboardGoneError,
+    DashboardNotFoundError,
+    DashboardUpstreamError,
+)
 from app.db.session import get_session
 from app.modules.claude.auth_manager import ClaudeAuthManager
 from app.modules.claude.oauth.schemas import (
@@ -34,7 +41,7 @@ from app.modules.claude.oauth.schemas import (
     ClaudeOauthStartResponse,
     ClaudeOauthStatusResponse,
 )
-from app.modules.claude.oauth.service import ClaudeOauthFlowError, ClaudeOAuthService
+from app.modules.claude.oauth.service import ClaudeOAuthService, ClaudeOauthFlowError
 from app.modules.claude.repository import SqlClaudeAccountRepository
 
 logger = logging.getLogger(__name__)
@@ -89,28 +96,32 @@ async def get_claude_oauth_service(
 
 
 # ---------------------------------------------------------------------------
-# Error code → HTTP status
+# Error code → dashboard exception
 # ---------------------------------------------------------------------------
 
 
-_ERROR_CODE_TO_HTTP: dict[str, int] = {
-    "flow_not_found": 404,
-    "flow_expired": 410,
-    "flow_not_pending": 409,
-    "state_mismatch": 400,
-    "missing_code": 400,
-    "invalid_grant": 502,
-    "anthropic_unreachable": 502,
-    "id_token_missing": 400,
-    "id_token_malformed": 400,
-    "id_token_claims_incomplete": 400,
-    "account_already_exists": 409,
+# Maps the service-level error_code to the right Dashboard*Error class so the
+# project's exception middleware (app.core.handlers.exceptions) preserves the
+# ``error.code`` in the JSON body. New error codes must be added here.
+_ERROR_CODE_TO_EXC: dict[str, type] = {
+    "flow_not_found": DashboardNotFoundError,
+    "flow_expired": DashboardGoneError,
+    "flow_not_pending": DashboardConflictError,
+    "state_mismatch": DashboardBadRequestError,
+    "missing_code": DashboardBadRequestError,
+    "invalid_grant": DashboardUpstreamError,
+    "anthropic_unreachable": DashboardUpstreamError,
+    "id_token_missing": DashboardBadRequestError,
+    "id_token_malformed": DashboardBadRequestError,
+    "id_token_claims_incomplete": DashboardBadRequestError,
+    "account_already_exists": DashboardConflictError,
 }
 
 
-def _error_envelope(code: str, message: str) -> dict[str, Any]:
-    """Match the project's standard dashboard-error envelope."""
-    return {"error": {"code": code, "message": message}}
+def _to_dashboard_error(exc: ClaudeOauthFlowError) -> Exception:
+    """Translate a service-layer error to a dashboard-envelope exception."""
+    cls = _ERROR_CODE_TO_EXC.get(exc.code, DashboardBadRequestError)
+    return cls(str(exc), code=exc.code)
 
 
 # ---------------------------------------------------------------------------
@@ -137,20 +148,21 @@ async def oauth_status(
 @router.post("/callback", response_model=ClaudeOauthCallbackResponse)
 async def callback_oauth(
     payload: ClaudeOauthCallbackRequest,
+    session: AsyncSession = Depends(get_session),
     _write=Depends(require_dashboard_write_access),
     service: ClaudeOAuthService = Depends(get_claude_oauth_service),
 ) -> ClaudeOauthCallbackResponse:
     try:
-        return await service.complete_oauth(
+        result = await service.complete_oauth(
             flow_id=payload.flow_id,
             code=payload.code,
             state=payload.state,
         )
     except ClaudeOauthFlowError as exc:
-        from fastapi import HTTPException
+        raise _to_dashboard_error(exc) from exc
 
-        status = _ERROR_CODE_TO_HTTP.get(exc.code, 400)
-        raise HTTPException(
-            status_code=status,
-            detail=_error_envelope(exc.code, str(exc)),
-        ) from exc
+    # Persist the inserted account row (the repository.insert call inside
+    # the auth_manager does not commit — the request boundary commits here
+    # so success + failure share the same lifecycle).
+    await session.commit()
+    return result

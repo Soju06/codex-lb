@@ -70,6 +70,11 @@ class DashboardBadRequestError(AppError):
     code = "bad_request"
 
 
+class DashboardGoneError(AppError):
+    status_code = 410
+    code = "gone"
+
+
 class DashboardValidationError(AppError):
     status_code = 422
     code = "validation_error"

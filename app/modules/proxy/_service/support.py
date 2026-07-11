@@ -7,6 +7,7 @@ import re
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable, Coroutine, Mapping
+from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -42,6 +43,49 @@ _ACCOUNT_SELECTION_RECOVERY_DEFAULT_SLEEP_SECONDS = 30.0
 _ACCOUNT_SELECTION_RECOVERY_MAX_SLEEP_SECONDS = 300.0
 _ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS = 10.0
 _ACCOUNT_SELECTION_RETRY_HINT_RE = re.compile(r"try again in\s+([0-9]+(?:\.[0-9]+)?)s", re.IGNORECASE)
+_LOCAL_ACCOUNT_CAP_ERROR_CODES = frozenset({"account_response_create_cap", "account_stream_cap"})
+_PROPAGATED_CAPACITY_STARTUP_WAIT: ContextVar[asyncio.Event | None] = ContextVar(
+    "propagated_capacity_startup_wait",
+    default=None,
+)
+_PROPAGATED_CAPACITY_STARTUP_READY: ContextVar[asyncio.Event | None] = ContextVar(
+    "propagated_capacity_startup_ready",
+    default=None,
+)
+
+
+def _bind_propagated_capacity_startup_wait(event: asyncio.Event) -> Token[asyncio.Event | None]:
+    return _PROPAGATED_CAPACITY_STARTUP_WAIT.set(event)
+
+
+def _reset_propagated_capacity_startup_wait(token: Token[asyncio.Event | None]) -> None:
+    _PROPAGATED_CAPACITY_STARTUP_WAIT.reset(token)
+
+
+def _bind_propagated_capacity_startup_ready(event: asyncio.Event) -> Token[asyncio.Event | None]:
+    return _PROPAGATED_CAPACITY_STARTUP_READY.set(event)
+
+
+def _reset_propagated_capacity_startup_ready(token: Token[asyncio.Event | None]) -> None:
+    _PROPAGATED_CAPACITY_STARTUP_READY.reset(token)
+
+
+def _signal_propagated_capacity_startup_wait() -> None:
+    ready_event = _PROPAGATED_CAPACITY_STARTUP_READY.get()
+    if ready_event is not None:
+        ready_event.clear()
+    event = _PROPAGATED_CAPACITY_STARTUP_WAIT.get()
+    if event is not None:
+        event.set()
+
+
+def _signal_propagated_capacity_startup_ready() -> None:
+    wait_event = _PROPAGATED_CAPACITY_STARTUP_WAIT.get()
+    if wait_event is not None:
+        wait_event.clear()
+    event = _PROPAGATED_CAPACITY_STARTUP_READY.get()
+    if event is not None:
+        event.set()
 
 
 def _account_selection_recovery_sleep_seconds_from_message(
@@ -80,6 +124,9 @@ def _account_selection_recovery_sleep_seconds_from_message(
         )
 
     if "hit your spend cap set by the owner of your workspace" in lowered:
+        return _ACCOUNT_SELECTION_RECOVERY_DEFAULT_SLEEP_SECONDS
+
+    if error_code in _LOCAL_ACCOUNT_CAP_ERROR_CODES:
         return _ACCOUNT_SELECTION_RECOVERY_DEFAULT_SLEEP_SECONDS
 
     return None
@@ -266,6 +313,10 @@ class _StreamSettlement:
     response_id: str | None = None
     usage_settlement_transferred: bool = False
 
+    def reset(self) -> None:
+        fresh = type(self)()
+        self.__dict__.update(fresh.__dict__)
+
 
 def _stream_settlement_error_payload(settlement: _StreamSettlement) -> UpstreamError:
     if settlement.error is not None:
@@ -368,6 +419,7 @@ class _WebSocketRequestState:
     preferred_account_id: str | None = None
     require_security_work_authorized: bool = False
     file_required_preferred_account: bool = False
+    bridge_soft_capacity_reroute_allowed: bool = False
     error_code_override: str | None = None
     error_message_override: str | None = None
     error_type_override: str | None = None

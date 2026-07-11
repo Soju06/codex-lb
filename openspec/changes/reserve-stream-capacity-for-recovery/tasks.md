@@ -1,0 +1,4 @@
+- [x] Add a configurable account stream recovery reserve.
+- [x] Apply the reserve to ordinary stream selection while exempting reattach.
+- [x] Add concurrency regression coverage for seven ordinary leases plus one recovery lease.
+- [x] Run focused tests, lint, type checks, and strict OpenSpec validation.

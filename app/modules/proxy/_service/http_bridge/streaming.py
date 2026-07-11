@@ -1105,7 +1105,9 @@ class _HTTPBridgeStreamingMixin:
                             allow_previous_response_recovery_rebind=should_attempt_previous_response_recovery,
                             allow_bootstrap_owner_rebind=should_attempt_bootstrap_rebind,
                             durable_lookup=durable_lookup,
-                            request_stage="reattach",
+                            request_stage=(
+                                "reattach" if should_attempt_previous_response_recovery else "bootstrap_rebind"
+                            ),
                             preferred_account_id=request_state.preferred_account_id,
                             request_usage_budget=request_state.request_usage_budget,
                             session_header_fallback_key=session_header_fallback_key,
@@ -1196,60 +1198,15 @@ class _HTTPBridgeStreamingMixin:
                     retry_request_state.request_stage = "reattach"
                     retry_request_state.preferred_account_id = request_state.preferred_account_id
 
-                    while True:
-                        try:
-                            await self._submit_http_bridge_request(
-                                session,
-                                request_state=retry_request_state,
-                                text_data=retry_text_data,
-                                queue_limit=queue_limit,
-                            )
-                        except ProxyResponseError as capacity_exc:
-                            wait_plan = _http_bridge_capacity_wait_plan(
-                                capacity_exc,
-                                request_deadline=request_deadline,
-                            )
-                            if wait_plan is None:
-                                raise
-                            bounded_wait_seconds, account_capacity_wait_seconds, message = wait_plan
-                            logger.info(
-                                "Waiting for account capacity before retrying HTTP bridge owner-forward recovery "
-                                "submit request_id=%s model=%s account_id=%s sleep_seconds=%.1f "
-                                "recovery_hint_seconds=%.1f error=%s",
-                                retry_request_state.request_id,
-                                retry_request_state.model,
-                                session.account.id,
-                                bounded_wait_seconds,
-                                account_capacity_wait_seconds,
-                                message,
-                            )
-                            async for line in _iter_account_capacity_wait_sse(
-                                request_id=retry_request_state.request_id,
-                                reason=message,
-                                sleep_seconds=bounded_wait_seconds,
-                                emit_keepalives=not propagate_http_errors,
-                            ):
-                                yield line
-                            if _service_time().monotonic() >= request_deadline:
-                                raise
-                            continue
-                        break
-                    _signal_propagated_capacity_startup_ready()
-                    if downstream_turn_state is not None:
-                        await self._register_http_bridge_turn_state(session, downstream_turn_state)
-                    event_queue = retry_request_state.event_queue
-                    assert event_queue is not None
-                    while True:
-                        event_block = await event_queue.get()
-                        if event_block is None:
-                            break
-                        if retry_request_state.latency_first_token_ms is None:
-                            block_payload = parse_sse_data_json(event_block)
-                            block_event_type = _event_type_from_payload(None, block_payload)
-                            if block_event_type in _TEXT_DELTA_EVENT_TYPES:
-                                retry_request_state.latency_first_token_ms = int(
-                                    (_service_time().monotonic() - retry_request_state.started_at) * 1000
-                                )
+                    async for event_block in self._stream_http_bridge_session_events(
+                        session,
+                        request_state=retry_request_state,
+                        text_data=retry_text_data,
+                        queue_limit=queue_limit,
+                        propagate_http_errors=propagate_http_errors,
+                        downstream_turn_state=downstream_turn_state,
+                        request_deadline=request_deadline,
+                    ):
                         yield event_block
                 except BaseException:
                     if retry_reservation_reacquired and retry_api_key_reservation is not None:

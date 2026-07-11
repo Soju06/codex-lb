@@ -7715,8 +7715,13 @@ async def test_stream_via_http_bridge_reacquires_api_key_reservation_after_owner
         submitted_reservations.append(request_state.api_key_reservation)
         event_queue = request_state.event_queue
         assert event_queue is not None
-        await event_queue.put('data: {"type":"response.completed"}\n\n')
-        await event_queue.put(None)
+
+        async def produce_after_reattach_delay() -> None:
+            await asyncio.sleep(0.01)
+            await event_queue.put('data: {"type":"response.completed"}\n\n')
+            await event_queue.put(None)
+
+        asyncio.create_task(produce_after_reattach_delay())
 
     reserve_retry = AsyncMock(return_value=retried_reservation)
     capacity_unavailable = ProxyResponseError(
@@ -7742,7 +7747,10 @@ async def test_stream_via_http_bridge_reacquires_api_key_reservation_after_owner
             ),
         ),
     )
-    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    app_settings = _make_app_settings()
+    app_settings.sse_keepalive_interval_seconds = 0.001
+    app_settings.stream_idle_timeout_seconds = 1.0
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: app_settings)
     monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=None))
     monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value="acc-1"))
     monkeypatch.setattr(service, "_prepare_http_bridge_request", fake_prepare)
@@ -7753,6 +7761,7 @@ async def test_stream_via_http_bridge_reacquires_api_key_reservation_after_owner
     monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", reserve_retry)
     monkeypatch.setattr(http_bridge_streaming_module, "_http_bridge_account_capacity_wait_seconds", lambda _exc: 0.001)
     monkeypatch.setattr(http_bridge_streaming_module, "_ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS", 0.001)
+    monkeypatch.setattr(http_bridge_streaming_module, "_http_bridge_startup_keepalive_grace_seconds", lambda: 0.001)
 
     chunks = [
         chunk
@@ -7775,6 +7784,7 @@ async def test_stream_via_http_bridge_reacquires_api_key_reservation_after_owner
     keepalive = proxy_service.parse_sse_data_json(chunks[0])
     assert keepalive is not None
     assert keepalive["status"] == "waiting_for_account_capacity"
+    assert http_bridge_streaming_module._codex_keepalive_frame() in chunks
     assert chunks[-1] == 'data: {"type":"response.completed"}\n\n'
     assert get_or_create.await_count == 3
     assert prepare_reservations == [initial_reservation, retried_reservation]

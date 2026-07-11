@@ -137,18 +137,104 @@ def test_parse_forwarded_request_rejects_body_with_injected_empty_tools() -> Non
     assert error is None
     assert forwarded is not None
 
-    # A tampered body with injected ``"tools": []`` fails verification even
-    # though the legacy v1 digest cannot distinguish it: when the v2 header
-    # is present it is the only signature consulted, so the owner instance
-    # never re-marks ``tools`` as explicitly set.
+    # A tampered body with injected ``"tools": []`` fails the v2
+    # verification. Without the legacy shim headers (the post-shim contract),
+    # the forward is rejected outright, so the owner instance never re-marks
+    # ``tools`` as explicitly set.
+    v2_only_headers = {
+        key: value
+        for key, value in headers.items()
+        if key not in (HTTP_BRIDGE_SIGNATURE_HEADER, HTTP_BRIDGE_CLIENT_IP_SIGNATURE_HEADER)
+    }
     forwarded, error = parse_forwarded_request(
-        headers,
+        v2_only_headers,
         payload=tampered_payload,
         current_instance="instance-b",
     )
     assert forwarded is None
     assert error is not None
     assert error.status_code == 400
+
+    # ROLLOUT SHIM residual (documented; flips to rejected when tasks.md
+    # task 12 removes the shim): while the legacy headers are still sent for
+    # pre-v2 owners, the same tampered body downgrades to the legacy digest —
+    # which cannot distinguish synthesized from injected empty tools — and is
+    # accepted. This is exactly as strong as every pre-v2 release was.
+    forwarded, error = parse_forwarded_request(
+        headers,
+        payload=tampered_payload,
+        current_instance="instance-b",
+    )
+    assert error is None
+    assert forwarded is not None
+
+    # Generic body tampering (not the synthesized-tools equivalence class)
+    # breaks both digests and is rejected even with the shim headers present.
+    generic_tampered = ResponsesRequest.model_validate({**body, "instructions": "own the fleet"})
+    forwarded, error = parse_forwarded_request(
+        headers,
+        payload=generic_tampered,
+        current_instance="instance-b",
+    )
+    assert forwarded is None
+    assert error is not None
+    assert error.status_code == 400
+
+
+def test_parse_forwarded_request_accepts_legacy_forward_with_spoofed_v2_header() -> None:
+    # A pre-v2 origin forwards unknown inbound ``x-codex-bridge-*`` headers
+    # verbatim, so an external client can plant a garbage v2 header on an
+    # honestly legacy-signed forward. v2 must be authoritative only when it
+    # VALIDATES — a present-but-invalid v2 header falls through to the legacy
+    # verification instead of denying the legitimate forward.
+    old_origin_payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.4", "instructions": "hi", "input": "hi", "tools": []}
+    )
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=False,
+        downstream_turn_state=None,
+    )
+    headers = build_owner_forward_headers(headers={}, payload=old_origin_payload, context=context)
+    headers[HTTP_BRIDGE_SIGNATURE_V2_HEADER] = "spoofed-by-external-client"
+
+    forwarded, error = parse_forwarded_request(
+        headers,
+        payload=old_origin_payload,
+        current_instance="instance-b",
+    )
+    assert error is None
+    assert forwarded is not None
+    assert forwarded.context == context
+
+
+def test_build_owner_forward_headers_drops_client_supplied_bridge_headers() -> None:
+    # Upgraded origins must never relay externally injected
+    # ``x-codex-bridge-*`` headers: the signature headers are recomputed from
+    # the trusted context and unknown bridge headers are dropped outright.
+    payload = _payload()
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=False,
+        downstream_turn_state=None,
+    )
+    inbound = {
+        "x-codex-bridge-signature-v2": "client-spoofed",
+        "x-codex-bridge-signature": "client-spoofed",
+        "x-codex-bridge-future-unknown": "client-spoofed",
+        "x-openai-client-version": "1.2.3",
+    }
+    headers = build_owner_forward_headers(headers=inbound, payload=payload, context=context)
+
+    assert headers[HTTP_BRIDGE_SIGNATURE_V2_HEADER] == _bridge_forward_signature_v2(
+        payload=payload,
+        context=context,
+    )
+    assert headers[HTTP_BRIDGE_SIGNATURE_HEADER] != "client-spoofed"
+    assert "x-codex-bridge-future-unknown" not in headers
+    assert headers["x-openai-client-version"] == "1.2.3"
 
 
 def test_owner_forward_legacy_signature_verifiable_by_old_code_owner() -> None:
@@ -429,8 +515,8 @@ def test_parse_forwarded_request_rejects_tampered_signature() -> None:
     headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
     headers[HTTP_BRIDGE_SIGNATURE_HEADER] = "bad-signature"
 
-    # While the valid v2 header is present it is the only signature
-    # consulted, so a corrupted legacy header alone does not reject.
+    # A validating v2 signature is authoritative, so a corrupted legacy
+    # header alone does not reject.
     forwarded, error = parse_forwarded_request(
         headers,
         payload=payload,
@@ -453,9 +539,12 @@ def test_parse_forwarded_request_rejects_tampered_signature() -> None:
     assert error.status_code == 400
     assert error.payload["error"]["code"] == "bridge_forward_invalid"
 
-    # A tampered v2 signature is rejected outright, with no legacy fallback.
+    # An invalid v2 signature falls through to the legacy verification (see
+    # the spoofed-v2 test); when the legacy signature is tampered too, the
+    # forward is rejected.
     headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
     headers[HTTP_BRIDGE_SIGNATURE_V2_HEADER] = "bad-signature"
+    headers[HTTP_BRIDGE_SIGNATURE_HEADER] = "bad-signature"
     forwarded, error = parse_forwarded_request(
         headers,
         payload=payload,

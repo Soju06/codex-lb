@@ -20,20 +20,32 @@
 - [x] 10. Owner-forward signature integrity (Codex P2 on #1203): add a v2
   signature header (`x-codex-bridge-signature-v2`) computed over the
   forwarding dump actually posted (`model_dump_for_forwarding()`), with a
-  version tag domain-separating it from the legacy digest. When the v2
-  header is present the receiver verifies only v2, so a body rewritten in
-  transit to inject an explicit empty tools list fails verification instead
-  of re-marking `tools` as set on the owner. Regression test
-  (fail-before/pass-after): tampered body is rejected with a 400
-  invalid-signature error; honest round-trip still verifies.
+  version tag domain-separating it from the legacy digest. A validating v2
+  signature proves the received body was not rewritten in transit, so an
+  injected explicit empty tools list fails v2 instead of re-marking `tools`
+  as set on the owner. Regression test (fail-before/pass-after): tampered
+  body rejected 400 when v2 is the operative signature; honest round-trip
+  still verifies.
 - [x] 11. Rolling-upgrade compatibility (second Codex P2 on #1203): keep
   sending the legacy signature headers (plain-dump digest) so pre-v2 owners
-  verify dual-signed forwards unchanged, and fall back to legacy
-  verification only when the v2 header is absent (pre-v2 origin). Tests:
-  new->new tamper rejection, new->old legacy-recompute equality, old->new
-  fallback acceptance. ROLLOUT SHIM: legacy emission + fallback are a
-  one-release shim — remove in a follow-up once fleets are homogeneous
-  (grep `ROLLOUT SHIM` / `HTTP_BRIDGE_SIGNATURE_V2_HEADER`).
-- [ ] 12. Follow-up (separate change, after one homogeneous release): drop
+  verify dual-signed forwards unchanged. Tests: new->old legacy-recompute
+  equality, old->new fallback acceptance. ROLLOUT SHIM: legacy emission +
+  fallback are a one-release shim — remove in a follow-up once fleets are
+  homogeneous (grep `ROLLOUT SHIM` / `HTTP_BRIDGE_SIGNATURE_V2_HEADER`).
+- [x] 12. Spoofed-v2 resilience (third Codex P2 on #1203): treat v2 as
+  authoritative only when it VALIDATES — an absent or invalid v2 header
+  falls through to legacy verification, and the forward is rejected only
+  when neither digest verifies, so a garbage v2 header planted by an
+  external client (relayed verbatim by pre-v2 origins) cannot deny an
+  honestly legacy-signed forward. Updated origins strip inbound
+  `x-codex-bridge-*` headers. Documented shim residual: a body-only
+  `"tools": []` injection into a dual-signed forward downgrades to the
+  legacy digest and verifies (exactly the pre-v2 strength); locked by test
+  and reverted to strict rejection when the shim is removed. Tests
+  (fail-before/pass-after): spoofed garbage v2 + valid legacy accepted via
+  fallback; client-supplied bridge headers dropped by the origin; generic
+  tamper still rejected with both digests broken.
+- [ ] 13. Follow-up (separate change, after one homogeneous release): drop
   the legacy v1 signature emission and the legacy fallback branch in
-  `parse_forwarded_request`; verify v2 exclusively.
+  `parse_forwarded_request`; verify v2 exclusively (flips the documented
+  shim-residual test back to strict rejection).

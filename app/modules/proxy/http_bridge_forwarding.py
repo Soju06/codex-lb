@@ -178,7 +178,17 @@ def build_owner_forward_headers(
     )
     connection_named = {token.strip().lower() for token in connection_value.split(",") if token.strip()}
     drop = _BRIDGE_UNSAFE_HEADER_NAMES | connection_named
-    forwarded = {key: value for key, value in filtered.items() if key.lower() not in drop}
+    # Drop any client-supplied ``x-codex-bridge-*`` header: those names are
+    # reserved for the internal forward contract and are set below from the
+    # trusted context. Pre-v2 origins relayed unknown bridge headers
+    # verbatim, which let an external client plant a spoofed
+    # ``x-codex-bridge-signature-v2`` on an honestly legacy-signed forward;
+    # upgraded origins must never relay externally injected bridge headers.
+    forwarded = {
+        key: value
+        for key, value in filtered.items()
+        if key.lower() not in drop and not key.lower().startswith("x-codex-bridge-")
+    }
     # filter_inbound_headers strips Authorization, but the owner instance
     # re-validates the client API key from this header (see
     # _validate_internal_bridge_api_key) before swapping in its own upstream
@@ -214,7 +224,8 @@ def build_owner_forward_headers(
     # follow-up): keep sending the legacy v1 signature headers, computed over
     # the plain ``model_dump`` (with synthesized ``"tools": []``), so
     # old-code owners can still verify requests from updated origins during
-    # a rolling upgrade. New-code owners verify only the v2 header below.
+    # a rolling upgrade. New-code owners verify the v2 header below first
+    # and fall back to these legacy headers only when v2 does not validate.
     forwarded[HTTP_BRIDGE_SIGNATURE_HEADER] = _bridge_forward_signature(
         payload=payload,
         context=context,
@@ -263,23 +274,35 @@ def parse_forwarded_request(
         client_ip=client_ip,
         reservation=_reservation_from_headers(headers),
     )
+    # v2 signs the exact forwarding serialization posted as the body, so a
+    # VALIDATING v2 signature proves the received body was not rewritten in
+    # transit — including an injected ``"tools": []`` that the legacy digest
+    # cannot distinguish from an omitted field. v2 is authoritative only when
+    # it validates: mere header presence is not a trustworthy signal, because
+    # a pre-v2 origin forwards unknown inbound ``x-codex-bridge-*`` headers
+    # verbatim (``filter_inbound_headers`` does not strip them and old code
+    # only overwrites the headers it knows), so an external client can plant
+    # a garbage v2 header on an honestly legacy-signed forward. A
+    # present-but-invalid v2 header therefore falls through to the legacy
+    # verification instead of rejecting outright.
     signature_v2 = _optional_header(headers.get(HTTP_BRIDGE_SIGNATURE_V2_HEADER))
-    if signature_v2 is not None:
-        # v2 signs the exact forwarding serialization posted as the body, so
-        # verifying it against the received (re-serialized) body rejects any
-        # in-transit rewrite — including an injected ``"tools": []`` that the
-        # legacy digest cannot distinguish from an omitted field. When the
-        # header is present it is the only signature consulted.
-        signature_valid = hmac.compare_digest(
-            signature_v2,
-            _bridge_forward_signature_v2(payload=payload, context=context),
-        )
+    signature_v2_valid = signature_v2 is not None and hmac.compare_digest(
+        signature_v2,
+        _bridge_forward_signature_v2(payload=payload, context=context),
+    )
+    if signature_v2_valid:
+        signature_valid = True
     else:
         # ROLLOUT SHIM (#1203, remove with HTTP_BRIDGE_SIGNATURE_V2_HEADER
         # follow-up): an origin still running pre-v2 code signs only the
         # legacy headers over the plain ``model_dump``. Accept those during a
         # rolling upgrade; drop this branch (and stop sending the v1 headers)
-        # once the fleet is homogeneous on a v2-signing release.
+        # once the fleet is homogeneous on a v2-signing release. Known
+        # residual until then: this fallback is exactly as strong as the
+        # pre-v2 scheme, so a body-only rewrite that injects ``"tools": []``
+        # into a dual-signed forward downgrades to the legacy digest (which
+        # is insensitive to synthesized-vs-injected empty tools) and
+        # verifies. Removing the shim restores strict v2-only rejection.
         signature = _optional_header(headers.get(HTTP_BRIDGE_SIGNATURE_HEADER))
         client_ip_signature = _optional_header(headers.get(HTTP_BRIDGE_CLIENT_IP_SIGNATURE_HEADER))
         expected_signature = _bridge_forward_signature(payload=payload, context=context)

@@ -823,8 +823,11 @@ class ModelRegistry:
                     for slug, tier_accounts in model_service_tier_accounts.items()
                 }
                 frozen_model_accounts = {slug: frozenset(account_ids) for slug, account_ids in model_accounts.items()}
+                authoritative_account_catalogs = per_account_results is not None and set(
+                    active_account_plans or per_account_results
+                ).issubset(account_plans)
 
-                if active_account_plans is not None and previous is not None:
+                if authoritative_account_catalogs and previous is not None:
                     for slug, previous_account_ids in previous.model_accounts.items():
                         if slug in models or not previous_account_ids:
                             continue
@@ -842,9 +845,6 @@ class ModelRegistry:
                 frozen_plan_models: dict[str, frozenset[str]] = {
                     plan_type: frozenset(slugs) for plan_type, slugs in plan_models_index.items()
                 }
-                authoritative_account_catalogs = per_account_results is not None and set(
-                    active_account_plans or per_account_results
-                ).issubset(account_plans)
                 bootstrap_floor_active = per_account_results is not None and not authoritative_account_catalogs
 
                 metadata_models = {

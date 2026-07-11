@@ -725,13 +725,13 @@ async def test_stale_plan_drops_removed_advertiser_model_when_previous_non_autho
     snapshot = registry.get_snapshot()
     assert snapshot is not None
     assert "gpt-5.6-sol" not in snapshot.models
-    assert "gpt-5.6-sol" not in registry.get_models_with_fallback()
+    assert "gpt-5.6-sol" in registry.get_models_with_fallback()
     assert "gpt-5.6-sol" not in snapshot.plan_models.get("pro", frozenset())
-    assert registry.plan_types_for_model("gpt-5.6-sol") == frozenset()
+    assert registry.plan_types_for_model("gpt-5.6-sol") == EXPECTED_GPT56_MODEL_PLANS
 
 
 @pytest.mark.asyncio
-async def test_suppressed_bootstrap_model_persists_across_partial_cycles_and_clears_on_readvertise():
+async def test_unknown_account_keeps_bootstrap_model_until_authoritative_readvertise():
     registry = ModelRegistry(ttl_seconds=60.0)
     sol = _model("gpt-5.6-sol")
     shared = _model("gpt-5.4")
@@ -754,8 +754,8 @@ async def test_suppressed_bootstrap_model_persists_across_partial_cycles_and_cle
     second = registry.get_snapshot()
     assert second is not None
     assert second.bootstrap_floor_active is True
-    assert "gpt-5.6-sol" not in registry.get_models_with_fallback()
-    assert "gpt-5.6-sol" in second.suppressed_model_slugs
+    assert "gpt-5.6-sol" in registry.get_models_with_fallback()
+    assert "gpt-5.6-sol" not in second.suppressed_model_slugs
 
     await registry.update(
         {"plus": [shared]},
@@ -766,10 +766,10 @@ async def test_suppressed_bootstrap_model_persists_across_partial_cycles_and_cle
     third = registry.get_snapshot()
     assert third is not None
     assert third.bootstrap_floor_active is True
-    assert "gpt-5.6-sol" not in registry.get_models_with_fallback()
-    assert registry.plan_types_for_model("gpt-5.6-sol") == frozenset()
-    assert registry.is_suppressed_model("gpt-5.6-sol") is True
-    assert "gpt-5.6-sol" in third.suppressed_model_slugs
+    assert "gpt-5.6-sol" in registry.get_models_with_fallback()
+    assert registry.plan_types_for_model("gpt-5.6-sol") == EXPECTED_GPT56_MODEL_PLANS
+    assert registry.is_suppressed_model("gpt-5.6-sol") is False
+    assert "gpt-5.6-sol" not in third.suppressed_model_slugs
 
     await registry.update(
         {"pro": [sol], "plus": [shared]},

@@ -5,7 +5,6 @@ import inspect
 import logging
 from collections import deque
 from typing import Any, Literal, TypeVar, overload
-from uuid import uuid4
 
 import aiohttp
 import anyio
@@ -78,6 +77,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_can_recover_during_drain,
     _http_bridge_can_single_instance_owner_takeover_without_anchor,
     _http_bridge_can_single_instance_prompt_cache_takeover_without_anchor,
+    _http_bridge_connect_request_state,
     _http_bridge_continuity_lost_error_envelope,
     _http_bridge_durable_lease_ttl_seconds,
     _http_bridge_endpoint_matches_current_instance,
@@ -94,6 +94,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_session_allows_api_key,
     _http_bridge_session_has_admission_waiter,
     _http_bridge_session_matches_preferred_account,
+    _http_bridge_session_meets_security_requirement,
     _http_bridge_session_retiring_with_visible_requests,
     _http_bridge_session_reusable_for_lookup,
     _http_bridge_session_reusable_for_request,
@@ -681,10 +682,7 @@ class _HTTPBridgeMixin(
                 )
                 reusable = (
                     existing is not None
-                    and (
-                        not require_security_work_authorized
-                        or bool(getattr(existing.account, "security_work_authorized", False))
-                    )
+                    and _http_bridge_session_meets_security_requirement(existing, require_security_work_authorized)
                     and _http_bridge_session_reusable_for_lookup(
                         session=existing,
                         key=key,
@@ -1112,6 +1110,9 @@ class _HTTPBridgeMixin(
                                 previous_session is not None
                                 and not previous_session.closed
                                 and _http_bridge_session_account_active(previous_session)
+                                and _http_bridge_session_meets_security_requirement(
+                                    previous_session, require_security_work_authorized
+                                )
                             ):
                                 key = previous_session.key
                                 existing = previous_session
@@ -1854,14 +1855,11 @@ class _HTTPBridgeMixin(
         request_deadline: float | None = None,
         require_security_work_authorized: bool = False,
     ) -> "_HTTPBridgeSession":
-        request_state = _WebSocketRequestState(
-            request_id=f"http_bridge_connect_{uuid4().hex}",
-            model=request_model,
-            service_tier=request_service_tier,
-            reasoning_effort=None,
-            api_key_reservation=None,
+        request_state = _http_bridge_connect_request_state(
+            headers=headers,
+            request_model=request_model,
+            request_service_tier=request_service_tier,
             started_at=_service_time().monotonic(),
-            transport=_REQUEST_TRANSPORT_HTTP,
         )
         deadline = (
             request_deadline

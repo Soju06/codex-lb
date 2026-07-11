@@ -928,6 +928,10 @@ class _HTTPBridgeUpstreamEventsMixin:
                     terminal_request_state.security_lineage_id,
                     account_id=session.account.id,
                 )
+                terminal_request_state.require_security_work_authorized = True
+                session.requires_security_work_authorized = True
+                if session.durable_session_id is not None:
+                    await self._durable_bridge.require_security_work_authorized(session_id=session.durable_session_id)
                 can_retry_security_work = (
                     not getattr(session.account, "security_work_authorized", False)
                     and not has_other_pending_requests

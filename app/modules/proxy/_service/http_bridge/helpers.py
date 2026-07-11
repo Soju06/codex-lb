@@ -10,6 +10,7 @@ from hashlib import sha256
 from ipaddress import ip_address
 from typing import Any, Literal, Mapping, TypeVar, cast
 from urllib.parse import urlparse
+from uuid import uuid4
 
 from app.core.balancer.rendezvous_hash import select_node
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
@@ -764,6 +765,31 @@ def _http_bridge_session_allows_api_key(session: "_HTTPBridgeSession", api_key: 
 
 def _http_bridge_session_account_active(session: "_HTTPBridgeSession") -> bool:
     return session.account.status == AccountStatus.ACTIVE and not is_account_routing_unavailable(session.account.id)
+
+
+def _http_bridge_session_meets_security_requirement(
+    session: "_HTTPBridgeSession", require_security_work_authorized: bool
+) -> bool:
+    return not require_security_work_authorized or bool(getattr(session.account, "security_work_authorized", False))
+
+
+def _http_bridge_connect_request_state(
+    *,
+    headers: Mapping[str, str],
+    request_model: str | None,
+    request_service_tier: str | None,
+    started_at: float,
+) -> _WebSocketRequestState:
+    return _WebSocketRequestState(
+        request_id=f"http_bridge_connect_{uuid4().hex}",
+        model=request_model,
+        service_tier=request_service_tier,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=started_at,
+        transport="http",
+        security_lineage_id=_sticky_key_from_session_header(headers),
+    )
 
 
 def _http_bridge_session_reusable_for_request(

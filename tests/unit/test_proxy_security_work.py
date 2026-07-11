@@ -4,9 +4,10 @@ import asyncio
 import json
 import time
 from collections import deque
+from contextlib import nullcontext
 from types import SimpleNamespace
-from typing import cast
-from unittest.mock import AsyncMock
+from typing import Any, cast
+from unittest.mock import AsyncMock, Mock
 
 import anyio
 import pytest
@@ -254,8 +255,17 @@ async def test_http_bridge_reconnect_selects_security_work_authorized_account(mo
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("headers", "expected_security_lineage_id"),
+    [
+        ({"session_id": "security-create"}, "security-create"),
+        ({}, None),
+    ],
+)
 async def test_http_bridge_create_passes_security_work_requirement_to_selection(
     monkeypatch: pytest.MonkeyPatch,
+    headers: dict[str, str],
+    expected_security_lineage_id: str | None,
 ) -> None:
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     authorized_account = _make_account("acc_security_create_authorized")
@@ -283,7 +293,7 @@ async def test_http_bridge_create_passes_security_work_requirement_to_selection(
 
     session = await service._create_http_bridge_session(
         proxy_service._HTTPBridgeSessionKey("session_header", "security-create", None),
-        headers={"session_id": "security-create"},
+        headers=headers,
         affinity=proxy_service._AffinityPolicy(
             key="security-create",
             kind=proxy_service.StickySessionKind.CODEX_SESSION,
@@ -296,8 +306,129 @@ async def test_http_bridge_create_passes_security_work_requirement_to_selection(
 
     assert select_account.await_args is not None
     assert select_account.await_args.kwargs["require_security_work_authorized"] is True
+    assert select_account.await_args.kwargs["security_lineage_id"] == expected_security_lineage_id
     assert session.upstream_reader is not None
     await session.upstream_reader
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("require_security_work_authorized", [False, True])
+async def test_previous_response_recovery_applies_security_account_gate(
+    monkeypatch: pytest.MonkeyPatch,
+    require_security_work_authorized: bool,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    current_key = proxy_service._HTTPBridgeSessionKey("session_header", "security-current", None)
+    previous_key = proxy_service._HTTPBridgeSessionKey("session_header", "security-previous", None)
+    previous_session = _make_bridge_session(key=previous_key)
+    previous_session.account = _make_account("acc-security-previous-ordinary")
+    previous_session.previous_response_ids = {"resp-security-previous"}
+    authorized_session = _make_bridge_session(key=current_key)
+    authorized_session.account = _make_account("acc-security-created-authorized")
+    authorized_session.account.security_work_authorized = True
+    alias_key = proxy_service._http_bridge_previous_response_alias_key("resp-security-previous", None)
+    service._http_bridge_sessions[previous_key] = previous_session
+    service._http_bridge_previous_response_index[alias_key] = previous_key
+    monkeypatch.setattr(service, "_prune_http_bridge_sessions_locked", Mock(return_value=[]))
+    create_http_bridge_session = AsyncMock(return_value=authorized_session)
+    monkeypatch.setattr(service, "_create_http_bridge_session", create_http_bridge_session)
+    monkeypatch.setattr(service, "_claim_durable_http_bridge_session", AsyncMock())
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(proxy_service, "_http_bridge_owner_instance", AsyncMock(return_value="instance-a"))
+    monkeypatch.setattr(
+        proxy_service,
+        "_active_http_bridge_instance_ring",
+        AsyncMock(return_value=("instance-a", ["instance-a", "instance-b"])),
+    )
+
+    resolved = await service._get_or_create_http_bridge_session(
+        current_key,
+        headers={"x-codex-session-id": "security-current"},
+        affinity=proxy_service._AffinityPolicy(
+            key="security-current",
+            kind=proxy_service.StickySessionKind.CODEX_SESSION,
+        ),
+        api_key=None,
+        request_model="gpt-5.6-sol",
+        idle_ttl_seconds=120.0,
+        max_sessions=8,
+        previous_response_id="resp-security-previous",
+        allow_previous_response_recovery_rebind=True,
+        require_security_work_authorized=require_security_work_authorized,
+    )
+
+    if require_security_work_authorized:
+        assert resolved is authorized_session
+        create_http_bridge_session.assert_awaited_once()
+        assert alias_key not in service._http_bridge_previous_response_index
+    else:
+        assert resolved is previous_session
+        create_http_bridge_session.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_authorized_cyber_denial_persists_durable_requirement_without_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    trusted_account = _make_account("acc-http-trusted-cyber-denial")
+    trusted_account.security_work_authorized = True
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="http-approved-cyber-denial",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        request_text='{"type":"response.create","input":[]}',
+        transport="http",
+        security_lineage_id="root-http-approved-cyber-denial",
+        skip_request_log=True,
+    )
+    session = _make_bridge_session(pending_requests=deque([request_state]), queued_request_count=1)
+    session.account = trusted_account
+    session.durable_session_id = "durable-http-approved-cyber-denial"
+    persist_lineage = AsyncMock()
+    persist_durable = AsyncMock(return_value=SimpleNamespace(session_id=session.durable_session_id))
+    retry_security_work = AsyncMock(return_value=True)
+    monkeypatch.setattr(service, "_mark_security_lineage_requirement", persist_lineage)
+    monkeypatch.setattr(service._durable_bridge, "require_security_work_authorized", persist_durable)
+    monkeypatch.setattr(service, "_retry_http_bridge_security_work_request", retry_security_work)
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {
+                "type": "response.failed",
+                "response": {
+                    "id": "resp-http-approved-cyber-denial",
+                    "status": "failed",
+                    "error": {"code": "cyber_policy", "message": "denied by Trusted Access"},
+                },
+            },
+            separators=(",", ":"),
+        ),
+    )
+
+    persist_lineage.assert_awaited_once_with(
+        "root-http-approved-cyber-denial",
+        account_id=trusted_account.id,
+    )
+    persist_durable.assert_awaited_once_with(session_id="durable-http-approved-cyber-denial")
+    retry_security_work.assert_not_awaited()
+    assert request_state.require_security_work_authorized is True
+    assert session.requires_security_work_authorized is True
+    assert request_state.excluded_account_ids == set()
+    assert request_state.event_queue is not None
+    advisory_event = await request_state.event_queue.get()
+    assert advisory_event is not None
+    assert "forward_original_security_work_error" in advisory_event
+    terminal_event = await request_state.event_queue.get()
+    assert terminal_event is not None
+    assert "cyber_policy" in terminal_event
+    assert await request_state.event_queue.get() is None
 
 
 @pytest.mark.asyncio

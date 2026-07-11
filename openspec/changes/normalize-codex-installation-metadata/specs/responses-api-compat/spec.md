@@ -4,8 +4,8 @@
 
 ### Requirement: Selected Codex installation identity is internally consistent
 
-For native Codex requests, when an account-specific installation id is
-applied, the service MUST use that same id in `x-codex-installation-id` and in
+For native Codex requests, the service MUST use an account-specific installation id consistently.
+When that id is applied, the service MUST use the same id in `x-codex-installation-id` and in
 an existing `x-codex-turn-metadata.installation_id` field on every upstream
 Responses transport. Missing, malformed, or non-object turn metadata MUST be
 preserved rather than invented or discarded.
@@ -31,4 +31,3 @@ preserved rather than invented or discarded.
 - **THEN** the service preserves that turn metadata unchanged
 - **AND** it still applies the selected account id through the standalone
   installation-id carrier
-

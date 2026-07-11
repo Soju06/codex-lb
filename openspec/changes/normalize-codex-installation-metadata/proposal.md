@@ -23,4 +23,3 @@ selection or failover.
 
 - Native Codex outbound metadata only.
 - No routing, replay, continuity, database, or credential behavior changes.
-

@@ -514,14 +514,18 @@ def apply_codex_installation_headers(
     updated = dict(headers)
     if not codex_installation_id:
         return updated
+    has_installation_id = False
     for key, value in list(updated.items()):
         lowered = key.lower()
         if lowered == CODEX_INSTALLATION_ID_HEADER:
             updated[key] = codex_installation_id
+            has_installation_id = True
         elif lowered == CODEX_TURN_METADATA_HEADER:
             rewritten = _rewrite_turn_metadata_installation_id(value, codex_installation_id)
             if isinstance(rewritten, str):
                 updated[key] = rewritten
+    if not has_installation_id:
+        updated[CODEX_INSTALLATION_ID_HEADER] = codex_installation_id
     return updated
 
 
@@ -2577,6 +2581,7 @@ async def _stream_responses_with_session(
         upstream_headers = _build_upstream_headers(headers, access_token, account_id)
         _apply_responses_lite_http_header(upstream_headers, payload_dict)
         method = "POST"
+    upstream_headers = apply_codex_installation_headers(upstream_headers, codex_installation_id)
     remaining_request_timeout = _remaining_total_timeout(
         request_total_timeout,
         pre_request_started_at,
@@ -2828,6 +2833,7 @@ async def _stream_responses_with_session(
         payload_json = json.dumps(payload_dict, ensure_ascii=True, separators=(",", ":"))
         upstream_headers = _build_upstream_headers(headers, access_token, account_id)
         _apply_responses_lite_http_header(upstream_headers, payload_dict)
+        upstream_headers = apply_codex_installation_headers(upstream_headers, codex_installation_id)
         method = "POST"
         remaining_request_timeout = _remaining_total_timeout(
             request_total_timeout,

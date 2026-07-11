@@ -176,7 +176,11 @@ def build_owner_forward_headers(
     )
     connection_named = {token.strip().lower() for token in connection_value.split(",") if token.strip()}
     drop = _BRIDGE_UNSAFE_HEADER_NAMES | connection_named
-    forwarded = {key: value for key, value in filtered.items() if key.lower() not in drop}
+    forwarded = {
+        key: value
+        for key, value in filtered.items()
+        if key.lower() not in drop and not key.lower().startswith("x-codex-bridge-")
+    }
     # filter_inbound_headers strips Authorization, but the owner instance
     # re-validates the client API key from this header (see
     # _validate_internal_bridge_api_key) before swapping in its own upstream

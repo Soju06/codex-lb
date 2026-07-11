@@ -20,6 +20,7 @@ from app.modules.proxy.http_bridge_forwarding import (
     HTTP_BRIDGE_FORWARDED_HEADER,
     HTTP_BRIDGE_ORIGIN_INSTANCE_HEADER,
     HTTP_BRIDGE_ORIGINAL_UNANCHORED_HEADER,
+    HTTP_BRIDGE_RESERVATION_ID_HEADER,
     HTTP_BRIDGE_RESERVATION_KEY_ID_HEADER,
     HTTP_BRIDGE_RESERVATION_MODEL_HEADER,
     HTTP_BRIDGE_SIGNATURE_HEADER,
@@ -932,6 +933,29 @@ def test_build_owner_forward_headers_strips_hop_by_hop_headers() -> None:
     assert headers.get("x-request-id") == "req-123"
     assert HTTP_BRIDGE_FORWARDED_HEADER in headers
     assert HTTP_BRIDGE_TARGET_INSTANCE_HEADER in headers
+
+
+def test_build_owner_forward_headers_strips_inbound_internal_bridge_headers() -> None:
+    payload = _payload()
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=False,
+        downstream_turn_state=None,
+    )
+    inbound = {
+        HTTP_BRIDGE_SIGNATURE_VERSION_HEADER: "2",
+        HTTP_BRIDGE_ORIGINAL_UNANCHORED_HEADER: "1",
+        HTTP_BRIDGE_RESERVATION_ID_HEADER: "spoofed-reservation",
+        "x-codex-bridge-future-internal": "spoofed",
+    }
+
+    headers = build_owner_forward_headers(headers=inbound, payload=payload, context=context)
+
+    assert HTTP_BRIDGE_SIGNATURE_VERSION_HEADER not in headers
+    assert HTTP_BRIDGE_ORIGINAL_UNANCHORED_HEADER not in headers
+    assert HTTP_BRIDGE_RESERVATION_ID_HEADER not in headers
+    assert "x-codex-bridge-future-internal" not in headers
 
 
 def test_build_owner_forward_headers_preserves_authorization_strips_host() -> None:

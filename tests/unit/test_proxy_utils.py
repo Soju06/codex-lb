@@ -27405,6 +27405,7 @@ async def test_retry_http_bridge_precreated_request_strips_retry_safe_injected_a
         proxy_injected_previous_response_id=True,
         fresh_upstream_request_text=fresh_text,
         fresh_upstream_request_is_retry_safe=True,
+        preferred_account_id="acc_bridge_injected_anchor",
         input_item_count=1,
         input_full_fingerprint=proxy_service._fingerprint_input_items(original_payload["input"]),
     )
@@ -27435,6 +27436,8 @@ async def test_retry_http_bridge_precreated_request_strips_retry_safe_injected_a
     assert request_state.previous_response_id is None
     assert request_state.proxy_injected_previous_response_id is False
     assert request_state.fresh_upstream_request_is_retry_safe is False
+    assert request_state.preferred_account_id is None
+    assert request_state.excluded_account_ids == {"acc_bridge_injected_anchor"}
     assert request_state.input_full_fingerprint == proxy_service._fingerprint_input_items(fresh_payload["input"])
 
 

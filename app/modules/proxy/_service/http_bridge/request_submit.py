@@ -1241,9 +1241,22 @@ class _HTTPBridgeRequestSubmitMixin:
                     f"(close_code={session.last_upstream_close_code})"
                 )
                 return False
+            migrate_stalled_owner = bool(
+                request_state.previous_response_id is not None
+                and request_state.proxy_injected_previous_response_id
+                and request_state.fresh_upstream_request_is_retry_safe
+                and request_state.fresh_upstream_request_text
+            )
             request_text = _prepare_websocket_request_state_for_visible_output_replay(request_state)
             if request_text is None:
                 return False
+            # A retry-safe proxy-injected anchor has now been converted back
+            # into the client's original full resend.  Keeping the prior
+            # preferred owner would reconnect to the same account that just
+            # failed to create a response, defeating the startup retry.
+            if migrate_stalled_owner:
+                request_state.preferred_account_id = None
+                request_state.excluded_account_ids.add(session.account.id)
         _log_http_bridge_event(
             "retry_precreated",
             session.key,

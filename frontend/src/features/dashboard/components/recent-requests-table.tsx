@@ -124,7 +124,7 @@ function formatRequestCostSummary(request: RequestLog | null): string | null {
 }
 
 function formatGenerationSpeed(request: RequestLog): string | null {
-  const outputCount = request.outputTokens;
+  const outputCount = request.outputTokensRaw;
   if (outputCount == null || request.latencyMs == null || request.latencyFirstTokenMs == null) {
     return null;
   }

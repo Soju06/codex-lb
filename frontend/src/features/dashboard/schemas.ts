@@ -188,6 +188,7 @@ export const RequestLogSchema = z.object({
   tokens: z.number().nullable(),
   inputTokens: z.number().nullable().optional().default(null),
   outputTokens: z.number().nullable().optional().default(null),
+  outputTokensRaw: z.number().nullable().optional(),
   cachedInputTokens: z.number().nullable(),
   reasoningEffort: z.string().nullable(),
   costUsd: z.number().nullable(),

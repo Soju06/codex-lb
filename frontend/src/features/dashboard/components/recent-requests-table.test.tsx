@@ -199,6 +199,7 @@ describe("RecentRequestsTable", () => {
             tokens: 1200,
             inputTokens: 1000,
             outputTokens: 200,
+            outputTokensRaw: 200,
             cachedInputTokens: 0,
             reasoningEffort: null,
             costUsd: 0,
@@ -215,6 +216,54 @@ describe("RecentRequestsTable", () => {
     expect(row).not.toBeNull();
     expect(within(row as HTMLElement).getByText("200ms")).toBeInTheDocument();
     expect(within(row as HTMLElement).getByText("250.0")).toBeInTheDocument();
+  });
+
+  it("does not calculate TPS from fallback output tokens", () => {
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={[
+          {
+            requestedAt: ISO,
+            accountId: "acc-reasoning",
+            planType: "plus",
+            apiKeyName: "Key Reasoning",
+            apiKeyId: "key-reasoning",
+            requestId: "req-reasoning",
+            requestKind: "normal",
+            model: "gpt-5.1",
+            source: null,
+            serviceTier: null,
+            requestedServiceTier: null,
+            actualServiceTier: null,
+            transport: "http",
+            ...NULL_USERAGENT_METADATA,
+            status: "ok",
+            errorCode: null,
+            errorMessage: null,
+            ...NULL_FAILURE_METADATA,
+            tokens: 1200,
+            inputTokens: 1000,
+            outputTokens: 200,
+            outputTokensRaw: null,
+            cachedInputTokens: 0,
+            reasoningEffort: null,
+            costUsd: 0,
+            costBreakdown: null,
+            latencyMs: 1000,
+            latencyFirstTokenMs: 200,
+          },
+        ]}
+      />,
+    );
+
+    const row = screen.getByText("gpt-5.1").closest("tr");
+
+    expect(row).not.toBeNull();
+    expect(within(row as HTMLElement).getByText("200ms")).toBeInTheDocument();
+    expect(within(row as HTMLElement).getByText("--")).toBeInTheDocument();
+    expect(within(row as HTMLElement).queryByText("250.0")).not.toBeInTheDocument();
   });
 
   it("renders empty state", () => {

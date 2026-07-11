@@ -67,6 +67,7 @@ def to_request_log_entry(log: RequestLog, *, api_key_name: str | None = None) ->
         tokens=total_tokens_from_log(log_like),
         input_tokens=log.input_tokens,
         output_tokens=output_tokens_from_log(log_like),
+        output_tokens_raw=log.output_tokens,
         cached_input_tokens=cached_input_tokens_from_log(log_like),
         cost_usd=cost_breakdown.total_usd,
         cost_breakdown=RequestLogCostBreakdown(**cost_breakdown.__dict__),

@@ -6,4 +6,4 @@
 - [x] Add frontend regression coverage for TPS excluding TTFT and using output tokens.
 - [x] Add Reports daily median TTFT/TPS aggregates and charts.
 - [x] Run focused frontend tests and typecheck.
-- [ ] Run OpenSpec validation once the local `openspec` CLI / uv Python is available.
+- [x] Run strict OpenSpec validation with the local `openspec` CLI / uv Python.

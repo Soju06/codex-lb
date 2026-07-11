@@ -9,6 +9,7 @@ from collections import deque
 from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Literal, NoReturn, Protocol
 
 import anyio
@@ -585,9 +586,16 @@ class _WebSocketRequestState:
     error_message_override: str | None = None
     error_type_override: str | None = None
     error_param_override: str | None = None
+    failure_phase_override: str | None = None
+    failure_detail_override: str | None = None
+    upstream_error_code_override: str | None = None
     error_http_status_override: int | None = None
     response_event_count: int = 0
     previous_response_not_found_rewritten: bool = False
+    previous_response_owner_lookup_source: str | None = None
+    previous_response_owner_lookup_outcome: str | None = None
+    previous_response_owner_requested_at: datetime | None = None
+    previous_response_owner_session_id: str | None = None
     response_create_gate_acquired: bool = False
     response_create_gate: asyncio.Semaphore | None = None
     response_create_admission: AdmissionLease | None = None
@@ -797,6 +805,9 @@ def _clear_websocket_request_error_overrides(request_state: _WebSocketRequestSta
     request_state.error_message_override = None
     request_state.error_type_override = None
     request_state.error_param_override = None
+    request_state.failure_phase_override = None
+    request_state.failure_detail_override = None
+    request_state.upstream_error_code_override = None
     request_state.error_http_status_override = None
 
 

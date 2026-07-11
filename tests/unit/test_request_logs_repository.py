@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -179,13 +180,14 @@ async def test_find_latest_account_id_for_response_id_prefers_session_then_falls
     session = AsyncMock()
     repo = RequestLogsRepository(session)
     executed_sql: list[str] = []
+    owner_requested_at = datetime(2026, 7, 11, 12, 0, 0)
     returned_values = iter(
         [
-            "acc_latest",
-            "acc_scoped",
-            "acc_session",
+            ("acc_latest", None, None),
+            ("acc_scoped", None, None),
+            ("acc_session", owner_requested_at, "sid_terminal_a"),
             None,
-            "acc_scoped",
+            ("acc_scoped", None, None),
             None,
         ]
     )
@@ -193,7 +195,7 @@ async def test_find_latest_account_id_for_response_id_prefers_session_then_falls
     async def _execute(statement):
         executed_sql.append(str(statement))
         value = next(returned_values)
-        return SimpleNamespace(scalar_one_or_none=lambda: value)
+        return SimpleNamespace(one_or_none=lambda: value)
 
     session.execute.side_effect = _execute
 
@@ -205,7 +207,7 @@ async def test_find_latest_account_id_for_response_id_prefers_session_then_falls
         response_id="resp_lookup_owner",
         api_key_id="api_key_1",
     )
-    owner_session = await repo.find_latest_account_id_for_response_id(
+    owner_session = await repo.find_latest_owner_record_for_response_id(
         response_id="resp_lookup_owner",
         api_key_id="api_key_1",
         session_id="sid_terminal_a",
@@ -222,7 +224,10 @@ async def test_find_latest_account_id_for_response_id_prefers_session_then_falls
 
     assert owner_any == "acc_latest"
     assert owner_scoped == "acc_scoped"
-    assert owner_session == "acc_session"
+    assert owner_session is not None
+    assert owner_session.account_id == "acc_session"
+    assert owner_session.requested_at == owner_requested_at
+    assert owner_session.session_id == "sid_terminal_a"
     assert owner_session_fallback == "acc_scoped"
     assert owner_missing is None
     assert "request_logs.api_key_id = :api_key_id_1" not in executed_sql[0]
@@ -255,7 +260,7 @@ async def test_find_latest_account_id_for_response_id_ignores_blank_session_id_s
 
     async def _execute(statement):
         executed_sql.append(str(statement))
-        return SimpleNamespace(scalar_one_or_none=lambda: "acc_scoped")
+        return SimpleNamespace(one_or_none=lambda: ("acc_scoped", None, None))
 
     session.execute.side_effect = _execute
 
@@ -275,11 +280,11 @@ async def test_find_latest_account_id_for_response_id_falls_back_when_session_sc
     session = AsyncMock()
     repo = RequestLogsRepository(session)
     executed_sql: list[str] = []
-    returned_values = iter(["   ", "acc_fallback"])
+    returned_values = iter([("   ", None, "sid_terminal_a"), ("acc_fallback", None, None)])
 
     async def _execute(statement):
         executed_sql.append(str(statement))
-        return SimpleNamespace(scalar_one_or_none=lambda: next(returned_values))
+        return SimpleNamespace(one_or_none=lambda: next(returned_values))
 
     session.execute.side_effect = _execute
 

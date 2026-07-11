@@ -1247,7 +1247,7 @@ async def test_v1_responses_previous_response_owner_lookup_failure_without_http_
         if False:
             yield ""
 
-    monkeypatch.setattr(RequestLogsRepository, "find_latest_account_id_for_response_id", fail_owner_lookup)
+    monkeypatch.setattr(RequestLogsRepository, "find_latest_owner_record_for_response_id", fail_owner_lookup)
     monkeypatch.setattr(proxy_module, "core_stream_responses", fail_stream)
 
     response = await async_client.post(

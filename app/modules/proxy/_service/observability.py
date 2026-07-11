@@ -192,6 +192,31 @@ def _record_continuity_owner_resolution(
     )
 
 
+def _format_continuity_fail_closed_diagnostics(
+    *,
+    previous_response_source: str | None,
+    fresh_replay_available: bool | None,
+    owner_lookup_source: str | None,
+    owner_lookup_outcome: str | None,
+    previous_response_age_seconds: int | None,
+    same_session: bool | None,
+) -> str | None:
+    fields: list[str] = []
+    if previous_response_source is not None:
+        fields.append(f"previous_response_source={previous_response_source}")
+    if fresh_replay_available is not None:
+        fields.append(f"fresh_replay_available={str(fresh_replay_available).lower()}")
+    if owner_lookup_source is not None:
+        fields.append(f"owner_lookup_source={owner_lookup_source}")
+    if owner_lookup_outcome is not None:
+        fields.append(f"owner_lookup_outcome={owner_lookup_outcome}")
+    if previous_response_age_seconds is not None:
+        fields.append(f"previous_response_age_seconds={previous_response_age_seconds}")
+    if same_session is not None:
+        fields.append(f"same_session={str(same_session).lower()}")
+    return " ".join(fields) if fields else None
+
+
 def _record_continuity_fail_closed(
     *,
     surface: str,
@@ -199,6 +224,12 @@ def _record_continuity_fail_closed(
     previous_response_id: str | None,
     session_id: str | None = None,
     upstream_error_code: str | None = None,
+    previous_response_source: str | None = None,
+    fresh_replay_available: bool | None = None,
+    owner_lookup_source: str | None = None,
+    owner_lookup_outcome: str | None = None,
+    previous_response_age_seconds: int | None = None,
+    same_session: bool | None = None,
 ) -> None:
     prometheus_available = bool(_service_global("PROMETHEUS_AVAILABLE", PROMETHEUS_AVAILABLE))
     counter = _service_global("continuity_fail_closed_total", continuity_fail_closed_total)
@@ -207,13 +238,23 @@ def _record_continuity_fail_closed(
             surface=surface,
             reason=reason,
         ).inc()
+    diagnostics = _format_continuity_fail_closed_diagnostics(
+        previous_response_source=previous_response_source,
+        fresh_replay_available=fresh_replay_available,
+        owner_lookup_source=owner_lookup_source,
+        owner_lookup_outcome=owner_lookup_outcome,
+        previous_response_age_seconds=previous_response_age_seconds,
+        same_session=same_session,
+    )
     logger.warning(
-        "continuity_fail_closed surface=%s reason=%s previous_response_id=%s session_id=%s upstream_error_code=%s",
+        "continuity_fail_closed surface=%s reason=%s previous_response_id=%s session_id=%s "
+        "upstream_error_code=%s diagnostics=%s",
         surface,
         reason,
         _hash_identifier_or_none(previous_response_id),
         _hash_identifier_or_none(session_id),
         upstream_error_code,
+        diagnostics,
     )
 
 

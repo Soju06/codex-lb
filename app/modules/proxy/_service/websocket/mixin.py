@@ -8,6 +8,7 @@ import time
 from collections import deque
 from contextlib import contextmanager
 from dataclasses import replace
+from datetime import datetime
 from typing import Any, Iterator, Mapping, NoReturn, cast
 
 import aiohttp
@@ -1075,6 +1076,7 @@ class _WebSocketMixin:
                             api_key=request_state.api_key or api_key,
                             session_id=request_state.session_id,
                             surface="websocket",
+                            request_state=request_state,
                         )
                     except ProxyResponseError as exc:
                         error = _parse_openai_error(exc.payload)
@@ -2909,9 +2911,25 @@ class _WebSocketMixin:
         api_key: ApiKeyData | None,
         session_id: str | None = None,
         surface: str,
+        request_state: _WebSocketRequestState | None = None,
     ) -> str | None:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
+
+        def _record_lookup_metadata(
+            *,
+            source: str,
+            outcome: str,
+            requested_at: datetime | None = None,
+            owner_session_id: str | None = None,
+        ) -> None:
+            if request_state is None:
+                return
+            request_state.previous_response_owner_lookup_source = source
+            request_state.previous_response_owner_lookup_outcome = outcome
+            request_state.previous_response_owner_requested_at = requested_at
+            request_state.previous_response_owner_session_id = owner_session_id
+
         if previous_response_id is None:
             return None
         response_id = previous_response_id.strip()
@@ -2922,6 +2940,7 @@ class _WebSocketMixin:
         cache_key = (response_id, api_key_id, session_id_value)
         cached_account_id = proxy._websocket_previous_response_account_index.get(cache_key)
         if cached_account_id is not None:
+            _record_lookup_metadata(source="request_cache", outcome="hit")
             _record_continuity_owner_resolution(
                 surface=surface,
                 source="request_cache",
@@ -2937,13 +2956,14 @@ class _WebSocketMixin:
         )
         try:
             async with proxy._repo_factory() as repos:
-                account_id = await repos.request_logs.find_latest_account_id_for_response_id(
+                owner_record = await repos.request_logs.find_latest_owner_record_for_response_id(
                     response_id=response_id,
                     api_key_id=api_key_id,
                     session_id=session_id_value,
                 )
         except Exception as exc:
             if fallback_account_id is not None:
+                _record_lookup_metadata(source="request_cache_fallback", outcome="hit")
                 _record_continuity_owner_resolution(
                     surface=surface,
                     source="request_cache_fallback",
@@ -2956,6 +2976,7 @@ class _WebSocketMixin:
                     exc_info=True,
                 )
                 return fallback_account_id
+            _record_lookup_metadata(source="request_logs", outcome="fail_closed")
             _record_continuity_owner_resolution(
                 surface=surface,
                 source="request_logs",
@@ -2974,8 +2995,9 @@ class _WebSocketMixin:
                 502,
                 _facade()._previous_response_owner_lookup_failed_error_envelope(),
             ) from exc
-        if account_id is None:
+        if owner_record is None:
             if fallback_account_id is not None:
+                _record_lookup_metadata(source="request_cache_fallback", outcome="hit")
                 _record_continuity_owner_resolution(
                     surface=surface,
                     source="request_cache_fallback",
@@ -2984,6 +3006,7 @@ class _WebSocketMixin:
                     session_id=session_id_value,
                 )
             else:
+                _record_lookup_metadata(source="request_logs", outcome="miss")
                 _record_continuity_owner_resolution(
                     surface=surface,
                     source="request_logs",
@@ -2995,8 +3018,14 @@ class _WebSocketMixin:
         proxy._remember_websocket_previous_response_owner(
             previous_response_id=response_id,
             api_key_id=api_key_id,
-            account_id=account_id,
+            account_id=owner_record.account_id,
             session_id=session_id_value,
+        )
+        _record_lookup_metadata(
+            source="request_logs",
+            outcome="hit",
+            requested_at=owner_record.requested_at,
+            owner_session_id=owner_record.session_id,
         )
         _record_continuity_owner_resolution(
             surface=surface,
@@ -3005,7 +3034,7 @@ class _WebSocketMixin:
             previous_response_id=response_id,
             session_id=session_id_value,
         )
-        return account_id
+        return owner_record.account_id
 
     async def _handle_websocket_connect_error(self, account: Account, exc: ProxyResponseError) -> ClassifiedFailure:
         proxy = cast(_WebSocketServiceProtocol, self)
@@ -4222,6 +4251,9 @@ class _WebSocketMixin:
                 status=status,
                 error_code=error_code,
                 error_message=error_message,
+                failure_phase=request_state.failure_phase_override,
+                failure_detail=request_state.failure_detail_override,
+                upstream_error_code=request_state.upstream_error_code_override,
                 input_tokens=usage.input_tokens if usage else None,
                 output_tokens=usage.output_tokens if usage else None,
                 cached_input_tokens=cached_input_tokens,
@@ -4289,6 +4321,9 @@ class _WebSocketMixin:
             status="error",
             error_code=error_code,
             error_message=error_message,
+            failure_phase=request_state.failure_phase_override,
+            failure_detail=request_state.failure_detail_override,
+            upstream_error_code=request_state.upstream_error_code_override,
             reasoning_effort=request_state.reasoning_effort,
             transport=request_state.transport,
             upstream_transport=request_state.upstream_transport,
@@ -4519,6 +4554,9 @@ class _WebSocketMixin:
                 status=status,
                 error_code=request_error_code,
                 error_message=request_error_message,
+                failure_phase=request_state.failure_phase_override,
+                failure_detail=request_state.failure_detail_override,
+                upstream_error_code=request_state.upstream_error_code_override,
                 reasoning_effort=request_state.reasoning_effort,
                 transport=request_state.transport,
                 upstream_transport=request_state.upstream_transport,

@@ -11,6 +11,7 @@ import time
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
+from datetime import timedelta
 from types import SimpleNamespace
 from typing import Any, AsyncIterator, Iterator, Literal, Protocol, Self, cast
 from unittest.mock import ANY, AsyncMock, MagicMock
@@ -66,6 +67,7 @@ from app.modules.proxy._service.support import (
     _account_selection_recovery_sleep_seconds,
     _sleep_for_account_selection_recovery,
 )
+from app.modules.proxy._service.websocket import helpers as websocket_helpers_module
 from app.modules.proxy._service.websocket import mixin as websocket_mixin
 from app.modules.proxy._service.websocket import mixin as websocket_mixin_module
 from app.modules.proxy.load_balancer import (
@@ -78,7 +80,7 @@ from app.modules.proxy.load_balancer import (
 )
 from app.modules.proxy.repo_bundle import ProxyRepositories
 from app.modules.proxy.sticky_repository import StickySessionsRepository
-from app.modules.request_logs.repository import RequestLogsRepository
+from app.modules.request_logs.repository import PreviousResponseOwnerRecord, RequestLogsRepository
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 
 pytestmark = pytest.mark.unit
@@ -1675,6 +1677,44 @@ async def test_resolve_websocket_previous_response_owner_records_request_log_sou
             "value": 1.0,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_resolve_websocket_previous_response_owner_cache_hit_keeps_owner_session_unknown():
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_cached_owner_metadata",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        previous_response_id="resp_cached_owner_metadata",
+        session_id="sid-cached-owner",
+    )
+    service._remember_websocket_previous_response_owner(
+        previous_response_id="resp_cached_owner_metadata",
+        api_key_id=None,
+        account_id="acc_cached_owner",
+        session_id="sid-cached-owner",
+    )
+
+    owner = await service._resolve_websocket_previous_response_owner(
+        previous_response_id="resp_cached_owner_metadata",
+        api_key=None,
+        session_id="sid-cached-owner",
+        surface="websocket",
+        request_state=request_state,
+    )
+
+    assert owner == "acc_cached_owner"
+    assert request_logs.lookup_calls == []
+    assert request_state.previous_response_owner_lookup_source == "request_cache"
+    assert request_state.previous_response_owner_lookup_outcome == "hit"
+    assert request_state.previous_response_owner_requested_at is None
+    assert request_state.previous_response_owner_session_id is None
+    assert websocket_helpers_module._websocket_stale_anchor_diagnostics(request_state).same_session is None
 
 
 @pytest.mark.asyncio
@@ -3692,6 +3732,34 @@ class _RequestLogsRecorder:
     async def add_log(self, **kwargs: object) -> None:
         self.calls.append(dict(kwargs))
 
+    async def find_latest_owner_record_for_response_id(
+        self,
+        *,
+        response_id: str,
+        api_key_id: str | None,
+        session_id: str | None = None,
+    ) -> PreviousResponseOwnerRecord | None:
+        key = (response_id, api_key_id, session_id)
+        self.lookup_calls.append(key)
+        if self.lookup_error is not None:
+            raise self.lookup_error
+        owner = self.response_owner_by_id.get(key)
+        if owner is not None:
+            return PreviousResponseOwnerRecord(
+                account_id=owner,
+                requested_at=None,
+                session_id=session_id,
+            )
+        if session_id is not None:
+            fallback_owner = self.response_owner_by_id.get((response_id, api_key_id, None))
+            if fallback_owner is not None:
+                return PreviousResponseOwnerRecord(
+                    account_id=fallback_owner,
+                    requested_at=None,
+                    session_id=None,
+                )
+        return None
+
     async def find_latest_account_id_for_response_id(
         self,
         *,
@@ -3699,16 +3767,12 @@ class _RequestLogsRecorder:
         api_key_id: str | None,
         session_id: str | None = None,
     ) -> str | None:
-        key = (response_id, api_key_id, session_id)
-        self.lookup_calls.append(key)
-        if self.lookup_error is not None:
-            raise self.lookup_error
-        owner = self.response_owner_by_id.get(key)
-        if owner is not None:
-            return owner
-        if session_id is not None:
-            return self.response_owner_by_id.get((response_id, api_key_id, None))
-        return None
+        owner = await self.find_latest_owner_record_for_response_id(
+            response_id=response_id,
+            api_key_id=api_key_id,
+            session_id=session_id,
+        )
+        return owner.account_id if owner is not None else None
 
     async def find_latest_response_id_for_session_id(
         self,
@@ -23603,6 +23667,7 @@ def test_maybe_rewrite_websocket_previous_response_not_found_masks_lost_local_an
 
 
 def test_sanitize_websocket_connect_failure_rewrites_previous_response_not_found(monkeypatch, caplog):
+    fixed_now = utcnow()
     request_state = proxy_service._WebSocketRequestState(
         request_id="ws_req_prev_connect_failure",
         model="gpt-5.1",
@@ -23611,10 +23676,18 @@ def test_sanitize_websocket_connect_failure_rewrites_previous_response_not_found
         api_key_reservation=None,
         started_at=0.0,
         previous_response_id="resp_prev_anchor",
+        session_id="sid-prev-shared",
     )
+    request_state.fresh_upstream_request_text = '{"type":"response.create","input":[]}'
+    request_state.fresh_upstream_request_is_retry_safe = True
+    request_state.previous_response_owner_lookup_source = "request_logs"
+    request_state.previous_response_owner_lookup_outcome = "hit"
+    request_state.previous_response_owner_requested_at = fixed_now - timedelta(seconds=42)
+    request_state.previous_response_owner_session_id = "sid-prev-shared"
     counter = _ObservedCounter()
     monkeypatch.setattr(proxy_service, "PROMETHEUS_AVAILABLE", True)
     monkeypatch.setattr(proxy_service, "continuity_fail_closed_total", counter, raising=False)
+    monkeypatch.setattr(websocket_helpers_module, "utcnow", lambda: fixed_now)
     caplog.set_level(logging.WARNING, logger="app.modules.proxy.service")
     original_payload = proxy_module.openai_error(
         "previous_response_not_found",
@@ -23642,7 +23715,23 @@ def test_sanitize_websocket_connect_failure_rewrites_previous_response_not_found
     assert rewritten_payload["error"]["type"] == "server_error"
     assert rewritten_error_code == "stream_incomplete"
     assert rewritten_error_message == "Upstream websocket closed before response.completed"
-    assert "continuity_fail_closed surface=websocket_connect reason=previous_response_not_found" in caplog.text
+    assert request_state.failure_phase_override == "upstream"
+    assert request_state.failure_detail_override == (
+        "previous_response_not_found "
+        "previous_response_source=client_supplied "
+        "fresh_replay_available=true "
+        "owner_lookup_source=request_logs "
+        "owner_lookup_outcome=hit "
+        "previous_response_age_seconds=42 "
+        "same_session=true"
+    )
+    assert request_state.upstream_error_code_override == "previous_response_not_found"
+    assert "resp_prev_anchor" not in request_state.failure_detail_override
+    assert (
+        "diagnostics=previous_response_source=client_supplied fresh_replay_available=true "
+        "owner_lookup_source=request_logs owner_lookup_outcome=hit "
+        "previous_response_age_seconds=42 same_session=true"
+    ) in caplog.text
     assert "resp_prev_anchor" not in caplog.text
     assert counter.samples == [
         {
@@ -23650,6 +23739,33 @@ def test_sanitize_websocket_connect_failure_rewrites_previous_response_not_found
             "value": 1.0,
         }
     ]
+
+
+def test_sanitize_websocket_terminal_stale_error_marks_missing_anchor_source_unknown():
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_unanchored_stale_error",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+    )
+
+    error_code, error_message, error_type, error_param = proxy_service._sanitize_websocket_terminal_error_fields(
+        request_state=request_state,
+        error_code="previous_response_not_found",
+        error_message="Previous response not found.",
+        error_type="invalid_request_error",
+        error_param="previous_response_id",
+    )
+
+    assert error_code == "stream_incomplete"
+    assert error_message == "Upstream websocket closed before response.completed"
+    assert error_type == "server_error"
+    assert error_param is None
+    assert request_state.failure_detail_override is not None
+    assert "previous_response_source=unknown" in request_state.failure_detail_override
+    assert "previous_response_source=none" not in request_state.failure_detail_override
 
 
 def test_sanitize_websocket_connect_failure_rewrites_invalid_request_previous_response_not_found():

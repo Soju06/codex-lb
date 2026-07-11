@@ -367,6 +367,7 @@ class _StreamingRetryMixin:
                 return False
             payload = verified_fresh_replay_payload
             verified_fresh_replay_payload = None
+            excluded_account_ids.add(account_id)
             preferred_account_id = None
             require_preferred_account = False
             affinity = replace(affinity, reallocate_sticky=True)
@@ -1656,6 +1657,10 @@ class _StreamingRetryMixin:
                                 last_transient_exc = retry_exc
                                 await _release_tracked_stream_lease(current_account_lease)
                                 current_account_lease = None
+                                _move_verified_fresh_replay_from_owner(
+                                    account_id=account.id,
+                                    outcome="owner_post_refresh_failure",
+                                )
                                 excluded_account_ids.add(account.id)
                                 continue
                             if propagate_http_errors:

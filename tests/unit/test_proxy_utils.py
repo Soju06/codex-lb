@@ -17658,6 +17658,8 @@ async def test_process_upstream_websocket_text_owner_replay_releases_old_account
     assert pending_request.request_text == json.dumps(fresh_payload, separators=(",", ":"))
     assert pending_request.previous_response_id is None
     assert pending_request.preferred_account_id is None
+    assert pending_request.excluded_account_ids == {old_account.id}
+    assert pending_request.affinity_policy.reallocate_sticky is True
     assert pending_request.account_response_create_lease is None
     assert pending_request.account_response_create_release is None
     assert pending_request.response_create_gate is response_create_gate

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import replace
 from typing import Any, TypeVar
 
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
@@ -59,6 +60,7 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
     _maybe_rewrite_websocket_previous_response_not_found_event,
     _pop_matching_websocket_request_states,
     _pop_terminal_websocket_request_state,
+    _prepare_websocket_request_state_for_account_switch,
     _previous_response_id_from_not_found_message,
     _release_websocket_response_create_gate,
     _response_output_item_done_tool_call,
@@ -690,15 +692,46 @@ class _HTTPBridgeUpstreamEventsMixin:
                 and status_request_state.previous_response_id is not None
                 and status_request_state.preferred_account_id is not None
             ):
-                status_request_state.error_http_status_override = 502
-                session.upstream_control.reconnect_requested = True
-                session.upstream_control.retire_after_drain = True
-                event, payload, event_type, rewritten_text = (
-                    _rewrite_websocket_previous_response_owner_unavailable_event(
-                        request_state=status_request_state,
+                safe_request_text = _prepare_websocket_request_state_for_account_switch(status_request_state)
+                if safe_request_text is not None:
+                    await self._release_request_state_account_response_create_lease(status_request_state)
+                    status_request_state.excluded_account_ids.add(session.account.id)
+                    status_request_state.affinity_policy = replace(
+                        status_request_state.affinity_policy,
+                        reallocate_sticky=True,
                     )
-                )
-                event_block = f"data: {rewritten_text}\n\n"
+                    status_request_state.request_text = safe_request_text
+                    async with session.pending_lock:
+                        if status_request_state not in session.pending_requests:
+                            session.pending_requests.appendleft(status_request_state)
+                            session.queued_request_count += 1
+                        status_request_state.awaiting_response_created = True
+                        status_request_state.response_id = None
+                    retried = await self._retry_http_bridge_precreated_request(session)
+                    if retried:
+                        return
+                    async with session.pending_lock:
+                        if status_request_state in session.pending_requests:
+                            session.pending_requests.remove(status_request_state)
+                            session.queued_request_count = max(0, session.queued_request_count - 1)
+                    status_request_state.error_http_status_override = 502
+                    (
+                        _downstream_text,
+                        event_block,
+                        event,
+                        payload,
+                        event_type,
+                    ) = _build_stream_incomplete_terminal_event_for_request(status_request_state)
+                else:
+                    status_request_state.error_http_status_override = 502
+                    session.upstream_control.reconnect_requested = True
+                    session.upstream_control.retire_after_drain = True
+                    event, payload, event_type, rewritten_text = (
+                        _rewrite_websocket_previous_response_owner_unavailable_event(
+                            request_state=status_request_state,
+                        )
+                    )
+                    event_block = f"data: {rewritten_text}\n\n"
         elif retry_error_code is not None and not is_previous_response_not_found_event:
             await self._handle_stream_error(
                 session.account,
@@ -842,7 +875,8 @@ class _HTTPBridgeUpstreamEventsMixin:
                     and (
                         terminal_request_state.previous_response_id is None
                         or (
-                            terminal_request_state.fresh_upstream_request_text is not None
+                            terminal_request_state.proxy_injected_previous_response_id
+                            and terminal_request_state.fresh_upstream_request_text is not None
                             and terminal_request_state.fresh_upstream_request_is_retry_safe
                         )
                     )

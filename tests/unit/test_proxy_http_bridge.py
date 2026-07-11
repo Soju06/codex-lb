@@ -11391,6 +11391,102 @@ async def test_process_http_bridge_upstream_text_masks_previous_response_usage_l
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_replays_proxy_verified_full_resend_after_owner_quota(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    fresh_text = (
+        '{"type":"response.create","model":"gpt-5.6-sol",'
+        '"input":[{"role":"user","content":[{"type":"input_text","text":"full resend"}]}]}'
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-verified-owner-limit",
+        model="gpt-5.6-sol",
+        service_tier="priority",
+        reasoning_effort="high",
+        api_key_reservation=None,
+        started_at=1.0,
+        previous_response_id="resp_verified_owner",
+        preferred_account_id="acc-limited",
+        proxy_injected_previous_response_id=True,
+        fresh_upstream_request_text=fresh_text,
+        fresh_upstream_request_is_retry_safe=True,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        request_text=(
+            '{"type":"response.create","model":"gpt-5.6-sol",'
+            '"previous_response_id":"resp_verified_owner","input":"trimmed"}'
+        ),
+        transport="http",
+        skip_request_log=True,
+        affinity_policy=proxy_service._AffinityPolicy(
+            key="http_turn_verified_owner_limit",
+            kind=proxy_service.StickySessionKind.CODEX_SESSION,
+        ),
+    )
+    account = cast(Any, SimpleNamespace(id="acc-limited", status=AccountStatus.ACTIVE))
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey(
+            "turn_state_header",
+            "http_turn_verified_owner_limit",
+            None,
+        ),
+        headers={"x-codex-turn-state": "http_turn_verified_owner_limit"},
+        affinity=request_state.affinity_policy,
+        request_model="gpt-5.6-sol",
+        account=account,
+        upstream=cast(UpstreamResponsesWebSocket, SimpleNamespace(close=AsyncMock())),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=1.0,
+        idle_ttl_seconds=120.0,
+    )
+    handle_stream_error = AsyncMock()
+    release_create_lease = AsyncMock()
+
+    async def retry_precreated(retry_session):
+        assert retry_session is session
+        assert request_state.previous_response_id is None
+        assert request_state.preferred_account_id is None
+        assert request_state.request_text == fresh_text
+        assert request_state.excluded_account_ids == {account.id}
+        assert request_state.affinity_policy.reallocate_sticky is True
+        assert list(session.pending_requests) == [request_state]
+        return True
+
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    monkeypatch.setattr(
+        service,
+        "_release_request_state_account_response_create_lease",
+        release_create_lease,
+    )
+    monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", retry_precreated)
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {
+                "type": "error",
+                "status": 429,
+                "error": {
+                    "type": "usage_limit_reached",
+                    "message": "The usage limit has been reached",
+                },
+            },
+            separators=(",", ":"),
+        ),
+    )
+
+    handle_stream_error.assert_awaited_once()
+    release_create_lease.assert_awaited_once_with(request_state)
+    assert request_state.event_queue is not None
+    assert request_state.event_queue.empty()
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_masks_owner_pinned_quota_error_with_queued_requests(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

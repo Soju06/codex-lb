@@ -6,6 +6,7 @@ import sys
 import time
 from collections import deque
 from contextlib import contextmanager
+from dataclasses import replace
 from typing import Any, Iterator, Mapping, NoReturn, cast
 
 import aiohttp
@@ -1080,6 +1081,12 @@ class _WebSocketMixin:
                         # The anchor remains unchanged. The normal connect path
                         # below must select the resolved owner or fail closed.
                         await retire_current_upstream()
+                        # Turn-state is learned from the retired account's
+                        # socket and must never cross the account boundary.
+                        upstream_turn_state = None
+                        filtered_headers = {
+                            key: value for key, value in filtered_headers.items() if key.lower() != "x-codex-turn-state"
+                        }
 
                 if upstream is None:
                     if text_data is not None and payload is None:
@@ -3243,6 +3250,11 @@ class _WebSocketMixin:
                 # re-acquires the account-local slot only when this field is
                 # clear.
                 await proxy._release_request_state_account_response_create_lease(request_state)
+                request_state.excluded_account_ids.add(account.id)
+                request_state.affinity_policy = replace(
+                    request_state.affinity_policy,
+                    reallocate_sticky=True,
+                )
                 request_state.request_text = safe_request_text
         if retry_error_code is not None:
             if retry_is_previous_response_not_found:

@@ -4,7 +4,7 @@
 
 ### Requirement: WebSocket full-resend previous-response misses MUST retry without stale anchor
 
-When a direct WebSocket `response.create` request includes both, the service MUST
+When a direct WebSocket `response.create` request includes both
 `previous_response_id` and a self-contained full resend payload, the service
 MUST retain a safe replay body without `previous_response_id`. If upstream
 rejects the anchor with `previous_response_not_found` before
@@ -19,7 +19,10 @@ or another pre-visible account-local failure, a client-owned
 `previous_response_id` MUST remain owner-bound even when the request resembles
 a full resend. The service MAY remove an anchor for account switching only when
 the proxy injected that anchor after verifying retained continuity metadata and
-captured an independently equivalent fresh request body.
+captured an independently equivalent fresh request body. A verified replay MUST
+exclude the failed owner, release any account-local create lease, and reallocate
+sticky selection before reconnecting. It MUST NOT move if the retained fresh
+body contains an account-scoped file reference.
 
 #### Scenario: full-resend WebSocket follow-up loses just-completed anchor
 
@@ -56,6 +59,23 @@ captured an independently equivalent fresh request body.
 - **AND** the owner reports a pre-visible quota failure
 - **THEN** the service may reconnect through another eligible account using the
   retained fresh body
+- **AND** the failed owner is excluded from replay selection
+- **AND** its account-local create lease is released before replacement
+  selection
+
+#### Scenario: client-owned continuation hits security authorization routing
+
+- **WHEN** a client-owned previous-response request receives a pre-visible
+  security-work authorization error
+- **THEN** the service keeps the request owner-bound
+- **AND** it does not strip the anchor to route through another account
+
+#### Scenario: verified fresh body contains an uploaded file
+
+- **WHEN** a proxy-injected previous-response anchor has a retained fresh body
+- **AND** that body contains `input_file.file_id`
+- **THEN** the service does not remove the anchor for account switching
+- **AND** it preserves the account that owns the uploaded file
 
 ### Requirement: Cross-transport full resends MUST require retained continuity proof
 
@@ -75,6 +95,16 @@ or mismatched proof MUST keep the request owner-bound.
 - **WHEN** the response owner is unavailable before visible output
 - **THEN** the service may remove `previous_response_id`
 - **AND** replay the full input through another eligible account
+
+#### Scenario: trimmed HTTP bridge full resend hits owner quota
+
+- **GIVEN** an HTTP bridge injected a durable anchor after proving and trimming
+  the stored input prefix
+- **AND** it retained the equivalent unanchored full request
+- **WHEN** the owner reports a pre-visible quota failure
+- **THEN** the bridge removes the proxy-injected anchor
+- **AND** reconnects on another eligible account while excluding the failed
+  owner
 
 #### Scenario: structural full resend lacks retained proof
 
@@ -124,6 +154,8 @@ excludes that owner.
   currently open upstream account
 - **THEN** the service retires the current upstream socket
 - **AND** reconnects the unchanged anchored request to the required owner
+- **AND** it does not forward turn-state learned from the retired account to the
+  required owner
 
 #### Scenario: required owner matches the healthy open WebSocket account
 

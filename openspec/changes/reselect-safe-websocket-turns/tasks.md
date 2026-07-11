@@ -11,10 +11,15 @@
 - [x] Reconnect mismatched owner-pinned turns without stripping their anchor.
 - [x] Permit quota failover only for proxy-injected verified anchors.
 - [x] Permit WS-to-HTTP failover only with matching session continuity fingerprints.
+- [x] Exclude failed owners and release account-local leases before verified replay.
+- [x] Preserve file pins and client-owned anchors across security routing.
+- [x] Drop retired-account turn-state before an owner-mismatch reconnect.
+- [x] Replay durable trimmed HTTP bridge full resends after owner quota.
 
 ## Verification
 
 - [x] Add helper, selector, owner-pin, and quota replay regressions.
 - [x] Add verified and unverified cross-transport replay regressions.
+- [x] Add file-pin, security, turn-state, sticky-exclusion, and HTTP bridge quota regressions.
 - [x] Run focused and broad WebSocket tests.
 - [x] Run Ruff, type checks, strict OpenSpec validation, and diff checks.

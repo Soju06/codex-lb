@@ -439,6 +439,10 @@ def _pop_matching_websocket_request_states(*args: Any, **kwargs: Any) -> Any:
     return _service_global("_pop_matching_websocket_request_states")(*args, **kwargs)
 
 
+def _prepare_websocket_request_state_for_account_switch(*args: Any, **kwargs: Any) -> Any:
+    return _service_global("_prepare_websocket_request_state_for_account_switch")(*args, **kwargs)
+
+
 def _matching_websocket_request_states_for_previous_response_error(*args: Any, **kwargs: Any) -> Any:
     return _service_global("_matching_websocket_request_states_for_previous_response_error")(*args, **kwargs)
 

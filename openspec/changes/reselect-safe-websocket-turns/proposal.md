@@ -23,6 +23,10 @@ selector check excludes an otherwise healthy open owner socket.
 - Allow a WebSocket-to-HTTP full resend to move accounts only when the shared
   session's in-memory continuity fingerprint proves the resent prefix and the
   request contains no account-scoped file reference.
+- Carry the same verified replay boundary through durable HTTP bridge quota
+  recovery, excluding the failed owner and releasing its account-local lease.
+- Prevent account-scoped file IDs, client-owned security retries, and learned
+  turn-state from crossing account boundaries.
 
 ## Impact
 

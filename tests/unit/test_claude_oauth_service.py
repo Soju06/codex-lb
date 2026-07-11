@@ -357,3 +357,83 @@ async def test_complete_oauth_logs_no_secrets(caplog: pytest.LogCaptureFixture) 
     joined = "\n".join(rec.getMessage() for rec in caplog.records)
     for secret in ("SECRET_AT", "SECRET_RT", "SECRET_CODE"):
         assert secret not in joined, f"log leaked token material: {secret!r}"
+
+
+# ---------------------------------------------------------------------------
+# claude-oauth-link endpoints (see openspec/changes/fix-claude-oauth-link-endpoints)
+# ---------------------------------------------------------------------------
+
+
+def _production_like_settings() -> Any:
+    """Settings shaped exactly like the production defaults.
+
+    Mirrors the values documented in ``app/core/config/settings.py`` after the
+    fix in ``openspec/changes/fix-claude-oauth-link-endpoints``. Used by the
+    URL-shape tests below so a regression in the default values is caught
+    here instead of at operator runtime.
+    """
+
+    return SimpleNamespace(
+        claude_oauth_authorize_endpoint="https://claude.com/cai/oauth/authorize",
+        claude_oauth_client_id="9d1c250a-e61b-44d9-88ed-5944d1962f5e",
+        claude_oauth_redirect_uri="https://platform.claude.com/oauth/code/callback",
+        claude_oauth_scopes="user:profile user:inference",
+        claude_oauth_flow_ttl_seconds=600,
+    )
+
+
+async def test_start_oauth_emits_claude_code_cli_url_with_code_true_flag() -> None:
+    """Regression guard for openspec/.../fix-claude-oauth-link-endpoints.
+
+    Anthropic accepts the authorization request only when the URL matches the
+    Claude Code CLI pattern: ``https://claude.com/cai/oauth/authorize?code=true&...
+    &redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&...``.
+    A previous attempt used ``https://platform.claude.com/oauth/authorize`` plus
+    ``redirect_uri=https://console.anthropic.com/oauth/code`` and was rejected
+    with "Redirect URI ... is not supported by client." (operator report).
+    """
+    from urllib.parse import parse_qs, urlparse
+
+    svc, _, _ = _make_service(settings=_production_like_settings())
+    resp = await svc.start_oauth()
+
+    parsed = urlparse(resp.authorization_url)
+    # Authorize endpoint matches Claude Code CLI.
+    assert parsed.scheme == "https"
+    assert parsed.netloc == "claude.com"
+    assert parsed.path == "/cai/oauth/authorize"
+    qs = parse_qs(parsed.query)
+    # ``code=true`` must be the first query parameter (matches Claude Code CLI).
+    assert qs.get("code") == ["true"], (
+        "code=true is required to select Anthropic's OOB code-display flow"
+    )
+    # The order of the query string matters because Anthropic's authorize
+    # endpoint requires ``code=true`` first; assert the literal substring
+    # appears right after the question mark.
+    assert resp.authorization_url.startswith(
+        "https://claude.com/cai/oauth/authorize?code=true&"
+    )
+    # Redirect URI is the one Anthropic has whitelisted for the public
+    # Claude Code client_id.
+    assert qs.get("redirect_uri") == [
+        "https://platform.claude.com/oauth/code/callback"
+    ]
+    assert qs.get("client_id") == ["9d1c250a-e61b-44d9-88ed-5944d1962f5e"]
+    assert qs.get("response_type") == ["code"]
+    assert qs.get("code_challenge_method") == ["S256"]
+    assert resp.redirect_uri == "https://platform.claude.com/oauth/code/callback"
+
+
+def test_default_settings_pin_claude_code_compatible_endpoints() -> None:
+    """Pin the production defaults so they cannot drift back to the rejected values.
+
+    If either default regresses, operators will hit Anthropic's
+    "Redirect URI ... is not supported by client" error at runtime.
+    """
+    from app.core.config.settings import Settings
+
+    # Construct Settings without reading the host's environment so the defaults
+    # are exercised in isolation (env vars still take precedence in production).
+    settings = Settings(_env_file=None)
+    assert settings.claude_oauth_authorize_endpoint == "https://claude.com/cai/oauth/authorize"
+    assert settings.claude_oauth_redirect_uri == "https://platform.claude.com/oauth/code/callback"

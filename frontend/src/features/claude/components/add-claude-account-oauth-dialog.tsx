@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { AlertMessage } from "@/components/alert-message";
+import { CopyButton } from "@/components/copy-button";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -169,20 +170,11 @@ function DialogBody({ onSuccess, onClose }: DialogBodyProps) {
                 autoComplete="off"
                 className="font-mono text-xs"
               />
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                className="h-9 shrink-0"
-                onClick={() => {
-                  if (startData?.authorizationUrl) {
-                    void navigator.clipboard.writeText(startData.authorizationUrl);
-                  }
-                }}
+              <CopyButton
+                value={startData?.authorizationUrl ?? ""}
+                label={t("claude.oauth.step1.copy")}
                 data-testid="add-claude-account-oauth-copy"
-              >
-                {t("claude.oauth.step1.copy")}
-              </Button>
+              />
             </div>
             {startData?.authorizationUrl ? (
               <a

@@ -383,7 +383,7 @@ def _daily_speed_medians_stmt(
             *([useragent_group_clause] if useragent_group_clause is not None else []),
         ),
     )
-    token_count = func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens)
+    token_count = RequestLog.output_tokens
     ttft_values_cte = (
         select(
             day_ranges_cte.c.report_date,

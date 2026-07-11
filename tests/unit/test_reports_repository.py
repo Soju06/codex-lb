@@ -127,8 +127,8 @@ async def test_aggregate_daily_rows_calculates_sql_medians_for_odd_even_and_inva
     async_session.add(_make_account(account_id, "reports-speed-medians@example.com"))
     async_session.add_all(
         [
-            # Day one ignores missing TTFT and invalid TPS samples: TTFT [100, 200, 300], TPS [10, 10].
-            # A missing persisted output count falls back to reasoning tokens.
+            # Day one ignores missing TTFT and invalid TPS samples: TTFT [100, 200, 300], TPS [10].
+            # Reasoning tokens are not used for the existing output TPS metric.
             RequestLog(
                 account_id=account_id,
                 request_id="report-speed-even-1",
@@ -172,8 +172,7 @@ async def test_aggregate_daily_rows_calculates_sql_medians_for_odd_even_and_inva
                 latency_ms=200,
                 latency_first_token_ms=200,
             ),
-            # Day two also accepts reasoning-only tokens for TPS: TTFT [100, 200, 300, 400], TPS [4, 20, 100].
-            # An explicit zero output count wins over a populated reasoning count.
+            # Day two ignores reasoning-only and zero-output rows for TPS: TTFT [100, 200, 300, 400], TPS [4, 20].
             RequestLog(
                 account_id=account_id,
                 request_id="report-speed-odd-1",
@@ -224,7 +223,7 @@ async def test_aggregate_daily_rows_calculates_sql_medians_for_odd_even_and_inva
 
     assert [(row.date, row.median_ttft_ms, row.median_tps) for row in rows] == [
         ("2026-06-01", 200.0, 10.0),
-        ("2026-06-02", 250.0, 20.0),
+        ("2026-06-02", 250.0, 12.0),
     ]
 
 

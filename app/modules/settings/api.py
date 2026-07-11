@@ -565,11 +565,6 @@ async def update_settings(
         single_account_id = (
             payload.single_account_id if "single_account_id" in payload.model_fields_set else current.single_account_id
         )
-        response_create_limit = (
-            payload.proxy_account_response_create_limit
-            if payload.proxy_account_response_create_limit is not None
-            else current.proxy_account_response_create_limit
-        )
         stream_limit = (
             payload.proxy_account_stream_limit
             if payload.proxy_account_stream_limit is not None
@@ -599,9 +594,21 @@ async def update_settings(
                 http_downstream_transport_policy=(
                     payload.http_downstream_transport_policy or current.http_downstream_transport_policy
                 ),
-                proxy_account_response_create_limit=response_create_limit,
-                proxy_account_stream_limit=stream_limit,
-                proxy_account_stream_recovery_reserve=stream_recovery_reserve,
+                proxy_account_response_create_limit=(
+                    payload.proxy_account_response_create_limit
+                    if "proxy_account_response_create_limit" in payload.model_fields_set
+                    else None
+                ),
+                proxy_account_stream_limit=(
+                    payload.proxy_account_stream_limit
+                    if "proxy_account_stream_limit" in payload.model_fields_set
+                    else None
+                ),
+                proxy_account_stream_recovery_reserve=(
+                    payload.proxy_account_stream_recovery_reserve
+                    if "proxy_account_stream_recovery_reserve" in payload.model_fields_set
+                    else None
+                ),
                 upstream_proxy_routing_enabled=(
                     payload.upstream_proxy_routing_enabled
                     if payload.upstream_proxy_routing_enabled is not None

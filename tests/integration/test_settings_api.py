@@ -9,7 +9,8 @@ import pytest
 from sqlalchemy import text
 
 from app.core.auth import generate_unique_account_id
-from app.db.models import Account, AccountStatus
+from app.core.config.settings_cache import get_settings_cache
+from app.db.models import Account, AccountStatus, DashboardSettings
 from app.db.session import SessionLocal
 
 pytestmark = pytest.mark.integration
@@ -205,6 +206,32 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["limitWarmupMinAvailablePercent"] == 99.0
     assert payload["weeklyPaceWorkingDays"] == "0,1,2,3,4"
     assert payload["weeklyPaceSmoothingMinutes"] == 120
+
+
+@pytest.mark.asyncio
+async def test_unrelated_settings_update_preserves_inherited_account_cap_nulls(async_client):
+    response = await async_client.get("/api/settings")
+    assert response.status_code == 200
+
+    async with SessionLocal() as session:
+        settings = await session.get(DashboardSettings, 1)
+        assert settings is not None
+        settings.proxy_account_response_create_limit = None
+        settings.proxy_account_stream_limit = None
+        settings.proxy_account_stream_recovery_reserve = None
+        await session.commit()
+    await get_settings_cache().invalidate()
+
+    response = await async_client.put("/api/settings", json={"warmupModel": "gpt-5.6-sol"})
+    assert response.status_code == 200
+    assert response.json()["warmupModel"] == "gpt-5.6-sol"
+
+    async with SessionLocal() as session:
+        settings = await session.get(DashboardSettings, 1)
+        assert settings is not None
+        assert settings.proxy_account_response_create_limit is None
+        assert settings.proxy_account_stream_limit is None
+        assert settings.proxy_account_stream_recovery_reserve is None
 
 
 @pytest.mark.asyncio

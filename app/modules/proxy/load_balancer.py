@@ -1021,6 +1021,7 @@ class LoadBalancer:
         secondary_budget_threshold_pct: float = 100.0,
         lease_kind: AccountLeaseKind | None = None,
         concurrency_caps: AccountConcurrencyCaps | None = None,
+        stream_reserve_slots: int = 0,
     ) -> AccountSelection:
         selection_inputs = await self._load_selection_inputs(
             model=model,
@@ -1045,7 +1046,12 @@ class LoadBalancer:
                 routing_policy_override=selection_inputs.routing_policy_override,
                 ignore_standard_quota_account_ids=selection_inputs.ignore_standard_quota_account_ids,
             )
-            selection_states = _filter_states_for_account_caps(states, lease_kind=lease_kind, caps=caps)
+            selection_states = _filter_states_for_account_caps(
+                states,
+                lease_kind=lease_kind,
+                caps=caps,
+                stream_reserve_slots=stream_reserve_slots,
+            )
             if not selection_states and states:
                 logger.warning(
                     "Account cap exhausted during opportunistic admission lease_kind=%s reason=%s candidates=%s",

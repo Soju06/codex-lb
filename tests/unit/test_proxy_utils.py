@@ -2024,6 +2024,7 @@ async def test_opportunistic_admission_scopes_single_account_to_selected_account
     await_args = admission_mock.await_args
     assert await_args is not None
     assert await_args.kwargs["account_ids"] == {"acc_selected"}
+    assert await_args.kwargs["stream_reserve_slots"] == settings.proxy_account_stream_recovery_reserve
 
 
 @pytest.mark.asyncio
@@ -2106,6 +2107,46 @@ async def test_opportunistic_admission_honors_stream_account_cap(monkeypatch):
     assert selection.account is None
     assert selection.error_code == "opportunistic_burn_window_closed"
     assert selection.error_message == "opportunistic burn window closed: no account capacity available"
+
+
+@pytest.mark.asyncio
+async def test_opportunistic_admission_reserves_stream_recovery_slot(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    settings.proxy_account_stream_limit = 8
+    settings.proxy_account_response_create_limit = 64
+    settings.proxy_account_stream_recovery_reserve = 1
+    settings.soft_drain_enabled = False
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_opportunistic_stream_reserve")
+    monkeypatch.setattr("app.modules.proxy.load_balancer.get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "_load_selection_inputs",
+        AsyncMock(
+            return_value=SelectionInputs(
+                accounts=[account],
+                latest_primary={},
+                latest_secondary={},
+                latest_monthly={},
+            )
+        ),
+    )
+    service._load_balancer._runtime[account.id] = RuntimeState(inflight_streams=7)
+
+    selection = await service._load_balancer.check_opportunistic_admission(
+        model="gpt-5.1",
+        account_ids=None,
+        prefer_earlier_reset_accounts=False,
+        routing_strategy="usage_weighted",
+        budget_threshold_pct=95.0,
+        lease_kind="stream",
+        concurrency_caps=proxy_service.effective_account_concurrency_caps(settings),
+        stream_reserve_slots=1,
+    )
+
+    assert selection.account is None
+    assert selection.error_code == "opportunistic_burn_window_closed"
 
 
 @pytest.mark.asyncio

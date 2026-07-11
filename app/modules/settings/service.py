@@ -62,9 +62,9 @@ class DashboardSettingsUpdateData:
     upstream_stream_transport: str
     prohibit_fast_mode: bool
     http_downstream_transport_policy: str
-    proxy_account_response_create_limit: int
-    proxy_account_stream_limit: int
-    proxy_account_stream_recovery_reserve: int
+    proxy_account_response_create_limit: int | None
+    proxy_account_stream_limit: int | None
+    proxy_account_stream_recovery_reserve: int | None
     upstream_proxy_routing_enabled: bool
     upstream_proxy_default_pool_id: str | None
     prefer_earlier_reset_accounts: bool

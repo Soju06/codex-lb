@@ -1970,6 +1970,15 @@ class ProxyService(
             secondary_budget_threshold_pct=_sticky_reallocation_secondary_budget_threshold_pct(settings),
             lease_kind=lease_kind,
             concurrency_caps=effective_account_concurrency_caps(settings),
+            stream_reserve_slots=(
+                (
+                    get_settings().proxy_account_stream_recovery_reserve
+                    if getattr(settings, "proxy_account_stream_recovery_reserve", None) is None
+                    else settings.proxy_account_stream_recovery_reserve
+                )
+                if lease_kind == "stream"
+                else 0
+            ),
         )
 
     async def _handle_proxy_error(self, account: Account, exc: ProxyResponseError) -> None:

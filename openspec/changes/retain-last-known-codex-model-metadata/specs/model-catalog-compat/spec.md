@@ -15,6 +15,11 @@ MUST replace the retained entry when the model appears again.
 Models outside the bundled Codex catalog MUST NOT be retained after they leave
 the current live availability snapshot.
 
+OpenAI-compatible source entries that share a slug with retained Codex metadata
+MUST replace retained metadata only when the source entry is visible/listed for
+the requesting API key. A same-slug source entry hidden by the API key's exact
+source allowlist MUST NOT shadow the retained metadata.
+
 #### Scenario: Sol metadata remains resolvable after a partial refresh
 
 - **GIVEN** a successful live catalog refresh returned complete metadata for `gpt-5.6-sol`
@@ -27,3 +32,11 @@ the current live availability snapshot.
 - **GIVEN** metadata was retained for a model omitted by a previous refresh
 - **WHEN** a later live refresh returns that model with updated metadata
 - **THEN** the updated live metadata is used and the model follows its current live visibility
+
+#### Scenario: Hidden source entry does not replace retained metadata
+
+- **GIVEN** metadata was retained for `gpt-5.6-sol`
+- **AND** an OpenAI-compatible source exposes the same `gpt-5.6-sol` slug
+- **AND** an API key's exact source allowlist hides that source entry from the Codex catalog
+- **WHEN** a client calls `GET /backend-api/codex/models` with that API key
+- **THEN** the hidden Sol catalog entry uses the retained Codex metadata

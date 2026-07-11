@@ -1560,3 +1560,56 @@ async def test_codex_visibility_allowlist_keeps_retained_metadata_hidden(async_c
     assert entries["gpt-5.6-terra"]["visibility"] == "list"
     assert entries["gpt-5.6-sol"]["visibility"] == "hide"
     assert entries["gpt-5.6-sol"]["base_instructions"] == "retained sol"
+
+
+@pytest.mark.asyncio
+async def test_hidden_same_slug_source_does_not_shadow_retained_metadata_for_codex_visibility_allowlist(
+    async_client,
+):
+    registry = get_model_registry()
+    sol = _make_upstream_model(
+        "gpt-5.6-sol",
+        base_instructions="retained sol metadata",
+        raw={"use_responses_lite": True},
+    )
+    terra = _make_upstream_model("gpt-5.6-terra")
+    await registry.update({"plus": [sol, terra]})
+    await registry.update({"plus": [terra]})
+    await _create_model_source(
+        async_client,
+        name="hidden-same-slug-sol-source",
+        model="gpt-5.6-sol",
+        supports_responses=True,
+    )
+
+    enable = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert enable.status_code == 200
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "retained-codex-visibility-alias",
+            "allowedModels": ["gpt-5.6-sol-extra-high-fast"],
+            "applyToCodexModel": True,
+        },
+    )
+    assert created.status_code == 200
+
+    resp = await async_client.get(
+        "/backend-api/codex/models",
+        headers={"Authorization": f"Bearer {created.json()['key']}"},
+    )
+
+    assert resp.status_code == 200
+    entries = {item["slug"]: item for item in resp.json()["models"]}
+    assert entries["gpt-5.6-sol"]["visibility"] == "hide"
+    assert entries["gpt-5.6-sol"]["base_instructions"] == "retained sol metadata"
+    assert entries["gpt-5.6-sol"]["use_responses_lite"] is True
+    assert "gpt-5.6-sol" not in {item["id"] for item in resp.json()["data"]}

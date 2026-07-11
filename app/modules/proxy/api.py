@@ -2661,7 +2661,13 @@ async def _build_codex_models_response(api_key: ApiKeyData | None) -> Response:
             elif not is_public_model(source_model, allowed_models):
                 continue
         visible_source_models.append(source_model)
-    source_model_slugs = {model.slug for model in visible_source_models}
+    source_model_slugs = {
+        model.slug
+        for model in visible_source_models
+        if visibility_allowed_models is None
+        or exact_source_allowed_models is None
+        or model.slug in exact_source_allowed_models
+    }
 
     if not models and not metadata_models and not source_models:
         await _release_reservation(reservation)

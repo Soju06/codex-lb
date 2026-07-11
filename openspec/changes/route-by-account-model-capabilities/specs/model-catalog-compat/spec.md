@@ -55,3 +55,13 @@ rejected solely because they are absent from subscription catalog discovery.
 - **WHEN** it is no longer in the active account set
 - **THEN** its capabilities no longer contribute to discovery or routing
 
+#### Scenario: Removed account is the sole advertiser within a stale plan
+
+- **GIVEN** two accounts share a plan and only one advertised a given model
+- **AND** the plan's refresh does not complete this cycle, so its catalog is carried forward
+- **AND** the sole advertiser is no longer in the active account set
+- **AND** the other account of that plan remains active
+- **WHEN** the stale plan's retained catalog is merged into discovery
+- **THEN** the model advertised only by the removed account leaves discovery
+- **AND** the models still advertised by the remaining active account are retained
+

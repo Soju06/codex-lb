@@ -554,6 +554,56 @@ async def test_partial_update_drops_capabilities_for_inactive_accounts():
 
 
 @pytest.mark.asyncio
+async def test_stale_plan_drops_models_only_removed_account_advertised():
+    # Regression for the Codex P2 finding: a stale plan (its only refresh failed)
+    # must not re-advertise a model that only a now-removed/paused account served.
+    # Setup: plan "pro" has two accounts. account-fail keeps advertising gpt-5.6
+    # (its refresh transiently fails but it stays active); account-sol was the ONLY
+    # advertiser of gpt-5.6-sol and is then removed. Plan "plus" refreshes cleanly,
+    # keeping the snapshot authoritative. The stale-plan carryover must retain
+    # gpt-5.6 (still served by the active account-fail) but drop gpt-5.6-sol (no
+    # remaining active account can serve it).
+    registry = ModelRegistry(ttl_seconds=60.0)
+    keep = _model("gpt-5.6")
+    sol = _model("gpt-5.6-sol")
+    shared = _model("gpt-5.4")
+
+    await registry.update(
+        {"pro": [keep, sol], "plus": [shared]},
+        per_account_results={
+            "account-fail": ("pro", [keep]),
+            "account-sol": ("pro", [sol]),
+            "account-plus": ("plus", [shared]),
+        },
+        active_account_plans={
+            "account-fail": "pro",
+            "account-sol": "pro",
+            "account-plus": "plus",
+        },
+    )
+
+    # Second refresh: "pro" is stale (account-fail's fetch failed, account-sol is
+    # gone), while "plus" refreshes successfully. account-fail stays active.
+    await registry.update(
+        {"plus": [shared]},
+        per_account_results={"account-plus": ("plus", [shared])},
+        active_account_plans={"account-fail": "pro", "account-plus": "plus"},
+    )
+
+    snapshot = registry.get_snapshot()
+    assert snapshot is not None
+    # Transient-fetch-fail active account keeps its last-known model.
+    assert "gpt-5.6" in snapshot.models
+    assert "pro" in snapshot.model_plans.get("gpt-5.6", frozenset())
+    assert "gpt-5.6" in snapshot.plan_models.get("pro", frozenset())
+    # Only-advertiser removed -> model leaves discovery entirely.
+    assert "gpt-5.6-sol" not in snapshot.models
+    assert "gpt-5.6-sol" not in snapshot.plan_models.get("pro", frozenset())
+    assert registry.plan_types_for_model("gpt-5.6-sol") == frozenset()
+    assert registry.account_ids_for_model("gpt-5.6-sol") == frozenset()
+
+
+@pytest.mark.asyncio
 async def test_clear_publishes_authoritative_empty_snapshot():
     registry = ModelRegistry(ttl_seconds=60.0)
     await registry.update({"plus": [_model("gpt-5.4")]})

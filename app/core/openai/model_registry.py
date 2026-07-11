@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 from fnmatch import fnmatchcase
 
@@ -644,8 +645,32 @@ class ModelRegistry:
                             if plan_type in stale_plans
                         }
 
+                    # When per-account coverage is authoritative, a stale plan may
+                    # only carry forward the models still advertised by at least one
+                    # ACTIVE account of that plan. An active account whose refresh
+                    # transiently failed keeps its last-known models (it is in
+                    # stale_account_ids); a removed/paused account is absent from the
+                    # active set, so a model that only it advertised leaves discovery
+                    # instead of being re-advertised as a dead model no active account
+                    # can serve.
+                    supported_stale_slugs: dict[str, set[str]] | None = None
+                    if active_account_plans is not None and previous.account_catalogs_authoritative:
+                        supported_stale_slugs = {}
+                        for slug, account_ids in previous.model_accounts.items():
+                            for account_id in account_ids:
+                                if account_id not in stale_account_ids:
+                                    continue
+                                plan_of_account = active_account_plans.get(
+                                    account_id, previous.account_plans.get(account_id)
+                                )
+                                if plan_of_account in stale_plans:
+                                    supported_stale_slugs.setdefault(plan_of_account, set()).add(slug)
+
                     for plan_type in stale_plans:
-                        stale_slugs = previous.plan_models.get(plan_type, frozenset())
+                        stale_slugs: Iterable[str] = previous.plan_models.get(plan_type, frozenset())
+                        if supported_stale_slugs is not None:
+                            supported = supported_stale_slugs.get(plan_type, set())
+                            stale_slugs = [slug for slug in stale_slugs if slug in supported]
                         for slug in stale_slugs:
                             if slug not in models and slug in previous.models:
                                 models[slug] = previous.models[slug]

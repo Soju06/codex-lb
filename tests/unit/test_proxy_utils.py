@@ -4778,6 +4778,11 @@ async def test_stream_responses_falls_back_to_http_post_without_native_codex_hea
     monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
     monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
     monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
+    monkeypatch.setattr(
+        proxy_module.get_codex_version_cache(),
+        "cached_version_or_default",
+        lambda: "0.142.0",
+    )
 
     payload = ResponsesRequest.model_validate(
         {"model": "gpt-5.1", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
@@ -4791,7 +4796,7 @@ async def test_stream_responses_falls_back_to_http_post_without_native_codex_hea
         event
         async for event in proxy_module.stream_responses(
             payload,
-            headers={},
+            headers={"originator": "sdk", "Version": "9.9.9"},
             access_token="token",
             account_id="acc_1",
             session=cast(proxy_module.aiohttp.ClientSession, session),
@@ -4800,6 +4805,11 @@ async def test_stream_responses_falls_back_to_http_post_without_native_codex_hea
 
     assert session.ws_calls == []
     assert len(session.post_calls) == 1
+    upstream_headers = cast(dict[str, str], session.post_calls[0]["headers"])
+    assert upstream_headers["User-Agent"].startswith("codex_cli_rs/0.142.0 ")
+    assert upstream_headers["originator"] == "codex_cli_rs"
+    assert upstream_headers["version"] == "0.142.0"
+    assert "Version" not in upstream_headers
     assert events == ['data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n']
 
 

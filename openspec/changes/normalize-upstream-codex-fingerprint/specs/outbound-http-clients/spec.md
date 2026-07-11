@@ -42,9 +42,9 @@ For a non-native request, the service MUST:
   `x-openai-client-os`, `x-openai-client-arch`, `x-openai-client-id`, and
   `x-openai-client-user-agent`, as well as every `x-stainless-*` header (the
   OpenAI SDK fingerprint family the API layer uses to detect SDK callers).
-- Remove any inbound `originator` header and MUST NOT add an `originator`
-  header, matching the Codex CLI behavior of omitting the header when the
-  originator equals the default `codex_cli_rs`.
+- Remove inbound `originator` and `version` headers case-insensitively, then
+  set `originator: codex_cli_rs` and `version: <version>`, where `<version>` is
+  the same cached Codex client version used in the outbound `User-Agent`.
 - Emit the upstream account header as PascalCase `ChatGPT-Account-Id`.
 - Preserve continuity headers (`x-codex-turn-state` and other `x-codex-*`
   stream headers) on the outbound request so sticky routing is unaffected.
@@ -55,14 +55,16 @@ in-process cache that is refreshed by existing background refresh paths.
 
 #### Scenario: non-native SDK http request is rewritten to the Codex CLI fingerprint
 
-- **WHEN** an http upstream request arrives with `User-Agent: OpenAI/Python 2.24.0`
-  and `x-openai-client-version` / `x-openai-client-os` / `x-stainless-os` headers
+- **WHEN** an http upstream request arrives with `User-Agent: OpenAI/Python 2.24.0`,
+  untrusted `originator` / mixed-case `Version` values, and
+  `x-openai-client-version` / `x-openai-client-os` / `x-stainless-os` headers
 - **THEN** the outbound `User-Agent` is `codex_cli_rs/<version> (Mac OS 26.5.0; arm64) iTerm.app/3.6.10`
 - **AND** the `x-openai-client-version`, `x-openai-client-os`,
   `x-openai-client-arch`, `x-openai-client-id`, and `x-openai-client-user-agent`
   headers are absent from the outbound request
 - **AND** every `x-stainless-*` header is absent from the outbound request
-- **AND** no `originator` header is present on the outbound request
+- **AND** the only outbound identity values are `originator: codex_cli_rs` and
+  `version: <version>` matching the version embedded in `User-Agent`
 
 #### Scenario: native Codex http request is left unchanged
 
@@ -91,8 +93,8 @@ in-process cache that is refreshed by existing background refresh paths.
   header, and an `x-codex-turn-state` continuity header
 - **THEN** the outbound websocket `User-Agent` is
   `codex_cli_rs/<version> (Mac OS 26.5.0; arm64) iTerm.app/3.6.10`
-- **AND** the `x-openai-client-*` and `originator` headers are absent from the
-  outbound request
+- **AND** SDK identity headers are absent and the outbound request carries
+  `originator: codex_cli_rs` and `version: <version>`
 - **AND** the upstream account id is carried under the PascalCase header name
   `ChatGPT-Account-Id`
 - **AND** the `x-codex-turn-state` header is preserved on the outbound request
@@ -111,8 +113,8 @@ in-process cache that is refreshed by existing background refresh paths.
   and `x-stainless-*` headers
 - **THEN** the upstream responses websocket `User-Agent` is
   `codex_cli_rs/<version> (Mac OS 26.5.0; arm64) iTerm.app/3.6.10`
-- **AND** the `x-openai-client-*`, `x-stainless-*`, and `originator` headers are
-  absent from the outbound request
+- **AND** the `x-openai-client-*` and `x-stainless-*` headers are absent while
+  `originator: codex_cli_rs` and `version: <version>` are present
 - **AND** the upstream account id is carried under the PascalCase header name
   `ChatGPT-Account-Id`
 - **AND** the required responses websocket beta header is still present
@@ -137,4 +139,5 @@ in-process cache that is refreshed by existing background refresh paths.
 - **AND** a non-native http request is normalized
 - **THEN** the outbound `User-Agent` uses the configured client-version default
   for `<version>`
+- **AND** the outbound `version` header uses that same configured default
 - **AND** resolving the version does not perform a network call on the request path

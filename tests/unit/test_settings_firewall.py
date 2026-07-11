@@ -202,3 +202,12 @@ def test_dashboard_trusted_header_mode_rejects_reserved_proxy_header(monkeypatch
 
     with pytest.raises(ValidationError, match="reserved header"):
         Settings()
+
+
+def test_dashboard_access_jwt_required_rejects_missing_validation_contract(monkeypatch):
+    monkeypatch.setenv("CODEX_LB_DASHBOARD_AUTH_MODE", DashboardAuthMode.TRUSTED_HEADER)
+    monkeypatch.setenv("CODEX_LB_FIREWALL_TRUST_PROXY_HEADERS", "true")
+    monkeypatch.setenv("CODEX_LB_DASHBOARD_ACCESS_JWT_REQUIRED", "true")
+
+    with pytest.raises(ValidationError, match="requires issuer, audiences, and allowed email domains"):
+        Settings()

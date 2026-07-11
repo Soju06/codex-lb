@@ -13,7 +13,7 @@ from app.db.session import get_background_session
 from app.dependencies import AccountsContext, get_accounts_context
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.service import ApiKeyData
-from app.modules.fleet.mappers import build_fleet_account_summaries
+from app.modules.fleet.mappers import build_fleet_account_summaries, build_fleet_capacity
 from app.modules.fleet.observability import build_fleet_observability
 from app.modules.fleet.schemas import FleetObservabilityResponse, FleetRefreshResponse, FleetSummaryResponse
 from app.modules.proxy.account_cache import get_account_selection_cache
@@ -69,12 +69,29 @@ async def get_fleet_summary(
             else await context.repository.list_accounts(refresh_existing=True)
         )
         persisted_status_by_account_id = {account.id: account.status.value for account in persisted_accounts}
+    generated_at = utcnow()
+    usage_repository = UsageRepository(context.session)
+    primary_usage = await usage_repository.latest_by_account(window="primary", account_ids=visible_account_ids)
+    secondary_usage = await usage_repository.latest_by_account(window="secondary", account_ids=visible_account_ids)
+    included_ids, excluded_accounts, five_hour, weekly, additional_capacity = build_fleet_capacity(
+        accounts,
+        include_usage=include_usage,
+        generated_at=generated_at,
+        primary_recorded_at_by_account={account_id: row.recorded_at for account_id, row in primary_usage.items()},
+        secondary_recorded_at_by_account={account_id: row.recorded_at for account_id, row in secondary_usage.items()},
+    )
     return FleetSummaryResponse(
         accounts=build_fleet_account_summaries(
             accounts,
             include_usage=include_usage,
             persisted_status_by_account_id=persisted_status_by_account_id,
-        )
+        ),
+        generated_at=generated_at,
+        included_account_ids=included_ids,
+        excluded_accounts=excluded_accounts,
+        five_hour=five_hour,
+        weekly=weekly,
+        additional_capacity=additional_capacity,
     )
 
 

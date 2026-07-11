@@ -151,6 +151,7 @@ class Settings(BaseSettings):
     database_migrate_on_startup: bool = True
     database_sqlite_pre_migrate_backup_enabled: bool = True
     database_sqlite_pre_migrate_backup_max_files: int = Field(default=5, ge=1)
+    database_sqlite_pre_migrate_backup_max_age_days: int | None = Field(default=None, gt=0)
     database_sqlite_startup_check_mode: Literal["quick", "full", "off"] = "quick"
     database_alembic_auto_remap_enabled: bool = True
     upstream_base_url: str = "https://chatgpt.com/backend-api"
@@ -238,6 +239,9 @@ class Settings(BaseSettings):
     conversation_archive_enabled: bool = False
     conversation_archive_dir: Path = DEFAULT_CONVERSATION_ARCHIVE_DIR
     conversation_archive_queue_max_bytes: int = Field(default=256 * 1024 * 1024, gt=0)
+    request_log_retention_days: int | None = Field(default=None, gt=0)
+    request_log_cleanup_interval_seconds: int = Field(default=3600, gt=0)
+    request_log_store_error_details: bool = True
     max_decompressed_body_bytes: int = Field(default=32 * 1024 * 1024, gt=0)
     max_decompressed_responses_body_bytes: int = Field(default=128 * 1024 * 1024, gt=0)
     image_inline_fetch_enabled: bool = True
@@ -279,6 +283,11 @@ class Settings(BaseSettings):
         return _configured_outbound_proxy_env()
 
     dashboard_auth_proxy_header: str = "Remote-User"
+    dashboard_access_jwt_issuer: str | None = None
+    dashboard_access_jwt_audiences: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    dashboard_access_allowed_email_domains: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    dashboard_access_jwt_header: str = "Cf-Access-Jwt-Assertion"
+    dashboard_access_jwt_required: bool = False
 
     # --- Multi-replica & production settings ---
     # Prometheus metrics
@@ -426,6 +435,33 @@ class Settings(BaseSettings):
         if not isinstance(value, str):
             raise TypeError("dashboard_auth_proxy_header must be a string")
         return normalize_dashboard_auth_proxy_header(value)
+
+    @field_validator("dashboard_access_jwt_header", mode="before")
+    @classmethod
+    def _normalize_dashboard_access_jwt_header(cls, value: object) -> str:
+        if not isinstance(value, str):
+            raise TypeError("dashboard_access_jwt_header must be a string")
+        return normalize_dashboard_auth_proxy_header(value)
+
+    @field_validator("dashboard_access_jwt_audiences", mode="before")
+    @classmethod
+    def _normalize_dashboard_access_jwt_audiences(cls, value: StringListInput) -> list[str]:
+        if value is None:
+            return []
+        entries = value.split(",") if isinstance(value, str) else value
+        if not isinstance(entries, list):
+            raise TypeError("dashboard_access_jwt_audiences must be a list or comma-separated string")
+        return [entry.strip() for entry in entries if isinstance(entry, str) and entry.strip()]
+
+    @field_validator("dashboard_access_allowed_email_domains", mode="before")
+    @classmethod
+    def _normalize_dashboard_access_allowed_email_domains(cls, value: StringListInput) -> list[str]:
+        if value is None:
+            return []
+        entries = value.split(",") if isinstance(value, str) else value
+        if not isinstance(entries, list):
+            raise TypeError("dashboard_access_allowed_email_domains must be a list or comma-separated string")
+        return [entry.strip().lower().lstrip("@") for entry in entries if isinstance(entry, str) and entry.strip()]
 
     @field_validator("http_responses_session_bridge_instance_ring", mode="before")
     @classmethod
@@ -578,6 +614,17 @@ class Settings(BaseSettings):
             raise ValueError("dashboard_auth_mode=trusted_header requires firewall_trust_proxy_headers=true")
         if not self.firewall_trusted_proxy_cidrs:
             raise ValueError("dashboard_auth_mode=trusted_header requires non-empty firewall_trusted_proxy_cidrs")
+        access_values = (
+            self.dashboard_access_jwt_issuer,
+            self.dashboard_access_jwt_audiences,
+            self.dashboard_access_allowed_email_domains,
+        )
+        if (any(access_values) and not all(access_values)) or (
+            self.dashboard_access_jwt_required and not all(access_values)
+        ):
+            raise ValueError(
+                "trusted-header Access JWT validation requires issuer, audiences, and allowed email domains"
+            )
         return self
 
 

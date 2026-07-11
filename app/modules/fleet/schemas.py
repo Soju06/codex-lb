@@ -28,8 +28,35 @@ class FleetAccountSummary(DashboardModel):
     last_refresh_at: datetime | None = None
 
 
+class FleetCapacityHeadline(DashboardModel):
+    used_percent: int | None = Field(default=None, ge=0, le=100)
+    stale: bool = True
+    stale_reason: str | None = None
+
+
+class FleetExcludedAccount(DashboardModel):
+    account_id: str
+    status: str
+
+
+class FleetAdditionalCapacity(DashboardModel):
+    account_id: str
+    quota_key: str | None = None
+    label: str
+    primary_used_percent: int | None = Field(default=None, ge=0, le=100)
+    secondary_used_percent: int | None = Field(default=None, ge=0, le=100)
+    primary_reset_at: datetime | None = None
+    secondary_reset_at: datetime | None = None
+
+
 class FleetSummaryResponse(DashboardModel):
     accounts: list[FleetAccountSummary] = Field(default_factory=list)
+    generated_at: datetime
+    included_account_ids: list[str] = Field(default_factory=list)
+    excluded_accounts: list[FleetExcludedAccount] = Field(default_factory=list)
+    five_hour: FleetCapacityHeadline = Field(default_factory=FleetCapacityHeadline)
+    weekly: FleetCapacityHeadline = Field(default_factory=FleetCapacityHeadline)
+    additional_capacity: list[FleetAdditionalCapacity] = Field(default_factory=list)
 
 
 class FleetRefreshResponse(DashboardModel):

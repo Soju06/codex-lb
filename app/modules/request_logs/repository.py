@@ -5,11 +5,12 @@ from datetime import datetime
 from typing import cast as typing_cast
 
 import anyio
-from sqlalchemy import Integer, String, and_, cast, func, literal_column, or_, select
+from sqlalchemy import Integer, String, and_, cast, delete, func, literal_column, or_, select
 from sqlalchemy import exc as sa_exc
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
+from app.core.config.settings import get_settings
 from app.core.usage.logs import RequestLogLike, calculated_cost_from_log
 from app.core.usage.types import BucketModelAggregate, RequestActivityAggregate
 from app.core.utils.request_id import ensure_request_id
@@ -27,6 +28,17 @@ class _RequestLogFilters:
 class RequestLogsRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
+
+    async def purge_before(self, cutoff: datetime) -> int:
+        """Hard-delete request metadata older than the exclusive cutoff."""
+
+        async with sqlite_writer_section():
+            result = await self._session.execute(
+                delete(RequestLog).where(RequestLog.requested_at < cutoff).returning(RequestLog.id)
+            )
+            deleted = len(result.scalars().all())
+            await self._session.commit()
+        return deleted
 
     @staticmethod
     def _exclude_warmup_clause() -> ColumnElement[bool]:
@@ -267,6 +279,7 @@ class RequestLogsRepository:
         archive_request_id: str | None = None,
     ) -> RequestLog:
         async with sqlite_writer_section():
+            persist_error_details = get_settings().request_log_store_error_details
             resolved_request_id = ensure_request_id(request_id)
             resolved_archive_request_id = (archive_request_id or "").strip() or resolved_request_id
             resolved_plan_type = plan_type
@@ -316,10 +329,10 @@ class RequestLogsRepository:
                 session_previous_gap_ms=session_previous_gap_ms,
                 status=status,
                 error_code=error_code,
-                error_message=error_message,
+                error_message=error_message if persist_error_details else None,
                 failure_phase=failure_phase,
-                failure_detail=failure_detail,
-                failure_exception_type=failure_exception_type,
+                failure_detail=failure_detail if persist_error_details else None,
+                failure_exception_type=failure_exception_type if persist_error_details else None,
                 upstream_status_code=upstream_status_code,
                 upstream_error_code=upstream_error_code,
                 bridge_stage=bridge_stage,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1720,6 +1721,22 @@ def test_create_sqlite_pre_migration_backup_rotates_old_files(tmp_path: Path) ->
             assert conn.execute("PRAGMA integrity_check").fetchone() == ("ok",)
             assert conn.execute("SELECT name FROM items").fetchall() == [("alpha",)]
         assert not Path(f"{backup}-wal").exists()
+
+
+def test_create_sqlite_pre_migration_backup_expires_old_files_by_age(tmp_path: Path) -> None:
+    db_path = tmp_path / "store.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("CREATE TABLE items (id INTEGER PRIMARY KEY)")
+
+    now = datetime(2026, 7, 11, 12, 0, 0, tzinfo=timezone.utc)
+    old_backup = create_sqlite_pre_migration_backup(db_path, max_files=5, now=now - timedelta(days=31))
+    old_timestamp = (now - timedelta(days=31)).timestamp()
+    os.utime(old_backup, (old_timestamp, old_timestamp))
+
+    fresh_backup = create_sqlite_pre_migration_backup(db_path, max_files=5, max_age_days=30, now=now)
+
+    assert not old_backup.exists()
+    assert fresh_backup.exists()
 
 
 def test_create_sqlite_pre_migration_backup_consolidates_wal_rows(tmp_path: Path) -> None:

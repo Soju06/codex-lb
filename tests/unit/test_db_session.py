@@ -31,6 +31,7 @@ class _FakeSettings:
     database_migrate_on_startup: bool = True
     database_sqlite_pre_migrate_backup_enabled: bool = False
     database_sqlite_pre_migrate_backup_max_files: int = 5
+    database_sqlite_pre_migrate_backup_max_age_days: int | None = None
     database_sqlite_startup_check_mode: str = "quick"
     database_migrations_fail_fast: bool = False
 

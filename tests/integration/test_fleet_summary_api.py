@@ -72,6 +72,7 @@ def _make_account(
     *,
     status: AccountStatus = AccountStatus.ACTIVE,
     plan_type: str = "plus",
+    last_refresh_at=None,
 ) -> Account:
     encryptor = TokenEncryptor()
     return Account(
@@ -82,7 +83,7 @@ def _make_account(
         access_token_encrypted=encryptor.encrypt("access"),
         refresh_token_encrypted=encryptor.encrypt("refresh"),
         id_token_encrypted=encryptor.encrypt("id"),
-        last_refresh=utcnow(),
+        last_refresh=last_refresh_at or utcnow(),
         status=status,
         deactivation_reason=None,
     )
@@ -117,17 +118,22 @@ async def _seed_account_with_windows(
     primary_reset_at: int,
     secondary_reset_at: int,
     status: AccountStatus = AccountStatus.ACTIVE,
+    usage_recorded_at=None,
+    account_last_refresh_at=None,
 ) -> None:
     async with SessionLocal() as session:
         accounts_repo = AccountsRepository(session)
         usage_repo = UsageRepository(session)
-        await accounts_repo.upsert(_make_account(account_id, email, status=status))
+        await accounts_repo.upsert(
+            _make_account(account_id, email, status=status, last_refresh_at=account_last_refresh_at)
+        )
         await usage_repo.add_entry(
             account_id,
             primary_used_percent,
             window="primary",
             reset_at=primary_reset_at,
             window_minutes=_PRIMARY_WINDOW_MINUTES,
+            recorded_at=usage_recorded_at,
         )
         await usage_repo.add_entry(
             account_id,
@@ -135,6 +141,7 @@ async def _seed_account_with_windows(
             window="secondary",
             reset_at=secondary_reset_at,
             window_minutes=_SECONDARY_WINDOW_MINUTES,
+            recorded_at=usage_recorded_at,
         )
 
 
@@ -280,6 +287,12 @@ async def test_fleet_summary_returns_minimal_projection_with_valid_key(async_cli
 
     assert response.status_code == 200
     payload = response.json()
+    assert payload["generatedAt"] is not None
+    assert payload["includedAccountIds"] == ["acc_fleet_a"]
+    assert payload["excludedAccounts"] == []
+    assert payload["fiveHour"] == {"usedPercent": 38, "stale": False, "staleReason": None}
+    assert payload["weekly"] == {"usedPercent": 20, "stale": False, "staleReason": None}
+    assert payload["additionalCapacity"] == []
     accounts = payload["accounts"]
     assert len(accounts) == 1
     account = accounts[0]
@@ -295,6 +308,56 @@ async def test_fleet_summary_returns_minimal_projection_with_valid_key(async_cli
     assert account["secondary"]["remainingPercent"] == 80
     assert account["secondary"]["windowMinutes"] == _SECONDARY_WINDOW_MINUTES
     assert account["secondary"]["resetAt"] is not None
+
+
+@pytest.mark.asyncio
+async def test_fleet_summary_freshness_uses_usage_snapshot_not_oauth_token_refresh(async_client, db_setup):
+    plain_key = await _create_api_key("fleet-summary-freshness-key")
+    now = utcnow()
+    await _seed_account_with_windows(
+        "fresh-usage-old-token",
+        "fresh-usage@onda.lol",
+        primary_used_percent=25.0,
+        secondary_used_percent=25.0,
+        primary_reset_at=1735862400,
+        secondary_reset_at=1736467200,
+        usage_recorded_at=now,
+        account_last_refresh_at=now - timedelta(days=8),
+    )
+
+    response = await async_client.get(
+        "/api/fleet/summary",
+        headers={"Authorization": f"Bearer {plain_key}"},
+    )
+    assert response.status_code == 200
+    assert response.json()["fiveHour"] == {"usedPercent": 25, "stale": False, "staleReason": None}
+
+
+@pytest.mark.asyncio
+async def test_fleet_summary_does_not_mark_old_usage_fresh_after_token_refresh(async_client, db_setup):
+    plain_key = await _create_api_key("fleet-summary-stale-usage-key")
+    now = utcnow()
+    await _seed_account_with_windows(
+        "old-usage-fresh-token",
+        "old-usage@onda.lol",
+        primary_used_percent=25.0,
+        secondary_used_percent=25.0,
+        primary_reset_at=1735862400,
+        secondary_reset_at=1736467200,
+        usage_recorded_at=now - timedelta(minutes=11),
+        account_last_refresh_at=now,
+    )
+
+    response = await async_client.get(
+        "/api/fleet/summary",
+        headers={"Authorization": f"Bearer {plain_key}"},
+    )
+    assert response.status_code == 200
+    assert response.json()["fiveHour"] == {
+        "usedPercent": None,
+        "stale": True,
+        "staleReason": "stale_usage:old-usage-fresh-token",
+    }
 
 
 @pytest.mark.asyncio
@@ -391,6 +454,18 @@ async def test_fleet_summary_hides_usage_when_key_disables_account_pool_usage(as
     assert account["lastRefreshAt"] is None
     assert account["primary"] == {"remainingPercent": None, "resetAt": None, "windowMinutes": None}
     assert account["secondary"] == {"remainingPercent": None, "resetAt": None, "windowMinutes": None}
+    payload = response.json()
+    assert payload["fiveHour"] == {
+        "usedPercent": None,
+        "stale": True,
+        "staleReason": "usage_not_visible",
+    }
+    assert payload["weekly"] == {
+        "usedPercent": None,
+        "stale": True,
+        "staleReason": "usage_not_visible",
+    }
+    assert payload["additionalCapacity"] == []
 
 
 @pytest.mark.asyncio

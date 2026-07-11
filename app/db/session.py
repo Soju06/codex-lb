@@ -130,7 +130,7 @@ _T = TypeVar("_T")
 
 
 class _SqliteBackupCreator(Protocol):
-    def __call__(self, source: Path, *, max_files: int) -> Path: ...
+    def __call__(self, source: Path, *, max_files: int, max_age_days: int | None = None) -> Path: ...
 
 
 def _ensure_sqlite_dir(url: str) -> None:
@@ -363,6 +363,7 @@ async def init_db() -> None:
                 lambda: create_sqlite_pre_migration_backup(
                     sqlite_path,
                     max_files=_settings.database_sqlite_pre_migrate_backup_max_files,
+                    max_age_days=_settings.database_sqlite_pre_migrate_backup_max_age_days,
                 ),
             )
             logger.info(

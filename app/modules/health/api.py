@@ -59,6 +59,10 @@ async def health_ready() -> HealthCheckResponse:
             try:
                 await session.execute(text("SELECT 1"))
                 checks = {"database": "ok"}
+                if get_settings().request_log_retention_days is not None:
+                    from app.modules.request_logs.cleanup_scheduler import request_log_cleanup_health
+
+                    checks["request_log_cleanup"] = request_log_cleanup_health()
                 status = "ok"
 
                 # Upstream health (degradation flag, circuit breaker) is NOT

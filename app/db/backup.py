@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
@@ -42,10 +42,13 @@ def create_sqlite_pre_migration_backup(
     source: Path,
     *,
     max_files: int,
+    max_age_days: int | None = None,
     now: datetime | None = None,
 ) -> Path:
     if max_files < 1:
         raise ValueError("max_files must be >= 1")
+    if max_age_days is not None and max_age_days < 1:
+        raise ValueError("max_age_days must be >= 1")
     if not source.exists():
         raise FileNotFoundError(f"sqlite database not found: {source}")
 
@@ -55,6 +58,13 @@ def create_sqlite_pre_migration_backup(
     _sqlite_backup(source, backup_path)
 
     backups = list_sqlite_pre_migration_backups(source)
+    if max_age_days is not None:
+        cutoff = timestamp - timedelta(days=max_age_days)
+        for old_backup in backups:
+            modified_at = datetime.fromtimestamp(old_backup.stat().st_mtime, tz=timezone.utc)
+            if modified_at < cutoff:
+                old_backup.unlink()
+        backups = list_sqlite_pre_migration_backups(source)
     excess = len(backups) - max_files
     if excess > 0:
         for old_backup in backups[:excess]:

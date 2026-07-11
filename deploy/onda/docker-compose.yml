@@ -1,0 +1,28 @@
+services:
+  tokenmaxxing:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    env_file:
+      - /etc/tokenmaxxing/codex-lb.env
+    network_mode: host
+    command:
+      - fastapi
+      - run
+      - app/main.py
+      - --host
+      - 127.0.0.1
+      - --port
+      - "2455"
+    volumes:
+      - tokenmaxxing-data:/var/lib/codex-lb
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:2455/health/ready', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  tokenmaxxing-data:
+    name: tokenmaxxing-data

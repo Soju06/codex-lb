@@ -95,6 +95,21 @@ def test_forwarded_fork_keeps_authenticated_original_unanchored_state() -> None:
     )
 
 
+def test_http_bridge_reuse_honors_security_requirement_stored_on_session() -> None:
+    session = _make_bridge_session()
+    session.requires_security_work_authorized = True
+    session.account.security_work_authorized = False
+
+    assert not http_bridge_helpers_module._http_bridge_session_meets_security_requirement(
+        session, require_security_work_authorized=False
+    )
+
+    session.account.security_work_authorized = True
+    assert http_bridge_helpers_module._http_bridge_session_meets_security_requirement(
+        session, require_security_work_authorized=False
+    )
+
+
 @pytest.mark.asyncio
 async def test_legacy_forward_anchor_lookup_accepts_registered_turn_state_alias() -> None:
     key = proxy_service._HTTPBridgeSessionKey("session_header", "sid-123", None)

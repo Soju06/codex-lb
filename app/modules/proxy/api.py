@@ -311,6 +311,7 @@ _CAPACITY_WAIT_MARKER_GRACE_SECONDS = 0.05
 # Keep bridge startup probing above tiny event-loop scheduling jitter:
 # PostgreSQL-backed failures may need a DB round trip before the first item.
 _HTTP_BRIDGE_STARTUP_ERROR_PROBE_SECONDS = 2.0
+_CAPACITY_STARTUP_SIGNAL_DISCOVERY_SECONDS = _HTTP_BRIDGE_STARTUP_ERROR_PROBE_SECONDS
 _CHAT_COMPLETIONS_STARTUP_ERROR_PROBE_SECONDS = 2.0
 _CURSOR_CHAT_COMPLETIONS_STARTUP_ERROR_PROBE_SECONDS = 15.0
 _CURSOR_CONTEXT_LIMIT_SYNTHETIC_USAGE_TOKENS: Final[int] = 1_000_000
@@ -4724,6 +4725,17 @@ async def _wait_for_first_stream_probe(
         if capacity_wait_event is None:
             return False
 
+        # Account selection can include a PostgreSQL round trip before it can
+        # report either successful admission or local capacity pressure. Give
+        # those paired signals the established bounded startup-probe window,
+        # but keep one absolute deadline so unrelated/no-marker streams cannot
+        # turn the route into a request-budget-length startup wait.
+        signal_discovery_seconds = (
+            _CAPACITY_STARTUP_SIGNAL_DISCOVERY_SECONDS
+            if capacity_ready_event is not None
+            else _CAPACITY_WAIT_MARKER_GRACE_SECONDS
+        )
+        signal_discovery_deadline = asyncio.get_running_loop().time() + signal_discovery_seconds
         while True:
             if first_task.done():
                 if capacity_wait_event.is_set():
@@ -4759,12 +4771,18 @@ async def _wait_for_first_stream_probe(
             marker_task = asyncio.create_task(capacity_wait_event.wait())
             ready_task = asyncio.create_task(capacity_ready_event.wait()) if capacity_ready_event is not None else None
             try:
+                signal_discovery_remaining = max(
+                    0.0,
+                    signal_discovery_deadline - asyncio.get_running_loop().time(),
+                )
+                if signal_discovery_remaining <= 0:
+                    return False
                 signal_waiters = {first_task, marker_task}
                 if ready_task is not None:
                     signal_waiters.add(ready_task)
                 signal_done, _pending = await asyncio.wait(
                     signal_waiters,
-                    timeout=_CAPACITY_WAIT_MARKER_GRACE_SECONDS,
+                    timeout=signal_discovery_remaining,
                     return_when=asyncio.FIRST_COMPLETED,
                 )
                 if not signal_done:

@@ -445,6 +445,34 @@ async def test_startup_probe_waits_for_capacity_marker_after_legacy_grace() -> N
 
 
 @pytest.mark.asyncio
+async def test_startup_probe_without_capacity_signal_returns_within_discovery_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capacity_wait_event = asyncio.Event()
+    capacity_ready_event = asyncio.Event()
+    release_first_event = asyncio.Event()
+
+    async def slow_stream_without_capacity_signal() -> AsyncIterator[str]:
+        await release_first_event.wait()
+        yield 'data: {"type":"response.output_text.delta","delta":"hello"}\n\n'
+
+    monkeypatch.setattr(proxy_api, "_CAPACITY_STARTUP_SIGNAL_DISCOVERY_SECONDS", 0.01)
+    stream, startup_error = await asyncio.wait_for(
+        proxy_api._probe_stream_startup_error(
+            slow_stream_without_capacity_signal(),
+            timeout_seconds=0.001,
+            capacity_wait_event=capacity_wait_event,
+            capacity_ready_event=capacity_ready_event,
+        ),
+        timeout=0.1,
+    )
+
+    assert startup_error is None
+    release_first_event.set()
+    assert "response.output_text.delta" in await asyncio.wait_for(anext(stream), timeout=0.1)
+
+
+@pytest.mark.asyncio
 async def test_startup_probe_waits_for_remote_owner_headers_without_local_marker() -> None:
     capacity_wait_event = asyncio.Event()
     capacity_ready_event = asyncio.Event()
@@ -1746,14 +1774,15 @@ async def test_external_stream_startup_waits_for_single_account_response_create_
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("request_budget_seconds", "recovery_sleep_seconds", "minimum_selection_calls"),
-    [(0.2, 0.1, 2), (0.1, 0.3, 1)],
+    ("request_budget_seconds", "recovery_sleep_seconds", "minimum_selection_calls", "selection_delay_seconds"),
+    [(0.2, 0.1, 2, 0.0), (0.1, 0.3, 1, 0.12)],
 )
 async def test_responses_route_preserves_selection_cap_429_after_startup_wait(
     monkeypatch: pytest.MonkeyPatch,
     request_budget_seconds: float,
     recovery_sleep_seconds: float,
     minimum_selection_calls: int,
+    selection_delay_seconds: float,
 ) -> None:
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     settings.http_responses_stream_request_budget_seconds = request_budget_seconds
@@ -1769,6 +1798,10 @@ async def test_responses_route_preserves_selection_cap_429_after_startup_wait(
     async def select_account(*_args: object, **_kwargs: object) -> AccountSelection:
         nonlocal selection_calls
         selection_calls += 1
+        if selection_delay_seconds:
+            # PostgreSQL-backed selection can legitimately exceed the old
+            # 50 ms marker grace before it discovers the local cap.
+            await asyncio.sleep(selection_delay_seconds)
         return AccountSelection(
             account=None,
             error_message="Account stream concurrency limit reached",

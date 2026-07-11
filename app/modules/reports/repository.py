@@ -372,6 +372,7 @@ def _daily_speed_medians_stmt(
 ):
     useragent_group_clause = _useragent_group_filter_clause(useragent_group)
     day_ranges_cte = _day_ranges_cte(day_ranges)
+    output_tokens = func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens)
     speed_values_cte = (
         select(
             day_ranges_cte.c.report_date,
@@ -379,13 +380,13 @@ def _daily_speed_medians_stmt(
             case(
                 (
                     and_(
-                        RequestLog.output_tokens.is_not(None),
-                        RequestLog.output_tokens > 0,
+                        output_tokens.is_not(None),
+                        output_tokens > 0,
                         RequestLog.latency_ms.is_not(None),
                         RequestLog.latency_first_token_ms.is_not(None),
                         RequestLog.latency_ms > RequestLog.latency_first_token_ms,
                     ),
-                    RequestLog.output_tokens * 1000.0 / (RequestLog.latency_ms - RequestLog.latency_first_token_ms),
+                    output_tokens * 1000.0 / (RequestLog.latency_ms - RequestLog.latency_first_token_ms),
                 ),
                 else_=0.0,
             ).label("tps"),

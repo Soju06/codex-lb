@@ -128,13 +128,15 @@ async def test_aggregate_daily_rows_calculates_sql_medians_for_odd_even_and_inva
     async_session.add_all(
         [
             # Day one has four samples: TTFT [0, 100, 200, 300] and TPS [0, 0, 10, 10].
+            # A missing persisted output count falls back to reasoning tokens.
             RequestLog(
                 account_id=account_id,
                 request_id="report-speed-even-1",
                 requested_at=datetime(2026, 6, 1, 9, 0),
                 model="gpt-5.1",
                 status="success",
-                output_tokens=10,
+                output_tokens=None,
+                reasoning_tokens=10,
                 latency_ms=1100,
                 latency_first_token_ms=100,
             ),
@@ -145,6 +147,7 @@ async def test_aggregate_daily_rows_calculates_sql_medians_for_odd_even_and_inva
                 model="gpt-5.1",
                 status="success",
                 output_tokens=12,
+                reasoning_tokens=999,
                 latency_ms=1500,
                 latency_first_token_ms=300,
             ),
@@ -154,7 +157,8 @@ async def test_aggregate_daily_rows_calculates_sql_medians_for_odd_even_and_inva
                 requested_at=datetime(2026, 6, 1, 11, 0),
                 model="gpt-5.1",
                 status="success",
-                output_tokens=8,
+                output_tokens=None,
+                reasoning_tokens=None,
                 latency_ms=1500,
                 latency_first_token_ms=None,
             ),
@@ -169,6 +173,7 @@ async def test_aggregate_daily_rows_calculates_sql_medians_for_odd_even_and_inva
                 latency_first_token_ms=200,
             ),
             # Day two has three samples: TTFT [100, 200, 300] and TPS [0, 4, 20].
+            # An explicit zero output count wins over a populated reasoning count.
             RequestLog(
                 account_id=account_id,
                 request_id="report-speed-odd-1",
@@ -196,6 +201,7 @@ async def test_aggregate_daily_rows_calculates_sql_medians_for_odd_even_and_inva
                 model="gpt-5.1",
                 status="success",
                 output_tokens=0,
+                reasoning_tokens=50,
                 latency_ms=700,
                 latency_first_token_ms=300,
             ),

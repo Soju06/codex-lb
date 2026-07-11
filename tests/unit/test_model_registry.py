@@ -676,7 +676,9 @@ async def test_stale_plan_preserves_models_with_unknown_account_provenance():
     # Unknown provenance -> preserved (degrade safe), not dropped.
     assert "pro-only" in snapshot.models
     assert "pro" in snapshot.model_plans.get("pro-only", frozenset())
-    assert "pro" in registry.plan_types_for_model("pro-only")
+    plan_types = registry.plan_types_for_model("pro-only")
+    assert plan_types is not None
+    assert "pro" in plan_types
 
 
 @pytest.mark.asyncio

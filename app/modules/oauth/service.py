@@ -698,7 +698,6 @@ class OauthService:
 
         workspace_matches = (
             not intended.chatgpt_account_id
-            or not account.chatgpt_account_id
             or intended.chatgpt_account_id == account.chatgpt_account_id
         )
         seat_matches = bool(

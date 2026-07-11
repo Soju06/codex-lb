@@ -644,6 +644,45 @@ async def test_targeted_reauth_rejects_other_seat_in_same_team_workspace(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_targeted_reauth_rejects_missing_workspace_for_known_team_seat():
+    repo = AsyncMock()
+    service = oauth_module.OauthService(repo)
+    target_id = "shared-workspace_seat-a"
+    intended = Account(
+        id=target_id,
+        chatgpt_account_id="shared-workspace",
+        chatgpt_user_id="user-seat-a",
+        email="seat-a@example.com",
+        plan_type="team",
+        access_token_encrypted=service._encryptor.encrypt("old-access"),
+        refresh_token_encrypted=service._encryptor.encrypt("old-refresh"),
+        id_token_encrypted=service._encryptor.encrypt("unused"),
+        last_refresh=utcnow(),
+        status=AccountStatus.REAUTH_REQUIRED,
+    )
+    repo.get_by_id.return_value = intended
+
+    with pytest.raises(oauth_module.ReauthSeatMismatchError):
+        await service._persist_tokens(
+            OAuthTokens(
+                access_token="personal-access",
+                refresh_token="personal-refresh",
+                id_token=_encode_jwt({
+                    "email": "seat-a@example.com",
+                    "sub": "auth0|seat-a",
+                    "https://api.openai.com/auth": {
+                        "chatgpt_user_id": "user-seat-a",
+                    },
+                }),
+            ),
+            intended_account_id=target_id,
+        )
+
+    repo.replace_reauthorized.assert_not_awaited()
+    repo.upsert_account_slot.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_device_oauth_flow_keeps_same_email_distinct_upstream_identities_in_overwrite_mode(
     async_client,
     monkeypatch,

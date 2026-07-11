@@ -4,7 +4,7 @@
 
 | Field | Value |
 |---|---|
-| Context / receipt | `docs/skill-outputs/me-lfg/20260710-codex-lb-hetzner-context.md` |
+| Context / receipt | `openspec/changes/secure-tokenmaxxing-boundaries/context/skill-outputs/me-lfg/20260710-codex-lb-hetzner-context.md` |
 | Session | autonomous |
 | Status | running |
 | Authority | receipt-scoped repo edit/commit/publication/merge/deploy/promotion/credential and access changes/smoke/observe/declared rollback |
@@ -15,7 +15,7 @@
 - Sources: current user request and target choice; setup inventory; technical approach review; active ExecPlan.
 - Actor impact: the user receives a private OpenAI-compatible codex-lb endpoint and existing agent goals continue through it.
 - Constraints: repository OpenSpec remains the behavioral source of truth; root checkout stays clean; no public steady-state ports; no secret output; one refresh writer; exact reviewed artifact; rollback must preserve current grants.
-- Upstream artifact check: used `docs/skill-outputs/me-review-technical-approach/2026-07-10-codex-lb-hetzner.md`; no brainstorm, grill, UI, or use-case artifact was needed because target and actors are explicit.
+- Upstream artifact check: used `openspec/changes/secure-tokenmaxxing-boundaries/context/skill-outputs/me-review-technical-approach/2026-07-10-codex-lb-hetzner.md`; no brainstorm, grill, UI, or use-case artifact was needed because target and actors are explicit.
 
 ## Outcome
 

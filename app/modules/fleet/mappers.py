@@ -158,8 +158,12 @@ def _capacity_headline(
         return FleetCapacityHeadline(stale=True, stale_reason="missing_usage:" + ",".join(missing_ids))
     if stale_ids:
         return FleetCapacityHeadline(stale=True, stale_reason="stale_usage:" + ",".join(stale_ids))
-    values = [100.0 - float(value) for value in remaining if value is not None]
+    values = [100.0 - _clamp_percent(float(value)) for value in remaining if value is not None]
     return FleetCapacityHeadline(used_percent=_round_used(sum(values) / len(values)), stale=False)
+
+
+def _clamp_percent(value: float) -> float:
+    return min(100.0, max(0.0, value))
 
 
 def _round_used(value: float) -> int:

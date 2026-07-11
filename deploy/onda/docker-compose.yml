@@ -7,9 +7,7 @@ services:
       - /etc/tokenmaxxing/codex-lb.env
     network_mode: host
     command:
-      - fastapi
-      - run
-      - app/main.py
+      - codex-lb
       - --host
       - 127.0.0.1
       - --port

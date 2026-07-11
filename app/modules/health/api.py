@@ -77,7 +77,8 @@ async def health_ready() -> HealthCheckResponse:
                         await session.execute(sa_select(func.min(RequestLog.requested_at)))
                     ).scalar_one_or_none()
                     if oldest_requested_at is not None:
-                        cutoff = utcnow() - timedelta(days=retention_days)
+                        interval_seconds = getattr(settings, "request_log_cleanup_interval_seconds", 3600)
+                        cutoff = utcnow() - timedelta(days=retention_days, seconds=interval_seconds * 2)
                         if oldest_requested_at < cutoff:
                             raise HTTPException(status_code=503, detail="Request log retention age exceeds policy")
                 status = "ok"

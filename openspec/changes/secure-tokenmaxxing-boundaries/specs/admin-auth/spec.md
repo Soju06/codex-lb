@@ -26,5 +26,12 @@ validated token and MUST NOT be taken from a separate identity header.
 #### Scenario: Required Access assertion blocks fallback authentication
 
 - **GIVEN** Access JWT validation is configured as required
-- **WHEN** the assertion is missing or invalid
+- **WHEN** a dashboard request has a missing or invalid assertion
 - **THEN** the request is rejected before password-session or other fallback dashboard authentication
+
+#### Scenario: Required Access assertion does not block internal probes
+
+- **GIVEN** Access JWT validation is configured as required
+- **WHEN** a health or internal readiness probe lacks an Access assertion
+- **THEN** the probe is allowed to reach its route handler
+- **AND** unvalidated trusted identity headers are stripped before forwarding

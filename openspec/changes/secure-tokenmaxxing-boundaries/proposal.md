@@ -16,6 +16,10 @@ retention also needs an enforceable upper bound.
 - Add automatic hard deletion of request logs older than a configurable
   retention period, with a 30-day production setting.
 - Keep payload and conversation archival disabled in the production contract.
+- Keep Onda health/internal probes operable without an Access browser assertion,
+  while dashboard traffic still fails closed when Access is required.
+- Run the Onda container through the repository `codex-lb` entry point so
+  runtime logging settings are honored.
 
 ## Impact
 
@@ -25,3 +29,5 @@ retention also needs an enforceable upper bound.
   without removing or changing current fields.
 - Request-level metadata has a bounded lifetime; no prompt or response bodies
   are retained by the Onda deployment.
+- Behavior contracts and delivery/review notes for this change live under the
+  OpenSpec change context instead of `docs/`.

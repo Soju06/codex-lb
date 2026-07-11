@@ -92,6 +92,39 @@ async def _request_actor(
     return payload["actor"]
 
 
+async def _request_path_with_required_access(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    path: str,
+    assertion: str | None = None,
+) -> dict[str, object]:
+    _configure_access(monkeypatch)
+    monkeypatch.setenv("CODEX_LB_DASHBOARD_ACCESS_JWT_REQUIRED", "true")
+    get_settings.cache_clear()
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    monkeypatch.setattr(jwt, "PyJWKClient", lambda *_args, **_kwargs: _StaticJwksClient(private_key.public_key()))
+    app = FastAPI()
+    add_dashboard_auth_proxy_middleware(app)
+
+    @app.get("/health/ready")
+    @app.get("/internal/drain/status")
+    async def probe(request: Request) -> dict[str, str | None]:
+        authentication = get_dashboard_request_auth(request)
+        return {
+            "actor": authentication.actor if authentication is not None else None,
+            "forwarded_header": request.headers.get("Remote-User"),
+        }
+
+    headers = {"Remote-User": "forged@onda.lol"}
+    if assertion is not None:
+        headers["Cf-Access-Jwt-Assertion"] = assertion
+    transport = ASGITransport(app=app, client=("127.0.0.1", 50000))
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(path, headers=headers)
+    get_settings.cache_clear()
+    return {"status": response.status_code, "payload": response.json()}
+
+
 @pytest.mark.asyncio
 async def test_access_jwt_derives_actor_from_validated_email(monkeypatch: pytest.MonkeyPatch) -> None:
     private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -161,6 +194,18 @@ async def test_access_jwt_rejects_missing_forged_and_jwks_failure(monkeypatch: p
         )
         is None
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/health/ready", "/internal/drain/status"])
+async def test_required_access_jwt_exempts_health_and_internal_probes(
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+) -> None:
+    result = await _request_path_with_required_access(monkeypatch, path=path)
+
+    assert result["status"] == 200
+    assert result["payload"] == {"actor": None, "forwarded_header": None}
 
 
 @pytest.mark.asyncio

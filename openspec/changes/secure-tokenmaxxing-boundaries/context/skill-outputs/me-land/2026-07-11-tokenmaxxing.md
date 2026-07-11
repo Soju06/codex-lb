@@ -10,7 +10,7 @@
 
 ## Authorization
 
-- Receipt: `docs/skill-outputs/me-lfg/20260711-tokenmaxxing-context.md`
+- Receipt: `openspec/changes/secure-tokenmaxxing-boundaries/context/skill-outputs/me-lfg/20260711-tokenmaxxing-context.md`
 - Deploy target: one dedicated Hetzner cpx21 in Ashburn.
 - Billing approval: direct user approval on 2026-07-11 after disclosure of
   USD 0.0601/hour and USD 37.49/month.

@@ -15,6 +15,12 @@ clamped to 0–100, and MUST be rounded to the nearest whole display percentage.
 - **AND** fresh exhausted capacity contributes 100 percent
 - **AND** paused or deactivated accounts are listed as excluded
 
+#### Scenario: Account percentage outliers are normalized before aggregation
+
+- **WHEN** a fresh included account reports a remaining percentage below 0 or above 100
+- **THEN** that account's remaining percentage is clamped into the 0–100 range before converting to used capacity
+- **AND** the fleet headline averages those per-account normalized used percentages
+
 #### Scenario: Included account data is stale or missing
 
 - **WHEN** any included active account has stale or missing five-hour data

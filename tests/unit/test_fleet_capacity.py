@@ -61,6 +61,26 @@ def test_capacity_averages_used_percent_rounds_and_clamps() -> None:
     assert additional == []
 
 
+def test_capacity_clamps_each_account_before_averaging_outliers() -> None:
+    now = utcnow()
+    accounts = [
+        _account("full", primary_remaining=100.0, secondary_remaining=0.0),
+        _account("exhausted", primary_remaining=-100.0, secondary_remaining=200.0),
+    ]
+    recorded_at = {account.account_id: now for account in accounts}
+
+    _included, _excluded, five_hour, weekly, _additional = build_fleet_capacity(
+        accounts,
+        include_usage=True,
+        generated_at=now,
+        primary_recorded_at_by_account=recorded_at,
+        secondary_recorded_at_by_account=recorded_at,
+    )
+
+    assert five_hour.used_percent == 50
+    assert weekly.used_percent == 50
+
+
 def test_capacity_excludes_unroutable_and_suppresses_stale_or_missing_headline() -> None:
     now = utcnow()
     accounts = [

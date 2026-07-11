@@ -33,6 +33,8 @@ def test_onda_deployment_forces_auth_retention_and_payload_controls() -> None:
 def test_onda_deployment_has_no_published_ports_and_binds_loopback() -> None:
     compose = COMPOSE_PATH.read_text()
     assert "network_mode: host" in compose
+    assert "codex-lb" in compose
+    assert "fastapi" not in compose
     assert "--host\n      - 127.0.0.1" in compose
     assert "ports:" not in compose
     assert "0.0.0.0" not in compose

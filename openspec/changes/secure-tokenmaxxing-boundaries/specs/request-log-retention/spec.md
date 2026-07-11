@@ -13,3 +13,10 @@ days and SHALL keep request/response payload and conversation archival disabled.
 - **THEN** request logs older than the cutoff are hard-deleted
 - **AND** request logs at or newer than the cutoff remain
 - **AND** a repeated cleanup remains successful
+
+#### Scenario: Readiness allows cleanup interval grace
+
+- **GIVEN** retention cleanup is enabled and its last successful run is still fresh
+- **WHEN** the oldest retained request log is older than the nominal retention cutoff only because the next cleanup interval has not elapsed
+- **THEN** readiness remains healthy
+- **AND** readiness still fails when cleanup itself is unhealthy or retained rows exceed the cleanup grace window

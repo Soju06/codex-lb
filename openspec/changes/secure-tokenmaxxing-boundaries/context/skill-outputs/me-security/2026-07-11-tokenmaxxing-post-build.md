@@ -9,7 +9,7 @@ Scope: current uncommitted Tokenmaxxing server diff in
 API-key capacity privacy, request-log retention, secret/payload handling, and
 deployment configuration
 Scope source: delegated LFG security re-audit plus
-`docs/skill-outputs/me-define-done/2026-07-11-tokenmaxxing.md`
+`openspec/changes/secure-tokenmaxxing-boundaries/context/skill-outputs/me-define-done/2026-07-11-tokenmaxxing.md`
 Review class: read-only security review; no external state or secrets read
 
 Selected principles:

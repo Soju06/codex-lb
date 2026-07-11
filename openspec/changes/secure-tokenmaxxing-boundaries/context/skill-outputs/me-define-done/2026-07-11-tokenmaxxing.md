@@ -4,7 +4,7 @@
 
 | Field | Value |
 |---|---|
-| Context / Receipt Ref | `docs/skill-outputs/me-grill/2026-07-11-tokenmaxxing.md`; predecessor `docs/skill-outputs/me-define-done/2026-07-10-codex-lb-hetzner.md` |
+| Context / Receipt Ref | `openspec/changes/secure-tokenmaxxing-boundaries/context/skill-outputs/me-grill/2026-07-11-tokenmaxxing.md`; predecessor `openspec/changes/secure-tokenmaxxing-boundaries/context/skill-outputs/me-define-done/2026-07-10-codex-lb-hetzner.md` |
 | Session | interactive |
 | Status | complete |
 | Authority Used | planning-artifact writes only; no product code, cloud mutation, credential import, deployment, or publication |
@@ -14,10 +14,10 @@
 | Field | Value |
 |---|---|
 | Chosen Direction | Deploy the unchanged Codex-LB dashboard at `tokenmaxxing.onda.systems`, make Codex-LB the sole four-account gateway, and add a signed WARP-authenticated macOS menu-bar capacity client. |
-| Source Request / Artifact | Current user decisions; `docs/skill-outputs/me-grill/2026-07-11-tokenmaxxing.md`; existing Hetzner contract and technical review. |
+| Source Request / Artifact | Current user decisions; `openspec/changes/secure-tokenmaxxing-boundaries/context/skill-outputs/me-grill/2026-07-11-tokenmaxxing.md`; existing Hetzner contract and technical review. |
 | Actor / User Impact | Every `@onda.lol` user can administer and consume the shared pool, view the web dashboard, and see normalized five-hour utilization in the macOS menu bar. |
 | Constraints | Original dashboard appearance; one Access layer with Google or OTP; WARP for native auth; per-user/device gateway keys; no prompt bodies; 30-day request-metadata retention; one OAuth refresh writer; no public host ports. |
-| Upstream Artifact Check | Used `docs/skill-outputs/me-review-technical-approach/2026-07-10-codex-lb-hetzner.md`; its Tailscale-only ingress decision is superseded by Access plus Tunnel, while its single-writer, immutable-artifact, persistence, and rollback findings remain binding. |
+| Upstream Artifact Check | Used `openspec/changes/secure-tokenmaxxing-boundaries/context/skill-outputs/me-review-technical-approach/2026-07-10-codex-lb-hetzner.md`; its Tailscale-only ingress decision is superseded by Access plus Tunnel, while its single-writer, immutable-artifact, persistence, and rollback findings remain binding. |
 | Live Verification Limits | Cloudflare resources, Apple signing credentials, four-account import, and deployed runtime are not verified in this contract-writing session. |
 
 ## Selected Principles

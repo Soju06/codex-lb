@@ -208,13 +208,23 @@ async def test_health_ready_fails_when_request_log_cleanup_is_unhealthy():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("days_old,expected_status", [(31, 503), (1, 200)])
-async def test_health_ready_enforces_oldest_request_log_age(days_old: int, expected_status: int):
+@pytest.mark.parametrize(
+    "oldest_age,expected_status",
+    [
+        (timedelta(days=31), 503),
+        (timedelta(days=30, minutes=30), 200),
+        (timedelta(days=1), 200),
+    ],
+)
+async def test_health_ready_enforces_oldest_request_log_age_with_cleanup_interval_grace(
+    oldest_age: timedelta,
+    expected_status: int,
+):
     from app.core.utils.time import utcnow
     from app.modules.health.api import health_ready
 
     oldest_result = MagicMock()
-    oldest_result.scalar_one_or_none.return_value = utcnow() - timedelta(days=days_old)
+    oldest_result.scalar_one_or_none.return_value = utcnow() - oldest_age
     mock_session = AsyncMock()
     mock_session.execute = AsyncMock(side_effect=[MagicMock(), oldest_result])
     settings = SimpleNamespace(

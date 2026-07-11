@@ -6,13 +6,13 @@ Active. Current pickup point: implement AC1–AC6 from the original frozen
 contract before any external write, then follow the Tokenmaxxing successor
 contract for ingress, authentication, cutover, retention, and the macOS client.
 
-Canonical lifecycle receipt: `docs/skill-outputs/me-lfg/20260710-codex-lb-hetzner-context.md`
+Canonical lifecycle receipt: `openspec/changes/secure-tokenmaxxing-boundaries/context/skill-outputs/me-lfg/20260710-codex-lb-hetzner-context.md`
 
 Current renewed Tokenmaxxing lifecycle receipt:
-`docs/skill-outputs/me-lfg/20260711-tokenmaxxing-context.md`
+`openspec/changes/secure-tokenmaxxing-boundaries/context/skill-outputs/me-lfg/20260711-tokenmaxxing-context.md`
 
 Successor product/auth contract:
-`docs/skill-outputs/me-define-done/2026-07-11-tokenmaxxing.md`
+`openspec/changes/secure-tokenmaxxing-boundaries/context/skill-outputs/me-define-done/2026-07-11-tokenmaxxing.md`
 
 Run context:
 
@@ -54,7 +54,7 @@ Done:
 
 In progress:
 
-1. Implement AC1–AC6 from `docs/skill-outputs/me-define-done/2026-07-10-codex-lb-hetzner.md`.
+1. Implement AC1–AC6 from `openspec/changes/secure-tokenmaxxing-boundaries/context/skill-outputs/me-define-done/2026-07-10-codex-lb-hetzner.md`.
 
 Next:
 
@@ -94,7 +94,7 @@ Next:
 - Run the remaining work under the direct-human LFG lifecycle receipt; rejected treating setup, deployment, credential migration, and session resumption as disconnected handoffs.
 - Keep the original Codex-LB dashboard and grant all `@onda.lol` users full
   administration through one Cloudflare Access layer offering Google or OTP;
-  decision record: `docs/skill-outputs/me-grill/2026-07-11-tokenmaxxing.md`.
+  decision record: `openspec/changes/secure-tokenmaxxing-boundaries/context/skill-outputs/me-grill/2026-07-11-tokenmaxxing.md`.
 
 ## Blockers
 
@@ -114,6 +114,23 @@ Next:
 - deploy preflight, smoke, rollback rehearsal, and observation-band checks
 - live Codex request through codex-lb before session migration
 - Herdr agent/session inventory before and after cutover
+
+## Review repair notes
+
+- Behavior contracts, lifecycle receipts, decision records, and review outputs
+  for this change are stored in
+  `openspec/changes/secure-tokenmaxxing-boundaries/context/skill-outputs/`.
+  `docs/` remains limited to repository navigation/readiness and existing
+  screenshots.
+- Required Cloudflare Access assertions apply fail-closed to dashboard traffic,
+  but health and internal probes remain routable with unvalidated identity
+  headers stripped.
+- Request-log readiness allows scheduler interval grace before treating the
+  oldest retained row as a retention violation.
+- Fleet capacity clamps each account's remaining percentage before converting
+  it to used capacity and averaging.
+- The Onda compose profile runs the image through `codex-lb` so the shared
+  runtime log configuration is used.
 
 ## LFG shaping dispatch
 

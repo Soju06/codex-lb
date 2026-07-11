@@ -58,6 +58,9 @@ class DashboardAuthProxyHeaderSanitizerMiddleware:
         )
 
         headers = cast(list[tuple[bytes, bytes]], scope.get("headers", []))
+        access_jwt_required_for_path = self._access_jwt_required and not _is_access_jwt_optional_path(
+            cast(str, scope.get("path", ""))
+        )
         # A configured Access assertion is the authentication boundary. Verify
         # it cryptographically even when an earlier proxy-aware middleware has
         # rewritten scope.client to the original internet client address.
@@ -77,7 +80,7 @@ class DashboardAuthProxyHeaderSanitizerMiddleware:
                     actor=actor,
                 )
                 next_scope["state"] = state
-            elif self._access_jwt_required:
+            elif access_jwt_required_for_path:
                 response = JSONResponse(
                     status_code=401,
                     content={"detail": "A valid Cloudflare Access assertion is required"},
@@ -147,6 +150,10 @@ def _header_value(headers: list[tuple[bytes, bytes]], target: bytes) -> str | No
         if name.lower() == target:
             return value.decode("latin-1")
     return None
+
+
+def _is_access_jwt_optional_path(path: str) -> bool:
+    return path == "/health" or path.startswith("/health/") or path == "/internal" or path.startswith("/internal/")
 
 
 __all__ = ["add_dashboard_auth_proxy_middleware", "DashboardAuthProxyHeaderSanitizerMiddleware"]

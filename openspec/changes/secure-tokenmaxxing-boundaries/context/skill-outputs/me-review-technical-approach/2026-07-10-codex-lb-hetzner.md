@@ -4,7 +4,7 @@ Verdict: proceed after the revisions below are frozen in the execution contract.
 
 Scope posture: hold.
 
-Upstream artifacts: `docs/exec-plans/active/codex-lb-hetzner.md`, `docs/skill-outputs/me-setup-repo/2026-07-10-codex-lb-inventory.md`.
+Upstream artifacts: `docs/exec-plans/active/codex-lb-hetzner.md`, `openspec/changes/secure-tokenmaxxing-boundaries/context/skill-outputs/me-setup-repo/2026-07-10-codex-lb-inventory.md`.
 
 ## Restatement
 

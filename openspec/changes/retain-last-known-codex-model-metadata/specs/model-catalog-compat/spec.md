@@ -16,9 +16,10 @@ Models outside the bundled Codex catalog MUST NOT be retained after they leave
 the current live availability snapshot.
 
 OpenAI-compatible source entries that share a slug with retained Codex metadata
-MUST replace retained metadata only when the source entry is visible/listed for
-the requesting API key. A same-slug source entry hidden by the API key's exact
-source allowlist MUST NOT shadow the retained metadata.
+MUST replace retained metadata only when the source entry's effective Codex
+visibility is `list` for the requesting client. A same-slug source entry hidden
+by raw catalog visibility or by the API key's exact source allowlist MUST NOT
+shadow the retained metadata.
 
 #### Scenario: Sol metadata remains resolvable after a partial refresh
 
@@ -37,6 +38,6 @@ source allowlist MUST NOT shadow the retained metadata.
 
 - **GIVEN** metadata was retained for `gpt-5.6-sol`
 - **AND** an OpenAI-compatible source exposes the same `gpt-5.6-sol` slug
-- **AND** an API key's exact source allowlist hides that source entry from the Codex catalog
+- **AND** that source entry is hidden from the effective Codex catalog by raw visibility or an API key's exact source allowlist
 - **WHEN** a client calls `GET /backend-api/codex/models` with that API key
 - **THEN** the hidden Sol catalog entry uses the retained Codex metadata

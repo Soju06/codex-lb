@@ -2664,9 +2664,12 @@ async def _build_codex_models_response(api_key: ApiKeyData | None) -> Response:
     source_model_slugs = {
         model.slug
         for model in visible_source_models
-        if visibility_allowed_models is None
-        or exact_source_allowed_models is None
-        or model.slug in exact_source_allowed_models
+        if _effective_source_codex_visibility(
+            model,
+            visibility_allowed_models=visibility_allowed_models,
+            exact_source_allowed_models=exact_source_allowed_models,
+        )
+        == "list"
     }
 
     if not models and not metadata_models and not source_models:
@@ -2715,8 +2718,10 @@ async def _build_codex_models_response(api_key: ApiKeyData | None) -> Response:
             continue
         entry = _to_codex_model_entry(
             model,
-            visibility=(
-                "list" if exact_source_allowed_models is None or model.slug in exact_source_allowed_models else "hide"
+            visibility=_effective_source_codex_visibility(
+                model,
+                visibility_allowed_models=visibility_allowed_models,
+                exact_source_allowed_models=exact_source_allowed_models,
             ),
         )
         entries.append(entry)
@@ -2981,6 +2986,24 @@ def _v1_supports_vision(model: UpstreamModel) -> bool:
 def _model_visibility(model: UpstreamModel) -> str:
     visibility = model.raw.get("visibility")
     return visibility if isinstance(visibility, str) else "list"
+
+
+def _effective_source_codex_visibility(
+    model: UpstreamModel,
+    *,
+    visibility_allowed_models: set[str] | None,
+    exact_source_allowed_models: set[str] | None,
+) -> str:
+    raw_visibility = _model_visibility(model)
+    if raw_visibility != "list":
+        return raw_visibility
+    if (
+        visibility_allowed_models is not None
+        and exact_source_allowed_models is not None
+        and model.slug not in exact_source_allowed_models
+    ):
+        return "hide"
+    return "list"
 
 
 def _to_model_metadata(model: UpstreamModel) -> ModelMetadata:

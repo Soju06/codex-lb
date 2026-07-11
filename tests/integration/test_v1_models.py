@@ -1511,6 +1511,57 @@ async def test_filtered_same_slug_source_does_not_hide_allowed_retained_metadata
 
 
 @pytest.mark.asyncio
+async def test_raw_hidden_same_slug_source_does_not_shadow_retained_metadata(async_client):
+    registry = get_model_registry()
+    sol = _make_upstream_model(
+        "gpt-5.6-sol",
+        base_instructions="retained sol metadata",
+        raw={"use_responses_lite": True},
+    )
+    terra = _make_upstream_model("gpt-5.6-terra")
+    await registry.update({"plus": [sol, terra]})
+    await registry.update({"plus": [terra]})
+    await _create_model_source(
+        async_client,
+        name="raw-hidden-same-slug-sol-source",
+        model="gpt-5.6-sol",
+        supports_responses=True,
+        raw_metadata_json=json.dumps({"visibility": "hide", "use_responses_lite": False}),
+    )
+    enable = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert enable.status_code == 200
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "raw-hidden-source-codex-visibility",
+            "allowedModels": ["gpt-5.6-sol"],
+            "applyToCodexModel": True,
+        },
+    )
+    assert created.status_code == 200
+
+    response = await async_client.get(
+        "/backend-api/codex/models",
+        headers={"Authorization": f"Bearer {created.json()['key']}"},
+    )
+
+    assert response.status_code == 200
+    entries = {item["slug"]: item for item in response.json()["models"]}
+    assert entries["gpt-5.6-sol"]["visibility"] == "hide"
+    assert entries["gpt-5.6-sol"]["base_instructions"] == "retained sol metadata"
+    assert entries["gpt-5.6-sol"]["use_responses_lite"] is True
+    assert "gpt-5.6-sol" not in {item["id"] for item in response.json()["data"]}
+
+
+@pytest.mark.asyncio
 async def test_first_partial_refresh_serves_hidden_bootstrap_metadata(async_client):
     registry = get_model_registry()
     await registry.update({"plus": [_make_upstream_model("gpt-5.6-terra")]})

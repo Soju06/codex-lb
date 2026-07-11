@@ -705,11 +705,9 @@ class _HTTPBridgeMixin(
                     assert existing is not None
                     current_instance = settings.http_responses_session_bridge_instance_id
                     if _durable_bridge_lookup_allows_local_reuse(durable_lookup, current_instance=current_instance):
-                        existing.api_key = api_key
-                        existing.request_model = request_model
-                        existing.request_service_tier = request_service_tier
-                        existing.requires_security_work_authorized |= require_security_work_authorized
-                        existing.last_used_at = _service_time().monotonic()
+                        _apply_http_bridge_reuse_metadata(
+                            existing, api_key, request_model, request_service_tier, require_security_work_authorized
+                        )
                         await _refresh_reused_http_bridge_session_with_handoff(
                             self,
                             existing,
@@ -1764,7 +1762,9 @@ class _HTTPBridgeMixin(
                     latest_response_id=None,
                     allow_takeover=allow_takeover,
                     force_owner_epoch_advance=force_owner_epoch_advance or claim_attempt > 0,
-                    requires_security_work_authorized=session.requires_security_work_authorized,
+                    requires_security_work_authorized=bool(
+                        getattr(session, "requires_security_work_authorized", False)
+                    ),
                 )
                 if lookup.owner_instance_id == current_instance:
                     break

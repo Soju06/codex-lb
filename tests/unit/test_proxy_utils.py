@@ -2833,7 +2833,7 @@ def test_response_create_client_metadata_replaces_installation_id():
         {
             "client_metadata": {
                 "x-codex-installation-id": "client-installation",
-                "x-codex-turn-metadata": '{"turn_id":"payload-turn"}',
+                "x-codex-turn-metadata": '{"installation_id":"client-installation","turn_id":"payload-turn"}',
             }
         },
         headers={},
@@ -2842,8 +2842,41 @@ def test_response_create_client_metadata_replaces_installation_id():
 
     assert metadata == {
         "x-codex-installation-id": "account-installation",
-        "x-codex-turn-metadata": '{"turn_id":"payload-turn"}',
+        "x-codex-turn-metadata": '{"installation_id":"account-installation","turn_id":"payload-turn"}',
     }
+
+
+def test_installation_headers_rewrite_canonical_turn_metadata():
+    headers = proxy_module.apply_codex_installation_headers(
+        {
+            "x-codex-installation-id": "client-installation",
+            "x-codex-turn-metadata": '{"installation_id":"client-installation","turn_id":"turn-1"}',
+        },
+        "account-installation",
+    )
+
+    assert headers["x-codex-installation-id"] == "account-installation"
+    assert json.loads(headers["x-codex-turn-metadata"]) == {
+        "installation_id": "account-installation",
+        "turn_id": "turn-1",
+    }
+
+
+@pytest.mark.parametrize(
+    "turn_metadata",
+    ["not-json", "[]", '{"turn_id":"turn-1"}'],
+)
+def test_installation_headers_preserve_turn_metadata_without_rewriteable_id(turn_metadata: str):
+    headers = proxy_module.apply_codex_installation_headers(
+        {
+            "x-codex-installation-id": "client-installation",
+            "x-codex-turn-metadata": turn_metadata,
+        },
+        "account-installation",
+    )
+
+    assert headers["x-codex-installation-id"] == "account-installation"
+    assert headers["x-codex-turn-metadata"] == turn_metadata
 
 
 def test_response_create_client_metadata_strips_installation_id_without_account_id():

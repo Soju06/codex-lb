@@ -171,8 +171,14 @@ async def test_first_partial_refresh_keeps_bootstrap_metadata_hidden_from_availa
 @pytest.mark.asyncio
 async def test_metadata_does_not_retain_non_bundled_models():
     registry = ModelRegistry(ttl_seconds=60.0)
+    workspace_model = replace(
+        _model("workspace-private"),
+        raw={"use_responses_lite": False},
+    )
 
-    await registry.update({"enterprise": [_model("workspace-private")]})
+    await registry.update({"enterprise": [workspace_model]})
+    assert registry.get_models_for_metadata()["workspace-private"].raw["use_responses_lite"] is False
+
     await registry.update({"enterprise": [_model("gpt-5.6-terra")]})
 
     assert "workspace-private" not in registry.get_models_for_metadata()

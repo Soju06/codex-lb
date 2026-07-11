@@ -685,10 +685,12 @@ class ModelRegistry:
                     plan_type: frozenset(slugs) for plan_type, slugs in plan_models_index.items()
                 }
 
-                metadata_models = dict(self._metadata_models or self._bootstrap_models)
-                metadata_models.update(
-                    (slug, model) for slug, model in models.items() if slug in self._bootstrap_models
-                )
+                metadata_models = {
+                    slug: model
+                    for slug, model in (self._metadata_models or self._bootstrap_models).items()
+                    if slug in self._bootstrap_models
+                }
+                metadata_models.update(models)
                 self._snapshot = ModelRegistrySnapshot(
                     models=models,
                     model_plans=frozen_model_plans,

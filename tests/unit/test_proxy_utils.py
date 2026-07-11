@@ -26059,23 +26059,23 @@ async def test_cleared_registry_keeps_bootstrap_plan_gating_in_new_account_windo
     assert _filter_accounts_for_model([unsupported, supported], "gpt-5.6-sol") == [supported]
 
 
-def test_suppressed_bootstrap_model_remains_an_account_selection_blocker(monkeypatch):
+def test_suppressed_catalog_model_remains_an_account_selection_blocker(monkeypatch):
     class Registry:
         def plan_types_for_model(self, slug: str) -> frozenset[str] | None:
             return frozenset()
 
-        def is_suppressed_bootstrap_model(self, slug: str) -> bool:
-            return slug == "gpt-5.6-sol"
+        def is_suppressed_model(self, slug: str) -> bool:
+            return slug == "private-alpha"
 
     monkeypatch.setattr("app.modules.proxy.load_balancer.get_model_registry", lambda: Registry())
 
     # A suppressed known slug is not an operator-mapped unknown: it must enter
     # model filtering and leave no eligible account to select.
-    assert _mapped_model_has_registry_entry("gpt-5.6-sol") is True
+    assert _mapped_model_has_registry_entry("private-alpha") is True
     assert _mapped_model_has_registry_entry("operator-mapped-slug") is False
-    account = _make_account("acc_suppressed_bootstrap")
+    account = _make_account("acc_suppressed_catalog")
     account.plan_type = "plus"
-    assert _filter_accounts_for_model([account], "gpt-5.6-sol") == []
+    assert _filter_accounts_for_model([account], "private-alpha") == []
 
 
 def test_http_bridge_session_rejects_account_without_requested_model(monkeypatch):
@@ -26101,26 +26101,26 @@ def test_http_bridge_session_rejects_account_without_requested_model(monkeypatch
     )
 
 
-def test_http_bridge_session_rejects_suppressed_bootstrap_model(monkeypatch):
+def test_http_bridge_session_rejects_suppressed_catalog_model(monkeypatch):
     session = cast(
         proxy_service._HTTPBridgeSession,
-        SimpleNamespace(account=_make_account("acc_bridge_suppressed_bootstrap")),
+        SimpleNamespace(account=_make_account("acc_bridge_suppressed_catalog")),
     )
 
     class Registry:
         def plan_types_for_model(self, slug: str) -> frozenset[str] | None:
-            assert slug == "gpt-5.6-sol"
+            assert slug == "private-alpha"
             return frozenset()
 
-        def is_suppressed_bootstrap_model(self, slug: str) -> bool:
-            return slug == "gpt-5.6-sol"
+        def is_suppressed_model(self, slug: str) -> bool:
+            return slug == "private-alpha"
 
     monkeypatch.setattr(proxy_support, "get_model_registry", lambda: Registry())
 
     assert (
         proxy_support._http_bridge_session_supports_service_tier(
             session,
-            request_model="gpt-5.6-sol",
+            request_model="private-alpha",
             request_service_tier=None,
         )
         is False

@@ -55,10 +55,11 @@ model cannot be attributed to any account.
 A retained account catalog MUST remain associated with the plan type that
 produced it. If an active account changes plan type and its new catalog refresh
 fails, the system MUST leave that account's catalog unknown rather than
-re-labeling its old capabilities as support for the new plan. A bootstrap slug
-explicitly suppressed because all its known advertisers left the active set MUST
-still enter plan filtering and select no account; this is distinct from an
-operator-mapped slug that has no catalog evidence at all.
+re-labeling its old capabilities as support for the new plan. Any previously
+advertised catalog slug explicitly suppressed because all its known advertisers
+left the active set MUST still enter plan filtering and select no account,
+whether or not it is part of the static bootstrap catalog; this is distinct from
+an operator-mapped slug that has no catalog evidence at all.
 
 #### Scenario: Catalog fetch partially fails after restart
 
@@ -117,25 +118,32 @@ operator-mapped slug that has no catalog evidence at all.
 - **AND** the plan's refresh does not complete in a later cycle
 - **THEN** the model advertised only by the removed account still leaves discovery
 
-#### Scenario: Removed bootstrap model stays suppressed across repeated partial refreshes
+#### Scenario: Removed catalog model stays suppressed across repeated partial refreshes
 
-- **GIVEN** a non-authoritative snapshot suppressed a bootstrap model because every last-known advertiser left the active account set
+- **GIVEN** a snapshot suppressed a previously advertised catalog model because every last-known advertiser left the active account set
 - **WHEN** later refresh cycles remain non-authoritative and still do not produce fresh active evidence for that model
 - **THEN** the model stays absent from discovery and plan gating across those repeated partial refreshes
 
-#### Scenario: Suppressed bootstrap model cannot select an account
+#### Scenario: Suppressed catalog model cannot select an account
 
-- **GIVEN** a partial snapshot explicitly suppresses a bootstrap model because no active account advertises it
+- **GIVEN** a snapshot explicitly suppresses a previously advertised model because no active account advertises it
 - **WHEN** account selection receives a request for that model
 - **THEN** the selector rejects every account for that model
 - **AND** it does not treat the known suppressed slug as an operator-mapped unknown
 
-#### Scenario: Fresh active evidence clears bootstrap suppression
+#### Scenario: Fresh active evidence clears catalog suppression
 
-- **GIVEN** a bootstrap model was previously suppressed after its last-known advertisers left the active account set
+- **GIVEN** a catalog model was previously suppressed after its last-known advertisers left the active account set
 - **WHEN** a later refresh records that an active account advertises that model again
 - **THEN** the suppression is cleared
 - **AND** the model returns to discovery and plan gating from live registry data
+
+#### Scenario: Never-known operator mapping remains distinct from suppression
+
+- **GIVEN** an operator-mapped slug has never appeared in an account catalog
+- **WHEN** an authoritative catalog snapshot does not contain that slug
+- **THEN** the registry does not mark the slug as suppressed
+- **AND** the existing operator-mapped unknown fallback remains available
 
 #### Scenario: Carried-forward model has unknown per-account provenance
 

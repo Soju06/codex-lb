@@ -23,6 +23,7 @@ subscription catalog.
 
 Last-known capabilities belong to the account plan that produced them. A failed
 refresh after a plan-type change is therefore unknown state, not evidence that
-the account retained its previous-plan entitlements. Conversely, an explicitly
-suppressed bootstrap slug is known unavailable and must be rejected during
-selection rather than taking the operator-mapped unknown fallback.
+the account retained its previous-plan entitlements. Conversely, any previously
+advertised catalog slug that is explicitly suppressed is known unavailable and
+must be rejected during selection rather than taking the operator-mapped unknown
+fallback. A genuinely never-advertised operator mapping has no such tombstone.

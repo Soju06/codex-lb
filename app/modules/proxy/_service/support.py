@@ -545,12 +545,12 @@ def _http_bridge_session_supports_service_tier(
     # Mirror select_account: only apply model-account filtering when the model has
     # registry plan-presence. An operator-mapped but unadvertised slug yields an
     # authoritative-empty account catalog, which must not deny bridge session reuse.
-    # Explicitly suppressed bootstrap slugs must, however, not allow reuse because
+    # Explicitly suppressed catalog slugs must, however, not allow reuse because
     # they intentionally block account selection even when the catalog is empty.
     plan_types_for_model = getattr(registry, "plan_types_for_model", None)
-    is_suppressed_bootstrap_model = getattr(registry, "is_suppressed_bootstrap_model", None)
+    is_suppressed_model = getattr(registry, "is_suppressed_model", None)
     if callable(plan_types_for_model) and not plan_types_for_model(request_model):
-        if callable(is_suppressed_bootstrap_model) and is_suppressed_bootstrap_model(request_model):
+        if callable(is_suppressed_model) and is_suppressed_model(request_model):
             return False
         return True
     account_ids_for_model = getattr(registry, "account_ids_for_model", None)

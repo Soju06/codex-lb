@@ -681,7 +681,7 @@ async def test_suppressed_bootstrap_model_persists_across_partial_cycles_and_cle
     assert second is not None
     assert second.bootstrap_floor_active is True
     assert "gpt-5.6-sol" not in registry.get_models_with_fallback()
-    assert "gpt-5.6-sol" in second.suppressed_bootstrap_model_slugs
+    assert "gpt-5.6-sol" in second.suppressed_model_slugs
 
     await registry.update(
         {"plus": [shared]},
@@ -694,8 +694,8 @@ async def test_suppressed_bootstrap_model_persists_across_partial_cycles_and_cle
     assert third.bootstrap_floor_active is True
     assert "gpt-5.6-sol" not in registry.get_models_with_fallback()
     assert registry.plan_types_for_model("gpt-5.6-sol") == frozenset()
-    assert registry.is_suppressed_bootstrap_model("gpt-5.6-sol") is True
-    assert "gpt-5.6-sol" in third.suppressed_bootstrap_model_slugs
+    assert registry.is_suppressed_model("gpt-5.6-sol") is True
+    assert "gpt-5.6-sol" in third.suppressed_model_slugs
 
     await registry.update(
         {"pro": [sol], "plus": [shared]},
@@ -711,8 +711,89 @@ async def test_suppressed_bootstrap_model_persists_across_partial_cycles_and_cle
     assert fourth.account_catalogs_authoritative is True
     assert fourth.bootstrap_floor_active is False
     assert "gpt-5.6-sol" in registry.get_models_with_fallback()
-    assert "gpt-5.6-sol" not in fourth.suppressed_bootstrap_model_slugs
+    assert "gpt-5.6-sol" not in fourth.suppressed_model_slugs
     assert registry.plan_types_for_model("gpt-5.6-sol") == frozenset({"pro"})
+
+
+@pytest.mark.asyncio
+async def test_complete_refresh_suppresses_removed_private_catalog_model() -> None:
+    registry = ModelRegistry(ttl_seconds=60.0)
+    private_alpha = _model("private-alpha")
+    shared = _model("gpt-5.4")
+
+    await registry.update(
+        {"pro": [private_alpha], "plus": [shared]},
+        per_account_results={
+            "account-private": ("pro", [private_alpha]),
+            "account-plus": ("plus", [shared]),
+        },
+        active_account_plans={"account-private": "pro", "account-plus": "plus"},
+    )
+
+    await registry.update(
+        {"plus": [shared]},
+        per_account_results={"account-plus": ("plus", [shared])},
+        active_account_plans={"account-plus": "plus"},
+    )
+
+    snapshot = registry.get_snapshot()
+    assert snapshot is not None
+    assert snapshot.account_catalogs_authoritative is True
+    assert "private-alpha" not in snapshot.models
+    assert registry.plan_types_for_model("private-alpha") == frozenset()
+    assert registry.is_suppressed_model("private-alpha") is True
+
+
+@pytest.mark.asyncio
+async def test_authoritative_catalog_does_not_suppress_never_known_operator_mapping() -> None:
+    registry = ModelRegistry(ttl_seconds=60.0)
+    shared = _model("gpt-5.4")
+
+    await registry.update(
+        {"plus": [shared]},
+        per_account_results={"account-plus": ("plus", [shared])},
+        active_account_plans={"account-plus": "plus"},
+    )
+
+    assert registry.plan_types_for_model("operator-mapped-never-known") == frozenset()
+    assert registry.is_suppressed_model("operator-mapped-never-known") is False
+
+
+@pytest.mark.asyncio
+async def test_private_catalog_model_reappearance_clears_suppression() -> None:
+    registry = ModelRegistry(ttl_seconds=60.0)
+    private_alpha = _model("private-alpha")
+    shared = _model("gpt-5.4")
+
+    await registry.update(
+        {"pro": [private_alpha], "plus": [shared]},
+        per_account_results={
+            "account-private": ("pro", [private_alpha]),
+            "account-plus": ("plus", [shared]),
+        },
+        active_account_plans={"account-private": "pro", "account-plus": "plus"},
+    )
+    await registry.update(
+        {"plus": [shared]},
+        per_account_results={"account-plus": ("plus", [shared])},
+        active_account_plans={"account-plus": "plus"},
+    )
+    assert registry.is_suppressed_model("private-alpha") is True
+
+    await registry.update(
+        {"pro": [private_alpha], "plus": [shared]},
+        per_account_results={
+            "account-private-new": ("pro", [private_alpha]),
+            "account-plus": ("plus", [shared]),
+        },
+        active_account_plans={"account-private-new": "pro", "account-plus": "plus"},
+    )
+
+    snapshot = registry.get_snapshot()
+    assert snapshot is not None
+    assert registry.is_suppressed_model("private-alpha") is False
+    assert registry.plan_types_for_model("private-alpha") == frozenset({"pro"})
+    assert snapshot.model_accounts["private-alpha"] == frozenset({"account-private-new"})
 
 
 @pytest.mark.asyncio

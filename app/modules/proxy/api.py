@@ -2652,7 +2652,16 @@ async def _build_codex_models_response(api_key: ApiKeyData | None) -> Response:
         for model in await _list_enabled_source_catalog_models(api_key, require_responses=True)
         if model.raw.get("supports_streaming") is True
     ]
-    source_model_slugs = {model.slug for model in source_models}
+    visible_source_models = []
+    for source_model in source_models:
+        if visibility_allowed_models is None:
+            if exact_source_allowed_models is not None:
+                if source_model.slug not in exact_source_allowed_models:
+                    continue
+            elif not is_public_model(source_model, allowed_models):
+                continue
+        visible_source_models.append(source_model)
+    source_model_slugs = {model.slug for model in visible_source_models}
 
     if not models and not metadata_models and not source_models:
         await _release_reservation(reservation)
@@ -2688,15 +2697,10 @@ async def _build_codex_models_response(api_key: ApiKeyData | None) -> Response:
             continue
         entries.append(_to_codex_model_entry(model, visibility="hide"))
         seen_slugs.add(slug)
-    for model in source_models:
+    for model in visible_source_models:
         if model.slug in seen_slugs:
             continue
         if visibility_allowed_models is None:
-            if exact_source_allowed_models is not None:
-                if model.slug not in exact_source_allowed_models:
-                    continue
-            elif not is_public_model(model, allowed_models):
-                continue
             entry = _to_codex_model_entry(model)
             entries.append(entry)
             seen_slugs.add(model.slug)

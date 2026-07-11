@@ -8,7 +8,8 @@
 - [x] 2.1 Capture and persist seat identity during OAuth and token refresh.
 - [x] 2.2 Carry the selected local account through server-side OAuth flow state.
 - [x] 2.3 Verify the returned seat and replace only the selected row.
-- [x] 2.4 Remove persistent affinity bindings after permanent authentication failure.
+- [x] 2.4 Remove persistent sticky bindings, durable bridge aliases, and durable
+      bridge continuity anchors after permanent authentication failure.
 - [x] 2.5 Pass the selected account from the dashboard reauthentication action.
 
 ## 3. Verification

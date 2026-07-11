@@ -19,6 +19,7 @@ from app.db.models import (
     AdditionalUsageHistory,
     ApiKeyAccountAssignment,
     DashboardSettings,
+    HttpBridgeSessionAlias,
     HttpBridgeSessionRecord,
     HttpBridgeSessionState,
     RequestLog,
@@ -513,17 +514,7 @@ class AccountsRepository:
             )
             if status in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
                 await self._session.execute(delete(StickySession).where(StickySession.account_id == account_id))
-                await self._session.execute(
-                    update(HttpBridgeSessionRecord)
-                    .where(HttpBridgeSessionRecord.account_id == account_id)
-                    .values(
-                        account_id=None,
-                        state=HttpBridgeSessionState.CLOSED,
-                        closed_at=utcnow(),
-                        owner_instance_id=None,
-                        lease_expires_at=None,
-                    )
-                )
+                await self._close_http_bridge_sessions_for_account(account_id)
             await self._session.commit()
             return result.scalar_one_or_none() is not None
 
@@ -583,19 +574,30 @@ class AccountsRepository:
             updated_id = result.scalar_one_or_none()
             if updated_id is not None and status in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
                 await self._session.execute(delete(StickySession).where(StickySession.account_id == account_id))
-                await self._session.execute(
-                    update(HttpBridgeSessionRecord)
-                    .where(HttpBridgeSessionRecord.account_id == account_id)
-                    .values(
-                        account_id=None,
-                        state=HttpBridgeSessionState.CLOSED,
-                        closed_at=utcnow(),
-                        owner_instance_id=None,
-                        lease_expires_at=None,
-                    )
-                )
+                await self._close_http_bridge_sessions_for_account(account_id)
             await self._session.commit()
             return updated_id is not None
+
+    async def _close_http_bridge_sessions_for_account(self, account_id: str) -> None:
+        session_ids = select(HttpBridgeSessionRecord.id).where(HttpBridgeSessionRecord.account_id == account_id)
+        await self._session.execute(
+            delete(HttpBridgeSessionAlias).where(HttpBridgeSessionAlias.session_id.in_(session_ids))
+        )
+        await self._session.execute(
+            update(HttpBridgeSessionRecord)
+            .where(HttpBridgeSessionRecord.account_id == account_id)
+            .values(
+                account_id=None,
+                state=HttpBridgeSessionState.CLOSED,
+                closed_at=utcnow(),
+                owner_instance_id=None,
+                lease_expires_at=None,
+                latest_turn_state=None,
+                latest_response_id=None,
+                latest_input_item_count=None,
+                latest_input_full_fingerprint=None,
+            )
+        )
 
     async def update_alias(self, account_id: str, alias: str | None) -> bool:
         async with sqlite_writer_section():

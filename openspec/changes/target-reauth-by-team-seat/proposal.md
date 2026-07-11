@@ -23,6 +23,8 @@ workspace.
 
 - `frontend-architecture`: reauthentication targets and verifies one local seat
   instead of merging every row that shares a workspace identity.
+- `sticky-session-operations`: accounts that become unusable clear persistent
+  sticky and durable HTTP bridge continuity bindings.
 
 ## Impact
 

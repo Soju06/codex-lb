@@ -25,6 +25,7 @@ from starlette.responses import StreamingResponse
 import app.core.clients.proxy as proxy_module
 from app.core.clients.proxy import _build_upstream_headers, filter_inbound_headers
 from app.core.config.settings import Settings
+from app.core.config.settings import get_settings as real_get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.errors import openai_error
 from app.core.openai.models import CompactResponsePayload, OpenAIResponsePayload
@@ -3446,6 +3447,7 @@ def _make_proxy_settings(*, log_proxy_service_tier_trace: bool) -> SimpleNamespa
         log_proxy_service_tier_trace=log_proxy_service_tier_trace,
         proxy_token_refresh_limit=32,
         proxy_upstream_websocket_connect_limit=64,
+        proxy_account_stream_recovery_reserve=1,
         proxy_response_create_limit=64,
         proxy_compact_response_create_limit=16,
         proxy_admission_wait_timeout_seconds=10.0,
@@ -23510,7 +23512,7 @@ async def test_select_account_with_budget_forwards_estimated_lease_tokens(monkey
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("request_stage", "expected_reserve"),
-    [("first_turn", 1), ("follow_up", 1), ("bootstrap_rebind", 1), ("reattach", 0)],
+    [("first_turn", 3), ("follow_up", 3), ("bootstrap_rebind", 3), ("reattach", 0)],
 )
 async def test_select_account_with_budget_reserves_stream_slot_for_reattach(
     monkeypatch,
@@ -23518,11 +23520,17 @@ async def test_select_account_with_budget_reserves_stream_slot_for_reattach(
     expected_reserve,
 ):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
-    settings.proxy_account_stream_recovery_reserve = 1
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     account = _make_account("acc_recovery_reserve")
     select_account = AsyncMock(return_value=AccountSelection(account=account, error_message=None))
 
+    # The reserve knob is env-backed (CODEX_LB_PROXY_ACCOUNT_STREAM_RECOVERY_RESERVE
+    # -> get_settings()), not a dashboard setting, so it is intentionally absent from
+    # the settings-cache stub. Use the real env-backed get_settings with a non-default
+    # value to prove the env knob is honored.
+    monkeypatch.setenv("CODEX_LB_PROXY_ACCOUNT_STREAM_RECOVERY_RESERVE", "3")
+    real_get_settings.cache_clear()
+    monkeypatch.setattr(proxy_service, "get_settings", real_get_settings)
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(service._load_balancer, "select_account", select_account)
     monkeypatch.setattr(proxy_service, "_remaining_budget_seconds", lambda _deadline: 10.0)

@@ -1732,7 +1732,7 @@ class ProxyService(
             with anyio.fail_after(remaining_budget):
                 settings = await get_settings_cache().get()
                 stream_reserve_slots = (
-                    int(getattr(settings, "proxy_account_stream_recovery_reserve", 1))
+                    get_settings().proxy_account_stream_recovery_reserve
                     if lease_kind == "stream" and request_stage != "reattach"
                     else 0
                 )

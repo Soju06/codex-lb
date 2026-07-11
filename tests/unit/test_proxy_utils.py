@@ -384,6 +384,37 @@ async def test_chat_startup_probe_consumes_capacity_marker_after_startup_event()
     assert await anext(stream) == 'data: {"type":"response.created"}\n\n'
 
 
+@pytest.mark.asyncio
+async def test_chat_startup_probe_consumes_repeated_capacity_markers_before_first_event() -> None:
+    capacity_wait_event = asyncio.Event()
+    release_next_event = asyncio.Event()
+
+    async def delayed_chat_stream() -> AsyncIterator[str]:
+        await asyncio.sleep(0.01)
+        capacity_wait_event.set()
+        await asyncio.sleep(0.01)
+        capacity_wait_event.set()
+        yield 'data: {"type":"response.created"}\n\n'
+        await release_next_event.wait()
+        yield 'data: {"type":"response.output_text.delta","delta":"hello"}\n\n'
+
+    probe_task = asyncio.create_task(
+        proxy_api._probe_chat_stream_startup_error(
+            delayed_chat_stream(),
+            timeout_seconds=0.001,
+            capacity_wait_event=capacity_wait_event,
+        )
+    )
+    try:
+        stream, startup_error = await asyncio.wait_for(probe_task, timeout=0.1)
+    finally:
+        release_next_event.set()
+
+    assert startup_error is None
+    assert capacity_wait_event.is_set() is False
+    assert await anext(stream) == 'data: {"type":"response.created"}\n\n'
+
+
 def test_relative_availability_settings_default_when_stored_values_are_null():
     settings = cast(Any, SimpleNamespace(relative_availability_power=None, relative_availability_top_k=None))
 
@@ -8690,6 +8721,89 @@ async def test_stream_with_retry_prefers_other_account_before_response_create_ca
     assert completed["type"] == "response.completed"
     assert stream_accounts == [saturated.id, spare.id]
     assert selections[1]["exclude_account_ids"] == {saturated.id}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("propagate_http_errors", [False, True])
+async def test_stream_with_retry_waits_after_response_create_cap_has_no_alternate(
+    monkeypatch,
+    propagate_http_errors: bool,
+):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_response_create_single")
+    selection_exclusions: list[set[str]] = []
+    stream_once_calls = 0
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        streaming_retry_module,
+        "_account_selection_recovery_sleep_seconds",
+        lambda _selection: 0.001,
+    )
+    monkeypatch.setattr(streaming_retry_module, "_ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS", 0.001)
+
+    async def select_account(_deadline: float, **kwargs: object) -> AccountSelection:
+        excluded = set(cast(set[str], kwargs["exclude_account_ids"]))
+        selection_exclusions.append(excluded)
+        if account.id in excluded:
+            return AccountSelection(
+                account=None,
+                error_message="No alternate account available",
+                error_code="no_accounts",
+            )
+        return AccountSelection(account=account, error_message=None)
+
+    async def fake_stream_once(*_args: object, **_kwargs: object):
+        nonlocal stream_once_calls
+        stream_once_calls += 1
+        if stream_once_calls == 1:
+            raise proxy_module.ProxyResponseError(
+                429,
+                proxy_module.openai_error(
+                    "account_response_create_cap",
+                    "Account response-create concurrency limit reached",
+                    error_type="server_error",
+                ),
+            )
+        yield 'data: {"type":"response.completed","response":{"id":"resp_response_create_single_ok"}}\n\n'
+
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(
+        service,
+        "_ensure_fresh_with_budget",
+        AsyncMock(side_effect=lambda selected, **_kwargs: selected),
+    )
+    monkeypatch.setattr(service, "_stream_once", fake_stream_once)
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+    chunks = [
+        chunk
+        async for chunk in service._stream_with_retry(
+            payload,
+            {"session_id": "sid-response-create-single"},
+            codex_session_affinity=False,
+            propagate_http_errors=propagate_http_errors,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            request_transport="http",
+            upstream_stream_transport_override="http",
+        )
+    ]
+
+    completed = json.loads(chunks[-1].split("data: ", 1)[1])
+
+    if propagate_http_errors:
+        assert len(chunks) == 1
+    else:
+        keepalive = json.loads(chunks[0].split("data: ", 1)[1])
+        assert keepalive["status"] == "waiting_for_account_capacity"
+    assert completed["type"] == "response.completed"
+    assert selection_exclusions == [set(), {account.id}, set()]
+    assert stream_once_calls == 2
 
 
 @pytest.mark.asyncio

@@ -4726,6 +4726,11 @@ async def _wait_for_first_stream_probe(
             # wait can set the shared marker again.
             capacity_wait_event.clear()
             await asyncio.wait({first_task})
+            # Another capacity sleep may have signalled while the upstream
+            # first item was still pending. That marker belongs to this same
+            # extended probe and must not leak into the next buffered startup
+            # event probe.
+            capacity_wait_event.clear()
             return True
         return first_task in done
     finally:

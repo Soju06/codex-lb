@@ -280,6 +280,8 @@ class _StreamingRetryMixin:
         last_transient_exc: ProxyResponseError | None = None
         last_security_work_retry_error: _RetryableStreamError | None = None
         excluded_account_ids: set[str] = set()
+        deferred_capacity_account_id: str | None = None
+        capacity_waited_account_ids: set[str] = set()
         preferred_account_id: str | None = None
         file_preferred_account_id: str | None = rewritten_file_account_id
         require_preferred_account = False
@@ -559,6 +561,39 @@ class _StreamingRetryMixin:
                         )
                         require_security_work_authorized = False
                         continue
+                    if not account and deferred_capacity_account_id is not None:
+                        deferred_error = _parse_openai_error(last_transient_exc.payload) if last_transient_exc else None
+                        recovery_sleep_seconds = _account_selection_recovery_sleep_seconds(
+                            AccountSelection(
+                                account=None,
+                                error_message=deferred_error.message if deferred_error else None,
+                                error_code="account_response_create_cap",
+                            )
+                        )
+                        if recovery_sleep_seconds is not None:
+                            remaining_budget_seconds = _facade()._remaining_budget_seconds(deadline)
+                            if remaining_budget_seconds <= 0:
+                                break
+                            capacity_account_id = deferred_capacity_account_id
+                            excluded_account_ids.discard(capacity_account_id)
+                            async for wait_event in _iter_account_capacity_recovery_wait(
+                                request_id=request_id,
+                                model=payload.model,
+                                account_id=capacity_account_id,
+                                error_message=deferred_error.message if deferred_error else None,
+                                recovery_sleep_seconds=recovery_sleep_seconds,
+                                deadline=deadline,
+                                emit_keepalives=not propagate_http_errors,
+                                stage="response_create_no_alternate",
+                            ):
+                                yield wait_event
+                            if _facade()._remaining_budget_seconds(deadline) <= 0:
+                                break
+                            capacity_waited_account_ids.add(capacity_account_id)
+                            deferred_capacity_account_id = None
+                            continue
+                    if account is not None:
+                        deferred_capacity_account_id = None
                     if (
                         not account
                         and (
@@ -1074,8 +1109,10 @@ class _StreamingRetryMixin:
                                             not require_preferred_account
                                             and account.id != file_preferred_account_id
                                             and attempt < max_attempts - 1
+                                            and account.id not in capacity_waited_account_ids
                                         )
                                         if can_try_other_account:
+                                            deferred_capacity_account_id = account.id
                                             await _release_tracked_stream_lease(current_account_lease)
                                             current_account_lease = None
                                             excluded_account_ids.add(account.id)
@@ -1363,14 +1400,16 @@ class _StreamingRetryMixin:
                             yield format_sse_event(_facade()._proxy_request_timeout_event(request_id))
                             return
                         try:
+                            can_try_other_account = (
+                                not require_preferred_account
+                                and account.id != file_preferred_account_id
+                                and attempt < max_attempts - 1
+                                and account.id not in capacity_waited_account_ids
+                            )
                             async for line in _stream_post_refresh_with_capacity_recovery(
                                 account,
                                 settlement=settlement,
-                                can_try_other_account=(
-                                    not require_preferred_account
-                                    and account.id != file_preferred_account_id
-                                    and attempt < max_attempts - 1
-                                ),
+                                can_try_other_account=can_try_other_account,
                                 tool_call_dedupe=tool_call_dedupe,
                             ):
                                 yield line
@@ -1425,6 +1464,8 @@ class _StreamingRetryMixin:
                             )
                             if error_code == "account_response_create_cap":
                                 last_transient_exc = retry_exc
+                                if can_try_other_account:
+                                    deferred_capacity_account_id = account.id
                                 await _release_tracked_stream_lease(current_account_lease)
                                 current_account_lease = None
                                 excluded_account_ids.add(account.id)

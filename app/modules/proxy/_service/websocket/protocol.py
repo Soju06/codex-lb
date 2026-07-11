@@ -39,6 +39,7 @@ class _WebSocketServiceProtocol(Protocol):
     _relay_upstream_websocket_messages: Any
     _release_websocket_request_state_reservation: Any
     _release_websocket_reservation: Any
+    _release_request_state_account_response_create_lease: Any
     _remember_websocket_previous_response_owner: Any
     _remember_websocket_previous_response_owner_miss: Any
     _repo_factory: Any

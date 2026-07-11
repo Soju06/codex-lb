@@ -17555,6 +17555,105 @@ async def test_process_upstream_websocket_text_transparently_retries_precreated_
 
 
 @pytest.mark.asyncio
+async def test_process_upstream_websocket_text_owner_replay_releases_old_account_create_lease(
+    monkeypatch,
+):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    finalize_request_state = AsyncMock()
+    handle_stream_error = AsyncMock()
+    old_account = _make_account("acc_ws_owner_old")
+
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize_request_state)
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+
+    old_lease = await service._load_balancer.acquire_account_lease(old_account.id, kind="response_create")
+    assert old_lease is not None
+
+    anchored_payload = {
+        "type": "response.create",
+        "model": "gpt-5.1",
+        "previous_response_id": "resp_anchor",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "continue"}]}],
+    }
+    fresh_payload = {
+        "type": "response.create",
+        "model": "gpt-5.1",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "continue"}]}],
+    }
+    response_create_gate = asyncio.Semaphore(1)
+    await response_create_gate.acquire()
+    pending_request = proxy_service._WebSocketRequestState(
+        request_id="ws_req_owner_replay_release_old_lease",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        awaiting_response_created=True,
+        response_create_gate=response_create_gate,
+        response_create_gate_acquired=True,
+        request_text=json.dumps(anchored_payload, separators=(",", ":")),
+        previous_response_id="resp_anchor",
+        preferred_account_id=old_account.id,
+        proxy_injected_previous_response_id=True,
+        fresh_upstream_request_text=json.dumps(fresh_payload, separators=(",", ":")),
+        fresh_upstream_request_is_retry_safe=True,
+        account_response_create_lease=old_lease,
+        account_response_create_release=service._load_balancer.release_account_lease,
+    )
+    pending_requests = deque([pending_request])
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    upstream_payload = {
+        "type": "response.failed",
+        "response": {
+            "id": "resp_owner_limit",
+            "status": "failed",
+            "error": {"code": "usage_limit_reached", "message": "usage limit reached"},
+            "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+        },
+    }
+
+    downstream_text = await service._process_upstream_websocket_text(
+        json.dumps(upstream_payload, separators=(",", ":")),
+        account=old_account,
+        account_id_value=old_account.id,
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=upstream_control,
+        response_create_gate=response_create_gate,
+    )
+
+    assert downstream_text == json.dumps(upstream_payload, separators=(",", ":"))
+    finalize_request_state.assert_not_awaited()
+    handle_stream_error.assert_awaited_once()
+    assert upstream_control.reconnect_requested is True
+    assert upstream_control.suppress_downstream_event is True
+    assert upstream_control.replay_request_state is pending_request
+    assert pending_request.request_text == json.dumps(fresh_payload, separators=(",", ":"))
+    assert pending_request.previous_response_id is None
+    assert pending_request.preferred_account_id is None
+    assert pending_request.account_response_create_lease is None
+    assert pending_request.account_response_create_release is None
+    assert pending_request.response_create_gate is response_create_gate
+    assert pending_request.response_create_gate_acquired is True
+    assert response_create_gate.locked() is True
+    assert list(pending_requests) == []
+
+    old_pressure = await service._load_balancer.account_pressure_snapshot(old_account.id)
+    assert old_pressure == (0, 0, 0.0)
+
+    replacement_lease = await service._acquire_account_response_create_lease_or_overload(
+        account_id="acc_ws_owner_new",
+        request_id="ws_req_owner_replay_release_old_lease_replay",
+        surface="websocket",
+    )
+    assert replacement_lease is not None
+    await service._load_balancer.release_account_lease(replacement_lease)
+
+
+@pytest.mark.asyncio
 async def test_process_upstream_websocket_text_does_not_fresh_retry_injected_tool_output_previous_response_not_found(
     monkeypatch,
 ):

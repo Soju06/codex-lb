@@ -3225,6 +3225,12 @@ class _WebSocketMixin:
             if safe_request_text is None:
                 retry_error_code = None
             else:
+                # Keep the global response-create gate/admission while dropping
+                # the old owner's per-account create lease. The replay may move
+                # to a replacement account, and the reconnect/send path
+                # re-acquires the account-local slot only when this field is
+                # clear.
+                await proxy._release_request_state_account_response_create_lease(request_state)
                 request_state.request_text = safe_request_text
         if retry_error_code is not None:
             if retry_is_previous_response_not_found:

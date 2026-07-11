@@ -117,6 +117,11 @@ supports_websockets = true
 requires_openai_auth = true # codex 应用需要
 ```
 
+此处记录的 `requires_openai_auth = true` 配置使用 Codex 后端鉴权；要满足
+Codex 内置 `$imagegen` 工具的 provider 条件，无需添加
+`x-openai-actor-authorization` 标记。主动跳过 OpenAI 登录的 provider 配置走另一条
+条件路径；详见 [Images 兼容性说明](openspec/specs/images-api-compat/context.md#codex-provider-eligibility)。
+
 可选：在保留 `codex-lb` 池化能力的同时，启用上游原生 WebSocket 流式传输：
 
 ```bash

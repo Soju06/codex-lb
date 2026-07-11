@@ -110,6 +110,128 @@ async def test_durable_bridge_lookup_prefers_turn_state_then_previous_response_t
 
 
 @pytest.mark.asyncio
+async def test_durable_bridge_turn_state_lookup_does_not_fall_back_to_canonical_session_key(
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    claimed = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-123",
+        api_key_id=None,
+        instance_id="instance-a",
+        lease_ttl_seconds=120.0,
+        account_id="acc-1",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    await coordinator.register_turn_state(
+        session_id=claimed.session_id,
+        api_key_id=None,
+        instance_id="instance-a",
+        owner_epoch=claimed.owner_epoch,
+        turn_state="http_turn_registered",
+        lease_ttl_seconds=120.0,
+    )
+
+    registered = await coordinator.lookup_turn_state_target(
+        turn_state="http_turn_registered",
+        api_key_id=None,
+    )
+    unknown = await coordinator.lookup_turn_state_target(
+        turn_state="http_turn_generated",
+        api_key_id=None,
+    )
+
+    assert registered is not None
+    assert registered.canonical_kind == "session_header"
+    assert registered.canonical_key == "sid-123"
+    assert unknown is None
+
+
+@pytest.mark.asyncio
+async def test_durable_bridge_turn_state_proof_does_not_accept_latest_state_without_alias(
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-latest-only",
+        api_key_id=None,
+        instance_id="instance-a",
+        lease_ttl_seconds=120.0,
+        account_id="acc-1",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state="http_turn_latest_only",
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+
+    assert (
+        await coordinator.lookup_turn_state_target(
+            turn_state="http_turn_latest_only",
+            api_key_id=None,
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_durable_bridge_stale_owner_cannot_register_turn_state_after_epoch_advance(
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    claimed = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-stale-alias",
+        api_key_id=None,
+        instance_id="instance-a",
+        lease_ttl_seconds=120.0,
+        account_id="acc-1",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    replaced = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-stale-alias",
+        api_key_id=None,
+        instance_id="instance-a",
+        lease_ttl_seconds=120.0,
+        account_id="acc-2",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+
+    stale_registered = await coordinator.register_turn_state(
+        session_id=claimed.session_id,
+        api_key_id=None,
+        instance_id="instance-a",
+        owner_epoch=claimed.owner_epoch,
+        turn_state="http_turn_stale_owner",
+        lease_ttl_seconds=120.0,
+    )
+    current_registered = await coordinator.register_turn_state(
+        session_id=replaced.session_id,
+        api_key_id=None,
+        instance_id="instance-a",
+        owner_epoch=replaced.owner_epoch,
+        turn_state="http_turn_current_owner",
+        lease_ttl_seconds=120.0,
+    )
+
+    assert stale_registered is False
+    assert current_registered is True
+    assert await coordinator.lookup_turn_state_target(turn_state="http_turn_stale_owner", api_key_id=None) is None
+    assert await coordinator.lookup_turn_state_target(turn_state="http_turn_current_owner", api_key_id=None) is not None
+
+
+@pytest.mark.asyncio
 async def test_durable_bridge_claim_renews_same_owner_epoch(
     coordinator: DurableBridgeSessionCoordinator,
 ) -> None:

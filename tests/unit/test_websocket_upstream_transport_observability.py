@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from collections import deque
+from types import SimpleNamespace
 from typing import Any, cast
 
 import anyio
 import pytest
 
+from app.core.crypto import TokenEncryptor
 from app.modules.proxy._service.support import (
     _REQUEST_TRANSPORT_HTTP,
     _REQUEST_TRANSPORT_WEBSOCKET,
@@ -22,12 +25,22 @@ class _DummyWebSocketService(_WebSocketMixin):
     def __init__(self) -> None:
         self.request_log_calls: list[dict[str, object]] = []
         self.remembered_response_ids: list[str] = []
+        self._encryptor = TokenEncryptor()
 
         class _LoadBalancer:
             async def record_success(self, _account: object) -> None:
                 return None
 
+        class _ConnectLease:
+            def release(self) -> None:
+                return None
+
+        class _WorkAdmission:
+            async def acquire_websocket_connect(self) -> _ConnectLease:
+                return _ConnectLease()
+
         self._load_balancer = _LoadBalancer()
+        self._work_admission = _WorkAdmission()
 
     async def _write_request_log(self, **kwargs: object) -> None:
         self.request_log_calls.append(kwargs)
@@ -46,6 +59,13 @@ class _DummyWebSocketService(_WebSocketMixin):
     ) -> None:
         if previous_response_id is not None:
             self.remembered_response_ids.append(previous_response_id)
+
+    def _get_work_admission(self) -> object:
+        return self._work_admission
+
+    async def _resolve_upstream_route_for_account(self, _account: object, *, operation: str) -> None:
+        assert operation == "responses_websocket"
+        return None
 
 
 class _DummyFacade:
@@ -72,6 +92,72 @@ async def _no_op_release_gate(_request_state: object, _response_create_gate: obj
 def _patch_websocket_dependencies(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(websocket_mixin_module, "_facade", lambda: _DummyFacade())
     monkeypatch.setattr(websocket_mixin_module, "_release_websocket_response_create_gate", _no_op_release_gate)
+
+
+@pytest.mark.asyncio
+async def test_direct_websocket_connect_egress_normalizes_selected_installation_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _DummyWebSocketService()
+    captured: dict[str, object] = {}
+    expected_upstream = object()
+
+    async def connect_responses_websocket(
+        headers: dict[str, str],
+        access_token: str,
+        account_id: str | None,
+        *,
+        route: object,
+        allow_direct_egress: bool,
+    ) -> object:
+        captured["headers"] = dict(headers)
+        captured["access_token"] = access_token
+        captured["account_id"] = account_id
+        captured["route"] = route
+        captured["allow_direct_egress"] = allow_direct_egress
+        return expected_upstream
+
+    class _DirectWebSocketFacade(_DummyFacade):
+        connect_responses_websocket: Any
+
+        @staticmethod
+        async def _call_with_supported_optional_kwargs(
+            function: object,
+            *args: object,
+            optional_kwargs: dict[str, object],
+        ) -> object:
+            return await cast(Any, function)(*args, **optional_kwargs)
+
+    _DirectWebSocketFacade.connect_responses_websocket = staticmethod(connect_responses_websocket)
+    monkeypatch.setattr(websocket_mixin_module, "_facade", lambda: _DirectWebSocketFacade())
+    account = cast(
+        Any,
+        SimpleNamespace(
+            access_token_encrypted=service._encryptor.encrypt("access-token"),
+            chatgpt_account_id="account-123",
+            codex_installation_id="account-installation",
+        ),
+    )
+
+    upstream = await service._open_upstream_websocket(
+        account,
+        {
+            "x-codex-installation-id": "client-installation",
+            "x-codex-turn-metadata": '{"installation_id":"nested-client-installation","turn_id":"turn_123"}',
+        },
+    )
+
+    assert upstream is expected_upstream
+    assert captured["access_token"] == "access-token"
+    assert captured["account_id"] == "account-123"
+    assert captured["route"] is None
+    assert captured["allow_direct_egress"] is True
+    upstream_headers = cast(dict[str, str], captured["headers"])
+    assert upstream_headers["x-codex-installation-id"] == "account-installation"
+    assert json.loads(upstream_headers["x-codex-turn-metadata"]) == {
+        "installation_id": "account-installation",
+        "turn_id": "turn_123",
+    }
 
 
 @pytest.mark.asyncio

@@ -1731,6 +1731,11 @@ class ProxyService(
         try:
             with anyio.fail_after(remaining_budget):
                 settings = await get_settings_cache().get()
+                stream_reserve_slots = (
+                    get_settings().proxy_account_stream_recovery_reserve
+                    if lease_kind == "stream" and request_stage != "reattach"
+                    else 0
+                )
                 required_preferred_account = (
                     preferred_account_id is not None and not fallback_on_preferred_account_unavailable
                 )
@@ -1798,6 +1803,7 @@ class ProxyService(
                         secondary_budget_threshold_pct=_sticky_reallocation_secondary_budget_threshold_pct(settings),
                         lease_kind=lease_kind,
                         estimated_lease_tokens=estimated_lease_tokens,
+                        stream_reserve_slots=stream_reserve_slots,
                         traffic_class=effective_traffic_class,
                     )
                     if preferred_selection.account is not None:
@@ -1841,6 +1847,7 @@ class ProxyService(
                     secondary_budget_threshold_pct=_sticky_reallocation_secondary_budget_threshold_pct(settings),
                     lease_kind=lease_kind,
                     estimated_lease_tokens=estimated_lease_tokens,
+                    stream_reserve_slots=stream_reserve_slots,
                     traffic_class=effective_traffic_class,
                 )
                 if selection.account is not None and selection.account.id in excluded_account_ids_set:

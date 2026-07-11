@@ -25,6 +25,7 @@ from starlette.responses import StreamingResponse
 import app.core.clients.proxy as proxy_module
 from app.core.clients.proxy import _build_upstream_headers, filter_inbound_headers
 from app.core.config.settings import Settings
+from app.core.config.settings import get_settings as real_get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.errors import openai_error
 from app.core.openai.models import CompactResponsePayload, OpenAIResponsePayload
@@ -2939,7 +2940,7 @@ def test_response_create_client_metadata_replaces_installation_id():
         {
             "client_metadata": {
                 "x-codex-installation-id": "client-installation",
-                "x-codex-turn-metadata": '{"turn_id":"payload-turn"}',
+                "x-codex-turn-metadata": '{"installation_id":"client-installation","turn_id":"payload-turn"}',
             }
         },
         headers={},
@@ -2948,8 +2949,41 @@ def test_response_create_client_metadata_replaces_installation_id():
 
     assert metadata == {
         "x-codex-installation-id": "account-installation",
-        "x-codex-turn-metadata": '{"turn_id":"payload-turn"}',
+        "x-codex-turn-metadata": '{"installation_id":"account-installation","turn_id":"payload-turn"}',
     }
+
+
+def test_installation_headers_rewrite_canonical_turn_metadata():
+    headers = proxy_module.apply_codex_installation_headers(
+        {
+            "x-codex-installation-id": "client-installation",
+            "x-codex-turn-metadata": '{"installation_id":"client-installation","turn_id":"turn-1"}',
+        },
+        "account-installation",
+    )
+
+    assert headers["x-codex-installation-id"] == "account-installation"
+    assert json.loads(headers["x-codex-turn-metadata"]) == {
+        "installation_id": "account-installation",
+        "turn_id": "turn-1",
+    }
+
+
+@pytest.mark.parametrize(
+    "turn_metadata",
+    ["not-json", "[]", '{"turn_id":"turn-1"}'],
+)
+def test_installation_headers_preserve_turn_metadata_without_rewriteable_id(turn_metadata: str):
+    headers = proxy_module.apply_codex_installation_headers(
+        {
+            "x-codex-installation-id": "client-installation",
+            "x-codex-turn-metadata": turn_metadata,
+        },
+        "account-installation",
+    )
+
+    assert headers["x-codex-installation-id"] == "account-installation"
+    assert headers["x-codex-turn-metadata"] == turn_metadata
 
 
 def test_response_create_client_metadata_strips_installation_id_without_account_id():
@@ -3552,6 +3586,7 @@ def _make_proxy_settings(*, log_proxy_service_tier_trace: bool) -> SimpleNamespa
         log_proxy_service_tier_trace=log_proxy_service_tier_trace,
         proxy_token_refresh_limit=32,
         proxy_upstream_websocket_connect_limit=64,
+        proxy_account_stream_recovery_reserve=1,
         proxy_response_create_limit=64,
         proxy_compact_response_create_limit=16,
         proxy_admission_wait_timeout_seconds=10.0,
@@ -5461,6 +5496,57 @@ async def test_stream_responses_falls_back_to_http_post_without_native_codex_hea
     assert upstream_headers["version"] == "0.142.0"
     assert "Version" not in upstream_headers
     assert events == ['data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n']
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_http_egress_normalizes_selected_installation_metadata(monkeypatch):
+    class Settings:
+        upstream_base_url = "https://chatgpt.com/backend-api"
+        upstream_connect_timeout_seconds = 8.0
+        stream_idle_timeout_seconds = 45.0
+        max_sse_event_bytes = 1024
+        image_inline_fetch_enabled = False
+        log_upstream_request_payload = False
+        proxy_request_budget_seconds = 15.0
+        upstream_stream_transport = "http"
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module.get_codex_version_cache(), "cached_version_or_default", lambda: "0.142.0")
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [{"role": "user", "content": "hi"}],
+        }
+    )
+    session = _SseSession(_SsePostResponse([b'data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n']))
+
+    events = [
+        event
+        async for event in proxy_module.stream_responses(
+            payload,
+            headers={
+                "x-codex-installation-id": "client-installation",
+                "x-codex-turn-metadata": '{"installation_id":"nested-client-installation","turn_id":"turn_123"}',
+            },
+            access_token="token",
+            account_id="acc_1",
+            session=cast(proxy_module.aiohttp.ClientSession, session),
+            codex_installation_id="account-installation",
+        )
+    ]
+
+    assert events == ['data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n']
+    assert len(session.calls) == 1
+    upstream_headers = cast(dict[str, str], session.calls[0]["headers"])
+    assert upstream_headers["x-codex-installation-id"] == "account-installation"
+    assert json.loads(upstream_headers["x-codex-turn-metadata"]) == {
+        "installation_id": "account-installation",
+        "turn_id": "turn_123",
+    }
 
 
 @pytest.mark.asyncio
@@ -12729,14 +12815,16 @@ async def test_select_websocket_connect_account_requires_preferred_account_for_p
         reasoning_effort=None,
         api_key_reservation=None,
         started_at=0.0,
+        request_stage="reattach",
     )
     selected_account = _make_account("acc_other")
     emit_connect_failure = AsyncMock()
+    select_account = AsyncMock(return_value=AccountSelection(account=selected_account, error_message=None))
 
     monkeypatch.setattr(
         service,
         "_select_account_with_budget",
-        AsyncMock(return_value=AccountSelection(account=selected_account, error_message=None)),
+        select_account,
     )
     monkeypatch.setattr(service, "_emit_websocket_connect_failure", emit_connect_failure)
 
@@ -12766,6 +12854,8 @@ async def test_select_websocket_connect_account_requires_preferred_account_for_p
     assert call.kwargs["status_code"] == 502
     assert call.kwargs["error_code"] == "previous_response_owner_unavailable"
     assert call.kwargs["account_id"] == "acc_owner"
+    assert select_account.await_args is not None
+    assert select_account.await_args.kwargs["request_stage"] == "reattach"
 
 
 @pytest.mark.asyncio
@@ -23751,6 +23841,45 @@ async def test_select_account_with_budget_forwards_estimated_lease_tokens(monkey
     assert selection.account == account
     assert select_account.await_args is not None
     assert select_account.await_args.kwargs["estimated_lease_tokens"] == 1234.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("request_stage", "expected_reserve"),
+    [("first_turn", 3), ("follow_up", 3), ("bootstrap_rebind", 3), ("reattach", 0)],
+)
+async def test_select_account_with_budget_reserves_stream_slot_for_reattach(
+    monkeypatch,
+    request_stage,
+    expected_reserve,
+):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_recovery_reserve")
+    select_account = AsyncMock(return_value=AccountSelection(account=account, error_message=None))
+
+    # The reserve knob is env-backed (CODEX_LB_PROXY_ACCOUNT_STREAM_RECOVERY_RESERVE
+    # -> get_settings()), not a dashboard setting, so it is intentionally absent from
+    # the settings-cache stub. Use the real env-backed get_settings with a non-default
+    # value to prove the env knob is honored.
+    monkeypatch.setenv("CODEX_LB_PROXY_ACCOUNT_STREAM_RECOVERY_RESERVE", "3")
+    real_get_settings.cache_clear()
+    monkeypatch.setattr(proxy_service, "get_settings", real_get_settings)
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    monkeypatch.setattr(proxy_service, "_remaining_budget_seconds", lambda _deadline: 10.0)
+
+    await service._select_account_with_budget(
+        deadline=123.0,
+        request_id=f"req-{request_stage}",
+        kind="http_bridge",
+        request_stage=request_stage,
+        lease_kind="stream",
+        model="gpt-5.6-sol",
+    )
+
+    assert select_account.await_args is not None
+    assert select_account.await_args.kwargs["stream_reserve_slots"] == expected_reserve
 
 
 @pytest.mark.asyncio

@@ -38,6 +38,26 @@ reserved tool entry.
   affinity/observability consumer, which stays order-insensitive.
 - Regression coverage at the product paths: websocket `response.create`
   frame, HTTP-bridge body, and legacy HTTP stream path.
+- Follow-up (salvaged from #1187): field omission survives re-serialization
+  hops. `ResponsesRequest.model_dump_for_forwarding()` extracts the
+  omission logic from `to_payload()` and is used by the multi-instance
+  owner-forward body (`HTTPBridgeOwnerClient.stream_responses`) and
+  model-source Responses egress (`_source_responses_response`), so a
+  forwarded body never re-marks `tools` as explicitly set on the owner
+  instance and openai-compatible sources never see a synthesized
+  `"tools": []`. The owner forward is dual-signed during rollout: a new v2
+  signature header (`x-codex-bridge-signature-v2`) binds the exact posted
+  body (a validating v2 proves the body was not rewritten, including an
+  injected `"tools": []`), while the legacy plain-dump headers keep being
+  sent as a one-release rolling-upgrade shim for pre-v2 owners. Receivers
+  treat v2 as authoritative only when it validates and otherwise fall back
+  to the legacy verification (rejecting only when neither verifies), because
+  pre-v2 origins relay unknown inbound bridge headers verbatim and a planted
+  garbage v2 header must not deny an honestly legacy-signed forward;
+  upgraded origins strip externally supplied `x-codex-bridge-*` headers.
+  The shim (legacy emission + fallback) is to be removed in a follow-up once
+  fleets are homogeneous (grep `ROLLOUT SHIM`); until then the fallback is
+  exactly as strong as the pre-v2 scheme.
 
 ## Sibling-field audit
 

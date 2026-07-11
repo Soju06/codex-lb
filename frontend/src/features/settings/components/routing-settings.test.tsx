@@ -101,6 +101,19 @@ describe("RoutingSettings", () => {
     });
   });
 
+  it("saves the Fast Mode prohibition toggle", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={onSave} />);
+
+    await user.click(screen.getByRole("switch", { name: "Prohibit Fast Mode" }));
+
+    expect(onSave).toHaveBeenCalledWith({
+      ...BASE_UPDATE_PAYLOAD,
+      prohibitFastMode: true,
+    });
+  });
+
   it("shows relative availability controls only for that strategy", async () => {
     const user = userEvent.setup();
     const onSave = vi.fn().mockResolvedValue(undefined);

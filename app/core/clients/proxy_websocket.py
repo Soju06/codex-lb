@@ -30,6 +30,7 @@ from app.core.clients.codex import (
 from app.core.clients.proxy import (
     _CHATGPT_ACCOUNT_ID_HEADER,
     _HOP_BY_HOP_HEADER_NAMES,
+    CODEX_INSTALLATION_ID_HEADER,
     ProxyResponseError,
     _is_native_codex_request,
     _normalize_non_native_upstream_fingerprint,
@@ -319,6 +320,18 @@ def _build_upstream_websocket_headers(
     account_id: str | None,
 ) -> dict[str, str]:
     headers = filter_inbound_websocket_headers(inbound)
+    # ``filter_inbound_websocket_headers`` strips ``x-codex-installation-id`` because it
+    # lives in ``IGNORE_INBOUND_HEADERS``. Callers normalize the selected account's
+    # canonical installation id onto the inbound headers before connecting (mirroring the
+    # HTTP ``/codex/responses`` egress, where ``apply_codex_installation_headers`` runs as
+    # the final post-filter step). Re-add it here so the websocket handshake keeps header
+    # parity instead of losing the standalone installation header to this second filter.
+    installation_id = next(
+        (value for key, value in inbound.items() if key.lower() == CODEX_INSTALLATION_ID_HEADER),
+        None,
+    )
+    if installation_id:
+        headers[CODEX_INSTALLATION_ID_HEADER] = installation_id
     native = _is_native_codex_request(headers)
     lower_keys = {key.lower() for key in headers}
     if "x-request-id" not in lower_keys and "request-id" not in lower_keys:

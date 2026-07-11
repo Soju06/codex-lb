@@ -7,7 +7,10 @@
 The system MUST retain the union of successfully refreshed account model
 catalogs for client discovery. When every active account has a current or
 retained last-known catalog, request selection MUST route a model or explicit
-service tier only to accounts whose own catalog advertised that capability.
+non-default service tier only to accounts whose own catalog advertised that
+capability. Requests that omit a tier or use the omit-equivalent `auto` or
+`default` tiers MUST use model-only account filtering, including when reusing
+an HTTP bridge session.
 
 #### Scenario: Same-plan accounts expose different models
 

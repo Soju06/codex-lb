@@ -557,7 +557,11 @@ def _http_bridge_session_supports_service_tier(
     model_account_ids = account_ids_for_model(request_model) if callable(account_ids_for_model) else None
     if model_account_ids is not None and session.account.id not in model_account_ids:
         return False
-    if request_service_tier is None:
+    # Keep bridge reuse aligned with account selection: clients commonly send
+    # these omit-equivalent values explicitly, but neither selects a specific
+    # service tier.
+    normalized_service_tier = request_service_tier.strip().lower() if request_service_tier is not None else None
+    if normalized_service_tier in {None, "auto", "default"}:
         return True
 
     allowed_account_ids = registry.account_ids_for_model_service_tier(request_model, request_service_tier)

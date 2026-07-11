@@ -747,6 +747,51 @@ async def test_plan_change_drops_failed_account_stale_catalog() -> None:
 
 
 @pytest.mark.asyncio
+async def test_plan_change_drops_only_changed_account_from_stale_plan() -> None:
+    registry = ModelRegistry(ttl_seconds=60.0)
+    changed_only = _model("changed-pro-only")
+    unchanged_only = _model("unchanged-pro-only")
+    shared = _model("gpt-5.4")
+
+    await registry.update(
+        {"pro": [changed_only, unchanged_only], "plus": [shared]},
+        per_account_results={
+            "account-changed": ("pro", [changed_only]),
+            "account-unchanged": ("pro", [unchanged_only]),
+            "account-plus": ("plus", [shared]),
+        },
+        active_account_plans={
+            "account-changed": "pro",
+            "account-unchanged": "pro",
+            "account-plus": "plus",
+        },
+    )
+
+    # Pro stays active but stale through account-unchanged. The failed catalog
+    # from account-changed must not be retained or relabeled after it moves to
+    # plus, while account-unchanged keeps its last-known pro catalog.
+    await registry.update(
+        {"plus": [shared]},
+        per_account_results={"account-plus": ("plus", [shared])},
+        active_account_plans={
+            "account-changed": "plus",
+            "account-unchanged": "pro",
+            "account-plus": "plus",
+        },
+    )
+
+    snapshot = registry.get_snapshot()
+    assert snapshot is not None
+    assert snapshot.account_catalogs_authoritative is False
+    assert "account-changed" not in snapshot.account_plans
+    assert "changed-pro-only" not in snapshot.models
+    assert "changed-pro-only" not in snapshot.model_accounts
+    assert snapshot.account_plans["account-unchanged"] == "pro"
+    assert snapshot.model_accounts["unchanged-pro-only"] == frozenset({"account-unchanged"})
+    assert snapshot.model_plans["unchanged-pro-only"] == frozenset({"pro"})
+
+
+@pytest.mark.asyncio
 async def test_stale_plan_preserves_models_with_unknown_account_provenance():
     # Degrade-safe carve-out: when a stale plan's model has NO per-account provenance
     # (an older/plan-only snapshot that never captured per-account catalogs), it must

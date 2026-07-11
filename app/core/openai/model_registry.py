@@ -670,7 +670,9 @@ class ModelRegistry:
                         stale_account_ids = {
                             account_id
                             for account_id, plan_type in previous.account_plans.items()
-                            if account_id in active_account_plans and plan_type in stale_plans
+                            if account_id in active_account_plans
+                            and plan_type in stale_plans
+                            and active_account_plans[account_id] == plan_type
                         }
                         refreshed_account_ids = set(per_account_results or {})
                         stale_account_ids.update(

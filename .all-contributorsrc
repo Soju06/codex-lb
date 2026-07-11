@@ -975,6 +975,15 @@
       "contributions": [
         "doc"
       ]
+    },
+    {
+      "login": "dmdfami",
+      "name": "DOMANHDUC",
+      "avatar_url": "https://avatars.githubusercontent.com/u/222630288?v=4",
+      "profile": "https://github.com/dmdfami",
+      "contributions": [
+        "code"
+      ]
     }
   ],
   "contributorsPerLine": 7,

@@ -27,6 +27,17 @@ run_make() {
   fi
 }
 
+run_command() {
+  if [[ "${CODEX_LB_TEST_DRY_RUN:-0}" == 1 ]]; then
+    printf '%q' "$1"
+    shift
+    printf ' %q' "$@"
+    printf '\n'
+  else
+    "$@"
+  fi
+}
+
 if (($# == 0)); then
   run_make ci
   exit
@@ -73,18 +84,20 @@ needs_fast=0
 needs_docker=0
 needs_helm=0
 needs_migration=0
+needs_openspec=0
 for path in "${changed[@]}"; do
   case "$path" in
     *.md|docs/*|openspec/*) ;;
     *) needs_fast=1 ;;
   esac
   case "$path" in
-    Dockerfile|docker-compose*.yml|scripts/docker-entrypoint.sh|scripts/distroless-entrypoint.py)
+    Dockerfile|docker-compose*.yml|*/docker-compose*.yml|scripts/docker-entrypoint.sh|scripts/distroless-entrypoint.py)
       needs_docker=1
       ;;
   esac
   case "$path" in deploy/helm/*|scripts/helm-*) needs_helm=1 ;; esac
   case "$path" in alembic.ini|alembic/*|app/db/*) needs_migration=1 ;; esac
+  case "$path" in openspec/*) needs_openspec=1 ;; esac
 done
 
 printf 'diff base: %s (%s)\n' "$base" "$merge_base"
@@ -95,3 +108,4 @@ if ((needs_fast)); then run_make ci-fast; else run_make architecture-check; fi
 if ((needs_migration)); then run_make migration-check; fi
 if ((needs_docker)); then run_make docker; fi
 if ((needs_helm)); then run_make helm-check; fi
+if ((needs_openspec)); then run_command openspec validate --specs; fi

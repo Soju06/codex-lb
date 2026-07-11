@@ -82,4 +82,6 @@ def test_canonical_diff_and_worktree_guards_cover_deletions_and_resolved_paths()
     root = Path(__file__).resolve().parents[2]
 
     assert "--diff-filter=ACDMR" in (root / "bin/test").read_text(encoding="utf-8")
+    assert "*/docker-compose*.yml" in (root / "bin/test").read_text(encoding="utf-8")
+    assert "openspec validate --specs" in (root / "bin/test").read_text(encoding="utf-8")
     assert ".agents/worktrees/" in (root / ".gitignore").read_text(encoding="utf-8")

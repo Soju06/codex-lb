@@ -11557,7 +11557,7 @@ async def test_http_bridge_replays_previous_response_from_validated_full_resend_
 
 
 @pytest.mark.asyncio
-async def test_websocket_keeps_previous_response_pinned_security_work_error(monkeypatch):
+async def test_websocket_replays_created_only_previous_response_security_work_error(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     handle_stream_error = AsyncMock()
@@ -11570,12 +11570,15 @@ async def test_websocket_keeps_previous_response_pinned_security_work_error(monk
         reasoning_effort=None,
         api_key_reservation=None,
         started_at=1.0,
-        awaiting_response_created=True,
         request_text='{"type":"response.create","previous_response_id":"resp_anchor","input":"tail"}',
         previous_response_id="resp_anchor",
         preferred_account_id=account.id,
         fresh_upstream_request_text='{"type":"response.create","input":"full resend"}',
         fresh_upstream_request_is_retry_safe=True,
+        response_id="resp_created_security_previous",
+        awaiting_response_created=False,
+        response_event_count=1,
+        downstream_visible=False,
     )
     pending_requests = deque([request_state])
     upstream_control = proxy_service._WebSocketUpstreamControl()
@@ -11614,6 +11617,8 @@ async def test_websocket_keeps_previous_response_pinned_security_work_error(monk
     assert request_state.replay_count == 1
     assert request_state.previous_response_id is None
     assert request_state.require_security_work_authorized is True
+    assert request_state.replay_downstream_response_id == "resp_created_security_previous"
+    assert request_state.suppress_next_created_downstream is True
     handle_stream_error.assert_not_awaited()
 
 

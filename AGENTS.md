@@ -6,6 +6,65 @@
 - GitHub auth for git/API is available via env vars: `GITHUB_USER`, `GITHUB_TOKEN` (PAT). Do not hardcode or commit tokens.
 - For authenticated git over HTTPS in automation, use: `https://x-access-token:${GITHUB_TOKEN}@github.com/<owner>/<repo>.git`
 
+## Working Directory & Parallel Sessions
+
+When this clone is shared with other Claude Code sessions or human
+contributors running in parallel, every session MUST work in its own
+git worktree. Sharing the main working tree races for `.git/index`,
+`.git/HEAD`, untracked files, and reflog — observed symptoms include
+PRs contaminated with unrelated files, branch tips carrying the wrong
+commits, and stashes that don't belong to the agent.
+
+### Pattern (per session)
+
+Each session gets its own physical working directory over the shared
+`.git/`:
+
+```bash
+# At the start of a session or sub-agent task:
+git worktree add /Users/amalov/codex-lb-<task-tag> -b <branch> origin/main
+cd /Users/amalov/codex-lb-<task-tag>
+
+# ... work, commit, push ...
+git push -u origin <branch>
+gh pr create ...
+
+# After the PR is merged:
+cd /Users/amalov/codex-lb && git worktree remove /Users/amalov/codex-lb-<task-tag>
+```
+
+`<task-tag>` must be unique and descriptive (e.g.
+`claude-account-summary-fix`, `openspec-sticky-threading`). Generic
+names like `fix` or `wip` collide across sessions.
+
+**Pros:** zero contention on `.git/index`/`.git/HEAD`/untracked files;
+each session is invisible to others until `git fetch`.
+**Cons:** ~5s extra setup per session; worktree must be cleaned up
+after merge.
+
+### Alternative for one-shot tasks
+
+A fresh clone in `/tmp` is acceptable for small, self-contained work
+that does not need to see other sessions' local state:
+
+```bash
+git clone /Users/amalov/codex-lb /tmp/codex-lb-<task-tag>
+cd /tmp/codex-lb-<task-tag>
+# ... work, push branch ...
+rm -rf /tmp/codex-lb-<task-tag>
+```
+
+### Stop-and-report triggers for sub-agents
+
+A sub-agent MUST pause and ask the user (not improvise a Plan B) when
+any of these appear mid-task:
+
+- `git status` lists files the agent did not edit.
+- `git push` is rejected with non-fast-forward on a branch the agent
+  just created (likely a name collision with a parallel session).
+- The working tree accumulates unrelated commits between the agent's
+  own `git add` and `git commit`.
+
 ## Code Conventions
 
 The `/project-conventions` skill is auto-activated on code edits (PreToolUse guard).

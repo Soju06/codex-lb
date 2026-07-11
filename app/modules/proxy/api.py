@@ -307,7 +307,7 @@ _UNAVAILABLE_SELECTION_ERROR_CODES = {
     "no_additional_quota_eligible_accounts",
 }
 _STREAM_STARTUP_ERROR_PROBE_SECONDS = 0.05
-_CAPACITY_WAIT_MARKER_GRACE_SECONDS = 0.025
+_CAPACITY_WAIT_MARKER_GRACE_SECONDS = 0.05
 # Keep bridge startup probing above tiny event-loop scheduling jitter:
 # PostgreSQL-backed failures may need a DB round trip before the first item.
 _HTTP_BRIDGE_STARTUP_ERROR_PROBE_SECONDS = 2.0
@@ -4764,7 +4764,7 @@ async def _wait_for_first_stream_probe(
                     signal_waiters.add(ready_task)
                 signal_done, _pending = await asyncio.wait(
                     signal_waiters,
-                    timeout=None if ready_task is not None else _CAPACITY_WAIT_MARKER_GRACE_SECONDS,
+                    timeout=_CAPACITY_WAIT_MARKER_GRACE_SECONDS,
                     return_when=asyncio.FIRST_COMPLETED,
                 )
                 if not signal_done:

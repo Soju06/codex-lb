@@ -8859,10 +8859,14 @@ async def test_stream_with_retry_prefers_other_account_before_response_create_ca
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("propagate_http_errors", [False, True])
+@pytest.mark.parametrize(
+    ("propagate_http_errors", "budget_expires"),
+    [(False, False), (True, False), (False, True)],
+)
 async def test_stream_with_retry_waits_after_response_create_cap_has_no_alternate(
     monkeypatch,
     propagate_http_errors: bool,
+    budget_expires: bool,
 ):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
@@ -8920,6 +8924,11 @@ async def test_stream_with_retry_waits_after_response_create_cap_has_no_alternat
     )
     monkeypatch.setattr(service, "_stream_once", fake_stream_once)
     monkeypatch.setattr(service._load_balancer, "release_account_lease", release_account_lease)
+    monkeypatch.setattr(
+        proxy_service,
+        "_remaining_budget_seconds",
+        lambda _deadline: 0.0 if budget_expires and stream_once_calls >= 1 and len(selection_exclusions) >= 2 else 10.0,
+    )
 
     payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
     chunks = [
@@ -8940,6 +8949,13 @@ async def test_stream_with_retry_waits_after_response_create_cap_has_no_alternat
 
     completed = json.loads(chunks[-1].split("data: ", 1)[1])
 
+    if budget_expires:
+        assert completed["type"] == "response.failed"
+        assert completed["response"]["error"]["code"] == "account_response_create_cap"
+        assert selection_exclusions == [set(), {account.id}]
+        assert stream_once_calls == 1
+        release_account_lease.assert_awaited_once_with(stream_lease)
+        return
     if propagate_http_errors:
         assert len(chunks) == 1
     else:

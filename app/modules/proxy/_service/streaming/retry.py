@@ -573,7 +573,17 @@ class _StreamingRetryMixin:
                         if recovery_sleep_seconds is not None:
                             remaining_budget_seconds = _facade()._remaining_budget_seconds(deadline)
                             if remaining_budget_seconds <= 0:
-                                break
+                                if propagate_http_errors and last_transient_exc is not None:
+                                    raise last_transient_exc
+                                event = response_failed_event(
+                                    "account_response_create_cap",
+                                    (deferred_error.message if deferred_error else None)
+                                    or "Account response-create concurrency limit reached",
+                                    error_type=(deferred_error.type if deferred_error else None) or "server_error",
+                                    response_id=request_id,
+                                )
+                                yield format_sse_event(event)
+                                return
                             capacity_account = deferred_capacity_account
                             capacity_account_id = capacity_account.id
                             excluded_account_ids.discard(capacity_account_id)
@@ -589,7 +599,17 @@ class _StreamingRetryMixin:
                             ):
                                 yield wait_event
                             if _facade()._remaining_budget_seconds(deadline) <= 0:
-                                break
+                                if propagate_http_errors and last_transient_exc is not None:
+                                    raise last_transient_exc
+                                event = response_failed_event(
+                                    "account_response_create_cap",
+                                    (deferred_error.message if deferred_error else None)
+                                    or "Account response-create concurrency limit reached",
+                                    error_type=(deferred_error.type if deferred_error else None) or "server_error",
+                                    response_id=request_id,
+                                )
+                                yield format_sse_event(event)
+                                return
                             account = capacity_account
                             current_account_lease = deferred_capacity_lease
                             deferred_capacity_account = None

@@ -691,6 +691,118 @@ async def test_targeted_reauth_rejects_missing_workspace_for_known_team_seat():
 
 
 @pytest.mark.asyncio
+async def test_targeted_reauth_allows_legacy_sub_match_for_new_chatgpt_user_id(monkeypatch):
+    repo = AsyncMock()
+    service = oauth_module.OauthService(repo)
+    monkeypatch.setattr(oauth_module, "get_account_selection_cache", lambda: SimpleNamespace(invalidate=lambda: None))
+    monkeypatch.setattr(oauth_module, "get_api_key_cache", lambda: SimpleNamespace(clear=lambda: None))
+    monkeypatch.setattr(oauth_module, "get_cache_invalidation_poller", lambda: None)
+
+    target_id = "shared-workspace_legacy-seat-a"
+    existing_token = _encode_jwt(
+        {
+            "email": "seat-a@example.com",
+            "sub": "auth0|legacy-seat-a",
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": "shared-workspace",
+            },
+        }
+    )
+    intended = Account(
+        id=target_id,
+        chatgpt_account_id="shared-workspace",
+        email="seat-a@example.com",
+        plan_type="team",
+        access_token_encrypted=service._encryptor.encrypt("old-access"),
+        refresh_token_encrypted=service._encryptor.encrypt("old-refresh"),
+        id_token_encrypted=service._encryptor.encrypt(existing_token),
+        last_refresh=utcnow(),
+        status=AccountStatus.REAUTH_REQUIRED,
+    )
+    repo.get_by_id.return_value = intended
+    repo.replace_reauthorized.side_effect = lambda _account_id, account: account
+
+    await service._persist_tokens(
+        OAuthTokens(
+            access_token="new-access",
+            refresh_token="new-refresh",
+            id_token=_encode_jwt(
+                {
+                    "email": "seat-a@example.com",
+                    "sub": "auth0|legacy-seat-a",
+                    "https://api.openai.com/auth": {
+                        "chatgpt_account_id": "shared-workspace",
+                        "chatgpt_user_id": "user-seat-a",
+                        "chatgpt_plan_type": "team",
+                    },
+                }
+            ),
+        ),
+        intended_account_id=target_id,
+    )
+
+    repo.replace_reauthorized.assert_awaited_once()
+    assert repo.replace_reauthorized.await_args.args[0] == target_id
+    saved = repo.replace_reauthorized.await_args.args[1]
+    assert saved.chatgpt_user_id == "user-seat-a"
+    repo.upsert_account_slot.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_targeted_reauth_rejects_workspace_mismatch_when_chatgpt_account_id_is_missing(monkeypatch):
+    repo = AsyncMock()
+    service = oauth_module.OauthService(repo)
+    monkeypatch.setattr(oauth_module, "get_account_selection_cache", lambda: SimpleNamespace(invalidate=lambda: None))
+    monkeypatch.setattr(oauth_module, "get_api_key_cache", lambda: SimpleNamespace(clear=lambda: None))
+    monkeypatch.setattr(oauth_module, "get_cache_invalidation_poller", lambda: None)
+
+    target_id = "legacy-workspace_seat-a"
+    existing_token = _encode_jwt(
+        {
+            "email": "seat-a@example.com",
+            "sub": "auth0|legacy-seat-a",
+        }
+    )
+    intended = Account(
+        id=target_id,
+        chatgpt_account_id=None,
+        chatgpt_user_id=None,
+        workspace_id="legacy-workspace-a",
+        email="seat-a@example.com",
+        plan_type="team",
+        access_token_encrypted=service._encryptor.encrypt("old-access"),
+        refresh_token_encrypted=service._encryptor.encrypt("old-refresh"),
+        id_token_encrypted=service._encryptor.encrypt(existing_token),
+        last_refresh=utcnow(),
+        status=AccountStatus.REAUTH_REQUIRED,
+    )
+    repo.get_by_id.return_value = intended
+
+    with pytest.raises(oauth_module.ReauthSeatMismatchError):
+        await service._persist_tokens(
+            OAuthTokens(
+                access_token="new-access",
+                refresh_token="new-refresh",
+                id_token=_encode_jwt(
+                    {
+                        "email": "seat-a@example.com",
+                        "sub": "auth0|legacy-seat-a",
+                        "https://api.openai.com/auth": {
+                            "chatgpt_user_id": "user-seat-a",
+                            "workspace_id": "legacy-workspace-b",
+                            "chatgpt_plan_type": "team",
+                        },
+                    }
+                ),
+            ),
+            intended_account_id=target_id,
+        )
+
+    repo.replace_reauthorized.assert_not_awaited()
+    repo.upsert_account_slot.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_device_oauth_flow_keeps_same_email_distinct_upstream_identities_in_overwrite_mode(
     async_client,
     monkeypatch,

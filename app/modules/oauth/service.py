@@ -688,18 +688,48 @@ class OauthService:
             raise ReauthSeatMismatchError(None, account.email)
 
         intended_user_id = intended.chatgpt_user_id
-        if not intended_user_id:
+        intended_claims = None
+        if intended_user_id is None:
             try:
                 intended_token = self._encryptor.decrypt(intended.id_token_encrypted)
                 intended_claims = extract_id_token_claims(intended_token)
                 intended_user_id = resolve_seat_identity(intended_claims, intended_claims.auth)
             except Exception:
                 intended_user_id = None
+        if intended_claims is None:
+            try:
+                intended_claims = extract_id_token_claims(self._encryptor.decrypt(intended.id_token_encrypted))
+            except Exception:
+                intended_claims = None
 
-        workspace_matches = not intended.chatgpt_account_id or intended.chatgpt_account_id == account.chatgpt_account_id
-        seat_matches = bool(
-            intended_user_id and account.chatgpt_user_id and intended_user_id == account.chatgpt_user_id
+        intended_workspace = clean_account_identity_part(intended.workspace_id or intended.workspace_label)
+        callback_workspace = clean_account_identity_part(account.workspace_id or account.workspace_label)
+        callback_claims = None
+        try:
+            callback_claims = extract_id_token_claims(self._encryptor.decrypt(account.id_token_encrypted))
+        except Exception:
+            callback_claims = None
+
+        intended_seat_ids = {
+            clean_account_identity_part(value)
+            for value in (intended_user_id, intended_claims.sub if intended_claims else None)
+            if clean_account_identity_part(value)
+        }
+        callback_seat_ids = {
+            clean_account_identity_part(value)
+            for value in (
+                account.chatgpt_user_id,
+                callback_claims.sub if callback_claims else None,
+            )
+            if clean_account_identity_part(value)
+        }
+
+        workspace_matches = (
+            intended.chatgpt_account_id is None or intended.chatgpt_account_id == account.chatgpt_account_id
         )
+        if workspace_matches and intended.chatgpt_account_id is None and intended_workspace is not None:
+            workspace_matches = bool(callback_workspace is not None and callback_workspace == intended_workspace)
+        seat_matches = bool(intended_seat_ids & callback_seat_ids)
         if not workspace_matches or not seat_matches:
             raise ReauthSeatMismatchError(intended.email, account.email)
 

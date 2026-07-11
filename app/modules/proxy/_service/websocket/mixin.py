@@ -624,7 +624,6 @@ class _WebSocketMixin:
         useragent, useragent_group = _request_log_useragent_fields(headers)
         runtime_settings = _facade().get_settings()
         settings = await _facade().get_settings_cache().get()
-        concurrency_caps = effective_account_concurrency_caps(settings)
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
         sticky_threads_enabled = settings.sticky_threads_enabled
         openai_cache_affinity_max_age_seconds = settings.openai_cache_affinity_max_age_seconds
@@ -1126,12 +1125,13 @@ class _WebSocketMixin:
                         and _is_websocket_response_create(payload)
                         and request_state.account_response_create_lease is None
                     ):
+                        current_settings = await _facade().get_settings_cache().get()
                         request_state.account_response_create_lease = (
                             await proxy._acquire_account_response_create_lease_or_overload(
                                 account_id=account.id,
                                 request_id=request_state.request_log_id or request_state.request_id,
                                 surface="websocket",
-                                concurrency_caps=concurrency_caps,
+                                concurrency_caps=effective_account_concurrency_caps(current_settings),
                             )
                         )
                         request_state.account_response_create_release = proxy._load_balancer.release_account_lease

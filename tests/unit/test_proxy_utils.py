@@ -19522,7 +19522,18 @@ async def test_proxy_responses_websocket_releases_reservation_on_local_account_c
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     settings.stream_idle_timeout_seconds = 300.0
     settings.proxy_downstream_websocket_idle_timeout_seconds = 120.0
-    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+
+    class _UpdatingSettingsCache:
+        calls = 0
+
+        async def get(self):
+            self.calls += 1
+            if self.calls > 1:
+                settings.proxy_account_response_create_limit = 7
+            return settings
+
+    settings_cache = _UpdatingSettingsCache()
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: settings_cache)
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
 
     class _FakeDownstreamWebSocket:
@@ -19588,7 +19599,8 @@ async def test_proxy_responses_websocket_releases_reservation_on_local_account_c
         return account, upstream
 
     async def fail_account_response_create_lease(*args, **kwargs):
-        del args, kwargs
+        del args
+        assert kwargs["concurrency_caps"].response_create_limit == 7
         raise proxy_module.ProxyResponseError(
             429,
             proxy_module.openai_error(
@@ -19619,6 +19631,7 @@ async def test_proxy_responses_websocket_releases_reservation_on_local_account_c
 
     release_reservation.assert_awaited_once_with(reservation)
     start_heartbeat.assert_called_once()
+    assert settings_cache.calls >= 2
     upstream.send_text.assert_not_awaited()
     assert len(downstream.sent_text) == 1
     payload = json.loads(downstream.sent_text[0])

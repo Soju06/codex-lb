@@ -56,6 +56,7 @@ async def _request_actor(
     assertion: str | None,
     validation_key: object,
     jwks_failure: bool = False,
+    client_host: str = "127.0.0.1",
 ) -> str | None:
     _configure_access(monkeypatch)
     jwks_client = _FailingJwksClient() if jwks_failure else _StaticJwksClient(validation_key)
@@ -70,7 +71,7 @@ async def _request_actor(
     headers = {"Remote-User": "forged@onda.lol"}
     if assertion is not None:
         headers["Cf-Access-Jwt-Assertion"] = assertion
-    transport = ASGITransport(app=app, client=("127.0.0.1", 50000))
+    transport = ASGITransport(app=app, client=(client_host, 50000))
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.get("/actor", headers=headers)
     get_settings.cache_clear()
@@ -85,6 +86,18 @@ async def test_access_jwt_derives_actor_from_validated_email(monkeypatch: pytest
         monkeypatch,
         assertion=_token(private_key),
         validation_key=private_key.public_key(),
+    )
+    assert actor == "person@onda.lol"
+
+
+@pytest.mark.asyncio
+async def test_access_jwt_survives_forwarded_client_address_rewrite(monkeypatch: pytest.MonkeyPatch) -> None:
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    actor = await _request_actor(
+        monkeypatch,
+        assertion=_token(private_key),
+        validation_key=private_key.public_key(),
+        client_host="203.0.113.24",
     )
     assert actor == "person@onda.lol"
 

@@ -56,7 +56,12 @@ class DashboardAuthProxyHeaderSanitizerMiddleware:
         )
 
         headers = cast(list[tuple[bytes, bytes]], scope.get("headers", []))
-        if trusted_source and self._access_jwks_client is not None:
+        # A configured Access assertion is the authentication boundary. Verify
+        # it cryptographically even when an earlier proxy-aware middleware has
+        # rewritten scope.client to the original internet client address.
+        # The legacy raw trusted-header path below still requires socket CIDR
+        # provenance.
+        if self._access_jwks_client is not None:
             assertion = _header_value(headers, self._access_assertion_header_name)
             actor = await self._validate_access_assertion(assertion)
             sanitized_headers = _filter_headers(

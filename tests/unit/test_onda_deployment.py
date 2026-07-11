@@ -19,6 +19,7 @@ def _env() -> dict[str, str]:
 def test_onda_deployment_forces_auth_retention_and_payload_controls() -> None:
     env = _env()
     assert env["CODEX_LB_DASHBOARD_ACCESS_JWT_REQUIRED"] == "true"
+    assert env["CODEX_LB_DASHBOARD_ACCESS_JWT_ISSUER"] == "https://onda-hq.cloudflareaccess.com"
     assert env["CODEX_LB_DASHBOARD_ACCESS_ALLOWED_EMAIL_DOMAINS"] == "onda.lol"
     assert env["CODEX_LB_REQUEST_LOG_RETENTION_DAYS"] == "30"
     assert env["CODEX_LB_REQUEST_LOG_STORE_ERROR_DETAILS"] == "false"

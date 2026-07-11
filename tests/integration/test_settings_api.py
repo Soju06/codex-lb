@@ -209,7 +209,7 @@ async def test_settings_api_get_and_update(async_client):
 
 
 @pytest.mark.asyncio
-async def test_unrelated_settings_update_preserves_inherited_account_cap_nulls(async_client):
+async def test_unrelated_settings_update_preserves_inherited_account_cap_nulls(async_client, monkeypatch):
     response = await async_client.get("/api/settings")
     assert response.status_code == 200
 
@@ -221,6 +221,16 @@ async def test_unrelated_settings_update_preserves_inherited_account_cap_nulls(a
         settings.proxy_account_stream_recovery_reserve = None
         await session.commit()
     await get_settings_cache().invalidate()
+
+    from app.modules.settings import service as settings_service
+
+    inherited = settings_service.get_settings().model_copy(
+        update={
+            "proxy_account_stream_limit": 1,
+            "proxy_account_stream_recovery_reserve": 2,
+        }
+    )
+    monkeypatch.setattr(settings_service, "get_settings", lambda: inherited)
 
     response = await async_client.put("/api/settings", json={"warmupModel": "gpt-5.6-sol"})
     assert response.status_code == 200

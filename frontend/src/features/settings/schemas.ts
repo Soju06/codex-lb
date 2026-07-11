@@ -124,18 +124,6 @@ export const DashboardSettingsSchema = z
     guestPasswordConfigured: z.boolean().optional().default(false),
     limitWarmupStaggeredIdleEnabled: z.boolean().optional().default(false),
   })
-  .superRefine((settings, ctx) => {
-    if (
-      settings.proxyAccountStreamLimit > 0 &&
-      settings.proxyAccountStreamRecoveryReserve > settings.proxyAccountStreamLimit
-    ) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["proxyAccountStreamRecoveryReserve"],
-        message: "proxyAccountStreamRecoveryReserve must not exceed proxyAccountStreamLimit",
-      });
-    }
-  })
   .transform((settings) => {
     const legacyProvided = settings.stickyReallocationBudgetThresholdPct !== undefined;
     const primaryProvided = settings.stickyReallocationPrimaryBudgetThresholdPct !== undefined;

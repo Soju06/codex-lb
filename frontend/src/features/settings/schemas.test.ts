@@ -292,6 +292,22 @@ describe("SettingsUpdateRequestSchema", () => {
     ).toBe(false);
   });
 
+  it("accepts a legacy inherited reserve above the stream limit in settings responses", () => {
+    const parsed = DashboardSettingsSchema.parse({
+      stickyThreadsEnabled: true,
+      preferEarlierResetAccounts: true,
+      importWithoutOverwrite: true,
+      totpRequiredOnLogin: false,
+      totpConfigured: false,
+      apiKeyAuthEnabled: false,
+      proxyAccountStreamLimit: 1,
+      proxyAccountStreamRecoveryReserve: 2,
+    });
+
+    expect(parsed.proxyAccountStreamLimit).toBe(1);
+    expect(parsed.proxyAccountStreamRecoveryReserve).toBe(2);
+  });
+
   it("accepts fill_first as a valid routing strategy", () => {
     const parsed = SettingsUpdateRequestSchema.parse({
       stickyThreadsEnabled: false,

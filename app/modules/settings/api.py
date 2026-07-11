@@ -575,7 +575,14 @@ async def update_settings(
             if payload.proxy_account_stream_recovery_reserve is not None
             else current.proxy_account_stream_recovery_reserve
         )
-        if stream_limit > 0 and stream_recovery_reserve > stream_limit:
+        cap_fields_changed = bool(
+            {
+                "proxy_account_stream_limit",
+                "proxy_account_stream_recovery_reserve",
+            }
+            & payload.model_fields_set
+        )
+        if cap_fields_changed and stream_limit > 0 and stream_recovery_reserve > stream_limit:
             raise DashboardBadRequestError(
                 "proxyAccountStreamRecoveryReserve must not exceed proxyAccountStreamLimit",
                 code="invalid_proxy_account_stream_recovery_reserve",

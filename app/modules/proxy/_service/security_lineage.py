@@ -58,7 +58,10 @@ class _SecurityLineageMixin:
         if not security_lineage_id:
             return False
         async with self._repo_factory() as repos:
-            entry = await repos.sticky_sessions.get_entry(
+            sticky_sessions = getattr(repos, "sticky_sessions", None)
+            if sticky_sessions is None:
+                return False
+            entry = await sticky_sessions.get_entry(
                 security_lineage_id,
                 kind=StickySessionKind.CODEX_SESSION,
             )

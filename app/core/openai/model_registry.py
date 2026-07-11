@@ -55,6 +55,8 @@ class ModelRegistrySnapshot:
     model_service_tier_accounts: dict[str, dict[str, frozenset[str]]]
     account_plans: dict[str, str]
     fetched_at: float
+    model_accounts: dict[str, frozenset[str]] = field(default_factory=dict)
+    account_catalogs_authoritative: bool = False
 
 
 _BOOTSTRAP_WEBSOCKET_PREFERRED_MODEL_PATTERNS = (
@@ -517,6 +519,8 @@ class ModelRegistry:
 
         if self._snapshot is None:
             return self.plan_types_for_model(slug)
+        if not self._snapshot.account_catalogs_authoritative and self._snapshot.account_plans:
+            return self.plan_types_for_model(slug)
 
         tier_plans = self._snapshot.model_service_tier_plans.get(slug) or self._snapshot.model_service_tier_plans.get(
             normalized_slug
@@ -528,6 +532,8 @@ class ModelRegistry:
     def account_ids_for_model_service_tier(self, slug: str, service_tier: str | None) -> frozenset[str] | None:
         if service_tier is None or self._snapshot is None:
             return None
+        if not self._snapshot.account_catalogs_authoritative:
+            return None
         normalized_slug = slug.strip().lower()
         normalized_service_tier = _canonical_service_tier_value(service_tier)
         if not normalized_slug or not normalized_service_tier:
@@ -537,8 +543,21 @@ class ModelRegistry:
             slug
         ) or self._snapshot.model_service_tier_accounts.get(normalized_slug)
         if tier_accounts is None:
+            if self._snapshot.account_catalogs_authoritative:
+                return frozenset()
             return None
         return tier_accounts.get(normalized_service_tier, frozenset())
+
+    def account_ids_for_model(self, slug: str) -> frozenset[str] | None:
+        """Return exact supporting accounts, or ``None`` while coverage is incomplete."""
+        if self._snapshot is None or not self._snapshot.account_catalogs_authoritative:
+            return None
+        normalized_slug = slug.strip().lower()
+        if not normalized_slug:
+            return None
+        return self._snapshot.model_accounts.get(slug) or self._snapshot.model_accounts.get(
+            normalized_slug, frozenset()
+        )
 
     def prefers_websockets(self, slug: str | None) -> bool:
         if not isinstance(slug, str):
@@ -564,6 +583,21 @@ class ModelRegistry:
             return True
         return (time.monotonic() - self._snapshot.fetched_at) >= self._ttl_seconds
 
+    async def clear(self) -> None:
+        """Publish an authoritative empty snapshot when no active accounts exist."""
+        async with self._lock:
+            self._snapshot = ModelRegistrySnapshot(
+                models={},
+                model_plans={},
+                plan_models={},
+                model_service_tier_plans={},
+                model_service_tier_accounts={},
+                account_plans={},
+                fetched_at=time.monotonic(),
+                model_accounts={},
+                account_catalogs_authoritative=True,
+            )
+
     async def update(
         self,
         per_plan_results: dict[str, list[UpstreamModel]],
@@ -582,6 +616,7 @@ class ModelRegistry:
                 model_plans: dict[str, set[str]] = {}
                 model_service_tier_plans: dict[str, dict[str, set[str]]] = {}
                 model_service_tier_accounts: dict[str, dict[str, set[str]]] = {}
+                model_accounts: dict[str, set[str]] = {}
                 account_plans: dict[str, str] = {}
 
                 # Carry over data from plans not present in per_plan_results
@@ -589,18 +624,25 @@ class ModelRegistry:
                     previous_plans = set(previous.plan_models.keys())
                     refreshed_plans = set(per_plan_results.keys())
                     stale_plans = previous_plans - refreshed_plans
-                    stale_account_ids = {
-                        account_id
-                        for account_id, plan_type in previous.account_plans.items()
-                        if plan_type in stale_plans
-                    }
                     if active_account_plans is not None:
+                        stale_plans.intersection_update(active_account_plans.values())
+                        stale_account_ids = {
+                            account_id
+                            for account_id, plan_type in previous.account_plans.items()
+                            if account_id in active_account_plans and plan_type in stale_plans
+                        }
                         refreshed_account_ids = set(per_account_results or {})
                         stale_account_ids.update(
                             account_id
                             for account_id in previous.account_plans
                             if account_id in active_account_plans and account_id not in refreshed_account_ids
                         )
+                    else:
+                        stale_account_ids = {
+                            account_id
+                            for account_id, plan_type in previous.account_plans.items()
+                            if plan_type in stale_plans
+                        }
 
                     for plan_type in stale_plans:
                         stale_slugs = previous.plan_models.get(plan_type, frozenset())
@@ -622,6 +664,17 @@ class ModelRegistry:
                         )
                         if plan_type is not None:
                             account_plans[account_id] = plan_type
+                    for slug, account_ids in previous.model_accounts.items():
+                        stale_model_accounts = account_ids & stale_account_ids
+                        if not stale_model_accounts:
+                            continue
+                        model_accounts.setdefault(slug, set()).update(stale_model_accounts)
+                        if slug in previous.models:
+                            models.setdefault(slug, previous.models[slug])
+                        for account_id in stale_model_accounts:
+                            plan_type = account_plans.get(account_id)
+                            if plan_type is not None:
+                                model_plans.setdefault(slug, set()).add(plan_type)
                     for slug, tier_accounts in previous.model_service_tier_accounts.items():
                         for service_tier, account_ids in tier_accounts.items():
                             stale_tier_accounts = account_ids & stale_account_ids
@@ -629,6 +682,12 @@ class ModelRegistry:
                                 model_service_tier_accounts.setdefault(slug, {}).setdefault(service_tier, set()).update(
                                     stale_tier_accounts
                                 )
+                                for account_id in stale_tier_accounts:
+                                    plan_type = account_plans.get(account_id)
+                                    if plan_type is not None:
+                                        model_service_tier_plans.setdefault(slug, {}).setdefault(
+                                            service_tier, set()
+                                        ).add(plan_type)
 
                 # Merge newly fetched results, aggregating service-tier metadata
                 # across plans refreshed in this pass. Stale plan slugs still map
@@ -652,6 +711,7 @@ class ModelRegistry:
                     for account_id, (plan_type, account_models) in per_account_results.items():
                         account_plans[account_id] = plan_type
                         for model in account_models:
+                            model_accounts.setdefault(model.slug, set()).add(account_id)
                             for service_tier in _model_service_tier_keys(model):
                                 model_service_tier_accounts.setdefault(model.slug, {}).setdefault(
                                     service_tier, set()
@@ -668,6 +728,7 @@ class ModelRegistry:
                     slug: {service_tier: frozenset(account_ids) for service_tier, account_ids in tier_accounts.items()}
                     for slug, tier_accounts in model_service_tier_accounts.items()
                 }
+                frozen_model_accounts = {slug: frozenset(account_ids) for slug, account_ids in model_accounts.items()}
 
                 # Build reverse index: plan_type -> set of slugs
                 plan_models_index: dict[str, set[str]] = {}
@@ -687,6 +748,11 @@ class ModelRegistry:
                     model_service_tier_accounts=frozen_model_service_tier_accounts,
                     account_plans=account_plans,
                     fetched_at=time.monotonic(),
+                    model_accounts=frozen_model_accounts,
+                    account_catalogs_authoritative=(
+                        per_account_results is not None
+                        and set(active_account_plans or per_account_results).issubset(account_plans)
+                    ),
                 )
             except Exception:
                 self._snapshot = previous

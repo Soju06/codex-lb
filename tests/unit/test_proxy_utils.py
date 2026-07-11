@@ -25969,6 +25969,47 @@ def test_filter_accounts_for_model_treats_omit_equivalent_service_tiers_as_unfil
     ]
 
 
+def test_filter_accounts_for_model_uses_authoritative_account_capabilities(monkeypatch):
+    supported = _make_account("acc_filter_supported")
+    unsupported = _make_account("acc_filter_unsupported")
+
+    class Registry:
+        def account_ids_for_model(self, slug: str) -> frozenset[str] | None:
+            assert slug == "gpt-5.6-sol"
+            return frozenset({supported.id})
+
+        def plan_types_for_model(self, slug: str) -> frozenset[str] | None:
+            assert slug == "gpt-5.6-sol"
+            return None
+
+    monkeypatch.setattr("app.modules.proxy.load_balancer.get_model_registry", lambda: Registry())
+
+    assert _filter_accounts_for_model([unsupported, supported], "gpt-5.6-sol") == [supported]
+
+
+def test_http_bridge_session_rejects_account_without_requested_model(monkeypatch):
+    session = cast(
+        proxy_service._HTTPBridgeSession,
+        SimpleNamespace(account=_make_account("acc_bridge_wrong_model")),
+    )
+
+    class Registry:
+        def account_ids_for_model(self, slug: str) -> frozenset[str] | None:
+            assert slug == "gpt-5.6-sol"
+            return frozenset({"acc_other"})
+
+    monkeypatch.setattr(proxy_support, "get_model_registry", lambda: Registry())
+
+    assert (
+        proxy_support._http_bridge_session_supports_service_tier(
+            session,
+            request_model="gpt-5.6-sol",
+            request_service_tier=None,
+        )
+        is False
+    )
+
+
 @pytest.mark.asyncio
 async def test_http_bridge_empty_prewarm_completion_does_not_replace_continuity_anchor():
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))

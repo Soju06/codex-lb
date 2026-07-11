@@ -2677,6 +2677,77 @@ async def test_select_account_skips_plan_filter_when_registry_snapshot_lacks_mod
 
 
 @pytest.mark.asyncio
+async def test_select_account_filters_model_by_authoritative_account_catalog(monkeypatch) -> None:
+    supported = _make_account("acc-model-supported", "supported@example.com")
+    unsupported = _make_account("acc-model-unsupported", "unsupported@example.com")
+    now = utcnow()
+    reset_at = int(now.replace(tzinfo=timezone.utc).timestamp()) + 300
+    primary = {
+        account.id: UsageHistory(
+            id=index,
+            account_id=account.id,
+            recorded_at=now,
+            window="primary",
+            used_percent=5.0,
+            reset_at=reset_at,
+            window_minutes=5,
+        )
+        for index, account in enumerate((supported, unsupported), start=1)
+    }
+    accounts_repo = StubAccountsRepository([unsupported, supported])
+    usage_repo = StubUsageRepository(primary=primary, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+
+    monkeypatch.setattr(
+        "app.modules.proxy.load_balancer.get_model_registry",
+        lambda: SimpleNamespace(
+            plan_types_for_model=lambda _model: frozenset({"plus"}),
+            account_ids_for_model=lambda _model: frozenset({supported.id}),
+            account_ids_for_model_service_tier=lambda _model, _tier: None,
+        ),
+    )
+
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+    selection = await balancer.select_account(model="gpt-5.6-sol")
+
+    assert selection.account is not None
+    assert selection.account.id == supported.id
+
+
+@pytest.mark.asyncio
+async def test_select_account_preserves_operator_mapped_unknown_model_fallback(monkeypatch) -> None:
+    account = _make_account("acc-operator-mapped", "mapped@example.com")
+    now = utcnow()
+    primary_entry = UsageHistory(
+        id=1,
+        account_id=account.id,
+        recorded_at=now,
+        window="primary",
+        used_percent=5.0,
+        reset_at=int(now.replace(tzinfo=timezone.utc).timestamp()) + 300,
+        window_minutes=5,
+    )
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(primary={account.id: primary_entry}, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+
+    monkeypatch.setattr(
+        "app.modules.proxy.load_balancer.get_model_registry",
+        lambda: SimpleNamespace(
+            plan_types_for_model=lambda _model: frozenset(),
+            account_ids_for_model=lambda _model: frozenset(),
+        ),
+    )
+
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+    selection = await balancer.select_account(model="operator-private-slug")
+
+    assert selection.account is not None
+    assert selection.account.id == account.id
+    assert selection.error_code is None
+
+
+@pytest.mark.asyncio
 async def test_select_account_empty_pool_preserves_no_accounts_for_modeled_request(monkeypatch) -> None:
     accounts_repo = StubAccountsRepository([])
     usage_repo = StubUsageRepository(primary={}, secondary={})

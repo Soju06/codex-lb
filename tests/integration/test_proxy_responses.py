@@ -237,6 +237,9 @@ async def test_backend_responses_preserves_responses_lite_tools_and_outputs(asyn
     event = _extract_first_event(lines)
     assert event["type"] == "response.completed"
     assert seen_payload["instructions"] == ""
+    # The Lite client omitted top-level ``tools``; the proxy must not
+    # synthesize ``"tools": []`` from the model default (issue #1184).
+    assert "tools" not in seen_payload
     assert seen_payload["input"] == [
         additional_tools,
         {"type": "message", "role": "developer", "content": "use repository tools"},
@@ -258,6 +261,49 @@ async def test_backend_responses_preserves_responses_lite_tools_and_outputs(asyn
         cast("Mapping[str, JsonValue]", seen_payload),
     )
     assert upstream_headers == {proxy_client_module.CODEX_RESPONSES_LITE_HEADER: "true"}
+
+
+@pytest.mark.asyncio
+async def test_backend_responses_forwards_explicit_empty_tools(async_client, monkeypatch):
+    # An explicit client-sent ``"tools": []`` is a real request field and must
+    # keep reaching upstream as ``[]`` (issue #1184 only suppresses the
+    # synthesized default for clients that omitted the field).
+    raw_account_id = "acc_responses_explicit_empty_tools"
+    auth_json = _make_auth_json(raw_account_id, "responses-explicit-empty-tools@example.com")
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    seen_payload: dict[str, object] = {}
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
+        del headers, access_token, account_id, base_url, raise_for_status, kwargs
+        seen_payload.update(payload.to_payload())
+        yield (
+            'data: {"type":"response.completed","response":{"id":"resp_explicit_empty_tools",'
+            '"object":"response","status":"completed","usage":{"input_tokens":2,"output_tokens":1}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    request_payload = {
+        "model": "gpt-5.6",
+        "instructions": "hi",
+        "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+        "tools": [],
+        "stream": True,
+    }
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        json=request_payload,
+    ) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    event = _extract_first_event(lines)
+    assert event["type"] == "response.completed"
+    assert seen_payload["tools"] == []
 
 
 @pytest.mark.asyncio

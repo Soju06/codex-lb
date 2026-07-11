@@ -4434,6 +4434,113 @@ async def test_v1_responses_http_bridge_trims_replayed_apply_patch_previous_resp
 
 
 @pytest.mark.asyncio
+async def test_backend_responses_http_bridge_lite_request_omits_synthesized_tools(
+    async_client,
+    monkeypatch,
+):
+    # Regression for issue #1184: Responses-Lite clients omit top-level
+    # ``tools`` entirely (the bundle rides in the ``additional_tools`` input
+    # item). The HTTP-bridge body must not synthesize ``"tools": []`` from the
+    # model default; gpt-5.6 reserved model tools reject any explicit
+    # ``tools`` param that cannot match the reserved schema.
+    _install_bridge_settings(monkeypatch, enabled=True)
+    account_id = await _import_account(
+        async_client,
+        "acc_backend_http_bridge_lite_no_tools",
+        "backend-http-bridge-lite-no-tools@example.com",
+    )
+    account = await _get_account(account_id)
+    fake_upstream = _FakeBridgeUpstreamWebSocket()
+
+    async def fake_select_account_with_budget(
+        self,
+        deadline,
+        *,
+        request_id,
+        kind,
+        request_stage="first_turn",
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset_accounts,
+        routing_strategy,
+        model,
+        exclude_account_ids=None,
+        additional_limit_name=None,
+        api_key=None,
+        preferred_account_id=None,
+    ):
+        del (
+            self,
+            deadline,
+            request_id,
+            kind,
+            request_stage,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset_accounts,
+            routing_strategy,
+            model,
+            exclude_account_ids,
+            additional_limit_name,
+            api_key,
+            preferred_account_id,
+        )
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        return fake_upstream
+
+    async def fail_legacy_stream(*args, **kwargs):
+        raise AssertionError("legacy core_stream_responses path must not be used when HTTP bridge is enabled")
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fail_legacy_stream)
+
+    payload = {
+        "model": "gpt-5.6",
+        "instructions": "",
+        "input": [
+            {
+                "type": "additional_tools",
+                "role": "developer",
+                "tools": [{"type": "custom", "name": "shell"}],
+            },
+            {"type": "message", "role": "developer", "content": "use repository tools"},
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+        ],
+        "stream": True,
+    }
+    events = await _collect_sse_events(async_client, "/backend-api/codex/responses", json_body=payload)
+
+    _assert_created_text_delta_completed(events)
+    assert len(fake_upstream.sent_text) == 1
+    bridge_body = json.loads(fake_upstream.sent_text[0])
+    assert "tools" not in bridge_body
+    # The Lite input prefix must survive and keep signaling Responses Lite.
+    assert bridge_body["input"][0]["type"] == "additional_tools"
+    client_metadata = bridge_body["client_metadata"]
+    assert client_metadata["ws_request_header_x_openai_internal_codex_responses_lite"] == "true"
+
+
+@pytest.mark.asyncio
 async def test_backend_responses_http_bridge_reuses_upstream_websocket_and_preserves_previous_response_id(
     async_client,
     monkeypatch,

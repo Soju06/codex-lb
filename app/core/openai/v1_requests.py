@@ -66,6 +66,14 @@ class V1ResponsesRequest(BaseModel):
 
     def to_responses_request(self) -> ResponsesRequest:
         data = self.model_dump(mode="json", exclude_none=True)
+        if "tools" not in self.model_fields_set:
+            # ``tools`` defaults to ``[]`` via ``default_factory``, so
+            # ``model_dump`` would hand ``ResponsesRequest`` an explicit
+            # ``"tools": []`` the client never sent, marking the field as set
+            # and forwarding a synthesized empty array upstream. Drop it here
+            # so field omission propagates through ``to_payload()``
+            # (issue #1184); an explicit client-sent ``[]`` stays intact.
+            data.pop("tools", None)
         messages = data.pop("messages", None)
         instructions = data.get("instructions")
         instruction_text = instructions if isinstance(instructions, str) else ""

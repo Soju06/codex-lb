@@ -1661,7 +1661,7 @@ async def test_http_bridge_keepalive_counts_as_first_yield_before_late_response_
 
 
 @pytest.mark.asyncio
-async def test_http_bridge_times_out_before_response_created(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_http_bridge_defers_response_created_timeout_to_reader(monkeypatch: pytest.MonkeyPatch) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     monkeypatch.setattr(service, "_detach_http_bridge_request", AsyncMock())
     monkeypatch.setattr(
@@ -1691,6 +1691,21 @@ async def test_http_bridge_times_out_before_response_created(monkeypatch: pytest
     async def fake_submit(*args: object, **kwargs: object) -> None:
         session.pending_requests.append(state)
 
+        async def emit_reader_timeout() -> None:
+            await asyncio.sleep(0.01)
+            assert state.event_queue is not None
+            await state.event_queue.put(
+                proxy_service.format_sse_event(
+                    proxy_service.response_failed_event(
+                        "reader_response_created_timeout",
+                        "reader owned timeout",
+                        response_id="resp_reader_timeout",
+                    )
+                )
+            )
+
+        asyncio.create_task(emit_reader_timeout())
+
     monkeypatch.setattr(service, "_submit_http_bridge_request", fake_submit)
     stream = service._stream_http_bridge_session_events(
         session,
@@ -1708,11 +1723,11 @@ async def test_http_bridge_times_out_before_response_created(monkeypatch: pytest
     assert isinstance(response, dict)
     error = response.get("error")
     assert isinstance(error, dict)
-    assert error.get("code") == "response_created_timeout"
+    assert error.get("code") == "reader_response_created_timeout"
 
 
 @pytest.mark.asyncio
-async def test_http_bridge_startup_watchdog_times_out_despite_upstream_metadata(
+async def test_http_bridge_reader_timeout_wins_despite_upstream_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
@@ -1751,8 +1766,8 @@ async def test_http_bridge_startup_watchdog_times_out_despite_upstream_metadata(
             await state.event_queue.put(
                 proxy_service.format_sse_event(
                     proxy_service.response_failed_event(
-                        "upstream_test_done",
-                        "test terminal",
+                        "reader_timeout_after_metadata",
+                        "reader owned timeout",
                         response_id="resp_upstream_active",
                     )
                 )
@@ -1780,7 +1795,7 @@ async def test_http_bridge_startup_watchdog_times_out_despite_upstream_metadata(
     assert isinstance(response, dict)
     error = response.get("error")
     assert isinstance(error, dict)
-    assert error.get("code") == "response_created_timeout"
+    assert error.get("code") == "reader_timeout_after_metadata"
 
 
 @pytest.mark.asyncio

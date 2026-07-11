@@ -1926,36 +1926,6 @@ class _HTTPBridgeStreamingMixin:
                                     )
                                 )
                             continue
-                        response_created_timeout_seconds = float(
-                            getattr(
-                                settings,
-                                "http_responses_session_bridge_response_created_timeout_seconds",
-                                30.0,
-                            )
-                        )
-                        if (
-                            request_state.latency_response_created_ms is None
-                            and request_state.awaiting_response_created
-                            and request_state.upstream_sent_at is not None
-                            and _service_time().monotonic() - request_state.upstream_sent_at
-                            >= response_created_timeout_seconds
-                        ):
-                            logger.warning(
-                                "HTTP bridge response.created timeout request_id=%s timeout_seconds=%s",
-                                request_state.request_id,
-                                response_created_timeout_seconds,
-                            )
-                            yield format_sse_event(
-                                cast(
-                                    Mapping[str, JsonValue],
-                                    response_failed_event(
-                                        "response_created_timeout",
-                                        "Upstream did not create a response within the startup window",
-                                        response_id=_websocket_downstream_response_id(request_state),
-                                    ),
-                                )
-                            )
-                            break
                         keepalive_count += 1
                         downstream_response_id = _websocket_downstream_response_id(request_state)
                         if keepalive_count > max_keepalive_count:

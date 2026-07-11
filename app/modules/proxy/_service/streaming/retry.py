@@ -540,6 +540,9 @@ class _StreamingRetryMixin:
                         yield format_sse_event(event)
                         return
                     account = selection.account
+                    require_security_work_authorized = (
+                        require_security_work_authorized or selection.requires_security_work_authorized
+                    )
                     current_account_lease = selection.lease
                     if selection.lease is not None:
                         account_leases.append(selection.lease)

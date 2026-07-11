@@ -94,13 +94,20 @@ class _SecurityLineageMixin:
         *,
         require_security_work_authorized: bool,
     ) -> AccountSelection:
+        selection.requires_security_work_authorized = require_security_work_authorized
         if (
             require_security_work_authorized
             and selection.account is not None
             and selection.account.security_work_authorized
         ):
-            await self._mark_security_lineage_requirement(
-                security_lineage_id,
-                account_id=selection.account.id,
-            )
+            try:
+                await self._mark_security_lineage_requirement(
+                    security_lineage_id,
+                    account_id=selection.account.id,
+                )
+            except BaseException:
+                load_balancer = getattr(self, "_load_balancer", None)
+                if load_balancer is not None:
+                    await load_balancer.release_account_lease(selection.lease)
+                raise
         return selection

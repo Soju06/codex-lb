@@ -1808,6 +1808,9 @@ class _WebSocketMixin:
                 raise
 
             account = selection.account
+            request_state.require_security_work_authorized = (
+                request_state.require_security_work_authorized or selection.requires_security_work_authorized
+            )
             if account is not None:
                 break
 
@@ -1893,7 +1896,10 @@ class _WebSocketMixin:
             return None
         error_code = selection.error_code or "no_accounts"
         error_message = selection.error_message or "No active accounts available"
-        if require_security_work_authorized and error_code == _facade()._NO_SECURITY_WORK_AUTHORIZED_ACCOUNTS_CODE:
+        if (
+            request_state.require_security_work_authorized
+            and error_code == _facade()._NO_SECURITY_WORK_AUTHORIZED_ACCOUNTS_CODE
+        ):
             await proxy._emit_websocket_security_work_missing_pool(
                 websocket,
                 client_send_lock=client_send_lock,

@@ -1831,6 +1831,7 @@ class _HTTPBridgeMixin(
                 lease_ttl_seconds=_http_bridge_durable_lease_ttl_seconds(),
                 latest_turn_state=session.downstream_turn_state,
                 latest_response_id=None,
+                requires_security_work_authorized=bool(getattr(session, "requires_security_work_authorized", False)),
             )
             if lookup is not None:
                 session.durable_owner_epoch = lookup.owner_epoch
@@ -2117,6 +2118,7 @@ class _HTTPBridgeMixin(
         require_same_account: bool = False,
     ) -> None:
         require_security_work_authorized = require_security_work_authorized or session.requires_security_work_authorized
+        session.requires_security_work_authorized = require_security_work_authorized
         old_account_id = session.account.id
         old_upstream = session.upstream
         old_reader = session.upstream_reader if restart_reader else None

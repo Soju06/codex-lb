@@ -173,6 +173,7 @@ class DurableBridgeSessionCoordinator:
         latest_input_item_count: int | None = None,
         latest_input_full_fingerprint: str | None = None,
         state: HttpBridgeSessionState | None = None,
+        requires_security_work_authorized: bool = False,
     ) -> DurableBridgeLookup | None:
         del api_key_id
         async with self._session() as session:
@@ -186,6 +187,7 @@ class DurableBridgeSessionCoordinator:
                 latest_input_item_count=latest_input_item_count,
                 latest_input_full_fingerprint=latest_input_full_fingerprint,
                 state=state,
+                requires_security_work_authorized=requires_security_work_authorized,
             )
         if snapshot is None:
             return None

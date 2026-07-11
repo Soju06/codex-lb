@@ -1706,6 +1706,10 @@ class ProxyService(
         fallback_on_preferred_account_unavailable: bool = True,
         traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
     ) -> AccountSelection:
+        def _with_effective_security_requirement(selection: AccountSelection) -> AccountSelection:
+            selection.requires_security_work_authorized = require_security_work_authorized
+            return selection
+
         remaining_budget = _remaining_budget_seconds(deadline)
         if remaining_budget <= 0:
             logger.warning(
@@ -1767,18 +1771,21 @@ class ProxyService(
                             account=None,
                             error_message="Single account routing is enabled but no account is selected",
                             error_code="single_account_not_configured",
+                            requires_security_work_authorized=require_security_work_authorized,
                         )
                     if selected_account_id in excluded_account_ids_set:
                         return AccountSelection(
                             account=None,
                             error_message="Selected single account is unavailable",
                             error_code="single_account_unavailable",
+                            requires_security_work_authorized=require_security_work_authorized,
                         )
                     if scoped_account_ids is not None and selected_account_id not in scoped_account_ids:
                         return AccountSelection(
                             account=None,
                             error_message="Selected single account is outside the API key account scope",
                             error_code="single_account_scope_mismatch",
+                            requires_security_work_authorized=require_security_work_authorized,
                         )
                     scoped_account_ids = {selected_account_id}
                     routing_strategy = "single_account"
@@ -1803,6 +1810,7 @@ class ProxyService(
                             account=None,
                             error_message="Preferred account is not available",
                             error_code="preferred_account_unavailable",
+                            requires_security_work_authorized=require_security_work_authorized,
                         )
                 if preferred_eligible:
                     preferred_selection = await self._load_balancer.select_account(
@@ -1851,7 +1859,7 @@ class ProxyService(
                             preferred_selection.error_code,
                             preferred_selection.error_message,
                         )
-                        return preferred_selection
+                        return _with_effective_security_requirement(preferred_selection)
                 selection = await self._load_balancer.select_account(
                     sticky_key=sticky_key,
                     sticky_kind=sticky_kind,
@@ -1889,6 +1897,7 @@ class ProxyService(
                         account=None,
                         error_message="No active accounts available",
                         error_code="no_accounts",
+                        requires_security_work_authorized=require_security_work_authorized,
                     )
                 logger.info(
                     "Proxy account selection result request_id=%s kind=%s request_stage=%s model=%s "

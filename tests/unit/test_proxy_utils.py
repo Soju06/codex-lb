@@ -11990,6 +11990,63 @@ async def test_connect_proxy_websocket_passes_sticky_kind_to_load_balancer(monke
 
 
 @pytest.mark.asyncio
+async def test_select_websocket_connect_account_uses_lineage_derived_security_requirement(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    select_account = AsyncMock(
+        return_value=AccountSelection(
+            account=None,
+            error_message="No accounts marked as authorized for security work",
+            error_code="no_security_work_authorized_accounts",
+        )
+    )
+    missing_pool = AsyncMock()
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "_remaining_budget_seconds", lambda _deadline: 10.0)
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    monkeypatch.setattr(service, "_security_lineage_requires_security_work_authorized", AsyncMock(return_value=True))
+    monkeypatch.setattr(service, "_emit_websocket_security_work_missing_pool", missing_pool)
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_lineage_missing_security_pool",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        security_lineage_id="root-security-lineage-missing-pool",
+    )
+
+    selected_account = await service._select_websocket_connect_account(
+        123.0,
+        sticky_key="root-security-lineage-missing-pool",
+        sticky_kind=proxy_service.StickySessionKind.CODEX_SESSION,
+        prefer_earlier_reset=False,
+        prefer_earlier_reset_window="secondary",
+        routing_strategy="usage_weighted",
+        model="gpt-5.1",
+        request_state=request_state,
+        api_key=None,
+        client_send_lock=anyio.Lock(),
+        websocket=cast(WebSocket, SimpleNamespace(send_text=AsyncMock())),
+        reallocate_sticky=False,
+        sticky_max_age_seconds=None,
+        exclude_account_ids=set(),
+        preferred_account_id=None,
+        require_security_work_authorized=False,
+    )
+
+    assert selected_account is None
+    assert request_state.require_security_work_authorized is True
+    assert select_account.await_args is not None
+    assert select_account.await_args.kwargs["require_security_work_authorized"] is True
+    missing_pool.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_connect_proxy_websocket_logs_preconnect_failure(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
@@ -23863,6 +23920,49 @@ async def test_select_account_with_budget_forwards_estimated_lease_tokens(monkey
 
 
 @pytest.mark.asyncio
+async def test_bind_security_lineage_selection_releases_selected_lease_when_marking_fails(monkeypatch):
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_security_lineage_mark_fail")
+    account.security_work_authorized = True
+    lease = AccountLease(
+        lease_id="lease_security_lineage_mark_fail",
+        account_id=account.id,
+        kind="stream",
+        acquired_at=1.0,
+    )
+    selection = AccountSelection(account=account, error_message=None, lease=lease)
+    mark_requirement = AsyncMock(side_effect=RuntimeError("sticky write failed"))
+    release_account_lease = AsyncMock()
+    monkeypatch.setattr(service, "_mark_security_lineage_requirement", mark_requirement)
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release_account_lease)
+
+    with pytest.raises(RuntimeError, match="sticky write failed"):
+        await service._bind_security_lineage_selection(
+            "root-security-lineage-mark-fail",
+            selection,
+            require_security_work_authorized=True,
+        )
+
+    assert selection.requires_security_work_authorized is True
+    mark_requirement.assert_awaited_once_with(
+        "root-security-lineage-mark-fail",
+        account_id=account.id,
+    )
+    release_account_lease.assert_awaited_once_with(lease)
+
+    ordinary_selection = AccountSelection(account=account, error_message=None, lease=lease)
+    returned = await service._bind_security_lineage_selection(
+        "root-security-lineage-mark-fail",
+        ordinary_selection,
+        require_security_work_authorized=False,
+    )
+    assert returned is ordinary_selection
+    assert ordinary_selection.requires_security_work_authorized is False
+    assert mark_requirement.await_count == 1
+    release_account_lease.assert_awaited_once_with(lease)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("request_stage", "expected_reserve"),
     [("first_turn", 3), ("follow_up", 3), ("bootstrap_rebind", 3), ("reattach", 0)],
@@ -24894,6 +24994,115 @@ async def test_reconnect_http_bridge_skips_extra_same_account_retry_after_keepal
         force_owner_epoch_advance=True,
         claim_account_id=account_b.id,
     )
+
+
+@pytest.mark.asyncio
+async def test_reconnect_http_bridge_session_sets_security_requirement_before_durable_claim(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account_a = _make_account("acc_bridge_reconnect_security_a")
+    account_b = _make_account("acc_bridge_reconnect_security_b")
+    account_b.security_work_authorized = True
+    old_upstream = AsyncMock()
+    new_upstream = SimpleNamespace(response_header=lambda _name: None)
+    claim_saw_security_requirement = False
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 10.0)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account_b, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=account_b))
+    monkeypatch.setattr(service, "_open_upstream_websocket_with_budget", AsyncMock(return_value=new_upstream))
+
+    async def claim_durable(session_arg, **kwargs):
+        nonlocal claim_saw_security_requirement
+        assert kwargs["claim_account_id"] == account_b.id
+        claim_saw_security_requirement = session_arg.requires_security_work_authorized
+
+    monkeypatch.setattr(service, "_claim_durable_http_bridge_session", AsyncMock(side_effect=claim_durable))
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_bridge_reconnect_security_claim",
+        model="gpt-5.5",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=10.0,
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "bridge-security-key", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(key="bridge-security-key"),
+        request_model="gpt-5.5",
+        account=account_a,
+        upstream=old_upstream,
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=0.0,
+        idle_ttl_seconds=30.0,
+        durable_session_id="durable-reconnect-security",
+        durable_owner_epoch=1,
+    )
+
+    await service._reconnect_http_bridge_session(
+        session,
+        request_state=request_state,
+        require_security_work_authorized=True,
+    )
+
+    assert claim_saw_security_requirement is True
+    assert session.requires_security_work_authorized is True
+    assert session.account == account_b
+    assert session.upstream is new_upstream
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("requires_security_work_authorized", [False, True])
+async def test_refresh_durable_http_bridge_session_persists_security_requirement(
+    monkeypatch,
+    requires_security_work_authorized,
+):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_bridge_refresh_security")
+    renew_live_session = AsyncMock(return_value=SimpleNamespace(owner_epoch=2))
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service._durable_bridge, "renew_live_session", renew_live_session)
+
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "bridge-refresh-security", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(key="bridge-refresh-security"),
+        request_model="gpt-5.5",
+        account=account,
+        upstream=cast(proxy_service.UpstreamResponsesWebSocket, SimpleNamespace()),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque(),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=0,
+        last_used_at=0.0,
+        idle_ttl_seconds=30.0,
+        durable_session_id="durable-refresh-security",
+        durable_owner_epoch=1,
+        requires_security_work_authorized=requires_security_work_authorized,
+    )
+
+    await service._refresh_durable_http_bridge_session(session)
+
+    assert renew_live_session.await_args is not None
+    assert (
+        renew_live_session.await_args.kwargs["requires_security_work_authorized"] is requires_security_work_authorized
+    )
+    assert session.durable_owner_epoch == 2
 
 
 @pytest.mark.asyncio

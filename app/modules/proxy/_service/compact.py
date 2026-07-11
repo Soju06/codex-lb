@@ -707,6 +707,9 @@ class _CompactMixin:
                     estimated_lease_tokens=estimated_lease_tokens,
                     fallback_on_preferred_account_unavailable=file_preferred_account_id is None,
                 )
+                require_security_work_authorized = (
+                    require_security_work_authorized or selection.requires_security_work_authorized
+                )
                 account = selection.account
                 if not account:
                     if (

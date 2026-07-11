@@ -280,6 +280,7 @@ class DurableBridgeRepository:
         latest_input_item_count: int | None = None,
         latest_input_full_fingerprint: str | None = None,
         state: HttpBridgeSessionState | None = None,
+        requires_security_work_authorized: bool = False,
     ) -> DurableBridgeSessionSnapshot | None:
         row = await self._session.get(HttpBridgeSessionRecord, session_id)
         if row is None:
@@ -301,6 +302,9 @@ class DurableBridgeRepository:
             row.latest_input_full_fingerprint = latest_input_full_fingerprint
         if state is not None:
             row.state = state
+        row.requires_security_work_authorized = (
+            row.requires_security_work_authorized or requires_security_work_authorized
+        )
         await self._commit_writer_section()
         await self._session.refresh(row)
         return _to_snapshot(row)

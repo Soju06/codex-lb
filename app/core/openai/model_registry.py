@@ -58,6 +58,8 @@ class ModelRegistrySnapshot:
     fetched_at: float
     model_accounts: dict[str, frozenset[str]] = field(default_factory=dict)
     account_catalogs_authoritative: bool = False
+    bootstrap_floor_active: bool = False
+    suppressed_bootstrap_model_slugs: frozenset[str] = field(default_factory=frozenset)
 
 
 _BOOTSTRAP_WEBSOCKET_PREFERRED_MODEL_PATTERNS = (
@@ -495,6 +497,12 @@ class ModelRegistry:
     def get_models_with_fallback(self) -> dict[str, UpstreamModel]:
         snapshot = self._snapshot
         if snapshot is not None:
+            if snapshot.bootstrap_floor_active:
+                models = dict(self._bootstrap_models)
+                for slug in snapshot.suppressed_bootstrap_model_slugs:
+                    models.pop(slug, None)
+                models.update(snapshot.models)
+                return models
             return snapshot.models
         return self._bootstrap_models
 
@@ -503,9 +511,17 @@ class ModelRegistry:
         bootstrap_model = self._bootstrap_models.get(slug) or self._bootstrap_models.get(normalized_slug)
         if self._snapshot is None:
             return bootstrap_model.available_in_plans if bootstrap_model is not None else None
-        snapshot_plans = self._snapshot.model_plans.get(slug) or self._snapshot.model_plans.get(
-            normalized_slug, frozenset()
-        )
+        if slug in self._snapshot.model_plans:
+            return self._snapshot.model_plans[slug]
+        if normalized_slug in self._snapshot.model_plans:
+            return self._snapshot.model_plans[normalized_slug]
+        if (
+            self._snapshot.bootstrap_floor_active
+            and bootstrap_model is not None
+            and normalized_slug not in self._snapshot.suppressed_bootstrap_model_slugs
+        ):
+            return bootstrap_model.available_in_plans
+        snapshot_plans = frozenset()
         return snapshot_plans
 
     def plan_types_for_model_service_tier(self, slug: str, service_tier: str | None) -> frozenset[str] | None:
@@ -571,6 +587,13 @@ class ModelRegistry:
             model = self._snapshot.models.get(slug) or self._snapshot.models.get(normalized_slug)
             if model is not None:
                 return model.prefer_websockets
+            if (
+                self._snapshot.bootstrap_floor_active
+                and normalized_slug not in self._snapshot.suppressed_bootstrap_model_slugs
+            ):
+                bootstrap_model = self._bootstrap_models.get(slug) or self._bootstrap_models.get(normalized_slug)
+                if bootstrap_model is not None:
+                    return bootstrap_model.prefer_websockets
             return False
 
         bootstrap_model = self._bootstrap_models.get(slug) or self._bootstrap_models.get(normalized_slug)
@@ -621,6 +644,9 @@ class ModelRegistry:
                 model_service_tier_accounts: dict[str, dict[str, set[str]]] = {}
                 model_accounts: dict[str, set[str]] = {}
                 account_plans: dict[str, str] = {}
+                suppressed_bootstrap_model_slugs: set[str] = (
+                    set(previous.suppressed_bootstrap_model_slugs) if previous is not None else set()
+                )
 
                 # Carry over data from plans not present in per_plan_results
                 if previous is not None:
@@ -775,6 +801,18 @@ class ModelRegistry:
                 }
                 frozen_model_accounts = {slug: frozenset(account_ids) for slug, account_ids in model_accounts.items()}
 
+                if active_account_plans is not None and previous is not None:
+                    for slug, previous_account_ids in previous.model_accounts.items():
+                        if slug in models or not previous_account_ids:
+                            continue
+                        if any(account_id in active_account_plans for account_id in previous_account_ids):
+                            continue
+                        if slug in self._bootstrap_models:
+                            suppressed_bootstrap_model_slugs.add(slug)
+                for slug in tuple(suppressed_bootstrap_model_slugs):
+                    if slug in models:
+                        suppressed_bootstrap_model_slugs.discard(slug)
+
                 # Build reverse index: plan_type -> set of slugs
                 plan_models_index: dict[str, set[str]] = {}
                 for slug, plans in frozen_model_plans.items():
@@ -784,6 +822,9 @@ class ModelRegistry:
                 frozen_plan_models: dict[str, frozenset[str]] = {
                     plan_type: frozenset(slugs) for plan_type, slugs in plan_models_index.items()
                 }
+                authoritative_account_catalogs = per_account_results is not None and set(
+                    active_account_plans or per_account_results
+                ).issubset(account_plans)
 
                 self._snapshot = ModelRegistrySnapshot(
                     models=models,
@@ -794,10 +835,9 @@ class ModelRegistry:
                     account_plans=account_plans,
                     fetched_at=time.monotonic(),
                     model_accounts=frozen_model_accounts,
-                    account_catalogs_authoritative=(
-                        per_account_results is not None
-                        and set(active_account_plans or per_account_results).issubset(account_plans)
-                    ),
+                    account_catalogs_authoritative=authoritative_account_catalogs,
+                    bootstrap_floor_active=not authoritative_account_catalogs,
+                    suppressed_bootstrap_model_slugs=frozenset(suppressed_bootstrap_model_slugs),
                 )
             except Exception:
                 self._snapshot = previous

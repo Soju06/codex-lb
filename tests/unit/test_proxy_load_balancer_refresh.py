@@ -2552,6 +2552,46 @@ async def test_select_account_uses_bootstrap_plan_filter_before_registry_refresh
 
 
 @pytest.mark.asyncio
+async def test_select_account_uses_bootstrap_plan_filter_during_partial_first_refresh(monkeypatch) -> None:
+    account = _make_account("acc-bootstrap-partial-plan-filtered", "bootstrap-partial-plan-filtered@example.com")
+    account.plan_type = "free"
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    primary_entry = UsageHistory(
+        id=1,
+        account_id=account.id,
+        recorded_at=now,
+        window="primary",
+        used_percent=5.0,
+        reset_at=now_epoch + 300,
+        window_minutes=5,
+    )
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(primary={account.id: primary_entry}, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+    registry = ModelRegistry(ttl_seconds=60.0)
+    gpt54 = registry.get_models_with_fallback()["gpt-5.4"]
+    await registry.update(
+        {"pro": [gpt54]},
+        per_account_results={"acc-pro-partial": ("pro", [gpt54])},
+        active_account_plans={"acc-pro-partial": "pro", account.id: "free"},
+    )
+
+    monkeypatch.setattr("app.modules.proxy.load_balancer.get_model_registry", lambda: registry)
+
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+    selection = await balancer.select_account(model="gpt-5.3-codex")
+
+    snapshot = registry.get_snapshot()
+    assert snapshot is not None
+    assert snapshot.account_catalogs_authoritative is False
+    assert snapshot.bootstrap_floor_active is True
+    assert selection.account is None
+    assert selection.error_code == NO_PLAN_SUPPORT_FOR_MODEL
+    assert selection.error_message == "No accounts with a plan supporting model 'gpt-5.3-codex'"
+
+
+@pytest.mark.asyncio
 async def test_select_account_treats_prolite_as_pro_for_registry_plan_filter(monkeypatch) -> None:
     account = _make_account("acc-prolite-plan-filtered", "prolite-plan-filtered@example.com")
     account.plan_type = "prolite"

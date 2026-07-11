@@ -159,7 +159,11 @@ async def test_prefers_websockets_uses_snapshot_value():
 @pytest.mark.asyncio
 async def test_prefers_websockets_does_not_use_bootstrap_after_snapshot():
     registry = ModelRegistry(ttl_seconds=60.0)
-    await registry.update({"plus": [_model("model-http")]})
+    await registry.update(
+        {"plus": [_model("model-http")]},
+        per_account_results={"account-plus": ("plus", [_model("model-http")])},
+        active_account_plans={"account-plus": "plus"},
+    )
 
     assert registry.prefers_websockets("gpt-5.3-codex-spark") is False
 
@@ -441,9 +445,14 @@ async def test_partial_first_refresh_degrades_account_capabilities_to_unknown():
     snapshot = registry.get_snapshot()
     assert snapshot is not None
     assert snapshot.account_catalogs_authoritative is False
+    assert snapshot.bootstrap_floor_active is True
     assert registry.account_ids_for_model("gpt-5.4") is None
     assert registry.account_ids_for_model_service_tier("gpt-5.4", "priority") is None
     assert registry.plan_types_for_model_service_tier("gpt-5.4", "priority") == frozenset({"pro"})
+    bootstrap_models = registry.get_models_with_fallback()
+    assert "gpt-5.6-sol" in bootstrap_models
+    assert registry.plan_types_for_model("gpt-5.6-sol") == EXPECTED_GPT56_MODEL_PLANS
+    assert registry.prefers_websockets("gpt-5.6-sol") is True
 
 
 @pytest.mark.asyncio
@@ -642,8 +651,67 @@ async def test_stale_plan_drops_removed_advertiser_model_when_previous_non_autho
     snapshot = registry.get_snapshot()
     assert snapshot is not None
     assert "gpt-5.6-sol" not in snapshot.models
+    assert "gpt-5.6-sol" not in registry.get_models_with_fallback()
     assert "gpt-5.6-sol" not in snapshot.plan_models.get("pro", frozenset())
     assert registry.plan_types_for_model("gpt-5.6-sol") == frozenset()
+
+
+@pytest.mark.asyncio
+async def test_suppressed_bootstrap_model_persists_across_partial_cycles_and_clears_on_readvertise():
+    registry = ModelRegistry(ttl_seconds=60.0)
+    sol = _model("gpt-5.6-sol")
+    shared = _model("gpt-5.4")
+
+    await registry.update(
+        {"pro": [sol], "plus": [shared]},
+        per_account_results={
+            "account-a": ("pro", [sol]),
+            "account-plus": ("plus", [shared]),
+        },
+        active_account_plans={"account-a": "pro", "account-b": "pro", "account-plus": "plus"},
+    )
+
+    await registry.update(
+        {"plus": [shared]},
+        per_account_results={"account-plus": ("plus", [shared])},
+        active_account_plans={"account-b": "pro", "account-plus": "plus"},
+    )
+
+    second = registry.get_snapshot()
+    assert second is not None
+    assert second.bootstrap_floor_active is True
+    assert "gpt-5.6-sol" not in registry.get_models_with_fallback()
+    assert "gpt-5.6-sol" in second.suppressed_bootstrap_model_slugs
+
+    await registry.update(
+        {"plus": [shared]},
+        per_account_results={"account-plus": ("plus", [shared])},
+        active_account_plans={"account-b": "pro", "account-plus": "plus"},
+    )
+
+    third = registry.get_snapshot()
+    assert third is not None
+    assert third.bootstrap_floor_active is True
+    assert "gpt-5.6-sol" not in registry.get_models_with_fallback()
+    assert registry.plan_types_for_model("gpt-5.6-sol") == frozenset()
+    assert "gpt-5.6-sol" in third.suppressed_bootstrap_model_slugs
+
+    await registry.update(
+        {"pro": [sol], "plus": [shared]},
+        per_account_results={
+            "account-b": ("pro", [sol]),
+            "account-plus": ("plus", [shared]),
+        },
+        active_account_plans={"account-b": "pro", "account-plus": "plus"},
+    )
+
+    fourth = registry.get_snapshot()
+    assert fourth is not None
+    assert fourth.account_catalogs_authoritative is True
+    assert fourth.bootstrap_floor_active is False
+    assert "gpt-5.6-sol" in registry.get_models_with_fallback()
+    assert "gpt-5.6-sol" not in fourth.suppressed_bootstrap_model_slugs
+    assert registry.plan_types_for_model("gpt-5.6-sol") == frozenset({"pro"})
 
 
 @pytest.mark.asyncio

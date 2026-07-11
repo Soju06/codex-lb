@@ -33,11 +33,12 @@ capability indexes MUST NOT be treated as authoritative and selection MUST use
 the existing plan-level fallback. Operator-mapped model slugs MUST NOT be
 rejected solely because they are absent from subscription catalog discovery.
 
-When there is no authoritative account coverage — including when every account
-is removed and live capability state is cleared — the static bootstrap catalog
-MUST remain the discovery and plan-gating floor. Clearing capability state MUST
-NOT publish an authoritative-empty catalog that reports canonical models as
-absent; otherwise, in the window after an account is added but before the next
+When there is no authoritative account coverage — including partial refreshes
+after prior successful cycles and when every account is removed and live
+capability state is cleared — the static bootstrap catalog MUST remain the
+discovery and plan-gating floor. Clearing capability state MUST NOT publish an
+authoritative-empty catalog that reports canonical models as absent;
+otherwise, in the window after an account is added but before the next
 scheduled refresh, model/plan filtering would be skipped (an unsupported plan
 could be selected) and `/v1/models` would report no models.
 
@@ -99,9 +100,21 @@ model cannot be attributed to any account.
 - **AND** the plan's refresh does not complete in a later cycle
 - **THEN** the model advertised only by the removed account still leaves discovery
 
+#### Scenario: Removed bootstrap model stays suppressed across repeated partial refreshes
+
+- **GIVEN** a non-authoritative snapshot suppressed a bootstrap model because every last-known advertiser left the active account set
+- **WHEN** later refresh cycles remain non-authoritative and still do not produce fresh active evidence for that model
+- **THEN** the model stays absent from discovery and plan gating across those repeated partial refreshes
+
+#### Scenario: Fresh active evidence clears bootstrap suppression
+
+- **GIVEN** a bootstrap model was previously suppressed after its last-known advertisers left the active account set
+- **WHEN** a later refresh records that an active account advertises that model again
+- **THEN** the suppression is cleared
+- **AND** the model returns to discovery and plan gating from live registry data
+
 #### Scenario: Carried-forward model has unknown per-account provenance
 
 - **GIVEN** a plan-only snapshot carried a model with no per-account provenance
 - **WHEN** the plan is stale in a later refresh that knows the active account set
 - **THEN** the model is preserved in discovery rather than dropped
-

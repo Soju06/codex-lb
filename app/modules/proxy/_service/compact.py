@@ -459,12 +459,9 @@ class _CompactMixin:
                 ),
             )
         api_key_id = api_key.id if api_key is not None else None
-        from app.modules.proxy._service.http_bridge.helpers import _http_bridge_turn_state_alias_key
-
+        owner_account_ids: set[str] = set()
         async with proxy._http_bridge_lock:
-            session_key = proxy._http_bridge_turn_state_index.get(
-                _http_bridge_turn_state_alias_key(normalized_turn_state, api_key_id)
-            )
+            session_key = proxy._http_bridge_turn_state_index.get((normalized_turn_state, api_key_id))
             session = proxy._http_bridge_sessions.get(session_key) if session_key is not None else None
             account = getattr(session, "account", None)
             account_id = getattr(account, "id", None)
@@ -487,7 +484,36 @@ class _CompactMixin:
             ) from exc
         account_id = getattr(durable_lookup, "account_id", None)
         if isinstance(account_id, str) and account_id.strip():
-            return account_id
+            owner_account_ids.add(account_id)
+        if api_key is None:
+            try:
+                async with proxy._repo_factory() as repos:
+                    sticky_account_id = await repos.sticky_sessions.get_account_id(
+                        normalized_turn_state,
+                        kind=StickySessionKind.CODEX_SESSION,
+                    )
+            except Exception as exc:
+                raise ProxyResponseError(
+                    502,
+                    openai_error(
+                        "turn_state_owner_unavailable",
+                        "Turn-state owner account is unavailable; retry the logical turn.",
+                        error_type="server_error",
+                    ),
+                ) from exc
+            if isinstance(sticky_account_id, str) and sticky_account_id.strip():
+                owner_account_ids.add(sticky_account_id)
+        if len(owner_account_ids) == 1:
+            return next(iter(owner_account_ids))
+        if len(owner_account_ids) > 1:
+            raise ProxyResponseError(
+                502,
+                openai_error(
+                    "turn_state_owner_conflict",
+                    "Turn-state continuity resolved to conflicting upstream accounts; retry the logical turn.",
+                    error_type="server_error",
+                ),
+            )
         raise ProxyResponseError(
             502,
             openai_error(

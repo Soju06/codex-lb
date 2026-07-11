@@ -645,6 +645,7 @@ class _WebSocketMixin:
         account: Account | None = None
         account_lease: AccountLease | None = None
         upstream_turn_state: str | None = _sticky_key_from_turn_state_header(headers)
+        upstream_account_id: str | None = None
         downstream_activity = _DownstreamWebSocketActivity()
         replay_request_state: _WebSocketRequestState | None = None
 
@@ -1104,6 +1105,11 @@ class _WebSocketMixin:
                                 )
                             )
                         continue
+                    if request_state is not None and request_state.request_stage == "reattach":
+                        # A replay can select a different owner.  Do not send
+                        # the previous socket's account-scoped turn token while
+                        # choosing and opening that replacement connection.
+                        upstream_turn_state = None
                     connect_headers = _facade()._headers_with_turn_state(filtered_headers, upstream_turn_state)
                     account, upstream = await proxy._connect_proxy_websocket(
                         connect_headers,
@@ -1130,6 +1136,12 @@ class _WebSocketMixin:
                         continue
                     account_lease = request_state.websocket_stream_lease
                     request_state.websocket_stream_lease = None
+                    if upstream_account_id is not None and account.id != upstream_account_id:
+                        # An upstream turn-state token belongs to the account
+                        # that issued it.  Never offer it to a replacement
+                        # owner when a transparent replay reconnects.
+                        upstream_turn_state = None
+                    upstream_account_id = account.id
                     upstream_turn_state = _facade()._upstream_turn_state_from_socket(upstream) or upstream_turn_state
                     upstream_control = _WebSocketUpstreamControl()
                     upstream_reader = asyncio.create_task(
@@ -3306,10 +3318,12 @@ class _WebSocketMixin:
                     and request_state.replay_count < 1
                     and bool(request_state.request_text)
                     and request_state.preferred_account_id != account.id
+                    and not request_state.file_required_preferred_account
                     and (
                         request_state.previous_response_id is None
                         or (
-                            request_state.fresh_upstream_request_text is not None
+                            request_state.proxy_injected_previous_response_id
+                            and request_state.fresh_upstream_request_text is not None
                             and request_state.fresh_upstream_request_is_retry_safe
                         )
                     )
@@ -3317,7 +3331,7 @@ class _WebSocketMixin:
                 if can_retry_security_work:
                     retry_text = request_state.request_text
                     if request_state.previous_response_id is not None:
-                        retry_text = request_state.fresh_upstream_request_text
+                        retry_text = _prepare_websocket_request_state_for_account_switch(request_state)
                     if retry_text:
                         request_state.replay_count += 1
                         request_state.response_id = None
@@ -3327,13 +3341,6 @@ class _WebSocketMixin:
                         request_state.error_message_override = terminal_error_message
                         request_state.error_type_override = error.type if error else None
                         request_state.error_param_override = error.param if error else None
-                        if retry_text != request_state.request_text:
-                            request_state.previous_response_id = None
-                            request_state.proxy_injected_previous_response_id = False
-                            request_state.request_text = retry_text
-                            request_state.responses_lite_model = (
-                                request_state.fresh_upstream_request_responses_lite_model
-                            )
                         upstream_control.reconnect_requested = True
                         upstream_control.suppress_downstream_event = True
                         await _release_websocket_response_create_gate(request_state, response_create_gate)

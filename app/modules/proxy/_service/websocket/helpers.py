@@ -50,6 +50,7 @@ from app.core.openai.models import OpenAIEvent
 from app.core.openai.parsing import parse_sse_event
 from app.core.openai.requests import (
     ResponsesRequest,
+    extract_input_file_ids,
 )
 from app.core.types import JsonValue
 from app.core.utils.sse import CODEX_KEEPALIVE_FRAME as CODEX_KEEPALIVE_FRAME  # noqa: F401
@@ -376,6 +377,16 @@ def _prepare_websocket_request_state_for_account_switch(
         and request_state.fresh_upstream_request_is_retry_safe
         and request_state.fresh_upstream_request_text
     ):
+        return None
+    try:
+        fresh_payload = json.loads(request_state.fresh_upstream_request_text)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    fresh_input = fresh_payload.get("input") if isinstance(fresh_payload, dict) else None
+    if extract_input_file_ids(fresh_input):
+        # A retained full body can be replay-safe for text continuity while
+        # still naming an account-scoped uploaded file.  Keep its injected
+        # anchor instead of moving that file reference to another account.
         return None
 
     request_state.request_text = request_state.fresh_upstream_request_text

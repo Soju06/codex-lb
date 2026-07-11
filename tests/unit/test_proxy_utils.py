@@ -149,6 +149,30 @@ def test_websocket_account_switch_restores_proxy_verified_fresh_form():
     assert request_state.responses_lite_model == "gpt-5.6-sol"
 
 
+def test_websocket_account_switch_keeps_anchor_when_fresh_replay_references_file():
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_ws_proxy_file_chain",
+        model="gpt-5.6-sol",
+        service_tier="priority",
+        reasoning_effort="high",
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        request_text='{"type":"response.create","previous_response_id":"resp_proxy"}',
+        previous_response_id="resp_proxy",
+        preferred_account_id="acc_file_owner",
+        proxy_injected_previous_response_id=True,
+        fresh_upstream_request_is_retry_safe=True,
+        fresh_upstream_request_text=(
+            '{"type":"response.create","input":[{"role":"user","content":['
+            '{"type":"input_file","file_id":"file_owner_pin"}]}]}'
+        ),
+    )
+
+    assert websocket_mixin._prepare_websocket_request_state_for_account_switch(request_state) is None
+    assert request_state.previous_response_id == "resp_proxy"
+    assert request_state.preferred_account_id == "acc_file_owner"
+
+
 @pytest.mark.asyncio
 async def test_revalidate_open_websocket_account_uses_current_model_and_tier(monkeypatch):
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
@@ -11535,7 +11559,7 @@ async def test_websocket_keeps_previous_response_pinned_security_work_error(monk
         awaiting_response_created=True,
         request_text='{"type":"response.create","previous_response_id":"resp_anchor","input":"tail"}',
         previous_response_id="resp_anchor",
-        preferred_account_id=account.id,
+        preferred_account_id="acc_ws_security_original_owner",
         fresh_upstream_request_text='{"type":"response.create","input":"full resend"}',
         fresh_upstream_request_is_retry_safe=True,
     )
@@ -17887,6 +17911,7 @@ async def test_proxy_responses_websocket_transparent_replay_preserves_sticky_thr
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     handled_error_codes: list[str] = []
     connect_calls: list[dict[str, object]] = []
+    connect_headers: list[dict[str, str]] = []
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     settings.sticky_threads_enabled = True
     settings.stream_idle_timeout_seconds = 300.0
@@ -18028,7 +18053,6 @@ async def test_proxy_responses_websocket_transparent_replay_preserves_sticky_thr
     ):
         del (
             self,
-            headers,
             sticky_max_age_seconds,
             prefer_earlier_reset,
             prefer_earlier_reset_window,
@@ -18038,6 +18062,7 @@ async def test_proxy_responses_websocket_transparent_replay_preserves_sticky_thr
             client_send_lock,
             websocket,
         )
+        connect_headers.append(dict(headers))
         connect_calls.append(
             {
                 "sticky_key": sticky_key,
@@ -18056,6 +18081,11 @@ async def test_proxy_responses_websocket_transparent_replay_preserves_sticky_thr
 
     monkeypatch.setattr(proxy_service.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
     monkeypatch.setattr(proxy_service.ProxyService, "_handle_stream_error", fake_handle_stream_error)
+    monkeypatch.setattr(
+        proxy_service,
+        "_upstream_turn_state_from_socket",
+        lambda upstream: "turn_state_from_first_owner" if upstream is first_upstream else None,
+    )
 
     request_payload = {
         "type": "response.create",
@@ -18085,6 +18115,8 @@ async def test_proxy_responses_websocket_transparent_replay_preserves_sticky_thr
     assert connect_calls[1]["sticky_key"] == "sticky-thread-xyz"
     assert connect_calls[1]["sticky_kind"] == proxy_service.StickySessionKind.STICKY_THREAD
     assert connect_calls[1]["reallocate_sticky"] is True
+    assert "x-codex-turn-state" not in connect_headers[0]
+    assert "x-codex-turn-state" not in connect_headers[1]
     assert first_upstream.closed is True
     assert len(first_upstream.sent_text) == 1
     assert len(second_upstream.sent_text) == 1
@@ -22421,6 +22453,83 @@ async def test_stream_previous_response_owner_usage_limit_fails_closed(monkeypat
     assert handle_await_args.args[0] == account_owner
     assert handle_await_args.args[2] == "usage_limit_reached"
     record_success.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_stream_verified_fresh_replay_moves_off_owner_after_previsible_quota(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    owner_account = _make_account("acc_stream_replay_owner")
+    replacement_account = _make_account("acc_stream_replay_replacement")
+    session_id = "sid_stream_verified_fresh_replay"
+    previous_response_id = "resp_stream_verified_owner"
+    request_logs.response_owner_by_id[(previous_response_id, None, session_id)] = owner_account.id
+    initial_input: list[JsonValue] = [{"role": "user", "content": "first turn"}]
+    full_input: list[JsonValue] = [
+        *initial_input,
+        {"role": "user", "content": "fresh full resend"},
+    ]
+    service._websocket_continuity_index[(session_id, None)] = proxy_service._WebSocketContinuityState(
+        last_completed_response_id=previous_response_id,
+        last_completed_input_count=len(initial_input),
+        last_completed_input_prefix_fingerprint=proxy_service._fingerprint_input_items(initial_input),
+    )
+    selection_calls: list[dict[str, object]] = []
+    streamed_payloads: list[ResponsesRequest] = []
+
+    async def fake_select_account(**kwargs):
+        selection_calls.append(dict(kwargs))
+        if kwargs.get("account_ids") == {owner_account.id} or kwargs.get("preferred_account_id") == owner_account.id:
+            return AccountSelection(account=owner_account, error_message=None)
+        assert kwargs.get("preferred_account_id") is None
+        assert kwargs.get("exclude_account_ids") == {owner_account.id}
+        assert kwargs.get("reallocate_sticky") is True
+        return AccountSelection(account=replacement_account, error_message=None)
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
+        del headers, access_token, base_url, raise_for_status, kwargs
+        streamed_payloads.append(payload)
+        if account_id == owner_account.chatgpt_account_id:
+            yield (
+                'data: {"type":"response.failed","response":{"id":"resp_owner_quota",'
+                '"status":"failed","error":{"code":"usage_limit_reached",'
+                '"message":"usage limit reached"},"usage":{"input_tokens":0,'
+                '"output_tokens":0,"total_tokens":0}}}\n\n'
+            )
+            return
+        assert account_id == replacement_account.chatgpt_account_id
+        yield (
+            'data: {"type":"response.completed","response":{"id":"resp_replay_ok",'
+            '"status":"completed","usage":{"input_tokens":1,"output_tokens":1,'
+            '"total_tokens":2}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service._load_balancer, "select_account", AsyncMock(side_effect=fake_select_account))
+    monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock(return_value={"failure_class": "rate_limit"}))
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=lambda account, **kwargs: account))
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "test verified full replay",
+            "input": full_input,
+            "previous_response_id": previous_response_id,
+            "stream": True,
+        }
+    )
+
+    chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": session_id})]
+
+    assert json.loads(chunks[-1].split("data: ", 1)[1])["type"] == "response.completed"
+    assert len(selection_calls) >= 2
+    assert [streamed.previous_response_id for streamed in streamed_payloads] == [previous_response_id, None]
+    assert streamed_payloads[1].input == full_input
 
 
 def test_cross_transport_fresh_replay_requires_matching_ws_continuity_prefix():

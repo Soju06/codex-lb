@@ -354,6 +354,30 @@ class _StreamingRetryMixin:
                 pass
             await proxy._load_balancer.release_account_lease(lease)
 
+        def _move_verified_fresh_replay_from_owner(*, account_id: str, outcome: str) -> bool:
+            # Only a proxy-injected owner anchor with locally verified full
+            # input may move; the failed owner stays excluded so sticky
+            # selection cannot immediately loop back to it.
+            nonlocal affinity, payload, preferred_account_id, require_preferred_account, verified_fresh_replay_payload
+            if not (
+                require_preferred_account
+                and preferred_account_id == account_id
+                and verified_fresh_replay_payload is not None
+            ):
+                return False
+            payload = verified_fresh_replay_payload
+            verified_fresh_replay_payload = None
+            preferred_account_id = None
+            require_preferred_account = False
+            affinity = replace(affinity, reallocate_sticky=True)
+            logger.info(
+                "cross_transport_verified_fresh_replay request_id=%s outcome=%s account_id=%s",
+                request_id,
+                outcome,
+                account_id,
+            )
+            return True
+
         async def _stream_post_refresh_with_capacity_recovery(
             account: Account,
             *,
@@ -1099,7 +1123,21 @@ class _StreamingRetryMixin:
                                 useragent=useragent,
                                 useragent_group=useragent_group,
                                 client_ip=client_ip,
-                                preferred_account_id=preferred_account_id,
+                                # Let the retry path observe a pre-visible
+                                # account-recovery error only for the one case
+                                # where this owner anchor has a locally
+                                # verified, unanchored replacement body.  All
+                                # other continuations retain the normal
+                                # fail-closed owner-error rewrite.
+                                preferred_account_id=(
+                                    None
+                                    if (
+                                        require_preferred_account
+                                        and preferred_account_id == account.id
+                                        and verified_fresh_replay_payload is not None
+                                    )
+                                    else preferred_account_id
+                                ),
                                 tool_call_dedupe=tool_call_dedupe,
                                 enforce_openai_sdk_contract=enforce_openai_sdk_contract,
                             ):
@@ -1272,6 +1310,10 @@ class _StreamingRetryMixin:
                                     await _release_tracked_stream_lease(current_account_lease)
                                     current_account_lease = None
                                     excluded_account_ids.add(account.id)
+                                    _move_verified_fresh_replay_from_owner(
+                                        account_id=account.id,
+                                        outcome="owner_previsible_failure",
+                                    )
                                     break
                                 raise
                             transient_retries += 1
@@ -1380,6 +1422,10 @@ class _StreamingRetryMixin:
                         await _release_tracked_stream_lease(current_account_lease)
                         current_account_lease = None
                         excluded_account_ids.add(account.id)
+                    _move_verified_fresh_replay_from_owner(
+                        account_id=account.id,
+                        outcome="owner_previsible_retryable_failure",
+                    )
                     continue
                 except _TerminalStreamError as exc:
                     if _facade()._should_penalize_stream_error(exc.code):

@@ -4,10 +4,13 @@
 
 ### Requirement: Compact requests preserve scoped turn-state ownership
 
-When a compact request contains `x-codex-turn-state`, the system MUST resolve
-the token only in the requesting API key scope and select only that owner
-account. If the owner cannot be resolved or selected, the request MUST fail
-closed and MUST NOT fall back to a generic sticky or load-balanced account.
+When a compact request contains a real client-supplied `x-codex-turn-state`,
+the system MUST resolve the token only in the requesting API key scope and
+select only that owner account. If the owner cannot be resolved or selected,
+the request MUST fail closed and MUST NOT fall back to a generic sticky or
+load-balanced account. Proxy-synthesized first-turn placeholders (the
+`turn_*` / `http_turn_*` values codex-lb injects when the client did not supply
+one) are not real continuity tokens and MUST NOT block file-owner routing.
 
 #### Scenario: Token belongs to the requesting API key
 
@@ -21,6 +24,14 @@ closed and MUST NOT fall back to a generic sticky or load-balanced account.
 - **WHEN** the client submits a compact request with that token
 - **THEN** the request fails with `turn_state_owner_unavailable`
 - **AND** no generic account is selected
+
+#### Scenario: Synthesized first-turn placeholder does not override file-owner routing
+
+- **GIVEN** the request carries only a proxy-synthesized `x-codex-turn-state`
+- **AND** the payload references an `input_file.file_id` pinned to an account
+- **WHEN** the client submits the compact request
+- **THEN** compact routing may use the pinned file owner
+- **AND** the synthesized placeholder does not trigger `turn_state_owner_unavailable`
 
 ### Requirement: Collected failures retain upstream turn-state metadata
 

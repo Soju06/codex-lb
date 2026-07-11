@@ -38,6 +38,7 @@ from app.modules.api_keys.service import (
 from app.modules.proxy._service.support import _request_log_useragent_fields, _RequestLogFailureMetadata
 from app.modules.proxy.affinity import (
     _AffinityPolicy,
+    _is_synthesized_turn_state,
     _owner_lookup_session_id_from_headers,
     _prompt_cache_key_from_request_model,
     _resolve_prompt_cache_key,
@@ -588,7 +589,7 @@ class _CompactMixin:
         routing_strategy = _routing_strategy(settings)
         turn_state_owner_account_id: str | None = None
         turn_state = _sticky_key_from_turn_state_header(headers)
-        if turn_state is not None:
+        if turn_state is not None and not _is_synthesized_turn_state(turn_state):
             turn_state_owner_account_id = await proxy._resolve_compact_turn_state_owner(
                 turn_state=turn_state,
                 api_key=api_key,

@@ -2833,6 +2833,82 @@ async def test_compact_turn_state_owner_is_a_strict_selection_constraint(monkeyp
     assert seen_selection["fallback_on_preferred_account_unavailable"] is False
 
 
+@pytest.mark.asyncio
+async def test_compact_synthesized_turn_state_allows_file_pin_routing(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_compact_file_pin_synth")
+    seen_selection: dict[str, object] = {}
+
+    async def select_account(_deadline: float, **kwargs: object) -> AccountSelection:
+        seen_selection.update(kwargs)
+        return AccountSelection(account=account, error_message=None)
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(
+        service,
+        "_resolve_compact_turn_state_owner",
+        AsyncMock(side_effect=AssertionError("synthetic turn-state must not trigger owner resolution")),
+    )
+    monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=account.id))
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=account))
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", AsyncMock())
+    monkeypatch.setattr(
+        proxy_service,
+        "core_compact_responses",
+        AsyncMock(return_value=CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})),
+    )
+
+    payload = ResponsesCompactRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [{"type": "input_file", "file_id": "file_pinned"}],
+        }
+    )
+
+    result = await service.compact_responses(
+        payload,
+        {"x-codex-turn-state": proxy_affinity.ensure_http_downstream_turn_state({})},
+    )
+
+    assert result.model_extra == {"output": []}
+    assert seen_selection["preferred_account_id"] == account.id
+    assert seen_selection["fallback_on_preferred_account_unavailable"] is False
+    assert request_logs.calls[0]["status"] == "success"
+    assert request_logs.calls[0]["account_id"] == account.id
+
+
+@pytest.mark.asyncio
+async def test_compact_real_turn_state_still_blocks_file_pin_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_compact_file_pin_real")
+    selection = AsyncMock()
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", selection)
+    monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=account.id))
+
+    payload = ResponsesCompactRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [{"type": "input_file", "file_id": "file_pinned"}],
+        }
+    )
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service.compact_responses(payload, {"x-codex-turn-state": "client-turn-state-123"})
+
+    assert _proxy_error_code(exc_info.value) == "turn_state_owner_unavailable"
+    selection.assert_not_awaited()
+
+
 def test_response_create_client_metadata_ignores_blank_multi_agent_headers():
     metadata = proxy_service._response_create_client_metadata(
         {},

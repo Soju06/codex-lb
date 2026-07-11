@@ -930,10 +930,13 @@ class _HTTPBridgeUpstreamEventsMixin:
                 )
                 terminal_request_state.require_security_work_authorized = True
                 session.requires_security_work_authorized = True
-                if session.durable_session_id is not None:
+                owner_is_security_work_authorized = bool(
+                    getattr(session.account, "security_work_authorized", False)
+                )
+                if owner_is_security_work_authorized and session.durable_session_id is not None:
                     await self._durable_bridge.require_security_work_authorized(session_id=session.durable_session_id)
                 can_retry_security_work = (
-                    not getattr(session.account, "security_work_authorized", False)
+                    not owner_is_security_work_authorized
                     and not has_other_pending_requests
                     and _websocket_request_can_replay_before_visible_output(terminal_request_state)
                 )

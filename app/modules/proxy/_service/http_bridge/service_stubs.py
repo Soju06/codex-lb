@@ -367,6 +367,10 @@ def _prepare_websocket_request_state_for_auth_replay(*args: Any, **kwargs: Any) 
     return _service_global("_prepare_websocket_request_state_for_auth_replay")(*args, **kwargs)
 
 
+def _websocket_auth_request_can_switch_account(*args: Any, **kwargs: Any) -> Any:
+    return _service_global("_websocket_auth_request_can_switch_account")(*args, **kwargs)
+
+
 def _classify_upstream_close(*args: Any, **kwargs: Any) -> Any:
     return _service_global("_classify_upstream_close")(*args, **kwargs)
 

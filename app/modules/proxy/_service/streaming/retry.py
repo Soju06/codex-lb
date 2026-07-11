@@ -1026,6 +1026,25 @@ class _StreamingRetryMixin:
                         )
                         message = str(exc) or "Request to upstream timed out"
                         if (
+                            _facade()._should_retry_transient_stream_error("upstream_unavailable", message)
+                            and attempt + 1 < max_attempts
+                            and _move_verified_fresh_replay_from_owner(
+                                account_id=account.id,
+                                outcome="owner_refresh_connect_failure",
+                            )
+                        ):
+                            await proxy._handle_stream_error(
+                                account,
+                                {"message": message},
+                                "upstream_unavailable",
+                            )
+                            last_retryable_stream_error = _RetryableStreamError(
+                                "upstream_unavailable",
+                                {"message": message},
+                                exclude_account=True,
+                            )
+                            continue
+                        if (
                             not require_preferred_account
                             and preferred_account_id is None
                             and _facade()._should_retry_transient_stream_error("upstream_unavailable", message)

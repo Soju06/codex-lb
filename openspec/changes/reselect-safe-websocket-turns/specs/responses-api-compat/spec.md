@@ -61,12 +61,32 @@ body contains an account-scoped file reference.
 - **AND** its account-local create lease is released before replacement
   selection
 
+#### Scenario: proxy-verified anchor hits owner refresh failure
+
+- **WHEN** the proxy injected a previous-response anchor after matching retained
+  input fingerprints
+- **AND** it retained the equivalent unanchored request body
+- **AND** the owner fails token refresh or upstream connection before any
+  downstream-visible output
+- **THEN** the service may remove the proxy-injected anchor
+- **AND** replay the retained fresh body through another eligible account while
+  excluding the failed owner
+
 #### Scenario: client-owned continuation hits security authorization routing
 
 - **WHEN** a client-owned previous-response request receives a pre-visible
   security-work authorization error
 - **THEN** the service keeps the request owner-bound
 - **AND** it does not strip the anchor to route through another account
+
+#### Scenario: file-backed proxy-verified body hits security authorization routing
+
+- **WHEN** a proxy-injected previous-response anchor has a retained fresh body
+- **AND** that body contains `input_file.file_id`
+- **AND** upstream returns a pre-visible security-work authorization error
+- **THEN** the service keeps the request owner-bound
+- **AND** it does not retry the retained body through a different security-work
+  account
 
 #### Scenario: verified fresh body contains an uploaded file
 
@@ -100,6 +120,16 @@ or mismatched proof MUST keep the request owner-bound.
   the stored input prefix
 - **AND** it retained the equivalent unanchored full request
 - **WHEN** the owner reports a pre-visible quota failure
+- **THEN** the bridge removes the proxy-injected anchor
+- **AND** reconnects on another eligible account while excluding the failed
+  owner
+
+#### Scenario: trimmed HTTP bridge full resend stalls before response creation
+
+- **GIVEN** an HTTP bridge injected a durable anchor after proving and trimming
+  the stored input prefix
+- **AND** it retained the equivalent unanchored full request
+- **WHEN** the owner disconnects or stalls before `response.created`
 - **THEN** the bridge removes the proxy-injected anchor
 - **AND** reconnects on another eligible account while excluding the failed
   owner

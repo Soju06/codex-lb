@@ -11457,7 +11457,7 @@ async def test_http_bridge_nonreplayable_auth_failure_marks_account_permanent(mo
         affinity=proxy_service._AffinityPolicy(),
         request_model="gpt-5.1",
         account=account,
-        upstream=cast(proxy_service.UpstreamResponsesWebSocket, AsyncMock()),
+        upstream=cast(proxy_service.UpstreamResponsesWebSocket, SimpleNamespace()),
         upstream_control=proxy_service._WebSocketUpstreamControl(),
         pending_requests=deque([request_state]),
         pending_lock=anyio.Lock(),
@@ -11522,7 +11522,7 @@ async def test_http_bridge_keeps_previous_response_pinned_security_work_error(mo
         affinity=proxy_service._AffinityPolicy(),
         request_model="gpt-5.1",
         account=account,
-        upstream=cast(proxy_service.UpstreamResponsesWebSocket, AsyncMock()),
+        upstream=cast(proxy_service.UpstreamResponsesWebSocket, SimpleNamespace()),
         upstream_control=proxy_service._WebSocketUpstreamControl(),
         pending_requests=deque([request_state]),
         pending_lock=anyio.Lock(),
@@ -11557,6 +11557,93 @@ async def test_http_bridge_keeps_previous_response_pinned_security_work_error(mo
     reconnect.assert_not_awaited()
     assert request_state.replay_count == 0
     assert request_state.previous_response_id == "resp_anchor"
+    assert request_state.event_queue is not None
+    warning_block = await request_state.event_queue.get()
+    assert warning_block is not None
+    warning = json.loads(warning_block.split("data: ", 1)[1])
+    assert warning["warning"]["action"] == "forward_original_security_work_error"
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_refuses_file_backed_proxy_anchor_security_work_retry(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_bridge_security_file_anchor")
+    reconnect = AsyncMock()
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+
+    anchored_payload = {
+        "type": "response.create",
+        "previous_response_id": "resp_file_anchor",
+        "input": [{"role": "user", "content": "tail"}],
+    }
+    fresh_payload = {
+        "type": "response.create",
+        "input": [
+            {
+                "role": "user",
+                "content": [{"type": "input_file", "file_id": "file_owner_pin"}],
+            }
+        ],
+    }
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="bridge_req_security_file_anchor",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        transport="http",
+        request_text=json.dumps(anchored_payload, separators=(",", ":")),
+        previous_response_id="resp_file_anchor",
+        proxy_injected_previous_response_id=True,
+        fresh_upstream_request_text=json.dumps(fresh_payload, separators=(",", ":")),
+        fresh_upstream_request_is_retry_safe=True,
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("turn_state_header", "turn-security-file-anchor", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(),
+        request_model="gpt-5.1",
+        account=account,
+        upstream=cast(proxy_service.UpstreamResponsesWebSocket, SimpleNamespace()),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=1.0,
+        idle_ttl_seconds=300.0,
+    )
+    cyber_message = (
+        "This chat was flagged for possible cybersecurity risk. "
+        "To get authorized for security work, join the Trusted Access for Cyber program. "
+        "https://chatgpt.com/cyber"
+    )
+    text = json.dumps(
+        {
+            "type": "response.failed",
+            "response": {
+                "id": "resp_security_file_anchor",
+                "status": "failed",
+                "error": {
+                    "code": "invalid_request_error",
+                    "type": "invalid_request_error",
+                    "message": cyber_message,
+                },
+            },
+        },
+        separators=(",", ":"),
+    )
+
+    await service._process_http_bridge_upstream_text(session, text)
+
+    reconnect.assert_not_awaited()
+    assert request_state.replay_count == 0
+    assert request_state.previous_response_id == "resp_file_anchor"
+    assert request_state.proxy_injected_previous_response_id is True
     assert request_state.event_queue is not None
     warning_block = await request_state.event_queue.get()
     assert warning_block is not None
@@ -22633,6 +22720,92 @@ async def test_stream_verified_fresh_replay_moves_off_owner_after_previsible_quo
     assert streamed_payloads[1].input == full_input
 
 
+@pytest.mark.asyncio
+async def test_stream_verified_fresh_replay_moves_off_owner_after_refresh_connect_failure(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    owner_account = _make_account("acc_stream_replay_refresh_owner")
+    replacement_account = _make_account("acc_stream_replay_refresh_replacement")
+    session_id = "sid_stream_verified_refresh_replay"
+    previous_response_id = "resp_stream_verified_refresh_owner"
+    request_logs.response_owner_by_id[(previous_response_id, None, session_id)] = owner_account.id
+    initial_input: list[JsonValue] = [{"role": "user", "content": "first turn"}]
+    full_input: list[JsonValue] = [
+        *initial_input,
+        {"role": "user", "content": "fresh full resend after refresh failure"},
+    ]
+    service._websocket_continuity_index[(session_id, None)] = proxy_service._WebSocketContinuityState(
+        last_completed_response_id=previous_response_id,
+        last_completed_input_count=len(initial_input),
+        last_completed_input_prefix_fingerprint=proxy_service._fingerprint_input_items(initial_input),
+    )
+    selection_calls: list[dict[str, object]] = []
+    streamed_payloads: list[ResponsesRequest] = []
+    streamed_account_ids: list[str | None] = []
+
+    async def fake_select_account(**kwargs):
+        selection_calls.append(dict(kwargs))
+        if kwargs.get("account_ids") == {owner_account.id} or kwargs.get("preferred_account_id") == owner_account.id:
+            return AccountSelection(account=owner_account, error_message=None)
+        assert kwargs.get("preferred_account_id") is None
+        assert kwargs.get("exclude_account_ids") == {owner_account.id}
+        assert kwargs.get("reallocate_sticky") is True
+        return AccountSelection(account=replacement_account, error_message=None)
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
+        del headers, access_token, base_url, raise_for_status, kwargs
+        streamed_payloads.append(payload)
+        streamed_account_ids.append(account_id)
+        assert account_id == replacement_account.chatgpt_account_id
+        yield (
+            'data: {"type":"response.completed","response":{"id":"resp_refresh_replay_ok",'
+            '"status":"completed","usage":{"input_tokens":1,"output_tokens":1,'
+            '"total_tokens":2}}}\n\n'
+        )
+
+    handle_stream_error = AsyncMock(return_value={"failure_class": "transient"})
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service._load_balancer, "select_account", AsyncMock(side_effect=fake_select_account))
+    monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    monkeypatch.setattr(
+        service,
+        "_ensure_fresh_with_budget",
+        AsyncMock(
+            side_effect=[
+                aiohttp.ClientConnectionError("[Errno 104] Connection reset by peer"),
+                replacement_account,
+            ]
+        ),
+    )
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "test verified full replay after refresh failure",
+            "input": full_input,
+            "previous_response_id": previous_response_id,
+            "stream": True,
+        }
+    )
+
+    chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": session_id})]
+
+    assert json.loads(chunks[-1].split("data: ", 1)[1])["type"] == "response.completed"
+    assert len(selection_calls) >= 2
+    assert [streamed.previous_response_id for streamed in streamed_payloads] == [None]
+    assert streamed_payloads[0].input == full_input
+    assert streamed_account_ids == [replacement_account.chatgpt_account_id]
+    handle_stream_error.assert_awaited_once()
+    assert handle_stream_error.await_args is not None
+    assert handle_stream_error.await_args.args[0] == owner_account
+
+
 def test_cross_transport_fresh_replay_requires_matching_ws_continuity_prefix():
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     first_input: list[JsonValue] = [
@@ -27669,6 +27842,7 @@ async def test_retry_http_bridge_precreated_request_refuses_created_after_visibl
 async def test_retry_http_bridge_precreated_request_strips_retry_safe_injected_anchor(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_bridge_injected_anchor")
     original_payload = {
         "type": "response.create",
         "model": "gpt-5.1",
@@ -27688,6 +27862,7 @@ async def test_retry_http_bridge_precreated_request_strips_retry_safe_injected_a
         awaiting_response_created=True,
         request_text=json.dumps(original_payload, separators=(",", ":")),
         previous_response_id="resp_anchor",
+        preferred_account_id=account.id,
         proxy_injected_previous_response_id=True,
         fresh_upstream_request_text=fresh_text,
         fresh_upstream_request_is_retry_safe=True,
@@ -27700,7 +27875,7 @@ async def test_retry_http_bridge_precreated_request_strips_retry_safe_injected_a
         headers={},
         affinity=proxy_service._AffinityPolicy(),
         request_model="gpt-5.1",
-        account=_make_account("acc_bridge_injected_anchor"),
+        account=account,
         upstream=AsyncMock(send_text=send_text),
         upstream_control=proxy_service._WebSocketUpstreamControl(),
         pending_requests=deque([request_state]),
@@ -27719,6 +27894,8 @@ async def test_retry_http_bridge_precreated_request_strips_retry_safe_injected_a
     assert retried is True
     send_text.assert_awaited_once_with(fresh_text)
     assert request_state.previous_response_id is None
+    assert request_state.preferred_account_id is None
+    assert request_state.excluded_account_ids == {account.id}
     assert request_state.proxy_injected_previous_response_id is False
     assert request_state.fresh_upstream_request_is_retry_safe is False
     assert request_state.input_full_fingerprint == proxy_service._fingerprint_input_items(fresh_payload["input"])

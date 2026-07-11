@@ -81,6 +81,7 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
     _inline_top_level_input_image_urls,
     _normalize_service_tier_value,
     _normalize_session_id,
+    _prepare_websocket_request_state_for_account_switch,
     _prepare_websocket_request_state_for_auth_replay,
     _prepare_websocket_request_state_for_visible_output_replay,
     _prewarm_response_timeout_seconds,
@@ -1232,12 +1233,12 @@ class _HTTPBridgeRequestSubmitMixin:
                     f"(close_code={session.last_upstream_close_code})"
                 )
                 return False
-            migrate_stalled_owner = (
-                request_state.previous_response_id is None and not request_state.file_required_preferred_account
-            )
             request_text = _prepare_websocket_request_state_for_visible_output_replay(request_state)
             if request_text is None:
                 return False
+            migrate_stalled_owner = (
+                request_state.previous_response_id is None and not request_state.file_required_preferred_account
+            )
             if migrate_stalled_owner:
                 request_state.preferred_account_id = None
                 request_state.excluded_account_ids.add(session.account.id)
@@ -1351,13 +1352,12 @@ class _HTTPBridgeRequestSubmitMixin:
         retry_text = request_state.request_text
         if not retry_text:
             return False
+        if request_state.file_required_preferred_account:
+            return False
         if request_state.previous_response_id is not None:
-            if not (
-                request_state.fresh_upstream_request_text is not None
-                and request_state.fresh_upstream_request_is_retry_safe
-            ):
+            retry_text = _prepare_websocket_request_state_for_account_switch(request_state)
+            if retry_text is None:
                 return False
-            retry_text = request_state.fresh_upstream_request_text
 
         request_state.replay_count += 1
         request_state.response_id = None

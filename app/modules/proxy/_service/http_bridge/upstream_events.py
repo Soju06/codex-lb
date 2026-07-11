@@ -73,6 +73,7 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
     _service_tier_from_event_payload,
     _service_time,
     _upstream_websocket_disconnect_message,
+    _websocket_auth_request_can_switch_account,
     _websocket_event_error_code,
     _websocket_event_error_message,
     _websocket_event_error_param,
@@ -878,14 +879,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                     and terminal_request_state.replay_count < 1
                     and bool(terminal_request_state.request_text)
                     and terminal_request_state.preferred_account_id != session.account.id
-                    and (
-                        terminal_request_state.previous_response_id is None
-                        or (
-                            terminal_request_state.proxy_injected_previous_response_id
-                            and terminal_request_state.fresh_upstream_request_text is not None
-                            and terminal_request_state.fresh_upstream_request_is_retry_safe
-                        )
-                    )
+                    and _websocket_auth_request_can_switch_account(terminal_request_state)
                 )
                 if terminal_request_state.event_queue is not None:
                     await terminal_request_state.event_queue.put(

@@ -389,7 +389,7 @@ def _prepare_websocket_request_state_for_account_switch(
         fresh_payload = json.loads(request_state.fresh_upstream_request_text)
     except (TypeError, json.JSONDecodeError):
         return None
-    fresh_input = fresh_payload.get("input") if isinstance(fresh_payload, dict) else None
+    fresh_input = fresh_payload.get("input")
     if extract_input_file_ids(fresh_input):
         # A retained full body can be replay-safe for text continuity while
         # still naming an account-scoped uploaded file.  Keep its injected
@@ -737,14 +737,29 @@ def _websocket_auth_failure_permanent_code(message: str | None) -> str:
     return _facade()._WEBSOCKET_AUTH_INVALIDATED_FAILURE_CODE
 
 
-def _websocket_auth_request_can_switch_account(request_state: _WebSocketRequestState) -> bool:
-    if request_state.previous_response_id is None or request_state.preferred_account_id is None:
+def _websocket_fresh_request_blocks_account_switch(request_state: _WebSocketRequestState) -> bool:
+    try:
+        fresh_payload = json.loads(request_state.fresh_upstream_request_text or "null")
+    except (TypeError, json.JSONDecodeError):
         return True
-    return bool(
+    if not isinstance(fresh_payload, dict):
+        return True
+    fresh_input = fresh_payload.get("input") if isinstance(fresh_payload, dict) else None
+    return bool(extract_input_file_ids(fresh_input))
+
+
+def _websocket_auth_request_can_switch_account(request_state: _WebSocketRequestState) -> bool:
+    if request_state.file_required_preferred_account:
+        return False
+    if request_state.previous_response_id is None:
+        return True
+    if not (
         request_state.proxy_injected_previous_response_id
         and request_state.fresh_upstream_request_is_retry_safe
         and request_state.fresh_upstream_request_text
-    )
+    ):
+        return False
+    return not _websocket_fresh_request_blocks_account_switch(request_state)
 
 
 def _prepare_websocket_request_state_for_auth_replay(

@@ -134,16 +134,15 @@ model_provider = "codex-lb"
 name = "openai"  # required — enables remote /responses/compact. Lowercase since Codex 2026-05-23; older "OpenAI" stops resolving gpt-5.5
 base_url = "http://127.0.0.1:2455/backend-api/codex"
 wire_api = "responses"
-http_headers = { "x-openai-actor-authorization" = "codex-lb" }
 supports_websockets = true
 requires_openai_auth = true # required for codex app
 ```
 
-The `x-openai-actor-authorization` header is required for Codex's built-in
-`$imagegen` tool when using the custom `codex-lb` provider. Its static
-`codex-lb` value is a non-secret capability marker for the Codex client gateway;
-it does not authenticate requests to codex-lb or replace API key auth. Existing
-users should add the line to their provider table and start a new Codex session.
+This documented `requires_openai_auth = true` setup uses Codex-backed
+authentication and does not need an `x-openai-actor-authorization` marker to be
+eligible for Codex's built-in `$imagegen` tool. Provider configurations that
+intentionally skip OpenAI login have a different eligibility path; see the
+[Images compatibility context](openspec/specs/images-api-compat/context.md#codex-provider-eligibility).
 
 Optional: enable native upstream WebSockets for Codex streaming while keeping `codex-lb` pooling:
 
@@ -180,7 +179,6 @@ name = "openai"
 base_url = "http://127.0.0.1:2455/backend-api/codex"
 wire_api = "responses"
 env_key = "CODEX_LB_API_KEY"
-http_headers = { "x-openai-actor-authorization" = "codex-lb" }
 supports_websockets = true
 requires_openai_auth = true # required for codex app
 ```
@@ -637,6 +635,7 @@ Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/e
     </tr>
     <tr>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/zepx"><img src="https://avatars.githubusercontent.com/u/1377772?v=4?s=100" width="100px;" alt="Choong Jun Jin"/><br /><sub><b>Choong Jun Jin</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=zepx" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=zepx" title="Tests">⚠️</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/leventov"><img src="https://avatars.githubusercontent.com/u/609240?v=4?s=100" width="100px;" alt="Roman Leventov"/><br /><sub><b>Roman Leventov</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=leventov" title="Code">💻</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://t.me/Tofighi_Times"><img src="https://avatars.githubusercontent.com/u/3256261?v=4?s=100" width="100px;" alt="AliReza Tofighi"/><br /><sub><b>AliReza Tofighi</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=ATofighi" title="Documentation">📖</a></td>
     </tr>
   </tbody>

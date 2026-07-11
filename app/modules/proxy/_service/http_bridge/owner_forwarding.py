@@ -66,9 +66,9 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_turn_state_alias_key,
     _log_http_bridge_event,
     _normalized_http_bridge_instance_ring,
+    _sticky_key_from_turn_state_header,
 )
 from app.modules.proxy._service.http_bridge.service_stubs import (
-    _header_value_case_insensitive,
     _headers_with_authorization,
     _partial_output_proxy_error_event_block,
     _record_continuity_owner_resolution,
@@ -97,6 +97,7 @@ from app.modules.proxy._service.support import (
     _event_type_from_payload,
     _HTTPBridgeOwnerForward,
     _HTTPBridgeSessionKey,
+    _signal_propagated_capacity_startup_ready,
 )
 from app.modules.proxy._service.support import (
     _websocket_route_log_kwargs as _websocket_route_log_kwargs,
@@ -281,13 +282,19 @@ class _HTTPBridgeOwnerForwardingMixin:
         client_ip: str | None = None,
     ) -> AsyncIterator[str]:
         current_instance, _ = _normalized_http_bridge_instance_ring(_service_get_settings())
-        forwarded_turn_state = _header_value_case_insensitive(headers, "x-codex-turn-state") or downstream_turn_state
+        incoming_turn_state = _sticky_key_from_turn_state_header(headers)
+        forwarded_turn_state = incoming_turn_state or downstream_turn_state
         forward_context = HTTPBridgeForwardContext(
             origin_instance=current_instance,
             target_instance=owner_forward.owner_instance,
             reservation=api_key_reservation,
             codex_session_affinity=codex_session_affinity,
             downstream_turn_state=forwarded_turn_state,
+            original_request_unanchored=(
+                owner_forward.key.affinity_kind in {"session_header", "internal_unanchored_parallel"}
+                and incoming_turn_state is None
+                and payload.previous_response_id is None
+            ),
             original_affinity_kind=owner_forward.key.affinity_kind,
             original_affinity_key=owner_forward.key.affinity_key,
             client_ip=client_ip,
@@ -317,6 +324,7 @@ class _HTTPBridgeOwnerForwardingMixin:
                 headers=forward_headers,
                 context=forward_context,
                 request_started_at=request_started_at,
+                on_response_ready=_signal_propagated_capacity_startup_ready,
             ):
                 forwarded_any = True
                 event_payload = parse_sse_data_json(event_block)

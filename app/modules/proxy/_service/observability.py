@@ -14,8 +14,9 @@ from app.core.metrics.prometheus import (
     continuity_owner_resolution_total,
     upstream_transport_decisions_total,
 )
-from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
+from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest, canonicalized_tools
 from app.core.types import JsonValue
+from app.core.utils.json_guards import is_json_list
 from app.core.utils.request_id import get_request_id
 from app.modules.proxy.affinity import (
     _extract_model_class,
@@ -248,9 +249,17 @@ def _truncate_identifier(value: str, *, max_length: int = 96) -> str:
 
 def _tools_hash(payload: ResponsesRequest | ResponsesCompactRequest) -> str | None:
     payload_tools = payload.to_payload().get("tools")
-    if not isinstance(payload_tools, list) or not payload_tools:
+    if not is_json_list(payload_tools) or not payload_tools:
         return None
-    serialized = json.dumps(payload_tools, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    # The wire payload keeps client tool entries byte-preserved (issue #1184),
+    # so the affinity/observability hash canonicalizes locally to stay
+    # insensitive to tool array order and object key order (change #228).
+    serialized = json.dumps(
+        canonicalized_tools(payload_tools),
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     return _hash_identifier(serialized)
 
 

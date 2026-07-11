@@ -15,8 +15,9 @@
   existing `_has_native_codex_transport_headers`.
 - [x] T5: Add `_normalize_non_native_upstream_fingerprint(headers)` and call it
   from `_build_upstream_headers` for non-native http requests: rewrite
-  `User-Agent`, strip `x-openai-client-*`, strip inbound `originator`, set
-  PascalCase `ChatGPT-Account-Id`.
+  `User-Agent`, strip SDK fingerprints and untrusted `originator` / `version`,
+  install canonical Codex identity headers, and set PascalCase
+  `ChatGPT-Account-Id`.
 
 ## Tests
 - [x] T6: `tests/unit/test_codex_version.py` — `cached_version_or_default()`
@@ -25,10 +26,11 @@
 - [x] T7: `tests/unit/test_proxy_upstream_fingerprint.py` — non-native http UA
   (`OpenAI/Python 2.24.0`) rewritten to `codex_cli_rs/<ver> (...)`.
 - [x] T8: native UA (`codex_exec/...`, `Codex Desktop/...`) left unchanged.
-- [x] T9: `x-openai-client-*` headers and inbound `originator` stripped on
-  non-native http; no `originator` header added.
+- [x] T9: `x-openai-client-*` headers and inbound identity values stripped on
+  non-native HTTP; canonical `originator` and `version` headers added.
 - [x] T10: account header emitted as PascalCase `ChatGPT-Account-Id`.
-- [x] T11: websocket header builder untouched (native path regression guard).
+- [x] T11: internal and client-facing websocket builders reuse the same
+  normalization; native websocket identity remains untouched.
 
 ## Spec
 - [x] T12: Add the delta in
@@ -40,3 +42,14 @@
 - [x] T15: Broader proxy-client sweep (1006 passed, 3 skipped, 0 new failures;
   18 pre-existing assertions updated for the intended behavior change).
 - [x] T16: `uvx ruff check .` + `uvx ruff format --check .` + `uv run ty check` clean.
+
+## Issue #1194 follow-up
+- [x] T17: Replace case-insensitive inbound `originator` and `version` values
+  with `codex_cli_rs` and the cached version on every non-native egress path.
+- [x] T18: Add HTTP, internal websocket, client-facing websocket, and
+  stream-level wire regressions proving both canonical headers are emitted.
+- [x] T19: Preserve native Codex identity headers unchanged.
+- [x] T20: Run the focused identity and wire regressions (15 + 2 passed) plus
+  the full proxy utility suite (589 passed).
+- [x] T21: Run Ruff, `ty`, proxy architecture checks, focused strict OpenSpec
+  validation, all-spec strict validation, and `git diff --check`.

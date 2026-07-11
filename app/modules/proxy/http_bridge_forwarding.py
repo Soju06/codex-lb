@@ -5,7 +5,7 @@ import hashlib
 import hmac
 import json
 import time
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass
 from typing import cast
 
@@ -42,6 +42,7 @@ _BRIDGE_UNSAFE_HEADER_NAMES = frozenset(
     }
 )
 _OWNER_FORWARD_SKIP_AUTO_HEADERS = frozenset({aiohttp.hdrs.ACCEPT, aiohttp.hdrs.ACCEPT_ENCODING})
+_LEGACY_SIGNATURE_DELIMITER = "|"
 
 HTTP_BRIDGE_INTERNAL_FORWARD_PATH = "/internal/bridge/responses"
 HTTP_BRIDGE_FORWARDED_HEADER = "x-codex-bridge-forwarded"
@@ -53,9 +54,12 @@ HTTP_BRIDGE_RESERVATION_KEY_ID_HEADER = "x-codex-bridge-reservation-key-id"
 HTTP_BRIDGE_RESERVATION_MODEL_HEADER = "x-codex-bridge-reservation-model"
 HTTP_BRIDGE_AFFINITY_KIND_HEADER = "x-codex-bridge-affinity-kind"
 HTTP_BRIDGE_AFFINITY_KEY_HEADER = "x-codex-bridge-affinity-key"
+HTTP_BRIDGE_ORIGINAL_UNANCHORED_HEADER = "x-codex-bridge-original-unanchored"
+HTTP_BRIDGE_SIGNATURE_VERSION_HEADER = "x-codex-bridge-signature-version"
 HTTP_BRIDGE_CLIENT_IP_HEADER = "x-codex-bridge-client-ip"
 HTTP_BRIDGE_CLIENT_IP_SIGNATURE_HEADER = "x-codex-bridge-client-ip-signature"
 HTTP_BRIDGE_SIGNATURE_HEADER = "x-codex-bridge-signature"
+_HTTP_BRIDGE_SIGNATURE_VERSION_V2 = "2"
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,10 +68,12 @@ class HTTPBridgeForwardContext:
     target_instance: str
     codex_session_affinity: bool
     downstream_turn_state: str | None
+    original_request_unanchored: bool = False
     original_affinity_kind: str | None = None
     original_affinity_key: str | None = None
     client_ip: str | None = None
     reservation: ApiKeyUsageReservationData | None = None
+    signature_version: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,6 +109,7 @@ class HTTPBridgeOwnerClient:
         headers: Mapping[str, str],
         context: HTTPBridgeForwardContext,
         request_started_at: float,
+        on_response_ready: Callable[[], None] | None = None,
     ) -> AsyncIterator[str]:
         settings = get_settings()
         timeout = _owner_forward_timeout(
@@ -125,6 +132,8 @@ class HTTPBridgeOwnerClient:
                         failure_detail="owner_forward_non_200",
                         upstream_status_code=response.status,
                     )
+                if on_response_ready is not None:
+                    on_response_ready()
                 yielded_event = False
                 try:
                     async for event_block in _iter_sse_event_blocks(
@@ -170,7 +179,11 @@ def build_owner_forward_headers(
     )
     connection_named = {token.strip().lower() for token in connection_value.split(",") if token.strip()}
     drop = _BRIDGE_UNSAFE_HEADER_NAMES | connection_named
-    forwarded = {key: value for key, value in filtered.items() if key.lower() not in drop}
+    forwarded = {
+        key: value
+        for key, value in filtered.items()
+        if key.lower() not in drop and not key.lower().startswith("x-codex-bridge-")
+    }
     # filter_inbound_headers strips Authorization, but the owner instance
     # re-validates the client API key from this header (see
     # _validate_internal_bridge_api_key) before swapping in its own upstream
@@ -186,6 +199,10 @@ def build_owner_forward_headers(
     forwarded[HTTP_BRIDGE_ORIGIN_INSTANCE_HEADER] = context.origin_instance
     forwarded[HTTP_BRIDGE_TARGET_INSTANCE_HEADER] = context.target_instance
     forwarded[HTTP_BRIDGE_CODEX_AFFINITY_HEADER] = "1" if context.codex_session_affinity else "0"
+    signature_version = _HTTP_BRIDGE_SIGNATURE_VERSION_V2 if context.original_request_unanchored else None
+    if signature_version is not None:
+        forwarded[HTTP_BRIDGE_SIGNATURE_VERSION_HEADER] = signature_version
+        forwarded[HTTP_BRIDGE_ORIGINAL_UNANCHORED_HEADER] = "1"
     if context.original_affinity_kind and context.original_affinity_key:
         forwarded[HTTP_BRIDGE_AFFINITY_KIND_HEADER] = context.original_affinity_kind
         forwarded[HTTP_BRIDGE_AFFINITY_KEY_HEADER] = context.original_affinity_key
@@ -195,6 +212,7 @@ def build_owner_forward_headers(
             payload=payload,
             context=context,
             include_client_ip=True,
+            signature_version=signature_version,
         )
     if context.downstream_turn_state:
         forwarded["x-codex-turn-state"] = context.downstream_turn_state
@@ -206,6 +224,7 @@ def build_owner_forward_headers(
         payload=payload,
         context=context,
         include_client_ip=False,
+        signature_version=signature_version,
     )
     return forwarded
 
@@ -236,43 +255,91 @@ def parse_forwarded_request(
             ),
         )
     client_ip = _optional_header(headers.get(HTTP_BRIDGE_CLIENT_IP_HEADER))
+    signature_version = _optional_header(headers.get(HTTP_BRIDGE_SIGNATURE_VERSION_HEADER))
+    original_unanchored_value = _optional_header(headers.get(HTTP_BRIDGE_ORIGINAL_UNANCHORED_HEADER))
+    if signature_version == _HTTP_BRIDGE_SIGNATURE_VERSION_V2:
+        if original_unanchored_value not in {"0", "1"}:
+            return None, _invalid_bridge_forward_signature_error()
+        original_request_unanchored = original_unanchored_value == "1"
+    elif signature_version is None:
+        original_request_unanchored = False
+    else:
+        return None, _invalid_bridge_forward_signature_error()
     context = HTTPBridgeForwardContext(
         origin_instance=headers.get(HTTP_BRIDGE_ORIGIN_INSTANCE_HEADER, "").strip() or "unknown",
         target_instance=target_instance,
         codex_session_affinity=_bool_header(headers.get(HTTP_BRIDGE_CODEX_AFFINITY_HEADER)),
         downstream_turn_state=_optional_header(headers.get("x-codex-turn-state")),
+        original_request_unanchored=original_request_unanchored,
         original_affinity_kind=_optional_header(headers.get(HTTP_BRIDGE_AFFINITY_KIND_HEADER)),
         original_affinity_key=_optional_header(headers.get(HTTP_BRIDGE_AFFINITY_KEY_HEADER)),
         client_ip=client_ip,
         reservation=_reservation_from_headers(headers),
+        signature_version=signature_version,
     )
+    if signature_version is None and _legacy_signature_context_has_ambiguous_delimiter(context):
+        return None, _invalid_bridge_forward_signature_error()
     signature = _optional_header(headers.get(HTTP_BRIDGE_SIGNATURE_HEADER))
     client_ip_signature = _optional_header(headers.get(HTTP_BRIDGE_CLIENT_IP_SIGNATURE_HEADER))
-    expected_signature = _bridge_forward_signature(payload=payload, context=context)
-    legacy_signature = _bridge_forward_signature(
+    expected_signature = _bridge_forward_signature(
+        payload=payload,
+        context=context,
+        signature_version=signature_version,
+    )
+    signature_without_client_ip = _bridge_forward_signature(
         payload=payload,
         context=context,
         include_client_ip=False,
+        signature_version=signature_version,
     )
     primary_signature_valid = signature is not None and hmac.compare_digest(signature, expected_signature)
-    legacy_signature_valid = signature is not None and hmac.compare_digest(signature, legacy_signature)
+    signature_without_client_ip_valid = signature is not None and hmac.compare_digest(
+        signature,
+        signature_without_client_ip,
+    )
     client_ip_signature_valid = client_ip_signature is not None and hmac.compare_digest(
         client_ip_signature,
         expected_signature,
     )
     signature_valid = primary_signature_valid or (
-        legacy_signature_valid and (client_ip is None or client_ip_signature_valid)
+        signature_without_client_ip_valid and (client_ip is None or client_ip_signature_valid)
     )
     if not signature_valid:
-        return None, ProxyResponseError(
-            400,
-            openai_error(
-                "bridge_forward_invalid",
-                "Internal bridge forward signature is invalid",
-                error_type="invalid_request_error",
-            ),
-        )
+        return None, _invalid_bridge_forward_signature_error()
     return HTTPBridgeForwardedRequest(context=context), None
+
+
+def _invalid_bridge_forward_signature_error() -> ProxyResponseError:
+    return ProxyResponseError(
+        400,
+        openai_error(
+            "bridge_forward_invalid",
+            "Internal bridge forward signature is invalid",
+            error_type="invalid_request_error",
+        ),
+    )
+
+
+def _legacy_signature_context_has_ambiguous_delimiter(context: HTTPBridgeForwardContext) -> bool:
+    """Reject legacy fields whose boundaries cannot be authenticated safely."""
+
+    values = [
+        context.origin_instance,
+        context.target_instance,
+        context.downstream_turn_state,
+        context.original_affinity_kind,
+        context.original_affinity_key,
+        context.client_ip,
+    ]
+    if context.reservation is not None:
+        values.extend(
+            (
+                context.reservation.reservation_id,
+                context.reservation.key_id,
+                context.reservation.model,
+            )
+        )
+    return any(_LEGACY_SIGNATURE_DELIMITER in value for value in values if value is not None)
 
 
 def _owner_forward_timeout(*, connect_timeout_seconds: float, idle_timeout_seconds: float) -> aiohttp.ClientTimeout:
@@ -314,6 +381,7 @@ def _bridge_forward_signature(
     payload: ResponsesRequest,
     context: HTTPBridgeForwardContext,
     include_client_ip: bool = True,
+    signature_version: str | None = None,
 ) -> str:
     payload_json = json.dumps(
         payload.model_dump(mode="json", exclude_none=True),
@@ -330,17 +398,53 @@ def _bridge_forward_signature(
         context.original_affinity_kind or "",
         context.original_affinity_key or "",
     ]
-    if include_client_ip:
-        fields.append(context.client_ip or "")
-    fields.extend(
-        (
-            context.reservation.reservation_id if context.reservation is not None else "",
-            context.reservation.key_id if context.reservation is not None else "",
-            context.reservation.model if context.reservation is not None else "",
-            body_digest,
-        )
+    reservation_fields = (
+        context.reservation.reservation_id if context.reservation is not None else "",
+        context.reservation.key_id if context.reservation is not None else "",
+        context.reservation.model if context.reservation is not None else "",
     )
-    signing_payload = "|".join(fields)
+    if signature_version is None:
+        # Preserve the deployed legacy wire format for anchored requests during
+        # rolling upgrades. Its delimiter-based encoding is intentionally not
+        # reused by v2 because attacker-controlled affinity values can contain
+        # the delimiter and make different field layouts authenticate alike.
+        if include_client_ip:
+            fields.append(context.client_ip or "")
+        fields.extend((*reservation_fields, body_digest))
+        signing_payload = _LEGACY_SIGNATURE_DELIMITER.join(fields)
+    else:
+        # Versioned signatures use an explicit domain and canonical structured
+        # encoding. Object boundaries make field re-packing impossible, and
+        # the client-IP mode is itself authenticated.
+        signing_payload = json.dumps(
+            {
+                "body_digest": body_digest,
+                "client_ip": context.client_ip if include_client_ip else None,
+                "client_ip_present": context.client_ip is not None,
+                "codex_session_affinity": context.codex_session_affinity,
+                "downstream_turn_state": context.downstream_turn_state,
+                "include_client_ip": include_client_ip,
+                "origin_instance": context.origin_instance,
+                "original_affinity_key": context.original_affinity_key,
+                "original_affinity_kind": context.original_affinity_kind,
+                "original_request_unanchored": context.original_request_unanchored,
+                "protocol": "codex-lb-http-bridge-forward",
+                "reservation": (
+                    {
+                        "id": reservation_fields[0],
+                        "key_id": reservation_fields[1],
+                        "model": reservation_fields[2],
+                    }
+                    if context.reservation is not None
+                    else None
+                ),
+                "signature_version": signature_version,
+                "target_instance": context.target_instance,
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
     secret = get_or_create_key(get_settings().encryption_key_file)
     return hmac.new(secret, signing_payload.encode("utf-8"), hashlib.sha256).hexdigest()
 

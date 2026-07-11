@@ -113,15 +113,14 @@ model_provider = "codex-lb"
 name = "OpenAI"  # 必填 —— 启用远程 /responses/compact
 base_url = "http://127.0.0.1:2455/backend-api/codex"
 wire_api = "responses"
-http_headers = { "x-openai-actor-authorization" = "codex-lb" }
 supports_websockets = true
 requires_openai_auth = true # codex 应用需要
 ```
 
-使用自定义 `codex-lb` provider 时，Codex 内置的 `$imagegen` 工具需要
-`x-openai-actor-authorization` 请求头。固定值 `codex-lb` 只是供 Codex 客户端网关
-识别能力的非敏感标记；它不会对 codex-lb 请求进行身份验证，也不能替代 API Key 鉴权。
-现有用户应将此行添加到 provider 配置表中，然后启动新的 Codex 会话。
+此处记录的 `requires_openai_auth = true` 配置使用 Codex 后端鉴权；要满足
+Codex 内置 `$imagegen` 工具的 provider 条件，无需添加
+`x-openai-actor-authorization` 标记。主动跳过 OpenAI 登录的 provider 配置走另一条
+条件路径；详见 [Images 兼容性说明](openspec/specs/images-api-compat/context.md#codex-provider-eligibility)。
 
 可选：在保留 `codex-lb` 池化能力的同时，启用上游原生 WebSocket 流式传输：
 
@@ -156,7 +155,6 @@ name = "OpenAI"
 base_url = "http://127.0.0.1:2455/backend-api/codex"
 wire_api = "responses"
 env_key = "CODEX_LB_API_KEY"
-http_headers = { "x-openai-actor-authorization" = "codex-lb" }
 supports_websockets = true
 requires_openai_auth = true # codex 应用需要
 ```

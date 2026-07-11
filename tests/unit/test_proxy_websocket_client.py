@@ -1048,6 +1048,7 @@ def test_responses_websocket_builder_normalizes_non_native_sdk_fingerprint():
         "x-openai-client-version": "2.24.0",
         "x-stainless-os": "MacOS",
         "originator": "sdk",
+        "Version": "9.9.9",
         "openai-beta": "responses_websockets=2026-02-06",
     }
     with patch.object(proxy_module.get_codex_version_cache(), "cached_version_or_default", return_value="0.142.0"):
@@ -1057,7 +1058,9 @@ def test_responses_websocket_builder_normalizes_non_native_sdk_fingerprint():
     lowered = {key.lower() for key in headers}
     assert "x-openai-client-version" not in lowered
     assert not any(key.lower().startswith("x-stainless-") for key in headers)
-    assert "originator" not in lowered
+    assert headers["originator"] == "codex_cli_rs"
+    assert headers["version"] == "0.142.0"
+    assert "Version" not in headers
     assert headers["ChatGPT-Account-Id"] == "acct-1"
     assert "chatgpt-account-id" not in headers
     # The responses websocket beta header is still appended.

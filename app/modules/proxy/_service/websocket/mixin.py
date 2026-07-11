@@ -626,6 +626,7 @@ class _WebSocketMixin:
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
         sticky_threads_enabled = settings.sticky_threads_enabled
         openai_cache_affinity_max_age_seconds = settings.openai_cache_affinity_max_age_seconds
+        prohibit_fast_mode = bool(getattr(settings, "prohibit_fast_mode", False))
         routing_strategy = _facade()._routing_strategy(settings)
         pending_requests: deque[_WebSocketRequestState] = deque()
         pending_lock = anyio.Lock()
@@ -680,6 +681,7 @@ class _WebSocketMixin:
                 if replay_request_state is not None:
                     request_state = replay_request_state
                     replay_request_state = None
+                    request_state.request_stage = "reattach"
                     request_affinity = request_state.affinity_policy
                     text_data = request_state.request_text
                     if text_data is None:
@@ -781,6 +783,7 @@ class _WebSocketMixin:
                                     openai_cache_affinity=openai_cache_affinity,
                                     sticky_threads_enabled=sticky_threads_enabled,
                                     openai_cache_affinity_max_age_seconds=openai_cache_affinity_max_age_seconds,
+                                    prohibit_fast_mode=prohibit_fast_mode,
                                     api_key=api_key,
                                     continuity_state=continuity_state,
                                     useragent=useragent,
@@ -816,6 +819,7 @@ class _WebSocketMixin:
                                         openai_cache_affinity=openai_cache_affinity,
                                         sticky_threads_enabled=sticky_threads_enabled,
                                         openai_cache_affinity_max_age_seconds=openai_cache_affinity_max_age_seconds,
+                                        prohibit_fast_mode=prohibit_fast_mode,
                                         api_key=api_key,
                                         continuity_state=continuity_state,
                                         useragent=useragent,
@@ -1277,6 +1281,7 @@ class _WebSocketMixin:
         sticky_threads_enabled: bool,
         openai_cache_affinity_max_age_seconds: int,
         api_key: ApiKeyData | None,
+        prohibit_fast_mode: bool = False,
         continuity_state: "_WebSocketContinuityState | None" = None,
         useragent: str | None = None,
         useragent_group: str | None = None,
@@ -1289,7 +1294,11 @@ class _WebSocketMixin:
             payload,
             openai_compat=openai_cache_affinity,
         )
-        apply_api_key_enforcement(responses_payload, refreshed_api_key)
+        apply_api_key_enforcement(
+            responses_payload,
+            refreshed_api_key,
+            prohibit_fast_mode=prohibit_fast_mode,
+        )
         normalized_payload = responses_payload.to_payload()
         body_uses_responses_lite = _payload_uses_responses_lite(normalized_payload)
         trusted_incremental_responses_lite = bool(
@@ -1775,6 +1784,7 @@ class _WebSocketMixin:
                     preferred_account_id=preferred_account_id,
                     require_security_work_authorized=require_security_work_authorized,
                     lease_kind="stream",
+                    request_stage=request_state.request_stage,
                     estimated_lease_tokens=_facade()._estimated_lease_tokens_from_request_usage_budget(
                         request_state.request_usage_budget
                     ),
@@ -1821,6 +1831,12 @@ class _WebSocketMixin:
                 heartbeat=_heartbeat,
             ):
                 break
+            # A wait clipped to the remaining request budget is still a
+            # completed wait. Preserve the selection error that caused it
+            # instead of performing one more selection that can only replace
+            # the original local-cap 429 with upstream_request_timeout.
+            if _facade()._remaining_budget_seconds(deadline) <= 0:
+                break
 
         account = selection.account
         if (
@@ -1857,7 +1873,7 @@ class _WebSocketMixin:
         if account:
             request_state.websocket_stream_lease = selection.lease
             return account
-        if defer_no_account_error:
+        if defer_no_account_error and not _facade()._is_local_account_cap_code(selection.error_code):
             _facade().logger.warning(
                 "Websocket account selection deferred no-account error request_id=%s model=%s "
                 "preferred_account_id=%s require_preferred=%s error_code=%s error=%s excluded_count=%s",
@@ -1882,7 +1898,7 @@ class _WebSocketMixin:
             )
             return None
         if require_preferred_account and preferred_account_id is not None:
-            if request_state.file_required_preferred_account and _facade()._is_local_account_cap_code(error_code):
+            if _facade()._is_local_account_cap_code(error_code):
                 await proxy._emit_websocket_connect_failure(
                     websocket,
                     client_send_lock=client_send_lock,

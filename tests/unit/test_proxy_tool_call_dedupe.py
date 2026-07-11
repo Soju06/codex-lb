@@ -198,6 +198,158 @@ def test_mark_duplicate_tool_call_downstream_event_keeps_distinct_code_mode_exec
     )
 
 
+def test_mark_duplicate_tool_call_downstream_event_suppresses_namespaced_replay_after_distinct_call():
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+
+    def payload(response_id: str, call_id: str) -> dict[str, JsonValue]:
+        return {
+            "type": "response.output_item.done",
+            "response_id": response_id,
+            "item": {
+                "type": "custom_tool_call",
+                "namespace": "collaboration",
+                "name": "spawn_agent",
+                "input": '{"message":"same task"}',
+                "call_id": call_id,
+            },
+        }
+
+    results = [
+        tool_call_dedupe.mark_duplicate_tool_call_downstream_event(
+            event,
+            seen_tool_call_keys=upstream_control.seen_tool_call_keys,
+            response_id=response_id,
+            scope_side_effects_by_response_id=False,
+        )
+        for event, response_id in (
+            (payload("resp_namespaced_first", "call_a"), "resp_namespaced_first"),
+            (payload("resp_namespaced_second", "call_c"), "resp_namespaced_second"),
+            (payload("resp_namespaced_second", "call_a"), "resp_namespaced_second"),
+        )
+    ]
+
+    assert results == [False, False, True]
+
+
+def test_mark_duplicate_tool_call_downstream_event_suppresses_namespaced_replay_after_read_only_call():
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+
+    def payload(response_id: str, call_id: str, name: str) -> dict[str, JsonValue]:
+        return {
+            "type": "response.output_item.done",
+            "response_id": response_id,
+            "item": {
+                "type": "custom_tool_call",
+                "namespace": "collaboration",
+                "name": name,
+                "input": '{"message":"same task"}' if name == "spawn_agent" else "{}",
+                "call_id": call_id,
+            },
+        }
+
+    results = [
+        tool_call_dedupe.mark_duplicate_tool_call_downstream_event(
+            event,
+            seen_tool_call_keys=upstream_control.seen_tool_call_keys,
+            response_id=response_id,
+            scope_side_effects_by_response_id=False,
+        )
+        for event, response_id in (
+            (payload("resp_namespaced_first", "call_a", "spawn_agent"), "resp_namespaced_first"),
+            (payload("resp_namespaced_second", "call_read", "list_agents"), "resp_namespaced_second"),
+            (payload("resp_namespaced_second", "call_a", "spawn_agent"), "resp_namespaced_second"),
+        )
+    ]
+
+    assert results == [False, False, True]
+
+
+def test_mark_duplicate_tool_call_downstream_event_suppresses_namespaced_replay_after_message_item():
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    spawn_payload: dict[str, JsonValue] = {
+        "type": "response.output_item.done",
+        "response_id": "resp_namespaced_first",
+        "item": {
+            "type": "custom_tool_call",
+            "namespace": "collaboration",
+            "name": "spawn_agent",
+            "input": '{"message":"same task"}',
+            "call_id": "call_a",
+        },
+    }
+    message_payload: dict[str, JsonValue] = {
+        "type": "response.output_item.done",
+        "response_id": "resp_namespaced_second",
+        "item": {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "still working"}],
+        },
+    }
+    replay_payload: dict[str, JsonValue] = {
+        **spawn_payload,
+        "response_id": "resp_namespaced_second",
+    }
+
+    results = [
+        tool_call_dedupe.mark_duplicate_tool_call_downstream_event(
+            event,
+            seen_tool_call_keys=upstream_control.seen_tool_call_keys,
+            response_id=response_id,
+            scope_side_effects_by_response_id=False,
+        )
+        for event, response_id in (
+            (spawn_payload, "resp_namespaced_first"),
+            (message_payload, "resp_namespaced_second"),
+            (replay_payload, "resp_namespaced_second"),
+        )
+    ]
+
+    assert results == [False, False, True]
+
+
+def test_mark_duplicate_tool_call_downstream_event_keeps_distinct_namespaces():
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    first_payload: dict[str, JsonValue] = {
+        "type": "response.output_item.done",
+        "response_id": "resp_namespace_v1",
+        "item": {
+            "type": "function_call",
+            "namespace": "multi_agent_v1",
+            "name": "spawn_agent",
+            "arguments": '{"message":"same task"}',
+            "call_id": "call_shared",
+        },
+    }
+    second_payload: dict[str, JsonValue] = {
+        **first_payload,
+        "response_id": "resp_namespace_v2",
+        "item": {
+            **cast(dict[str, JsonValue], first_payload["item"]),
+            "namespace": "collaboration",
+        },
+    }
+
+    assert (
+        tool_call_dedupe.mark_duplicate_tool_call_downstream_event(
+            first_payload,
+            seen_tool_call_keys=upstream_control.seen_tool_call_keys,
+            response_id="resp_namespace_v1",
+            scope_side_effects_by_response_id=False,
+        )
+        is False
+    )
+    assert (
+        tool_call_dedupe.mark_duplicate_tool_call_downstream_event(
+            second_payload,
+            seen_tool_call_keys=upstream_control.seen_tool_call_keys,
+            response_id="resp_namespace_v2",
+            scope_side_effects_by_response_id=False,
+        )
+        is False
+    )
+
+
 def test_mark_duplicate_tool_call_downstream_event_suppresses_direct_wait_agent_replay():
     upstream_control = proxy_service._WebSocketUpstreamControl()
     first_payload: dict[str, JsonValue] = {
@@ -1476,6 +1628,241 @@ def test_dedupe_replayed_side_effect_input_items_keeps_distinct_code_mode_calls(
             "call_id": "call_code_mode_second",
             "output": "second result",
         },
+    ]
+
+    deduped_items, removed_count = tool_call_dedupe.dedupe_replayed_side_effect_input_items(input_items)
+
+    assert removed_count == 0
+    assert deduped_items == input_items
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "arguments"),
+    [
+        ("spawn_agent", '{"message":"same task"}'),
+        ("wait_agent", '{"targets":["agent-a"],"timeout_ms":30000}'),
+    ],
+)
+def test_dedupe_replayed_side_effect_input_items_keeps_distinct_namespaced_calls(
+    tool_name: str,
+    arguments: str,
+):
+    input_items: list[JsonValue] = [
+        {
+            "type": "function_call",
+            "namespace": "collaboration",
+            "name": tool_name,
+            "arguments": arguments,
+            "call_id": "call_namespaced_first",
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "call_namespaced_first",
+            "output": "first result",
+        },
+        {
+            "type": "function_call",
+            "namespace": "collaboration",
+            "name": tool_name,
+            "arguments": arguments,
+            "call_id": "call_namespaced_second",
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "call_namespaced_second",
+            "output": "second result",
+        },
+    ]
+
+    deduped_items, removed_count = tool_call_dedupe.dedupe_replayed_side_effect_input_items(input_items)
+
+    assert removed_count == 0
+    assert deduped_items == input_items
+
+
+def test_dedupe_replayed_side_effect_input_items_suppresses_exact_namespaced_replay():
+    repeated_call: dict[str, JsonValue] = {
+        "type": "custom_tool_call",
+        "namespace": "collaboration",
+        "name": "spawn_agent",
+        "input": '{"message":"same task"}',
+        "call_id": "call_namespaced",
+    }
+    input_items: list[JsonValue] = [
+        repeated_call,
+        {
+            "type": "custom_tool_call_output",
+            "call_id": "call_namespaced",
+            "output": "first result",
+        },
+        dict(repeated_call),
+        {
+            "type": "custom_tool_call_output",
+            "call_id": "call_namespaced",
+            "output": "replayed result",
+        },
+    ]
+
+    deduped_items, removed_count = tool_call_dedupe.dedupe_replayed_side_effect_input_items(input_items)
+
+    assert removed_count == 1
+    assert sum(1 for item in deduped_items if isinstance(item, dict) and item.get("type") == "custom_tool_call") == 1
+
+
+def test_dedupe_replayed_side_effect_input_items_keeps_distinct_namespaced_custom_calls():
+    repeated_input = '{"message":"same task"}'
+    input_items: list[JsonValue] = [
+        {
+            "type": "custom_tool_call",
+            "namespace": "collaboration",
+            "name": "spawn_agent",
+            "input": repeated_input,
+            "call_id": "call_custom_namespaced_first",
+        },
+        {
+            "type": "custom_tool_call_output",
+            "call_id": "call_custom_namespaced_first",
+            "output": "first result",
+        },
+        {
+            "type": "custom_tool_call",
+            "namespace": "collaboration",
+            "name": "spawn_agent",
+            "input": repeated_input,
+            "call_id": "call_custom_namespaced_second",
+        },
+        {
+            "type": "custom_tool_call_output",
+            "call_id": "call_custom_namespaced_second",
+            "output": "second result",
+        },
+    ]
+
+    deduped_items, removed_count = tool_call_dedupe.dedupe_replayed_side_effect_input_items(input_items)
+
+    assert removed_count == 0
+    assert deduped_items == input_items
+
+
+def test_dedupe_replayed_side_effect_input_items_suppresses_namespaced_replay_after_distinct_call():
+    repeated_input = '{"message":"same task"}'
+
+    def call(call_id: str) -> dict[str, JsonValue]:
+        return {
+            "type": "custom_tool_call",
+            "namespace": "collaboration",
+            "name": "spawn_agent",
+            "input": repeated_input,
+            "call_id": call_id,
+        }
+
+    def output(call_id: str, value: str) -> dict[str, JsonValue]:
+        return {
+            "type": "custom_tool_call_output",
+            "call_id": call_id,
+            "output": value,
+        }
+
+    input_items: list[JsonValue] = [
+        call("call_a"),
+        output("call_a", "first result"),
+        call("call_c"),
+        output("call_c", "distinct result"),
+        call("call_a"),
+        output("call_a", "replayed result"),
+    ]
+
+    deduped_items, removed_count = tool_call_dedupe.dedupe_replayed_side_effect_input_items(input_items)
+
+    assert removed_count == 1
+    assert [item.get("call_id") for item in deduped_items if isinstance(item, dict) and "call_id" in item] == [
+        "call_a",
+        "call_a",
+        "call_c",
+        "call_c",
+    ]
+    replay_output = cast(dict[str, JsonValue], deduped_items[-1])
+    assert replay_output["type"] == "message"
+    assert replay_output["content"] == [{"type": "output_text", "text": "replayed result"}]
+
+
+def test_dedupe_replayed_side_effect_input_items_suppresses_namespaced_replay_after_read_only_call():
+    spawn_call: dict[str, JsonValue] = {
+        "type": "custom_tool_call",
+        "namespace": "collaboration",
+        "name": "spawn_agent",
+        "input": '{"message":"same task"}',
+        "call_id": "call_a",
+    }
+    input_items: list[JsonValue] = [
+        spawn_call,
+        {"type": "custom_tool_call_output", "call_id": "call_a", "output": "first result"},
+        {
+            "type": "custom_tool_call",
+            "namespace": "collaboration",
+            "name": "list_agents",
+            "input": "{}",
+            "call_id": "call_read",
+        },
+        {"type": "custom_tool_call_output", "call_id": "call_read", "output": "agent list"},
+        dict(spawn_call),
+        {"type": "custom_tool_call_output", "call_id": "call_a", "output": "replayed result"},
+    ]
+
+    deduped_items, removed_count = tool_call_dedupe.dedupe_replayed_side_effect_input_items(input_items)
+
+    assert removed_count == 1
+    assert [item.get("call_id") for item in deduped_items if isinstance(item, dict) and "call_id" in item] == [
+        "call_a",
+        "call_a",
+        "call_read",
+        "call_read",
+    ]
+    replay_output = cast(dict[str, JsonValue], deduped_items[-1])
+    assert replay_output["type"] == "message"
+    assert replay_output["content"] == [{"type": "output_text", "text": "replayed result"}]
+
+
+def test_dedupe_replayed_side_effect_input_items_suppresses_namespaced_replay_after_unknown_output():
+    spawn_call: dict[str, JsonValue] = {
+        "type": "custom_tool_call",
+        "namespace": "collaboration",
+        "name": "spawn_agent",
+        "input": '{"message":"same task"}',
+        "call_id": "call_a",
+    }
+    input_items: list[JsonValue] = [
+        spawn_call,
+        {"type": "custom_tool_call_output", "call_id": "call_a", "output": "first result"},
+        {"type": "custom_tool_call_output", "call_id": "call_unknown", "output": "unmatched result"},
+        dict(spawn_call),
+        {"type": "custom_tool_call_output", "call_id": "call_a", "output": "replayed result"},
+    ]
+
+    deduped_items, removed_count = tool_call_dedupe.dedupe_replayed_side_effect_input_items(input_items)
+
+    assert removed_count == 1
+    unmatched_output = cast(dict[str, JsonValue], deduped_items[2])
+    assert unmatched_output["call_id"] == "call_unknown"
+    replay_output = cast(dict[str, JsonValue], deduped_items[-1])
+    assert replay_output["type"] == "message"
+    assert replay_output["content"] == [{"type": "output_text", "text": "replayed result"}]
+
+
+def test_dedupe_replayed_side_effect_input_items_resets_namespaced_identity_at_user_boundary():
+    spawn_call: dict[str, JsonValue] = {
+        "type": "custom_tool_call",
+        "namespace": "collaboration",
+        "name": "spawn_agent",
+        "input": '{"message":"same task"}',
+        "call_id": "call_a",
+    }
+    input_items: list[JsonValue] = [
+        spawn_call,
+        {"type": "custom_tool_call_output", "call_id": "call_a", "output": "first result"},
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "spawn again"}]},
+        dict(spawn_call),
+        {"type": "custom_tool_call_output", "call_id": "call_a", "output": "second result"},
     ]
 
     deduped_items, removed_count = tool_call_dedupe.dedupe_replayed_side_effect_input_items(input_items)

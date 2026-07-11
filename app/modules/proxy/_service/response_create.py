@@ -43,6 +43,12 @@ _RESPONSE_CREATE_TOOL_OUTPUT_OMISSION_NOTICE = (
 )
 _RESPONSE_CREATE_IMAGE_OMISSION_NOTICE = "[codex-lb omitted historical inline image to fit upstream websocket budget]"
 _OVERSIZED_RESPONSE_CREATE_DUMP_DIR: Path | None = None
+_RESPONSE_CREATE_COMPATIBILITY_METADATA_HEADERS = (
+    "x-codex-turn-metadata",
+    "x-openai-subagent",
+    "x-codex-parent-thread-id",
+    "x-codex-window-id",
+)
 
 
 def _service_module() -> Any | None:
@@ -801,9 +807,10 @@ def _response_create_client_metadata(
                 client_metadata[key] = value
 
     normalized_headers = {key.lower(): value for key, value in headers.items()}
-    turn_metadata = normalized_headers.get("x-codex-turn-metadata")
-    if isinstance(turn_metadata, str) and turn_metadata.strip():
-        client_metadata.setdefault("x-codex-turn-metadata", turn_metadata)
+    for header_name in _RESPONSE_CREATE_COMPATIBILITY_METADATA_HEADERS:
+        metadata_value = normalized_headers.get(header_name)
+        if isinstance(metadata_value, str) and metadata_value.strip():
+            client_metadata.setdefault(header_name, metadata_value)
 
     if codex_installation_id:
         client_metadata[CODEX_INSTALLATION_ID_HEADER] = codex_installation_id

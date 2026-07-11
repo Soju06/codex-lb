@@ -9,6 +9,8 @@
   response-create admission release edge cases raised in PR #1207 review.
 - [x] 1.5 Require file-backed HTTP bridge precreated retries to reconnect on the
   pinned owner or fail closed.
+- [x] 1.6 Keep stale same-model HTTP bridge previous-response aliases on the
+  continuity-lost fail-closed path instead of model-transition rebind.
 
 ## 2. Verification
 

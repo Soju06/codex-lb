@@ -50,3 +50,21 @@ the existing pre-visible forced-refresh and eligible-account failover behavior.
 - **WHEN** the proxy excludes the failed owner and selects a replacement account
 - **THEN** the failed owner's stream lease is released before replacement
   selection so the owner does not retain stale local pressure
+
+### Requirement: Stale HTTP bridge previous-response aliases fail closed
+
+The HTTP bridge MUST NOT treat a stale previous-response alias as a model
+transition unless the indexed session's model is incompatible with the incoming
+request. When a previous-response alias resolves to a closed or inactive session
+for the same model and no durable recovery owner is available, the proxy MUST
+surface the existing continuity-lost failure instead of creating or selecting a
+replacement bridge.
+
+#### Scenario: stale same-model previous-response alias fails closed
+
+- **GIVEN** the previous-response index still points to an inactive HTTP bridge
+  session for the same model
+- **AND** no durable owner lookup is available for that response id
+- **WHEN** a request arrives with that `previous_response_id`
+- **THEN** the proxy fails closed with the stream-incomplete continuity error
+- **AND** it does not create a replacement bridge for the stale response id

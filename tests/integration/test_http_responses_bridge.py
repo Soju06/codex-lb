@@ -2142,6 +2142,56 @@ async def test_v1_responses_http_bridge_missing_turn_state_alias_with_previous_r
 
 
 @pytest.mark.asyncio
+async def test_v1_responses_http_bridge_stale_previous_response_alias_same_model_fails_closed(
+    app_instance,
+    monkeypatch,
+):
+    _install_bridge_settings_with_limits(monkeypatch, enabled=True)
+    service = get_proxy_service_for_app(app_instance)
+    service._http_bridge_sessions.clear()
+    service._http_bridge_inflight_sessions.clear()
+    service._http_bridge_turn_state_index.clear()
+    service._http_bridge_previous_response_index.clear()
+
+    previous_response_id = "resp_stale_same_model_alias"
+    stale_key = proxy_module._HTTPBridgeSessionKey("prompt_cache", "bridge-stale-prev-owner", None)
+    stale_session = cast(proxy_module._HTTPBridgeSession, _make_dummy_bridge_session(stale_key))
+    stale_session.request_model = "gpt-5.1"
+    stale_session.account = cast(Account, SimpleNamespace(id="acc-stale-prev-owner", status=AccountStatus.PAUSED))
+    stale_session.previous_response_ids.add(previous_response_id)
+    service._http_bridge_sessions[stale_key] = stale_session
+    service._http_bridge_previous_response_index[(previous_response_id, None)] = stale_key
+
+    async def fail_create_http_bridge_session(self, *args, **kwargs):
+        del self, args, kwargs
+        raise AssertionError("stale same-model previous_response_id must fail closed before replacement creation")
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_create_http_bridge_session", fail_create_http_bridge_session)
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service._get_or_create_http_bridge_session(
+            proxy_module._HTTPBridgeSessionKey("request", "bridge-stale-prev-request", None),
+            headers={},
+            affinity=proxy_module._AffinityPolicy(),
+            api_key=None,
+            request_model="gpt-5.1",
+            idle_ttl_seconds=120.0,
+            max_sessions=128,
+            previous_response_id=previous_response_id,
+        )
+
+    exc = exc_info.value
+    assert exc.status_code == 502
+    assert exc.payload["error"] == {
+        "message": "Upstream websocket closed before response.completed",
+        "type": "server_error",
+        "code": "stream_incomplete",
+    }
+    assert service._http_bridge_previous_response_index.get((previous_response_id, None)) is None
+    assert service._http_bridge_sessions[stale_key] is stale_session
+
+
+@pytest.mark.asyncio
 async def test_v1_responses_http_bridge_replayed_turn_state_alias_preserves_owner_without_rekeying_session(
     async_client,
     app_instance,

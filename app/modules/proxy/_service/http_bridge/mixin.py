@@ -1098,7 +1098,9 @@ class _HTTPBridgeMixin(
                                         else None,
                                     )
                                     session_to_return_after_close = previous_session
-                            elif previous_session is not None:
+                            elif previous_session is not None and not _http_bridge_models_compatible(
+                                previous_session.request_model, request_model
+                            ):
                                 model_transition_rebind = True
                             else:
                                 self._http_bridge_previous_response_index.pop(previous_alias_key, None)

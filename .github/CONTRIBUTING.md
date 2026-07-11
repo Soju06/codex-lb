@@ -193,9 +193,7 @@ PR titles must follow the same format — that's the title release-please reads.
 2. Make atomic commits with Conventional Commit titles.
 3. Run the lint/test gate locally (see above).
 4. Open a PR using the template. Link the relevant issue.
-5. Codex Review (and a human maintainer) will review. Address feedback by
-   pushing follow-up commits — no force-pushing during active review.
-6. Once approved and CI is green, a maintainer squash-merges with a clean
+5. Once approved and CI is green, a maintainer squash-merges with a clean
    Conventional Commits title.
 
 ## Merge gates and collaborator rules
@@ -215,24 +213,10 @@ Before a PR is squash-merged into `main`:
    `CI Required` check is the branch-protection check to require: it
    depends on every CI job and also runs for merge queue synthetic merge
    groups, so a stale PR head cannot bypass a broken merge result.
-2. **`@codex review` must be clean — or its findings addressed — on the
-   merge-target head.** Every PR triggers `@codex review` at least once
-   against the head that's about to be merged. Local `codex review
-   --base origin/main` runs are encouraged but don't substitute for the
-   cloud review (the cloud `@codex review` reliably catches things the
-   local run misses).
-   The `🤖 codex: ok` label is maintained by the trusted
-   `Codex review labels` workflow from current-head CI and current-head
-   Codex review evidence. Treat the label as an audit aid, not as a
-   substitute for branch protection or merge queue checks.
-   - **P1 findings**: fix in the PR, or justify in-thread with a short
-     write-up of why the finding doesn't apply. No silent skipping.
-   - **P2 findings**: fix in the PR, or open a follow-up issue and link
-     it in the PR thread before merging.
-3. **`mergeable` must be `CLEAN`** in the GitHub API — no merge
+2. **`mergeable` must be `CLEAN`** in the GitHub API — no merge
    conflicts, no requested-changes review still outstanding, no missing
    required status check.
-4. **OpenSpec change folder for behavior changes** (see
+3. **OpenSpec change folder for behavior changes** (see
    [Workflow: OpenSpec-first](#workflow-openspec-first)). Pure
    refactors, docs-only edits, dev-tool changes, and test stabilization
    PRs are exempt; everything else needs an `openspec/changes/<slug>/`
@@ -266,9 +250,9 @@ self-merge escape hatch applies:
 
 - If a collaborator's PR has been waiting on a maintainer merge for
   **more than 14 days** with **all merge gates met** (CI green,
-  `@codex review` clean or findings addressed, `mergeable=CLEAN`, no
-  outstanding requested-changes review, no objection from any other
-  active collaborator in the thread), the PR author may self-merge.
+  `mergeable=CLEAN`, no outstanding requested-changes review, no
+  objection from any other active collaborator in the thread), the
+  PR author may self-merge.
 - Self-merge under this clause **must** include a comment on the PR
   explicitly invoking the clause and linking to the date the merge
   gates first went green. Audit trail must stay clean.
@@ -280,8 +264,8 @@ self-merge escape hatch applies:
 
 These rules are intentionally lightweight. They don't require:
 
-- A second human reviewer in addition to `@codex review` for every PR.
-  Codex review + the PR author + a maintainer merge is the baseline.
+- A second human reviewer for every PR. The PR author + a maintainer
+  merge is the baseline.
 - Squash-merge commit message rewriting beyond the Conventional Commits
   title. The PR description ends up in the body; that's enough.
 - A formal escalation process for disagreements. If a P1 finding is

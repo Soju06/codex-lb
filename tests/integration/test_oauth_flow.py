@@ -557,14 +557,16 @@ async def test_targeted_reauth_replaces_only_matching_team_seat(monkeypatch):
     monkeypatch.setattr(oauth_module, "get_cache_invalidation_poller", lambda: None)
 
     target_id = "shared-workspace_seat-a"
-    existing_token = _encode_jwt({
-        "email": "seat-a@example.com",
-        "sub": "auth0|seat-a",
-        "https://api.openai.com/auth": {
-            "chatgpt_account_id": "shared-workspace",
-            "chatgpt_user_id": "user-seat-a",
-        },
-    })
+    existing_token = _encode_jwt(
+        {
+            "email": "seat-a@example.com",
+            "sub": "auth0|seat-a",
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": "shared-workspace",
+                "chatgpt_user_id": "user-seat-a",
+            },
+        }
+    )
     intended = Account(
         id=target_id,
         chatgpt_account_id="shared-workspace",
@@ -583,15 +585,17 @@ async def test_targeted_reauth_replaces_only_matching_team_seat(monkeypatch):
         OAuthTokens(
             access_token="new-access",
             refresh_token="new-refresh",
-            id_token=_encode_jwt({
-                "email": "seat-a@example.com",
-                "sub": "auth0|seat-a",
-                "https://api.openai.com/auth": {
-                    "chatgpt_account_id": "shared-workspace",
-                    "chatgpt_user_id": "user-seat-a",
-                    "chatgpt_plan_type": "team",
-                },
-            }),
+            id_token=_encode_jwt(
+                {
+                    "email": "seat-a@example.com",
+                    "sub": "auth0|seat-a",
+                    "https://api.openai.com/auth": {
+                        "chatgpt_account_id": "shared-workspace",
+                        "chatgpt_user_id": "user-seat-a",
+                        "chatgpt_plan_type": "team",
+                    },
+                }
+            ),
         ),
         intended_account_id=target_id,
     )
@@ -627,14 +631,16 @@ async def test_targeted_reauth_rejects_other_seat_in_same_team_workspace(monkeyp
             OAuthTokens(
                 access_token="other-access",
                 refresh_token="other-refresh",
-                id_token=_encode_jwt({
-                    "email": "seat-b@example.com",
-                    "sub": "google-oauth2|seat-b",
-                    "https://api.openai.com/auth": {
-                        "chatgpt_account_id": "shared-workspace",
-                        "chatgpt_user_id": "user-seat-b",
-                    },
-                }),
+                id_token=_encode_jwt(
+                    {
+                        "email": "seat-b@example.com",
+                        "sub": "google-oauth2|seat-b",
+                        "https://api.openai.com/auth": {
+                            "chatgpt_account_id": "shared-workspace",
+                            "chatgpt_user_id": "user-seat-b",
+                        },
+                    }
+                ),
             ),
             intended_account_id=target_id,
         )
@@ -667,13 +673,15 @@ async def test_targeted_reauth_rejects_missing_workspace_for_known_team_seat():
             OAuthTokens(
                 access_token="personal-access",
                 refresh_token="personal-refresh",
-                id_token=_encode_jwt({
-                    "email": "seat-a@example.com",
-                    "sub": "auth0|seat-a",
-                    "https://api.openai.com/auth": {
-                        "chatgpt_user_id": "user-seat-a",
-                    },
-                }),
+                id_token=_encode_jwt(
+                    {
+                        "email": "seat-a@example.com",
+                        "sub": "auth0|seat-a",
+                        "https://api.openai.com/auth": {
+                            "chatgpt_user_id": "user-seat-a",
+                        },
+                    }
+                ),
             ),
             intended_account_id=target_id,
         )

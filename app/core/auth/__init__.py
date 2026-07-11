@@ -146,9 +146,7 @@ def resolve_seat_identity(claims: "IdTokenClaims", auth_claims: "OpenAIAuthClaim
     (auth0/google-oauth2 principal). Returns None when nothing usable is present.
     """
     resolved_auth = auth_claims if auth_claims is not None else (claims.auth or OpenAIAuthClaims())
-    return clean_account_identity_part(
-        resolved_auth.chatgpt_user_id or claims.chatgpt_user_id or claims.sub
-    )
+    return clean_account_identity_part(resolved_auth.chatgpt_user_id or claims.chatgpt_user_id or claims.sub)
 
 
 def parse_auth_json(raw: bytes) -> AuthFile:

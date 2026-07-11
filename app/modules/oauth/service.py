@@ -696,14 +696,9 @@ class OauthService:
             except Exception:
                 intended_user_id = None
 
-        workspace_matches = (
-            not intended.chatgpt_account_id
-            or intended.chatgpt_account_id == account.chatgpt_account_id
-        )
+        workspace_matches = not intended.chatgpt_account_id or intended.chatgpt_account_id == account.chatgpt_account_id
         seat_matches = bool(
-            intended_user_id
-            and account.chatgpt_user_id
-            and intended_user_id == account.chatgpt_user_id
+            intended_user_id and account.chatgpt_user_id and intended_user_id == account.chatgpt_user_id
         )
         if not workspace_matches or not seat_matches:
             raise ReauthSeatMismatchError(intended.email, account.email)

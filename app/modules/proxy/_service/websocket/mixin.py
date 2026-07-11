@@ -588,12 +588,13 @@ class _WebSocketMixin:
         *,
         api_key: ApiKeyData | None,
         codex_session_affinity: bool,
+        synthesized_turn_state: str | None = None,
     ) -> "_WebSocketContinuityState":
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
         if not codex_session_affinity:
             return _WebSocketContinuityState()
-        session_id = _owner_lookup_session_id_from_headers(headers)
+        session_id = _owner_lookup_session_id_from_headers(headers, synthesized_turn_state=synthesized_turn_state)
         if session_id is None:
             return _WebSocketContinuityState()
         key = (session_id, api_key.id if api_key is not None else None)
@@ -617,6 +618,7 @@ class _WebSocketMixin:
         openai_cache_affinity: bool,
         api_key: ApiKeyData | None,
         client_ip: str | None = None,
+        synthesized_turn_state: str | None = None,
     ) -> None:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
@@ -640,6 +642,7 @@ class _WebSocketMixin:
             headers,
             api_key=api_key,
             codex_session_affinity=codex_session_affinity,
+            synthesized_turn_state=synthesized_turn_state,
         )
         account: Account | None = None
         account_lease: AccountLease | None = None
@@ -790,6 +793,7 @@ class _WebSocketMixin:
                                     useragent=useragent,
                                     useragent_group=useragent_group,
                                     client_ip=client_ip,
+                                    synthesized_turn_state=synthesized_turn_state,
                                 )
                                 if await _websocket_full_replay_should_wait_for_continuity(
                                     prepared_request.request_state,
@@ -826,6 +830,7 @@ class _WebSocketMixin:
                                         useragent=useragent,
                                         useragent_group=useragent_group,
                                         client_ip=client_ip,
+                                        synthesized_turn_state=synthesized_turn_state,
                                     )
                                 request_state = prepared_request.request_state
                                 request_affinity = prepared_request.affinity_policy
@@ -838,7 +843,10 @@ class _WebSocketMixin:
                                     _error_message,
                                 ) = _sanitize_websocket_previous_response_error(
                                     previous_response_id=_facade()._previous_response_id_from_payload(payload),
-                                    session_id=_owner_lookup_session_id_from_headers(headers),
+                                    session_id=_owner_lookup_session_id_from_headers(
+                                        headers,
+                                        synthesized_turn_state=synthesized_turn_state,
+                                    ),
                                     status_code=exc.status_code,
                                     payload=exc.payload,
                                     error_code="upstream_error",
@@ -1287,6 +1295,7 @@ class _WebSocketMixin:
         useragent: str | None = None,
         useragent_group: str | None = None,
         client_ip: str | None = None,
+        synthesized_turn_state: str | None = None,
     ) -> _PreparedWebSocketRequest:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
@@ -1418,7 +1427,7 @@ class _WebSocketMixin:
             request_usage_budget=estimate_api_key_request_usage(responses_payload),
         )
         try:
-            session_id = _owner_lookup_session_id_from_headers(headers)
+            session_id = _owner_lookup_session_id_from_headers(headers, synthesized_turn_state=synthesized_turn_state)
             request_state, text_data = proxy._prepare_response_bridge_request_state(
                 responses_payload,
                 api_key=refreshed_api_key,
@@ -1524,12 +1533,17 @@ class _WebSocketMixin:
             openai_cache_affinity_max_age_seconds=openai_cache_affinity_max_age_seconds,
             sticky_threads_enabled=sticky_threads_enabled,
             api_key=api_key,
+            synthesized_turn_state=synthesized_turn_state,
         )
         sticky_key_source = "none"
         if affinity_policy.kind == StickySessionKind.CODEX_SESSION:
-            sticky_key_source = (
-                "turn_state_header" if _sticky_key_from_turn_state_header(headers) is not None else "session_header"
-            )
+            turn_state_key = _sticky_key_from_turn_state_header(headers)
+            if turn_state_key is not None and turn_state_key == synthesized_turn_state:
+                sticky_key_source = "generated_turn_state"
+            elif turn_state_key is not None:
+                sticky_key_source = "turn_state_header"
+            else:
+                sticky_key_source = "session_header"
         elif affinity_policy.key:
             sticky_key_source = "payload" if had_prompt_cache_key else "derived"
         _maybe_log_proxy_request_shape(

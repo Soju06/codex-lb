@@ -440,7 +440,10 @@ async def test_proxy_codex_session_id_pins_responses_and_compact_without_sticky_
 
 
 @pytest.mark.asyncio
-async def test_proxy_codex_turn_state_pins_responses_and_compact_without_sticky_threads(async_client, monkeypatch):
+async def test_proxy_unregistered_turn_state_does_not_pin_compact_via_unscoped_sticky_state(
+    async_client,
+    monkeypatch,
+):
     await _set_routing_settings(async_client, sticky_threads_enabled=False)
     acc_a_id = await _import_account(async_client, "acc_turn_state_a", "turn_state_a@example.com")
     acc_b_id = await _import_account(async_client, "acc_turn_state_b", "turn_state_b@example.com")
@@ -518,8 +521,9 @@ async def test_proxy_codex_turn_state_pins_responses_and_compact_without_sticky_
         json=compact_payload,
         headers=headers,
     )
-    assert response.status_code == 200
-    assert compact_seen == ["acc_turn_state_a"]
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "turn_state_owner_unavailable"
+    assert compact_seen == []
 
 
 @pytest.mark.asyncio

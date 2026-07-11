@@ -514,6 +514,7 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
             assert "limit_warmup_prompt" in dashboard_columns
             assert "limit_warmup_cooldown_seconds" in dashboard_columns
             assert "limit_warmup_exhausted_threshold_percent" in dashboard_columns
+            assert "limit_warmup_idle_threshold_percent" in dashboard_columns
             assert "limit_warmup_min_available_percent" in dashboard_columns
             exhausted_threshold = (
                 await session.execute(
@@ -521,6 +522,12 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
                 )
             ).scalar_one()
             assert exhausted_threshold == 99.0
+            idle_threshold = (
+                await session.execute(
+                    text("SELECT limit_warmup_idle_threshold_percent FROM dashboard_settings WHERE id=1")
+                )
+            ).scalar_one()
+            assert idle_threshold == 1.0
             assert "hide_upstream_quota_from_api_keys" in dashboard_columns
             assert dashboard_column_defaults["hide_upstream_quota_from_api_keys"] in ("0", 0, False)
             assert "single_account_id" in dashboard_columns

@@ -34,6 +34,7 @@ export function buildSettingsUpdateRequest(
     limitWarmupPrompt: settings.limitWarmupPrompt,
     limitWarmupCooldownSeconds: settings.limitWarmupCooldownSeconds,
     limitWarmupExhaustedThresholdPercent: settings.limitWarmupExhaustedThresholdPercent,
+    limitWarmupIdleThresholdPercent: settings.limitWarmupIdleThresholdPercent,
     limitWarmupMinAvailablePercent: settings.limitWarmupMinAvailablePercent,
     limitWarmupStaggeredIdleEnabled: settings.limitWarmupStaggeredIdleEnabled,
     weeklyPaceWorkingDays: settings.weeklyPaceWorkingDays,

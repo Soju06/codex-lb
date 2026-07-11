@@ -4,7 +4,7 @@
 
 The system SHALL support an optional limit warm-up mechanism that is disabled by default. When enabled globally and for an account, background usage refresh MAY send one minimal upstream Responses request after it confirms that a selected quota window has moved from an exhausted sample to a newly available reset window.
 
-The system SHALL also support a separate disabled-by-default staggered idle warm-up mode. When that mode is enabled globally and the account is opted in, background usage refresh MAY send one minimal upstream Responses request for an active account whose primary 5h usage window is effectively unused. The `limit_warmup_exhausted_threshold_percent` setting (default 99.0) controls the idle gate for the staggered idle path: an account with `used_percent` at or below the configured threshold is considered idle. This setting also controls the pre-reset exhaustion gate for the regular warm-up path, so operators can configure a single threshold that governs both warm-up modes. Idle warm-up attempts MUST be deduplicated per account/window/reset tuple and MUST be scheduled deterministically across the primary reset window instead of all firing immediately.
+The system SHALL also support a separate disabled-by-default staggered idle warm-up mode. When that mode is enabled globally and the account is opted in, background usage refresh MAY send one minimal upstream Responses request for an active account whose primary 5h usage window is effectively unused. The `limit_warmup_idle_threshold_percent` setting (default 1.0) controls the idle gate for the staggered idle path: an account with `used_percent` at or below the configured threshold is considered idle. This setting is independent from `limit_warmup_exhausted_threshold_percent` (default 99.0), which controls the pre-reset exhaustion gate for the regular warm-up path. Idle warm-up attempts MUST be deduplicated per account/window/reset tuple and MUST be scheduled deterministically across the primary reset window instead of all firing immediately.
 
 #### Scenario: Warm-up is skipped unless reset is confirmed
 - **GIVEN** limit warm-up is enabled globally and for an account
@@ -36,7 +36,7 @@ The system SHALL also support a separate disabled-by-default staggered idle warm
 #### Scenario: Staggered idle warm-up pre-starts rolling primary windows
 - **GIVEN** limit warm-up and staggered idle warm-up are enabled globally
 - **AND** multiple active accounts are opted into limit warm-up
-- **AND** an opted-in account has a healthy idle primary 5h usage sample with `used_percent` at or below the configured `limit_warmup_exhausted_threshold_percent`
+- **AND** an opted-in account has a healthy idle primary 5h usage sample with `used_percent` at or below the configured `limit_warmup_idle_threshold_percent`
 - **WHEN** background usage refresh evaluates that account inside its deterministic stagger slot
 - **THEN** the system MUST attempt to send one minimal upstream warm-up request for that account's current 300-minute cycle
 - **AND** the system MUST NOT send another staggered idle warm-up for that same account/cycle tuple
@@ -44,7 +44,7 @@ The system SHALL also support a separate disabled-by-default staggered idle warm
 
 #### Scenario: Staggered idle warm-up is skipped for accounts with real usage
 - **GIVEN** staggered idle warm-up is enabled globally
-- **AND** an active opted-in account has a primary 5h usage window with `used_percent` above the configured `limit_warmup_exhausted_threshold_percent`
+- **AND** an active opted-in account has a primary 5h usage window with `used_percent` above the configured `limit_warmup_idle_threshold_percent`
 - **WHEN** background usage refresh evaluates that account
 - **THEN** the system MUST NOT send staggered idle warm-up traffic for that account
 

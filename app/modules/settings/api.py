@@ -151,6 +151,7 @@ def _dashboard_settings_response(settings) -> DashboardSettingsResponse:
         limit_warmup_prompt=settings.limit_warmup_prompt,
         limit_warmup_cooldown_seconds=settings.limit_warmup_cooldown_seconds,
         limit_warmup_exhausted_threshold_percent=settings.limit_warmup_exhausted_threshold_percent,
+        limit_warmup_idle_threshold_percent=settings.limit_warmup_idle_threshold_percent,
         limit_warmup_min_available_percent=settings.limit_warmup_min_available_percent,
         weekly_pace_working_days=settings.weekly_pace_working_days,
         weekly_pace_smoothing_minutes=settings.weekly_pace_smoothing_minutes,
@@ -675,6 +676,11 @@ async def update_settings(
                     if payload.limit_warmup_exhausted_threshold_percent is not None
                     else current.limit_warmup_exhausted_threshold_percent
                 ),
+                limit_warmup_idle_threshold_percent=(
+                    payload.limit_warmup_idle_threshold_percent
+                    if payload.limit_warmup_idle_threshold_percent is not None
+                    else current.limit_warmup_idle_threshold_percent
+                ),
                 limit_warmup_min_available_percent=(
                     payload.limit_warmup_min_available_percent
                     if payload.limit_warmup_min_available_percent is not None
@@ -740,6 +746,7 @@ async def update_settings(
             "limit_warmup_prompt",
             "limit_warmup_cooldown_seconds",
             "limit_warmup_exhausted_threshold_percent",
+            "limit_warmup_idle_threshold_percent",
             "limit_warmup_min_available_percent",
             "weekly_pace_working_days",
             "weekly_pace_smoothing_minutes",

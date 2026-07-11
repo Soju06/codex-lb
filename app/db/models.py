@@ -617,6 +617,12 @@ class DashboardSettings(Base):
         server_default=text("99.0"),
         nullable=False,
     )
+    limit_warmup_idle_threshold_percent: Mapped[float] = mapped_column(
+        Float,
+        default=1.0,
+        server_default=text("1.0"),
+        nullable=False,
+    )
     limit_warmup_min_available_percent: Mapped[float] = mapped_column(
         Float,
         default=100.0,

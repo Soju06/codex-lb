@@ -108,6 +108,7 @@ export function SettingsPage() {
                 settings.limitWarmupModel,
                 settings.limitWarmupPrompt,
                 settings.limitWarmupExhaustedThresholdPercent,
+                settings.limitWarmupIdleThresholdPercent,
                 settings.limitWarmupCooldownSeconds,
                 settings.limitWarmupStaggeredIdleEnabled,
               ].join(":")}

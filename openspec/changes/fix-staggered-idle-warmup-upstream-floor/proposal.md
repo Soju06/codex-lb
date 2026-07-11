@@ -13,35 +13,33 @@ the account sits idle.
 
 Additionally, the dashboard's "Exhausted at %" setting
 (`limit_warmup_exhausted_threshold_percent`) was only wired to the regular
-(post-exhaustion) warm-up path (`_build_candidate`), not to the staggered
-idle path. The UI places this field in the shared warm-up settings grid
-beneath the staggered idle toggle, so operators reasonably expect it to
-control both warm-up modes. An operator lowering the threshold to make
-staggered idle fire for accounts below a certain usage level had no effect.
+(post-exhaustion) warm-up path. The UI places this field in the shared
+warm-up settings grid beneath the staggered idle toggle, so operators
+reasonably expect it to control both warm-up modes. Reusing the same setting
+for both paths is problematic because the default of 99.0% means "exhausted"
+for the regular path but would mean "almost everything is idle" for the
+staggered path — opposite semantics.
 
 ## What Changes
 
-- Wire the existing `limit_warmup_exhausted_threshold_percent` setting into
-  the staggered idle path (`_build_staggered_idle_candidate`), so the
-  "Exhausted at %" field in the dashboard controls the idle gate for both
-  warm-up modes.
-- The staggered idle gate changes from the hardcoded `used_percent > 0.0`
-  to `used_percent > idle_threshold_percent`, where `idle_threshold_percent`
-  is the configured `limit_warmup_exhausted_threshold_percent` (default 99.0).
-- With the default threshold of 99.0%, accounts at or below 99% used are
-  considered idle for staggered warm-up. Operators can lower this to be more
-  conservative (e.g. 1.0 to only warm truly idle accounts at the upstream
-  floor) or raise it toward 99.0 for broader coverage.
-- Add a regression test asserting that an account at `used_percent = 1.0`
-  with the threshold set to 1.0 qualifies for staggered idle warm-up.
+- Add a new `limit_warmup_idle_threshold_percent` setting (default 1.0) that
+  controls the staggered idle gate independently from the regular warm-up's
+  exhaustion threshold.
+- Wire the new setting into `_build_staggered_idle_candidate`; an account with
+  `used_percent` at or below the configured idle threshold is considered idle.
+- Add an Alembic migration for the new `dashboard_settings` column.
+- Add a new "Idle at %" input to the dashboard settings UI, shown beneath the
+  staggered idle toggle when that mode is enabled.
+- The existing "Exhausted at %" field remains scoped to the regular warm-up
+  path only.
 
 ## Impact
 
 - Staggered idle warm-up will now actually fire for idle accounts during the
   account's deterministic slot in the 5h window, as originally intended by
   issue #433.
-- The "Exhausted at %" dashboard setting now controls both the regular
-  warm-up exhaustion gate and the staggered idle idle gate.
+- Operators can independently configure the idle threshold (default 1.0%
+  matching the upstream floor) and the exhaustion threshold (default 99.0%).
+- Database migration adds a new column; existing deployments get the default
+  of 1.0 automatically.
 - No change to the regular (post-exhaustion) warm-up path logic.
-- No database migration — reuses the existing
-  `limit_warmup_exhausted_threshold_percent` column.

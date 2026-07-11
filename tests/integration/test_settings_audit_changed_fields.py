@@ -70,6 +70,11 @@ def _default_put_body() -> dict[str, Any]:
             98.5,
             "limit_warmup_exhausted_threshold_percent",
         ),
+        (
+            "limitWarmupIdleThresholdPercent",
+            2.0,
+            "limit_warmup_idle_threshold_percent",
+        ),
         ("weeklyPaceWorkingDays", "0,1,2,3,4", "weekly_pace_working_days"),
         ("limitWarmupStaggeredIdleEnabled", True, "limit_warmup_staggered_idle_enabled"),
         ("hideUpstreamQuotaFromApiKeys", True, "hide_upstream_quota_from_api_keys"),

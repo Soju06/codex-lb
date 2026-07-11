@@ -40,6 +40,7 @@ describe("DashboardSettingsSchema", () => {
       limitWarmupPrompt: "Say OK.",
       limitWarmupCooldownSeconds: 3600,
       limitWarmupExhaustedThresholdPercent: 99,
+      limitWarmupIdleThresholdPercent: 1,
       limitWarmupMinAvailablePercent: 100,
       limitWarmupStaggeredIdleEnabled: true,
     });

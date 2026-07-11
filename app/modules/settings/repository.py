@@ -56,6 +56,7 @@ class SettingsRepository:
             limit_warmup_prompt="Say OK.",
             limit_warmup_cooldown_seconds=3600,
             limit_warmup_exhausted_threshold_percent=99.0,
+            limit_warmup_idle_threshold_percent=1.0,
             limit_warmup_min_available_percent=100.0,
             weekly_pace_working_days="0,1,2,3,4,5,6",
             weekly_pace_smoothing_minutes=30,
@@ -107,6 +108,7 @@ class SettingsRepository:
         limit_warmup_prompt: str | None = None,
         limit_warmup_cooldown_seconds: int | None = None,
         limit_warmup_exhausted_threshold_percent: float | None = None,
+        limit_warmup_idle_threshold_percent: float | None = None,
         limit_warmup_min_available_percent: float | None = None,
         weekly_pace_working_days: str | None = None,
         weekly_pace_smoothing_minutes: int | None = None,
@@ -179,6 +181,8 @@ class SettingsRepository:
             settings.limit_warmup_cooldown_seconds = limit_warmup_cooldown_seconds
         if limit_warmup_exhausted_threshold_percent is not None:
             settings.limit_warmup_exhausted_threshold_percent = limit_warmup_exhausted_threshold_percent
+        if limit_warmup_idle_threshold_percent is not None:
+            settings.limit_warmup_idle_threshold_percent = limit_warmup_idle_threshold_percent
         if limit_warmup_min_available_percent is not None:
             settings.limit_warmup_min_available_percent = limit_warmup_min_available_percent
         if weekly_pace_working_days is not None:

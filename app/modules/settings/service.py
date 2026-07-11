@@ -44,6 +44,7 @@ class DashboardSettingsData:
     limit_warmup_prompt: str
     limit_warmup_cooldown_seconds: int
     limit_warmup_exhausted_threshold_percent: float
+    limit_warmup_idle_threshold_percent: float
     limit_warmup_min_available_percent: float
     weekly_pace_working_days: str
     weekly_pace_smoothing_minutes: int
@@ -85,6 +86,7 @@ class DashboardSettingsUpdateData:
     limit_warmup_prompt: str
     limit_warmup_cooldown_seconds: int
     limit_warmup_exhausted_threshold_percent: float
+    limit_warmup_idle_threshold_percent: float
     limit_warmup_min_available_percent: float
     weekly_pace_working_days: str
     weekly_pace_smoothing_minutes: int
@@ -135,6 +137,7 @@ class SettingsService:
             limit_warmup_prompt=row.limit_warmup_prompt,
             limit_warmup_cooldown_seconds=row.limit_warmup_cooldown_seconds,
             limit_warmup_exhausted_threshold_percent=row.limit_warmup_exhausted_threshold_percent,
+            limit_warmup_idle_threshold_percent=row.limit_warmup_idle_threshold_percent,
             limit_warmup_min_available_percent=row.limit_warmup_min_available_percent,
             weekly_pace_working_days=row.weekly_pace_working_days,
             weekly_pace_smoothing_minutes=row.weekly_pace_smoothing_minutes,
@@ -183,6 +186,7 @@ class SettingsService:
             limit_warmup_prompt=payload.limit_warmup_prompt,
             limit_warmup_cooldown_seconds=payload.limit_warmup_cooldown_seconds,
             limit_warmup_exhausted_threshold_percent=payload.limit_warmup_exhausted_threshold_percent,
+            limit_warmup_idle_threshold_percent=payload.limit_warmup_idle_threshold_percent,
             limit_warmup_min_available_percent=payload.limit_warmup_min_available_percent,
             weekly_pace_working_days=payload.weekly_pace_working_days,
             weekly_pace_smoothing_minutes=payload.weekly_pace_smoothing_minutes,
@@ -226,6 +230,7 @@ class SettingsService:
             limit_warmup_prompt=row.limit_warmup_prompt,
             limit_warmup_cooldown_seconds=row.limit_warmup_cooldown_seconds,
             limit_warmup_exhausted_threshold_percent=row.limit_warmup_exhausted_threshold_percent,
+            limit_warmup_idle_threshold_percent=row.limit_warmup_idle_threshold_percent,
             limit_warmup_min_available_percent=row.limit_warmup_min_available_percent,
             weekly_pace_working_days=row.weekly_pace_working_days,
             weekly_pace_smoothing_minutes=row.weekly_pace_smoothing_minutes,

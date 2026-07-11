@@ -28,6 +28,7 @@ const LIMIT_WARMUP_DEFAULTS = {
   limitWarmupCooldownSeconds: 3600,
   limitWarmupMinAvailablePercent: 100,
   limitWarmupStaggeredIdleEnabled: false,
+  limitWarmupIdleThresholdPercent: 1,
 };
 
 const BASE_SETTINGS: DashboardSettings = {

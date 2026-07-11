@@ -77,6 +77,7 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["limitWarmupPrompt"] == "Say OK."
     assert payload["limitWarmupCooldownSeconds"] == 3600
     assert payload["limitWarmupExhaustedThresholdPercent"] == 99.0
+    assert payload["limitWarmupIdleThresholdPercent"] == 1.0
     assert payload["limitWarmupMinAvailablePercent"] == 100.0
     assert payload["weeklyPaceWorkingDays"] == "0,1,2,3,4,5,6"
     assert payload["weeklyPaceSmoothingMinutes"] == 30
@@ -114,6 +115,7 @@ async def test_settings_api_get_and_update(async_client):
             "limitWarmupPrompt": "Say OK.",
             "limitWarmupCooldownSeconds": 7200,
             "limitWarmupExhaustedThresholdPercent": 98.5,
+            "limitWarmupIdleThresholdPercent": 2.0,
             "limitWarmupMinAvailablePercent": 99.0,
             "weeklyPaceWorkingDays": "0,1,2,3,4",
             "weeklyPaceSmoothingMinutes": 120,
@@ -152,6 +154,7 @@ async def test_settings_api_get_and_update(async_client):
     assert updated["limitWarmupPrompt"] == "Say OK."
     assert updated["limitWarmupCooldownSeconds"] == 7200
     assert updated["limitWarmupExhaustedThresholdPercent"] == 98.5
+    assert updated["limitWarmupIdleThresholdPercent"] == 2.0
     assert updated["limitWarmupMinAvailablePercent"] == 99.0
     assert updated["weeklyPaceWorkingDays"] == "0,1,2,3,4"
     assert updated["weeklyPaceSmoothingMinutes"] == 120
@@ -190,6 +193,7 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["limitWarmupPrompt"] == "Say OK."
     assert payload["limitWarmupCooldownSeconds"] == 7200
     assert payload["limitWarmupExhaustedThresholdPercent"] == 98.5
+    assert payload["limitWarmupIdleThresholdPercent"] == 2.0
     assert payload["limitWarmupMinAvailablePercent"] == 99.0
     assert payload["weeklyPaceWorkingDays"] == "0,1,2,3,4"
     assert payload["weeklyPaceSmoothingMinutes"] == 120

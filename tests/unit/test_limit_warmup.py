@@ -62,6 +62,7 @@ def _settings(**overrides: object) -> DashboardSettings:
         "limit_warmup_prompt": "Say OK.",
         "limit_warmup_cooldown_seconds": 3600,
         "limit_warmup_exhausted_threshold_percent": 99.0,
+        "limit_warmup_idle_threshold_percent": 1.0,
         "limit_warmup_min_available_percent": 100.0,
         "limit_warmup_staggered_idle_enabled": False,
     }
@@ -1101,7 +1102,7 @@ async def test_staggered_idle_warmup_requires_unused_primary_window(monkeypatch)
         accounts=accounts,
         settings=_settings(
             limit_warmup_min_available_percent=80.0,
-            limit_warmup_exhausted_threshold_percent=1.0,
+            limit_warmup_idle_threshold_percent=1.0,
             limit_warmup_staggered_idle_enabled=True,
         ),
         before_primary={account.id: _usage(account.id, used_percent=10, reset_at=18_000)},
@@ -1133,7 +1134,7 @@ async def test_staggered_idle_warmup_accepts_upstream_idle_floor(monkeypatch) ->
     await service.run_after_usage_refresh(
         accounts=accounts,
         settings=_settings(
-            limit_warmup_exhausted_threshold_percent=1.0,
+            limit_warmup_idle_threshold_percent=1.0,
             limit_warmup_staggered_idle_enabled=True,
         ),
         before_primary={account.id: _usage(account.id, used_percent=1.0, reset_at=18_000)},

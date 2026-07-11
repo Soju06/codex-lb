@@ -84,6 +84,7 @@ type RoutingSettingsDraft = {
   limitWarmupPrompt: string;
   limitWarmupCooldown: string;
   limitWarmupExhaustedThreshold: string;
+  limitWarmupIdleThreshold: string;
   additionalQuotaKey: string;
   additionalQuotaPolicy: AdditionalQuotaRoutingPolicy;
 };
@@ -100,6 +101,7 @@ function createRoutingSettingsDraft(settings: DashboardSettings): RoutingSetting
     limitWarmupPrompt: settings.limitWarmupPrompt,
     limitWarmupCooldown: String(settings.limitWarmupCooldownSeconds),
     limitWarmupExhaustedThreshold: String(settings.limitWarmupExhaustedThresholdPercent),
+    limitWarmupIdleThreshold: String(settings.limitWarmupIdleThresholdPercent),
     additionalQuotaKey: "",
     additionalQuotaPolicy: "inherit",
   };
@@ -162,11 +164,18 @@ export function RoutingSettings({
     Number.isFinite(parsedLimitWarmupExhaustedThreshold) &&
     parsedLimitWarmupExhaustedThreshold > 0 &&
     parsedLimitWarmupExhaustedThreshold <= 100;
+  const parsedLimitWarmupIdleThreshold = Number(draft.limitWarmupIdleThreshold);
+  const limitWarmupIdleThresholdValid =
+    Number.isFinite(parsedLimitWarmupIdleThreshold) &&
+    parsedLimitWarmupIdleThreshold > 0 &&
+    parsedLimitWarmupIdleThreshold <= 100;
   const limitWarmupFieldsChanged =
     draft.limitWarmupModel.trim() !== settings.limitWarmupModel ||
     draft.limitWarmupPrompt.trim() !== settings.limitWarmupPrompt ||
     (limitWarmupExhaustedThresholdValid &&
       parsedLimitWarmupExhaustedThreshold !== settings.limitWarmupExhaustedThresholdPercent) ||
+    (limitWarmupIdleThresholdValid &&
+      parsedLimitWarmupIdleThreshold !== settings.limitWarmupIdleThresholdPercent) ||
     (limitWarmupCooldownValid && parsedLimitWarmupCooldown !== settings.limitWarmupCooldownSeconds);
   const limitWarmupFieldsValid =
     draft.limitWarmupModel.trim().length > 0 &&
@@ -174,6 +183,7 @@ export function RoutingSettings({
     draft.limitWarmupPrompt.trim().length > 0 &&
     draft.limitWarmupPrompt.trim().length <= LIMIT_WARMUP_PROMPT_MAX_LENGTH &&
     limitWarmupExhaustedThresholdValid &&
+    limitWarmupIdleThresholdValid &&
     limitWarmupCooldownValid;
 
   const parsedRelativeAvailabilityPower = Number.parseFloat(draft.relativeAvailabilityPower);
@@ -846,6 +856,28 @@ export function RoutingSettings({
                 onCheckedChange={(checked) => save({ limitWarmupStaggeredIdleEnabled: checked })}
               />
             </div>
+            {settings.limitWarmupStaggeredIdleEnabled && (
+              <div className="flex items-center justify-between gap-4 pl-4">
+                <div className="min-w-0">
+                  <span className="block text-[11px] font-medium text-muted-foreground">Idle at %</span>
+                  <p className="text-[10px] text-muted-foreground">
+                    Treat accounts at or below this usage as idle for staggered warm-up.
+                  </p>
+                </div>
+                <Input
+                  type="number"
+                  min={0.1}
+                  max={100}
+                  step={0.1}
+                  inputMode="decimal"
+                  value={draft.limitWarmupIdleThreshold}
+                  disabled={busy}
+                  onChange={(event) => updateDraft({ limitWarmupIdleThreshold: event.target.value })}
+                  className="h-8 w-24 text-xs"
+                  aria-label="Staggered idle warm-up idle threshold percent"
+                />
+              </div>
+            )}
 
             <div className="grid gap-2 sm:grid-cols-[10rem_minmax(0,1fr)_7rem_7rem]">
               <div className="space-y-1">
@@ -927,6 +959,7 @@ export function RoutingSettings({
                     limitWarmupModel: draft.limitWarmupModel.trim(),
                     limitWarmupPrompt: draft.limitWarmupPrompt.trim(),
                     limitWarmupExhaustedThresholdPercent: parsedLimitWarmupExhaustedThreshold,
+                    limitWarmupIdleThresholdPercent: parsedLimitWarmupIdleThreshold,
                     limitWarmupCooldownSeconds: parsedLimitWarmupCooldown,
                   })
                 }

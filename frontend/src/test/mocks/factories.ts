@@ -506,6 +506,7 @@ export function createDashboardSettings(
 		limitWarmupPrompt: "Say OK.",
 		limitWarmupCooldownSeconds: 3600,
 		limitWarmupExhaustedThresholdPercent: 99,
+		limitWarmupIdleThresholdPercent: 1,
 		limitWarmupMinAvailablePercent: 100,
 		guestAccessEnabled: false,
 		guestPasswordConfigured: false,

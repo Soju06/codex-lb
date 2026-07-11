@@ -370,7 +370,7 @@ class LimitWarmupService:
                         after_primary=after_primary,
                         refresh_started_at=refresh_started_at,
                         usage_refresh_interval_seconds=usage_refresh_interval_seconds,
-                        idle_threshold_percent=settings.limit_warmup_exhausted_threshold_percent,
+                        idle_threshold_percent=settings.limit_warmup_idle_threshold_percent,
                     )
                 if candidate is None:
                     continue

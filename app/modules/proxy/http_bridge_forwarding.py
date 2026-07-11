@@ -56,6 +56,11 @@ HTTP_BRIDGE_AFFINITY_KEY_HEADER = "x-codex-bridge-affinity-key"
 HTTP_BRIDGE_CLIENT_IP_HEADER = "x-codex-bridge-client-ip"
 HTTP_BRIDGE_CLIENT_IP_SIGNATURE_HEADER = "x-codex-bridge-client-ip-signature"
 HTTP_BRIDGE_SIGNATURE_HEADER = "x-codex-bridge-signature"
+# v2 signs the exact forwarding serialization posted as the body; the v1
+# header above is kept only as a one-release rolling-upgrade shim (see the
+# ROLLOUT SHIM notes in ``build_owner_forward_headers`` and
+# ``parse_forwarded_request``).
+HTTP_BRIDGE_SIGNATURE_V2_HEADER = "x-codex-bridge-signature-v2"
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,10 +210,19 @@ def build_owner_forward_headers(
         forwarded[HTTP_BRIDGE_RESERVATION_ID_HEADER] = context.reservation.reservation_id
         forwarded[HTTP_BRIDGE_RESERVATION_KEY_ID_HEADER] = context.reservation.key_id
         forwarded[HTTP_BRIDGE_RESERVATION_MODEL_HEADER] = context.reservation.model
+    # ROLLOUT SHIM (#1203, remove with HTTP_BRIDGE_SIGNATURE_V2_HEADER
+    # follow-up): keep sending the legacy v1 signature headers, computed over
+    # the plain ``model_dump`` (with synthesized ``"tools": []``), so
+    # old-code owners can still verify requests from updated origins during
+    # a rolling upgrade. New-code owners verify only the v2 header below.
     forwarded[HTTP_BRIDGE_SIGNATURE_HEADER] = _bridge_forward_signature(
         payload=payload,
         context=context,
         include_client_ip=False,
+    )
+    forwarded[HTTP_BRIDGE_SIGNATURE_V2_HEADER] = _bridge_forward_signature_v2(
+        payload=payload,
+        context=context,
     )
     return forwarded
 
@@ -249,23 +263,40 @@ def parse_forwarded_request(
         client_ip=client_ip,
         reservation=_reservation_from_headers(headers),
     )
-    signature = _optional_header(headers.get(HTTP_BRIDGE_SIGNATURE_HEADER))
-    client_ip_signature = _optional_header(headers.get(HTTP_BRIDGE_CLIENT_IP_SIGNATURE_HEADER))
-    expected_signature = _bridge_forward_signature(payload=payload, context=context)
-    legacy_signature = _bridge_forward_signature(
-        payload=payload,
-        context=context,
-        include_client_ip=False,
-    )
-    primary_signature_valid = signature is not None and hmac.compare_digest(signature, expected_signature)
-    legacy_signature_valid = signature is not None and hmac.compare_digest(signature, legacy_signature)
-    client_ip_signature_valid = client_ip_signature is not None and hmac.compare_digest(
-        client_ip_signature,
-        expected_signature,
-    )
-    signature_valid = primary_signature_valid or (
-        legacy_signature_valid and (client_ip is None or client_ip_signature_valid)
-    )
+    signature_v2 = _optional_header(headers.get(HTTP_BRIDGE_SIGNATURE_V2_HEADER))
+    if signature_v2 is not None:
+        # v2 signs the exact forwarding serialization posted as the body, so
+        # verifying it against the received (re-serialized) body rejects any
+        # in-transit rewrite — including an injected ``"tools": []`` that the
+        # legacy digest cannot distinguish from an omitted field. When the
+        # header is present it is the only signature consulted.
+        signature_valid = hmac.compare_digest(
+            signature_v2,
+            _bridge_forward_signature_v2(payload=payload, context=context),
+        )
+    else:
+        # ROLLOUT SHIM (#1203, remove with HTTP_BRIDGE_SIGNATURE_V2_HEADER
+        # follow-up): an origin still running pre-v2 code signs only the
+        # legacy headers over the plain ``model_dump``. Accept those during a
+        # rolling upgrade; drop this branch (and stop sending the v1 headers)
+        # once the fleet is homogeneous on a v2-signing release.
+        signature = _optional_header(headers.get(HTTP_BRIDGE_SIGNATURE_HEADER))
+        client_ip_signature = _optional_header(headers.get(HTTP_BRIDGE_CLIENT_IP_SIGNATURE_HEADER))
+        expected_signature = _bridge_forward_signature(payload=payload, context=context)
+        legacy_signature = _bridge_forward_signature(
+            payload=payload,
+            context=context,
+            include_client_ip=False,
+        )
+        primary_signature_valid = signature is not None and hmac.compare_digest(signature, expected_signature)
+        legacy_signature_valid = signature is not None and hmac.compare_digest(signature, legacy_signature)
+        client_ip_signature_valid = client_ip_signature is not None and hmac.compare_digest(
+            client_ip_signature,
+            expected_signature,
+        )
+        signature_valid = primary_signature_valid or (
+            legacy_signature_valid and (client_ip is None or client_ip_signature_valid)
+        )
     if not signature_valid:
         return None, ProxyResponseError(
             400,
@@ -318,6 +349,32 @@ def _bridge_forward_signature(
     context: HTTPBridgeForwardContext,
     include_client_ip: bool = True,
 ) -> str:
+    # Legacy (v1) computation over a plain ``model_dump``, which synthesizes
+    # ``"tools": []`` for clients that omitted the field — so it cannot
+    # distinguish an omitted-tools body from one with an injected explicit
+    # empty list. Kept only so old-code owners can verify requests from
+    # updated origins during a rolling upgrade; new-code receivers prefer
+    # ``_bridge_forward_signature_v2`` (see the ROLLOUT SHIM note in
+    # ``parse_forwarded_request``).
+    payload_json = json.dumps(
+        payload.model_dump(mode="json", exclude_none=True),
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return _signed_bridge_forward_digest(
+        payload_json=payload_json,
+        context=context,
+        include_client_ip=include_client_ip,
+        version=None,
+    )
+
+
+def _bridge_forward_signature_v2(
+    *,
+    payload: ResponsesRequest,
+    context: HTTPBridgeForwardContext,
+) -> str:
     # Sign the same forwarding dump that is actually posted as the request
     # body (``model_dump_for_forwarding``), not a plain ``model_dump`` that
     # synthesizes ``"tools": []`` for clients that omitted the field. A plain
@@ -326,22 +383,42 @@ def _bridge_forward_signature(
     # ``"tools": []`` would still verify on the owner instance and re-mark
     # ``tools`` as explicitly set (issue #1184). With the forwarding dump the
     # receiving side re-serializes the parsed body it actually received, and
-    # any injected or stripped ``tools`` field changes the digest.
+    # any injected or stripped ``tools`` field changes the digest. The "v2"
+    # version tag domain-separates this digest from the legacy headers so a
+    # v1 signature value can never be replayed in the v2 header.
     payload_json = json.dumps(
         payload.model_dump_for_forwarding(),
         ensure_ascii=True,
         sort_keys=True,
         separators=(",", ":"),
     )
+    return _signed_bridge_forward_digest(
+        payload_json=payload_json,
+        context=context,
+        include_client_ip=True,
+        version="v2",
+    )
+
+
+def _signed_bridge_forward_digest(
+    *,
+    payload_json: str,
+    context: HTTPBridgeForwardContext,
+    include_client_ip: bool,
+    version: str | None,
+) -> str:
     body_digest = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
-    fields = [
-        context.origin_instance,
-        context.target_instance,
-        "1" if context.codex_session_affinity else "0",
-        context.downstream_turn_state or "",
-        context.original_affinity_kind or "",
-        context.original_affinity_key or "",
-    ]
+    fields = [] if version is None else [version]
+    fields.extend(
+        (
+            context.origin_instance,
+            context.target_instance,
+            "1" if context.codex_session_affinity else "0",
+            context.downstream_turn_state or "",
+            context.original_affinity_kind or "",
+            context.original_affinity_key or "",
+        )
+    )
     if include_client_ip:
         fields.append(context.client_ip or "")
     fields.extend(

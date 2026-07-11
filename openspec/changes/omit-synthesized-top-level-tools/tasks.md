@@ -17,10 +17,23 @@
   surfaces: owner-forward JSON body carries no `tools` key for a request
   that omitted it (and the forwarded signature still verifies), and the
   source-bound Responses payload carries no `tools` key.
-- [x] 10. Owner-forward signature integrity (Codex P2 on #1203): sign the
-  forwarding dump actually posted (`model_dump_for_forwarding()`) instead of
-  a plain `model_dump` that synthesizes `"tools": []`, so a body rewritten
-  in transit to inject an explicit empty tools list fails verification
-  instead of re-marking `tools` as set on the owner. Regression test
+- [x] 10. Owner-forward signature integrity (Codex P2 on #1203): add a v2
+  signature header (`x-codex-bridge-signature-v2`) computed over the
+  forwarding dump actually posted (`model_dump_for_forwarding()`), with a
+  version tag domain-separating it from the legacy digest. When the v2
+  header is present the receiver verifies only v2, so a body rewritten in
+  transit to inject an explicit empty tools list fails verification instead
+  of re-marking `tools` as set on the owner. Regression test
   (fail-before/pass-after): tampered body is rejected with a 400
   invalid-signature error; honest round-trip still verifies.
+- [x] 11. Rolling-upgrade compatibility (second Codex P2 on #1203): keep
+  sending the legacy signature headers (plain-dump digest) so pre-v2 owners
+  verify dual-signed forwards unchanged, and fall back to legacy
+  verification only when the v2 header is absent (pre-v2 origin). Tests:
+  new->new tamper rejection, new->old legacy-recompute equality, old->new
+  fallback acceptance. ROLLOUT SHIM: legacy emission + fallback are a
+  one-release shim — remove in a follow-up once fleets are homogeneous
+  (grep `ROLLOUT SHIM` / `HTTP_BRIDGE_SIGNATURE_V2_HEADER`).
+- [ ] 12. Follow-up (separate change, after one homogeneous release): drop
+  the legacy v1 signature emission and the legacy fallback branch in
+  `parse_forwarded_request`; verify v2 exclusively.

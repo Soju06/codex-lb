@@ -22,10 +22,12 @@ from app.modules.proxy.http_bridge_forwarding import (
     HTTP_BRIDGE_RESERVATION_KEY_ID_HEADER,
     HTTP_BRIDGE_RESERVATION_MODEL_HEADER,
     HTTP_BRIDGE_SIGNATURE_HEADER,
+    HTTP_BRIDGE_SIGNATURE_V2_HEADER,
     HTTP_BRIDGE_TARGET_INSTANCE_HEADER,
     HTTPBridgeForwardContext,
     HTTPBridgeOwnerClient,
     _bridge_forward_signature,
+    _bridge_forward_signature_v2,
     _owner_forward_receive_timeout,
     _owner_forward_timeout,
     build_owner_forward_headers,
@@ -108,21 +110,24 @@ def test_parse_forwarded_request_rejects_body_with_injected_empty_tools() -> Non
     body = payload.model_dump_for_forwarding()
     assert "tools" not in body
 
-    # The signature must be computed over the tools-less forwarding dump that
-    # is actually posted: signing a body that carries an explicit empty tools
-    # list must yield a different signature, otherwise a body rewritten in
-    # transit to inject ``"tools": []`` would still verify.
+    # The v2 signature must be computed over the tools-less forwarding dump
+    # that is actually posted: signing a body that carries an explicit empty
+    # tools list must yield a different v2 signature, otherwise a body
+    # rewritten in transit to inject ``"tools": []`` would still verify.
     tampered_body = dict(body)
     tampered_body["tools"] = []
     tampered_payload = ResponsesRequest.model_validate(tampered_body)
     assert "tools" in tampered_payload.model_fields_set
-    assert headers[HTTP_BRIDGE_SIGNATURE_HEADER] != _bridge_forward_signature(
+    assert headers[HTTP_BRIDGE_SIGNATURE_V2_HEADER] == _bridge_forward_signature_v2(
+        payload=payload,
+        context=context,
+    )
+    assert headers[HTTP_BRIDGE_SIGNATURE_V2_HEADER] != _bridge_forward_signature_v2(
         payload=tampered_payload,
         context=context,
-        include_client_ip=False,
     )
 
-    # Honest round-trip of the posted body still verifies.
+    # Honest round-trip of the posted body still verifies (new -> new).
     honest_payload = ResponsesRequest.model_validate(body)
     forwarded, error = parse_forwarded_request(
         headers,
@@ -132,8 +137,10 @@ def test_parse_forwarded_request_rejects_body_with_injected_empty_tools() -> Non
     assert error is None
     assert forwarded is not None
 
-    # A tampered body with injected ``"tools": []`` fails verification, so
-    # the owner instance never re-marks ``tools`` as explicitly set.
+    # A tampered body with injected ``"tools": []`` fails verification even
+    # though the legacy v1 digest cannot distinguish it: when the v2 header
+    # is present it is the only signature consulted, so the owner instance
+    # never re-marks ``tools`` as explicitly set.
     forwarded, error = parse_forwarded_request(
         headers,
         payload=tampered_payload,
@@ -142,6 +149,61 @@ def test_parse_forwarded_request_rejects_body_with_injected_empty_tools() -> Non
     assert forwarded is None
     assert error is not None
     assert error.status_code == 400
+
+
+def test_owner_forward_legacy_signature_verifiable_by_old_code_owner() -> None:
+    # ROLLOUT SHIM coverage (new origin -> old owner): an owner still running
+    # pre-v2 code recomputes the legacy digest from a plain ``model_dump`` of
+    # the parsed body, which re-synthesizes ``"tools": []`` for a tools-less
+    # body. The dual-signed request must keep the legacy header equal to that
+    # recomputation so old owners verify it unchanged.
+    payload = _payload()
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=False,
+        downstream_turn_state=None,
+    )
+    headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
+    body = payload.model_dump_for_forwarding()
+    assert "tools" not in body
+
+    # Old code's plain ``model_dump`` of the parsed tools-less body is
+    # byte-identical to the dump of the same body with an explicit
+    # ``"tools": []`` — simulate the old recomputation with the latter.
+    old_owner_view = ResponsesRequest.model_validate({**body, "tools": []})
+    assert headers[HTTP_BRIDGE_SIGNATURE_HEADER] == _bridge_forward_signature(
+        payload=old_owner_view,
+        context=context,
+        include_client_ip=False,
+    )
+
+
+def test_parse_forwarded_request_falls_back_to_legacy_signature_without_v2() -> None:
+    # ROLLOUT SHIM coverage (old origin -> new owner): a pre-v2 origin posts
+    # a body with the synthesized ``"tools": []`` and signs only the legacy
+    # headers. A new-code owner must fall back to legacy verification when
+    # the v2 header is absent.
+    old_origin_payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.4", "instructions": "hi", "input": "hi", "tools": []}
+    )
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-a",
+        target_instance="instance-b",
+        codex_session_affinity=False,
+        downstream_turn_state=None,
+    )
+    headers = build_owner_forward_headers(headers={}, payload=old_origin_payload, context=context)
+    del headers[HTTP_BRIDGE_SIGNATURE_V2_HEADER]
+
+    forwarded, error = parse_forwarded_request(
+        headers,
+        payload=old_origin_payload,
+        current_instance="instance-b",
+    )
+    assert error is None
+    assert forwarded is not None
+    assert forwarded.context == context
 
 
 def test_build_owner_forward_headers_uses_legacy_signature_with_client_ip_header() -> None:
@@ -238,6 +300,8 @@ def test_parse_forwarded_request_rejects_legacy_signature_with_unbound_client_ip
         client_ip="203.0.113.9",
     )
     headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
+    # Simulate a pre-v2 origin: legacy headers only, no v2 signature.
+    headers.pop(HTTP_BRIDGE_SIGNATURE_V2_HEADER, None)
     headers[HTTP_BRIDGE_SIGNATURE_HEADER] = _bridge_forward_signature(
         payload=payload,
         context=context,
@@ -291,6 +355,8 @@ def test_parse_forwarded_request_accepts_legacy_signature_when_client_ip_header_
         client_ip="203.0.113.9",
     )
     headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
+    # Simulate a pre-v2 origin: legacy headers only, no v2 signature.
+    headers.pop(HTTP_BRIDGE_SIGNATURE_V2_HEADER, None)
     headers[HTTP_BRIDGE_CLIENT_IP_HEADER] = "   "
     headers[HTTP_BRIDGE_SIGNATURE_HEADER] = _bridge_forward_signature(
         payload=payload,
@@ -363,6 +429,33 @@ def test_parse_forwarded_request_rejects_tampered_signature() -> None:
     headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
     headers[HTTP_BRIDGE_SIGNATURE_HEADER] = "bad-signature"
 
+    # While the valid v2 header is present it is the only signature
+    # consulted, so a corrupted legacy header alone does not reject.
+    forwarded, error = parse_forwarded_request(
+        headers,
+        payload=payload,
+        current_instance="instance-b",
+    )
+    assert error is None
+    assert forwarded is not None
+
+    # Without the v2 header (pre-v2 origin), the tampered legacy signature
+    # is rejected by the fallback verification.
+    headers.pop(HTTP_BRIDGE_SIGNATURE_V2_HEADER, None)
+    forwarded, error = parse_forwarded_request(
+        headers,
+        payload=payload,
+        current_instance="instance-b",
+    )
+
+    assert forwarded is None
+    assert error is not None
+    assert error.status_code == 400
+    assert error.payload["error"]["code"] == "bridge_forward_invalid"
+
+    # A tampered v2 signature is rejected outright, with no legacy fallback.
+    headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
+    headers[HTTP_BRIDGE_SIGNATURE_V2_HEADER] = "bad-signature"
     forwarded, error = parse_forwarded_request(
         headers,
         payload=payload,

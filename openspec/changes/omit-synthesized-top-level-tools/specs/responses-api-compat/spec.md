@@ -17,10 +17,19 @@ Field omission MUST survive every re-serialization hop: the multi-instance
 owner-forward body (internal bridge forward) MUST NOT contain fields the
 client omitted, the owner instance receiving a forwarded request MUST NOT
 re-mark `tools` as explicitly set, and model-source Responses egress payloads
-MUST likewise omit fields the client never sent. The owner-forward signature
-MUST be computed over the same forwarding serialization that is posted as the
-body, so a forwarded body whose `tools` presence differs from the signed body
-MUST fail signature verification.
+MUST likewise omit fields the client never sent. The owner forward MUST carry
+a v2 signature (`x-codex-bridge-signature-v2`) computed over the same
+forwarding serialization that is posted as the body; when the v2 header is
+present the receiving instance MUST verify only the v2 signature, so a
+forwarded body whose `tools` presence differs from the signed body MUST fail
+signature verification. For rolling-upgrade compatibility the origin MUST
+also keep sending the legacy signature headers (computed over the plain dump
+with the synthesized `"tools": []`) so pre-v2 owners verify unchanged, and a
+receiver MUST fall back to legacy verification only when the v2 header is
+absent (pre-v2 origin). ROLLOUT SHIM: the legacy header emission and the
+legacy fallback are a one-release compatibility shim and MUST be removed in a
+follow-up change once fleets are homogeneous on a v2-signing release (grep
+for `ROLLOUT SHIM` / `HTTP_BRIDGE_SIGNATURE_V2_HEADER`).
 
 #### Scenario: Responses Lite request reaches upstream without a tools key
 
@@ -57,6 +66,17 @@ MUST fail signature verification.
 - **THEN** the owner instance rejects the forwarded request with an invalid
   bridge-forward-signature error instead of re-marking `tools` as explicitly
   set
+
+#### Scenario: Mixed-version fleets keep verifying during a rolling upgrade
+
+- **WHEN** an updated origin forwards a dual-signed tools-less body to an
+  owner still running pre-v2 code
+- **THEN** the legacy signature header matches the pre-v2 owner's
+  recomputation over the plain dump, so the forward verifies unchanged
+- **WHEN** a pre-v2 origin forwards a legacy-signed body (no v2 header) to
+  an updated owner
+- **THEN** the updated owner falls back to legacy verification and accepts
+  the forward
 
 #### Scenario: Model-source Responses egress omits unsent tools
 

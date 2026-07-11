@@ -45,7 +45,13 @@ reserved tool entry.
   model-source Responses egress (`_source_responses_response`), so a
   forwarded body never re-marks `tools` as explicitly set on the owner
   instance and openai-compatible sources never see a synthesized
-  `"tools": []`.
+  `"tools": []`. The owner forward is dual-signed during rollout: a new v2
+  signature header (`x-codex-bridge-signature-v2`) binds the exact posted
+  body (tamper-proof against an injected `"tools": []`), while the legacy
+  plain-dump headers keep being sent as a one-release rolling-upgrade shim
+  for pre-v2 owners and are consulted by new receivers only when the v2
+  header is absent. The shim (legacy emission + fallback) is to be removed
+  in a follow-up once fleets are homogeneous (grep `ROLLOUT SHIM`).
 
 ## Sibling-field audit
 

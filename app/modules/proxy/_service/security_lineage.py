@@ -59,7 +59,7 @@ class _SecurityLineageMixin:
         self: Any,
         security_lineage_id: str | None,
     ) -> bool:
-        if not security_lineage_id:
+        if not security_lineage_id or not callable(self._repo_factory):
             return False
         async with self._repo_factory() as repos:
             sticky_sessions = getattr(repos, "sticky_sessions", None)

@@ -798,7 +798,7 @@ def _apply_http_bridge_reuse_metadata(
     session.request_model = request_model
     session.request_service_tier = request_service_tier
     session.requires_security_work_authorized = (
-        session.requires_security_work_authorized or require_security_work_authorized
+        bool(getattr(session, "requires_security_work_authorized", False)) or require_security_work_authorized
     )
     session.last_used_at = _service_time().monotonic()
 

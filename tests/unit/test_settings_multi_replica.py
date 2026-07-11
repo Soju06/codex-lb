@@ -10,7 +10,7 @@ pytestmark = pytest.mark.unit
 
 
 def test_settings_multi_replica_defaults():
-    settings = Settings()
+    settings = Settings(_env_file=None)  # ty: ignore[unknown-argument]
     assert settings.metrics_enabled is False
     assert settings.metrics_port == 9090
     assert settings.log_format == "text"

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import timedelta
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -175,6 +176,79 @@ async def test_health_ready_circuit_breaker_disabled_returns_200():
 
     assert response.status == "ok"
     assert response.checks == {"database": "ok"}
+
+
+@pytest.mark.asyncio
+async def test_health_ready_fails_when_request_log_cleanup_is_unhealthy():
+    from app.modules.health.api import health_ready
+
+    mock_session = AsyncMock()
+    mock_session.execute = AsyncMock()
+    settings = SimpleNamespace(
+        request_log_retention_days=30,
+        request_log_cleanup_interval_seconds=3600,
+        leader_election_enabled=False,
+        http_responses_session_bridge_enabled=False,
+    )
+
+    async def mock_get_session_context():
+        yield mock_session
+
+    with (
+        patch("app.core.draining._draining", False),
+        patch("app.modules.health.api.get_session", return_value=mock_get_session_context()),
+        patch("app.modules.health.api.get_settings", return_value=settings),
+        patch("app.modules.request_logs.cleanup_scheduler.request_log_cleanup_is_ready", return_value=False),
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            await health_ready()
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail == "Request log retention cleanup is not healthy"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("days_old,expected_status", [(31, 503), (1, 200)])
+async def test_health_ready_enforces_oldest_request_log_age(days_old: int, expected_status: int):
+    from app.core.utils.time import utcnow
+    from app.modules.health.api import health_ready
+
+    oldest_result = MagicMock()
+    oldest_result.scalar_one_or_none.return_value = utcnow() - timedelta(days=days_old)
+    mock_session = AsyncMock()
+    mock_session.execute = AsyncMock(side_effect=[MagicMock(), oldest_result])
+    settings = SimpleNamespace(
+        request_log_retention_days=30,
+        request_log_cleanup_interval_seconds=3600,
+        leader_election_enabled=False,
+        http_responses_session_bridge_enabled=False,
+    )
+
+    async def mock_get_session_context():
+        yield mock_session
+
+    with (
+        patch("app.core.draining._draining", False),
+        patch("app.core.startup._bridge_durable_schema_ready", True),
+        patch("app.core.startup._bridge_registration_complete", True),
+        patch("app.modules.health.api.get_session", return_value=mock_get_session_context()),
+        patch("app.modules.health.api.get_settings", return_value=settings),
+        patch("app.modules.request_logs.cleanup_scheduler.request_log_cleanup_is_ready", return_value=True),
+        patch("app.modules.health.api._get_bridge_ring_info", new=AsyncMock(return_value=_bridge_ring_ok())),
+    ):
+        if expected_status == 503:
+            with pytest.raises(HTTPException) as exc_info:
+                await health_ready()
+            assert exc_info.value.status_code == 503
+            assert exc_info.value.detail == "Request log retention age exceeds policy"
+        else:
+            response = await health_ready()
+            assert response.status == "ok"
+            assert response.checks is not None
+            assert (
+                response.checks["request_log_cleanup"].startswith("ok:")
+                or response.checks["request_log_cleanup"] == "pending"
+            )
 
 
 @pytest.mark.asyncio

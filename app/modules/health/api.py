@@ -59,18 +59,18 @@ async def health_ready() -> HealthCheckResponse:
             try:
                 await session.execute(text("SELECT 1"))
                 checks = {"database": "ok"}
-                retention_days = get_settings().request_log_retention_days
-                if retention_days is not None:
+                settings = get_settings()
+                retention_days = getattr(settings, "request_log_retention_days", None)
+                if isinstance(retention_days, int) and not isinstance(retention_days, bool) and retention_days > 0:
                     from app.modules.request_logs.cleanup_scheduler import (
                         request_log_cleanup_health,
                         request_log_cleanup_is_ready,
                     )
 
                     checks["request_log_cleanup"] = request_log_cleanup_health()
-                    settings = get_settings()
                     if not request_log_cleanup_is_ready(
-                        interval_seconds=settings.request_log_cleanup_interval_seconds,
-                        leader_election_enabled=settings.leader_election_enabled,
+                        interval_seconds=getattr(settings, "request_log_cleanup_interval_seconds", 3600),
+                        leader_election_enabled=getattr(settings, "leader_election_enabled", False),
                     ):
                         raise HTTPException(status_code=503, detail="Request log retention cleanup is not healthy")
                     oldest_requested_at = (

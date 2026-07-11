@@ -57,7 +57,7 @@ fi
 merge_base="$(git merge-base HEAD "$base")"
 mapfile -t changed < <(
   {
-    git diff --name-only --diff-filter=ACMR "$merge_base" --
+    git diff --name-only --diff-filter=ACDMR "$merge_base" --
     git ls-files --others --exclude-standard
   } | sort -u
 )

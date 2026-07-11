@@ -76,3 +76,10 @@ def test_operability_guard_rejects_dev_without_checkout_local_database_url(tmp_p
     dev.chmod(0o755)
 
     assert "bin/dev does not force the checkout-local database URL" in check_repository(tmp_path)
+
+
+def test_canonical_diff_and_worktree_guards_cover_deletions_and_resolved_paths() -> None:
+    root = Path(__file__).resolve().parents[2]
+
+    assert "--diff-filter=ACDMR" in (root / "bin/test").read_text(encoding="utf-8")
+    assert ".agents/worktrees/" in (root / ".gitignore").read_text(encoding="utf-8")

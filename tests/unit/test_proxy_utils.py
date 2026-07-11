@@ -8732,6 +8732,13 @@ async def test_stream_with_retry_waits_after_response_create_cap_has_no_alternat
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     account = _make_account("acc_response_create_single")
+    stream_lease = AccountLease(
+        lease_id="lease_response_create_single",
+        account_id=account.id,
+        kind="stream",
+        acquired_at=time.monotonic(),
+    )
+    release_account_lease = AsyncMock()
     selection_exclusions: list[set[str]] = []
     stream_once_calls = 0
 
@@ -8753,11 +8760,12 @@ async def test_stream_with_retry_waits_after_response_create_cap_has_no_alternat
                 error_message="No alternate account available",
                 error_code="no_accounts",
             )
-        return AccountSelection(account=account, error_message=None)
+        return AccountSelection(account=account, error_message=None, lease=stream_lease)
 
     async def fake_stream_once(*_args: object, **_kwargs: object):
         nonlocal stream_once_calls
         stream_once_calls += 1
+        assert release_account_lease.await_count == 0
         if stream_once_calls == 1:
             raise proxy_module.ProxyResponseError(
                 429,
@@ -8776,6 +8784,7 @@ async def test_stream_with_retry_waits_after_response_create_cap_has_no_alternat
         AsyncMock(side_effect=lambda selected, **_kwargs: selected),
     )
     monkeypatch.setattr(service, "_stream_once", fake_stream_once)
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release_account_lease)
 
     payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
     chunks = [
@@ -8802,8 +8811,9 @@ async def test_stream_with_retry_waits_after_response_create_cap_has_no_alternat
         keepalive = json.loads(chunks[0].split("data: ", 1)[1])
         assert keepalive["status"] == "waiting_for_account_capacity"
     assert completed["type"] == "response.completed"
-    assert selection_exclusions == [set(), {account.id}, set()]
+    assert selection_exclusions == [set(), {account.id}]
     assert stream_once_calls == 2
+    release_account_lease.assert_awaited_once_with(stream_lease)
 
 
 @pytest.mark.asyncio
@@ -8875,7 +8885,7 @@ async def test_stream_with_retry_reprobes_alternate_after_capacity_wait(monkeypa
 
     assert json.loads(chunks[0].split("data: ", 1)[1])["status"] == "waiting_for_account_capacity"
     assert json.loads(chunks[-1].split("data: ", 1)[1])["type"] == "response.completed"
-    assert selection_exclusions == [set(), {saturated.id}, set(), {saturated.id}]
+    assert selection_exclusions == [set(), {saturated.id}, {saturated.id}]
     assert stream_accounts == [saturated.id, saturated.id, spare.id]
 
 

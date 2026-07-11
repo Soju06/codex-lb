@@ -280,7 +280,8 @@ class _StreamingRetryMixin:
         last_transient_exc: ProxyResponseError | None = None
         last_security_work_retry_error: _RetryableStreamError | None = None
         excluded_account_ids: set[str] = set()
-        deferred_capacity_account_id: str | None = None
+        deferred_capacity_account: Account | None = None
+        deferred_capacity_lease: AccountLease | None = None
         preferred_account_id: str | None = None
         file_preferred_account_id: str | None = rewritten_file_account_id
         require_preferred_account = False
@@ -560,7 +561,7 @@ class _StreamingRetryMixin:
                         )
                         require_security_work_authorized = False
                         continue
-                    if not account and deferred_capacity_account_id is not None:
+                    if not account and deferred_capacity_account is not None:
                         deferred_error = _parse_openai_error(last_transient_exc.payload) if last_transient_exc else None
                         recovery_sleep_seconds = _account_selection_recovery_sleep_seconds(
                             AccountSelection(
@@ -573,7 +574,8 @@ class _StreamingRetryMixin:
                             remaining_budget_seconds = _facade()._remaining_budget_seconds(deadline)
                             if remaining_budget_seconds <= 0:
                                 break
-                            capacity_account_id = deferred_capacity_account_id
+                            capacity_account = deferred_capacity_account
+                            capacity_account_id = capacity_account.id
                             excluded_account_ids.discard(capacity_account_id)
                             async for wait_event in _iter_account_capacity_recovery_wait(
                                 request_id=request_id,
@@ -588,10 +590,14 @@ class _StreamingRetryMixin:
                                 yield wait_event
                             if _facade()._remaining_budget_seconds(deadline) <= 0:
                                 break
-                            deferred_capacity_account_id = None
-                            continue
-                    if account is not None:
-                        deferred_capacity_account_id = None
+                            account = capacity_account
+                            current_account_lease = deferred_capacity_lease
+                            deferred_capacity_account = None
+                            deferred_capacity_lease = None
+                    if account is not None and deferred_capacity_account is not None:
+                        await _release_tracked_stream_lease(deferred_capacity_lease)
+                        deferred_capacity_account = None
+                        deferred_capacity_lease = None
                     if (
                         not account
                         and (
@@ -1109,9 +1115,8 @@ class _StreamingRetryMixin:
                                             and attempt < max_attempts - 1
                                         )
                                         if can_try_other_account:
-                                            deferred_capacity_account_id = account.id
-                                            await _release_tracked_stream_lease(current_account_lease)
-                                            current_account_lease = None
+                                            deferred_capacity_account = account
+                                            deferred_capacity_lease = current_account_lease
                                             excluded_account_ids.add(account.id)
                                             break
                                         remaining_budget_seconds = _facade()._remaining_budget_seconds(deadline)
@@ -1461,9 +1466,11 @@ class _StreamingRetryMixin:
                             if error_code == "account_response_create_cap":
                                 last_transient_exc = retry_exc
                                 if can_try_other_account:
-                                    deferred_capacity_account_id = account.id
-                                await _release_tracked_stream_lease(current_account_lease)
-                                current_account_lease = None
+                                    deferred_capacity_account = account
+                                    deferred_capacity_lease = current_account_lease
+                                else:
+                                    await _release_tracked_stream_lease(current_account_lease)
+                                    current_account_lease = None
                                 excluded_account_ids.add(account.id)
                                 continue
                             if _facade()._is_account_neutral_error_code(error_code):

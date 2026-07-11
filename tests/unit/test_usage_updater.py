@@ -1525,7 +1525,7 @@ async def test_usage_refresh_uses_fresh_monthly_row_for_quota_freshness(monkeypa
         account.id,
         100.0,
         window="monthly",
-        recorded_at=datetime.now(),
+        recorded_at=usage_updater_module.utcnow(),
         reset_at=int(time.time()) + 3600,
         window_minutes=43_200,
     )

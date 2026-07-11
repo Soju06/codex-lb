@@ -26101,6 +26101,32 @@ def test_http_bridge_session_rejects_account_without_requested_model(monkeypatch
     )
 
 
+def test_http_bridge_session_rejects_suppressed_bootstrap_model(monkeypatch):
+    session = cast(
+        proxy_service._HTTPBridgeSession,
+        SimpleNamespace(account=_make_account("acc_bridge_suppressed_bootstrap")),
+    )
+
+    class Registry:
+        def plan_types_for_model(self, slug: str) -> frozenset[str] | None:
+            assert slug == "gpt-5.6-sol"
+            return frozenset()
+
+        def is_suppressed_bootstrap_model(self, slug: str) -> bool:
+            return slug == "gpt-5.6-sol"
+
+    monkeypatch.setattr(proxy_support, "get_model_registry", lambda: Registry())
+
+    assert (
+        proxy_support._http_bridge_session_supports_service_tier(
+            session,
+            request_model="gpt-5.6-sol",
+            request_service_tier=None,
+        )
+        is False
+    )
+
+
 def test_http_bridge_session_allows_operator_mapped_unadvertised_model(monkeypatch):
     session = cast(
         proxy_service._HTTPBridgeSession,

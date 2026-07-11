@@ -834,6 +834,29 @@ async def test_authoritative_catalog_does_not_suppress_never_known_operator_mapp
 
 
 @pytest.mark.asyncio
+async def test_first_authoritative_catalog_suppresses_omitted_bootstrap_model() -> None:
+    registry = ModelRegistry(ttl_seconds=60.0)
+    advertised = _model("gpt-5.6-terra")
+
+    await registry.update(
+        {"pro": [advertised]},
+        per_account_results={"account-pro": ("pro", [advertised])},
+        active_account_plans={"account-pro": "pro"},
+    )
+
+    snapshot = registry.get_snapshot()
+    assert snapshot is not None
+    assert snapshot.account_catalogs_authoritative is True
+    assert snapshot.bootstrap_floor_active is False
+    assert "gpt-5.6-terra" in snapshot.models
+    assert "gpt-5.6-sol" not in snapshot.models
+    assert registry.plan_types_for_model("gpt-5.6-sol") == frozenset()
+    assert registry.account_ids_for_model("gpt-5.6-sol") == frozenset()
+    assert registry.is_suppressed_model("gpt-5.6-sol") is True
+    assert registry.is_suppressed_model("operator-mapped-never-known") is False
+
+
+@pytest.mark.asyncio
 async def test_private_catalog_model_reappearance_clears_suppression() -> None:
     registry = ModelRegistry(ttl_seconds=60.0)
     private_alpha = _model("private-alpha")

@@ -828,11 +828,15 @@ class ModelRegistry:
                     active_account_plans or per_account_results
                 ).issubset(account_plans)
 
-                if authoritative_account_catalogs and previous is not None:
-                    for slug, previous_account_ids in previous.model_accounts.items():
-                        if slug in models or not previous_account_ids:
-                            continue
-                        suppressed_model_slugs.add(slug)
+                if authoritative_account_catalogs:
+                    for slug in self._bootstrap_models:
+                        if slug not in models:
+                            suppressed_model_slugs.add(slug)
+                    if previous is not None:
+                        for slug, previous_account_ids in previous.model_accounts.items():
+                            if slug in models or not previous_account_ids:
+                                continue
+                            suppressed_model_slugs.add(slug)
                 for slug in tuple(suppressed_model_slugs):
                     if slug in models:
                         suppressed_model_slugs.discard(slug)

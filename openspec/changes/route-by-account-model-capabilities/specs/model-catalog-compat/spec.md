@@ -134,6 +134,14 @@ an operator-mapped slug that has no catalog evidence at all.
 - **THEN** the selector rejects every account for that model
 - **AND** it does not treat the known suppressed slug as an operator-mapped unknown
 
+#### Scenario: First complete catalog suppresses omitted bootstrap model
+
+- **GIVEN** there is no previous registry snapshot
+- **AND** a bootstrap model slug is known to the proxy
+- **WHEN** the first authoritative account-catalog refresh omits that model
+- **THEN** the registry marks the omitted bootstrap slug as suppressed
+- **AND** account selection does not treat that known slug as an operator-mapped unknown
+
 #### Scenario: Fresh active evidence clears catalog suppression
 
 - **GIVEN** a catalog model was previously suppressed after its last-known advertisers left the active account set

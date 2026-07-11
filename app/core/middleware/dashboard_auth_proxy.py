@@ -8,7 +8,7 @@ import jwt
 from fastapi import FastAPI
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from app.core.auth.dashboard_mode import DashboardAuthMode
+from app.core.auth.dashboard_mode import DashboardAuthMode, DashboardRequestAuth
 from app.core.config.settings import get_settings
 from app.core.middleware.api_firewall import _is_trusted_proxy_source, _parse_trusted_proxy_networks
 
@@ -67,9 +67,15 @@ class DashboardAuthProxyHeaderSanitizerMiddleware:
             sanitized_headers = _filter_headers(
                 _filter_headers(headers, self._trusted_header_name), self._access_assertion_header_name
             )
+            next_scope = {**scope, "headers": sanitized_headers}
             if actor is not None:
-                sanitized_headers.append((self._trusted_header_name, actor.encode("utf-8")))
-            await self.app({**scope, "headers": sanitized_headers}, receive, send)
+                state = dict(cast(dict[str, Any], scope.get("state", {})))
+                state["dashboard_request_auth"] = DashboardRequestAuth(
+                    mode=DashboardAuthMode.TRUSTED_HEADER,
+                    actor=actor,
+                )
+                next_scope["state"] = state
+            await self.app(next_scope, receive, send)
             return
 
         if trusted_source:

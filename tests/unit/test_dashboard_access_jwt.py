@@ -10,6 +10,7 @@ from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
 from fastapi import FastAPI, Request
 from httpx import ASGITransport, AsyncClient
 
+from app.core.auth.dashboard_mode import get_dashboard_request_auth
 from app.core.config.settings import get_settings
 from app.core.middleware.dashboard_auth_proxy import add_dashboard_auth_proxy_middleware
 
@@ -66,7 +67,11 @@ async def _request_actor(
 
     @app.get("/actor")
     async def actor(request: Request) -> dict[str, str | None]:
-        return {"actor": request.headers.get("Remote-User")}
+        authentication = get_dashboard_request_auth(request)
+        return {
+            "actor": authentication.actor if authentication is not None else None,
+            "forwarded_header": request.headers.get("Remote-User"),
+        }
 
     headers = {"Remote-User": "forged@onda.lol"}
     if assertion is not None:
@@ -76,7 +81,9 @@ async def _request_actor(
         response = await client.get("/actor", headers=headers)
     get_settings.cache_clear()
     assert response.status_code == 200
-    return response.json()["actor"]
+    payload = response.json()
+    assert payload["forwarded_header"] is None
+    return payload["actor"]
 
 
 @pytest.mark.asyncio

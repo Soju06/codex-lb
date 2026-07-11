@@ -20,6 +20,8 @@ retention also needs an enforceable upper bound.
   while dashboard traffic still fails closed when Access is required.
 - Run the Onda container through the repository `codex-lb` entry point so
   runtime logging settings are honored.
+- Generate fresh `.env.local` files without persisting the sample tilde database
+  URL override so local setup uses the resolved default data directory.
 
 ## Impact
 

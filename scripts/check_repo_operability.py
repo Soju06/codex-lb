@@ -52,6 +52,8 @@ def check_repository(root: Path) -> list[str]:
         content = setup.read_text(encoding="utf-8")
         if "bun run build" not in content:
             errors.append("bin/setup does not build frontend assets required by bin/dev")
+        if re.search(r"\b(?:cp|install)\b[^\n]*\.env\.example[^\n]*\.env\.local", content):
+            errors.append("bin/setup copies .env.example verbatim into .env.local")
 
     dev = root / "bin/dev"
     if dev.is_file():

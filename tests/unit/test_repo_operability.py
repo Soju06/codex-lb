@@ -69,6 +69,15 @@ def test_operability_guard_rejects_setup_without_frontend_build(tmp_path: Path) 
     assert "bin/setup does not build frontend assets required by bin/dev" in check_repository(tmp_path)
 
 
+def test_operability_guard_rejects_setup_that_copies_env_example_verbatim(tmp_path: Path) -> None:
+    _make_valid_fixture(tmp_path)
+    setup = tmp_path / "bin" / "setup"
+    setup.write_text("#!/bin/sh\ninstall -m 600 .env.example .env.local\nbun run build\n", encoding="utf-8")
+    setup.chmod(0o755)
+
+    assert "bin/setup copies .env.example verbatim into .env.local" in check_repository(tmp_path)
+
+
 def test_operability_guard_rejects_dev_without_checkout_local_database_url(tmp_path: Path) -> None:
     _make_valid_fixture(tmp_path)
     dev = tmp_path / "bin" / "dev"

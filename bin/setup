@@ -6,7 +6,8 @@ usage() {
 Usage: bin/setup
 
 Prepare a checkout using the repository's locked Python and frontend dependencies.
-Creates .env.local from .env.example only when .env.local does not already exist.
+Creates .env.local from .env.example only when .env.local does not already exist,
+leaving the sample database URL unset so settings resolve the default data dir.
 EOF
 }
 
@@ -36,8 +37,23 @@ if [[ ! -f .env.local ]]; then
     printf 'error: %s/.env.example is missing\n' "$repo_root" >&2
     exit 1
   fi
-  install -m 600 .env.example .env.local
-  printf 'created .env.local from .env.example (no secrets were generated)\n'
+  tmp_env_local="$(mktemp "${repo_root}/.env.local.XXXXXX")"
+  cleanup_tmp_env_local() {
+    rm -f "$tmp_env_local"
+  }
+  trap cleanup_tmp_env_local EXIT
+  awk '
+    /^CODEX_LB_DATABASE_URL=/ {
+      print "# CODEX_LB_DATABASE_URL is intentionally omitted by bin/setup."
+      print "# Uncomment and set an absolute URL when overriding the default database."
+      next
+    }
+    { print }
+  ' .env.example >"$tmp_env_local"
+  install -m 600 "$tmp_env_local" .env.local
+  rm -f "$tmp_env_local"
+  trap - EXIT
+  printf 'created .env.local from .env.example with default database URL unset (no secrets were generated)\n'
 else
   printf 'kept existing .env.local\n'
 fi

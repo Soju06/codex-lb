@@ -33,8 +33,13 @@
 - [x] 4.6 Move behavior contracts and review artifacts from `docs/` into this
       OpenSpec change context.
 
-## 5. Delivery
+## 5. Setup operability
 
-- [ ] 5.1 Run targeted and aggregate tests.
-- [ ] 5.2 Run fresh review and security re-audit.
-- [ ] 5.3 Deploy, click-test, exercise API-key create/use/revoke, and observe.
+- [x] 5.1 Keep fresh checkout setup from persisting the sample tilde database URL.
+- [x] 5.2 Add operability guard coverage for verbatim `.env.example` copies.
+
+## 6. Delivery
+
+- [ ] 6.1 Run targeted and aggregate tests.
+- [ ] 6.2 Run fresh review and security re-audit.
+- [ ] 6.3 Deploy, click-test, exercise API-key create/use/revoke, and observe.

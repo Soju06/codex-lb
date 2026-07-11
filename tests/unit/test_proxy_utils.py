@@ -10,7 +10,7 @@ from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from typing import Any, AsyncIterator, Iterator, Protocol, Self, cast
+from typing import Any, AsyncIterator, Iterator, Literal, Protocol, Self, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import aiohttp
@@ -481,7 +481,7 @@ async def test_startup_probe_ready_supersedes_recovered_capacity_marker() -> Non
             super().__init__()
             self.wait_calls = 0
 
-        async def wait(self) -> bool:
+        async def wait(self) -> Literal[True]:
             self.wait_calls += 1
             if self.wait_calls >= 2:
                 recovery_ready_wait_started.set()

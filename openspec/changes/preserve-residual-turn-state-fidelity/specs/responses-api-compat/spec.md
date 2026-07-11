@@ -10,7 +10,9 @@ select only that owner account. If the owner cannot be resolved or selected,
 the request MUST fail closed and MUST NOT fall back to a generic sticky or
 load-balanced account. Proxy-synthesized first-turn placeholders (the
 `turn_*` / `http_turn_*` values codex-lb injects when the client did not supply
-one) are not real continuity tokens and MUST NOT block file-owner routing.
+one) are not real continuity tokens until registered as bridge aliases; an
+unregistered placeholder MUST NOT block file-owner routing, but a registered
+placeholder MUST still resolve to its owner account.
 
 #### Scenario: Token belongs to the requesting API key
 
@@ -24,6 +26,12 @@ one) are not real continuity tokens and MUST NOT block file-owner routing.
 - **WHEN** the client submits a compact request with that token
 - **THEN** the request fails with `turn_state_owner_unavailable`
 - **AND** no generic account is selected
+
+#### Scenario: Registered synthesized placeholder belongs to the requesting API key
+
+- **GIVEN** a proxy-synthesized `http_turn_*` token has been registered as a bridge alias
+- **WHEN** the client later submits a compact request with that token
+- **THEN** compact selection is constrained to the registered owner account
 
 #### Scenario: Synthesized first-turn placeholder does not override file-owner routing
 

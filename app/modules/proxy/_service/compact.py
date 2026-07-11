@@ -101,7 +101,8 @@ class _CompactServiceProtocol(Protocol):
         *,
         turn_state: str,
         api_key: ApiKeyData | None,
-    ) -> str: ...
+        fail_on_missing: bool = True,
+    ) -> str | None: ...
 
     async def _ensure_fresh_with_budget(
         self, account: Account, *, force: bool = False, timeout_seconds: float | None = None
@@ -438,7 +439,8 @@ class _CompactMixin:
         *,
         turn_state: str,
         api_key: ApiKeyData | None,
-    ) -> str:
+        fail_on_missing: bool = True,
+    ) -> str | None:
         """Resolve a turn-state token to its API-key-scoped HTTP bridge owner.
 
         A compact request cannot safely fall back to generic sticky routing: an
@@ -447,6 +449,12 @@ class _CompactMixin:
         that arrives on another replica.  Both lookup surfaces are keyed by the
         exact API key id, so a token observed under one key cannot select an
         account for another key.
+
+        Synthetic-shaped ``turn_*`` / ``http_turn_*`` values can be real
+        registered bridge aliases on later turns.  Callers may pass
+        ``fail_on_missing=False`` only for those synthetic placeholders so an
+        unregistered first-turn placeholder still allows weaker routing signals
+        such as file ownership to run.
         """
         proxy = cast(_CompactServiceProtocol, self)
         normalized_turn_state = turn_state.strip()
@@ -515,6 +523,8 @@ class _CompactMixin:
                     error_type="server_error",
                 ),
             )
+        if not fail_on_missing:
+            return None
         raise ProxyResponseError(
             502,
             openai_error(
@@ -589,10 +599,11 @@ class _CompactMixin:
         routing_strategy = _routing_strategy(settings)
         turn_state_owner_account_id: str | None = None
         turn_state = _sticky_key_from_turn_state_header(headers)
-        if turn_state is not None and not _is_synthesized_turn_state(turn_state):
+        if turn_state is not None:
             turn_state_owner_account_id = await proxy._resolve_compact_turn_state_owner(
                 turn_state=turn_state,
                 api_key=api_key,
+                fail_on_missing=not _is_synthesized_turn_state(turn_state),
             )
         previous_response_id = getattr(payload, "previous_response_id", None)
         previous_response_preferred_account_id: str | None = None

@@ -1230,6 +1230,7 @@ async def test_internal_bridge_responses_disables_openai_sdk_contract(
         AsyncMock(return_value=(None, None)),
     )
     monkeypatch.setattr(proxy_api_module, "_strip_internal_bridge_headers", lambda h: dict(h))
+    monkeypatch.setattr(proxy_api_module, "_prohibit_fast_mode_enabled", AsyncMock(return_value=False))
 
     # Minimal payload + request stubs.
     from app.core.openai.requests import ResponsesRequest

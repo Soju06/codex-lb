@@ -869,4 +869,5 @@ async def test_process_websocket_security_retry_never_migrates_file_pinned_owner
     )
 
     assert upstream_control.replay_request_state is None
+    assert upstream_control.reconnect_requested is False
     assert request_state.require_security_work_authorized is False

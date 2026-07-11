@@ -452,6 +452,39 @@ def _facade() -> Any:
     return sys.modules["app.modules.proxy.service"]
 
 
+async def _reject_websocket_owner_switch_blocked(
+    proxy: Any,
+    websocket: WebSocket,
+    *,
+    client_send_lock: anyio.Lock,
+    request_state: _WebSocketRequestState,
+    account: Account,
+    api_key: ApiKeyData | None,
+    response_create_gate: asyncio.Semaphore,
+    downstream_activity: _DownstreamWebSocketActivity,
+) -> None:
+    error_message = (
+        "Previous response owner differs while another response is still streaming; retry after the terminal frame."
+    )
+    await proxy._release_websocket_request_state_reservation(request_state)
+    await proxy._write_websocket_connect_failure(
+        account_id=account.id,
+        api_key=api_key,
+        request_state=request_state,
+        error_code="previous_response_owner_unavailable",
+        error_message=error_message,
+    )
+    await proxy._emit_websocket_terminal_error(
+        websocket,
+        client_send_lock=client_send_lock,
+        request_state=request_state,
+        error_code="previous_response_owner_unavailable",
+        error_message=error_message,
+        downstream_activity=downstream_activity,
+    )
+    await _release_websocket_response_create_gate(request_state, response_create_gate)
+
+
 @contextmanager
 def _websocket_archive_request_context(request_id: str | None) -> Iterator[None]:
     token = set_request_id(request_id)
@@ -1086,24 +1119,14 @@ class _WebSocketMixin:
                             if owner_switch_blocked and request_state in pending_requests:
                                 pending_requests.remove(request_state)
                         if owner_switch_blocked:
-                            error_message = (
-                                "Previous response owner differs while another response is still streaming; "
-                                "retry after the terminal frame."
-                            )
-                            await proxy._release_websocket_request_state_reservation(request_state)
-                            await proxy._write_websocket_connect_failure(
-                                account_id=account.id,
-                                api_key=api_key,
-                                request_state=request_state,
-                                error_code="previous_response_owner_unavailable",
-                                error_message=error_message,
-                            )
-                            await proxy._emit_websocket_terminal_error(
+                            await _reject_websocket_owner_switch_blocked(
+                                proxy,
                                 websocket,
                                 client_send_lock=client_send_lock,
                                 request_state=request_state,
-                                error_code="previous_response_owner_unavailable",
-                                error_message=error_message,
+                                account=account,
+                                api_key=api_key,
+                                response_create_gate=response_create_gate,
                                 downstream_activity=downstream_activity,
                             )
                             request_state = None

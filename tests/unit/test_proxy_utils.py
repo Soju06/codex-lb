@@ -19415,6 +19415,57 @@ async def test_proxy_responses_websocket_prefers_previous_response_owner_from_re
 
 
 @pytest.mark.asyncio
+async def test_websocket_owner_switch_blocked_cleanup_releases_response_create_gate(monkeypatch):
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_owner_switch_blocked_cleanup")
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_owner_switch_blocked_cleanup",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        awaiting_response_created=True,
+    )
+    response_create_gate = asyncio.Semaphore(1)
+    await response_create_gate.acquire()
+    request_state.response_create_gate = response_create_gate
+    request_state.response_create_gate_acquired = True
+    lease = await service._load_balancer.acquire_account_lease(account.id, kind="response_create")
+    assert lease is not None
+    request_state.account_response_create_lease = lease
+    request_state.account_response_create_release = service._load_balancer.release_account_lease
+
+    release_reservation = AsyncMock()
+    write_failure = AsyncMock()
+    emit_terminal_error = AsyncMock()
+    monkeypatch.setattr(service, "_release_websocket_request_state_reservation", release_reservation)
+    monkeypatch.setattr(service, "_write_websocket_connect_failure", write_failure)
+    monkeypatch.setattr(service, "_emit_websocket_terminal_error", emit_terminal_error)
+
+    await websocket_mixin._reject_websocket_owner_switch_blocked(
+        service,
+        cast(WebSocket, SimpleNamespace(send_text=AsyncMock())),
+        client_send_lock=anyio.Lock(),
+        request_state=request_state,
+        account=account,
+        api_key=None,
+        response_create_gate=response_create_gate,
+        downstream_activity=proxy_service._DownstreamWebSocketActivity(),
+    )
+
+    release_reservation.assert_awaited_once_with(request_state)
+    write_failure.assert_awaited_once()
+    emit_terminal_error.assert_awaited_once()
+    assert request_state.response_create_gate is None
+    assert request_state.response_create_gate_acquired is False
+    assert request_state.account_response_create_lease is None
+    assert request_state.account_response_create_release is None
+    assert response_create_gate.locked() is False
+    assert await service._load_balancer.account_pressure_snapshot(account.id) == (0, 0, 0.0)
+
+
+@pytest.mark.asyncio
 async def test_proxy_responses_websocket_uses_turn_state_as_owner_lookup_session_scope(monkeypatch):
     request_logs = _RequestLogsRecorder()
     request_logs.response_owner_by_id[("resp_prev_owner", None, "turn_scope_owner")] = "acc_owner_prev"
@@ -22743,15 +22794,24 @@ async def test_stream_verified_fresh_replay_moves_off_owner_after_refresh_connec
     selection_calls: list[dict[str, object]] = []
     streamed_payloads: list[ResponsesRequest] = []
     streamed_account_ids: list[str | None] = []
+    owner_pressures_before_replacement: list[tuple[int, int, float]] = []
 
     async def fake_select_account(**kwargs):
         selection_calls.append(dict(kwargs))
         if kwargs.get("account_ids") == {owner_account.id} or kwargs.get("preferred_account_id") == owner_account.id:
-            return AccountSelection(account=owner_account, error_message=None)
+            lease = await service._load_balancer.acquire_account_lease(owner_account.id, kind="stream")
+            assert lease is not None
+            return AccountSelection(account=owner_account, error_message=None, lease=lease)
         assert kwargs.get("preferred_account_id") is None
         assert kwargs.get("exclude_account_ids") == {owner_account.id}
         assert kwargs.get("reallocate_sticky") is True
-        return AccountSelection(account=replacement_account, error_message=None)
+        owner_pressures_before_replacement.append(
+            await service._load_balancer.account_pressure_snapshot(owner_account.id)
+        )
+        assert owner_pressures_before_replacement[-1] == (0, 0, 0.0)
+        lease = await service._load_balancer.acquire_account_lease(replacement_account.id, kind="stream")
+        assert lease is not None
+        return AccountSelection(account=replacement_account, error_message=None, lease=lease)
 
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
         del headers, access_token, base_url, raise_for_status, kwargs
@@ -22801,6 +22861,9 @@ async def test_stream_verified_fresh_replay_moves_off_owner_after_refresh_connec
     assert [streamed.previous_response_id for streamed in streamed_payloads] == [None]
     assert streamed_payloads[0].input == full_input
     assert streamed_account_ids == [replacement_account.chatgpt_account_id]
+    assert owner_pressures_before_replacement == [(0, 0, 0.0)]
+    assert await service._load_balancer.account_pressure_snapshot(owner_account.id) == (0, 0, 0.0)
+    assert await service._load_balancer.account_pressure_snapshot(replacement_account.id) == (0, 0, 0.0)
     handle_stream_error.assert_awaited_once()
     assert handle_stream_error.await_args is not None
     assert handle_stream_error.await_args.args[0] == owner_account
@@ -27899,6 +27962,82 @@ async def test_retry_http_bridge_precreated_request_strips_retry_safe_injected_a
     assert request_state.proxy_injected_previous_response_id is False
     assert request_state.fresh_upstream_request_is_retry_safe is False
     assert request_state.input_full_fingerprint == proxy_service._fingerprint_input_items(fresh_payload["input"])
+    assert request_state.replay_count == 1
+
+
+@pytest.mark.asyncio
+async def test_retry_http_bridge_precreated_request_keeps_file_backed_injected_anchor_owner_bound(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_bridge_file_backed_anchor")
+    original_input: list[JsonValue] = [{"role": "user", "content": [{"type": "input_text", "text": "anchored turn"}]}]
+    original_payload = {
+        "type": "response.create",
+        "model": "gpt-5.1",
+        "previous_response_id": "resp_anchor",
+        "input": original_input,
+    }
+    fresh_payload = {
+        "type": "response.create",
+        "model": "gpt-5.1",
+        "input": [
+            {
+                "role": "user",
+                "content": [{"type": "input_image", "file_id": "file_image_owner"}],
+            }
+        ],
+    }
+    original_text = json.dumps(original_payload, separators=(",", ":"))
+    fresh_text = json.dumps(fresh_payload, separators=(",", ":"))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_bridge_file_backed_anchor",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        awaiting_response_created=True,
+        request_text=original_text,
+        previous_response_id="resp_anchor",
+        preferred_account_id=account.id,
+        proxy_injected_previous_response_id=True,
+        fresh_upstream_request_text=fresh_text,
+        fresh_upstream_request_is_retry_safe=True,
+        input_item_count=1,
+        input_full_fingerprint=proxy_service._fingerprint_input_items(original_input),
+    )
+    send_text = AsyncMock()
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "bridge-key", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(),
+        request_model="gpt-5.1",
+        account=account,
+        upstream=AsyncMock(send_text=send_text),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=0.0,
+        idle_ttl_seconds=30.0,
+        last_upstream_close_code=1011,
+    )
+    reconnect = AsyncMock(return_value=None)
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+
+    retried = await service._retry_http_bridge_precreated_request(session)
+
+    assert retried is True
+    reconnect.assert_awaited_once_with(session, request_state=request_state)
+    send_text.assert_awaited_once_with(original_text)
+    assert request_state.request_text == original_text
+    assert request_state.previous_response_id == "resp_anchor"
+    assert request_state.preferred_account_id == account.id
+    assert request_state.excluded_account_ids == set()
+    assert request_state.proxy_injected_previous_response_id is True
+    assert request_state.fresh_upstream_request_is_retry_safe is True
+    assert request_state.replay_count == 1
 
 
 @pytest.mark.asyncio

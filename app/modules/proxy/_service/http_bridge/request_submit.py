@@ -1233,15 +1233,33 @@ class _HTTPBridgeRequestSubmitMixin:
                     f"(close_code={session.last_upstream_close_code})"
                 )
                 return False
-            request_text = _prepare_websocket_request_state_for_visible_output_replay(request_state)
-            if request_text is None:
-                return False
-            migrate_stalled_owner = (
-                request_state.previous_response_id is None and not request_state.file_required_preferred_account
-            )
-            if migrate_stalled_owner:
-                request_state.preferred_account_id = None
-                request_state.excluded_account_ids.add(session.account.id)
+            if request_state.previous_response_id is not None:
+                switch_text = _prepare_websocket_request_state_for_account_switch(request_state)
+                if switch_text is None:
+                    # The retained full body may be retry-safe for continuity
+                    # while still naming an account-scoped uploaded file.  In
+                    # that case retry on the same owner-bound anchor instead of
+                    # letting visible-output replay strip the anchor and migrate.
+                    fresh_retry_safe = request_state.fresh_upstream_request_is_retry_safe
+                    request_state.fresh_upstream_request_is_retry_safe = False
+                    try:
+                        request_text = _prepare_websocket_request_state_for_visible_output_replay(request_state)
+                    finally:
+                        request_state.fresh_upstream_request_is_retry_safe = fresh_retry_safe
+                    if request_text is None:
+                        return False
+                else:
+                    request_text = _prepare_websocket_request_state_for_visible_output_replay(request_state)
+                    if request_text is None:
+                        return False
+                    request_state.excluded_account_ids.add(session.account.id)
+            else:
+                request_text = _prepare_websocket_request_state_for_visible_output_replay(request_state)
+                if request_text is None:
+                    return False
+                if not request_state.file_required_preferred_account:
+                    request_state.preferred_account_id = None
+                    request_state.excluded_account_ids.add(session.account.id)
         _log_http_bridge_event(
             "retry_precreated",
             session.key,

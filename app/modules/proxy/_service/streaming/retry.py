@@ -1038,6 +1038,8 @@ class _StreamingRetryMixin:
                                 {"message": message},
                                 "upstream_unavailable",
                             )
+                            await _release_tracked_stream_lease(current_account_lease)
+                            current_account_lease = None
                             last_retryable_stream_error = _RetryableStreamError(
                                 "upstream_unavailable",
                                 {"message": message},

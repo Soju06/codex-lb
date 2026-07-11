@@ -27,3 +27,24 @@ the existing pre-visible forced-refresh and eligible-account failover behavior.
   failure is classified by an existing pre-visible failover rule
 - **THEN** the proxy may exclude that account for the current request and try
   another eligible account
+
+#### Scenario: retained file-backed bridge replay remains owner-bound
+
+- **GIVEN** an HTTP bridge precreated request uses a proxy-injected
+  `previous_response_id` anchor
+- **AND** the retained retry-safe full body references an account-scoped
+  uploaded file through `input_file.file_id` or file-backed `input_image`
+- **WHEN** the bridge retries after an upstream close before visible output
+- **THEN** the proxy keeps the anchored request owner-bound instead of stripping
+  the anchor, excluding the owner, and replaying the file reference on another
+  account
+
+#### Scenario: verified owner refresh failover releases the failed stream lease
+
+- **GIVEN** a streaming request selects the previous-response owner and holds an
+  account stream lease
+- **AND** a locally verified full resend permits failover after that owner fails
+  refresh or connect before output is emitted
+- **WHEN** the proxy excludes the failed owner and selects a replacement account
+- **THEN** the failed owner's stream lease is released before replacement
+  selection so the owner does not retain stale local pressure

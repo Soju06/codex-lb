@@ -5,6 +5,8 @@
 - [x] 1.2 Preserve the existing pre-visible failover contract for replayable
   compact/connect surfaces.
 - [x] 1.3 Include issue trace for PR #822.
+- [x] 1.4 Cover owner-bound bridge replay, stream lease release, and websocket
+  response-create admission release edge cases raised in PR #1207 review.
 
 ## 2. Verification
 

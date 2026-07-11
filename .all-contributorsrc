@@ -984,6 +984,18 @@
       "contributions": [
         "code"
       ]
+    },
+    {
+      "login": "haziqazizi",
+      "name": "Haziq Azizi Bin Ahmad Zakir",
+      "avatar_url": "https://avatars.githubusercontent.com/u/7590703?v=4",
+      "profile": "https://github.com/haziqazizi",
+      "contributions": [
+        "code",
+        "test",
+        "doc",
+        "infra"
+      ]
     }
   ],
   "contributorsPerLine": 7,

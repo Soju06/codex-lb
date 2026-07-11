@@ -15,3 +15,11 @@ exclusions from killing a healthy continuation. If the required owner differs
 from the open socket, the socket is retired and the unchanged request is
 reconnected to that owner.
 
+For a transport change from direct WebSocket to HTTP, the same process may use
+the session-scoped WebSocket continuity index to verify that the HTTP input
+starts with the exact input fingerprint stored for the referenced response.
+The request must also contain matching tool calls before tool outputs and no
+account-scoped file id. If any proof is missing, the continuation stays
+owner-bound and fails closed when its owner is unavailable. This proof is
+process-local; restart or cross-replica gaps deliberately degrade to
+fail-closed behavior rather than structural guessing.

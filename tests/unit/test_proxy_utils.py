@@ -22234,6 +22234,73 @@ async def test_stream_previous_response_owner_usage_limit_fails_closed(monkeypat
     record_success.assert_not_awaited()
 
 
+def test_cross_transport_fresh_replay_requires_matching_ws_continuity_prefix():
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    first_input: list[JsonValue] = [
+        {"role": "user", "content": [{"type": "input_text", "text": "call echo"}]},
+    ]
+    full_input: list[JsonValue] = [
+        *first_input,
+        {
+            "type": "function_call",
+            "name": "echo",
+            "call_id": "call_1",
+            "arguments": '{"value":"ok"}',
+        },
+        {"type": "function_call_output", "call_id": "call_1", "output": "ok"},
+        {"role": "user", "content": [{"type": "input_text", "text": "continue"}]},
+    ]
+    service._websocket_continuity_index[("turn_generated_by_ws", None)] = proxy_service._WebSocketContinuityState(
+        last_completed_response_id="resp_ws_owner",
+        last_completed_input_count=len(first_input),
+        last_completed_input_prefix_fingerprint=proxy_service._fingerprint_input_items(first_input),
+    )
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "test",
+            "previous_response_id": "resp_ws_owner",
+            "input": full_input,
+        }
+    )
+
+    fresh = streaming_retry_module._verified_cross_transport_fresh_replay(
+        cast(Any, service),
+        payload=payload,
+        headers={"x-codex-session-id": "sid-cross-transport"},
+        api_key=None,
+    )
+
+    assert fresh is not None
+    assert fresh.previous_response_id is None
+    assert fresh.input == full_input
+
+
+def test_cross_transport_fresh_replay_rejects_unverified_client_full_resend():
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "test",
+            "previous_response_id": "resp_unknown",
+            "input": [
+                {"role": "user", "content": "one"},
+                {"role": "user", "content": "two"},
+            ],
+        }
+    )
+
+    assert (
+        streaming_retry_module._verified_cross_transport_fresh_replay(
+            cast(Any, service),
+            payload=payload,
+            headers={"x-codex-session-id": "sid-cross-transport"},
+            api_key=None,
+        )
+        is None
+    )
+
+
 @pytest.mark.asyncio
 async def test_stream_prompt_cache_key_does_not_soften_previous_response_owner(monkeypatch):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)

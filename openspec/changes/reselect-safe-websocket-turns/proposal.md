@@ -20,10 +20,13 @@ selector check excludes an otherwise healthy open owner socket.
   was retained.
 - Keep client-owned previous-response continuations owner-bound for quota and
   other pre-visible failures.
+- Allow a WebSocket-to-HTTP full resend to move accounts only when the shared
+  session's in-memory continuity fingerprint proves the resent prefix and the
+  request contains no account-scoped file reference.
 
 ## Impact
 
-- Direct client-facing Responses WebSocket lifecycle only.
-- Existing HTTP bridge durable-anchor and full-resend behavior is unchanged.
+- Direct client-facing Responses WebSocket lifecycle and verified
+  WebSocket-to-HTTP full-resend recovery.
+- Existing HTTP bridge durable-anchor behavior is unchanged.
 - No model catalog, database, credential, or HTTP streaming change.
-

@@ -57,6 +57,43 @@ captured an independently equivalent fresh request body.
 - **THEN** the service may reconnect through another eligible account using the
   retained fresh body
 
+### Requirement: Cross-transport full resends require retained continuity proof
+
+When an HTTP Responses request references a response completed on a direct
+WebSocket session, the service MAY remove the owner-scoped
+`previous_response_id` after a pre-visible owner failure only when the same
+process retains session continuity metadata proving that the resent input
+starts with the exact stored input prefix. The input MUST be self-contained for
+tool semantics and MUST NOT contain an account-scoped file reference. Missing
+or mismatched proof MUST keep the request owner-bound.
+
+#### Scenario: verified WebSocket-to-HTTP image full resend
+
+- **GIVEN** a direct WebSocket response completed with a stored input count and
+  fingerprint for a named Codex session
+- **AND** the next HTTP request in that session references the response
+- **AND** its input begins with the exact stored prefix, includes each tool call
+  before its output, and uses only inline image data
+- **WHEN** the response owner is unavailable before visible output
+- **THEN** the service may remove `previous_response_id`
+- **AND** replay the full input through another eligible account
+
+#### Scenario: structural full resend lacks retained proof
+
+- **GIVEN** an HTTP request carries `previous_response_id` and multiple input
+  items
+- **AND** no matching session continuity fingerprint is retained
+- **WHEN** the owner is unavailable
+- **THEN** the service fails closed
+- **AND** it does not infer completeness from input length or shape alone
+
+#### Scenario: account-scoped file reference cannot move
+
+- **GIVEN** an otherwise verified cross-transport full resend contains an
+  `input_file.file_id` or account-scoped image file reference
+- **WHEN** the owner is unavailable
+- **THEN** the service keeps the request owner-bound
+
 ### Requirement: Hard continuity owner lookup fails closed
 
 When a request depends on hard continuity ownership, the service MUST fail

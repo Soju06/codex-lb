@@ -478,13 +478,12 @@ describe("AccountList", () => {
       />,
     );
 
-    expect(screen.getByTestId("account-list-scroll-region")).toHaveClass(
-      "overflow-y-auto",
-      "max-h-[calc(100dvh-23rem)]",
-    );
-    expect(screen.getByTestId("account-list-scroll-region")).not.toHaveClass(
-      "lg:max-h-none",
-    );
+    const scrollRegion = screen.getByTestId("account-list-scroll-region");
+
+    expect(scrollRegion).toHaveClass("overflow-y-auto");
+    expect(scrollRegion.parentElement).toHaveClass("max-h-[calc(100dvh-15rem)]");
+    expect(scrollRegion).not.toHaveClass("max-h-[calc(100dvh-23rem)]");
+    expect(scrollRegion).not.toHaveClass("lg:max-h-none");
   });
 
   it("filters re-auth required accounts by status", async () => {

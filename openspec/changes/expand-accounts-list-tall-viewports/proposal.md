@@ -9,9 +9,9 @@ a short nested scrollbar.
 
 ## What Changes
 
-- Remove the fixed 32rem ceiling from the account rows region while retaining
-  an internal scrolling bound that leaves space for the page controls and fixed
-  status bar.
+- Remove the fixed 32rem ceiling from the account rows region while bounding the
+  complete list column so optional controls use their rendered height and the
+  remaining rows stay above the fixed status bar.
 - Stop stretching the left card to the selected-account detail height when its
   controls and account rows need less space.
 - Add tall-viewport browser coverage proving that the rows region grows beyond

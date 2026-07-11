@@ -225,6 +225,46 @@ test("accounts list keeps many rows in an internal scroll region", async ({ page
   expect(reachedBottom.scrollTop).toBeGreaterThan(0);
   expect(reachedBottom.lastRowVisible).toBe(true);
   await expect(addAccountButton).toBeVisible();
+
+  await scrollRegion.evaluate((element) => {
+    element.scrollTop = 0;
+  });
+  await page.getByRole("button", { name: "Need help?" }).click();
+  await expect(page.getByText("Windows OAuth Help")).toBeVisible();
+
+  const helpOpenDimensions = await scrollRegion.evaluate((element) => ({
+    clientHeight: element.clientHeight,
+    scrollHeight: element.scrollHeight,
+  }));
+  expect(helpOpenDimensions.clientHeight).toBeLessThan(initialDimensions.clientHeight);
+  expect(helpOpenDimensions.scrollHeight).toBeGreaterThan(helpOpenDimensions.clientHeight);
+
+  const helpOpenScrollRegionBox = await scrollRegion.boundingBox();
+  const helpOpenStatusBarBox = await statusBar.boundingBox();
+  if (!helpOpenScrollRegionBox || !helpOpenStatusBarBox) {
+    throw new Error("Help-open account scroll region or status bar is not measurable");
+  }
+  expect(helpOpenScrollRegionBox.y + helpOpenScrollRegionBox.height).toBeLessThanOrEqual(
+    helpOpenStatusBarBox.y - 8,
+  );
+  await expect(page.getByRole("button", { name: "Need help?" })).toBeVisible();
+  await expect(addAccountButton).toBeVisible();
+
+  const helpOpenReachedBottom = await scrollRegion.evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+    const lastRow = element.lastElementChild;
+    if (!lastRow) {
+      return { scrollTop: element.scrollTop, lastRowVisible: false };
+    }
+    const rowRect = lastRow.getBoundingClientRect();
+    const regionRect = element.getBoundingClientRect();
+    return {
+      scrollTop: element.scrollTop,
+      lastRowVisible: rowRect.top >= regionRect.top && rowRect.bottom <= regionRect.bottom,
+    };
+  });
+  expect(helpOpenReachedBottom.scrollTop).toBeGreaterThan(0);
+  expect(helpOpenReachedBottom.lastRowVisible).toBe(true);
 });
 
 test("accounts list card ends after the final row when all accounts fit", async ({ page }) => {

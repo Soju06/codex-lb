@@ -2572,6 +2572,114 @@ async def test_stream_http_bridge_or_retry_bypasses_bridge_for_image_generation_
 
 
 @pytest.mark.asyncio
+async def test_native_image_bypass_emits_capacity_keepalive_before_upstream_start(monkeypatch):
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    account = _make_account("acc_native_image_capacity")
+    capacity_released = asyncio.Event()
+    selection_calls = 0
+    upstream_calls = 0
+    bridge_calls = 0
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        proxy_service,
+        "_http_bridge_runtime_config",
+        lambda _dashboard_settings, _app_settings: proxy_service._HTTPBridgeRuntimeConfig(
+            enabled=True,
+            idle_ttl_seconds=30.0,
+            codex_idle_ttl_seconds=30.0,
+            max_sessions=8,
+            queue_limit=16,
+            prompt_cache_idle_ttl_seconds=30.0,
+            gateway_safe_mode=False,
+        ),
+    )
+    monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=None))
+
+    async def select_account(_deadline: float, **_kwargs: object) -> AccountSelection:
+        nonlocal selection_calls
+        selection_calls += 1
+        if not capacity_released.is_set():
+            return AccountSelection(
+                account=None,
+                error_message="Account stream capacity is exhausted; per-account limit is 8.",
+                error_code="account_stream_cap",
+            )
+        return AccountSelection(account=account, error_message=None)
+
+    async def wait_for_capacity(**kwargs: object):
+        assert kwargs["stage"] == "selection"
+        if kwargs["emit_keepalives"]:
+            yield 'data: {"type":"codex.keepalive","status":"waiting_for_account_capacity"}\n\n'
+        await capacity_released.wait()
+
+    async def core_stream_responses(*_args: object, **_kwargs: object):
+        nonlocal upstream_calls
+        upstream_calls += 1
+        yield 'data: {"type":"response.completed","response":{"id":"resp_native_image_capacity_ok"}}\n\n'
+
+    async def forbidden_http_bridge(*_args: object, **_kwargs: object):
+        nonlocal bridge_calls
+        bridge_calls += 1
+        yield "data: bridge\n\n"
+
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=account))
+    monkeypatch.setattr(streaming_retry_module, "_iter_account_capacity_recovery_wait", wait_for_capacity)
+    monkeypatch.setattr(proxy_service, "core_stream_responses", core_stream_responses)
+    monkeypatch.setattr(service, "_stream_via_http_bridge", forbidden_http_bridge)
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.5",
+            "instructions": "describe the image",
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "describe"},
+                        {"type": "input_image", "image_url": "data:image/png;base64,iVBORw0KGgo="},
+                    ],
+                }
+            ],
+            "stream": True,
+        }
+    )
+    stream = service._stream_http_bridge_or_retry(
+        payload,
+        {"originator": "Codex Desktop"},
+        codex_session_affinity=True,
+        propagate_http_errors=True,
+        openai_cache_affinity=False,
+        api_key=None,
+        api_key_reservation=None,
+        suppress_text_done_events=False,
+        enforce_openai_sdk_contract=False,
+    )
+
+    first = await asyncio.wait_for(anext(stream), timeout=0.2)
+    first_payload = json.loads(first.split("data: ", 1)[1])
+
+    assert first_payload["type"] == "codex.keepalive"
+    assert first_payload["status"] == "waiting_for_account_capacity"
+    assert selection_calls == 1
+    assert upstream_calls == 0
+    assert bridge_calls == 0
+
+    capacity_released.set()
+    remaining = [chunk async for chunk in stream]
+    completed = json.loads(remaining[-1].split("data: ", 1)[1])
+
+    assert completed["type"] == "response.completed"
+    assert completed["response"]["id"] == "resp_native_image_capacity_ok"
+    assert selection_calls == 2
+    assert upstream_calls == 1
+    assert bridge_calls == 0
+
+
+@pytest.mark.asyncio
 async def test_stream_http_bridge_or_retry_forces_http_for_input_image_when_bridge_disabled(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))

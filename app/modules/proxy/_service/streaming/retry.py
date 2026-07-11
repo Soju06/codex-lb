@@ -363,7 +363,7 @@ class _StreamingRetryMixin:
                         error_message=error.message if error else None,
                         recovery_sleep_seconds=recovery_sleep_seconds,
                         deadline=deadline,
-                        emit_keepalives=not propagate_http_errors,
+                        emit_keepalives=not propagate_http_errors or not enforce_openai_sdk_contract,
                         stage="post_refresh_response_create",
                     ):
                         yield wait_event
@@ -594,7 +594,7 @@ class _StreamingRetryMixin:
                                 error_message=deferred_error.message if deferred_error else None,
                                 recovery_sleep_seconds=recovery_sleep_seconds,
                                 deadline=deadline,
-                                emit_keepalives=not propagate_http_errors,
+                                emit_keepalives=not propagate_http_errors or not enforce_openai_sdk_contract,
                                 stage="response_create_no_alternate",
                             ):
                                 yield wait_event
@@ -641,7 +641,7 @@ class _StreamingRetryMixin:
                                 error_message=selection.error_message,
                                 recovery_sleep_seconds=recovery_sleep_seconds,
                                 deadline=deadline,
-                                emit_keepalives=not propagate_http_errors,
+                                emit_keepalives=not propagate_http_errors or not enforce_openai_sdk_contract,
                                 stage="selection",
                             ):
                                 yield wait_event
@@ -1149,7 +1149,8 @@ class _StreamingRetryMixin:
                                             error_message=error_message,
                                             recovery_sleep_seconds=recovery_sleep_seconds,
                                             deadline=deadline,
-                                            emit_keepalives=not propagate_http_errors,
+                                            emit_keepalives=not propagate_http_errors
+                                            or not enforce_openai_sdk_contract,
                                             stage="response_create",
                                         ):
                                             yield wait_event

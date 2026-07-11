@@ -20,7 +20,7 @@
 
 Add a narrowly scoped outside-interaction guard to the API-key create and edit dialog content. The guard prevents dialog dismissal only when the event target belongs to portalled dropdown content owned by the dialog. It does not globally disable outside interactions.
 
-Configure the nested model dropdown as non-modal. Radix otherwise composes two modal layers—a dropdown portal inside a dialog—and Chrome can dismiss the parent dialog during a checkbox selection even after the outside-interaction guard runs. The parent API-key dialog remains modal, so page content outside the editor is still protected.
+Configure the nested model and account dropdowns as non-modal. Radix otherwise composes two modal layers—a dropdown portal inside a dialog—and Chrome can dismiss the parent dialog during a checkbox selection even after the outside-interaction guard runs. The parent API-key dialog remains modal, so page content outside the editor is still protected.
 
 The implementation will reuse the same guard for both API-key dialogs because both embed the same portalled selectors. A regression test will exercise the externally failing edit path: open the dialog, open Allowed models, select a model, assert that the dialog remains open, submit, and assert that the selected allowlist is present in the update payload.
 

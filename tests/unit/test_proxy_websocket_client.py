@@ -600,8 +600,8 @@ async def test_connect_responses_websocket_uses_all_proxy_fallback(monkeypatch):
     monkeypatch.delenv("HTTPS_PROXY", raising=False)
     monkeypatch.delenv("socks_proxy", raising=False)
     monkeypatch.delenv("SOCKS_PROXY", raising=False)
-    monkeypatch.setenv("all_proxy", "socks5://127.0.0.1:7890")
     monkeypatch.delenv("ALL_PROXY", raising=False)
+    monkeypatch.setenv("all_proxy", "socks5://127.0.0.1:7890")
 
     await connect_responses_websocket(
         {"openai-beta": "responses_websockets=2026-02-06"},
@@ -642,10 +642,10 @@ async def test_connect_responses_websocket_uses_socks_proxy_before_all_proxy(mon
     monkeypatch.delenv("WSS_PROXY", raising=False)
     monkeypatch.delenv("https_proxy", raising=False)
     monkeypatch.delenv("HTTPS_PROXY", raising=False)
-    monkeypatch.setenv("socks_proxy", "socks5://127.0.0.1:7890")
     monkeypatch.delenv("SOCKS_PROXY", raising=False)
-    monkeypatch.setenv("all_proxy", "socks5://127.0.0.1:7891")
+    monkeypatch.setenv("socks_proxy", "socks5://127.0.0.1:7890")
     monkeypatch.delenv("ALL_PROXY", raising=False)
+    monkeypatch.setenv("all_proxy", "socks5://127.0.0.1:7891")
 
     await connect_responses_websocket(
         {"openai-beta": "responses_websockets=2026-02-06"},
@@ -684,12 +684,12 @@ async def test_connect_responses_websocket_uses_socks_proxy_before_https_proxy(m
     monkeypatch.delenv("NO_PROXY", raising=False)
     monkeypatch.delenv("wss_proxy", raising=False)
     monkeypatch.delenv("WSS_PROXY", raising=False)
-    monkeypatch.setenv("https_proxy", "http://127.0.0.1:7890")
     monkeypatch.delenv("HTTPS_PROXY", raising=False)
-    monkeypatch.setenv("socks_proxy", "socks5://127.0.0.1:7891")
+    monkeypatch.setenv("https_proxy", "http://127.0.0.1:7890")
     monkeypatch.delenv("SOCKS_PROXY", raising=False)
-    monkeypatch.setenv("all_proxy", "socks5://127.0.0.1:7892")
+    monkeypatch.setenv("socks_proxy", "socks5://127.0.0.1:7891")
     monkeypatch.delenv("ALL_PROXY", raising=False)
+    monkeypatch.setenv("all_proxy", "socks5://127.0.0.1:7892")
 
     await connect_responses_websocket(
         {"openai-beta": "responses_websockets=2026-02-06"},
@@ -726,8 +726,8 @@ async def test_connect_responses_websocket_normalizes_http_socks_env_proxy(monke
     )
     monkeypatch.delenv("no_proxy", raising=False)
     monkeypatch.delenv("NO_PROXY", raising=False)
-    monkeypatch.setenv("socks_proxy", "http://127.0.0.1:7891")
     monkeypatch.delenv("SOCKS_PROXY", raising=False)
+    monkeypatch.setenv("socks_proxy", "http://127.0.0.1:7891")
 
     await connect_responses_websocket(
         {"openai-beta": "responses_websockets=2026-02-06"},
@@ -1061,6 +1061,21 @@ def test_responses_websocket_builder_normalizes_non_native_sdk_fingerprint():
     assert headers["ChatGPT-Account-Id"] == "acct-1"
     assert "chatgpt-account-id" not in headers
     # The responses websocket beta header is still appended.
+    assert "responses_websockets=2026-02-06" in headers["openai-beta"]
+
+
+def test_responses_websocket_builder_strips_internal_responses_lite_header():
+    from app.core.clients.proxy_websocket import _build_upstream_websocket_headers
+
+    inbound = {
+        "User-Agent": "codex_cli_rs/0.142.0 (Mac OS 27.0.0; arm64) iTerm.app/3.6.10",
+        "X-OpenAI-Internal-Codex-Responses-Lite": "1",
+        "openai-beta": "responses_websockets=2026-02-06",
+    }
+    headers = _build_upstream_websocket_headers(inbound, "tok", "acct-1")
+    lowered = {key.lower() for key in headers}
+
+    assert "x-openai-internal-codex-responses-lite" not in lowered
     assert "responses_websockets=2026-02-06" in headers["openai-beta"]
 
 

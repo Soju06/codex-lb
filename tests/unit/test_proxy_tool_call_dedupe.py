@@ -120,6 +120,84 @@ def test_mark_duplicate_tool_call_downstream_event_suppresses_exec_command_with_
     )
 
 
+def test_mark_duplicate_tool_call_downstream_event_suppresses_code_mode_exec_replay():
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    first_payload: dict[str, JsonValue] = {
+        "type": "response.output_item.done",
+        "response_id": "resp_code_mode",
+        "item": {
+            "type": "custom_tool_call",
+            "name": "exec",
+            "input": "const r = await tools.exec_command({cmd: 'touch marker'}); text(r.output);",
+            "call_id": "call_exec",
+        },
+    }
+    replay_payload: dict[str, JsonValue] = {
+        **first_payload,
+        "response_id": "resp_code_mode_replay",
+    }
+
+    assert (
+        tool_call_dedupe.mark_duplicate_tool_call_downstream_event(
+            first_payload,
+            seen_tool_call_keys=upstream_control.seen_tool_call_keys,
+            response_id="resp_code_mode",
+            scope_side_effects_by_response_id=False,
+        )
+        is False
+    )
+    assert (
+        tool_call_dedupe.mark_duplicate_tool_call_downstream_event(
+            replay_payload,
+            seen_tool_call_keys=upstream_control.seen_tool_call_keys,
+            response_id="resp_code_mode_replay",
+            scope_side_effects_by_response_id=False,
+        )
+        is True
+    )
+
+
+def test_mark_duplicate_tool_call_downstream_event_keeps_distinct_code_mode_exec_call_ids():
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    first_payload: dict[str, JsonValue] = {
+        "type": "response.output_item.done",
+        "response_id": "resp_code_mode_first",
+        "item": {
+            "type": "custom_tool_call",
+            "name": "exec",
+            "input": "const r = await tools.exec_command({cmd: 'pwd'}); text(r.output);",
+            "call_id": "call_exec_first",
+        },
+    }
+    second_payload: dict[str, JsonValue] = {
+        "type": "response.output_item.done",
+        "response_id": "resp_code_mode_second",
+        "item": {
+            **cast(dict[str, JsonValue], first_payload["item"]),
+            "call_id": "call_exec_second",
+        },
+    }
+
+    assert (
+        tool_call_dedupe.mark_duplicate_tool_call_downstream_event(
+            first_payload,
+            seen_tool_call_keys=upstream_control.seen_tool_call_keys,
+            response_id="resp_code_mode_first",
+            scope_side_effects_by_response_id=False,
+        )
+        is False
+    )
+    assert (
+        tool_call_dedupe.mark_duplicate_tool_call_downstream_event(
+            second_payload,
+            seen_tool_call_keys=upstream_control.seen_tool_call_keys,
+            response_id="resp_code_mode_second",
+            scope_side_effects_by_response_id=False,
+        )
+        is False
+    )
+
+
 def test_mark_duplicate_tool_call_downstream_event_suppresses_direct_wait_agent_replay():
     upstream_control = proxy_service._WebSocketUpstreamControl()
     first_payload: dict[str, JsonValue] = {
@@ -1363,6 +1441,40 @@ def test_dedupe_replayed_side_effect_input_items_keeps_read_only_custom_tool_cal
             "name": "read_context",
             "input": json.dumps({"path": "README.md"}),
             "call_id": "call_custom_b",
+        },
+    ]
+
+    deduped_items, removed_count = tool_call_dedupe.dedupe_replayed_side_effect_input_items(input_items)
+
+    assert removed_count == 0
+    assert deduped_items == input_items
+
+
+@pytest.mark.parametrize("tool_name", ["exec", "collaboration"])
+def test_dedupe_replayed_side_effect_input_items_keeps_distinct_code_mode_calls(tool_name: str):
+    repeated_input = "const result = await tools.exec_command({cmd: 'pwd'}); text(result.output);"
+    input_items: list[JsonValue] = [
+        {
+            "type": "custom_tool_call",
+            "name": tool_name,
+            "input": repeated_input,
+            "call_id": "call_code_mode_first",
+        },
+        {
+            "type": "custom_tool_call_output",
+            "call_id": "call_code_mode_first",
+            "output": "first result",
+        },
+        {
+            "type": "custom_tool_call",
+            "name": tool_name,
+            "input": repeated_input,
+            "call_id": "call_code_mode_second",
+        },
+        {
+            "type": "custom_tool_call_output",
+            "call_id": "call_code_mode_second",
+            "output": "second result",
         },
     ]
 

@@ -14,7 +14,9 @@ import anyio
 
 from app.core.balancer.types import UpstreamError
 from app.core.clients.proxy_websocket import UpstreamResponsesWebSocket
+from app.core.openai.model_registry import get_model_registry
 from app.core.openai.models import OpenAIEvent
+from app.core.plan_types import account_plan_matches_allowed
 from app.core.types import JsonValue
 from app.core.upstream_proxy import ResolvedUpstreamRoute
 from app.db.models import Account
@@ -41,7 +43,12 @@ _ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS = 10.0
 _ACCOUNT_SELECTION_RETRY_HINT_RE = re.compile(r"try again in\s+([0-9]+(?:\.[0-9]+)?)s", re.IGNORECASE)
 
 
-def _account_selection_recovery_sleep_seconds_from_message(message: str | None) -> float | None:
+def _account_selection_recovery_sleep_seconds_from_message(
+    message: str | None,
+    *,
+    error_code: str | None = None,
+    suppress_uncoded_local_selector_hint: bool = False,
+) -> float | None:
     message = (message or "").strip()
     if not message:
         return None
@@ -53,6 +60,10 @@ def _account_selection_recovery_sleep_seconds_from_message(message: str | None) 
         or "no accounts with a plan" in lowered
         or "no accounts with available additional quota" in lowered
         or "no fresh additional quota data" in lowered
+        or (
+            (error_code == "no_accounts" or (suppress_uncoded_local_selector_hint and error_code is None))
+            and lowered.startswith("rate limit exceeded. try again in")
+        )
     ):
         return None
 
@@ -74,7 +85,11 @@ def _account_selection_recovery_sleep_seconds_from_message(message: str | None) 
 
 
 def _account_selection_recovery_sleep_seconds(selection: AccountSelection) -> float | None:
-    return _account_selection_recovery_sleep_seconds_from_message(selection.error_message)
+    return _account_selection_recovery_sleep_seconds_from_message(
+        selection.error_message,
+        error_code=selection.error_code,
+        suppress_uncoded_local_selector_hint=selection.account is None,
+    )
 
 
 def _account_capacity_wait_payload(
@@ -295,8 +310,21 @@ class _WebSocketRequestState:
     reasoning_effort: str | None
     api_key_reservation: ApiKeyUsageReservationData | None
     started_at: float
+    responses_lite_model: str | None = None
     latency_first_token_ms: int | None = None
+    latency_response_created_ms: int | None = None
+    latency_first_upstream_event_ms: int | None = None
+    latency_response_create_gate_wait_ms: int | None = None
+    latency_bridge_queue_wait_ms: int | None = None
+    response_create_gate_wait_started_at: float | None = None
+    bridge_queue_wait_started_at: float | None = None
+    prewarm_status: str | None = None
+    prewarm_latency_ms: int | None = None
+    prewarm_canary_bucket: str | None = None
+    prewarm_eligible_reason: str | None = None
+    session_previous_gap_ms: int | None = None
     request_log_id: str | None = None
+    archive_request_id: str | None = None
     requested_service_tier: str | None = None
     actual_service_tier: str | None = None
     response_id: str | None = None
@@ -329,6 +357,12 @@ class _WebSocketRequestState:
     # on, and dropping the anchor there would silently turn a continuation into
     # a context-free fresh turn.
     fresh_upstream_request_is_retry_safe: bool = False
+    # Responses-Lite model advertised by ``fresh_upstream_request_text``. A
+    # fresh replay built from a trusted marker-only frame has the reserved
+    # marker stripped, so swapping to the fresh body must also swap this onto
+    # ``responses_lite_model``; otherwise the replay's ``response.created``
+    # would be recorded as a Lite acceptance for a non-Lite upstream request.
+    fresh_upstream_request_responses_lite_model: str | None = None
     request_stage: str = "first_turn"
     preferred_account_id: str | None = None
     require_security_work_authorized: bool = False
@@ -350,6 +384,7 @@ class _WebSocketRequestState:
     suppressed_downstream_tool_call: bool = False
     suppressed_duplicate_tool_call: bool = False
     pending_function_call_ids: list[str] = field(default_factory=list)
+    pending_tool_call_types: dict[str, str] = field(default_factory=dict)
     seen_tool_call_keys: dict[tuple[str, str, str | None, str | None, str], None] = field(default_factory=dict)
     input_item_count: int = 0
     input_full_fingerprint: str | None = None
@@ -363,6 +398,7 @@ class _WebSocketRequestState:
     upstream_proxy_fail_closed_reason: str | None = None
     useragent: str | None = None
     useragent_group: str | None = None
+    client_ip: str | None = None
     downstream_visible: bool = False
     suppress_next_created_downstream: bool = False
     replay_downstream_response_id: str | None = None
@@ -409,6 +445,7 @@ class _HTTPBridgeSession:
     queued_request_count: int
     last_used_at: float
     idle_ttl_seconds: float
+    request_service_tier: str | None = None
     lifecycle_lock: anyio.Lock = field(default_factory=anyio.Lock)
     api_key: ApiKeyData | None = None
     codex_session: bool = False
@@ -421,6 +458,7 @@ class _HTTPBridgeSession:
     last_completed_input_count: int = 0
     last_completed_response_id: str | None = None
     last_completed_input_prefix_fingerprint: str | None = None
+    last_pending_tool_calls: dict[str, str] = field(default_factory=dict)
     durable_session_id: str | None = None
     durable_owner_epoch: int | None = None
     upstream_reader: asyncio.Task[None] | None = None
@@ -436,12 +474,35 @@ class _HTTPBridgeSession:
     upstream_proxy_fail_closed_reason: str | None = None
 
 
+def _http_bridge_session_supports_service_tier(
+    session: _HTTPBridgeSession,
+    *,
+    request_model: str | None,
+    request_service_tier: str | None,
+) -> bool:
+    if request_model is None or request_service_tier is None:
+        return True
+
+    registry = get_model_registry()
+    allowed_account_ids = registry.account_ids_for_model_service_tier(request_model, request_service_tier)
+    if allowed_account_ids is not None:
+        return session.account.id in allowed_account_ids
+
+    allowed_plans = registry.plan_types_for_model_service_tier(request_model, request_service_tier)
+    if allowed_plans is None:
+        return True
+    return account_plan_matches_allowed(session.account.plan_type, allowed_plans)
+
+
 @dataclass(slots=True)
 class _WebSocketContinuityState:
     last_completed_input_count: int = 0
     last_completed_response_id: str | None = None
     last_completed_input_prefix_fingerprint: str | None = None
     last_pending_function_call_ids: list[str] = field(default_factory=list)
+    last_pending_tool_call_types: dict[str, str] = field(default_factory=dict)
+    responses_lite_model: str | None = None
+    responses_lite_response_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

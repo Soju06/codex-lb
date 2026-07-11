@@ -129,6 +129,7 @@ class _StreamingRetryMixin:
         request_transport: str,
         rewritten_file_account_id: str | None = None,
         upstream_stream_transport_override: str | None = None,
+        client_ip: str | None = None,
         enforce_openai_sdk_contract: bool = True,
     ) -> AsyncIterator[str]:
         proxy = cast(_StreamingServiceProtocol, self)
@@ -309,6 +310,7 @@ class _StreamingRetryMixin:
                             requested_service_tier=payload.service_tier,
                             useragent=useragent,
                             useragent_group=useragent_group,
+                            client_ip=client_ip,
                         )
                         return
             file_required_preferred_account = False
@@ -350,6 +352,7 @@ class _StreamingRetryMixin:
                         upstream_transport=upstream_stream_transport,
                         useragent=useragent,
                         useragent_group=useragent_group,
+                        client_ip=client_ip,
                     )
                     yield format_sse_event(_facade()._proxy_request_timeout_event(request_id))
                     return
@@ -368,6 +371,7 @@ class _StreamingRetryMixin:
                             prefer_earlier_reset_window=_facade()._prefer_earlier_reset_window(settings),
                             routing_strategy=routing_strategy,
                             model=payload.model,
+                            service_tier=payload.service_tier,
                             exclude_account_ids=excluded_account_ids,
                             preferred_account_id=preferred_account_id,
                             require_security_work_authorized=require_security_work_authorized,
@@ -394,6 +398,7 @@ class _StreamingRetryMixin:
                                 upstream_transport=upstream_stream_transport,
                                 useragent=useragent,
                                 useragent_group=useragent_group,
+                                client_ip=client_ip,
                             )
                             yield format_sse_event(_facade()._proxy_request_timeout_event(request_id))
                             return
@@ -515,6 +520,7 @@ class _StreamingRetryMixin:
                             requested_service_tier=payload.service_tier,
                             useragent=useragent,
                             useragent_group=useragent_group,
+                            client_ip=client_ip,
                         )
                         return
                     # If a prior attempt stored a transient 500 and the caller
@@ -546,6 +552,7 @@ class _StreamingRetryMixin:
                             requested_service_tier=payload.service_tier,
                             useragent=useragent,
                             useragent_group=useragent_group,
+                            client_ip=client_ip,
                         )
                         return
                     if last_security_work_retry_error is not None:
@@ -575,6 +582,7 @@ class _StreamingRetryMixin:
                             requested_service_tier=payload.service_tier,
                             useragent=useragent,
                             useragent_group=useragent_group,
+                            client_ip=client_ip,
                         )
                         return
                     no_accounts_msg = selection.error_message or "No active accounts available"
@@ -601,6 +609,7 @@ class _StreamingRetryMixin:
                         requested_service_tier=payload.service_tier,
                         useragent=useragent,
                         useragent_group=useragent_group,
+                        client_ip=client_ip,
                     )
                     return
 
@@ -640,6 +649,7 @@ class _StreamingRetryMixin:
                         requested_service_tier=payload.service_tier,
                         useragent=useragent,
                         useragent_group=useragent_group,
+                        client_ip=client_ip,
                     )
                     return
                 try:
@@ -666,6 +676,7 @@ class _StreamingRetryMixin:
                             upstream_transport=upstream_stream_transport,
                             useragent=useragent,
                             useragent_group=useragent_group,
+                            client_ip=client_ip,
                         )
                         yield format_sse_event(_facade()._proxy_request_timeout_event(request_id))
                         return
@@ -688,6 +699,7 @@ class _StreamingRetryMixin:
                             upstream_proxy_fail_closed_reason=exc.reason,
                             useragent=useragent,
                             useragent_group=useragent_group,
+                            client_ip=client_ip,
                         )
                         event = response_failed_event(
                             "upstream_proxy_unavailable",
@@ -737,6 +749,7 @@ class _StreamingRetryMixin:
                             upstream_transport=upstream_stream_transport,
                             useragent=useragent,
                             useragent_group=useragent_group,
+                            client_ip=client_ip,
                         )
                         event = response_failed_event(
                             "upstream_unavailable",
@@ -771,6 +784,7 @@ class _StreamingRetryMixin:
                             upstream_transport=upstream_stream_transport,
                             useragent=useragent,
                             useragent_group=useragent_group,
+                            client_ip=client_ip,
                         )
                         yield format_sse_event(_facade()._proxy_request_timeout_event(request_id))
                         return
@@ -801,6 +815,7 @@ class _StreamingRetryMixin:
                                 request_transport=request_transport,
                                 useragent=useragent,
                                 useragent_group=useragent_group,
+                                client_ip=client_ip,
                                 preferred_account_id=preferred_account_id,
                                 tool_call_dedupe=tool_call_dedupe,
                                 enforce_openai_sdk_contract=enforce_openai_sdk_contract,
@@ -1076,6 +1091,7 @@ class _StreamingRetryMixin:
                                 upstream_transport=upstream_stream_transport,
                                 useragent=useragent,
                                 useragent_group=useragent_group,
+                                client_ip=client_ip,
                             )
                             yield format_sse_event(_facade()._proxy_request_timeout_event(request_id))
                             return
@@ -1130,6 +1146,7 @@ class _StreamingRetryMixin:
                                 upstream_transport=upstream_stream_transport,
                                 useragent=useragent,
                                 useragent_group=useragent_group,
+                                client_ip=client_ip,
                             )
                             event = response_failed_event(
                                 "upstream_unavailable",
@@ -1162,6 +1179,7 @@ class _StreamingRetryMixin:
                                 upstream_transport=upstream_stream_transport,
                                 useragent=useragent,
                                 useragent_group=useragent_group,
+                                client_ip=client_ip,
                             )
                             yield format_sse_event(_facade()._proxy_request_timeout_event(request_id))
                             return
@@ -1184,6 +1202,7 @@ class _StreamingRetryMixin:
                                 request_transport=request_transport,
                                 useragent=useragent,
                                 useragent_group=useragent_group,
+                                client_ip=client_ip,
                                 tool_call_dedupe=tool_call_dedupe,
                                 enforce_openai_sdk_contract=enforce_openai_sdk_contract,
                             ):
@@ -1405,6 +1424,7 @@ class _StreamingRetryMixin:
                         requested_service_tier=payload.service_tier,
                         useragent=useragent,
                         useragent_group=useragent_group,
+                        client_ip=client_ip,
                     )
                 return
             retries_exhausted_msg = "No available accounts after retries"
@@ -1442,6 +1462,7 @@ class _StreamingRetryMixin:
                     requested_service_tier=payload.service_tier,
                     useragent=useragent,
                     useragent_group=useragent_group,
+                    client_ip=client_ip,
                 )
         finally:
             if not upstream_transport_metric_recorded:

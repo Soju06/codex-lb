@@ -1007,13 +1007,15 @@ async def test_proxy_stream_exception_without_terminal_event_logs_as_stream_inco
 async def test_stream_responses_starts_sse_keepalive_before_first_upstream_event(monkeypatch):
     upstream_started = asyncio.Event()
     release_upstream = asyncio.Event()
+    seen_client_ip: list[str | None] = []
 
     class _FakeService:
         async def rate_limit_headers(self):
             return {}
 
         async def stream_responses(self, *args, **kwargs):
-            del args, kwargs
+            del args
+            seen_client_ip.append(kwargs.get("client_ip"))
             upstream_started.set()
             await release_upstream.wait()
             event = {"type": "response.completed", "response": {"id": "resp_delayed"}}
@@ -1032,6 +1034,7 @@ async def test_stream_responses_starts_sse_keepalive_before_first_upstream_event
             "method": "POST",
             "path": "/backend-api/codex/responses",
             "headers": [],
+            "client": ("203.0.113.7", 54321),
         }
     )
     payload = proxy_api_module.ResponsesRequest.model_validate(
@@ -1053,6 +1056,50 @@ async def test_stream_responses_starts_sse_keepalive_before_first_upstream_event
     release_upstream.set()
     chunks = [cast(str, await asyncio.wait_for(iterator.__anext__(), timeout=0.2)) for _ in range(2)]
     assert any("response.completed" in chunk for chunk in chunks)
+    assert seen_client_ip == ["203.0.113.7"]
+
+
+@pytest.mark.asyncio
+async def test_compact_responses_passes_client_ip_to_service(monkeypatch):
+    seen_client_ip: list[str | None] = []
+
+    class _FakeService:
+        async def rate_limit_headers(self):
+            return {}
+
+        async def compact_responses(self, *args, **kwargs):
+            del args
+            seen_client_ip.append(kwargs.get("client_ip"))
+            return proxy_api_module.CompactResponsePayload.model_validate({"object": "response.compact"})
+
+    async def allow_request_limits(*args, **kwargs):
+        del args, kwargs
+        return None
+
+    monkeypatch.setattr(proxy_api_module, "_enforce_request_limits", allow_request_limits)
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/backend-api/codex/responses/compact",
+            "headers": [],
+            "client": ("203.0.113.8", 54321),
+        }
+    )
+    payload = proxy_api_module.ResponsesCompactRequest.model_validate(
+        {"model": "gpt-5.1", "instructions": "hi", "input": []}
+    )
+
+    response = await proxy_api_module._compact_responses(
+        request,
+        payload,
+        ProxyContext(service=cast(proxy_module.ProxyService, _FakeService())),
+        api_key=None,
+    )
+
+    assert response.status_code == 200
+    assert seen_client_ip == ["203.0.113.8"]
 
 
 @pytest.mark.asyncio

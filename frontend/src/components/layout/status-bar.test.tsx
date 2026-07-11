@@ -4,6 +4,8 @@ import { HttpResponse, http } from "msw";
 import { describe, expect, it } from "vitest";
 
 import { StatusBar } from "@/components/layout/status-bar";
+import i18n from "@/i18n";
+import { createDashboardSettings } from "@/test/mocks/factories";
 import { server } from "@/test/mocks/server";
 
 function renderStatusBar() {
@@ -19,6 +21,14 @@ function renderStatusBar() {
     <QueryClientProvider client={queryClient}>
       <StatusBar />
     </QueryClientProvider>,
+  );
+}
+
+function mockSettings(
+  overrides: Parameters<typeof createDashboardSettings>[0] = {},
+) {
+  server.use(
+    http.get("/api/settings", () => HttpResponse.json(createDashboardSettings(overrides))),
   );
 }
 
@@ -73,5 +83,71 @@ describe("StatusBar", () => {
         name: /New version available/,
       }),
     ).not.toBeInTheDocument();
+  });
+
+  it("localizes combined routing labels in zh-CN", async () => {
+    await i18n.changeLanguage("zh-CN");
+    try {
+      mockSettings({
+        routingStrategy: "capacity_weighted",
+        stickyThreadsEnabled: true,
+        preferEarlierResetAccounts: true,
+        preferEarlierResetWindow: "secondary",
+      });
+
+      renderStatusBar();
+
+      expect(await screen.findByText(/按容量加权/)).toBeInTheDocument();
+      expect(screen.getByText(/粘性/)).toBeInTheDocument();
+      expect(screen.getByText(/较早周重置/)).toBeInTheDocument();
+      expect(screen.queryByText(/Capacity weighted/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/Sticky threads/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/Early weekly reset/)).not.toBeInTheDocument();
+    } finally {
+      await i18n.changeLanguage("en");
+    }
+  });
+
+  it("does not show early reset for strategies that do not honor it", async () => {
+    mockSettings({
+      routingStrategy: "round_robin",
+      stickyThreadsEnabled: false,
+      preferEarlierResetAccounts: true,
+      preferEarlierResetWindow: "secondary",
+    });
+
+    renderStatusBar();
+
+    expect(await screen.findByText("Round robin")).toBeInTheDocument();
+    expect(screen.queryByText("Early weekly reset")).not.toBeInTheDocument();
+    expect(screen.queryByText("Round robin + Early weekly reset")).not.toBeInTheDocument();
+  });
+
+  it("keeps single-account routing label unadorned", async () => {
+    mockSettings({
+      routingStrategy: "single_account",
+      stickyThreadsEnabled: true,
+      preferEarlierResetAccounts: true,
+      preferEarlierResetWindow: "secondary",
+    });
+
+    renderStatusBar();
+
+    expect(await screen.findByText("Single account")).toBeInTheDocument();
+    expect(screen.queryByText("Single account + Sticky threads")).not.toBeInTheDocument();
+    expect(screen.queryByText("Single account + Sticky + Early weekly reset")).not.toBeInTheDocument();
+  });
+
+  it("still shows early reset for supported strategies", async () => {
+    mockSettings({
+      routingStrategy: "fill_first",
+      stickyThreadsEnabled: false,
+      preferEarlierResetAccounts: true,
+      preferEarlierResetWindow: "secondary",
+    });
+
+    renderStatusBar();
+
+    expect(await screen.findByText("Fill first + Early weekly reset")).toBeInTheDocument();
   });
 });

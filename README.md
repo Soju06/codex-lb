@@ -10,6 +10,8 @@ Resources
 
 # codex-lb
 
+**English** | [简体中文](./README.zh-CN.md)
+
 Load balancer for ChatGPT accounts. Pool multiple accounts, track usage, manage API keys, view everything in a dashboard.
 
 | ![dashboard](docs/screenshots/dashboard.jpg) | ![accounts](docs/screenshots/accounts.jpg) |
@@ -42,6 +44,23 @@ Load balancer for ChatGPT accounts. Pool multiple accounts, track usage, manage 
 <td><b>Auto Model Sync</b><br>Available models fetched from upstream</td>
 </tr>
 </table>
+
+## Routing Strategy Guide
+
+The dashboard setting **Routing strategy** controls how eligible accounts are selected for each request. No strategy can guarantee account-safety outcomes; conservative use still depends on staying within OpenAI terms, using normal request volumes, and avoiding traffic patterns that would be unusual for your accounts.
+
+For low-volume, policy-compliant personal use, start with **Capacity weighted** or **Relative availability** and keep sticky threads enabled. Those strategies preserve session locality while avoiding sudden all-traffic shifts to a single account.
+
+| Routing strategy | Behavior | Trade-offs and recommended use |
+|---|---|---|
+| Capacity weighted | Prefers accounts with more usable quota headroom. | Good default for mixed pools and normal compliant usage. |
+| Relative availability | Draws from the strongest available accounts with configurable weighting. | Smooths distribution while still preferring healthier accounts. |
+| Usage weighted | Reacts to observed recent usage. | Useful when usage history should influence selection, but less direct than capacity-based routing. |
+| Round robin | Cycles evenly through eligible accounts. | Simple and predictable, but ignores quota shape and reset timing. |
+| Fill first | Uses one account heavily before moving on. | Best for controlled drain tests; less conservative for everyday traffic. |
+| Sequential drain | Drains accounts in a fixed order. | Useful for maintenance or explicit account rotation, not a normal safety-first default. |
+| Reset drain | Prioritizes capacity near reset windows. | Helps consume expiring quota, but can create timing-shaped bursts. |
+| Single account | Pins all traffic to one selected active account. | Useful for isolation and debugging; no load balancing. |
 
 ## Quick Start
 
@@ -586,9 +605,9 @@ Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/e
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/n3crosis"><img src="https://avatars.githubusercontent.com/u/11072158?v=4?s=100" width="100px;" alt="n3crosis"/><br /><sub><b>n3crosis</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=n3crosis" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=n3crosis" title="Tests">⚠️</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/copilot"><img src="https://github.com/copilot.png?s=100" width="100px;" alt="copilot"/><br /><sub><b>copilot</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=copilot" title="Code">💻</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/geoHeil"><img src="https://avatars.githubusercontent.com/u/1694964?v=4?s=100" width="100px;" alt="geoHeil"/><br /><sub><b>geoHeil</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=geoHeil" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=geoHeil" title="Tests">⚠️</a></td>
-      <td align="center" valign="top" width="14.28%"><a href="https://github.com/WangErgouaaaa"><img src="https://avatars.githubusercontent.com/u/117421439?v=4?s=100" width="100px;" alt="Guanwei Chen"/><br /><sub><b>Guanwei Chen</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=WangErgouaaaa" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=WangErgouaaaa" title="Tests">⚠️</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/ellentane"><img src="https://avatars.githubusercontent.com/u/70338266?v=4?s=100" width="100px;" alt="Jonáš Sivek"/><br /><sub><b>Jonáš Sivek</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=ellentane" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=ellentane" title="Tests">⚠️</a></td>
-      <td align="center" valign="top" width="14.28%"><a href="https://github.com/RyeBelen"><img src="https://avatars.githubusercontent.com/u/121075326?v=4?s=100" width="100px;" alt="Kapitantutan"/><br /><sub><b>Kapitantutan</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=RyeBelen" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=RyeBelen" title="Tests">⚠️</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/WangErgouaaaa"><img src="https://avatars.githubusercontent.com/u/117421439?v=4?s=100" width="100px;" alt="Guanwei Chen"/><br /><sub><b>Guanwei Chen</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=WangErgouaaaa" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=WangErgouaaaa" title="Tests">⚠️</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/LuoYe17"><img src="https://avatars.githubusercontent.com/u/191728117?v=4?s=100" width="100px;" alt="落叶"/><br /><sub><b>落叶</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=LuoYe17" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=LuoYe17" title="Documentation">📖</a> <a href="https://github.com/Soju06/codex-lb/commits?author=LuoYe17" title="Tests">⚠️</a> <a href="#translation-LuoYe17" title="Translation">🌍</a></td>
     </tr>
   </tbody>
 </table>

@@ -8,7 +8,12 @@ from app.core.errors import OpenAIErrorEnvelope, openai_error
 from app.core.exceptions import ProxyModelNotAllowed
 from app.core.openai.exceptions import ClientPayloadError
 from app.core.openai.model_registry import ModelRegistry, get_model_registry
-from app.core.openai.requests import ResponsesCompactRequest, ResponsesReasoning, ResponsesRequest
+from app.core.openai.requests import (
+    ResponsesCompactRequest,
+    ResponsesReasoning,
+    ResponsesRequest,
+    responses_input_uses_lite_tools,
+)
 from app.core.openai.strict_schema import (
     validate_strict_function_tool_schema,
     validate_strict_json_schema,
@@ -31,12 +36,24 @@ logger = logging.getLogger(__name__)
 _UNSUPPORTED_UPSTREAM_REASONING_EFFORTS: frozenset[str] = frozenset({"minimal"})
 _DEFAULT_REASONING_EFFORT_FALLBACK = "low"
 
+# Client-plane reasoning efforts the reference Codex client never sends on the
+# wire. GPT-5.6 Sol/Terra advertise ``ultra`` in their catalog entries, but the
+# official client rewrites it to ``max`` before building the Responses request
+# (``reasoning_effort_for_request`` in codex-rs ``core/src/client.rs`` at
+# rust-v0.144.1); ``ultra``'s extra effect (proactive multi-agent mode) is
+# purely client-side. Mirror that aliasing for API-key enforcement and raw
+# API callers so the upstream backend only ever sees wire-safe values.
+_REASONING_EFFORT_WIRE_ALIASES: dict[str, str] = {"ultra": "max"}
+
 # Cursor exposes GPT-5 family model labels with UI suffixes such as "Extra
 # High Fast". The ChatGPT/Codex upstream accepts the canonical GPT-5-family
 # slug plus request fields, not those synthetic suffixes in the model name.
 # Keep this deliberately narrow: only strip known Cursor-style suffix tokens
 # from known GPT-5 base model slugs, and leave every other model untouched.
 _GPT5_ALIAS_BASE_MODELS: tuple[str, ...] = (
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
     "gpt-5.4-mini",
     "gpt-5.3-codex",
     "gpt-5.2-codex",
@@ -83,6 +100,19 @@ _MODEL_ALIAS_TOKENS: frozenset[str] = frozenset(
 _UPSTREAM_OMIT_SERVICE_TIERS: frozenset[str] = frozenset({"auto", "default"})
 
 
+def resolve_wire_reasoning_effort(effort: str) -> str:
+    """Return the wire-safe value for a client-plane reasoning effort.
+
+    The reference Codex client rewrites client-plane efforts (``ultra`` ->
+    ``max``) before building the upstream Responses request; every codex-lb
+    code path that builds an upstream payload directly (proxy enforcement,
+    automation compact pings) applies the same aliasing so the upstream
+    backend never sees a client-plane literal. Unknown values pass through
+    unchanged.
+    """
+    return _REASONING_EFFORT_WIRE_ALIASES.get(effort.strip().lower(), effort)
+
+
 def validate_model_access(api_key: ApiKeyData | None, model: str | None) -> None:
     if api_key is None:
         return
@@ -98,6 +128,8 @@ def validate_model_access(api_key: ApiKeyData | None, model: str | None) -> None
 def apply_api_key_enforcement(
     payload: ResponsesRequest | ResponsesCompactRequest,
     api_key: ApiKeyData | None,
+    *,
+    registry: ModelRegistry | None = None,
 ) -> None:
     normalize_upstream_model_alias(payload)
 
@@ -105,16 +137,30 @@ def apply_api_key_enforcement(
         normalize_unsupported_reasoning_effort(payload)
         return
 
-    if api_key.enforced_model and payload.model != api_key.enforced_model:
-        logger.info(
-            "api_key_model_enforced request_id=%s key_id=%s requested_model=%s enforced_model=%s",
-            get_request_id(),
-            api_key.id,
-            payload.model,
-            api_key.enforced_model,
-        )
+    if api_key.enforced_model:
+        requested_model = payload.model
+        if requested_model != api_key.enforced_model:
+            logger.info(
+                "api_key_model_enforced request_id=%s key_id=%s requested_model=%s enforced_model=%s",
+                get_request_id(),
+                api_key.id,
+                requested_model,
+                api_key.enforced_model,
+            )
         payload.model = api_key.enforced_model
         normalize_upstream_model_alias(payload)
+        if (
+            responses_input_uses_lite_tools(payload.input)
+            and _model_responses_lite_capability(
+                payload.model,
+                registry=registry or get_model_registry(),
+            )
+            is False
+        ):
+            raise ProxyModelNotAllowed(
+                f"API key enforced model '{payload.model}' does not support Responses Lite",
+                code="responses_lite_model_mismatch",
+            )
 
     if api_key.enforced_reasoning_effort is not None:
         requested_effort = payload.reasoning.effort if payload.reasoning else None
@@ -157,6 +203,84 @@ def apply_api_key_enforcement(
                 api_key.enforced_service_tier,
                 effective_service_tier,
             )
+
+
+def _model_responses_lite_capability(
+    model: str,
+    *,
+    registry: ModelRegistry,
+) -> bool | None:
+    normalized_model = model.strip().lower()
+    models = registry.get_models_with_fallback()
+    model_entry = models.get(model) or models.get(normalized_model)
+    if model_entry is None:
+        return None
+    capability = model_entry.raw.get("use_responses_lite")
+    return capability if isinstance(capability, bool) else None
+
+
+# Non-standard reasoning toggles some OpenAI-compatible clients attach
+# (OpenRouter/SGLang style). Forwarding them to a source whose model does not
+# support reasoning flips the upstream into reasoning-extraction mode: the
+# answer lands in ``message.reasoning`` instead of ``message.content``.
+_SOURCE_REASONING_TOGGLE_KEYS: tuple[str, ...] = (
+    "include_reasoning",
+    "separate_reasoning",
+    "stream_reasoning",
+    "reasoning",
+    "reasoning_effort",
+)
+
+
+def sanitize_source_chat_payload(
+    payload: dict[str, JsonValue],
+    *,
+    allow_reasoning: bool,
+) -> None:
+    """Clean a chat-completions wire payload before forwarding to a source.
+
+    ``ChatCompletionsRequest`` allows extra fields and defaults ``tools`` to an
+    empty list, so an unfiltered ``model_dump`` forwards ``"tools": []`` and any
+    client-side reasoning toggles verbatim.
+    """
+    tools = payload.get("tools")
+    if isinstance(tools, list) and not tools:
+        payload.pop("tools", None)
+        payload.pop("tool_choice", None)
+        payload.pop("parallel_tool_calls", None)
+    if not allow_reasoning:
+        for key in _SOURCE_REASONING_TOGGLE_KEYS:
+            payload.pop(key, None)
+
+
+def apply_api_key_enforcement_to_chat_payload(
+    payload: dict[str, JsonValue],
+    api_key: ApiKeyData | None,
+) -> None:
+    """Mirror :func:`apply_api_key_enforcement` onto a chat-completions wire payload.
+
+    Source-routed chat requests forward the original chat-shaped payload
+    instead of the converted ``ResponsesRequest``, so enforced fields must be
+    applied to the outbound dict as well or the upstream receives the
+    caller's values while accounting uses the enforced ones.
+    """
+    if api_key is None:
+        return
+
+    if api_key.enforced_reasoning_effort is not None:
+        enforced_effort = resolve_wire_reasoning_effort(api_key.enforced_reasoning_effort)
+        payload["reasoning_effort"] = enforced_effort
+        reasoning = payload.get("reasoning")
+        if isinstance(reasoning, dict):
+            payload["reasoning"] = {**reasoning, "effort": enforced_effort}
+        else:
+            payload["reasoning"] = {"effort": enforced_effort}
+
+    if api_key.enforced_service_tier is not None:
+        if api_key.enforced_service_tier in _UPSTREAM_OMIT_SERVICE_TIERS:
+            payload.pop("service_tier", None)
+        else:
+            payload["service_tier"] = api_key.enforced_service_tier
 
 
 def resolve_model_alias(model: str | None) -> str | None:
@@ -267,6 +391,9 @@ def normalize_unsupported_reasoning_effort(
     so clients (e.g. Codex CLI's ``--reasoning-effort minimal``) keep
     working. Mapping picks the model's lowest advertised effort, falling
     back to ``low`` when the registry has no metadata yet.
+
+    Client-plane efforts the reference Codex client aliases before sending
+    (``ultra`` -> ``max``) are rewritten the same way here.
     """
 
     if payload.reasoning is None or payload.reasoning.effort is None:
@@ -274,6 +401,19 @@ def normalize_unsupported_reasoning_effort(
 
     requested_effort = payload.reasoning.effort
     normalized_effort = requested_effort.strip().lower()
+
+    wire_alias = _REASONING_EFFORT_WIRE_ALIASES.get(normalized_effort)
+    if wire_alias is not None:
+        payload.reasoning.effort = wire_alias
+        logger.info(
+            "reasoning_effort_wire_aliased request_id=%s model=%s requested_effort=%s aliased_effort=%s",
+            get_request_id(),
+            payload.model,
+            requested_effort,
+            wire_alias,
+        )
+        return
+
     if normalized_effort not in _UNSUPPORTED_UPSTREAM_REASONING_EFFORTS:
         return
 

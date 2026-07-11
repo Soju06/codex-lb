@@ -44,7 +44,7 @@ def resolve_websocket_proxy_from_env(url: str, environ: Mapping[str, str | None]
     port = parsed.port or (443 if scheme == "wss" else 80)
     proxies = _sanitized_proxy_env(environ)
     proxy_bypass_environment = getattr(urllib.request, "proxy_bypass_environment")
-    if hostname and proxy_bypass_environment(f"{hostname}:{port}", proxies):
+    if hostname and proxies.get("no") and proxy_bypass_environment(f"{hostname}:{port}", proxies):
         return None
 
     for name in env_names:

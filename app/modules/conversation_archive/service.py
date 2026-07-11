@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import os
 import zlib
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -137,7 +138,21 @@ def _archive_paths_for_lookup(
 
 
 def _archive_dir() -> Path:
-    return Path(getattr(get_settings(), "conversation_archive_dir")).expanduser()
+    return _expand_archive_dir(Path(getattr(get_settings(), "conversation_archive_dir")))
+
+
+def _expand_archive_dir(directory: Path) -> Path:
+    text = str(directory)
+    if text == "~":
+        home = os.environ.get("HOME")
+        if home:
+            return Path(home)
+    for prefix in ("~/", "~\\"):
+        if text.startswith(prefix):
+            home = os.environ.get("HOME")
+            if home:
+                return Path(home) / text[2:]
+    return directory.expanduser()
 
 
 def _iter_archive_paths(directory: Path) -> Iterator[Path]:

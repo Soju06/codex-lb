@@ -243,6 +243,16 @@ export function formatChartDateTime(iso: string | null | undefined): string {
   return date ? getChartDateTimeFormatter().format(date) : "--";
 }
 
+export function formatElapsed(ms: number | null | undefined): string {
+  if (ms === null || ms === undefined) {
+    return "—";
+  }
+  if (ms < 1000) {
+    return `${ms} ms`;
+  }
+  return `${(ms / 1000).toFixed(1)} s`;
+}
+
 export function formatRelative(ms: number): string {
   const minutes = Math.ceil(ms / 60_000);
   if (minutes < 60) {

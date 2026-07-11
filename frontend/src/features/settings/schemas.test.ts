@@ -20,6 +20,7 @@ describe("DashboardSettingsSchema", () => {
       relativeAvailabilityTopK: 5,
       singleAccountId: "acc-1",
       weeklyPaceWorkingDays: "0,1,2,3,4",
+      weeklyPaceSmoothingMinutes: 60,
       openaiCacheAffinityMaxAgeSeconds: 300,
       dashboardSessionTtlSeconds: 43200,
       stickyReallocationBudgetThresholdPct: 95,
@@ -32,12 +33,15 @@ describe("DashboardSettingsSchema", () => {
       guestAccessEnabled: true,
       guestPasswordConfigured: false,
       apiKeyAuthEnabled: true,
+      hideUpstreamQuotaFromApiKeys: false,
       limitWarmupEnabled: false,
       limitWarmupWindows: "both",
       limitWarmupModel: "auto",
       limitWarmupPrompt: "Say OK.",
       limitWarmupCooldownSeconds: 3600,
+      limitWarmupExhaustedThresholdPercent: 99,
       limitWarmupMinAvailablePercent: 100,
+      limitWarmupStaggeredIdleEnabled: true,
     });
 
     expect(parsed.stickyThreadsEnabled).toBe(true);
@@ -50,6 +54,7 @@ describe("DashboardSettingsSchema", () => {
     expect(parsed.relativeAvailabilityTopK).toBe(5);
     expect(parsed.singleAccountId).toBe("acc-1");
     expect(parsed.weeklyPaceWorkingDays).toBe("0,1,2,3,4");
+    expect(parsed.weeklyPaceSmoothingMinutes).toBe(60);
     expect(parsed.openaiCacheAffinityMaxAgeSeconds).toBe(300);
     expect(parsed.dashboardSessionTtlSeconds).toBe(43200);
     expect(parsed.stickyReallocationPrimaryBudgetThresholdPct).toBe(90);
@@ -59,8 +64,10 @@ describe("DashboardSettingsSchema", () => {
     expect(parsed.guestAccessEnabled).toBe(true);
     expect(parsed.guestPasswordConfigured).toBe(false);
     expect(parsed.apiKeyAuthEnabled).toBe(true);
+    expect(parsed.hideUpstreamQuotaFromApiKeys).toBe(false);
     expect(parsed.limitWarmupEnabled).toBe(false);
     expect(parsed.limitWarmupWindows).toBe("both");
+    expect(parsed.limitWarmupStaggeredIdleEnabled).toBe(true);
   });
 
   it("parses legacy settings payload and applies defaults for missing routing fields", () => {
@@ -72,6 +79,7 @@ describe("DashboardSettingsSchema", () => {
       stickyReallocationBudgetThresholdPct: 95,
       totpConfigured: false,
       apiKeyAuthEnabled: true,
+      hideUpstreamQuotaFromApiKeys: false,
     });
 
     expect(parsed.upstreamStreamTransport).toBe("default");
@@ -80,13 +88,17 @@ describe("DashboardSettingsSchema", () => {
     expect(parsed.routingStrategy).toBe("usage_weighted");
     expect(parsed.singleAccountId).toBeNull();
     expect(parsed.openaiCacheAffinityMaxAgeSeconds).toBe(300);
+    expect(parsed.dashboardSessionTtlSeconds).toBe(31536000);
     expect(parsed.limitWarmupEnabled).toBe(false);
     expect(parsed.limitWarmupWindows).toBe("both");
     expect(parsed.limitWarmupModel).toBe("auto");
     expect(parsed.limitWarmupPrompt).toBe("Say OK.");
     expect(parsed.limitWarmupCooldownSeconds).toBe(3600);
+    expect(parsed.limitWarmupExhaustedThresholdPercent).toBe(99);
     expect(parsed.limitWarmupMinAvailablePercent).toBe(100);
     expect(parsed.weeklyPaceWorkingDays).toBe("0,1,2,3,4,5,6");
+    expect(parsed.weeklyPaceSmoothingMinutes).toBe(30);
+    expect(parsed.limitWarmupStaggeredIdleEnabled).toBe(false);
     expect(parsed.stickyReallocationPrimaryBudgetThresholdPct).toBe(95);
     expect(parsed.stickyReallocationSecondaryBudgetThresholdPct).toBe(95);
     expect(parsed.guestAccessEnabled).toBe(false);
@@ -148,6 +160,7 @@ describe("SettingsUpdateRequestSchema", () => {
       relativeAvailabilityTopK: 7,
       singleAccountId: "acc-1",
       weeklyPaceWorkingDays: "0,1,2,3,4",
+      weeklyPaceSmoothingMinutes: 120,
       openaiCacheAffinityMaxAgeSeconds: 120,
       dashboardSessionTtlSeconds: 7200,
       stickyReallocationBudgetThresholdPct: 95,
@@ -157,12 +170,15 @@ describe("SettingsUpdateRequestSchema", () => {
       importWithoutOverwrite: true,
       totpRequiredOnLogin: true,
       apiKeyAuthEnabled: false,
+      hideUpstreamQuotaFromApiKeys: true,
       limitWarmupEnabled: true,
       limitWarmupWindows: "primary",
       limitWarmupModel: "gpt-5.1-codex-mini",
       limitWarmupPrompt: "Say OK.",
       limitWarmupCooldownSeconds: 7200,
+      limitWarmupExhaustedThresholdPercent: 98.5,
       limitWarmupMinAvailablePercent: 99,
+      limitWarmupStaggeredIdleEnabled: true,
     });
 
     expect(parsed.openaiCacheAffinityMaxAgeSeconds).toBe(120);
@@ -180,10 +196,13 @@ describe("SettingsUpdateRequestSchema", () => {
     expect(parsed.relativeAvailabilityTopK).toBe(7);
     expect(parsed.singleAccountId).toBe("acc-1");
     expect(parsed.weeklyPaceWorkingDays).toBe("0,1,2,3,4");
+    expect(parsed.weeklyPaceSmoothingMinutes).toBe(120);
     expect(parsed.totpRequiredOnLogin).toBe(true);
     expect(parsed.apiKeyAuthEnabled).toBe(false);
+    expect(parsed.hideUpstreamQuotaFromApiKeys).toBe(true);
     expect(parsed.limitWarmupEnabled).toBe(true);
     expect(parsed.limitWarmupWindows).toBe("primary");
+    expect(parsed.limitWarmupExhaustedThresholdPercent).toBe(98.5);
   });
 
   it("accepts long session lifetimes above 30 days", () => {
@@ -208,6 +227,7 @@ describe("SettingsUpdateRequestSchema", () => {
     expect(parsed.importWithoutOverwrite).toBeUndefined();
     expect(parsed.totpRequiredOnLogin).toBeUndefined();
     expect(parsed.apiKeyAuthEnabled).toBeUndefined();
+    expect(parsed.hideUpstreamQuotaFromApiKeys).toBeUndefined();
     expect(parsed.relativeAvailabilityPower).toBeUndefined();
     expect(parsed.relativeAvailabilityTopK).toBeUndefined();
     expect(parsed.singleAccountId).toBeUndefined();
@@ -215,6 +235,7 @@ describe("SettingsUpdateRequestSchema", () => {
     expect(parsed.dashboardSessionTtlSeconds).toBeUndefined();
     expect(parsed.warmupModel).toBeUndefined();
     expect(parsed.weeklyPaceWorkingDays).toBeUndefined();
+    expect(parsed.weeklyPaceSmoothingMinutes).toBeUndefined();
   });
 
   it("rejects invalid types", () => {
@@ -256,6 +277,16 @@ describe("SettingsUpdateRequestSchema", () => {
     ).toBe(false);
   });
 
+  it("rejects invalid weekly pace smoothing windows", () => {
+    expect(
+      SettingsUpdateRequestSchema.safeParse({
+        stickyThreadsEnabled: false,
+        preferEarlierResetAccounts: true,
+        weeklyPaceSmoothingMinutes: 45,
+      }).success,
+    ).toBe(false);
+  });
+
   it("matches backend limit warm-up model and prompt length bounds", () => {
     expect(
       SettingsUpdateRequestSchema.safeParse({
@@ -269,6 +300,23 @@ describe("SettingsUpdateRequestSchema", () => {
         stickyThreadsEnabled: false,
         preferEarlierResetAccounts: true,
         limitWarmupPrompt: "p".repeat(513),
+      }).success,
+    ).toBe(false);
+  });
+
+  it("matches backend limit warm-up threshold bounds", () => {
+    expect(
+      SettingsUpdateRequestSchema.safeParse({
+        stickyThreadsEnabled: false,
+        preferEarlierResetAccounts: true,
+        limitWarmupExhaustedThresholdPercent: 0,
+      }).success,
+    ).toBe(false);
+    expect(
+      SettingsUpdateRequestSchema.safeParse({
+        stickyThreadsEnabled: false,
+        preferEarlierResetAccounts: true,
+        limitWarmupExhaustedThresholdPercent: 100.1,
       }).success,
     ).toBe(false);
   });

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -31,10 +32,10 @@ def list_sqlite_pre_migration_backups(source: Path) -> list[Path]:
 
 def _sqlite_backup(source: Path, backup_path: Path) -> None:
     source_mode = source.stat().st_mode
-    with sqlite3.connect(source) as source_conn:
-        with sqlite3.connect(backup_path) as backup_conn:
-            source_conn.backup(backup_conn)
-            backup_conn.execute("PRAGMA journal_mode=DELETE")
+    with closing(sqlite3.connect(source)) as source_conn, closing(sqlite3.connect(backup_path)) as backup_conn:
+        source_conn.backup(backup_conn)
+        backup_conn.execute("PRAGMA journal_mode=DELETE")
+        backup_conn.commit()
     backup_path.chmod(source_mode)
 
 

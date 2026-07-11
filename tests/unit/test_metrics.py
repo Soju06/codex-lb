@@ -24,6 +24,9 @@ class _MetricChild:
     def dec(self, amount: float = 1.0) -> None:
         self.value -= amount
 
+    def set(self, value: float) -> None:
+        self.value = value
+
     def observe(self, amount: float) -> None:
         self.observations.append(amount)
 
@@ -129,6 +132,24 @@ def test_prometheus_metrics_defined_when_dependency_available(monkeypatch: pytes
     assert prometheus_module.continuity_owner_resolution_total.labelnames == ("surface", "source", "outcome")
     assert prometheus_module.continuity_fail_closed_total.name == "codex_lb_continuity_fail_closed_total"
     assert prometheus_module.continuity_fail_closed_total.labelnames == ("surface", "reason")
+    assert prometheus_module.account_inflight_leases.name == "codex_lb_account_inflight_leases"
+    assert prometheus_module.account_inflight_leases.labelnames == ("account_id", "kind")
+    assert prometheus_module.image_requests_total.name == "codex_lb_image_requests_total"
+    assert prometheus_module.image_requests_total.labelnames == (
+        "route",
+        "model",
+        "stream",
+        "status",
+        "outcome",
+    )
+    assert prometheus_module.image_request_duration_seconds.name == "codex_lb_image_request_duration_seconds"
+    assert prometheus_module.image_request_duration_seconds.labelnames == (
+        "route",
+        "model",
+        "stream",
+        "status",
+        "outcome",
+    )
 
 
 @pytest.mark.asyncio

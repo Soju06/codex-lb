@@ -18,6 +18,8 @@ from app.core.openai.models import CompactResponsePayload, OpenAIResponsePayload
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal
+from app.modules.api_keys.repository import ApiKeysRepository
+from app.modules.api_keys.service import ApiKeyCreateData, ApiKeysService
 from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 
@@ -93,6 +95,23 @@ def _session_call_json(session: _JsonSession) -> dict[str, object]:
     return cast(dict[str, object], session.calls[0]["json"])
 
 
+async def _create_api_key(
+    *,
+    name: str,
+    assigned_account_ids: list[str] | None = None,
+) -> tuple[str, str]:
+    async with SessionLocal() as session:
+        service = ApiKeysService(ApiKeysRepository(session))
+        created = await service.create_key(
+            ApiKeyCreateData(
+                name=name,
+                allowed_models=None,
+                assigned_account_ids=assigned_account_ids,
+            )
+        )
+    return created.id, created.key
+
+
 @pytest.mark.asyncio
 async def test_proxy_compact_no_accounts(async_client):
     payload = {"model": "gpt-5.1", "instructions": "hi", "input": []}
@@ -100,6 +119,39 @@ async def test_proxy_compact_no_accounts(async_client):
     assert response.status_code == 503
     error = response.json()["error"]
     assert error["code"] == "no_accounts"
+
+
+@pytest.mark.asyncio
+async def test_proxy_compact_rejects_untrimmable_lite_prelude_before_account_selection(async_client):
+    payload = {
+        "model": "gpt-5.6-sol",
+        "instructions": "",
+        "input": [
+            {
+                "type": "additional_tools",
+                "role": "developer",
+                "tools": [
+                    {
+                        "type": "custom",
+                        "name": "exec",
+                        "format": {
+                            "type": "grammar",
+                            "syntax": "lark",
+                            "definition": "x" * 500_000,
+                        },
+                    }
+                ],
+            },
+            {"type": "message", "role": "developer", "content": "instructions"},
+        ],
+    }
+
+    response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
+
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["code"] == "responses_compact_input_too_large"
+    assert error["param"] == "input"
 
 
 @pytest.mark.asyncio
@@ -138,7 +190,7 @@ async def test_proxy_compact_strips_tool_fields_before_upstream(async_client, mo
     assert seen_payloads[0]["input"] == []
     assert "tools" not in seen_payloads[0]
     assert "tool_choice" not in seen_payloads[0]
-    assert "parallel_tool_calls" not in seen_payloads[0]
+    assert seen_payloads[0]["parallel_tool_calls"] is False
     assert "text" not in seen_payloads[0]
 
 
@@ -316,6 +368,65 @@ async def test_proxy_compact_headers_include_monthly_only_credits(async_client, 
     assert response.headers.get("x-codex-credits-has-credits") == "true"
     assert response.headers.get("x-codex-credits-unlimited") == "false"
     assert response.headers.get("x-codex-credits-balance") == "8.75"
+
+
+@pytest.mark.asyncio
+async def test_proxy_compact_hides_upstream_quota_for_api_key_clients_when_setting_enabled(async_client, monkeypatch):
+    email = "compact-hidden@example.com"
+    raw_account_id = "acc_compact_hidden"
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    expected_account_id = generate_unique_account_id(raw_account_id, email)
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+
+    async with SessionLocal() as session:
+        usage_repo = UsageRepository(session)
+        await usage_repo.add_entry(
+            account_id=expected_account_id,
+            used_percent=25.0,
+            window="primary",
+            reset_at=now_epoch + 300,
+            window_minutes=5,
+            recorded_at=now,
+            credits_has=True,
+            credits_unlimited=False,
+            credits_balance=12.5,
+        )
+
+    _, key = await _create_api_key(name="compact-hidden", assigned_account_ids=[expected_account_id])
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        return OpenAIResponsePayload.model_validate({"output": []})
+
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+
+    settings = await async_client.put(
+        "/api/settings",
+        json={
+            "apiKeyAuthEnabled": True,
+            "hideUpstreamQuotaFromApiKeys": True,
+        },
+    )
+    assert settings.status_code == 200
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": []}
+    response = await async_client.post(
+        "/backend-api/codex/responses/compact",
+        json=payload,
+        headers={"Authorization": f"Bearer {key}"},
+    )
+    assert response.status_code == 200
+    assert response.json()["output"] == []
+    assert response.headers.get("x-codex-primary-used-percent") is None
+    assert response.headers.get("x-codex-primary-window-minutes") is None
+    assert response.headers.get("x-codex-primary-reset-at") is None
+    assert response.headers.get("x-codex-credits-has-credits") is None
+    assert response.headers.get("x-codex-credits-unlimited") is None
+    assert response.headers.get("x-codex-credits-balance") is None
 
 
 @pytest.mark.asyncio

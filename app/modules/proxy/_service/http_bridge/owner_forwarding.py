@@ -278,6 +278,7 @@ class _HTTPBridgeOwnerForwardingMixin:
         downstream_turn_state: str | None,
         request_started_at: float,
         proxy_api_authorization: str | None,
+        client_ip: str | None = None,
     ) -> AsyncIterator[str]:
         current_instance, _ = _normalized_http_bridge_instance_ring(_service_get_settings())
         forwarded_turn_state = _header_value_case_insensitive(headers, "x-codex-turn-state") or downstream_turn_state
@@ -289,6 +290,7 @@ class _HTTPBridgeOwnerForwardingMixin:
             downstream_turn_state=forwarded_turn_state,
             original_affinity_kind=owner_forward.key.affinity_kind,
             original_affinity_key=owner_forward.key.affinity_key,
+            client_ip=client_ip,
         )
         forward_headers = _headers_with_authorization(headers, proxy_api_authorization)
         start = _service_time().monotonic()

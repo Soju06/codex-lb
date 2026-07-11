@@ -80,7 +80,7 @@ export function AccountListItem({
       type="button"
       onClick={() => onSelect(account.accountId)}
       className={cn(
-        "relative w-full rounded-lg px-3 py-2.5 text-left transition-colors",
+        "relative min-w-0 w-full rounded-lg px-3 py-2.5 text-left transition-colors",
         selected ? "bg-primary/8 ring-1 ring-primary/25" : "hover:bg-muted/50",
       )}
     >
@@ -89,7 +89,7 @@ export function AccountListItem({
           {resetBadgeLabel}
         </span>
       ) : null}
-      <div className="flex items-center gap-2.5">
+      <div className="flex items-start gap-2.5">
         <div className="min-w-0 flex-1">
           <p className="truncate text-sm font-medium">
             {titleIsEmail && blurred ? (
@@ -118,7 +118,7 @@ export function AccountListItem({
       <div
         className={cn(
           "mt-2 grid gap-2",
-          visibleQuotaRows > 1 ? "grid-cols-2" : "grid-cols-1",
+          visibleQuotaRows > 1 ? "grid-cols-1 sm:grid-cols-2" : "grid-cols-1",
         )}
       >
         {showMonthlyRow ? (
@@ -143,9 +143,9 @@ export function AccountListItem({
           />
         ) : null}
       </div>
-      <div className="mt-2 flex items-center justify-between gap-2 text-[10px] text-muted-foreground">
-        <span>{warmupLabel}</span>
-        <span className="truncate">{warmupMeta}</span>
+      <div className="mt-2 flex min-w-0 items-center justify-between gap-2 text-[10px] text-muted-foreground">
+        <span className="shrink-0">{warmupLabel}</span>
+        <span className="min-w-0 truncate">{warmupMeta}</span>
       </div>
     </button>
   );

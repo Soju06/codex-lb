@@ -1,11 +1,14 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useRef } from "react";
 import { toast } from "sonner";
 
 import {
   consumeRateLimitResetCredit,
+  consumeAccountUsageResetCredit,
   deleteAccount,
   exportAccountAuth,
   getAccountTrends,
+  getAccountUsageResetCredits,
   getRateLimitResetCredits,
   importAccount,
   listAccounts,
@@ -17,7 +20,50 @@ import {
   updateAccountLimitWarmup,
   updateAccountRoutingPolicy,
 } from "@/features/accounts/api";
-import type { AccountRoutingPolicy } from "@/features/accounts/schemas";
+import type {
+  AccountRoutingPolicy,
+  AccountUsageResetConsumeResponse,
+} from "@/features/accounts/schemas";
+
+async function invalidateAccountRelatedQueries(queryClient: ReturnType<typeof useQueryClient>, accountId?: string) {
+  const invalidations = [
+    queryClient.invalidateQueries({ queryKey: ["accounts", "list"] }),
+    queryClient.invalidateQueries({ queryKey: ["dashboard", "overview"] }),
+    queryClient.invalidateQueries({ queryKey: ["dashboard", "projections"] }),
+  ];
+  if (accountId) {
+    invalidations.push(queryClient.invalidateQueries({ queryKey: ["accounts", "trends", accountId] }));
+    invalidations.push(queryClient.invalidateQueries({ queryKey: ["accounts", "usage-reset-credits", accountId] }));
+  } else {
+    invalidations.push(queryClient.invalidateQueries({ queryKey: ["accounts", "trends"] }));
+    invalidations.push(queryClient.invalidateQueries({ queryKey: ["accounts", "usage-reset-credits"] }));
+  }
+  await Promise.all(invalidations);
+}
+
+function usageResetToastMessage(data: AccountUsageResetConsumeResponse): string {
+  const changed =
+    data.primaryUsedPercentBefore !== data.primaryUsedPercentAfter ||
+    data.secondaryUsedPercentBefore !== data.secondaryUsedPercentAfter ||
+    data.accountStatusBefore !== data.accountStatusAfter;
+  if (data.code === "reset") {
+    return changed ? "Usage reset applied" : "Usage reset applied; upstream values are unchanged";
+  }
+  if (data.code === "already_redeemed") {
+    return "Usage reset was already applied";
+  }
+  if (data.code === "no_credit") {
+    return "No usage reset credits available";
+  }
+  if (data.code === "nothing_to_reset") {
+    return "Nothing to reset";
+  }
+  return "Usage reset request completed";
+}
+
+function createRedeemRequestId(): string {
+  return globalThis.crypto?.randomUUID?.() ?? `dashboard-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
 
 /**
  * Account mutation actions without the polling query.
@@ -26,15 +72,16 @@ import type { AccountRoutingPolicy } from "@/features/accounts/schemas";
  */
 export function useAccountMutations() {
   const queryClient = useQueryClient();
+  const usageResetRedeemRequestRef = useRef<{
+    accountId: string;
+    redeemRequestId: string;
+  } | null>(null);
 
   const importMutation = useMutation({
     mutationFn: importAccount,
     onSuccess: () => {
       toast.success("Account imported");
-      void queryClient.invalidateQueries({ queryKey: ["accounts", "list"] });
-      void queryClient.invalidateQueries({ queryKey: ["accounts", "trends"] });
-      void queryClient.invalidateQueries({ queryKey: ["dashboard", "overview"] });
-      void queryClient.invalidateQueries({ queryKey: ["dashboard", "projections"] });
+      void invalidateAccountRelatedQueries(queryClient);
     },
     onError: (error: Error) => {
       toast.error(error.message || "Import failed");
@@ -45,10 +92,7 @@ export function useAccountMutations() {
     mutationFn: pauseAccount,
     onSuccess: () => {
       toast.success("Account paused");
-      void queryClient.invalidateQueries({ queryKey: ["accounts", "list"] });
-      void queryClient.invalidateQueries({ queryKey: ["accounts", "trends"] });
-      void queryClient.invalidateQueries({ queryKey: ["dashboard", "overview"] });
-      void queryClient.invalidateQueries({ queryKey: ["dashboard", "projections"] });
+      void invalidateAccountRelatedQueries(queryClient);
     },
     onError: (error: Error) => {
       toast.error(error.message || "Pause failed");
@@ -59,10 +103,7 @@ export function useAccountMutations() {
     mutationFn: reactivateAccount,
     onSuccess: () => {
       toast.success("Account resumed");
-      void queryClient.invalidateQueries({ queryKey: ["accounts", "list"] });
-      void queryClient.invalidateQueries({ queryKey: ["accounts", "trends"] });
-      void queryClient.invalidateQueries({ queryKey: ["dashboard", "overview"] });
-      void queryClient.invalidateQueries({ queryKey: ["dashboard", "projections"] });
+      void invalidateAccountRelatedQueries(queryClient);
     },
     onError: (error: Error) => {
       toast.error(error.message || "Resume failed");
@@ -74,10 +115,7 @@ export function useAccountMutations() {
       setAccountAlias(accountId, alias),
     onSuccess: () => {
       toast.success("Account alias updated");
-      void queryClient.invalidateQueries({ queryKey: ["accounts", "list"] });
-      void queryClient.invalidateQueries({ queryKey: ["accounts", "trends"] });
-      void queryClient.invalidateQueries({ queryKey: ["dashboard", "overview"] });
-      void queryClient.invalidateQueries({ queryKey: ["dashboard", "projections"] });
+      void invalidateAccountRelatedQueries(queryClient);
     },
     onError: (error: Error) => {
       toast.error(error.message || "Alias update failed");
@@ -89,10 +127,7 @@ export function useAccountMutations() {
       deleteAccount(accountId, deleteHistory),
     onSuccess: () => {
       toast.success("Account deleted");
-      void queryClient.invalidateQueries({ queryKey: ["accounts", "list"] });
-      void queryClient.invalidateQueries({ queryKey: ["accounts", "trends"] });
-      void queryClient.invalidateQueries({ queryKey: ["dashboard", "overview"] });
-      void queryClient.invalidateQueries({ queryKey: ["dashboard", "projections"] });
+      void invalidateAccountRelatedQueries(queryClient);
     },
     onError: (error: Error) => {
       toast.error(error.message || "Delete failed");
@@ -104,16 +139,32 @@ export function useAccountMutations() {
       probeAccount(accountId, model ? { model } : undefined),
     onSuccess: (_data, variables) => {
       toast.success("Account probed");
-      void queryClient.invalidateQueries({ queryKey: ["accounts", "list"] });
-      void queryClient.invalidateQueries({ queryKey: ["accounts", "trends"] });
-      void queryClient.invalidateQueries({
-        queryKey: ["accounts", "trends", variables.accountId],
-      });
-      void queryClient.invalidateQueries({ queryKey: ["dashboard", "overview"] });
-      void queryClient.invalidateQueries({ queryKey: ["dashboard", "projections"] });
+      void invalidateAccountRelatedQueries(queryClient, variables.accountId);
     },
     onError: (error: Error) => {
       toast.error(error.message || "Probe failed");
+    },
+  });
+
+  const usageResetMutation = useMutation({
+    mutationFn: ({ accountId }: { accountId: string }) => {
+      if (usageResetRedeemRequestRef.current?.accountId !== accountId) {
+        usageResetRedeemRequestRef.current = {
+          accountId,
+          redeemRequestId: createRedeemRequestId(),
+        };
+      }
+      return consumeAccountUsageResetCredit(accountId, {
+        redeemRequestId: usageResetRedeemRequestRef.current.redeemRequestId,
+      });
+    },
+    onSuccess: async (data, variables) => {
+      usageResetRedeemRequestRef.current = null;
+      await invalidateAccountRelatedQueries(queryClient, variables.accountId);
+      toast.success(usageResetToastMessage(data));
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Usage reset failed");
     },
   });
 
@@ -122,10 +173,7 @@ export function useAccountMutations() {
       updateAccountLimitWarmup(accountId, enabled),
     onSuccess: (data) => {
       toast.success(data.enabled ? "Limit warm-up enabled" : "Limit warm-up disabled");
-      void queryClient.invalidateQueries({ queryKey: ["accounts", "list"] });
-      void queryClient.invalidateQueries({ queryKey: ["accounts", "trends"] });
-      void queryClient.invalidateQueries({ queryKey: ["dashboard", "overview"] });
-      void queryClient.invalidateQueries({ queryKey: ["dashboard", "projections"] });
+      void invalidateAccountRelatedQueries(queryClient);
     },
     onError: (error: Error) => {
       toast.error(error.message || "Limit warm-up update failed");
@@ -144,10 +192,7 @@ export function useAccountMutations() {
       const label =
         data.routingPolicy === "normal" ? "normal" : data.routingPolicy.replace("_", "-");
       toast.success(`Account routing policy set to ${label}`);
-      void queryClient.invalidateQueries({ queryKey: ["accounts", "list"] });
-      void queryClient.invalidateQueries({ queryKey: ["accounts", "trends"] });
-      void queryClient.invalidateQueries({ queryKey: ["dashboard", "overview"] });
-      void queryClient.invalidateQueries({ queryKey: ["dashboard", "projections"] });
+      void invalidateAccountRelatedQueries(queryClient);
     },
     onError: (error: Error) => {
       toast.error(error.message || "Routing policy update failed");
@@ -169,10 +214,7 @@ export function useAccountMutations() {
       updateAccount(accountId, { securityWorkAuthorized }),
     onSuccess: () => {
       toast.success("Account updated");
-      void queryClient.invalidateQueries({ queryKey: ["accounts", "list"] });
-      void queryClient.invalidateQueries({ queryKey: ["accounts", "trends"] });
-      void queryClient.invalidateQueries({ queryKey: ["dashboard", "overview"] });
-      void queryClient.invalidateQueries({ queryKey: ["dashboard", "projections"] });
+      void invalidateAccountRelatedQueries(queryClient);
     },
     onError: (error: Error) => {
       toast.error(error.message || "Update failed");
@@ -180,7 +222,8 @@ export function useAccountMutations() {
   });
 
   const resetCreditConsumeMutation = useMutation({
-    mutationFn: (accountId: string) => consumeRateLimitResetCredit(accountId),
+    mutationFn: ({ accountId, redeemRequestId }: { accountId: string; redeemRequestId?: string }) =>
+      consumeRateLimitResetCredit(accountId, redeemRequestId ? { redeemRequestId } : undefined),
     onSuccess: (data) => {
       const resetCount = data.windowsReset ?? 0;
       toast.success(
@@ -204,6 +247,7 @@ export function useAccountMutations() {
     setAliasMutation,
     deleteMutation,
     probeMutation,
+    usageResetMutation,
     exportAuthMutation,
     limitWarmupMutation,
     routingPolicyMutation,
@@ -232,6 +276,15 @@ export function useAccountTrends(accountId: string | null) {
     staleTime: 5 * 60_000,
     refetchInterval: 5 * 60_000,
     refetchIntervalInBackground: false,
+  });
+}
+
+export function useAccountUsageResetCredits(accountId: string | null) {
+  return useQuery({
+    queryKey: ["accounts", "usage-reset-credits", accountId],
+    queryFn: () => getAccountUsageResetCredits(accountId!),
+    enabled: !!accountId,
+    staleTime: 60_000,
   });
 }
 

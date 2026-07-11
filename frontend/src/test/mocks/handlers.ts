@@ -21,7 +21,9 @@ import {
   createDashboardSettings,
   createDefaultAccounts,
   createDefaultApiKeys,
+  createDefaultModelSources,
   createDefaultRequestLogs,
+  createModelSource,
   createOauthCompleteResponse,
   createOauthStartResponse,
   createOauthStatusResponse,
@@ -34,6 +36,7 @@ import {
   createRequestLogsResponse,
   type DashboardAuthSession,
   type DashboardSettings,
+  type ModelSource,
   type QuotaPlannerDecision,
   type QuotaPlannerForecast,
   type QuotaPlannerSettings,
@@ -55,6 +58,7 @@ const ApiKeyCreatePayloadSchema = z.looseObject({
   trafficClass: z.enum(TRAFFIC_CLASSES).optional(),
   transportPolicyOverride: z.enum(["smart", "always_http", "always_websocket"]).nullable().optional(),
   assignedAccountIds: z.array(z.string()).optional(),
+  assignedSourceIds: z.array(z.string()).optional(),
 });
 
 const FirewallIpCreatePayloadSchema = z.looseObject({
@@ -68,6 +72,7 @@ const ApiKeyUpdatePayloadSchema = z.looseObject({
   transportPolicyOverride: z.enum(["smart", "always_http", "always_websocket"]).nullable().optional(),
   isActive: z.boolean().optional(),
   assignedAccountIds: z.array(z.string()).optional(),
+  assignedSourceIds: z.array(z.string()).optional(),
   resetUsage: z.boolean().optional(),
   limits: z
     .array(
@@ -131,6 +136,33 @@ const SettingsPayloadSchema = z.looseObject({
   totpRequiredOnLogin: z.boolean().optional(),
   totpConfigured: z.boolean().optional(),
   apiKeyAuthEnabled: z.boolean().optional(),
+  limitWarmupStaggeredIdleEnabled: z.boolean().optional(),
+  hideUpstreamQuotaFromApiKeys: z.boolean().optional(),
+});
+
+const ModelSourceCreatePayloadSchema = z.looseObject({
+  name: z.string().optional(),
+  baseUrl: z.string().optional(),
+  supportsChatCompletions: z.boolean().optional(),
+  supportsResponses: z.boolean().optional(),
+  supportsAudioTranscriptions: z.boolean().optional(),
+  models: z
+    .array(
+      z.looseObject({
+        model: z.string(),
+        displayName: z.string().nullable().optional(),
+        contextWindow: z.number().nullable().optional(),
+        maxOutputTokens: z.number().nullable().optional(),
+        supportsStreaming: z.boolean().optional(),
+        supportsTools: z.boolean().optional(),
+        supportsVision: z.boolean().optional(),
+      }),
+    )
+    .optional(),
+});
+
+const ModelSourceUpdatePayloadSchema = z.looseObject({
+  isEnabled: z.boolean().optional(),
 });
 
 const QuotaPlannerSettingsPayloadSchema = z.looseObject({
@@ -149,6 +181,41 @@ const QuotaPlannerSettingsPayloadSchema = z.looseObject({
   warmupModelPreference: z.string().nullable().optional(),
   dryRun: z.boolean().optional(),
 });
+
+const AutomationSchedulePayloadSchema = z.object({
+	type: z.literal("daily"),
+	time: z.string().regex(/^\d{2}:\d{2}$/),
+	timezone: z.string().min(1),
+	thresholdMinutes: z.number().int().min(0).max(240).default(0),
+	days: z
+		.array(z.enum(["mon", "tue", "wed", "thu", "fri", "sat", "sun"]))
+		.min(1)
+		.max(7),
+});
+
+const AutomationCreatePayloadSchema = z.object({
+	name: z.string().min(1),
+	enabled: z.boolean().optional(),
+	includePausedAccounts: z.boolean().optional(),
+	schedule: AutomationSchedulePayloadSchema,
+	model: z.string().min(1),
+	reasoningEffort: z.enum(["minimal", "low", "medium", "high", "xhigh", "max", "ultra"]).nullable().optional(),
+	prompt: z.string().optional(),
+	accountIds: z.array(z.string().min(1)),
+});
+
+const AutomationUpdatePayloadSchema = z
+	.object({
+		name: z.string().min(1).optional(),
+		enabled: z.boolean().optional(),
+		includePausedAccounts: z.boolean().optional(),
+		schedule: AutomationSchedulePayloadSchema.optional(),
+		model: z.string().min(1).optional(),
+		reasoningEffort: z.enum(["minimal", "low", "medium", "high", "xhigh", "max", "ultra"]).nullable().optional(),
+		prompt: z.string().min(1).optional(),
+		accountIds: z.array(z.string().min(1)).optional(),
+	})
+	.passthrough();
 
 // ── Helpers ──
 
@@ -175,6 +242,66 @@ type MockState = {
   upstreamProxyAdmin: UpstreamProxyAdmin;
   quotaPlannerForecast: QuotaPlannerForecast;
   apiKeys: ApiKey[];
+  automations: Array<{
+    id: string;
+    name: string;
+    enabled: boolean;
+    includePausedAccounts: boolean;
+    schedule: {
+      type: "daily";
+      time: string;
+      timezone: string;
+      thresholdMinutes: number;
+      days: Array<"mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun">;
+    };
+    model: string;
+    reasoningEffort: "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra" | null;
+    prompt: string;
+    accountIds: string[];
+    nextRunAt: string | null;
+    lastRun: {
+      id: string;
+      jobId: string;
+      model: string | null;
+      reasoningEffort: "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra" | null;
+      trigger: "scheduled" | "manual";
+      status: "running" | "success" | "failed" | "partial";
+      scheduledFor: string;
+      startedAt: string;
+      finishedAt: string | null;
+      accountId: string | null;
+      errorCode: string | null;
+      errorMessage: string | null;
+      attemptCount: number;
+    } | null;
+  }>;
+  automationRuns: Record<
+    string,
+    Array<{
+      id: string;
+      jobId: string;
+      model: string | null;
+      reasoningEffort:
+        | "minimal"
+        | "low"
+        | "medium"
+        | "high"
+        | "xhigh"
+        | "max"
+        | "ultra"
+        | null;
+      trigger: "scheduled" | "manual";
+      status: "running" | "success" | "failed" | "partial";
+      scheduledFor: string;
+      startedAt: string;
+      finishedAt: string | null;
+      accountId: string | null;
+      errorCode: string | null;
+      errorMessage: string | null;
+      attemptCount: number;
+    }>
+  >;
+  modelSources: ModelSource[];
   firewallEntries: Array<{ ipAddress: string; createdAt: string }>;
   stickySessions: Array<{
     key: string;
@@ -198,6 +325,9 @@ function createInitialState(): MockState {
     upstreamProxyAdmin: createUpstreamProxyAdmin(),
     quotaPlannerForecast: createQuotaPlannerForecast(),
     apiKeys: createDefaultApiKeys(),
+    automations: [],
+    automationRuns: {},
+    modelSources: createDefaultModelSources(),
     firewallEntries: [],
     stickySessions: [],
   };
@@ -379,6 +509,201 @@ function findAccount(accountId: string): AccountSummary | undefined {
 
 function findApiKey(keyId: string): ApiKey | undefined {
   return state.apiKeys.find((item) => item.id === keyId);
+}
+
+function findAutomation(automationId: string) {
+	return state.automations.find((item) => item.id === automationId);
+}
+
+function findAutomationRun(runId: string) {
+	for (const runs of Object.values(state.automationRuns)) {
+		const run = runs.find((entry) => entry.id === runId);
+		if (run) {
+			return run;
+		}
+	}
+	return null;
+}
+
+function randomId(prefix: string): string {
+	return `${prefix}_${Math.random().toString(16).slice(2, 10)}`;
+}
+
+function createAutomationRun(automationId: string, trigger: "manual" | "scheduled") {
+	const nowIso = new Date().toISOString();
+	const automation = findAutomation(automationId);
+	const run = {
+		id: randomId("run"),
+		jobId: automationId,
+		model: automation?.model ?? null,
+		reasoningEffort: automation?.reasoningEffort ?? null,
+		trigger,
+		status: "success" as const,
+		scheduledFor: nowIso,
+		startedAt: nowIso,
+		finishedAt: nowIso,
+		accountId: null,
+		errorCode: null,
+		errorMessage: null,
+		attemptCount: 1,
+	};
+	const existingRuns = state.automationRuns[automationId] ?? [];
+	state.automationRuns[automationId] = [run, ...existingRuns].slice(0, 20);
+	if (automation) {
+		automation.lastRun = run;
+	}
+	return run;
+}
+
+function toFiniteNonNegative(value: string | null, fallback: number): number {
+	const parsed = Number(value);
+	if (!Number.isFinite(parsed)) {
+		return fallback;
+	}
+	const normalized = Math.floor(parsed);
+	return normalized >= 0 ? normalized : fallback;
+}
+
+function listFilteredAutomationJobs(url: URL) {
+	const search = (url.searchParams.get("search") || "").trim().toLowerCase();
+	const accountIds = new Set(url.searchParams.getAll("accountId"));
+	const models = new Set(url.searchParams.getAll("model"));
+	const statuses = new Set(url.searchParams.getAll("status").map((value) => value.toLowerCase()));
+	const scheduleTypes = new Set(url.searchParams.getAll("scheduleType"));
+
+	return state.automations.filter((automation) => {
+		if (search.length > 0) {
+			const haystack = [
+				automation.id,
+				automation.name,
+				automation.prompt,
+				automation.model,
+				automation.reasoningEffort,
+			]
+				.filter(Boolean)
+				.join(" ")
+				.toLowerCase();
+			if (!haystack.includes(search)) {
+				return false;
+			}
+		}
+
+		if (accountIds.size > 0) {
+			const isAllAccountsJob = automation.accountIds.length === 0;
+			const hasMatch = automation.accountIds.some((accountId) => accountIds.has(accountId));
+			if (!isAllAccountsJob && !hasMatch) {
+				return false;
+			}
+		}
+
+		if (models.size > 0 && !models.has(automation.model)) {
+			return false;
+		}
+
+		if (scheduleTypes.size > 0 && !scheduleTypes.has(automation.schedule.type)) {
+			return false;
+		}
+
+		if (statuses.size > 0 && !statuses.has("all")) {
+			const mappedStatus = automation.enabled ? "enabled" : "disabled";
+			if (!statuses.has(mappedStatus)) {
+				return false;
+			}
+		}
+
+		return true;
+	});
+}
+
+function listAutomationRunsWithContext() {
+	const entries: Array<
+		(MockState["automationRuns"][string][number] & {
+			jobName: string | null;
+			model: string | null;
+			reasoningEffort: "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra" | null;
+			effectiveStatus: "running" | "success" | "failed" | "partial";
+			totalAccounts: number;
+			completedAccounts: number;
+			pendingAccounts: number;
+			cycleKey: string;
+		})
+	> = [];
+
+	for (const [jobId, runs] of Object.entries(state.automationRuns)) {
+		const job = findAutomation(jobId);
+		for (const run of runs) {
+			entries.push({
+				...run,
+				jobName: job?.name ?? null,
+				model: job?.model ?? null,
+				reasoningEffort: run.reasoningEffort ?? job?.reasoningEffort ?? null,
+				effectiveStatus: run.status,
+				totalAccounts: 1,
+				completedAccounts: 1,
+				pendingAccounts: 0,
+				cycleKey: `${run.trigger}:${run.jobId}:${run.id}`,
+			});
+		}
+	}
+
+	entries.sort((a, b) => {
+		const aTs = new Date(a.startedAt).getTime();
+		const bTs = new Date(b.startedAt).getTime();
+		return bTs - aTs;
+	});
+	return entries;
+}
+
+function listFilteredAutomationRuns(url: URL) {
+	const search = (url.searchParams.get("search") || "").trim().toLowerCase();
+	const accountIds = new Set(url.searchParams.getAll("accountId"));
+	const models = new Set(url.searchParams.getAll("model"));
+	const statuses = new Set(url.searchParams.getAll("status").map((value) => value.toLowerCase()));
+	const triggers = new Set(url.searchParams.getAll("trigger").map((value) => value.toLowerCase()));
+	const automationIds = new Set(url.searchParams.getAll("automationId"));
+
+	return listAutomationRunsWithContext().filter((run) => {
+		if (search.length > 0) {
+			const haystack = [
+				run.id,
+				run.jobId,
+				run.jobName,
+				run.model,
+				run.reasoningEffort,
+				run.accountId,
+				run.errorCode,
+				run.errorMessage,
+			]
+				.filter(Boolean)
+				.join(" ")
+				.toLowerCase();
+			if (!haystack.includes(search)) {
+				return false;
+			}
+		}
+
+		if (accountIds.size > 0 && (!run.accountId || !accountIds.has(run.accountId))) {
+			return false;
+		}
+
+		if (models.size > 0 && (!run.model || !models.has(run.model))) {
+			return false;
+		}
+
+		if (statuses.size > 0 && !statuses.has("all") && !statuses.has(run.status)) {
+			return false;
+		}
+
+		if (triggers.size > 0 && !triggers.has(run.trigger)) {
+			return false;
+		}
+
+		if (automationIds.size > 0 && !automationIds.has(run.jobId)) {
+			return false;
+		}
+
+		return true;
+	});
 }
 
 export const handlers = [
@@ -601,6 +926,45 @@ export const handlers = [
       );
     }
     return HttpResponse.json(createAccountTrends(accountId));
+  }),
+
+  http.get("/api/accounts/:accountId/usage-reset-credits", ({ params }) => {
+    const accountId = String(params.accountId);
+    const account = findAccount(accountId);
+    if (!account) {
+      return HttpResponse.json(
+        { error: { code: "account_not_found", message: "Account not found" } },
+        { status: 404 },
+      );
+    }
+    return HttpResponse.json({
+      accountId,
+      rateLimitResetCredits: { availableCount: 3 },
+    });
+  }),
+
+  http.post("/api/accounts/:accountId/usage-reset-credits/consume", ({ params }) => {
+    const accountId = String(params.accountId);
+    const account = findAccount(accountId);
+    if (!account) {
+      return HttpResponse.json(
+        { error: { code: "account_not_found", message: "Account not found" } },
+        { status: 404 },
+      );
+    }
+    return HttpResponse.json({
+      status: "reset",
+      accountId,
+      code: "reset",
+      windowsReset: 2,
+      usageWritten: true,
+      primaryUsedPercentBefore: 99,
+      primaryUsedPercentAfter: 1,
+      secondaryUsedPercentBefore: 80,
+      secondaryUsedPercentAfter: 0,
+      accountStatusBefore: account.status,
+      accountStatusAfter: account.status,
+    });
   }),
 
   http.post("/api/accounts/:accountId/probe", ({ params }) => {
@@ -1200,6 +1564,245 @@ export const handlers = [
       hasMore: offset + entries.length < filteredEntries.length,
     });
   }),
+  http.get("/api/automations", ({ request }) => {
+    const url = new URL(request.url);
+    const filtered = listFilteredAutomationJobs(url);
+    const total = filtered.length;
+    const limit = Math.max(1, toFiniteNonNegative(url.searchParams.get("limit"), 25));
+    const offset = toFiniteNonNegative(url.searchParams.get("offset"), 0);
+    const items = filtered.slice(offset, offset + limit);
+    return HttpResponse.json({
+      items,
+      total,
+      hasMore: offset + limit < total,
+    });
+  }),
+
+  http.get("/api/automations/options", ({ request }) => {
+    const filtered = listFilteredAutomationJobs(new URL(request.url));
+    const accountIds = [
+      ...new Set(state.accounts.map((account) => account.accountId)),
+    ].sort();
+    const models = [
+      ...new Set(
+        filtered
+          .map((entry) => entry.model)
+          .filter((value) => value.length > 0),
+      ),
+    ].sort();
+    const scheduleTypes = [
+      ...new Set(
+        filtered
+          .map((entry) => entry.schedule.type)
+          .filter((value) => value.length > 0),
+      ),
+    ].sort();
+    const statuses = [
+      ...new Set(filtered.map((entry) => (entry.enabled ? "enabled" : "disabled"))),
+    ].sort();
+    return HttpResponse.json({
+      accountIds,
+      models,
+      statuses,
+      scheduleTypes,
+    });
+  }),
+
+  http.post("/api/automations", async ({ request }) => {
+    const payload = await parseJsonBody(request, AutomationCreatePayloadSchema);
+    if (!payload) {
+      return HttpResponse.json(
+        { error: { code: "validation_error", message: "Invalid request payload" } },
+        { status: 422 },
+      );
+    }
+    const now = new Date();
+    const nextRunAt = new Date(now.getTime() + 60 * 60 * 1000).toISOString();
+    const item = {
+      id: randomId("job"),
+      name: payload.name,
+      enabled: payload.enabled ?? true,
+      schedule: payload.schedule,
+      model: payload.model,
+      reasoningEffort: payload.reasoningEffort ?? null,
+      includePausedAccounts: payload.includePausedAccounts ?? false,
+      prompt: payload.prompt ?? "ping",
+      accountIds: payload.accountIds,
+      nextRunAt: payload.enabled === false ? null : nextRunAt,
+      lastRun: null,
+    };
+    state.automations = [item, ...state.automations];
+    state.automationRuns[item.id] = [];
+    return HttpResponse.json(item);
+  }),
+
+  http.patch("/api/automations/:automationId", async ({ params, request }) => {
+    const automationId = String(params.automationId);
+    const automation = findAutomation(automationId);
+    if (!automation) {
+      return HttpResponse.json(
+        { error: { code: "automation_not_found", message: "Automation not found" } },
+        { status: 404 },
+      );
+    }
+    const payload = await parseJsonBody(request, AutomationUpdatePayloadSchema);
+    if (!payload) {
+      return HttpResponse.json(
+        { error: { code: "validation_error", message: "Invalid request payload" } },
+        { status: 422 },
+      );
+    }
+    if (payload.name !== undefined) automation.name = payload.name;
+    if (payload.enabled !== undefined) automation.enabled = payload.enabled;
+    if (payload.schedule !== undefined) automation.schedule = payload.schedule;
+    if (payload.model !== undefined) automation.model = payload.model;
+    if (payload.reasoningEffort !== undefined) {
+      automation.reasoningEffort = payload.reasoningEffort;
+    }
+    if (payload.includePausedAccounts !== undefined) {
+      automation.includePausedAccounts = payload.includePausedAccounts;
+    }
+    if (payload.prompt !== undefined) automation.prompt = payload.prompt;
+    if (payload.accountIds !== undefined) automation.accountIds = payload.accountIds;
+    if (!automation.enabled) {
+      automation.nextRunAt = null;
+    } else if (!automation.nextRunAt) {
+      automation.nextRunAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    }
+    return HttpResponse.json(automation);
+  }),
+
+  http.delete("/api/automations/:automationId", ({ params }) => {
+    const automationId = String(params.automationId);
+    const exists = state.automations.some((item) => item.id === automationId);
+    if (!exists) {
+      return HttpResponse.json(
+        { error: { code: "automation_not_found", message: "Automation not found" } },
+        { status: 404 },
+      );
+    }
+    state.automations = state.automations.filter((item) => item.id !== automationId);
+    delete state.automationRuns[automationId];
+    return HttpResponse.json({ status: "deleted" });
+  }),
+
+  http.post("/api/automations/:automationId/run-now", ({ params }) => {
+    const automationId = String(params.automationId);
+    const automation = findAutomation(automationId);
+    if (!automation) {
+      return HttpResponse.json(
+        { error: { code: "automation_not_found", message: "Automation not found" } },
+        { status: 404 },
+      );
+    }
+    const run = createAutomationRun(automationId, "manual");
+    return HttpResponse.json(run, { status: 202 });
+  }),
+
+  http.get("/api/automations/runs", ({ request }) => {
+    const url = new URL(request.url);
+    const filtered = listFilteredAutomationRuns(url);
+    const total = filtered.length;
+    const limit = Math.max(1, toFiniteNonNegative(url.searchParams.get("limit"), 25));
+    const offset = toFiniteNonNegative(url.searchParams.get("offset"), 0);
+    const items = filtered.slice(offset, offset + limit);
+    return HttpResponse.json({
+      items,
+      total,
+      hasMore: offset + limit < total,
+    });
+  }),
+
+  http.get("/api/automations/runs/options", ({ request }) => {
+    const filtered = listFilteredAutomationRuns(new URL(request.url));
+    const accountIds = [
+      ...new Set(state.accounts.map((account) => account.accountId)),
+    ].sort();
+    const models = [
+      ...new Set(
+        filtered
+          .map((entry) => entry.model)
+          .filter((value): value is string => !!value && value.length > 0),
+      ),
+    ].sort();
+    const statuses = ["running", "success", "partial", "failed"];
+    const triggers = ["scheduled", "manual"];
+    return HttpResponse.json({
+      accountIds,
+      models,
+      statuses,
+      triggers,
+    });
+  }),
+
+  http.get("/api/automations/runs/:runId/details", ({ params }) => {
+    const runId = String(params.runId);
+    const run = findAutomationRun(runId);
+    if (!run) {
+      return HttpResponse.json(
+        {
+          error: { code: "automation_run_not_found", message: "Automation run not found" },
+        },
+        { status: 404 },
+      );
+    }
+    const automation = findAutomation(run.jobId);
+    return HttpResponse.json({
+      run: {
+        ...run,
+        jobName: automation?.name ?? null,
+        model: run.model ?? automation?.model ?? null,
+        reasoningEffort: run.reasoningEffort ?? automation?.reasoningEffort ?? null,
+        effectiveStatus: run.status,
+        totalAccounts: run.accountId ? 1 : 0,
+        completedAccounts: run.accountId ? 1 : 0,
+        pendingAccounts: 0,
+        cycleKey: `${run.trigger}:${run.jobId}:${run.id}`,
+      },
+      accounts: run.accountId
+        ? [
+            {
+              accountId: run.accountId,
+              status: run.status,
+              runId: run.id,
+              scheduledFor: run.scheduledFor,
+              startedAt: run.startedAt,
+              finishedAt: run.finishedAt,
+              errorCode: run.errorCode,
+              errorMessage: run.errorMessage,
+            },
+          ]
+        : [],
+      totalAccounts: run.accountId ? 1 : 0,
+      completedAccounts: run.accountId ? 1 : 0,
+      pendingAccounts: 0,
+    });
+  }),
+
+  http.get("/api/automations/:automationId/runs", ({ params, request }) => {
+    const automationId = String(params.automationId);
+    const automation = findAutomation(automationId);
+    if (!automation) {
+      return HttpResponse.json(
+        { error: { code: "automation_not_found", message: "Automation not found" } },
+        { status: 404 },
+      );
+    }
+    const url = new URL(request.url);
+    const limit = Math.max(1, toFiniteNonNegative(url.searchParams.get("limit"), 20));
+    const all = state.automationRuns[automationId] ?? [];
+    const items = all.slice(0, limit).map((run) => ({
+      ...run,
+      jobName: automation.name,
+      model: automation.model,
+      reasoningEffort: run.reasoningEffort ?? automation.reasoningEffort ?? null,
+    }));
+    return HttpResponse.json({
+      items,
+      total: all.length,
+      hasMore: all.length > limit,
+    });
+  }),
 
   http.post("/api/sticky-sessions/delete", async ({ request }) => {
     const payload = (await parseJsonBody(
@@ -1402,6 +2005,90 @@ export const handlers = [
     });
   }),
 
+  http.get("/api/model-sources/", () => {
+    return HttpResponse.json({ sources: state.modelSources });
+  }),
+
+  http.post("/api/model-sources/", async ({ request }) => {
+    const payload = await parseJsonBody(request, ModelSourceCreatePayloadSchema);
+    const sequence = state.modelSources.length + 1;
+    const sourceId = `src_mock_${sequence}`;
+    const now = new Date().toISOString();
+    const source = createModelSource({
+      id: sourceId,
+      name: payload?.name ?? `Model source ${sequence}`,
+      baseUrl: payload?.baseUrl ?? "http://localhost:8000/v1",
+      supportsChatCompletions: payload?.supportsChatCompletions ?? true,
+      supportsResponses: payload?.supportsResponses ?? false,
+      supportsAudioTranscriptions: payload?.supportsAudioTranscriptions ?? false,
+      models: (payload?.models ?? [{ model: `model-${sequence}` }]).map(
+        (model, index) => ({
+          id: index + 1,
+          sourceId,
+          model: model.model,
+          displayName: model.displayName ?? model.model,
+          contextWindow: model.contextWindow ?? null,
+          maxOutputTokens: model.maxOutputTokens ?? null,
+          supportsStreaming: model.supportsStreaming ?? true,
+          supportsTools: model.supportsTools ?? false,
+          supportsVision: model.supportsVision ?? false,
+          inputPer1M: null,
+          cachedInputPer1M: null,
+          outputPer1M: null,
+          audioPerMinute: null,
+          rawMetadataJson: null,
+          isEnabled: true,
+          createdAt: now,
+          updatedAt: now,
+        }),
+      ),
+    });
+    state.modelSources = [...state.modelSources, source];
+    return HttpResponse.json(source);
+  }),
+
+  http.patch("/api/model-sources/:sourceId", async ({ params, request }) => {
+    const sourceId = String(params.sourceId);
+    const existing = state.modelSources.find((source) => source.id === sourceId);
+    if (!existing) {
+      return HttpResponse.json(
+        { error: { code: "not_found", message: "Model source not found" } },
+        { status: 404 },
+      );
+    }
+    const payload = await parseJsonBody(request, ModelSourceUpdatePayloadSchema);
+    const updated = createModelSource({
+      ...existing,
+      ...(payload?.isEnabled !== undefined ? { isEnabled: payload.isEnabled } : {}),
+      updatedAt: new Date().toISOString(),
+    });
+    state.modelSources = state.modelSources.map((source) =>
+      source.id === sourceId ? updated : source,
+    );
+    return HttpResponse.json(updated);
+  }),
+
+  http.delete("/api/model-sources/:sourceId", ({ params }) => {
+    const sourceId = String(params.sourceId);
+    const exists = state.modelSources.some((source) => source.id === sourceId);
+    if (!exists) {
+      return HttpResponse.json(
+        { error: { code: "not_found", message: "Model source not found" } },
+        { status: 404 },
+      );
+    }
+    state.modelSources = state.modelSources.filter(
+      (source) => source.id !== sourceId,
+    );
+    state.apiKeys = state.apiKeys.map((apiKey) =>
+      createApiKey({
+        ...apiKey,
+        assignedSourceIds: apiKey.assignedSourceIds.filter((id) => id !== sourceId),
+      }),
+    );
+    return new HttpResponse(null, { status: 204 });
+  }),
+
   http.get("/api/api-keys/", () => {
     return HttpResponse.json(state.apiKeys);
   }),
@@ -1415,7 +2102,10 @@ export const handlers = [
         name: payload?.name ?? `API Key ${sequence}`,
         accountAssignmentScopeEnabled:
           (payload?.assignedAccountIds?.length ?? 0) > 0,
+        sourceAssignmentScopeEnabled:
+          (payload?.assignedSourceIds?.length ?? 0) > 0,
         assignedAccountIds: payload?.assignedAccountIds ?? [],
+        assignedSourceIds: payload?.assignedSourceIds ?? [],
         trafficClass: payload?.trafficClass ?? "foreground",
       }),
       key: `sk-test-generated-${sequence}`,
@@ -1456,6 +2146,13 @@ export const handlers = [
         : {}),
       ...(payload.assignedAccountIds !== undefined
         ? { assignedAccountIds: payload.assignedAccountIds }
+        : {}),
+      ...(payload.assignedSourceIds !== undefined
+        ? {
+            sourceAssignmentScopeEnabled:
+              payload.assignedSourceIds.length > 0,
+            assignedSourceIds: payload.assignedSourceIds,
+          }
         : {}),
     };
 

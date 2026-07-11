@@ -42,7 +42,7 @@ from app.core.openai.requests import (
 )
 from app.core.resilience.overload import is_local_overload_error_code
 from app.core.types import JsonValue
-from app.core.utils.request_id import ensure_request_id, get_request_id
+from app.core.utils.request_id import ensure_request_id, get_request_id, reset_request_id, set_request_id
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
 from app.modules.api_keys.service import (
     ApiKeyData,
@@ -61,8 +61,10 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _build_http_bridge_prewarm_text,
     _http_bridge_key_strength,
     _http_bridge_precreated_retry_failure_error,
+    _http_bridge_prewarm_canary_bucket,
     _http_bridge_request_counts_against_queue,
     _log_http_bridge_event,
+    _record_http_bridge_prewarm_outcome,
 )
 from app.modules.proxy._service.http_bridge.service_stubs import (
     _classify_upstream_close,
@@ -77,7 +79,6 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
     _prewarm_response_timeout_seconds,
     _release_websocket_response_create_gate,
     _response_create_client_metadata,
-    _response_create_text_with_account_installation_id,
     _security_work_advisory_event,
     _service_as_image_fetch_session,
     _service_get_settings,
@@ -182,6 +183,18 @@ _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS = 5.0
 _HTTP_BRIDGE_BACKGROUND_CLEANUP_WARN_THRESHOLD = 100
 
 
+async def _send_http_bridge_request_text_with_archive_id(
+    session: "_HTTPBridgeSession",
+    request_state: _WebSocketRequestState,
+    text_data: str,
+) -> None:
+    token = set_request_id(request_state.archive_request_id)
+    try:
+        await session.upstream.send_text(text_data)
+    finally:
+        reset_request_id(token)
+
+
 def _text_with_account_installation_id(text_data: str, codex_installation_id: str | None) -> str:
     payload = json.loads(text_data)
     if not isinstance(payload, dict):
@@ -232,7 +245,9 @@ class _HTTPBridgeRequestSubmitMixin:
         api_key: ApiKeyData | None,
         api_key_reservation: ApiKeyUsageReservationData | None,
         request_id: str | None = None,
+        client_ip: str | None = None,
         enforce_openai_sdk_contract: bool = True,
+        preserve_responses_lite_client_metadata: bool = False,
     ) -> tuple[_WebSocketRequestState, str]:
         request_state, text_data = self._prepare_response_bridge_request_state(
             payload,
@@ -241,13 +256,18 @@ class _HTTPBridgeRequestSubmitMixin:
             include_type_field=True,
             attach_event_queue=True,
             transport=_REQUEST_TRANSPORT_HTTP,
-            client_metadata=_response_create_client_metadata(payload.to_payload(), headers=headers),
+            client_metadata=_response_create_client_metadata(
+                payload.to_payload(),
+                headers=headers,
+                preserve_existing_responses_lite=preserve_responses_lite_client_metadata,
+            ),
             headers=headers,
             session_id=_owner_lookup_session_id_from_headers(headers),
             request_log_id=request_id or get_request_id() or ensure_request_id(None),
             enforce_openai_sdk_contract=enforce_openai_sdk_contract,
         )
         request_state.useragent, request_state.useragent_group = _request_log_useragent_fields(headers)
+        request_state.client_ip = client_ip
         return request_state, text_data
 
     def _prepare_response_bridge_request_state(
@@ -296,9 +316,11 @@ class _HTTPBridgeRequestSubmitMixin:
             if input_item_count > 0:
                 input_full_fingerprint = _fingerprint_input_items(payload_input_list)
 
+        resolved_request_id = request_id or f"ws_{uuid4().hex}"
         request_state = _WebSocketRequestState(
-            request_id=request_id or f"ws_{uuid4().hex}",
+            request_id=resolved_request_id,
             request_log_id=request_log_id,
+            archive_request_id=request_log_id or resolved_request_id,
             model=payload.model,
             service_tier=forwarded_service_tier,
             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
@@ -546,6 +568,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 openai_error("upstream_unavailable", "HTTP responses session bridge is retiring"),
             )
         text_data = self._http_bridge_text_with_account_installation_id(session, request_state, text_data)
+        request_state.session_previous_gap_ms = int(max(0.0, request_state.started_at - session.last_used_at) * 1000)
         await self._maybe_prewarm_http_bridge_session(
             session,
             request_state=request_state,
@@ -582,6 +605,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 surface="http_bridge",
             )
             _copy_websocket_route_metadata_from_session(request_state, session)
+            request_state.bridge_queue_wait_started_at = _service_time().monotonic()
             await self._acquire_request_state_response_create_admission(
                 request_state,
                 response_create_gate=session.response_create_gate,
@@ -590,6 +614,10 @@ class _HTTPBridgeRequestSubmitMixin:
                 bridge_session=session,
             )
             gate_acquired = True
+            if request_state.bridge_queue_wait_started_at is not None:
+                request_state.latency_bridge_queue_wait_ms = int(
+                    max(0.0, _service_time().monotonic() - request_state.bridge_queue_wait_started_at) * 1000
+                )
             async with session.lifecycle_lock:
                 current_session = session
                 http_bridge_sessions = getattr(self, "_http_bridge_sessions", None)
@@ -627,7 +655,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 async with session.pending_lock:
                     session.pending_requests.append(request_state)
                 request_enqueued = True
-                await session.upstream.send_text(text_data)
+                await _send_http_bridge_request_text_with_archive_id(session, request_state, text_data)
                 session.last_used_at = _service_time().monotonic()
         except ProxyResponseError:
             await self._cleanup_http_bridge_submit_interruption(
@@ -703,24 +731,43 @@ class _HTTPBridgeRequestSubmitMixin:
         request_state: _WebSocketRequestState,
         text_data: str,
     ) -> None:
-        if (
-            not session.codex_session
-            or session.prewarmed
-            or request_state.previous_response_id is not None
-            or not getattr(_service_get_settings(), "http_responses_session_bridge_codex_prewarm_enabled", False)
-        ):
+        settings = _service_get_settings()
+        if not session.codex_session or session.prewarmed or request_state.previous_response_id is not None:
+            request_state.prewarm_status = request_state.prewarm_status or "not_applicable"
+            return
+        bucket, reason = _http_bridge_prewarm_canary_bucket(
+            settings,
+            session=session,
+            request_state=request_state,
+            text_data=text_data,
+        )
+        request_state.prewarm_canary_bucket = bucket
+        request_state.prewarm_eligible_reason = reason
+        if bucket == "not_eligible":
+            request_state.prewarm_status = "not_applicable"
+            return
+        if bucket == "control":
+            request_state.prewarm_status = "canary_miss"
+            _record_http_bridge_prewarm_outcome(outcome="canary_miss", cohort=reason, bucket=bucket)
             return
         prewarm_lock = session.prewarm_lock
         if prewarm_lock is None:
+            request_state.prewarm_status = "skipped"
+            _record_http_bridge_prewarm_outcome(outcome="skipped", cohort=reason, bucket=bucket)
             return
         async with prewarm_lock:
             if session.prewarmed:
+                request_state.prewarm_status = "skipped"
+                _record_http_bridge_prewarm_outcome(outcome="skipped", cohort=reason, bucket=bucket)
                 return
             warmup_text = _build_http_bridge_prewarm_text(text_data)
             session.prewarmed = True
             if warmup_text is None:
+                request_state.prewarm_status = "skipped"
+                _record_http_bridge_prewarm_outcome(outcome="skipped", cohort=reason, bucket=bucket)
                 return
 
+            prewarm_started_at = _service_time().monotonic()
             warmup_state = _WebSocketRequestState(
                 request_id=f"http_prewarm_{uuid4().hex}",
                 model=request_state.model,
@@ -795,6 +842,11 @@ class _HTTPBridgeRequestSubmitMixin:
                             timeout=_prewarm_response_timeout_seconds(),
                         )
                     except asyncio.TimeoutError:
+                        request_state.prewarm_latency_ms = int(
+                            max(0.0, _service_time().monotonic() - prewarm_started_at) * 1000
+                        )
+                        request_state.prewarm_status = "timeout"
+                        _record_http_bridge_prewarm_outcome(outcome="timeout", cohort=reason, bucket=bucket)
                         logger.warning(
                             "HTTP bridge prewarm timed out request_id=%s model=%s",
                             request_state.request_id,
@@ -838,6 +890,9 @@ class _HTTPBridgeRequestSubmitMixin:
                             ),
                         )
                 session.last_used_at = _service_time().monotonic()
+                request_state.prewarm_latency_ms = int(max(0.0, session.last_used_at - prewarm_started_at) * 1000)
+                request_state.prewarm_status = "success"
+                _record_http_bridge_prewarm_outcome(outcome="success", cohort=reason, bucket=bucket)
             except ProxyResponseError as exc:
                 error = _parse_openai_error(exc.payload)
                 code = _normalize_error_code(error.code if error else None, error.type if error else None)
@@ -850,11 +905,26 @@ class _HTTPBridgeRequestSubmitMixin:
                 )
                 if is_local_overload_error_code(code):
                     session.prewarmed = False
+                    request_state.prewarm_latency_ms = int(
+                        max(0.0, _service_time().monotonic() - prewarm_started_at) * 1000
+                    )
+                    request_state.prewarm_status = "skipped"
+                    _record_http_bridge_prewarm_outcome(outcome="skipped", cohort=reason, bucket=bucket)
                     return
                 session.prewarmed = False
+                request_state.prewarm_latency_ms = int(
+                    max(0.0, _service_time().monotonic() - prewarm_started_at) * 1000
+                )
+                request_state.prewarm_status = "error"
+                _record_http_bridge_prewarm_outcome(outcome="error", cohort=reason, bucket=bucket)
                 raise
             except BaseException:
                 session.prewarmed = False
+                request_state.prewarm_latency_ms = int(
+                    max(0.0, _service_time().monotonic() - prewarm_started_at) * 1000
+                )
+                request_state.prewarm_status = "error"
+                _record_http_bridge_prewarm_outcome(outcome="error", cohort=reason, bucket=bucket)
                 await self._cleanup_http_bridge_submit_interruption(
                     session,
                     request_state=warmup_state,
@@ -1049,12 +1119,7 @@ class _HTTPBridgeRequestSubmitMixin:
                     request_state.previous_response_id = None
                     request_state.proxy_injected_previous_response_id = False
                     request_state.request_text = retry_text_data
-                retry_text_data = _response_create_text_with_account_installation_id(
-                    retry_text_data,
-                    account=session.account,
-                )
-                request_state.request_text = retry_text_data
-                await session.upstream.send_text(retry_text_data)
+                await _send_http_bridge_request_text_with_archive_id(session, request_state, retry_text_data)
             _clear_websocket_request_error_overrides(request_state)
             session.last_used_at = _service_time().monotonic()
             return True
@@ -1111,7 +1176,7 @@ class _HTTPBridgeRequestSubmitMixin:
         try:
             await self._reconnect_http_bridge_session(session, request_state=request_state)
             request_text = self._http_bridge_text_with_account_installation_id(session, request_state, request_text)
-            await session.upstream.send_text(request_text)
+            await _send_http_bridge_request_text_with_archive_id(session, request_state, request_text)
             session.last_used_at = _service_time().monotonic()
             return True
         except Exception as exc:
@@ -1178,7 +1243,7 @@ class _HTTPBridgeRequestSubmitMixin:
         try:
             await self._reconnect_http_bridge_session(session, request_state=request_state)
             request_text = self._http_bridge_text_with_account_installation_id(session, request_state, request_text)
-            await session.upstream.send_text(request_text)
+            await _send_http_bridge_request_text_with_archive_id(session, request_state, request_text)
             session.last_used_at = _service_time().monotonic()
             return "retried"
         except Exception as exc:
@@ -1246,7 +1311,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 require_security_work_authorized=True,
             )
             retry_text = self._http_bridge_text_with_account_installation_id(session, request_state, retry_text)
-            await session.upstream.send_text(retry_text)
+            await _send_http_bridge_request_text_with_archive_id(session, request_state, retry_text)
             session.last_used_at = _service_time().monotonic()
             return True
         except Exception as exc:

@@ -26,7 +26,9 @@ from app.core.clients.proxy import (  # noqa: F401  # noqa: F401
 from app.core.clients.proxy import codex_control_request as core_codex_control_request  # noqa: F401
 from app.core.clients.proxy import compact_responses as core_compact_responses  # noqa: F401
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
+from app.core.clients.proxy_websocket import UpstreamWebSocketMessage
 from app.core.openai.parsing import parse_sse_event
+from app.core.utils.request_id import reset_request_id, set_request_id
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
 from app.modules.proxy._service.api_key_usage import (
     _API_KEY_RESERVATION_HEARTBEAT_SECONDS as _API_KEY_RESERVATION_HEARTBEAT_SECONDS,
@@ -59,7 +61,7 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
     _pop_terminal_websocket_request_state,
     _previous_response_id_from_not_found_message,
     _release_websocket_response_create_gate,
-    _response_output_item_done_function_call_id,
+    _response_output_item_done_tool_call,
     _rewrite_websocket_continuity_corruption_event,
     _rewrite_websocket_downstream_response_id,
     _rewrite_websocket_previous_response_owner_unavailable_event,
@@ -67,6 +69,7 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
     _security_work_advisory_event,
     _service_get_settings,
     _service_tier_from_event_payload,
+    _service_time,
     _upstream_websocket_disconnect_message,
     _websocket_event_error_code,
     _websocket_event_error_message,
@@ -168,6 +171,37 @@ _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS = 5.0
 _HTTP_BRIDGE_BACKGROUND_CLEANUP_WARN_THRESHOLD = 100
 
 
+def _archive_http_bridge_upstream_text(
+    session: "_HTTPBridgeSession",
+    text: str,
+    request_state: "_WebSocketRequestState | None",
+) -> None:
+    _archive_http_bridge_upstream_message(
+        session,
+        UpstreamWebSocketMessage(kind="text", text=text),
+        request_state,
+    )
+
+
+def _archive_http_bridge_upstream_message(
+    session: "_HTTPBridgeSession",
+    message: UpstreamWebSocketMessage,
+    request_state: "_WebSocketRequestState | None",
+) -> None:
+    if request_state is None or request_state.archive_request_id is None:
+        archive_request_id = None
+    else:
+        archive_request_id = request_state.archive_request_id
+    archive_received = getattr(session.upstream, "archive_received", None)
+    if not callable(archive_received):
+        return
+    token = set_request_id(archive_request_id)
+    try:
+        archive_received(message)
+    finally:
+        reset_request_id(token)
+
+
 class _HTTPBridgeUpstreamEventsMixin:
     async def _relay_http_bridge_upstream_messages(
         self: Any,
@@ -227,6 +261,9 @@ class _HTTPBridgeUpstreamEventsMixin:
                         break
                     continue
 
+                async with session.pending_lock:
+                    archive_request_state = session.pending_requests[0] if len(session.pending_requests) == 1 else None
+                _archive_http_bridge_upstream_message(session, message, archive_request_state)
                 session.last_upstream_close_code = message.close_code
                 retried = await self._retry_http_bridge_precreated_request(session)
                 if retried:
@@ -289,6 +326,7 @@ class _HTTPBridgeUpstreamEventsMixin:
         session: "_HTTPBridgeSession",
         text: str,
     ) -> None:
+        original_text = text
         event_block = f"data: {text}\n\n"
         payload = parse_sse_data_json(event_block)
         event = parse_sse_event(event_block)
@@ -354,17 +392,28 @@ class _HTTPBridgeUpstreamEventsMixin:
             else:
                 release_create_gate = False
 
+            _archive_http_bridge_upstream_text(session, original_text, matched_request_state)
+
             if matched_request_state is not None:
+                now = _service_time().monotonic()
+                if matched_request_state.latency_first_upstream_event_ms is None:
+                    matched_request_state.latency_first_upstream_event_ms = int(
+                        max(0.0, now - matched_request_state.started_at) * 1000
+                    )
+                if event_type == "response.created" and matched_request_state.latency_response_created_ms is None:
+                    matched_request_state.latency_response_created_ms = int(
+                        max(0.0, now - matched_request_state.started_at) * 1000
+                    )
                 actual_service_tier = _service_tier_from_event_payload(payload)
                 if actual_service_tier is not None:
                     matched_request_state.actual_service_tier = actual_service_tier
                     matched_request_state.service_tier = actual_service_tier
-                completed_function_call_id = _response_output_item_done_function_call_id(payload)
-                if (
-                    completed_function_call_id is not None
-                    and completed_function_call_id not in matched_request_state.pending_function_call_ids
-                ):
-                    matched_request_state.pending_function_call_ids.append(completed_function_call_id)
+                completed_tool_call = _response_output_item_done_tool_call(payload)
+                if completed_tool_call is not None:
+                    completed_call_id, completed_call_type = completed_tool_call
+                    if completed_call_id not in matched_request_state.pending_function_call_ids:
+                        matched_request_state.pending_function_call_ids.append(completed_call_id)
+                    matched_request_state.pending_tool_call_types[completed_call_id] = completed_call_type
                 if mark_duplicate_tool_call_downstream_event(
                     payload,
                     seen_tool_call_keys=matched_request_state.seen_tool_call_keys,
@@ -697,6 +746,11 @@ class _HTTPBridgeUpstreamEventsMixin:
             # anchor for continuity lookups.
             if response_id is not None:
                 session.last_completed_response_id = response_id
+                # Remember which tool-call items the completed response left
+                # pending so an anchored follow-up that omits their outputs
+                # (interrupted turn) can receive synthetic interrupted
+                # outputs instead of an upstream missing-tool-output 400.
+                session.last_pending_tool_calls = dict(terminal_request_state.pending_tool_call_types)
             # Prefix trimming is only meaningful for list-shaped inputs, so
             # keep the input-count / fingerprint update scoped to that path.
             if terminal_request_state.input_item_count > 0:

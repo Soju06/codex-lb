@@ -6,6 +6,7 @@ import re
 import shutil
 import sqlite3
 from collections.abc import Callable, Iterable, Sequence
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -305,7 +306,7 @@ def _retag_jsonl_record_provider(record: JsonObject, source_provider: str, targe
 
 def _sqlite_count_provider_rows(db_path: Path, provider: str) -> int:
     try:
-        with _connect_sqlite(db_path, read_only=True) as conn:
+        with closing(_connect_sqlite(db_path, read_only=True)) as conn:
             if not _sqlite_has_threads_table(conn):
                 return 0
             if not _sqlite_has_model_provider_column(conn):
@@ -331,7 +332,7 @@ def _update_sqlite_provider(db_path: Path, source_provider: str, target_provider
 
 
 def _update_sqlite_provider_in_place(db_path: Path, source_provider: str, target_provider: str) -> int:
-    with _connect_sqlite(db_path) as conn:
+    with closing(_connect_sqlite(db_path)) as conn:
         if not _sqlite_has_threads_table(conn):
             return 0
         cursor = conn.execute(
@@ -412,7 +413,7 @@ def _provider_counts(codex_home: Path) -> tuple[ProviderCount, ...]:
                 counts[provider] = counts.get(provider, 0) + 1
     for db_path in _find_state_dbs(codex_home):
         try:
-            with _connect_sqlite(db_path, read_only=True) as conn:
+            with closing(_connect_sqlite(db_path, read_only=True)) as conn:
                 if not _sqlite_has_threads_table(conn):
                     continue
                 if not _sqlite_has_model_provider_column(conn):
@@ -459,18 +460,22 @@ def _create_backup(codex_home: Path, jsonl_files: Sequence[Path], state_dbs: Seq
 
 def _backup_sqlite_db(source: Path, destination: Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
-    with _connect_sqlite(source, read_only=True) as source_conn, sqlite3.connect(str(destination)) as backup_conn:
+    with closing(_connect_sqlite(source, read_only=True)) as source_conn, closing(
+        sqlite3.connect(str(destination))
+    ) as backup_conn:
         source_conn.backup(backup_conn)
         backup_conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         backup_conn.execute("PRAGMA journal_mode=DELETE")
+        backup_conn.commit()
     for sidecar in _sqlite_sidecar_paths(destination):
         sidecar.unlink(missing_ok=True)
 
 
 def _consolidate_sqlite_db(db_path: Path) -> None:
-    with _connect_sqlite(db_path) as conn:
+    with closing(_connect_sqlite(db_path)) as conn:
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         conn.execute("PRAGMA journal_mode=DELETE")
+        conn.commit()
 
 
 def _sqlite_sidecar_paths(db_path: Path) -> tuple[Path, Path]:

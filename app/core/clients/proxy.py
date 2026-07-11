@@ -55,6 +55,7 @@ from app.core.errors import (
     openai_error,
     response_failed_event,
 )
+from app.core.openai.exceptions import ClientPayloadError
 from app.core.openai.model_registry import get_model_registry
 from app.core.openai.models import CompactResponsePayload, OpenAIError
 from app.core.openai.parsing import (
@@ -62,7 +63,11 @@ from app.core.openai.parsing import (
     parse_error_payload,
     parse_sse_event,
 )
-from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
+from app.core.openai.requests import (
+    ResponsesCompactRequest,
+    ResponsesRequest,
+    validate_compact_input_wire_budget,
+)
 from app.core.resilience.circuit_breaker import (
     CircuitBreaker,
     CircuitBreakerOpenError,
@@ -76,6 +81,8 @@ from app.core.utils.request_id import get_request_id
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
 
 CODEX_INSTALLATION_ID_HEADER = "x-codex-installation-id"
+CODEX_RESPONSES_LITE_HEADER = "x-openai-internal-codex-responses-lite"
+CODEX_RESPONSES_LITE_WEBSOCKET_METADATA_KEY = "ws_request_header_x_openai_internal_codex_responses_lite"
 
 IGNORE_INBOUND_HEADERS = {
     "authorization",
@@ -87,6 +94,11 @@ IGNORE_INBOUND_HEADERS = {
     CODEX_INSTALLATION_ID_HEADER,
     "true-client-ip",
 }
+INTERNAL_OPENAI_UPSTREAM_HEADERS = frozenset(
+    {
+        CODEX_RESPONSES_LITE_HEADER,
+    }
+)
 
 _ERROR_TYPE_CODE_MAP = {
     "rate_limit_exceeded": "rate_limit_exceeded",
@@ -447,6 +459,8 @@ def _should_drop_inbound_header(name: str) -> bool:
     normalized = name.lower()
     if normalized in IGNORE_INBOUND_HEADERS:
         return True
+    if normalized in INTERNAL_OPENAI_UPSTREAM_HEADERS:
+        return True
     if normalized.startswith("x-forwarded-"):
         return True
     if normalized.startswith("cf-"):
@@ -579,7 +593,7 @@ def _build_upstream_headers(
     account_id: str | None,
     accept: str = "text/event-stream",
 ) -> dict[str, str]:
-    headers = dict(inbound)
+    headers = filter_inbound_headers(inbound)
     native = _is_native_codex_request(headers)
     lower_keys = {key.lower() for key in headers}
     if "x-request-id" not in lower_keys and "request-id" not in lower_keys:
@@ -636,7 +650,8 @@ def _build_upstream_websocket_headers(
             token.strip().lower() for token in value.split(",") if isinstance(value, str) and token.strip()
         )
     blocked_header_names = _HOP_BY_HOP_HEADER_NAMES | connected_header_tokens
-    headers = {key: value for key, value in inbound.items() if key.lower() not in blocked_header_names}
+    filtered = filter_inbound_headers(inbound)
+    headers = {key: value for key, value in filtered.items() if key.lower() not in blocked_header_names}
     native = _is_native_codex_request(headers)
     lower_keys = {key.lower() for key in headers}
     if "x-request-id" not in lower_keys and "request-id" not in lower_keys:
@@ -1323,6 +1338,80 @@ def _payload_uses_image_generation_tool(payload: Mapping[str, JsonValue]) -> boo
         if tool_type == "image_generation":
             return True
     return False
+
+
+def _payload_uses_responses_lite(payload: Mapping[str, JsonValue]) -> bool:
+    input_value = payload.get("input")
+    if not isinstance(input_value, list):
+        return False
+    return any(is_json_mapping(item) and item.get("type") == "additional_tools" for item in input_value)
+
+
+def _client_metadata_uses_responses_lite(client_metadata: Mapping[str, JsonValue]) -> bool:
+    return any(
+        key.lower() == CODEX_RESPONSES_LITE_WEBSOCKET_METADATA_KEY
+        and isinstance(value, str)
+        and value.strip().lower() == "true"
+        for key, value in client_metadata.items()
+    )
+
+
+def _payload_has_responses_lite_websocket_marker(payload: Mapping[str, JsonValue]) -> bool:
+    raw_metadata = payload.get("client_metadata")
+    return is_json_mapping(raw_metadata) and _client_metadata_uses_responses_lite(raw_metadata)
+
+
+def _normalize_responses_lite_websocket_client_metadata(
+    payload: Mapping[str, JsonValue],
+    client_metadata: Mapping[str, JsonValue],
+    *,
+    preserve_existing: bool = False,
+) -> dict[str, JsonValue]:
+    normalized = dict(client_metadata)
+    existing_marker = _client_metadata_uses_responses_lite(normalized)
+    for key in tuple(normalized):
+        if key.lower() == CODEX_RESPONSES_LITE_WEBSOCKET_METADATA_KEY:
+            del normalized[key]
+    if _payload_uses_responses_lite(payload) or (preserve_existing and existing_marker):
+        normalized[CODEX_RESPONSES_LITE_WEBSOCKET_METADATA_KEY] = "true"
+    return normalized
+
+
+def _strip_responses_lite_websocket_client_metadata(
+    payload: dict[str, JsonValue],
+) -> None:
+    raw_metadata = payload.get("client_metadata")
+    client_metadata = dict(raw_metadata) if is_json_mapping(raw_metadata) else {}
+    for key in tuple(client_metadata):
+        if key.lower() == CODEX_RESPONSES_LITE_WEBSOCKET_METADATA_KEY:
+            del client_metadata[key]
+    if client_metadata:
+        payload["client_metadata"] = client_metadata
+    else:
+        payload.pop("client_metadata", None)
+
+
+def _set_responses_lite_websocket_client_metadata(
+    payload: dict[str, JsonValue],
+) -> None:
+    raw_metadata = payload.get("client_metadata")
+    client_metadata = dict(raw_metadata) if is_json_mapping(raw_metadata) else {}
+    normalized = _normalize_responses_lite_websocket_client_metadata(
+        payload,
+        client_metadata,
+    )
+    if normalized:
+        payload["client_metadata"] = normalized
+    else:
+        payload.pop("client_metadata", None)
+
+
+def _apply_responses_lite_http_header(
+    headers: dict[str, str],
+    payload: Mapping[str, JsonValue],
+) -> None:
+    if _payload_uses_responses_lite(payload):
+        headers[CODEX_RESPONSES_LITE_HEADER] = "true"
 
 
 def _ws_transport_payload_budget_bytes(settings: Settings | object) -> int:
@@ -2419,7 +2508,11 @@ async def _stream_responses_with_session(
             _as_image_fetch_session(client_session),
             effective_connect_timeout,
         )
-    payload_json = json.dumps(payload_dict, ensure_ascii=True, separators=(",", ":"))
+    http_payload_dict = dict(payload_dict)
+    _strip_responses_lite_websocket_client_metadata(http_payload_dict)
+    websocket_payload_dict = dict(payload_dict)
+    _set_responses_lite_websocket_client_metadata(websocket_payload_dict)
+    payload_json = json.dumps(websocket_payload_dict, ensure_ascii=True, separators=(",", ":"))
     payload_size_estimate_bytes = len(payload_json.encode("utf-8"))
     transport_mode = _configured_stream_transport(
         transport=settings.upstream_stream_transport,
@@ -2434,11 +2527,14 @@ async def _stream_responses_with_session(
         has_image_generation_tool=_payload_uses_image_generation_tool(payload_dict),
         payload_size_estimate_bytes=payload_size_estimate_bytes,
     )
+    payload_dict = websocket_payload_dict if transport == "websocket" else http_payload_dict
+    payload_json = json.dumps(payload_dict, ensure_ascii=True, separators=(",", ":"))
     if transport == "websocket":
         upstream_headers = _build_upstream_websocket_headers(headers, access_token, account_id)
         method = "GET"
     else:
         upstream_headers = _build_upstream_headers(headers, access_token, account_id)
+        _apply_responses_lite_http_header(upstream_headers, payload_dict)
         method = "POST"
     remaining_request_timeout = _remaining_total_timeout(
         request_total_timeout,
@@ -2666,7 +2762,8 @@ async def _stream_responses_with_session(
         rejection_status: int | None,
         rejection_message: str,
     ) -> AsyncIterator[str]:
-        nonlocal transport, upstream_headers, method, remaining_request_timeout, timeout, started_at
+        nonlocal transport, upstream_headers, method, remaining_request_timeout, timeout, started_at, payload_dict
+        nonlocal payload_json
 
         logger.warning(
             "upstream_websocket_handshake_rejected request_id=%s status=%s target=%s retrying_transport=http",
@@ -2686,7 +2783,10 @@ async def _stream_responses_with_session(
         )
 
         transport = "http"
+        payload_dict = http_payload_dict
+        payload_json = json.dumps(payload_dict, ensure_ascii=True, separators=(",", ":"))
         upstream_headers = _build_upstream_headers(headers, access_token, account_id)
+        _apply_responses_lite_http_header(upstream_headers, payload_dict)
         method = "POST"
         remaining_request_timeout = _remaining_total_timeout(
             request_total_timeout,
@@ -3172,6 +3272,18 @@ class _CompactCommandTransport:
                 _as_image_fetch_session(self.session),
                 effective_connect_timeout,
             )
+        _apply_responses_lite_http_header(upstream_headers, payload_dict)
+        try:
+            validate_compact_input_wire_budget(payload_dict)
+        except ClientPayloadError as exc:
+            error = openai_error(
+                exc.code or "invalid_request_error",
+                str(exc),
+                error_type=exc.error_type or "invalid_request_error",
+            )
+            if exc.param is not None:
+                error["error"]["param"] = exc.param
+            raise ProxyResponseError(400, error) from exc
         now = time.monotonic()
         compact_timeout_seconds = _remaining_total_timeout(
             compact_timeout_seconds,

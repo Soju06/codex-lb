@@ -47,6 +47,30 @@ describe("AccountList", () => {
     expect(screen.getByText("On")).toBeInTheDocument();
   });
 
+  it("renders primary idle warm-up attempts as 5h", () => {
+    const attemptedAt = new Date("2026-06-03T12:00:00Z").toISOString();
+    const account = createAccountSummary({
+      accountId: "acc-idle",
+      displayName: "Idle Warmup Account",
+      limitWarmupEnabled: true,
+      limitWarmup: {
+        window: "primary_idle",
+        resetAt: 18_000,
+        status: "succeeded",
+        model: "gpt-5.1-codex-mini",
+        attemptedAt,
+        completedAt: attemptedAt,
+        errorCode: null,
+        errorMessage: null,
+      },
+    });
+
+    render(<AccountList accounts={[account]} />);
+
+    const row = screen.getByTestId("account-list-row");
+    expect(within(row).getByText((text) => text.includes("Succeeded | 5h |"))).toBeInTheDocument();
+  });
+
   it("exposes account actions from list rows", async () => {
     const user = userEvent.setup();
     const onAction = vi.fn();
@@ -119,6 +143,27 @@ describe("AccountList", () => {
 
     expect(rowNames()).toEqual(["Charlie Account", "Beta Account", "Alpha Account"]);
     expect(screen.getByRole("button", { name: "Account, sorted descending" })).toBeInTheDocument();
+  });
+
+  it("uses controlled sort state and reports the next header sort", async () => {
+    const user = userEvent.setup();
+    const onSortChange = vi.fn();
+    render(
+      <AccountList
+        accounts={[
+          createAccountSummary({ accountId: "acc-b", displayName: "Beta Account" }),
+          createAccountSummary({ accountId: "acc-a", displayName: "Alpha Account" }),
+        ]}
+        sort={{ key: "account", direction: "asc" }}
+        onSortChange={onSortChange}
+      />,
+    );
+
+    expect(rowNames()).toEqual(["Alpha Account", "Beta Account"]);
+
+    await user.click(screen.getByRole("button", { name: "Account, sorted ascending" }));
+
+    expect(onSortChange).toHaveBeenCalledWith({ key: "account", direction: "desc" });
   });
 
   it("sorts quota by the lowest visible remaining quota percent", async () => {
@@ -247,5 +292,39 @@ describe("AccountList", () => {
     await user.click(button);
 
     expect(onAction).not.toHaveBeenCalledWith(account, "reset-credit");
+  });
+
+  it("shows the banked reset count as a bubble on the reset button", () => {
+    render(
+      <AccountList
+        accounts={[
+          createAccountSummary({
+            accountId: "acc-reset",
+            displayName: "Reset Account",
+            availableResetCredits: 3,
+          }),
+        ]}
+      />,
+    );
+
+    const resetButton = screen.getByRole("button", { name: "Redeem reset credit for Reset Account" });
+    expect(within(resetButton).getByText("3")).toBeInTheDocument();
+  });
+
+  it("caps the reset count bubble at 99+", () => {
+    render(
+      <AccountList
+        accounts={[
+          createAccountSummary({
+            accountId: "acc-many-reset",
+            displayName: "Many Reset Account",
+            availableResetCredits: 120,
+          }),
+        ]}
+      />,
+    );
+
+    const resetButton = screen.getByRole("button", { name: "Redeem reset credit for Many Reset Account" });
+    expect(within(resetButton).getByText("99+")).toBeInTheDocument();
   });
 });

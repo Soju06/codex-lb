@@ -1,6 +1,6 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { test, type Page, type Route } from "@playwright/test";
+import { expect, test, type Page, type Route } from "@playwright/test";
 
 import {
   accounts,
@@ -15,6 +15,7 @@ import {
   settings,
   unauthenticatedSession,
 } from "./fixtures";
+import { createAccountSummary } from "../src/test/mocks/factories";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SCREENSHOT_DIR = path.resolve(__dirname, "../../docs/screenshots");
@@ -43,7 +44,11 @@ function fulfill(route: Route, data: unknown) {
   });
 }
 
-async function interceptApi(page: Page, session: SessionOverride = authSession) {
+async function interceptApi(
+  page: Page,
+  session: SessionOverride = authSession,
+  accountList = accounts,
+) {
   await page.route("**/api/**", (route) => {
     const url = new URL(route.request().url());
     const p = url.pathname;
@@ -57,7 +62,7 @@ async function interceptApi(page: Page, session: SessionOverride = authSession) 
       const slice = requestLogs.slice(offset, offset + limit);
       return fulfill(route, createRequestLogsResponse(slice, requestLogs.length, offset + limit < requestLogs.length));
     }
-    if (p === "/api/accounts") return fulfill(route, { accounts });
+    if (p === "/api/accounts") return fulfill(route, { accounts: accountList });
     const trendsMatch = p.match(/^\/api\/accounts\/([^/]+)\/trends$/);
     if (trendsMatch) {
       const trends = accountTrends[trendsMatch[1]];
@@ -156,6 +161,54 @@ test("accounts — light", async ({ page }) => {
 
 test("accounts — dark", async ({ page }) => {
   await capture(page, { file: "accounts-dark.jpg", theme: "dark", route: "/accounts" });
+});
+
+test("accounts list keeps many rows in an internal scroll region", async ({ page }) => {
+  const manyAccounts = Array.from({ length: 40 }, (_, index) =>
+    createAccountSummary({
+      accountId: `acc_overflow_${index}`,
+      email: `overflow-${index}@example.com`,
+      displayName: `Overflow Account ${index}`,
+      planType: "plus",
+      status: "active",
+    }),
+  );
+
+  await applyTheme(page, "light");
+  await interceptApi(page, authSession, manyAccounts);
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.addInitScript((css: string) => {
+    const style = document.createElement("style");
+    style.textContent = css;
+    (document.head ?? document.documentElement).appendChild(style);
+  }, DISABLE_ANIMATIONS_CSS);
+  await page.setViewportSize({ width: 1440, height: 720 });
+  await page.goto("http://localhost:4173/accounts", { waitUntil: "networkidle" });
+  await page.waitForSelector('[data-testid="account-list-scroll-region"]', { timeout: 10_000 });
+
+  const scrollRegion = page.getByTestId("account-list-scroll-region");
+  const addAccountButton = page.getByRole("button", { name: "Add account" });
+
+  await expect(addAccountButton).toBeVisible();
+  expect(await scrollRegion.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
+  expect(await scrollRegion.evaluate((element) => element.scrollTop)).toBe(0);
+
+  const reachedBottom = await scrollRegion.evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+    const lastRow = element.lastElementChild;
+    if (!lastRow) {
+      return { scrollTop: element.scrollTop, lastRowVisible: false };
+    }
+    const rowRect = lastRow.getBoundingClientRect();
+    const regionRect = element.getBoundingClientRect();
+    return {
+      scrollTop: element.scrollTop,
+      lastRowVisible: rowRect.top >= regionRect.top && rowRect.bottom <= regionRect.bottom,
+    };
+  });
+  expect(reachedBottom.scrollTop).toBeGreaterThan(0);
+  expect(reachedBottom.lastRowVisible).toBe(true);
+  await expect(addAccountButton).toBeVisible();
 });
 
 test("settings — light", async ({ page }) => {

@@ -12,6 +12,9 @@ const BASE_PACE: WeeklyCreditPace = {
   scheduledUsedPercent: 14,
   deltaPercent: 36,
   scheduleGapCredits: 360_000,
+  smoothedDeltaPercent: 24,
+  smoothedScheduleGapCredits: 240_000,
+  paceGapSmoothingMinutes: 30,
   overPlanCredits: 360_000,
   projectedShortfallCredits: 360_000,
   pauseForBreakEvenHours: 60.5,
@@ -42,7 +45,7 @@ describe("WeeklyCreditsPaceCard", () => {
     expect(screen.getByText("Pace gap")).toBeInTheDocument();
     expect(screen.getByText("50%")).toBeInTheDocument();
     expect(screen.getByText("14%")).toBeInTheDocument();
-    expect(screen.getByText("36% over planned usage")).toBeInTheDocument();
+    expect(screen.getByText("24% over planned usage")).toBeInTheDocument();
     expect(screen.getByText("Recommendations")).toBeInTheDocument();
     expect(screen.getByText("Pause")).toBeInTheDocument();
     expect(screen.getByText("2d 12h until reset")).toBeInTheDocument();
@@ -50,7 +53,7 @@ describe("WeeklyCreditsPaceCard", () => {
     expect(screen.getByText("Reduce ongoing weekly-credit load by ~72%")).toBeInTheDocument();
     expect(screen.getByText("Add capacity")).toBeInTheDocument();
     expect(screen.getByText("7.1x Pro weekly pool (~8 accounts)")).toBeInTheDocument();
-    expect(screen.getByText("360K credits over planned usage now")).toBeInTheDocument();
+    expect(screen.getByText("240K credits over planned usage over 30m")).toBeInTheDocument();
     expect(screen.getByText("360K credits projected short before reset")).toBeInTheDocument();
     expect(screen.queryByText("500K")).not.toBeInTheDocument();
     expect(screen.getByText("Schedule marker")).toBeInTheDocument();
@@ -63,6 +66,8 @@ describe("WeeklyCreditsPaceCard", () => {
           ...BASE_PACE,
           deltaPercent: -8,
           scheduleGapCredits: 0,
+          smoothedDeltaPercent: -8,
+          smoothedScheduleGapCredits: 0,
           overPlanCredits: 0,
           projectedShortfallCredits: 0,
           pauseForBreakEvenHours: null,
@@ -105,6 +110,9 @@ describe("WeeklyCreditsPaceCard", () => {
         pace={{
           ...BASE_PACE,
           scheduleGapCredits: 3_096,
+          smoothedDeltaPercent: 36,
+          smoothedScheduleGapCredits: 3_096,
+          paceGapSmoothingMinutes: 0,
           overPlanCredits: 3_096,
           projectedShortfallCredits: 0,
           pauseForBreakEvenHours: null,
@@ -138,6 +146,8 @@ describe("WeeklyCreditsPaceCard", () => {
           ...BASE_PACE,
           deltaPercent: -5,
           scheduleGapCredits: 0,
+          smoothedDeltaPercent: -5,
+          smoothedScheduleGapCredits: 0,
           overPlanCredits: 0,
           projectedShortfallCredits: 42_000,
           status: "danger",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -125,16 +126,21 @@ def test_cleanup_script_dry_run_lists_superseded_pr(tmp_path: Path) -> None:
             "body": "Synced automatically from release-please PR #806; no manual beta workflow dispatch is required.",
         }
     ]
-    gh = tmp_path / "gh"
+    gh = tmp_path / ("gh.cmd" if os.name == "nt" else "gh")
+    fake_gh = tmp_path / "fake_gh.py"
     calls = tmp_path / "calls.jsonl"
-    gh.write_text(
+    fake_gh.write_text(
         "#!/usr/bin/env python3\n"
         "import json, pathlib, sys\n"
         f"pathlib.Path({str(calls)!r}).write_text(json.dumps(sys.argv[1:]) + '\\n')\n"
         f"print({json.dumps(prs)!r})\n",
         encoding="utf-8",
     )
-    gh.chmod(0o755)
+    if os.name == "nt":
+        gh.write_text(f'@echo off\r\n"{sys.executable}" "{fake_gh}" %*\r\n', encoding="utf-8")
+    else:
+        gh.write_text(fake_gh.read_text(encoding="utf-8"), encoding="utf-8")
+        gh.chmod(0o755)
 
     result = subprocess.run(
         [
@@ -154,7 +160,11 @@ def test_cleanup_script_dry_run_lists_superseded_pr(tmp_path: Path) -> None:
             "--dry-run",
         ],
         cwd=Path(__file__).parents[2],
-        env={"PATH": f"{tmp_path}:{Path('/usr/bin')}", "PYTHONPATH": str(Path(__file__).parents[2])},
+        env={
+            **os.environ,
+            "PATH": os.pathsep.join((str(tmp_path), os.environ.get("PATH", ""))),
+            "PYTHONPATH": str(Path(__file__).parents[2]),
+        },
         check=True,
         text=True,
         stdout=subprocess.PIPE,

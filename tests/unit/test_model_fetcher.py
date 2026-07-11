@@ -49,6 +49,11 @@ class _CodexResponse:
                     "base_instructions": "",
                     "context_window": 128000,
                     "priority": 1,
+                    "model_messages": {
+                        "instructions_template": "You are a coding assistant.",
+                        "instructions_variables": {"personality_default": ""},
+                        "approvals": None,
+                    },
                 }
             ]
         }
@@ -109,3 +114,8 @@ async def test_fetch_models_for_plan_uses_resolved_codex_route(monkeypatch: pyte
     assert client.calls[0]["route"] is route
     assert client.calls[0]["method"] == "GET"
     assert str(client.calls[0]["url"]).endswith("/codex/models?client_version=0.128.0")
+    assert models[0].raw["model_messages"] == {
+        "instructions_template": "You are a coding assistant.",
+        "instructions_variables": {"personality_default": ""},
+        "approvals": None,
+    }

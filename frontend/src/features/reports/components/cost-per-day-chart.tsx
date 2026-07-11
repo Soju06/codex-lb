@@ -8,14 +8,17 @@ import {
   ResponsiveContainer,
 } from "@/components/lazy-recharts";
 import type { DailyReportRow } from "../schemas";
+import { buildContinuousDailyRows } from "../daily-series";
 import { ChartTooltip } from "./chart-tooltip";
 
 export type CostPerDayChartProps = {
+  startDate: string;
+  endDate: string;
   data: DailyReportRow[];
 };
 
-export function CostPerDayChart({ data }: CostPerDayChartProps) {
-  const chartData = data.map((d) => ({
+export function CostPerDayChart({ startDate, endDate, data }: CostPerDayChartProps) {
+  const chartData = buildContinuousDailyRows(startDate, endDate, data).map((d) => ({
     date: d.date.slice(5),
     cost: d.costUsd,
   }));

@@ -46,7 +46,7 @@ def _default_put_body() -> dict[str, Any]:
             180,
             "openai_cache_affinity_max_age_seconds",
         ),
-        ("dashboardSessionTtlSeconds", 31536000, "dashboard_session_ttl_seconds"),
+        ("dashboardSessionTtlSeconds", 604800, "dashboard_session_ttl_seconds"),
         (
             "httpResponsesSessionBridgePromptCacheIdleTtlSeconds",
             1800,
@@ -64,7 +64,14 @@ def _default_put_body() -> dict[str, Any]:
         ),
         ("importWithoutOverwrite", False, "import_without_overwrite"),
         ("apiKeyAuthEnabled", True, "api_key_auth_enabled"),
+        (
+            "limitWarmupExhaustedThresholdPercent",
+            98.5,
+            "limit_warmup_exhausted_threshold_percent",
+        ),
         ("weeklyPaceWorkingDays", "0,1,2,3,4", "weekly_pace_working_days"),
+        ("limitWarmupStaggeredIdleEnabled", True, "limit_warmup_staggered_idle_enabled"),
+        ("hideUpstreamQuotaFromApiKeys", True, "hide_upstream_quota_from_api_keys"),
     ],
 )
 @pytest.mark.asyncio

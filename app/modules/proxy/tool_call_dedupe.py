@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 _TOOL_CALL_DEDUPE_CACHE_LIMIT = 1024
 _PARALLEL_TOOL_CALL_NAME = "multi_tool_use.parallel"
-_DIRECT_SIDE_EFFECT_TOOL_CALL_NAMES = frozenset(
+_HISTORY_DIRECT_SIDE_EFFECT_TOOL_CALL_NAMES = frozenset(
     {
         "apply_patch",
         "close_agent",
@@ -30,17 +30,28 @@ _DIRECT_SIDE_EFFECT_TOOL_CALL_NAMES = frozenset(
         "write_stdin",
     }
 )
-_SIDE_EFFECT_TOOL_CALL_NAMES = frozenset(
+_CODE_MODE_DOWNSTREAM_SIDE_EFFECT_TOOL_CALL_NAMES = frozenset({"collaboration", "exec"})
+_DOWNSTREAM_DIRECT_SIDE_EFFECT_TOOL_CALL_NAMES = frozenset(
+    {*_HISTORY_DIRECT_SIDE_EFFECT_TOOL_CALL_NAMES, *_CODE_MODE_DOWNSTREAM_SIDE_EFFECT_TOOL_CALL_NAMES}
+)
+_HISTORY_SIDE_EFFECT_TOOL_CALL_NAMES = frozenset(
     {
         _PARALLEL_TOOL_CALL_NAME,
-        *_DIRECT_SIDE_EFFECT_TOOL_CALL_NAMES,
-        *(f"functions.{name}" for name in _DIRECT_SIDE_EFFECT_TOOL_CALL_NAMES),
+        *_HISTORY_DIRECT_SIDE_EFFECT_TOOL_CALL_NAMES,
+        *(f"functions.{name}" for name in _HISTORY_DIRECT_SIDE_EFFECT_TOOL_CALL_NAMES),
+    }
+)
+_DOWNSTREAM_SIDE_EFFECT_TOOL_CALL_NAMES = frozenset(
+    {
+        _PARALLEL_TOOL_CALL_NAME,
+        *_DOWNSTREAM_DIRECT_SIDE_EFFECT_TOOL_CALL_NAMES,
+        *(f"functions.{name}" for name in _DOWNSTREAM_DIRECT_SIDE_EFFECT_TOOL_CALL_NAMES),
     }
 )
 _SIDE_EFFECT_TOOL_CALL_ITEM_TYPES = frozenset({"apply_patch_call"})
 _PARALLEL_TOOL_USE_DEDUPE_RECIPIENT_NAMES = frozenset(
     {
-        *(f"functions.{name}" for name in _DIRECT_SIDE_EFFECT_TOOL_CALL_NAMES),
+        *(f"functions.{name}" for name in _HISTORY_DIRECT_SIDE_EFFECT_TOOL_CALL_NAMES),
         "multi_tool_use.parallel",
     }
 )
@@ -113,7 +124,8 @@ def mark_duplicate_tool_call_downstream_event(
     if call_id is not None and not isinstance(call_id, str):
         call_id = None
     is_side_effect_tool_call = item_type in _SIDE_EFFECT_TOOL_CALL_ITEM_TYPES or (
-        item_name in _SIDE_EFFECT_TOOL_CALL_NAMES and _tool_call_has_side_effect_arguments(item_name, argument_value)
+        item_name in _DOWNSTREAM_SIDE_EFFECT_TOOL_CALL_NAMES
+        and _tool_call_has_side_effect_arguments(item_name, argument_value)
     )
     if not is_side_effect_tool_call:
         seen_tool_call_keys.clear()
@@ -143,9 +155,13 @@ def mark_duplicate_tool_call_downstream_event(
         return True
     if is_side_effect_tool_call:
         same_response_argument_key = (dedupe_response_id, str(item_type), item_name, None, argument_key)
-        cross_response_argument_key = ("", str(item_type), item_name, None, argument_key)
+        code_mode_call = item_name in _CODE_MODE_DOWNSTREAM_SIDE_EFFECT_TOOL_CALL_NAMES
+        cross_response_call_id = call_id if code_mode_call else None
+        cross_response_argument_key = ("", str(item_type), item_name, cross_response_call_id, argument_key)
+        has_cross_response_identity = not code_mode_call or cross_response_call_id is not None
         if (
             not scope_side_effects_by_response_id
+            and has_cross_response_identity
             and cross_response_argument_key in seen_tool_call_keys
             and same_response_argument_key not in seen_tool_call_keys
         ):
@@ -159,7 +175,7 @@ def mark_duplicate_tool_call_downstream_event(
     seen_tool_call_keys[key] = None
     if is_side_effect_tool_call:
         seen_tool_call_keys[same_response_argument_key] = None
-        if not scope_side_effects_by_response_id:
+        if not scope_side_effects_by_response_id and has_cross_response_identity:
             seen_tool_call_keys[cross_response_argument_key] = None
     while len(seen_tool_call_keys) > _TOOL_CALL_DEDUPE_CACHE_LIMIT:
         seen_tool_call_keys.pop(next(iter(seen_tool_call_keys)))
@@ -457,9 +473,9 @@ def replayed_side_effect_tool_call_key(item: Mapping[str, JsonValue]) -> tuple[s
         argument_value = item.get("arguments")
         if not isinstance(argument_value, str):
             return None
-        is_side_effect_tool_call = item_name in _SIDE_EFFECT_TOOL_CALL_NAMES and _tool_call_has_side_effect_arguments(
-            item_name,
-            argument_value,
+        is_side_effect_tool_call = (
+            item_name in _HISTORY_SIDE_EFFECT_TOOL_CALL_NAMES
+            and _tool_call_has_side_effect_arguments(item_name, argument_value)
         )
         if not is_side_effect_tool_call:
             return None
@@ -467,7 +483,7 @@ def replayed_side_effect_tool_call_key(item: Mapping[str, JsonValue]) -> tuple[s
     elif item_type == "custom_tool_call":
         item_name_value = item.get("name")
         item_name = item_name_value if isinstance(item_name_value, str) else None
-        if item_name not in _SIDE_EFFECT_TOOL_CALL_NAMES:
+        if item_name not in _HISTORY_SIDE_EFFECT_TOOL_CALL_NAMES:
             return None
         argument_value = item.get("input")
         if not isinstance(argument_value, str):
@@ -564,7 +580,7 @@ def replayed_tool_output_index_for_call(
 
 def _tool_call_has_side_effect_arguments(item_name: str | None, argument_value: str) -> bool:
     if item_name != _PARALLEL_TOOL_CALL_NAME:
-        return item_name in _SIDE_EFFECT_TOOL_CALL_NAMES
+        return item_name in _DOWNSTREAM_SIDE_EFFECT_TOOL_CALL_NAMES
 
     argument = json_object_from_argument(argument_value)
     if argument is None:

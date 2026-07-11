@@ -54,6 +54,19 @@ state while `/wham/usage` still returns `used_percent: 100` for a short period
 afterwards. codex-lb mirrors `/wham/usage` during that window, so the account
 stays `RATE_LIMITED` or `QUOTA_EXCEEDED` until upstream catches up.
 
+## Limit Warm-Up Exhaustion Threshold
+
+Reset-confirmed limit warm-up compares the usage sample from before a refresh
+with the sample written after that refresh. The pre-refresh sample must be at
+or above the configured exhausted threshold, the post-refresh sample must be
+below `100`, and `reset_at` must move forward.
+
+The exhausted threshold defaults to `99.0` because some upstream usage payloads
+plateau at 99 percent for windows that are practically exhausted. This avoids
+missing reset-confirmed warm-ups for those accounts while keeping the reset
+confirmation requirement intact. Operators who want the historical strict
+behavior can set the threshold to `100.0`.
+
 ## Operational Notes
 
 - Wait first. The next request through that account usually wakes the upstream

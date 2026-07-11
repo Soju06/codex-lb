@@ -68,6 +68,25 @@ collapsing below a usable minimum width.
 - **THEN** the selected label is truncated with an ellipsis within the trigger
 - **AND** the selector does not overflow its container
 
+### Requirement: Account proxy binding can test the selected pool
+
+The account detail proxy-binding panel SHALL expose an in-place test action for the selected proxy
+pool when that pool has at least one endpoint. Activating the action SHALL call the existing upstream
+proxy endpoint-test API for the selected pool's first endpoint and SHALL display the latest bounded
+reachability result without showing proxy credentials or account tokens.
+
+#### Scenario: Operator tests the selected account proxy pool
+
+- **GIVEN** an account proxy binding panel has a selected pool with at least one endpoint
+- **WHEN** an operator activates the pool test action
+- **THEN** the dashboard calls the existing endpoint-test API with the selected pool's first endpoint id
+- **AND** displays whether the endpoint was reachable, plus bounded status/latency details when provided
+
+#### Scenario: Pool test is disabled when no endpoint is available
+
+- **WHEN** the selected account proxy pool has no endpoints
+- **THEN** the pool test action is disabled
+
 ### Requirement: Account list presents a single add-account entry point with a chooser dialog
 
 The account list SHALL present account creation through a single dashed-border placeholder control

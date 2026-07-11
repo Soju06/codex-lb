@@ -14,6 +14,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import cast
 
+import pytest
+
 from app.core import conversation_archive
 from app.core.utils.request_id import reset_request_id, set_request_id
 from app.modules.conversation_archive import api as conversation_archive_api
@@ -446,6 +448,8 @@ def test_archive_uses_hourly_gzip_files(monkeypatch, tmp_path):
 
 
 def test_archive_files_are_operator_only_even_with_permissive_umask(monkeypatch, tmp_path):
+    if os.name == "nt":
+        pytest.skip("POSIX chmod semantics are not enforced on Windows")
     archive_dir = tmp_path / "archive"
     monkeypatch.setattr(
         conversation_archive,

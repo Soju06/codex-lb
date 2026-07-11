@@ -49,10 +49,13 @@ def _to_response(row: ApiKeyData) -> ApiKeyResponse:
         enforced_service_tier=row.enforced_service_tier,
         traffic_class=row.traffic_class,
         transport_policy_override=row.transport_policy_override,
+        usage_sections=row.usage_sections,
         expires_at=row.expires_at,
         is_active=row.is_active,
         account_assignment_scope_enabled=row.account_assignment_scope_enabled,
+        source_assignment_scope_enabled=row.source_assignment_scope_enabled,
         assigned_account_ids=row.assigned_account_ids,
+        assigned_source_ids=row.assigned_source_ids,
         created_at=row.created_at,
         last_used_at=row.last_used_at,
         limits=[
@@ -135,8 +138,14 @@ async def create_api_key(
                 enforced_service_tier=payload.enforced_service_tier,
                 traffic_class=payload.traffic_class or "foreground",
                 transport_policy_override=payload.transport_policy_override,
+                usage_sections=(
+                    payload.usage_sections
+                    if payload.usage_sections is not None
+                    else "upstream_limits,account_pool_usage"
+                ),
                 expires_at=payload.expires_at,
                 assigned_account_ids=payload.assigned_account_ids,
+                assigned_source_ids=payload.assigned_source_ids,
                 limits=limit_inputs,
             )
         )
@@ -192,12 +201,16 @@ async def update_api_key(
         traffic_class_set="traffic_class" in fields,
         transport_policy_override=payload.transport_policy_override,
         transport_policy_override_set="transport_policy_override" in fields,
+        usage_sections=payload.usage_sections,
+        usage_sections_set="usage_sections" in fields,
         expires_at=payload.expires_at,
         expires_at_set="expires_at" in fields,
         is_active=payload.is_active,
         is_active_set="is_active" in fields,
         assigned_account_ids=payload.assigned_account_ids,
         assigned_account_ids_set="assigned_account_ids" in fields,
+        assigned_source_ids=payload.assigned_source_ids,
+        assigned_source_ids_set="assigned_source_ids" in fields,
         limits=limit_inputs,
         limits_set=limits_set,
         reset_usage=bool(payload.reset_usage),

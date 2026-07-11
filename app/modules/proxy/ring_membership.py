@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.utils.time import utcnow
 from app.db.models import BridgeRingMember
+from app.db.session import close_session
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -212,7 +213,7 @@ class RingMembershipService:
         try:
             yield session
         finally:
-            await session.close()
+            await close_session(session)
 
 
 def _bridge_ring_metadata_json(endpoint_base_url: str | None) -> str | None:

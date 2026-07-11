@@ -14,6 +14,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -115,8 +116,9 @@ def cleanup_plan(
 
 
 def _run_gh(args: Sequence[str]) -> str:
+    gh = shutil.which("gh") or "gh"
     proc = subprocess.run(
-        ["gh", *args],
+        [gh, *args],
         check=True,
         text=True,
         stdout=subprocess.PIPE,

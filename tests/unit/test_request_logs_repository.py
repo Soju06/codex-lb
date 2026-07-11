@@ -7,7 +7,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.exc import ResourceClosedError
 
-from app.db.models import RequestLog
+from app.db.models import ModelSource, RequestLog
 from app.db.session import SessionLocal
 from app.modules.request_logs.repository import RequestLogsRepository
 
@@ -63,6 +63,117 @@ async def test_add_log_persists_request_kind(db_setup) -> None:
         persisted = await session.scalar(select(RequestLog).where(RequestLog.id == saved.id))
         assert persisted is not None
         assert persisted.request_kind == "warmup"
+
+
+@pytest.mark.asyncio
+async def test_add_log_does_not_recalculate_unpriced_model_source_cost(db_setup) -> None:
+    del db_setup
+    async with SessionLocal() as session:
+        session.add(
+            ModelSource(
+                id="source_unpriced",
+                name="source unpriced",
+                base_url="https://source-unpriced.example.invalid/v1",
+            )
+        )
+        await session.commit()
+        repo = RequestLogsRepository(session)
+
+        saved = await repo.add_log(
+            account_id=None,
+            model_source_id="source_unpriced",
+            request_id="req_source_unpriced",
+            model="gpt-5.2",
+            input_tokens=10_000,
+            output_tokens=5_000,
+            latency_ms=1,
+            status="success",
+            error_code=None,
+            cost_usd=None,
+        )
+
+        persisted = await session.scalar(select(RequestLog).where(RequestLog.id == saved.id))
+        assert persisted is not None
+        assert persisted.cost_usd == 0.0
+
+
+@pytest.mark.asyncio
+async def test_add_log_persists_archive_request_id(db_setup) -> None:
+    del db_setup
+    async with SessionLocal() as session:
+        repo = RequestLogsRepository(session)
+
+        explicit = await repo.add_log(
+            account_id=None,
+            request_id="resp_downstream",
+            archive_request_id="req_archive_origin",
+            model="gpt-5.2",
+            input_tokens=10,
+            output_tokens=5,
+            latency_ms=1,
+            status="success",
+            error_code=None,
+        )
+        fallback = await repo.add_log(
+            account_id=None,
+            request_id="req_archive_same",
+            model="gpt-5.2",
+            input_tokens=10,
+            output_tokens=5,
+            latency_ms=1,
+            status="success",
+            error_code=None,
+        )
+
+        explicit_persisted = await session.scalar(select(RequestLog).where(RequestLog.id == explicit.id))
+        fallback_persisted = await session.scalar(select(RequestLog).where(RequestLog.id == fallback.id))
+
+    assert explicit_persisted is not None
+    assert explicit_persisted.request_id == "resp_downstream"
+    assert explicit_persisted.archive_request_id == "req_archive_origin"
+    assert fallback_persisted is not None
+    assert fallback_persisted.archive_request_id == "req_archive_same"
+
+
+@pytest.mark.asyncio
+async def test_add_log_persists_ttft_phase_and_prewarm_fields(db_setup) -> None:
+    del db_setup
+    async with SessionLocal() as session:
+        repo = RequestLogsRepository(session)
+
+        saved = await repo.add_log(
+            account_id=None,
+            request_id="req_phase",
+            model="gpt-5.2",
+            input_tokens=50000,
+            output_tokens=5,
+            latency_ms=1000,
+            status="success",
+            error_code=None,
+            latency_first_token_ms=900,
+            latency_response_created_ms=210,
+            latency_first_upstream_event_ms=180,
+            latency_response_create_gate_wait_ms=50,
+            latency_bridge_queue_wait_ms=40,
+            prewarm_status="success",
+            prewarm_latency_ms=120,
+            prewarm_canary_bucket="treatment",
+            prewarm_eligible_reason="first_turn_50k_gap_2m",
+            session_previous_gap_ms=180000,
+        )
+
+        persisted = await session.scalar(select(RequestLog).where(RequestLog.id == saved.id))
+
+    assert persisted is not None
+    assert persisted.latency_response_created_ms == 210
+    assert persisted.latency_first_upstream_event_ms == 180
+    assert persisted.latency_response_create_gate_wait_ms == 50
+    assert persisted.latency_bridge_queue_wait_ms == 40
+    assert persisted.prewarm_status == "success"
+    assert persisted.prewarm_latency_ms == 120
+    assert persisted.prewarm_canary_bucket == "treatment"
+    assert persisted.prewarm_eligible_reason == "first_turn_50k_gap_2m"
+    assert persisted.session_previous_gap_ms == 180000
 
 
 @pytest.mark.asyncio

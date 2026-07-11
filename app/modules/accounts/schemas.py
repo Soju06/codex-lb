@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import List
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from app.modules.shared.schemas import DashboardModel
 
@@ -30,6 +30,15 @@ class AccountRequestUsage(DashboardModel):
     total_tokens: int = 0
     cached_input_tokens: int = 0
     total_cost_usd: float = 0.0
+
+
+class AccountUsageResetCredits(DashboardModel):
+    available_count: int = Field(ge=0)
+
+
+class AccountUsageResetCreditsResponse(DashboardModel):
+    account_id: str
+    rate_limit_reset_credits: AccountUsageResetCredits
 
 
 class AccountTokenStatus(DashboardModel):
@@ -221,6 +230,34 @@ class AccountProbeResponse(DashboardModel):
     status: str
     account_id: str
     probe_status_code: int
+    primary_used_percent_before: float | None = None
+    primary_used_percent_after: float | None = None
+    secondary_used_percent_before: float | None = None
+    secondary_used_percent_after: float | None = None
+    account_status_before: str
+    account_status_after: str
+
+
+class AccountUsageResetConsumeRequest(DashboardModel):
+    redeem_request_id: str | None = None
+
+    @field_validator("redeem_request_id")
+    @classmethod
+    def normalize_redeem_request_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("redeem_request_id must not be empty")
+        return normalized
+
+
+class AccountUsageResetConsumeResponse(DashboardModel):
+    status: str
+    account_id: str
+    code: str
+    windows_reset: int = 0
+    usage_written: bool
     primary_used_percent_before: float | None = None
     primary_used_percent_after: float | None = None
     secondary_used_percent_before: float | None = None

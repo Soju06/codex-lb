@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 
-from sqlalchemy import Integer, cast, delete, func, select, true, update
+from sqlalchemy import BigInteger, Integer, cast, delete, func, select, true, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only, selectinload
 
@@ -16,10 +16,12 @@ from app.db.models import (
     ApiKey,
     ApiKeyAccountAssignment,
     ApiKeyLimit,
+    ApiKeyModelSourceAssignment,
     ApiKeyUsageReservation,
     ApiKeyUsageReservationItem,
     LimitType,
     LimitWindow,
+    ModelSource,
     RequestLog,
     RequestLogDailyAggregate,
 )
@@ -182,6 +184,7 @@ class ApiKeysRepository:
             .options(
                 selectinload(ApiKey.limits),
                 selectinload(ApiKey.account_assignments),
+                selectinload(ApiKey.source_assignments),
             )
         )
 
@@ -213,6 +216,12 @@ class ApiKeysRepository:
             .options(load_only(Account.id, Account.plan_type, Account.status))
             .where(Account.id.in_(account_ids))
         )
+        return list(result.scalars().all())
+
+    async def list_model_sources_by_ids(self, source_ids: list[str]) -> list[ModelSource]:
+        if not source_ids:
+            return []
+        result = await self._session.execute(select(ModelSource).where(ModelSource.id.in_(source_ids)))
         return list(result.scalars().all())
 
     async def list_all_accounts(self) -> list[Account]:
@@ -332,6 +341,47 @@ class ApiKeysRepository:
             )
         return parts.to_summary()
 
+    async def get_limit_usage_value(
+        self,
+        key_id: str,
+        *,
+        limit_type: LimitType,
+        since: datetime,
+        until: datetime,
+        model_filter: str | None,
+    ) -> int:
+        if limit_type == LimitType.CREDITS:
+            return 0
+
+        if limit_type == LimitType.TOTAL_TOKENS:
+            value_expr = func.coalesce(RequestLog.input_tokens, 0) + func.coalesce(
+                RequestLog.output_tokens,
+                RequestLog.reasoning_tokens,
+                0,
+            )
+        elif limit_type == LimitType.INPUT_TOKENS:
+            value_expr = func.coalesce(RequestLog.input_tokens, 0)
+        elif limit_type == LimitType.OUTPUT_TOKENS:
+            value_expr = func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)
+        elif limit_type == LimitType.COST_USD:
+            value_expr = cast(func.floor(func.coalesce(RequestLog.cost_usd, 0.0) * 1_000_000), BigInteger)
+        else:
+            return 0
+
+        stmt = select(func.coalesce(func.sum(value_expr), 0)).where(
+            RequestLog.api_key_id == key_id,
+            RequestLog.status == "success",
+            self._exclude_warmup_clause(),
+            RequestLog.requested_at >= since,
+            RequestLog.requested_at < until,
+        )
+        if model_filter is not None:
+            stmt = stmt.where(RequestLog.model == model_filter)
+
+        result = await self._session.execute(stmt)
+        value = result.scalar_one()
+        return int(value or 0)
+
     async def update(
         self,
         key_id: str,
@@ -344,7 +394,9 @@ class ApiKeysRepository:
         enforced_service_tier: str | None | _Unset = _UNSET,
         traffic_class: str | _Unset = _UNSET,
         transport_policy_override: str | None | _Unset = _UNSET,
+        usage_sections: str | _Unset = _UNSET,
         account_assignment_scope_enabled: bool | _Unset = _UNSET,
+        source_assignment_scope_enabled: bool | _Unset = _UNSET,
         expires_at: datetime | None | _Unset = _UNSET,
         is_active: bool | _Unset = _UNSET,
         key_hash: str | _Unset = _UNSET,
@@ -378,9 +430,15 @@ class ApiKeysRepository:
         if transport_policy_override is not _UNSET:
             assert transport_policy_override is None or isinstance(transport_policy_override, str)
             row.transport_policy_override = transport_policy_override
+        if usage_sections is not _UNSET:
+            assert isinstance(usage_sections, str)
+            row.usage_sections = usage_sections
         if account_assignment_scope_enabled is not _UNSET:
             assert isinstance(account_assignment_scope_enabled, bool)
             row.account_assignment_scope_enabled = account_assignment_scope_enabled
+        if source_assignment_scope_enabled is not _UNSET:
+            assert isinstance(source_assignment_scope_enabled, bool)
+            row.source_assignment_scope_enabled = source_assignment_scope_enabled
         if expires_at is not _UNSET:
             assert expires_at is None or isinstance(expires_at, datetime)
             row.expires_at = expires_at
@@ -471,6 +529,18 @@ class ApiKeysRepository:
         parent = await self._session.get(ApiKey, key_id)
         if parent is not None:
             await self._session.refresh(parent, attribute_names=["account_assignments"])
+
+    async def replace_source_assignments(self, key_id: str, source_ids: list[str], *, commit: bool = True) -> None:
+        await self._session.execute(
+            delete(ApiKeyModelSourceAssignment).where(ApiKeyModelSourceAssignment.api_key_id == key_id)
+        )
+        for source_id in source_ids:
+            self._session.add(ApiKeyModelSourceAssignment(api_key_id=key_id, source_id=source_id))
+        if commit:
+            await self._session.commit()
+        parent = await self._session.get(ApiKey, key_id)
+        if parent is not None:
+            await self._session.refresh(parent, attribute_names=["source_assignments"])
 
     async def increment_limit_usage(
         self,

@@ -143,15 +143,19 @@ def _dashboard_settings_response(settings) -> DashboardSettingsResponse:
         totp_required_on_login=settings.totp_required_on_login,
         totp_configured=settings.totp_configured,
         api_key_auth_enabled=settings.api_key_auth_enabled,
+        hide_upstream_quota_from_api_keys=settings.hide_upstream_quota_from_api_keys,
         limit_warmup_enabled=settings.limit_warmup_enabled,
         limit_warmup_windows=settings.limit_warmup_windows,
         limit_warmup_model=settings.limit_warmup_model,
         limit_warmup_prompt=settings.limit_warmup_prompt,
         limit_warmup_cooldown_seconds=settings.limit_warmup_cooldown_seconds,
+        limit_warmup_exhausted_threshold_percent=settings.limit_warmup_exhausted_threshold_percent,
         limit_warmup_min_available_percent=settings.limit_warmup_min_available_percent,
         weekly_pace_working_days=settings.weekly_pace_working_days,
+        weekly_pace_smoothing_minutes=settings.weekly_pace_smoothing_minutes,
         guest_access_enabled=settings.guest_access_enabled,
         guest_password_configured=settings.guest_password_configured,
+        limit_warmup_staggered_idle_enabled=settings.limit_warmup_staggered_idle_enabled,
     )
 
 
@@ -644,6 +648,11 @@ async def update_settings(
                     if payload.api_key_auth_enabled is not None
                     else current.api_key_auth_enabled
                 ),
+                hide_upstream_quota_from_api_keys=(
+                    payload.hide_upstream_quota_from_api_keys
+                    if payload.hide_upstream_quota_from_api_keys is not None
+                    else current.hide_upstream_quota_from_api_keys
+                ),
                 limit_warmup_enabled=(
                     payload.limit_warmup_enabled
                     if payload.limit_warmup_enabled is not None
@@ -657,6 +666,11 @@ async def update_settings(
                     if payload.limit_warmup_cooldown_seconds is not None
                     else current.limit_warmup_cooldown_seconds
                 ),
+                limit_warmup_exhausted_threshold_percent=(
+                    payload.limit_warmup_exhausted_threshold_percent
+                    if payload.limit_warmup_exhausted_threshold_percent is not None
+                    else current.limit_warmup_exhausted_threshold_percent
+                ),
                 limit_warmup_min_available_percent=(
                     payload.limit_warmup_min_available_percent
                     if payload.limit_warmup_min_available_percent is not None
@@ -667,10 +681,20 @@ async def update_settings(
                     if payload.weekly_pace_working_days is not None
                     else current.weekly_pace_working_days
                 ),
+                weekly_pace_smoothing_minutes=(
+                    payload.weekly_pace_smoothing_minutes
+                    if payload.weekly_pace_smoothing_minutes is not None
+                    else current.weekly_pace_smoothing_minutes
+                ),
                 guest_access_enabled=(
                     payload.guest_access_enabled
                     if payload.guest_access_enabled is not None
                     else current.guest_access_enabled
+                ),
+                limit_warmup_staggered_idle_enabled=(
+                    payload.limit_warmup_staggered_idle_enabled
+                    if payload.limit_warmup_staggered_idle_enabled is not None
+                    else current.limit_warmup_staggered_idle_enabled
                 ),
             )
         )
@@ -704,15 +728,18 @@ async def update_settings(
             "import_without_overwrite",
             "totp_required_on_login",
             "api_key_auth_enabled",
+            "hide_upstream_quota_from_api_keys",
             "limit_warmup_enabled",
             "limit_warmup_windows",
             "limit_warmup_model",
             "limit_warmup_prompt",
             "limit_warmup_cooldown_seconds",
+            "limit_warmup_exhausted_threshold_percent",
             "limit_warmup_min_available_percent",
             "weekly_pace_working_days",
-            "weekly_pace_working_days",
+            "weekly_pace_smoothing_minutes",
             "guest_access_enabled",
+            "limit_warmup_staggered_idle_enabled",
         )
         if getattr(current, field_name) != getattr(updated, field_name)
     ]

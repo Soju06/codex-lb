@@ -73,9 +73,9 @@ export function AccountList({
   }, [accounts, quotaDisplay, search, statusFilter, activeSortMode]);
 
   return (
-    <div className="space-y-3">
-      <div className="grid grid-cols-2 gap-2">
-        <div className="relative col-span-2 min-w-0">
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col space-y-3">
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+        <div className="relative min-w-0 sm:col-span-2">
           <Search className="pointer-events-none absolute top-1/2 left-2.5 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground/60" aria-hidden />
           <Input
             placeholder="Search accounts..."
@@ -121,7 +121,7 @@ export function AccountList({
         </Select>
       </div>
 
-      <div className="flex items-center justify-between gap-3">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <Button
           type="button"
           variant="link"
@@ -146,7 +146,10 @@ export function AccountList({
 
       {helpOpen ? <WindowsOauthHelp /> : null}
 
-      <div className="max-h-[calc(100vh-16rem)] space-y-1 overflow-y-auto p-1" data-testid="account-list-scroll-region">
+      <div
+        className="flex-1 min-h-0 space-y-1 overflow-y-auto p-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden max-h-[min(32rem,calc(100dvh-16rem))]"
+        data-testid="account-list-scroll-region"
+      >
         {filtered.length === 0 ? (
           <div className="flex flex-col items-center gap-2 rounded-lg border border-dashed p-6 text-center">
             <p className="text-sm font-medium text-muted-foreground">No matching accounts</p>

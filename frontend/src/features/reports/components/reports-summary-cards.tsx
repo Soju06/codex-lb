@@ -23,7 +23,7 @@ export function ReportsSummaryCards({ summary, comparison }: ReportsSummaryCards
     {
       label: "Tokens",
       value: formatNumber(summary.totalInputTokens + summary.totalOutputTokens),
-      sub: `Input ${formatNumber(summary.totalInputTokens)} · Output ${formatNumber(summary.totalOutputTokens)}`,
+      sub: `Input ${formatNumber(summary.totalInputTokens)} · Cache ${formatNumber(summary.totalCachedTokens)} · Output ${formatNumber(summary.totalOutputTokens)}`,
       comparison: buildComparison(
         summary.totalInputTokens + summary.totalOutputTokens,
         comparison.previous.totalTokens,
@@ -67,10 +67,18 @@ export function ReportsSummaryCards({ summary, comparison }: ReportsSummaryCards
 }
 
 function formatNumber(n: number): string {
-  if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(1)}B`;
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+  if (n >= 1_000_000_000) return formatCompactNumber(n / 1_000_000_000, "B");
+  if (n >= 1_000_000) return formatCompactNumber(n / 1_000_000, "M");
+  if (n >= 1_000) return formatCompactNumber(n / 1_000, "K");
   return String(n);
+}
+
+function formatCompactNumber(value: number, suffix: "B" | "M" | "K"): string {
+  if (suffix === "M" && value >= 100 && Number.isInteger(value)) {
+    return `${value.toFixed(0)}${suffix}`;
+  }
+
+  return `${value.toFixed(1)}${suffix}`;
 }
 
 function buildComparison(

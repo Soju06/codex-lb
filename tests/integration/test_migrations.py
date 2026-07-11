@@ -8,6 +8,10 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.core.auth import DEFAULT_PLAN
+from app.core.auth.dashboard_session_ttl import (
+    DEFAULT_DASHBOARD_SESSION_TTL_SECONDS,
+    REMOTE_DASHBOARD_SESSION_TTL_SECONDS,
+)
 from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
@@ -486,14 +490,19 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
             await session.execute(text("PRAGMA foreign_keys=ON"))
             dashboard_columns_rows = (await session.execute(text("PRAGMA table_info(dashboard_settings)"))).fetchall()
             dashboard_columns = {str(row[1]) for row in dashboard_columns_rows if len(row) > 1}
+            dashboard_column_defaults = {str(row[1]): row[4] for row in dashboard_columns_rows if len(row) > 4}
             account_columns_rows = (await session.execute(text("PRAGMA table_info(accounts)"))).fetchall()
             account_columns = {str(row[1]) for row in account_columns_rows if len(row) > 1}
+            api_key_columns_rows = (await session.execute(text("PRAGMA table_info(api_keys)"))).fetchall()
+            api_key_columns = {str(row[1]) for row in api_key_columns_rows if len(row) > 1}
+            api_key_column_defaults = {str(row[1]): row[4] for row in api_key_columns_rows if len(row) > 4}
             request_log_columns_rows = (await session.execute(text("PRAGMA table_info(request_logs)"))).fetchall()
             request_log_columns = {str(row[1]) for row in request_log_columns_rows if len(row) > 1}
             assert "deleted_at" in request_log_columns
             assert "transport" in request_log_columns
             assert "plan_type" in request_log_columns
             assert "source" in request_log_columns
+            assert "archive_request_id" in request_log_columns
             assert "limit_warmup_enabled" in account_columns
             legacy_plan_type = (
                 await session.execute(text("SELECT plan_type FROM request_logs WHERE id=1"))
@@ -504,8 +513,24 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
             assert "limit_warmup_model" in dashboard_columns
             assert "limit_warmup_prompt" in dashboard_columns
             assert "limit_warmup_cooldown_seconds" in dashboard_columns
+            assert "limit_warmup_exhausted_threshold_percent" in dashboard_columns
             assert "limit_warmup_min_available_percent" in dashboard_columns
+            exhausted_threshold = (
+                await session.execute(
+                    text("SELECT limit_warmup_exhausted_threshold_percent FROM dashboard_settings WHERE id=1")
+                )
+            ).scalar_one()
+            assert exhausted_threshold == 99.0
+            assert "hide_upstream_quota_from_api_keys" in dashboard_columns
+            assert dashboard_column_defaults["hide_upstream_quota_from_api_keys"] in ("0", 0, False)
             assert "single_account_id" in dashboard_columns
+            assert "limit_warmup_staggered_idle_enabled" in dashboard_columns
+            assert "usage_sections" in api_key_columns
+            assert api_key_column_defaults["usage_sections"] in (
+                "'upstream_limits,account_pool_usage'",
+                '"upstream_limits,account_pool_usage"',
+                "upstream_limits,account_pool_usage",
+            )
             if "routing_strategy" in dashboard_columns:
                 routing_strategy = (
                     await session.execute(text("SELECT routing_strategy FROM dashboard_settings WHERE id=1"))
@@ -792,6 +817,60 @@ async def test_dashboard_settings_default_flip_migration_updates_pristine_fresh_
             ).one()
             assert row[0] in (True, 1)
             assert row[1] in (True, 1)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("initial_ttl_seconds", "expected_ttl_seconds"),
+    [
+        (REMOTE_DASHBOARD_SESSION_TTL_SECONDS, DEFAULT_DASHBOARD_SESSION_TTL_SECONDS),
+        (7200, 7200),
+    ],
+)
+async def test_dashboard_session_ttl_migration_updates_only_legacy_default(
+    tmp_path,
+    initial_ttl_seconds: int,
+    expected_ttl_seconds: int,
+):
+    db_url = f"sqlite+aiosqlite:///{tmp_path / f'dashboard-session-ttl-{initial_ttl_seconds}.sqlite'}"
+    parent_revision = "20260701_000000_add_weekly_pace_smoothing_minutes"
+    target_revision = "20260705_000000_harden_dashboard_session_ttl"
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=True))
+
+    engine = create_async_engine(db_url, future=True)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with session_factory() as session:
+            await session.execute(
+                text(
+                    """
+                    UPDATE dashboard_settings
+                    SET dashboard_session_ttl_seconds = :initial_ttl_seconds
+                    WHERE id = 1
+                    """
+                ),
+                {"initial_ttl_seconds": initial_ttl_seconds},
+            )
+            await session.commit()
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, target_revision, bootstrap_legacy=False))
+
+        async with session_factory() as session:
+            ttl_seconds = (
+                await session.execute(
+                    text(
+                        """
+                        SELECT dashboard_session_ttl_seconds
+                        FROM dashboard_settings
+                        WHERE id = 1
+                        """
+                    )
+                )
+            ).scalar_one()
+            assert ttl_seconds == expected_ttl_seconds
     finally:
         await engine.dispose()
 

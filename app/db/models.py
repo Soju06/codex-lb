@@ -26,6 +26,8 @@ from sqlalchemy import (
 from sqlalchemy import Enum as SqlEnum
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
+from app.core.auth.dashboard_session_ttl import DEFAULT_DASHBOARD_SESSION_TTL_SECONDS
+
 
 class Base(DeclarativeBase):
     pass
@@ -177,7 +179,10 @@ class AdditionalUsageHistory(Base):
 
 class RequestLog(Base):
     __tablename__ = "request_logs"
-    __table_args__ = (Index("idx_logs_useragent_group", "useragent_group"),)
+    __table_args__ = (
+        Index("idx_logs_useragent_group", "useragent_group"),
+        Index("idx_logs_client_ip", "client_ip"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     account_id: Mapped[str | None] = mapped_column(
@@ -185,9 +190,15 @@ class RequestLog(Base):
         ForeignKey("accounts.id", ondelete="SET NULL"),
         nullable=True,
     )
+    model_source_id: Mapped[str | None] = mapped_column(
+        String,
+        nullable=True,
+    )
+    model_source_kind: Mapped[str | None] = mapped_column(String, nullable=True)
     api_key_id: Mapped[str | None] = mapped_column(String, nullable=True)
     session_id: Mapped[str | None] = mapped_column(String, nullable=True)
     request_id: Mapped[str] = mapped_column(String, nullable=False)
+    archive_request_id: Mapped[str | None] = mapped_column(String, nullable=True)
     request_kind: Mapped[str] = mapped_column(
         String,
         default=RequestKind.NORMAL.value,
@@ -201,6 +212,7 @@ class RequestLog(Base):
     source: Mapped[str | None] = mapped_column(String, nullable=True)
     useragent: Mapped[str | None] = mapped_column(Text, nullable=True)
     useragent_group: Mapped[str | None] = mapped_column(String, nullable=True)
+    client_ip: Mapped[str | None] = mapped_column(String, nullable=True)
     transport: Mapped[str | None] = mapped_column(String, nullable=True)
     service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
     requested_service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -213,6 +225,15 @@ class RequestLog(Base):
     reasoning_effort: Mapped[str | None] = mapped_column(String, nullable=True)
     latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     latency_first_token_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    latency_response_created_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    latency_first_upstream_event_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    latency_response_create_gate_wait_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    latency_bridge_queue_wait_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    prewarm_status: Mapped[str | None] = mapped_column(String, nullable=True)
+    prewarm_latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    prewarm_canary_bucket: Mapped[str | None] = mapped_column(String, nullable=True)
+    prewarm_eligible_reason: Mapped[str | None] = mapped_column(String, nullable=True)
+    session_previous_gap_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     status: Mapped[str] = mapped_column(String, nullable=False)
     error_code: Mapped[str | None] = mapped_column(String, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -231,6 +252,11 @@ class RequestLog(Base):
     account: Mapped[Account | None] = relationship(
         "Account",
         back_populates="request_logs",
+    )
+    model_source: Mapped["ModelSource | None"] = relationship(
+        "ModelSource",
+        back_populates="request_logs",
+        primaryjoin="foreign(RequestLog.model_source_id) == ModelSource.id",
     )
 
 
@@ -506,8 +532,8 @@ class DashboardSettings(Base):
     )
     dashboard_session_ttl_seconds: Mapped[int] = mapped_column(
         Integer,
-        default=43200,
-        server_default=text("43200"),
+        default=DEFAULT_DASHBOARD_SESSION_TTL_SECONDS,
+        server_default=text(str(DEFAULT_DASHBOARD_SESSION_TTL_SECONDS)),
         nullable=False,
     )
     import_without_overwrite: Mapped[bool] = mapped_column(
@@ -534,6 +560,12 @@ class DashboardSettings(Base):
     api_key_auth_enabled: Mapped[bool] = mapped_column(
         Boolean,
         default=False,
+        nullable=False,
+    )
+    hide_upstream_quota_from_api_keys: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=false(),
         nullable=False,
     )
     totp_secret_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
@@ -615,6 +647,12 @@ class DashboardSettings(Base):
         server_default=text("3600"),
         nullable=False,
     )
+    limit_warmup_exhausted_threshold_percent: Mapped[float] = mapped_column(
+        Float,
+        default=99.0,
+        server_default=text("99.0"),
+        nullable=False,
+    )
     limit_warmup_min_available_percent: Mapped[float] = mapped_column(
         Float,
         default=100.0,
@@ -624,6 +662,18 @@ class DashboardSettings(Base):
         String,
         default="0,1,2,3,4,5,6",
         server_default=text("'0,1,2,3,4,5,6'"),
+        nullable=False,
+    )
+    weekly_pace_smoothing_minutes: Mapped[int] = mapped_column(
+        Integer,
+        default=30,
+        server_default=text("30"),
+        nullable=False,
+    )
+    limit_warmup_staggered_idle_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=false(),
         nullable=False,
     )
     warmup_model: Mapped[str] = mapped_column(
@@ -684,6 +734,18 @@ class ApiKey(Base):
         server_default=false(),
         nullable=False,
     )
+    source_assignment_scope_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=false(),
+        nullable=False,
+    )
+    usage_sections: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=False,
+        default="upstream_limits,account_pool_usage",
+        server_default="upstream_limits,account_pool_usage",
+    )
     expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
@@ -697,6 +759,12 @@ class ApiKey(Base):
     )
     account_assignments: Mapped[list["ApiKeyAccountAssignment"]] = relationship(
         "ApiKeyAccountAssignment",
+        back_populates="api_key",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+    )
+    source_assignments: Mapped[list["ApiKeyModelSourceAssignment"]] = relationship(
+        "ApiKeyModelSourceAssignment",
         back_populates="api_key",
         cascade="all, delete-orphan",
         lazy="selectin",
@@ -720,6 +788,122 @@ class ApiKeyAccountAssignment(Base):
 
     api_key: Mapped["ApiKey"] = relationship("ApiKey", back_populates="account_assignments")
     account: Mapped["Account"] = relationship("Account", back_populates="api_key_assignments")
+
+
+class ModelSource(Base):
+    __tablename__ = "model_sources"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    kind: Mapped[str] = mapped_column(
+        String,
+        default="openai_compatible",
+        server_default=text("'openai_compatible'"),
+        nullable=False,
+    )
+    base_url: Mapped[str] = mapped_column(String, nullable=False)
+    api_key_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true(), nullable=False)
+    health_status: Mapped[str] = mapped_column(
+        String,
+        default="unknown",
+        server_default=text("'unknown'"),
+        nullable=False,
+    )
+    supports_chat_completions: Mapped[bool] = mapped_column(
+        Boolean,
+        default=True,
+        server_default=true(),
+        nullable=False,
+    )
+    supports_responses: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=false(),
+        nullable=False,
+    )
+    supports_audio_transcriptions: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=false(),
+        nullable=False,
+    )
+    timeout_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    max_concurrency: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    models: Mapped[list["ModelSourceModel"]] = relationship(
+        "ModelSourceModel",
+        back_populates="source",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+    )
+    api_key_assignments: Mapped[list["ApiKeyModelSourceAssignment"]] = relationship(
+        "ApiKeyModelSourceAssignment",
+        back_populates="source",
+        cascade="all, delete-orphan",
+    )
+    request_logs: Mapped[list["RequestLog"]] = relationship(
+        "RequestLog",
+        back_populates="model_source",
+        primaryjoin="ModelSource.id == foreign(RequestLog.model_source_id)",
+        viewonly=True,
+    )
+
+
+class ModelSourceModel(Base):
+    __tablename__ = "model_source_models"
+    __table_args__ = (UniqueConstraint("source_id", "model", name="uq_model_source_models_source_model"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    source_id: Mapped[str] = mapped_column(String, ForeignKey("model_sources.id", ondelete="CASCADE"), nullable=False)
+    model: Mapped[str] = mapped_column(String, nullable=False)
+    display_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    context_window: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    max_output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    supports_streaming: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true(), nullable=False)
+    supports_tools: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false(), nullable=False)
+    supports_vision: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false(), nullable=False)
+    input_per_1m: Mapped[float | None] = mapped_column(Float, nullable=True)
+    cached_input_per_1m: Mapped[float | None] = mapped_column(Float, nullable=True)
+    output_per_1m: Mapped[float | None] = mapped_column(Float, nullable=True)
+    audio_per_minute: Mapped[float | None] = mapped_column(Float, nullable=True)
+    raw_metadata_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    source: Mapped["ModelSource"] = relationship("ModelSource", back_populates="models")
+
+
+class ApiKeyModelSourceAssignment(Base):
+    __tablename__ = "api_key_model_sources"
+
+    api_key_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("api_keys.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    source_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("model_sources.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+    api_key: Mapped["ApiKey"] = relationship("ApiKey", back_populates="source_assignments")
+    source: Mapped["ModelSource"] = relationship("ModelSource", back_populates="api_key_assignments")
 
 
 class LimitType(str, Enum):
@@ -836,6 +1020,169 @@ class ApiKeyUsageReservationItem(Base):
         back_populates="items",
     )
     limit: Mapped[ApiKeyLimit] = relationship("ApiKeyLimit")
+
+
+class AutomationJob(Base):
+    __tablename__ = "automation_jobs"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true(), nullable=False)
+    schedule_type: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="daily",
+        server_default=text("'daily'"),
+    )
+    schedule_time: Mapped[str] = mapped_column(String(5), nullable=False)
+    schedule_timezone: Mapped[str] = mapped_column(String(64), nullable=False)
+    schedule_days: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        default="mon,tue,wed,thu,fri,sat,sun",
+        server_default=text("'mon,tue,wed,thu,fri,sat,sun'"),
+    )
+    schedule_threshold_minutes: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
+    include_paused_accounts: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=false(),
+    )
+    account_scope_all: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=true())
+    model: Mapped[str] = mapped_column(String, nullable=False)
+    reasoning_effort: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    prompt: Mapped[str] = mapped_column(Text, nullable=False, default="ping", server_default=text("'ping'"))
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    account_links: Mapped[list["AutomationJobAccount"]] = relationship(
+        "AutomationJobAccount",
+        back_populates="job",
+        cascade="all, delete-orphan",
+    )
+    runs: Mapped[list["AutomationRun"]] = relationship(
+        "AutomationRun",
+        back_populates="job",
+        cascade="all, delete-orphan",
+    )
+    run_cycles: Mapped[list["AutomationRunCycle"]] = relationship(
+        "AutomationRunCycle",
+        back_populates="job",
+        cascade="all, delete-orphan",
+    )
+
+
+class AutomationJobAccount(Base):
+    __tablename__ = "automation_job_accounts"
+    __table_args__ = (UniqueConstraint("job_id", "position", name="uq_automation_job_accounts_position"),)
+
+    job_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("automation_jobs.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    account_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("accounts.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+    job: Mapped[AutomationJob] = relationship("AutomationJob", back_populates="account_links")
+    account: Mapped[Account] = relationship("Account")
+
+
+class AutomationRun(Base):
+    __tablename__ = "automation_runs"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    job_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("automation_jobs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    trigger: Mapped[str] = mapped_column(String(16), nullable=False)
+    slot_key: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    cycle_key: Mapped[str] = mapped_column(String(160), nullable=False)
+    cycle_expected_accounts: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cycle_window_end: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    model: Mapped[str | None] = mapped_column(String, nullable=True)
+    reasoning_effort: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    scheduled_for: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="running", server_default=text("'running'"))
+    account_id: Mapped[str | None] = mapped_column(
+        String,
+        ForeignKey("accounts.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    error_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+    job: Mapped[AutomationJob] = relationship("AutomationJob", back_populates="runs")
+    account: Mapped[Account | None] = relationship("Account")
+
+
+class AutomationRunCycle(Base):
+    __tablename__ = "automation_run_cycles"
+
+    cycle_key: Mapped[str] = mapped_column(String(160), primary_key=True)
+    job_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("automation_jobs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    trigger: Mapped[str] = mapped_column(String(16), nullable=False)
+    cycle_expected_accounts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
+    cycle_window_end: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    include_paused_accounts: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=false(),
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+    job: Mapped[AutomationJob] = relationship("AutomationJob", back_populates="run_cycles")
+    cycle_accounts: Mapped[list["AutomationRunCycleAccount"]] = relationship(
+        "AutomationRunCycleAccount",
+        back_populates="cycle",
+        cascade="all, delete-orphan",
+    )
+
+
+class AutomationRunCycleAccount(Base):
+    __tablename__ = "automation_run_cycle_accounts"
+    __table_args__ = (UniqueConstraint("cycle_key", "position", name="uq_automation_run_cycle_accounts_position"),)
+
+    cycle_key: Mapped[str] = mapped_column(
+        String(160),
+        ForeignKey("automation_run_cycles.cycle_key", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    account_id: Mapped[str] = mapped_column(String, primary_key=True)
+    slot_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    scheduled_for: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+    cycle: Mapped[AutomationRunCycle] = relationship("AutomationRunCycle", back_populates="cycle_accounts")
 
 
 class RateLimitAttempt(Base):
@@ -1097,9 +1444,25 @@ Index(
 Index("idx_accounts_email", Account.email)
 Index("idx_api_keys_name", ApiKey.name)
 Index("idx_logs_account_time", RequestLog.account_id, RequestLog.requested_at)
+Index("idx_logs_model_source_time", RequestLog.model_source_id, RequestLog.requested_at)
 Index("idx_logs_api_key_time", RequestLog.api_key_id, RequestLog.requested_at.desc(), RequestLog.id.desc())
 Index("idx_logs_api_key_time_account", RequestLog.api_key_id, RequestLog.requested_at.desc(), RequestLog.account_id)
 Index("idx_logs_request_kind_time", RequestLog.request_kind, RequestLog.requested_at.desc(), RequestLog.id.desc())
+Index(
+    "idx_logs_account_kind_deleted_latest",
+    RequestLog.account_id,
+    RequestLog.request_kind,
+    RequestLog.deleted_at,
+    RequestLog.requested_at,
+    RequestLog.id,
+)
+Index(
+    "idx_logs_account_request_latest",
+    RequestLog.account_id,
+    RequestLog.request_id,
+    RequestLog.requested_at,
+    RequestLog.id,
+)
 Index("idx_logs_requested_at", RequestLog.requested_at)
 Index("idx_logs_source_requested_at", RequestLog.source, RequestLog.requested_at.desc())
 Index("idx_logs_requested_at_id", RequestLog.requested_at.desc(), RequestLog.id.desc())
@@ -1164,6 +1527,8 @@ Index(
 )
 Index("idx_account_limit_warmups_status_attempted", AccountLimitWarmup.status, AccountLimitWarmup.attempted_at.desc())
 Index("idx_api_key_accounts_account_id", ApiKeyAccountAssignment.account_id)
+Index("idx_api_key_model_sources_source_id", ApiKeyModelSourceAssignment.source_id)
+Index("idx_model_source_models_model_enabled", ModelSourceModel.model, ModelSourceModel.is_enabled)
 Index("idx_api_key_limits_key_id", ApiKeyLimit.api_key_id)
 Index("idx_api_key_limits_reset_at", ApiKeyLimit.reset_at)
 Index("idx_api_key_usage_reservations_key_id", ApiKeyUsageReservation.api_key_id)
@@ -1183,6 +1548,12 @@ Index(
     QuotaWindowObservation.account_id,
     QuotaWindowObservation.observed_at.desc(),
 )
+Index("idx_automation_jobs_enabled", AutomationJob.enabled)
+Index("idx_automation_job_accounts_account_id", AutomationJobAccount.account_id)
+Index("idx_automation_runs_job_id_started_at", AutomationRun.job_id, AutomationRun.started_at)
+Index("idx_automation_runs_status_started_at", AutomationRun.status, AutomationRun.started_at)
+Index("idx_automation_runs_scheduled_for", AutomationRun.scheduled_for)
+Index("idx_automation_runs_cycle_key_started_at", AutomationRun.cycle_key, AutomationRun.started_at)
 Index("idx_http_bridge_sessions_owner_state", HttpBridgeSessionRecord.owner_instance_id, HttpBridgeSessionRecord.state)
 Index("idx_http_bridge_sessions_lease", HttpBridgeSessionRecord.lease_expires_at)
 Index("idx_http_bridge_sessions_last_seen", HttpBridgeSessionRecord.last_seen_at.desc())
@@ -1233,4 +1604,13 @@ Index(
     AdditionalUsageHistory.window,
     AdditionalUsageHistory.account_id,
     AdditionalUsageHistory.recorded_at,
+)
+Index(
+    "ix_additional_usage_quota_window_latest",
+    AdditionalUsageHistory.quota_key,
+    AdditionalUsageHistory.window,
+    AdditionalUsageHistory.account_id,
+    AdditionalUsageHistory.recorded_at.desc(),
+    AdditionalUsageHistory.used_percent.desc(),
+    AdditionalUsageHistory.id.desc(),
 )

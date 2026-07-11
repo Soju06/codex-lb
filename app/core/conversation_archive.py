@@ -166,9 +166,23 @@ def _redact_headers(headers: Mapping[str, str] | None) -> dict[str, str] | None:
 
 def _archive_path() -> Path:
     settings = get_settings()
-    directory = Path(getattr(settings, "conversation_archive_dir")).expanduser()
+    directory = _expand_archive_dir(Path(getattr(settings, "conversation_archive_dir")))
     filename = f"{datetime.now(UTC).strftime('%Y-%m-%dT%H')}.jsonl.gz"
     return directory / filename
+
+
+def _expand_archive_dir(directory: Path) -> Path:
+    text = str(directory)
+    if text == "~":
+        home = os.environ.get("HOME")
+        if home:
+            return Path(home)
+    for prefix in ("~/", "~\\"):
+        if text.startswith(prefix):
+            home = os.environ.get("HOME")
+            if home:
+                return Path(home) / text[2:]
+    return directory.expanduser()
 
 
 def flush_archive_writer() -> None:

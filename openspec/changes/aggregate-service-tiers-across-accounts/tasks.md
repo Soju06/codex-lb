@@ -1,0 +1,6 @@
+- [x] 1.1 Union speed/service-tier metadata across plans when merging same-slug models in the registry
+- [x] 1.2 Preserve last-writer-wins for non-tier model fields
+- [x] 1.3 De-duplicate unioned tier entries
+- [x] 1.4 Add registry regression tests for union and dedup of tier metadata
+- [x] 1.5 Add a product-path regression test on `GET /backend-api/codex/models`
+- [x] 1.6 Validate OpenSpec and targeted test suites

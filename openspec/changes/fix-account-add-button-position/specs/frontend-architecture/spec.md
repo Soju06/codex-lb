@@ -6,6 +6,8 @@ The Accounts page SHALL display a two-column layout: left panel with searchable 
 
 The Accounts page SHALL keep the add account button outside the scrollable account list so it remains reachable without scrolling through existing accounts.
 
+The Accounts page SHALL keep long account lists in a bounded internal scroll region on desktop so account rows do not push the page layout past the selected-account detail panel.
+
 The Accounts page SHALL also allow exporting a selected account as an OpenCode-compatible `auth.json` payload with explicit raw-token warnings.
 
 #### Scenario: Account selection
@@ -28,6 +30,12 @@ The Accounts page SHALL also allow exporting a selected account as an OpenCode-c
 - **WHEN** the Accounts page renders the account list controls
 - **THEN** the add account button is not a child of the scrollable account list
 - **AND** the button remains available without scrolling through existing accounts
+
+#### Scenario: Long account list scrolls inside the left panel
+
+- **WHEN** the Accounts page renders more account rows than fit in the visible left panel
+- **THEN** the account rows scroll inside the account list region
+- **AND** the add account action remains visible outside that scroll region
 
 #### Scenario: OAuth browser authorization URL copy fallback
 

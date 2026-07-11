@@ -5,11 +5,15 @@ import base64
 import contextlib
 import json
 from datetime import timedelta
+from typing import cast
 
 import pytest
+from fastapi.responses import JSONResponse
 from sqlalchemy import select, update
 
+import app.core.clients.proxy as core_proxy_module
 import app.modules.api_keys.repository as api_keys_repository_module
+import app.modules.proxy.api as proxy_api
 import app.modules.proxy.load_balancer as load_balancer_module
 import app.modules.proxy.service as proxy_module
 from app.core.auth import generate_unique_account_id
@@ -21,6 +25,12 @@ from app.db.models import Account, AccountStatus, ApiKeyUsageReservation, LimitW
 from app.db.session import SessionLocal
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import ApiKeyCreateData, ApiKeysService, LimitRuleInput
+from app.modules.model_sources.forwarding import (
+    SourceChatCompletion,
+    SourceResponsesStream,
+    SourceUsage,
+    SourceUsageHolder,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -84,6 +94,40 @@ async def _import_account(async_client, account_id: str, email: str) -> str:
     response = await async_client.post("/api/accounts/import", files=files)
     assert response.status_code == 200
     return generate_unique_account_id(account_id, email)
+
+
+async def _create_model_source(
+    async_client,
+    *,
+    name: str,
+    model: str,
+    supports_responses: bool = False,
+    raw_metadata_json: str | None = None,
+) -> str:
+    model_entry = {
+        "model": model,
+        "displayName": model,
+        "contextWindow": 8192,
+        "maxOutputTokens": 1024,
+        "supportsStreaming": True,
+        "supportsTools": True,
+    }
+    if raw_metadata_json is not None:
+        model_entry["rawMetadataJson"] = raw_metadata_json
+
+    response = await async_client.post(
+        "/api/model-sources/",
+        json={
+            "name": name,
+            "baseUrl": f"https://{name}.example.invalid/v1",
+            "apiKey": f"token-{name}",
+            "supportsChatCompletions": True,
+            "supportsResponses": supports_responses,
+            "models": [model_entry],
+        },
+    )
+    assert response.status_code == 200
+    return response.json()["id"]
 
 
 @pytest.mark.asyncio
@@ -209,6 +253,26 @@ async def test_api_key_transport_policy_override_invalid_value_returns_400(async
 
 
 @pytest.mark.asyncio
+async def test_create_api_key_preserves_empty_usage_sections(async_client):
+    create = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "hidden-usage-key",
+            "allowedModels": [],
+            "usageSections": "",
+        },
+    )
+
+    assert create.status_code == 200
+    payload = create.json()
+    assert payload["usageSections"] == ""
+
+    listed = await async_client.get("/api/api-keys/")
+    assert listed.status_code == 200
+    assert listed.json()[0]["usageSections"] == ""
+
+
+@pytest.mark.asyncio
 async def test_api_key_update_persists_assigned_account_ids(async_client):
     first_account_id = await _import_account(async_client, "acc-assigned-a", "assigned-a@example.com")
     second_account_id = await _import_account(async_client, "acc-assigned-b", "assigned-b@example.com")
@@ -306,7 +370,11 @@ async def test_api_key_list_includes_pooled_credit_fields_for_selectable_assigne
 @pytest.mark.asyncio
 async def test_deleted_assigned_accounts_do_not_fall_back_to_other_accounts(async_client, monkeypatch):
     await _populate_test_registry()
-    monkeypatch.setattr(load_balancer_module, "_filter_accounts_for_model", lambda accounts, model: accounts)
+    monkeypatch.setattr(
+        load_balancer_module,
+        "_filter_accounts_for_model",
+        lambda accounts, model, *, service_tier=None: accounts,
+    )
     assigned_account_id = await _import_account(async_client, "acc-scoped", "scoped@example.com")
     await _import_account(async_client, "acc-fallback", "fallback@example.com")
 
@@ -340,8 +408,19 @@ async def test_deleted_assigned_accounts_do_not_fall_back_to_other_accounts(asyn
 
     listed = await async_client.get("/api/api-keys/")
     assert listed.status_code == 200
-    assert listed.json()[0]["assignedAccountIds"] == []
-    assert listed.json()[0]["accountAssignmentScopeEnabled"] is True
+    listed_key = listed.json()[0]
+    assert listed_key["assignedAccountIds"] == []
+    assert listed_key["accountAssignmentScopeEnabled"] is True
+    assert listed_key["pooledCapacityCreditsPrimary"] == 0.0
+    assert listed_key["pooledRemainingPercentPrimary"] is None
+    assert listed_key["pooledRemainingPercentSecondary"] is None
+
+    usage = await async_client.get("/v1/usage", headers={"Authorization": f"Bearer {key}"})
+    assert usage.status_code == 200
+    assert usage.json()["account_pool_usage"] == {
+        "primary": None,
+        "secondary": None,
+    }
 
     called = False
 
@@ -884,6 +963,766 @@ async def test_api_key_usage_tracking_and_request_log_link(async_client, monkeyp
 
 
 @pytest.mark.asyncio
+async def test_source_routed_chat_completion_settles_api_key_usage(async_client, monkeypatch):
+    enable = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert enable.status_code == 200
+
+    model = "vllm-chat-usage"
+    source_id = await _create_model_source(async_client, name="vllm-usage", model=model)
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "source-usage-key",
+            "assignedSourceIds": [source_id],
+            "limits": [
+                {"limitType": "total_tokens", "limitWindow": "weekly", "maxValue": 1_000},
+            ],
+        },
+    )
+    assert created.status_code == 200
+    assert created.json()["sourceAssignmentScopeEnabled"] is True
+    key = created.json()["key"]
+    key_id = created.json()["id"]
+    observed: dict[str, object] = {}
+
+    async def fake_forward(source, payload):
+        observed["source_id"] = source.id
+        observed["payload"] = dict(payload)
+        return SourceChatCompletion(
+            payload={
+                "id": "chatcmpl_source_usage",
+                "object": "chat.completion",
+                "created": 1,
+                "model": model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 11,
+                    "completion_tokens": 7,
+                    "total_tokens": 18,
+                    "prompt_tokens_details": {"cached_tokens": 3},
+                },
+            },
+            usage=SourceUsage(input_tokens=11, output_tokens=7, cached_input_tokens=3),
+            upstream_status_code=200,
+        )
+
+    monkeypatch.setattr(proxy_api, "forward_chat_completion", fake_forward)
+
+    response = await async_client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"model": model, "messages": [{"role": "user", "content": "hi"}]},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["id"] == "chatcmpl_source_usage"
+    assert observed["source_id"] == source_id
+    forwarded_payload = cast("dict[str, object]", observed["payload"])
+    assert forwarded_payload["model"] == model
+    assert forwarded_payload["messages"] == [{"role": "user", "content": "hi"}]
+    assert forwarded_payload["stream"] is False
+
+    async with SessionLocal() as session:
+        repo = ApiKeysRepository(session)
+        limits = await repo.get_limits_by_key(key_id)
+        assert len(limits) == 1
+        assert limits[0].current_value == 18
+
+        result = await session.execute(select(RequestLog).order_by(RequestLog.requested_at.desc()))
+        latest_log = result.scalars().first()
+        assert latest_log is not None
+        assert latest_log.api_key_id == key_id
+        assert latest_log.account_id is None
+        assert latest_log.model_source_id == source_id
+        assert latest_log.model_source_kind == "openai_compatible"
+        assert latest_log.model == model
+        assert latest_log.input_tokens == 11
+        assert latest_log.output_tokens == 7
+        assert latest_log.cached_input_tokens == 3
+        assert latest_log.status == "success"
+
+
+@pytest.mark.asyncio
+async def test_source_routed_chat_completion_applies_api_key_enforcement(async_client, monkeypatch):
+    enable = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert enable.status_code == 200
+
+    model = "vllm-chat-enforced"
+    source_id = await _create_model_source(
+        async_client,
+        name="vllm-enforced",
+        model=model,
+        raw_metadata_json='{"supports_reasoning": true}',
+    )
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "source-enforced-key",
+            "assignedSourceIds": [source_id],
+            "enforcedReasoningEffort": "high",
+            "enforcedServiceTier": "priority",
+        },
+    )
+    assert created.status_code == 200
+    key = created.json()["key"]
+    observed: dict[str, object] = {}
+
+    async def fake_forward(source, payload):
+        observed["payload"] = dict(payload)
+        return SourceChatCompletion(
+            payload={
+                "id": "chatcmpl_source_enforced",
+                "object": "chat.completion",
+                "created": 1,
+                "model": model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+            usage=SourceUsage(input_tokens=1, output_tokens=1, cached_input_tokens=0),
+            upstream_status_code=200,
+        )
+
+    monkeypatch.setattr(proxy_api, "forward_chat_completion", fake_forward)
+
+    response = await async_client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {key}"},
+        json={
+            "model": model,
+            "messages": [{"role": "user", "content": "hi"}],
+            "service_tier": "flex",
+            "reasoning_effort": "low",
+        },
+    )
+
+    assert response.status_code == 200
+    forwarded_payload = cast("dict[str, object]", observed["payload"])
+    assert forwarded_payload["reasoning_effort"] == "high"
+    assert forwarded_payload["service_tier"] == "priority"
+
+
+@pytest.mark.asyncio
+async def test_backend_codex_responses_routes_responses_capable_model_source(async_client, monkeypatch):
+    model = "external-codex-responses"
+    source_id = await _create_model_source(
+        async_client,
+        name="codex-responses-route",
+        model=model,
+        supports_responses=True,
+    )
+    observed: dict[str, object] = {}
+
+    async def fake_stream(source, payload):
+        observed["source_id"] = source.id
+        observed["payload"] = dict(payload)
+        usage_holder = SourceUsageHolder()
+
+        async def body():
+            usage_holder.usage = SourceUsage(input_tokens=2, output_tokens=1, cached_input_tokens=0)
+            yield (
+                b'data: {"type":"response.completed","response":{"id":"resp_source",'
+                b'"usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}}}\n\n'
+            )
+
+        return SourceResponsesStream(body=body(), usage_holder=usage_holder, upstream_status_code=200)
+
+    monkeypatch.setattr(proxy_api, "stream_source_responses", fake_stream)
+
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        json={"model": model, "instructions": "hi", "input": []},
+    ) as response:
+        assert response.status_code == 200
+        lines = [line async for line in response.aiter_lines() if line]
+
+    assert observed["source_id"] == source_id
+    forwarded_payload = cast("dict[str, object]", observed["payload"])
+    assert forwarded_payload["model"] == model
+    assert forwarded_payload["stream"] is True
+    assert any("resp_source" in line for line in lines)
+
+
+@pytest.mark.asyncio
+async def test_backend_codex_responses_filters_unsupported_model_source_tools(async_client, monkeypatch):
+    model = "external-codex-responses-tools"
+    await _create_model_source(
+        async_client,
+        name="codex-responses-tools",
+        model=model,
+        supports_responses=True,
+        raw_metadata_json=(
+            '{"source_request_overrides":{"options":{"num_ctx":32768},"model":"ignored-model","stream":false}}'
+        ),
+    )
+    observed: dict[str, object] = {}
+
+    async def fake_stream(source, payload):
+        observed["source_id"] = source.id
+        observed["payload"] = dict(payload)
+        usage_holder = SourceUsageHolder()
+
+        async def body():
+            usage_holder.usage = SourceUsage(input_tokens=2, output_tokens=1, cached_input_tokens=0)
+            yield (
+                b'data: {"type":"response.completed","response":{"id":"resp_source_tools",'
+                b'"usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}}}\n\n'
+            )
+
+        return SourceResponsesStream(body=body(), usage_holder=usage_holder, upstream_status_code=200)
+
+    monkeypatch.setattr(proxy_api, "stream_source_responses", fake_stream)
+
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        json={
+            "model": model,
+            "instructions": "hi",
+            "input": [],
+            "tools": [
+                {"type": "function", "name": "run_shell", "parameters": {"type": "object", "properties": {}}},
+                {"type": "namespace", "function": {"name": "multi_agent_v1"}},
+                {"type": "web_search"},
+            ],
+            "tool_choice": "auto",
+            "parallel_tool_calls": True,
+        },
+    ) as response:
+        assert response.status_code == 200
+        lines = [line async for line in response.aiter_lines() if line]
+
+    forwarded_payload = cast("dict[str, object]", observed["payload"])
+    assert forwarded_payload["tools"] == [
+        {"type": "function", "name": "run_shell", "parameters": {"type": "object", "properties": {}}}
+    ]
+    assert forwarded_payload["model"] == model
+    assert forwarded_payload["options"] == {"num_ctx": 32768}
+    # source_request_overrides must not clobber the proxy-owned stream flag.
+    assert forwarded_payload["stream"] is True
+    assert forwarded_payload["tool_choice"] == "auto"
+    assert forwarded_payload["parallel_tool_calls"] is True
+    assert any("resp_source_tools" in line for line in lines)
+
+
+@pytest.mark.asyncio
+async def test_backend_codex_responses_keeps_search_tools_for_capable_model_source(async_client, monkeypatch):
+    model = "external-codex-responses-search"
+    await _create_model_source(
+        async_client,
+        name="codex-responses-search",
+        model=model,
+        supports_responses=True,
+        raw_metadata_json='{"supports_search_tool":true}',
+    )
+    observed: dict[str, object] = {}
+
+    async def fake_stream(source, payload):
+        observed["payload"] = dict(payload)
+        usage_holder = SourceUsageHolder()
+
+        async def body():
+            usage_holder.usage = SourceUsage(input_tokens=2, output_tokens=1, cached_input_tokens=0)
+            yield (
+                b'data: {"type":"response.completed","response":{"id":"resp_source_search",'
+                b'"usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}}}\n\n'
+            )
+
+        return SourceResponsesStream(body=body(), usage_holder=usage_holder, upstream_status_code=200)
+
+    monkeypatch.setattr(proxy_api, "stream_source_responses", fake_stream)
+
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        json={
+            "model": model,
+            "instructions": "hi",
+            "input": [],
+            "tools": [
+                {"type": "function", "name": "run_shell", "parameters": {"type": "object", "properties": {}}},
+                {"type": "web_search"},
+                {"type": "namespace", "function": {"name": "multi_agent_v1"}},
+            ],
+            "tool_choice": {"type": "web_search"},
+        },
+    ) as response:
+        assert response.status_code == 200
+        [line async for line in response.aiter_lines() if line]
+
+    forwarded_payload = cast("dict[str, object]", observed["payload"])
+    assert forwarded_payload["tools"] == [
+        {"type": "function", "name": "run_shell", "parameters": {"type": "object", "properties": {}}},
+        {"type": "web_search"},
+    ]
+    # The forced choice references a tool that survived filtering; keep it.
+    assert forwarded_payload["tool_choice"] == {"type": "web_search"}
+
+
+@pytest.mark.asyncio
+async def test_backend_codex_responses_keeps_legacy_alias_allowed_search_tool_choice(async_client, monkeypatch):
+    model = "external-codex-responses-alias-allowed"
+    await _create_model_source(
+        async_client,
+        name="codex-responses-alias-allowed",
+        model=model,
+        supports_responses=True,
+        raw_metadata_json='{"supports_search_tool":true}',
+    )
+    observed: dict[str, object] = {}
+
+    async def fake_stream(source, payload):
+        observed["payload"] = dict(payload)
+        usage_holder = SourceUsageHolder()
+
+        async def body():
+            usage_holder.usage = SourceUsage(input_tokens=2, output_tokens=1, cached_input_tokens=0)
+            yield (
+                b'data: {"type":"response.completed","response":{"id":"resp_source_alias_allowed",'
+                b'"usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}}}\n\n'
+            )
+
+        return SourceResponsesStream(body=body(), usage_holder=usage_holder, upstream_status_code=200)
+
+    monkeypatch.setattr(proxy_api, "stream_source_responses", fake_stream)
+
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        json={
+            "model": model,
+            "instructions": "hi",
+            "input": [],
+            "tools": [
+                {"type": "function", "name": "run_shell", "parameters": {"type": "object", "properties": {}}},
+                {"type": "web_search_preview"},
+                {"type": "namespace", "function": {"name": "multi_agent_v1"}},
+            ],
+            "tool_choice": {
+                "type": "allowed_tools",
+                "mode": "required",
+                "tools": [
+                    {"type": "function", "name": "run_shell"},
+                    {"type": "web_search_preview"},
+                ],
+            },
+        },
+    ) as response:
+        assert response.status_code == 200
+        [line async for line in response.aiter_lines() if line]
+
+    forwarded_payload = cast("dict[str, object]", observed["payload"])
+    # The legacy alias in the tools list is normalized before filtering.
+    assert forwarded_payload["tools"] == [
+        {"type": "function", "name": "run_shell", "parameters": {"type": "object", "properties": {}}},
+        {"type": "web_search"},
+    ]
+    # The allowed_tools entries get the same alias normalization, so the
+    # forced search choice survives alongside the (normalized) search tool.
+    assert forwarded_payload["tool_choice"] == {
+        "type": "allowed_tools",
+        "mode": "required",
+        "tools": [
+            {"type": "function", "name": "run_shell"},
+            {"type": "web_search"},
+        ],
+    }
+
+
+@pytest.mark.asyncio
+async def test_backend_codex_responses_normalizes_allowed_tool_choice_alias_without_drops(async_client, monkeypatch):
+    model = "external-codex-responses-alias-nodrop"
+    await _create_model_source(
+        async_client,
+        name="codex-responses-alias-nodrop",
+        model=model,
+        supports_responses=True,
+        raw_metadata_json='{"supports_search_tool":true}',
+    )
+    observed: dict[str, object] = {}
+
+    async def fake_stream(source, payload):
+        observed["payload"] = dict(payload)
+        usage_holder = SourceUsageHolder()
+
+        async def body():
+            usage_holder.usage = SourceUsage(input_tokens=2, output_tokens=1, cached_input_tokens=0)
+            yield (
+                b'data: {"type":"response.completed","response":{"id":"resp_source_alias_nodrop",'
+                b'"usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}}}\n\n'
+            )
+
+        return SourceResponsesStream(body=body(), usage_holder=usage_holder, upstream_status_code=200)
+
+    monkeypatch.setattr(proxy_api, "stream_source_responses", fake_stream)
+
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        json={
+            "model": model,
+            "instructions": "hi",
+            "input": [],
+            "tools": [
+                {"type": "function", "name": "run_shell", "parameters": {"type": "object", "properties": {}}},
+                {"type": "web_search_preview"},
+            ],
+            "tool_choice": {
+                "type": "allowed_tools",
+                "mode": "required",
+                "tools": [{"type": "web_search_preview"}],
+            },
+        },
+    ) as response:
+        assert response.status_code == 200
+        [line async for line in response.aiter_lines() if line]
+
+    forwarded_payload = cast("dict[str, object]", observed["payload"])
+    # Every tool is supported, so nothing is dropped and the tools list keeps
+    # the normalized alias from request validation.
+    assert forwarded_payload["tools"] == [
+        {"type": "function", "name": "run_shell", "parameters": {"type": "object", "properties": {}}},
+        {"type": "web_search"},
+    ]
+    # The nested allowed_tools alias must be normalized even when no tools were
+    # dropped, so the forced choice matches the normalized tools list.
+    assert forwarded_payload["tool_choice"] == {
+        "type": "allowed_tools",
+        "mode": "required",
+        "tools": [{"type": "web_search"}],
+    }
+
+
+@pytest.mark.asyncio
+async def test_backend_codex_responses_drops_tool_choice_referencing_dropped_source_tool(async_client, monkeypatch):
+    model = "external-codex-responses-dangling-choice"
+    await _create_model_source(
+        async_client,
+        name="codex-responses-dangling-choice",
+        model=model,
+        supports_responses=True,
+    )
+    observed: dict[str, object] = {}
+
+    async def fake_stream(source, payload):
+        observed["payload"] = dict(payload)
+        usage_holder = SourceUsageHolder()
+
+        async def body():
+            usage_holder.usage = SourceUsage(input_tokens=2, output_tokens=1, cached_input_tokens=0)
+            yield (
+                b'data: {"type":"response.completed","response":{"id":"resp_source_dangling",'
+                b'"usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}}}\n\n'
+            )
+
+        return SourceResponsesStream(body=body(), usage_holder=usage_holder, upstream_status_code=200)
+
+    monkeypatch.setattr(proxy_api, "stream_source_responses", fake_stream)
+
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        json={
+            "model": model,
+            "instructions": "hi",
+            "input": [],
+            "tools": [
+                {"type": "function", "name": "run_shell", "parameters": {"type": "object", "properties": {}}},
+                {"type": "web_search"},
+            ],
+            "tool_choice": {"type": "web_search"},
+        },
+    ) as response:
+        assert response.status_code == 200
+        [line async for line in response.aiter_lines() if line]
+
+    forwarded_payload = cast("dict[str, object]", observed["payload"])
+    assert forwarded_payload["tools"] == [
+        {"type": "function", "name": "run_shell", "parameters": {"type": "object", "properties": {}}}
+    ]
+    # web_search was dropped, so a forced web_search choice must not be forwarded.
+    assert "tool_choice" not in forwarded_payload
+
+
+@pytest.mark.asyncio
+async def test_backend_codex_responses_prunes_include_entries_of_dropped_source_tools(async_client, monkeypatch):
+    model = "external-codex-responses-include-prune"
+    await _create_model_source(
+        async_client,
+        name="codex-responses-include-prune",
+        model=model,
+        supports_responses=True,
+    )
+    observed: dict[str, object] = {}
+
+    async def fake_stream(source, payload):
+        observed["payload"] = dict(payload)
+        usage_holder = SourceUsageHolder()
+
+        async def body():
+            usage_holder.usage = SourceUsage(input_tokens=2, output_tokens=1, cached_input_tokens=0)
+            yield (
+                b'data: {"type":"response.completed","response":{"id":"resp_source_include_prune",'
+                b'"usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}}}\n\n'
+            )
+
+        return SourceResponsesStream(body=body(), usage_holder=usage_holder, upstream_status_code=200)
+
+    monkeypatch.setattr(proxy_api, "stream_source_responses", fake_stream)
+
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        json={
+            "model": model,
+            "instructions": "hi",
+            "input": [],
+            "tools": [
+                {"type": "function", "name": "run_shell", "parameters": {"type": "object", "properties": {}}},
+                {"type": "web_search"},
+            ],
+            "include": ["web_search_call.action.sources", "reasoning.encrypted_content"],
+        },
+    ) as response:
+        assert response.status_code == 200
+        [line async for line in response.aiter_lines() if line]
+
+    forwarded_payload = cast("dict[str, object]", observed["payload"])
+    assert forwarded_payload["tools"] == [
+        {"type": "function", "name": "run_shell", "parameters": {"type": "object", "properties": {}}}
+    ]
+    # The web_search-specific include entry must be pruned with the dropped
+    # tool; non-tool-specific entries stay untouched.
+    assert forwarded_payload["include"] == ["reasoning.encrypted_content"]
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_filters_unsupported_model_source_tools(async_client, monkeypatch):
+    model = "external-v1-responses-tools"
+    source_id = await _create_model_source(
+        async_client,
+        name="v1-responses-tools",
+        model=model,
+        supports_responses=True,
+        raw_metadata_json=(
+            '{"source_request_overrides":{"options":{"num_ctx":32768},"model":"ignored-model","stream":false}}'
+        ),
+    )
+    observed: dict[str, object] = {}
+
+    async def fake_stream(source, payload):
+        observed["source_id"] = source.id
+        observed["payload"] = dict(payload)
+        usage_holder = SourceUsageHolder()
+
+        async def body():
+            usage_holder.usage = SourceUsage(input_tokens=2, output_tokens=1, cached_input_tokens=0)
+            yield (
+                b'data: {"type":"response.completed","response":{"id":"resp_v1_source_tools",'
+                b'"usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}}}\n\n'
+            )
+
+        return SourceResponsesStream(body=body(), usage_holder=usage_holder, upstream_status_code=200)
+
+    monkeypatch.setattr(proxy_api, "stream_source_responses", fake_stream)
+
+    async with async_client.stream(
+        "POST",
+        "/v1/responses",
+        json={
+            "model": model,
+            "input": "hi",
+            "stream": True,
+            "tools": [
+                {"type": "function", "name": "run_shell", "parameters": {"type": "object", "properties": {}}},
+                {"type": "web_search"},
+            ],
+            "tool_choice": {"type": "web_search"},
+            "parallel_tool_calls": True,
+        },
+    ) as response:
+        assert response.status_code == 200
+        lines = [line async for line in response.aiter_lines() if line]
+
+    assert observed["source_id"] == source_id
+    forwarded_payload = cast("dict[str, object]", observed["payload"])
+    assert forwarded_payload["tools"] == [
+        {"type": "function", "name": "run_shell", "parameters": {"type": "object", "properties": {}}}
+    ]
+    assert forwarded_payload["model"] == model
+    assert forwarded_payload["options"] == {"num_ctx": 32768}
+    assert forwarded_payload["stream"] is True
+    assert "tool_choice" not in forwarded_payload
+    assert any("resp_v1_source_tools" in line for line in lines)
+
+
+@pytest.mark.asyncio
+async def test_backend_codex_responses_compaction_trigger_skips_model_source(async_client, monkeypatch):
+    model = "external-codex-responses-compact"
+    await _create_model_source(
+        async_client,
+        name="codex-responses-compact",
+        model=model,
+        supports_responses=True,
+    )
+    observed: dict[str, object] = {}
+
+    async def fail_source(*args, **kwargs):
+        del args, kwargs
+        pytest.fail("compaction triggers must use the Codex compaction path")
+
+    async def fake_stream_responses(request, payload, context, api_key, **kwargs):
+        del request, context, api_key
+        observed["model"] = payload.model
+        observed["input"] = payload.input
+        observed["codex_session_affinity"] = kwargs.get("codex_session_affinity")
+        return JSONResponse({"ok": True})
+
+    monkeypatch.setattr(proxy_api, "stream_source_responses", fail_source)
+    monkeypatch.setattr(proxy_api, "_stream_responses", fake_stream_responses)
+
+    response = await async_client.post(
+        "/backend-api/codex/responses",
+        json={
+            "model": model,
+            "instructions": "compact this turn",
+            "input": [
+                {"role": "user", "content": "hello"},
+                {"type": "compaction_trigger"},
+            ],
+            "stream": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+    assert observed == {
+        "model": model,
+        "input": [{"role": "user", "content": "hello"}, {"type": "compaction_trigger"}],
+        "codex_session_affinity": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_backend_codex_responses_file_pinned_payload_skips_model_source(async_client, monkeypatch):
+    model = "external-codex-responses-file-pin"
+    await _create_model_source(
+        async_client,
+        name="codex-responses-file-pin",
+        model=model,
+        supports_responses=True,
+    )
+    observed: dict[str, object] = {}
+
+    async def fail_source(*args, **kwargs):
+        del args, kwargs
+        pytest.fail("file-pinned responses must use subscription routing")
+
+    async def fake_stream_responses(request, payload, context, api_key, **kwargs):
+        del request, context, api_key
+        observed["model"] = payload.model
+        observed["input"] = payload.input
+        observed["codex_session_affinity"] = kwargs.get("codex_session_affinity")
+        return JSONResponse({"ok": True})
+
+    monkeypatch.setattr(proxy_api, "stream_source_responses", fail_source)
+    monkeypatch.setattr(proxy_api, "_stream_responses", fake_stream_responses)
+
+    response = await async_client.post(
+        "/backend-api/codex/responses",
+        json={
+            "model": model,
+            "instructions": "read this file",
+            "input": [
+                {
+                    "role": "user",
+                    "content": [{"type": "input_file", "file_id": "file_pinned"}],
+                }
+            ],
+            "stream": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+    assert observed == {
+        "model": model,
+        "input": [{"role": "user", "content": [{"type": "input_file", "file_id": "file_pinned"}]}],
+        "codex_session_affinity": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_file_pinned_payload_skips_model_source(async_client, monkeypatch):
+    model = "external-v1-responses-file-pin"
+    await _create_model_source(
+        async_client,
+        name="v1-responses-file-pin",
+        model=model,
+        supports_responses=True,
+    )
+    observed: dict[str, object] = {}
+
+    async def fail_source(*args, **kwargs):
+        del args, kwargs
+        pytest.fail("file-pinned /v1/responses must use subscription routing")
+
+    async def fake_stream_responses(request, payload, context, api_key, **kwargs):
+        del request, context, api_key, kwargs
+        observed["model"] = payload.model
+        return JSONResponse({"ok": True})
+
+    monkeypatch.setattr(proxy_api, "stream_source_responses", fail_source)
+    monkeypatch.setattr(proxy_api, "_stream_responses", fake_stream_responses)
+
+    response = await async_client.post(
+        "/v1/responses",
+        json={
+            "model": model,
+            "input": [
+                {
+                    "role": "user",
+                    "content": [{"type": "input_file", "file_id": "file_pinned_v1"}],
+                }
+            ],
+            "stream": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+    assert observed["model"] == model
+
+
+@pytest.mark.asyncio
 async def test_api_key_usage_summary_cost_respects_service_tier(async_client, monkeypatch):
     enable = await async_client.put(
         "/api/settings",
@@ -1043,6 +1882,19 @@ async def test_api_key_create_accepts_uppercase_enforced_reasoning(async_client)
 
 
 @pytest.mark.asyncio
+async def test_api_key_create_accepts_extended_enforced_reasoning(async_client):
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "extended-enforcement",
+            "enforcedReasoningEffort": "ULTRA",
+        },
+    )
+    assert created.status_code == 200
+    assert created.json()["enforcedReasoningEffort"] == "ultra"
+
+
+@pytest.mark.asyncio
 async def test_api_key_update_accepts_uppercase_enforced_reasoning(async_client):
     created = await async_client.post(
         "/api/api-keys/",
@@ -1061,6 +1913,27 @@ async def test_api_key_update_accepts_uppercase_enforced_reasoning(async_client)
     )
     assert updated.status_code == 200
     assert updated.json()["enforcedReasoningEffort"] == "high"
+
+
+@pytest.mark.asyncio
+async def test_api_key_update_accepts_extended_enforced_reasoning(async_client):
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "extended-enforcement-update",
+        },
+    )
+    assert created.status_code == 200
+    key_id = created.json()["id"]
+
+    updated = await async_client.patch(
+        f"/api/api-keys/{key_id}",
+        json={
+            "enforcedReasoningEffort": "MAX",
+        },
+    )
+    assert updated.status_code == 200
+    assert updated.json()["enforcedReasoningEffort"] == "max"
 
 
 @pytest.mark.asyncio
@@ -1801,6 +2674,75 @@ async def test_api_key_reservation_released_on_compact_upstream_failure(async_cl
     async with SessionLocal() as session:
         repo = ApiKeysRepository(session)
         limits = await repo.get_limits_by_key(key_id)
+        assert len(limits) == 1
+        assert limits[0].current_value == 0
+
+
+@pytest.mark.asyncio
+async def test_api_key_reservation_released_when_compact_image_inlining_exceeds_wire_budget(
+    async_client,
+    monkeypatch,
+):
+    enable = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert enable.status_code == 200
+
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "compact-inline-too-large",
+            "limits": [
+                {"limitType": "total_tokens", "limitWindow": "weekly", "maxValue": 100},
+            ],
+        },
+    )
+    assert created.status_code == 200
+    key = created.json()["key"]
+    key_id = created.json()["id"]
+    await _import_account(async_client, "acc_compact_inline_too_large", "compact-inline-too-large@example.com")
+
+    async def fake_inline(payload_dict, session, connect_timeout):
+        del payload_dict, session, connect_timeout
+        return {
+            "model": _TEST_MODELS[0],
+            "input": [{"role": "user", "content": "data:image/png;base64," + "A" * 500_000}],
+            "parallel_tool_calls": False,
+        }
+
+    def unexpected_upstream_start(**kwargs):
+        del kwargs
+        pytest.fail("oversized transformed compact input must not reach upstream")
+
+    monkeypatch.setattr(core_proxy_module, "_inline_input_image_urls", fake_inline)
+    monkeypatch.setattr(core_proxy_module, "_maybe_log_upstream_request_start", unexpected_upstream_start)
+
+    response = await async_client.post(
+        "/v1/responses/compact",
+        headers={"Authorization": f"Bearer {key}"},
+        json={
+            "model": _TEST_MODELS[0],
+            "instructions": "compact this image",
+            "input": [
+                {
+                    "role": "user",
+                    "content": [{"type": "input_image", "image_url": "https://example.com/image.png"}],
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "responses_compact_input_too_large"
+    assert response.json()["error"]["param"] == "input"
+    async with SessionLocal() as session:
+        limits = await ApiKeysRepository(session).get_limits_by_key(key_id)
         assert len(limits) == 1
         assert limits[0].current_value == 0
 

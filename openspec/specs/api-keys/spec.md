@@ -377,7 +377,7 @@ The service contract SHALL be typed explicitly: `enforce_limits_for_request(key_
 When updating API key limits, the system SHALL preserve existing usage state (`current_value`, `reset_at`) for unchanged limit rules. Limit comparison key is `(limit_type, limit_window, model_filter)`.
 
 - Matching existing rule: `current_value` and `reset_at` SHALL be preserved; only `max_value` is updated
-- New rule (no match): `current_value=0` and fresh `reset_at`
+- New rule (no match): when `resetUsage` is false, `current_value` is initialized from successful request-log usage in the new rule's current window; when `resetUsage` is true, `current_value=0`; always with a fresh `reset_at`
 - Removed rule (in existing but not in update): row is deleted
 
 Usage reset SHALL only occur via an explicit action (`reset_usage` field or dedicated endpoint), never as a side-effect of metadata or policy edits.
@@ -424,40 +424,50 @@ Backend contract:
 - **WHEN** the same limit rules are submitted in a different order
 - **THEN** the system treats this as unchanged and omits `limits` from the payload
 
-### Requirement: Public model list filtering
+### Requirement: Public OpenAI-compatible model list filtering
 
-All model list endpoints SHALL filter models using a single predicate that requires both conditions:
+OpenAI-compatible model list endpoints SHALL filter models using a single predicate that requires both conditions:
 1. `model.supported_in_api` is true
 2. If `allowed_models` is configured, the model is in the allowed set
 
-This predicate SHALL be applied consistently across `/api/models`, `/v1/models`, and `/backend-api/codex/models`.
+This predicate SHALL be applied consistently across `/api/models`, `/v1/models`, and the OpenAI-style `data` alias in `/backend-api/codex/models`. The Codex-native `models` catalog in `/backend-api/codex/models` SHALL also expose unsupported upstream models only when the model is a Codex shell-command model (`shell_type="shell_command"`); unsupported non-shell models SHALL remain hidden.
 
 #### Scenario: Unsupported model excluded from /v1/models
 
 - **WHEN** a model snapshot contains a model with `supported_in_api=false`
 - **THEN** that model is not included in the `/v1/models` response
 
-#### Scenario: Unsupported model excluded from /backend-api/codex/models
+#### Scenario: Unsupported non-shell model excluded from /backend-api/codex/models
 
 - **WHEN** a model snapshot contains a model with `supported_in_api=false`
+- **AND** the model is not a Codex shell-command model
 - **THEN** that model is not included in the `/backend-api/codex/models` response
+
+#### Scenario: Unsupported Codex shell model included only in Codex-native catalog
+
+- **WHEN** a model snapshot contains a model with `supported_in_api=false`
+- **AND** the model has `shell_type="shell_command"`
+- **THEN** that model is included in `/backend-api/codex/models.models`
+- **AND** that model is not included in `/backend-api/codex/models.data`
+- **AND** that model is not included in `/api/models` or `/v1/models`
 
 #### Scenario: Allowed but unsupported model excluded
 
 - **WHEN** a model is in the `allowed_models` set but has `supported_in_api=false`
+- **AND** the model is not a Codex shell-command model
 - **THEN** that model is not exposed in any model list endpoint
 
 #### Scenario: gpt-5.3-codex aliases share availability gate consistently
 
 - **WHEN** `gpt-5.3-codex` has `supported_in_api=false`
 - **AND** `gpt-5.3-codex-spark` has `supported_in_api=true`
-- **THEN** `/api/models`, `/v1/models`, and `/backend-api/codex/models`
+- **THEN** `/api/models`, `/v1/models`, and `/backend-api/codex/models.data`
       expose `gpt-5.3-codex-spark` but do not expose `gpt-5.3-codex`
 
 #### Scenario: Consistent model set across endpoints
 
 - **GIVEN** any model registry state
-- **THEN** `/api/models`, `/v1/models`, and `/backend-api/codex/models` expose the same set of models
+- **THEN** `/api/models`, `/v1/models`, and `/backend-api/codex/models.data` expose the same OpenAI-compatible set of models
 
 ### Requirement: Reservation 정산 exactly-once 보장
 
@@ -558,13 +568,13 @@ The system MUST recognize `gpt-5.4-mini` pricing when computing request costs. S
 
 ### Requirement: API keys can read their own `/v1/usage`
 
-The system SHALL expose `GET /v1/usage` for self-service usage lookup by API-key clients. The route MUST require a valid API key in the `Authorization` header using the Bearer authentication scheme even when `api_key_auth_enabled` is false globally. The response MUST include only data for the authenticated key and MUST return:
+The system SHALL expose `GET /v1/usage` for self-service usage lookup by API-key clients. The route MUST require a valid API key in the `Authorization` header using the Bearer authentication scheme even when `api_key_auth_enabled` is false globally. The response MUST include only data for the authenticated key and explicitly visible aggregate upstream quota sections, and MUST return:
 
 - `request_count`
 - `total_tokens`
 - `cached_input_tokens`
 - `total_cost_usd`
-- `limits[]` containing only limits configured on the authenticated API key, with `limit_type`, `limit_window`, `max_value`, `current_value`, `remaining_value`, `model_filter`, `reset_at`, and `source`
+- `limits[]` containing limits configured on the authenticated API key, with `limit_type`, `limit_window`, `max_value`, `current_value`, `remaining_value`, `model_filter`, `reset_at`, and `source`. When no API-key limits are configured and aggregate upstream quota details are visible to the caller, `limits[]` MAY mirror those aggregate upstream credit windows for legacy client compatibility.
 - `upstream_limits[]` containing aggregate upstream Codex credit windows when available, with the same fields and `source: "aggregate"`
 
 Validation failures MUST use the existing OpenAI error envelope used by `/v1/*` routes.
@@ -595,6 +605,13 @@ Validation failures MUST use the existing OpenAI error envelope used by `/v1/*` 
 - **AND** upstream Codex aggregate usage data exists
 - **THEN** `limits[]` contains the API-key limit values
 - **AND** `upstream_limits[]` contains the aggregate Codex credit windows
+
+#### Scenario: Upstream limits are mirrored for legacy clients without API-key limits
+
+- **WHEN** an API key without its own limits calls `GET /v1/usage`
+- **AND** upstream Codex aggregate usage data is visible to the key
+- **THEN** `upstream_limits[]` contains the aggregate Codex credit windows
+- **AND** `limits[]` contains the same aggregate Codex credit windows for legacy client compatibility
 
 #### Scenario: Self-usage works while global proxy auth is disabled
 

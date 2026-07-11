@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { RoutingSettings } from "@/features/settings/components/routing-settings";
 import { buildSettingsUpdateRequest } from "@/features/settings/payload";
+import type { DashboardSettings } from "@/features/settings/schemas";
 import { createAccountSummary, createDashboardSettings } from "@/test/mocks/factories";
 
 if (!HTMLElement.prototype.hasPointerCapture) {
@@ -19,11 +20,23 @@ if (!HTMLElement.prototype.scrollIntoView) {
   HTMLElement.prototype.scrollIntoView = () => undefined;
 }
 
-const BASE_SETTINGS = createDashboardSettings({
+const LIMIT_WARMUP_DEFAULTS = {
+  limitWarmupEnabled: false,
+  limitWarmupWindows: "both" as const,
+  limitWarmupModel: "auto",
+  limitWarmupPrompt: "Say OK.",
+  limitWarmupCooldownSeconds: 3600,
+  limitWarmupMinAvailablePercent: 100,
+  limitWarmupStaggeredIdleEnabled: false,
+};
+
+const BASE_SETTINGS: DashboardSettings = {
+  ...createDashboardSettings(),
+  ...LIMIT_WARMUP_DEFAULTS,
   stickyThreadsEnabled: false,
   preferEarlierResetAccounts: true,
   totpConfigured: false,
-});
+};
 const BASE_UPDATE_PAYLOAD = buildSettingsUpdateRequest(BASE_SETTINGS, {});
 
 describe("RoutingSettings", () => {
@@ -338,10 +351,14 @@ describe("RoutingSettings", () => {
     render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={vi.fn().mockResolvedValue(undefined)} />);
 
     expect(screen.getByRole("switch", { name: "Enable limit warm-up" })).toBeInTheDocument();
+    expect(screen.getByRole("switch", { name: "Enable staggered idle warm-up" })).toBeDisabled();
     expect(screen.getByRole("switch", { name: "Prefer earlier reset accounts" })).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "Reset preference window" })).toBeInTheDocument();
-    expect(screen.getByLabelText("Warmup model")).toHaveAttribute("maxLength", "128");
     expect(screen.getByLabelText("Warm-up model")).toHaveAttribute("maxLength", "128");
+    expect(screen.getByRole("combobox", { name: "Warm-up windows" })).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Pace gap average" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Model")).toHaveAttribute("maxLength", "128");
+    expect(screen.getByLabelText("Exhausted at %")).toHaveAttribute("max", "100");
     expect(screen.getByLabelText("Warm-up prompt")).toHaveAttribute("maxLength", "512");
   });
 
@@ -376,6 +393,20 @@ describe("RoutingSettings", () => {
     expect(onSave).not.toHaveBeenCalled();
   });
 
+  it("saves weekly pace smoothing changes", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={onSave} />);
+
+    await user.click(screen.getByRole("combobox", { name: "Pace gap average" }));
+    await user.click(await screen.findByRole("option", { name: "2h" }));
+
+    expect(onSave).toHaveBeenCalledWith({
+      ...BASE_UPDATE_PAYLOAD,
+      weeklyPaceSmoothingMinutes: 120,
+    });
+  });
+
   it("does not silently truncate decimal warm-up cooldown values", async () => {
     const user = userEvent.setup();
     const onSave = vi.fn().mockResolvedValue(undefined);
@@ -383,6 +414,33 @@ describe("RoutingSettings", () => {
 
     await user.clear(screen.getByLabelText("Warm-up cooldown"));
     await user.type(screen.getByLabelText("Warm-up cooldown"), "60.5");
+
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    expect(onSave).not.toHaveBeenCalled();
+  });
+
+  it("saves warm-up exhausted threshold changes", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={onSave} />);
+
+    await user.clear(screen.getByLabelText("Exhausted at %"));
+    await user.type(screen.getByLabelText("Exhausted at %"), "98.5");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(onSave).toHaveBeenCalledWith({
+      ...BASE_UPDATE_PAYLOAD,
+      limitWarmupExhaustedThresholdPercent: 98.5,
+    });
+  });
+
+  it("rejects invalid warm-up exhausted thresholds", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={onSave} />);
+
+    await user.clear(screen.getByLabelText("Exhausted at %"));
+    await user.type(screen.getByLabelText("Exhausted at %"), "100.1");
 
     expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
     expect(onSave).not.toHaveBeenCalled();
@@ -434,5 +492,34 @@ describe("RoutingSettings", () => {
     );
 
     expect(screen.getAllByText("Fill first").length).toBeGreaterThan(0);
+  });
+
+  it("explains routing strategy trade-offs and account-safety guidance", () => {
+    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={vi.fn().mockResolvedValue(undefined)} />);
+
+    expect(screen.getByText("Strategy guide")).toBeInTheDocument();
+    expect(screen.getByText(/Good default for compliant mixed-account pools/i)).toBeInTheDocument();
+    expect(screen.getByText(/No strategy can guarantee account-safety outcomes/i)).toBeInTheDocument();
+  });
+
+  it("saves staggered idle warm-up when limit warm-up is enabled", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(
+      <RoutingSettings
+        settings={{ ...BASE_SETTINGS, limitWarmupEnabled: true }}
+        busy={false}
+        onSave={onSave}
+      />,
+    );
+
+    await user.click(screen.getByRole("switch", { name: "Enable staggered idle warm-up" }));
+
+    expect(onSave).toHaveBeenCalledWith(
+      buildSettingsUpdateRequest(
+        { ...BASE_SETTINGS, limitWarmupEnabled: true },
+        { limitWarmupEnabled: true, limitWarmupStaggeredIdleEnabled: true },
+      ),
+    );
   });
 });

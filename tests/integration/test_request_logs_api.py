@@ -6,7 +6,7 @@ import pytest
 
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus, ApiKey
+from app.db.models import Account, AccountStatus, ApiKey, ModelSource, RequestLog
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.request_logs.repository import RequestLogsRepository
@@ -61,6 +61,7 @@ async def test_request_logs_api_returns_recent(async_client, db_setup):
         await logs_repo.add_log(
             account_id="acc_logs",
             request_id="req_logs_2",
+            archive_request_id="archive_req_logs_2",
             model="legacy-model",
             input_tokens=50,
             output_tokens=0,
@@ -92,6 +93,8 @@ async def test_request_logs_api_returns_recent(async_client, db_setup):
     assert latest["apiKeyId"] == "key_logs_1"
     assert latest["apiKeyName"] == "Debug Key"
     assert latest["errorCode"] == "rate_limit_exceeded"
+    assert latest["requestId"] == "req_logs_2"
+    assert latest["archiveRequestId"] == "archive_req_logs_2"
     assert latest["errorMessage"] == "Rate limit reached"
     assert latest["failurePhase"] == "owner_forward_status"
     assert latest["failureDetail"] == "owner_forward_non_200"
@@ -110,6 +113,8 @@ async def test_request_logs_api_returns_recent(async_client, db_setup):
 
     older = payload[1]
     assert older["status"] == "ok"
+    assert older["requestId"] == "req_logs_1"
+    assert older["archiveRequestId"] == "req_logs_1"
     assert older["apiKeyId"] is None
     assert older["apiKeyName"] is None
     assert older["tokens"] == 300
@@ -124,6 +129,71 @@ async def test_request_logs_api_returns_recent(async_client, db_setup):
     }
     assert older["transport"] == "http"
     assert older["requestKind"] == "normal"
+
+
+@pytest.mark.asyncio
+async def test_request_logs_api_returns_model_source_metadata(async_client, db_setup):
+    del db_setup
+    async with SessionLocal() as session:
+        logs_repo = RequestLogsRepository(session)
+        await logs_repo.add_log(
+            account_id=None,
+            model_source_id="source_history",
+            model_source_kind="openai_compatible",
+            request_id="req_source_history",
+            model="source-model",
+            input_tokens=10,
+            output_tokens=20,
+            latency_ms=100,
+            status="success",
+            error_code=None,
+            source="model_source",
+        )
+
+    response = await async_client.get("/api/request-logs?limit=1")
+    assert response.status_code == 200
+    latest = response.json()["requests"][0]
+    assert latest["requestId"] == "req_source_history"
+    assert latest["source"] == "model_source"
+    assert latest["modelSourceId"] == "source_history"
+    assert latest["modelSourceKind"] == "openai_compatible"
+
+
+@pytest.mark.asyncio
+async def test_request_log_model_source_id_survives_source_delete(db_setup):
+    del db_setup
+    async with SessionLocal() as session:
+        session.add(
+            ModelSource(
+                id="source_deleted_history",
+                name="deleted history",
+                base_url="https://deleted-history.example.invalid/v1",
+            )
+        )
+        await session.commit()
+        logs_repo = RequestLogsRepository(session)
+        saved = await logs_repo.add_log(
+            account_id=None,
+            model_source_id="source_deleted_history",
+            model_source_kind="openai_compatible",
+            request_id="req_deleted_source_history",
+            model="source-model",
+            input_tokens=10,
+            output_tokens=20,
+            latency_ms=100,
+            status="success",
+            error_code=None,
+            source="model_source",
+        )
+        source = await session.get(ModelSource, "source_deleted_history")
+        assert source is not None
+        await session.delete(source)
+        await session.commit()
+
+        persisted = await session.get(RequestLog, saved.id)
+        assert persisted is not None
+        assert persisted.model_source_id == "source_deleted_history"
+        assert persisted.model_source_kind == "openai_compatible"
 
 
 @pytest.mark.asyncio
@@ -146,6 +216,7 @@ async def test_request_logs_api_returns_useragent_fields(async_client, db_setup)
             requested_at=now,
             useragent="opencode/1.15.13 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14",
             useragent_group="opencode",
+            client_ip="203.0.113.7",
         )
         await logs_repo.add_log(
             account_id="acc_logs_useragent",
@@ -170,10 +241,12 @@ async def test_request_logs_api_returns_useragent_fields(async_client, db_setup)
     latest = payload[0]
     assert latest["useragent"] == "opencode/1.15.13 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
     assert latest["useragentGroup"] == "opencode"
+    assert latest["clientIp"] == "203.0.113.7"
 
     older = payload[1]
     assert older["useragent"] is None
     assert older["useragentGroup"] is None
+    assert older["clientIp"] is None
 
 
 @pytest.mark.asyncio

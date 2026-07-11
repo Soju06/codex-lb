@@ -350,6 +350,7 @@ def _prepare_websocket_request_state_for_visible_output_replay(
         request_state.previous_response_id = None
         request_state.proxy_injected_previous_response_id = False
         request_state.fresh_upstream_request_is_retry_safe = False
+        request_state.responses_lite_model = request_state.fresh_upstream_request_responses_lite_model
         _refresh_websocket_request_input_fingerprint_from_text(request_state)
     request_text = request_state.request_text
     if not isinstance(request_text, str):
@@ -390,6 +391,34 @@ def _websocket_continuity_anchor_for_payload(
     )
 
 
+_WEBSOCKET_TOOL_CALL_ITEM_TYPES_BY_OUTPUT_TYPE = {
+    "function_call_output": "function_call",
+    "custom_tool_call_output": "custom_tool_call",
+    "apply_patch_call_output": "apply_patch_call",
+}
+_WEBSOCKET_TOOL_CALL_ITEM_TYPES = frozenset(_WEBSOCKET_TOOL_CALL_ITEM_TYPES_BY_OUTPUT_TYPE.values())
+
+
+def _websocket_input_items_are_self_contained_fresh_replay(input_items: list[JsonValue]) -> bool:
+    seen_call_ids_by_type: dict[str, set[str]] = {item_type: set() for item_type in _WEBSOCKET_TOOL_CALL_ITEM_TYPES}
+    for item in input_items:
+        if not isinstance(item, dict):
+            continue
+        item_type = _websocket_input_item_type(item)
+        call_id_value = item.get("call_id")
+        call_id = call_id_value if isinstance(call_id_value, str) and call_id_value else None
+        if item_type in _WEBSOCKET_TOOL_CALL_ITEM_TYPES:
+            if call_id is not None:
+                seen_call_ids_by_type[item_type].add(call_id)
+            continue
+        call_item_type = _WEBSOCKET_TOOL_CALL_ITEM_TYPES_BY_OUTPUT_TYPE.get(item_type or "")
+        if call_item_type is None:
+            continue
+        if call_id is None or call_id not in seen_call_ids_by_type[call_item_type]:
+            return False
+    return True
+
+
 def _websocket_client_previous_response_full_resend_is_retry_safe(
     *,
     previous_response_id: str | None,
@@ -400,6 +429,8 @@ def _websocket_client_previous_response_full_resend_is_retry_safe(
         return False
     input_items = cast(list[JsonValue], input_value)
     if len(input_items) <= 1:
+        return False
+    if not _websocket_input_items_are_self_contained_fresh_replay(input_items):
         return False
     if (
         continuity_state is not None
@@ -423,16 +454,53 @@ def _record_websocket_continuity_completion(
     request_state: _WebSocketRequestState,
     response_id: str | None,
 ) -> None:
-    if response_id is None or request_state.input_item_count <= 0 or request_state.input_full_fingerprint is None:
+    if response_id is None:
         continuity_state.last_completed_response_id = None
         continuity_state.last_completed_input_count = 0
         continuity_state.last_completed_input_prefix_fingerprint = None
         continuity_state.last_pending_function_call_ids = []
+        continuity_state.last_pending_tool_call_types = {}
         return
+    # Record the completed response id and pending tool-call metadata
+    # regardless of input shape (string inputs leave ``input_item_count`` at
+    # 0), so an anchored follow-up can still match continuity and receive
+    # synthetic interrupted tool outputs. Prefix anchoring/trimming is only
+    # meaningful for fingerprinted list inputs, so the count/fingerprint pair
+    # is cleared rather than left stale when the completed turn cannot
+    # provide one.
     continuity_state.last_completed_response_id = response_id
-    continuity_state.last_completed_input_count = request_state.input_item_count
-    continuity_state.last_completed_input_prefix_fingerprint = request_state.input_full_fingerprint
+    if request_state.input_item_count > 0 and request_state.input_full_fingerprint is not None:
+        continuity_state.last_completed_input_count = request_state.input_item_count
+        continuity_state.last_completed_input_prefix_fingerprint = request_state.input_full_fingerprint
+    else:
+        continuity_state.last_completed_input_count = 0
+        continuity_state.last_completed_input_prefix_fingerprint = None
     continuity_state.last_pending_function_call_ids = list(request_state.pending_function_call_ids)
+    continuity_state.last_pending_tool_call_types = dict(request_state.pending_tool_call_types)
+
+
+def _record_websocket_responses_lite_acceptance(
+    continuity_state: _WebSocketContinuityState,
+    *,
+    request_state: _WebSocketRequestState,
+) -> None:
+    # Codex can reuse an accepted ``generate=false`` prewarm response and send
+    # only an empty or user-only input delta next. That frame no longer carries
+    # ``additional_tools``, so the accepted prewarm must seed Lite continuity.
+    # Only Lite acceptances may update the single-slot state: a non-Lite
+    # acceptance must not clobber a previously accepted Lite continuity with
+    # ``None``. The accepted response id is recorded so trusted incremental
+    # continuity can require ``previous_response_id`` to reference it.
+    if request_state.responses_lite_model is None:
+        return
+    continuity_state.responses_lite_model = request_state.responses_lite_model
+    # Prefer the downstream-visible id: a suppressed-created replay keeps
+    # exposing the original response id to the client (every downstream event
+    # is rewritten to it), so the next incremental frame can only reference
+    # that visible id, never the hidden upstream replay id.
+    continuity_state.responses_lite_response_id = (
+        request_state.replay_downstream_response_id or request_state.response_id
+    )
 
 
 def _websocket_response_id(event: OpenAIEvent | None, payload: dict[str, JsonValue] | None) -> str | None:
@@ -653,6 +721,7 @@ def _prepare_websocket_request_state_for_auth_replay(
         request_state.preferred_account_id = None
         request_state.proxy_injected_previous_response_id = False
         request_state.fresh_upstream_request_is_retry_safe = False
+        request_state.responses_lite_model = request_state.fresh_upstream_request_responses_lite_model
         _refresh_websocket_request_input_fingerprint_from_text(request_state)
     request_text = request_state.request_text
     if not isinstance(request_text, str):

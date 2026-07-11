@@ -9,6 +9,7 @@ from app.core.types import JsonValue
 from app.modules.proxy.types import (
     AdditionalRateLimitData,
     CreditStatusDetailsData,
+    RateLimitResetCreditsData,
     RateLimitStatusDetailsData,
     RateLimitStatusPayloadData,
     RateLimitWindowSnapshotData,
@@ -111,12 +112,23 @@ class AdditionalRateLimitStatus(BaseModel):
         )
 
 
+class RateLimitResetCredits(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    available_count: int
+
+    @classmethod
+    def from_data(cls, data: RateLimitResetCreditsData) -> "RateLimitResetCredits":
+        return cls(available_count=data.available_count)
+
+
 class RateLimitStatusPayload(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     plan_type: str
     rate_limit: RateLimitStatusDetails | None = None
     credits: CreditStatusDetails | None = None
+    rate_limit_reset_credits: RateLimitResetCredits | None = None
     additional_rate_limits: list[AdditionalRateLimitStatus] = []
 
     @classmethod
@@ -125,8 +137,26 @@ class RateLimitStatusPayload(BaseModel):
             plan_type=data.plan_type,
             rate_limit=RateLimitStatusDetails.from_data(data.rate_limit) if data.rate_limit else None,
             credits=CreditStatusDetails.from_data(data.credits) if data.credits else None,
+            rate_limit_reset_credits=(
+                RateLimitResetCredits.from_data(data.rate_limit_reset_credits)
+                if data.rate_limit_reset_credits
+                else None
+            ),
             additional_rate_limits=[AdditionalRateLimitStatus.from_data(arl) for arl in data.additional_rate_limits],
         )
+
+
+class ConsumeRateLimitResetCreditRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    redeem_request_id: str
+
+
+class ConsumeRateLimitResetCreditResponse(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    code: str
+    windows_reset: int = 0
 
 
 class ReasoningLevelSchema(BaseModel):
@@ -223,6 +253,13 @@ class V1UsageLimitResponse(BaseModel):
     source: str = "api_key_limit"
 
 
+class AccountPoolUsageResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    primary: float | None = None
+    secondary: float | None = None
+
+
 class V1UsageResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -232,6 +269,7 @@ class V1UsageResponse(BaseModel):
     total_cost_usd: float
     limits: list[V1UsageLimitResponse]
     upstream_limits: list[V1UsageLimitResponse] = []
+    account_pool_usage: AccountPoolUsageResponse | None = None
 
 
 class V1ResetCreditEntry(BaseModel):

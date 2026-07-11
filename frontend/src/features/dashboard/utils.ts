@@ -62,6 +62,9 @@ export type WeeklyCreditPace = {
   scheduledUsedPercent: number;
   deltaPercent: number;
   scheduleGapCredits: number;
+  smoothedDeltaPercent?: number;
+  smoothedScheduleGapCredits?: number;
+  paceGapSmoothingMinutes?: number;
   /** Legacy alias for scheduleGapCredits while older components migrate. */
   overPlanCredits: number;
   projectedShortfallCredits: number;
@@ -719,6 +722,9 @@ export function buildWeeklyCreditPace(
     scheduledUsedPercent,
     deltaPercent,
     scheduleGapCredits,
+    smoothedDeltaPercent: deltaPercent,
+    smoothedScheduleGapCredits: scheduleGapCredits,
+    paceGapSmoothingMinutes: 0,
     overPlanCredits: scheduleGapCredits,
     projectedShortfallCredits,
     pauseForBreakEvenHours,

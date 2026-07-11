@@ -220,3 +220,17 @@ The system SHALL support an optional limit warm-up mechanism that is disabled by
 - **THEN** the database permits at most one persisted attempt for that tuple
 - **AND** later refresh cycles skip that tuple after a prior attempt exists
 
+#### Scenario: Staggered idle warm-up pre-starts rolling primary windows
+- **GIVEN** limit warm-up and staggered idle warm-up are enabled globally
+- **AND** multiple active accounts are opted into limit warm-up
+- **AND** an opted-in account has a healthy idle primary 5h usage sample
+- **WHEN** background usage refresh evaluates that account inside its deterministic stagger slot
+- **THEN** the system MAY send one minimal upstream warm-up request for that account's current 300-minute cycle
+- **AND** the system MUST NOT send another staggered idle warm-up for that same account/cycle tuple
+- **AND** account slots MUST be spread deterministically across the 300-minute rolling window so restarts do not align all opted-in accounts into the same phase
+
+#### Scenario: Staggered idle warm-up remains opt-in
+- **GIVEN** limit warm-up is enabled globally and for an account
+- **AND** staggered idle warm-up is disabled
+- **WHEN** background usage refresh observes an idle primary 5h sample that is not a reset-confirmed transition
+- **THEN** limit warm-up MUST NOT send synthetic traffic for that idle sample

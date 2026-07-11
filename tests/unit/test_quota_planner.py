@@ -5,7 +5,8 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from app.core.balancer import AccountState
-from app.db.models import AccountStatus
+from app.db.models import Account, AccountStatus, RequestLog
+from app.db.session import SessionLocal
 from app.modules.quota_planner.logic import (
     DemandForecastSlot,
     PlannerAction,
@@ -18,7 +19,7 @@ from app.modules.quota_planner.logic import (
     plan_shadow_actions,
     simulate_pool,
 )
-from app.modules.quota_planner.repository import DemandBin
+from app.modules.quota_planner.repository import DemandBin, QuotaPlannerRepository, _to_db_naive_utc
 
 pytestmark = pytest.mark.unit
 
@@ -90,6 +91,94 @@ def test_planner_settings_default_to_nonblocking_shadow_mode() -> None:
     assert settings.prewarm_enabled is True
     assert settings.allow_synthetic_traffic is False
     assert settings.dry_run is True
+
+
+def test_to_db_naive_utc_normalizes_aware_datetimes() -> None:
+    scheduled_at = datetime(2026, 6, 18, 8, 30, tzinfo=timezone(timedelta(hours=3)))
+
+    assert _to_db_naive_utc(scheduled_at) == datetime(2026, 6, 18, 5, 30)
+    assert _to_db_naive_utc(None) is None
+
+
+@pytest.mark.asyncio
+async def test_quota_planner_repository_normalizes_aware_datetimes_at_session_boundary(db_setup) -> None:
+    del db_setup
+    tz_plus_3 = timezone(timedelta(hours=3))
+    scheduled_at = datetime(2026, 6, 18, 8, 30, tzinfo=tz_plus_3)
+    executed_at = datetime(2026, 6, 18, 9, 0, tzinfo=tz_plus_3)
+    observed_at = datetime(2026, 6, 18, 9, 15, tzinfo=tz_plus_3)
+    aware_since = datetime(2026, 6, 18, 8, 30, tzinfo=tz_plus_3)
+
+    async with SessionLocal() as session:
+        session.add(
+            Account(
+                id="quota-planner-aware-account",
+                email="quota-planner-aware@example.com",
+                plan_type="plus",
+                access_token_encrypted=b"access",
+                refresh_token_encrypted=b"refresh",
+                id_token_encrypted=b"id",
+                last_refresh=datetime(2026, 6, 18, 5, 0),
+                status=AccountStatus.ACTIVE,
+            )
+        )
+        await session.commit()
+
+        repo = QuotaPlannerRepository(session)
+        decision = await repo.log_decision(
+            mode="shadow",
+            action="warmup",
+            idempotency_key="quota-planner-aware-boundary",
+            account_id="quota-planner-aware-account",
+            scheduled_at=scheduled_at,
+            status="planned",
+        )
+
+        assert decision.scheduled_at == datetime(2026, 6, 18, 5, 30)
+
+        updated = await repo.update_decision_status(
+            decision.id,
+            status="executed",
+            executed_at=executed_at,
+            expected_status="planned",
+        )
+
+        assert updated is not None
+        assert updated.executed_at == datetime(2026, 6, 18, 6, 0)
+
+        observation = await repo.add_window_observation(
+            account_id="quota-planner-aware-account",
+            source="warmup_probe",
+            observed_at=observed_at,
+            model="gpt-5.4-mini",
+            confidence="observed",
+        )
+
+        assert observation.observed_at == datetime(2026, 6, 18, 6, 15)
+
+        session.add(
+            RequestLog(
+                request_id="quota-planner-aware-warmup",
+                request_kind="warmup",
+                requested_at=datetime(2026, 6, 18, 6, 30),
+                model="gpt-5.4-mini",
+                status="ok",
+                input_tokens=12,
+                cached_input_tokens=3,
+                output_tokens=4,
+                cost_usd=0.25,
+            )
+        )
+        await session.commit()
+
+        assert await repo.count_executed_warmups_since(aware_since) == 1
+        assert await repo.warmup_cost_since(aware_since) == pytest.approx(0.25)
+
+        bins = await repo.aggregate_demand_bins(since=aware_since)
+
+        assert len(bins) == 1
+        assert bins[0].request_count == 1
+        assert bins[0].cost_usd == pytest.approx(0.25)
 
 
 def test_candidate_start_times_do_not_floor_now_into_the_past() -> None:

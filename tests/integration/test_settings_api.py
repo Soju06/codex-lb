@@ -58,7 +58,7 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["relativeAvailabilityTopK"] == 5
     assert payload["singleAccountId"] is None
     assert payload["openaiCacheAffinityMaxAgeSeconds"] == 1800
-    assert payload["dashboardSessionTtlSeconds"] == 43200
+    assert payload["dashboardSessionTtlSeconds"] == 31536000
     assert payload["httpResponsesSessionBridgePromptCacheIdleTtlSeconds"] == 3600
     assert payload["httpResponsesSessionBridgeGatewaySafeMode"] is False
     assert payload["stickyReallocationBudgetThresholdPct"] == 95.0
@@ -69,13 +69,17 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["totpRequiredOnLogin"] is False
     assert payload["totpConfigured"] is False
     assert payload["apiKeyAuthEnabled"] is False
+    assert payload["hideUpstreamQuotaFromApiKeys"] is False
     assert payload["limitWarmupEnabled"] is False
     assert payload["limitWarmupWindows"] == "both"
     assert payload["limitWarmupModel"] == "auto"
     assert payload["limitWarmupPrompt"] == "Say OK."
     assert payload["limitWarmupCooldownSeconds"] == 3600
+    assert payload["limitWarmupExhaustedThresholdPercent"] == 99.0
     assert payload["limitWarmupMinAvailablePercent"] == 100.0
     assert payload["weeklyPaceWorkingDays"] == "0,1,2,3,4,5,6"
+    assert payload["weeklyPaceSmoothingMinutes"] == 30
+    assert payload["limitWarmupStaggeredIdleEnabled"] is False
 
     response = await async_client.put(
         "/api/settings",
@@ -101,13 +105,17 @@ async def test_settings_api_get_and_update(async_client):
             "importWithoutOverwrite": False,
             "totpRequiredOnLogin": False,
             "apiKeyAuthEnabled": True,
+            "hideUpstreamQuotaFromApiKeys": True,
             "limitWarmupEnabled": True,
             "limitWarmupWindows": "primary",
             "limitWarmupModel": "gpt-5.1-codex-mini",
             "limitWarmupPrompt": "Say OK.",
             "limitWarmupCooldownSeconds": 7200,
+            "limitWarmupExhaustedThresholdPercent": 98.5,
             "limitWarmupMinAvailablePercent": 99.0,
             "weeklyPaceWorkingDays": "0,1,2,3,4",
+            "weeklyPaceSmoothingMinutes": 120,
+            "limitWarmupStaggeredIdleEnabled": True,
         },
     )
     assert response.status_code == 200
@@ -134,13 +142,17 @@ async def test_settings_api_get_and_update(async_client):
     assert updated["totpRequiredOnLogin"] is False
     assert updated["totpConfigured"] is False
     assert updated["apiKeyAuthEnabled"] is True
+    assert updated["hideUpstreamQuotaFromApiKeys"] is True
     assert updated["limitWarmupEnabled"] is True
     assert updated["limitWarmupWindows"] == "primary"
     assert updated["limitWarmupModel"] == "gpt-5.1-codex-mini"
     assert updated["limitWarmupPrompt"] == "Say OK."
     assert updated["limitWarmupCooldownSeconds"] == 7200
+    assert updated["limitWarmupExhaustedThresholdPercent"] == 98.5
     assert updated["limitWarmupMinAvailablePercent"] == 99.0
     assert updated["weeklyPaceWorkingDays"] == "0,1,2,3,4"
+    assert updated["weeklyPaceSmoothingMinutes"] == 120
+    assert updated["limitWarmupStaggeredIdleEnabled"] is True
 
     response = await async_client.get("/api/settings")
     assert response.status_code == 200
@@ -167,13 +179,16 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["totpRequiredOnLogin"] is False
     assert payload["totpConfigured"] is False
     assert payload["apiKeyAuthEnabled"] is True
+    assert payload["hideUpstreamQuotaFromApiKeys"] is True
     assert payload["limitWarmupEnabled"] is True
     assert payload["limitWarmupWindows"] == "primary"
     assert payload["limitWarmupModel"] == "gpt-5.1-codex-mini"
     assert payload["limitWarmupPrompt"] == "Say OK."
     assert payload["limitWarmupCooldownSeconds"] == 7200
+    assert payload["limitWarmupExhaustedThresholdPercent"] == 98.5
     assert payload["limitWarmupMinAvailablePercent"] == 99.0
     assert payload["weeklyPaceWorkingDays"] == "0,1,2,3,4"
+    assert payload["weeklyPaceSmoothingMinutes"] == 120
 
 
 @pytest.mark.asyncio
@@ -354,6 +369,7 @@ async def test_settings_api_allows_partial_updates(async_client):
     assert updated["routingStrategy"] == original["routingStrategy"]
     assert updated["upstreamProxyRoutingEnabled"] == original["upstreamProxyRoutingEnabled"]
     assert updated["upstreamProxyDefaultPoolId"] == original["upstreamProxyDefaultPoolId"]
+    assert updated["hideUpstreamQuotaFromApiKeys"] == original["hideUpstreamQuotaFromApiKeys"]
 
 
 @pytest.mark.asyncio
@@ -361,6 +377,16 @@ async def test_settings_api_rejects_invalid_weekly_pace_working_days(async_clien
     response = await async_client.put(
         "/api/settings",
         json={"weeklyPaceWorkingDays": "0,1,7"},
+    )
+
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_settings_api_rejects_invalid_weekly_pace_smoothing_minutes(async_client):
+    response = await async_client.put(
+        "/api/settings",
+        json={"weeklyPaceSmoothingMinutes": 45},
     )
 
     assert response.status_code == 422

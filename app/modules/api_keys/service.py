@@ -21,9 +21,9 @@ from app.core.usage.pricing import (
 )
 from app.core.usage.types import UsageWindowRow
 from app.core.utils.time import to_utc_naive, utcnow
-from app.db.models import Account, AccountStatus, ApiKey, ApiKeyLimit, LimitType, LimitWindow, UsageHistory
+from app.db.models import Account, AccountStatus, ApiKey, ApiKeyLimit, LimitType, LimitWindow, ModelSource, UsageHistory
 from app.db.session import sqlite_writer_section
-from app.modules.api_keys.limit_windows import advance_limit_reset, next_limit_reset
+from app.modules.api_keys.limit_windows import advance_limit_reset, limit_window_delta, next_limit_reset
 from app.modules.api_keys.repository import (
     _UNSET,
     ApiKeyTrendBucket,
@@ -61,7 +61,17 @@ class ApiKeysRepositoryProtocol(Protocol):
     async def list_all(self) -> list[ApiKey]: ...
     async def list_usage_summary_by_key(self) -> dict[str, ApiKeyUsageSummary]: ...
     async def get_usage_summary_by_key_id(self, key_id: str) -> ApiKeyUsageSummary: ...
+    async def get_limit_usage_value(
+        self,
+        key_id: str,
+        *,
+        limit_type: LimitType,
+        since: datetime,
+        until: datetime,
+        model_filter: str | None,
+    ) -> int: ...
     async def list_accounts_by_ids(self, account_ids: list[str]) -> list[Account]: ...
+    async def list_model_sources_by_ids(self, source_ids: list[str]) -> list[ModelSource]: ...
     async def list_all_accounts(self) -> list[Account]: ...
 
     async def update(
@@ -76,7 +86,9 @@ class ApiKeysRepositoryProtocol(Protocol):
         enforced_service_tier: str | None | _Unset = ...,
         traffic_class: str | _Unset = ...,
         transport_policy_override: str | None | _Unset = ...,
+        usage_sections: str | _Unset = ...,
         account_assignment_scope_enabled: bool | _Unset = ...,
+        source_assignment_scope_enabled: bool | _Unset = ...,
         expires_at: datetime | None | _Unset = ...,
         is_active: bool | _Unset = ...,
         key_hash: str | _Unset = ...,
@@ -102,6 +114,7 @@ class ApiKeysRepositoryProtocol(Protocol):
     async def replace_account_assignments(
         self, key_id: str, account_ids: list[str], *, commit: bool = True
     ) -> None: ...
+    async def replace_source_assignments(self, key_id: str, source_ids: list[str], *, commit: bool = True) -> None: ...
 
     async def increment_limit_usage(
         self,
@@ -260,8 +273,10 @@ class ApiKeyCreateData:
     enforced_service_tier: str | None = None
     traffic_class: str = TRAFFIC_CLASS_FOREGROUND
     transport_policy_override: str | None = None
+    usage_sections: str = "upstream_limits,account_pool_usage"
     expires_at: datetime | None = None
     assigned_account_ids: list[str] | None = None
+    assigned_source_ids: list[str] | None = None
     limits: list[LimitRuleInput] = field(default_factory=list)
 
 
@@ -283,12 +298,16 @@ class ApiKeyUpdateData:
     traffic_class_set: bool = False
     transport_policy_override: str | None = None
     transport_policy_override_set: bool = False
+    usage_sections: str | None = None
+    usage_sections_set: bool = False
     expires_at: datetime | None = None
     expires_at_set: bool = False
     is_active: bool | None = None
     is_active_set: bool = False
     assigned_account_ids: list[str] | None = None
     assigned_account_ids_set: bool = False
+    assigned_source_ids: list[str] | None = None
+    assigned_source_ids_set: bool = False
     limits: list[LimitRuleInput] | None = None
     limits_set: bool = False
     reset_usage: bool = False
@@ -310,10 +329,13 @@ class ApiKeyData:
     apply_to_codex_model: bool = False
     traffic_class: str = TRAFFIC_CLASS_FOREGROUND
     transport_policy_override: str | None = None
+    usage_sections: str = "upstream_limits,account_pool_usage"
     limits: list[LimitRuleData] = field(default_factory=list)
     usage_summary: "ApiKeyUsageSummaryData | None" = None
     account_assignment_scope_enabled: bool = False
+    source_assignment_scope_enabled: bool = False
     assigned_account_ids: list[str] = field(default_factory=list)
+    assigned_source_ids: list[str] = field(default_factory=list)
     pooled_credits: "PooledCreditData | None" = None
 
 
@@ -343,9 +365,13 @@ def _compute_pooled_credits(
     all_accounts: list[Account],
     primary_usage: dict[str, UsageHistory],
     secondary_usage: dict[str, UsageHistory],
+    account_assignment_scope_enabled: bool = False,
 ) -> PooledCreditData:
     import app.core.usage as usage_core
     from app.modules.usage.mappers import usage_history_to_window_row
+
+    if account_assignment_scope_enabled and not assigned_account_ids:
+        return PooledCreditData()
 
     if assigned_account_ids:
         requested_account_ids = set(assigned_account_ids)
@@ -408,6 +434,7 @@ class ApiKeyUsageReservationData:
     reservation_id: str
     key_id: str
     model: str
+    has_applicable_limits: bool = True
 
 
 class ApiKeysService:
@@ -421,11 +448,13 @@ class ApiKeysService:
         plain_key = _generate_plain_key()
         normalized_allowed_models = _normalize_allowed_models(payload.allowed_models)
         assigned_account_ids = await self._resolve_assigned_account_ids(payload.assigned_account_ids)
+        assigned_source_ids = await self._resolve_assigned_source_ids(payload.assigned_source_ids)
         enforced_model = _normalize_model_slug(payload.enforced_model)
         enforced_reasoning_effort = _normalize_reasoning_effort(payload.enforced_reasoning_effort)
         enforced_service_tier = _normalize_service_tier(payload.enforced_service_tier)
         traffic_class = _normalize_traffic_class(payload.traffic_class)
         transport_policy_override = _normalize_transport_policy_override(payload.transport_policy_override)
+        usage_sections = _normalize_usage_sections(payload.usage_sections)
         _validate_model_enforcement(enforced_model=enforced_model, allowed_models=normalized_allowed_models)
         row = ApiKey(
             id=str(__import__("uuid").uuid4()),
@@ -438,8 +467,10 @@ class ApiKeysService:
             enforced_reasoning_effort=enforced_reasoning_effort,
             enforced_service_tier=enforced_service_tier,
             account_assignment_scope_enabled=bool(assigned_account_ids),
+            source_assignment_scope_enabled=bool(assigned_source_ids),
             traffic_class=traffic_class,
             transport_policy_override=transport_policy_override,
+            usage_sections=usage_sections,
             expires_at=expires_at,
             is_active=True,
             created_at=now,
@@ -450,6 +481,8 @@ class ApiKeysService:
 
             if assigned_account_ids:
                 await self._repository.replace_account_assignments(created.id, assigned_account_ids, commit=False)
+            if assigned_source_ids:
+                await self._repository.replace_source_assignments(created.id, assigned_source_ids, commit=False)
 
             if payload.limits:
                 limit_rows = [_limit_input_to_row(li, created.id, now) for li in payload.limits]
@@ -475,25 +508,35 @@ class ApiKeysService:
             assigned_ids_by_key = {
                 row.id: [a.account_id for a in getattr(row, "account_assignments", [])] for row in rows
             }
-            needs_all_accounts = any(not assigned_ids for assigned_ids in assigned_ids_by_key.values())
+            needs_all_accounts = any(
+                not assigned_ids_by_key[row.id] and not row.account_assignment_scope_enabled for row in rows
+            )
             if needs_all_accounts:
                 all_accounts = await self._repository.list_all_accounts()
                 primary_usage = await self._usage_repository.latest_by_account("primary")
                 secondary_usage = await self._usage_repository.latest_by_account("secondary")
             else:
                 all_account_ids = sorted({account_id for ids in assigned_ids_by_key.values() for account_id in ids})
-                all_accounts = await self._repository.list_accounts_by_ids(all_account_ids)
-                primary_usage = await self._usage_repository.latest_by_account("primary", account_ids=all_account_ids)
-                secondary_usage = await self._usage_repository.latest_by_account(
-                    "secondary",
-                    account_ids=all_account_ids,
-                )
+                if all_account_ids:
+                    all_accounts = await self._repository.list_accounts_by_ids(all_account_ids)
+                    primary_usage = await self._usage_repository.latest_by_account(
+                        "primary", account_ids=all_account_ids
+                    )
+                    secondary_usage = await self._usage_repository.latest_by_account(
+                        "secondary",
+                        account_ids=all_account_ids,
+                    )
+                else:
+                    all_accounts = []
+                    primary_usage = {}
+                    secondary_usage = {}
             for row in rows:
                 pooled_by_key[row.id] = _compute_pooled_credits(
                     assigned_account_ids=assigned_ids_by_key[row.id],
                     all_accounts=all_accounts,
                     primary_usage=primary_usage,
                     secondary_usage=secondary_usage,
+                    account_assignment_scope_enabled=row.account_assignment_scope_enabled,
                 )
 
         return [
@@ -521,6 +564,12 @@ class ApiKeysService:
         else:
             assigned_account_ids = None
             account_assignment_scope_enabled = _UNSET
+        if payload.assigned_source_ids_set:
+            assigned_source_ids = await self._resolve_assigned_source_ids(payload.assigned_source_ids)
+            source_assignment_scope_enabled: bool | _Unset = bool(assigned_source_ids)
+        else:
+            assigned_source_ids = None
+            source_assignment_scope_enabled = _UNSET
 
         if payload.enforced_model_set:
             enforced_model = _normalize_model_slug(payload.enforced_model)
@@ -552,6 +601,9 @@ class ApiKeysService:
         transport_policy_override_update: str | None | _Unset = _UNSET
         if payload.transport_policy_override_set:
             transport_policy_override_update = _normalize_transport_policy_override(payload.transport_policy_override)
+        usage_sections: str | _Unset = _UNSET
+        if payload.usage_sections_set:
+            usage_sections = _normalize_usage_sections(payload.usage_sections)
 
         if payload.allowed_models_set or payload.enforced_model_set:
             effective_allowed_models = (
@@ -570,12 +622,13 @@ class ApiKeysService:
             now = utcnow()
             existing_limits = await self._repository.get_limits_by_key(key_id)
             submitted_limits = payload.limits or []
-            limit_rows = _build_limit_rows_for_update(
+            limit_rows = await _build_limit_rows_for_update(
                 key_id=key_id,
                 now=now,
                 submitted_limits=submitted_limits,
                 existing_limits=existing_limits,
                 reset_usage=payload.reset_usage,
+                repository=self._repository,
             )
         elif payload.reset_usage:
             now = utcnow()
@@ -595,7 +648,9 @@ class ApiKeysService:
                 enforced_service_tier=(enforced_service_tier if payload.enforced_service_tier_set else _UNSET),
                 traffic_class=traffic_class_update,
                 transport_policy_override=transport_policy_override_update,
+                usage_sections=usage_sections,
                 account_assignment_scope_enabled=account_assignment_scope_enabled,
+                source_assignment_scope_enabled=source_assignment_scope_enabled,
                 expires_at=expires_at if payload.expires_at_set else _UNSET,
                 is_active=(payload.is_active if payload.is_active_set and payload.is_active is not None else _UNSET),
                 commit=False,
@@ -606,6 +661,9 @@ class ApiKeysService:
             if payload.assigned_account_ids_set:
                 assert assigned_account_ids is not None
                 await self._repository.replace_account_assignments(key_id, assigned_account_ids, commit=False)
+            if payload.assigned_source_ids_set:
+                assert assigned_source_ids is not None
+                await self._repository.replace_source_assignments(key_id, assigned_source_ids, commit=False)
 
             if limit_rows is not None:
                 await self._repository.upsert_limits(key_id, limit_rows, commit=False)
@@ -617,6 +675,7 @@ class ApiKeysService:
 
         if (
             payload.assigned_account_ids_set
+            or payload.assigned_source_ids_set
             or limit_rows is not None
             or payload.name_set
             or payload.allowed_models_set
@@ -626,6 +685,7 @@ class ApiKeysService:
             or payload.enforced_service_tier_set
             or payload.traffic_class_set
             or payload.transport_policy_override_set
+            or payload.usage_sections_set
             or payload.expires_at_set
             or payload.is_active_set
         ):
@@ -650,6 +710,18 @@ class ApiKeysService:
             missing = ", ".join(missing_account_ids)
             raise ApiKeyValidationError(f"Unknown account ids: {missing}")
         return normalized_account_ids
+
+    async def _resolve_assigned_source_ids(self, source_ids: list[str] | None) -> list[str]:
+        normalized_source_ids = _normalize_assigned_source_ids(source_ids)
+        if not normalized_source_ids:
+            return []
+        existing_sources = await self._repository.list_model_sources_by_ids(normalized_source_ids)
+        existing_source_ids = {source.id for source in existing_sources}
+        missing_source_ids = [source_id for source_id in normalized_source_ids if source_id not in existing_source_ids]
+        if missing_source_ids:
+            missing = ", ".join(missing_source_ids)
+            raise ApiKeyValidationError(f"Unknown model source ids: {missing}")
+        return normalized_source_ids
 
     async def delete_key(self, key_id: str) -> None:
         row = await self._repository.get_by_id(key_id)
@@ -793,6 +865,7 @@ class ApiKeysService:
             reservation_id=reservation_id,
             key_id=key_id,
             model=request_model or "",
+            has_applicable_limits=bool(reservation_items),
         )
 
     async def finalize_usage_reservation(
@@ -804,6 +877,7 @@ class ApiKeysService:
         output_tokens: int,
         cached_input_tokens: int = 0,
         service_tier: str | None = None,
+        cost_microdollars: int | None = None,
     ) -> None:
         for attempt in range(_SQLITE_BUSY_RETRY_ATTEMPTS):
             try:
@@ -815,6 +889,7 @@ class ApiKeysService:
                     cached_input_tokens=cached_input_tokens,
                     service_tier=service_tier,
                     status="finalized",
+                    cost_microdollars_override=cost_microdollars,
                 )
                 return
             except OperationalError as exc:
@@ -865,6 +940,7 @@ class ApiKeysService:
         cached_input_tokens: int | None,
         service_tier: str | None,
         status: str,
+        cost_microdollars_override: int | None = None,
     ) -> None:
         async with sqlite_writer_section():
             reservation = await self._repository.get_usage_reservation(reservation_id)
@@ -883,12 +959,16 @@ class ApiKeysService:
             effective_input_tokens = input_tokens or 0
             effective_output_tokens = output_tokens or 0
             effective_cached_input_tokens = cached_input_tokens or 0
-            cost_microdollars = _calculate_cost_microdollars(
-                model,
-                effective_input_tokens,
-                effective_output_tokens,
-                effective_cached_input_tokens,
-                service_tier,
+            cost_microdollars = (
+                cost_microdollars_override
+                if cost_microdollars_override is not None
+                else _calculate_cost_microdollars(
+                    model,
+                    effective_input_tokens,
+                    effective_output_tokens,
+                    effective_cached_input_tokens,
+                    service_tier,
+                )
             )
 
             try:
@@ -1152,6 +1232,29 @@ def _normalize_name(name: str) -> str:
     return normalized
 
 
+_VALID_USAGE_SECTIONS = {"upstream_limits", "account_pool_usage"}
+_DEFAULT_USAGE_SECTIONS = "upstream_limits,account_pool_usage"
+
+
+def _normalize_usage_sections(raw: str | None) -> str:
+    if raw is None:
+        return _DEFAULT_USAGE_SECTIONS
+    if not raw.strip():
+        return ""
+    sections = [s.strip() for s in raw.split(",") if s.strip()]
+    invalid = [s for s in sections if s not in _VALID_USAGE_SECTIONS]
+    if invalid:
+        raise ApiKeyValidationError(f"Invalid usage sections: {', '.join(invalid)}")
+    return ",".join(dict.fromkeys(sections))
+
+
+def _get_usage_sections_with_default(row: ApiKey) -> str:
+    value = getattr(row, "usage_sections", None)
+    if value is None:
+        return _DEFAULT_USAGE_SECTIONS
+    return value
+
+
 def _generate_plain_key() -> str:
     return f"sk-clb-{secrets.token_urlsafe(32)}"
 
@@ -1196,6 +1299,20 @@ def _normalize_assigned_account_ids(account_ids: list[str] | None) -> list[str]:
     return normalized
 
 
+def _normalize_assigned_source_ids(source_ids: list[str] | None) -> list[str]:
+    if not source_ids:
+        return []
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for source_id in source_ids:
+        value = source_id.strip()
+        if not value or value in seen:
+            continue
+        normalized.append(value)
+        seen.add(value)
+    return normalized
+
+
 def _normalize_model_slug(value: str | None) -> str | None:
     if value is None:
         return None
@@ -1205,7 +1322,7 @@ def _normalize_model_slug(value: str | None) -> str | None:
     return normalized
 
 
-_SUPPORTED_REASONING_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh"})
+_SUPPORTED_REASONING_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"})
 _SUPPORTED_SERVICE_TIERS = frozenset({"auto", "default", "priority", "flex"})
 
 
@@ -1502,6 +1619,7 @@ def _to_created_data(data: ApiKeyData, key: str) -> ApiKeyCreatedData:
         enforced_service_tier=data.enforced_service_tier,
         traffic_class=data.traffic_class,
         transport_policy_override=data.transport_policy_override,
+        usage_sections=data.usage_sections,
         expires_at=data.expires_at,
         is_active=data.is_active,
         created_at=data.created_at,
@@ -1509,7 +1627,9 @@ def _to_created_data(data: ApiKeyData, key: str) -> ApiKeyCreatedData:
         limits=data.limits,
         usage_summary=data.usage_summary,
         account_assignment_scope_enabled=data.account_assignment_scope_enabled,
+        source_assignment_scope_enabled=data.source_assignment_scope_enabled,
         assigned_account_ids=data.assigned_account_ids,
+        assigned_source_ids=data.assigned_source_ids,
         key=key,
     )
 
@@ -1522,6 +1642,7 @@ def _to_api_key_data(
 ) -> ApiKeyData:
     limits = [_to_limit_rule_data(limit) for limit in row.limits] if row.limits else []
     account_assignments = getattr(row, "account_assignments", [])
+    source_assignments = getattr(row, "source_assignments", [])
     return ApiKeyData(
         id=row.id,
         name=row.name,
@@ -1535,6 +1656,7 @@ def _to_api_key_data(
         transport_policy_override=_normalize_transport_policy_override_lenient(
             getattr(row, "transport_policy_override", None)
         ),
+        usage_sections=_get_usage_sections_with_default(row),
         expires_at=row.expires_at,
         is_active=row.is_active,
         created_at=row.created_at,
@@ -1542,7 +1664,9 @@ def _to_api_key_data(
         limits=limits,
         usage_summary=usage_summary,
         account_assignment_scope_enabled=getattr(row, "account_assignment_scope_enabled", False),
+        source_assignment_scope_enabled=getattr(row, "source_assignment_scope_enabled", False),
         assigned_account_ids=[assignment.account_id for assignment in account_assignments],
+        assigned_source_ids=[assignment.source_id for assignment in source_assignments],
         pooled_credits=pooled_credits,
     )
 
@@ -1580,13 +1704,14 @@ def _limit_input_to_row(
     )
 
 
-def _build_limit_rows_for_update(
+async def _build_limit_rows_for_update(
     *,
     key_id: str,
     now: datetime,
     submitted_limits: list[LimitRuleInput],
     existing_limits: list[ApiKeyLimit],
     reset_usage: bool,
+    repository: ApiKeysRepositoryProtocol | None = None,
 ) -> list[ApiKeyLimit]:
     existing_by_key = {_limit_identity_from_row(limit): limit for limit in existing_limits}
     submitted_by_key = {_limit_identity_from_input(limit): limit for limit in submitted_limits}
@@ -1597,8 +1722,13 @@ def _build_limit_rows_for_update(
     for submitted in submitted_limits:
         identity = _limit_identity_from_input(submitted)
         matched = existing_by_key.get(identity)
-        if matched is None or reset_usage:
+        if reset_usage:
             rows.append(_limit_input_to_row(submitted, key_id, now))
+            continue
+        if matched is None:
+            if repository is None:
+                raise TypeError("repository is required to backfill new API key limit usage")
+            rows.append(await _new_limit_input_to_backfilled_row(submitted, key_id, now, repository))
             continue
         rows.append(
             _limit_input_to_row(
@@ -1610,6 +1740,32 @@ def _build_limit_rows_for_update(
             )
         )
     return rows
+
+
+async def _new_limit_input_to_backfilled_row(
+    submitted: LimitRuleInput,
+    key_id: str,
+    now: datetime,
+    repository: ApiKeysRepositoryProtocol,
+) -> ApiKeyLimit:
+    limit_type = LimitType(submitted.limit_type)
+    window = LimitWindow(submitted.limit_window)
+    reset_at = next_limit_reset(now, window)
+    since = now - limit_window_delta(window)
+    current_value = await repository.get_limit_usage_value(
+        key_id,
+        limit_type=limit_type,
+        since=since,
+        until=now,
+        model_filter=submitted.model_filter,
+    )
+    return _limit_input_to_row(
+        submitted,
+        key_id,
+        now,
+        current_value=current_value,
+        reset_at=reset_at,
+    )
 
 
 def _build_reset_limit_rows(

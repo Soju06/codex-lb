@@ -47,6 +47,21 @@ def _make_account(account_id: str) -> Account:
     )
 
 
+def test_effective_account_concurrency_caps_supports_partial_settings_double(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        load_balancer_module,
+        "get_settings",
+        lambda: SimpleNamespace(circuit_breaker_enabled=False),
+    )
+
+    assert effective_account_concurrency_caps() == load_balancer_module.AccountConcurrencyCaps(
+        response_create_limit=4,
+        stream_limit=8,
+    )
+
+
 @pytest.mark.asyncio
 async def test_account_lease_uses_explicit_dashboard_cap_snapshot_not_startup_environment(
     monkeypatch: pytest.MonkeyPatch,

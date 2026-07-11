@@ -1798,18 +1798,16 @@ def effective_account_concurrency_caps(dashboard_settings: object | None = None)
     startup_settings = get_settings()
     response_create_limit = getattr(dashboard_settings, "proxy_account_response_create_limit", None)
     stream_limit = getattr(dashboard_settings, "proxy_account_stream_limit", None)
+    startup_response_create_limit = getattr(startup_settings, "proxy_account_response_create_limit", 4)
+    startup_stream_limit = getattr(startup_settings, "proxy_account_stream_limit", 8)
     return AccountConcurrencyCaps(
         response_create_limit=max(
             0,
-            int(
-                startup_settings.proxy_account_response_create_limit
-                if response_create_limit is None
-                else response_create_limit
-            ),
+            int(startup_response_create_limit if response_create_limit is None else response_create_limit),
         ),
         stream_limit=max(
             0,
-            int(startup_settings.proxy_account_stream_limit if stream_limit is None else stream_limit),
+            int(startup_stream_limit if stream_limit is None else stream_limit),
         ),
     )
 

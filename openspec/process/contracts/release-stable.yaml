@@ -1,0 +1,60 @@
+name: release-stable
+description: Promote a previously released beta to stable.
+trigger: /process release-stable
+history_target: release-log
+interruption_commands:
+  - stop
+  - rollback
+  - explain
+  - skip
+phases:
+  - name: preflight
+    description: |
+      Confirm the target beta tag exists, the beta has been live for
+      at least 48 hours, and there are no open blocker issues tagged
+      against it.
+    irreversible: false
+    stop_signals:
+      - release_version_drift
+    expected_artifacts: []
+
+  - name: guard
+    description: |
+      Run `scripts/guard_stable_release.py` against the candidate tag.
+      It must exit 0.
+    irreversible: false
+    stop_signals:
+      - release_version_drift
+    expected_artifacts: []
+
+  - name: draft-release
+    description: |
+      Run `scripts/release_metadata.py --tag <tag>` to draft release
+      notes. Show the user the planned notes.
+    irreversible: false
+    stop_signals: []
+    expected_artifacts:
+      - Release notes draft
+
+  - name: tag-and-publish
+    description: |
+      Push the stable tag and run
+      `.github/workflows/release.yml` via `gh workflow run`.
+      Append to `openspec/process/release-log.md`.
+    irreversible: true
+    confirmation_phrase: "release stable "
+    stop_signals:
+      - ci_red
+      - release_version_drift
+    expected_artifacts:
+      - Stable tag pushed
+      - Release artifact published
+
+  - name: write-release-notes
+    description: |
+      Append a row to `openspec/process/release-log.md` capturing tag,
+      date, included PRs, and the user who approved.
+    irreversible: false
+    stop_signals: []
+    expected_artifacts:
+      - openspec/process/release-log.md updated

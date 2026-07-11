@@ -118,6 +118,18 @@ Prompting cue (use when writing docs):
 - Sync delta specs → main specs: `/opsx:sync <change>`
 - Archive: `/opsx:archive <change>`
 
+### /process skill
+
+For end-to-end task automation, see
+[`openspec/process/process-map.md`](openspec/process/process-map.md). The
+cheat sheet describes the five runnable task types
+(`/process feature`, `/process bugfix`, `/process release-beta`,
+`/process release-stable`, `/process sync-upstream`) plus the
+`/process weekly-summary` read-only report. Machine-readable contracts
+live under `openspec/process/contracts/`; the validator at
+`openspec/process/scripts/validate_contracts.py` is also wired into the
+`process-check` GitHub Action.
+
 ## Contributing & Merge Gates
 
 When authoring or merging a PR (as a human contributor, a collaborator,

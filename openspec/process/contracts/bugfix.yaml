@@ -1,0 +1,84 @@
+name: bugfix
+description: Address a reported issue. Requires a `Fixes #N` reference.
+trigger: /process bugfix
+history_target: openspec-change-notes
+interruption_commands:
+  - stop
+  - rollback
+  - explain
+  - skip
+phases:
+  - name: read-issue
+    description: |
+      Read the issue body and any linked context. Restate the bug in
+      one sentence and confirm scope with the user.
+    irreversible: false
+    stop_signals:
+      - ambiguous_scope
+    expected_artifacts: []
+
+  - name: reproduce
+    description: |
+      Write or run a failing test that reproduces the bug. Confirm it
+      fails for the right reason.
+    irreversible: false
+    stop_signals: []
+    expected_artifacts:
+      - tests/unit/ or tests/integration/ test file
+
+  - name: draft-openspec-change
+    description: |
+      Create openspec/changes/<slug>/ with proposal.md, tasks.md,
+      specs/<cap>/spec.md, README.md. Wait for user "ok".
+    irreversible: false
+    stop_signals:
+      - ambiguous_scope
+    expected_artifacts:
+      - openspec/changes/<slug>/proposal.md
+      - openspec/changes/<slug>/tasks.md
+      - openspec/changes/<slug>/README.md
+      - openspec/changes/<slug>/specs/<cap>/spec.md
+
+  - name: verify-openspec-change
+    description: |
+      Run `openspec validate --change <slug> --strict`.
+    irreversible: false
+    stop_signals:
+      - openspec_validate_failed
+    expected_artifacts: []
+
+  - name: implement-in-worktree
+    description: |
+      Worktree + fix + tests + commit + push + PR with `Fixes #N`.
+    irreversible: false
+    stop_signals:
+      - ci_red
+      - secrets_in_diff
+    expected_artifacts:
+      - PR opened with `Fixes #N` in the body
+
+  - name: respond-to-review
+    description: |
+      Iterate on review until CI green + approve.
+    irreversible: false
+    stop_signals:
+      - ci_red
+    expected_artifacts: []
+
+  - name: merge
+    description: |
+      Squash-merge. Remove worktree. Mark OpenSpec change as `applied`.
+    irreversible: true
+    confirmation_phrase: "merge PR #"
+    stop_signals:
+      - ci_red
+    expected_artifacts:
+      - PR merged into main
+
+  - name: write-notes
+    description: |
+      Append run summary to openspec/changes/<slug>/notes.md.
+    irreversible: false
+    stop_signals: []
+    expected_artifacts:
+      - openspec/changes/<slug>/notes.md

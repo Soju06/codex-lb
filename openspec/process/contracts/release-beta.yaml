@@ -1,0 +1,59 @@
+name: release-beta
+description: Prepare and publish a beta release via release-please.
+trigger: /process release-beta
+history_target: release-log
+interruption_commands:
+  - stop
+  - rollback
+  - explain
+  - skip
+phases:
+  - name: preflight
+    description: |
+      Confirm we are on `main`, working tree is clean, and CI on main is
+      green. Read the latest merged PRs since the last tag.
+    irreversible: false
+    stop_signals:
+      - ci_red
+    expected_artifacts: []
+
+  - name: bump-versions
+    description: |
+      Run `scripts/prepare_beta_release.py` to bump version files and
+      open a release-please PR. Show the user the planned tag.
+    irreversible: false
+    stop_signals:
+      - release_version_drift
+    expected_artifacts:
+      - release-please PR opened
+
+  - name: review-release-pr
+    description: |
+      Wait for release-please workflow to merge the PR. Confirm the
+      generated tag matches what the user expects.
+    irreversible: false
+    stop_signals:
+      - ci_red
+    expected_artifacts: []
+
+  - name: publish-beta
+    description: |
+      Confirm CI on the new tag is green. Trigger
+      `.github/workflows/publish-beta-release.yml` via `gh workflow run`.
+      Append an entry to `openspec/process/release-log.md`.
+    irreversible: true
+    confirmation_phrase: "publish beta "
+    stop_signals:
+      - ci_red
+      - release_version_drift
+    expected_artifacts:
+      - Beta artifact published to GitHub Releases
+
+  - name: write-release-notes
+    description: |
+      Append a row to `openspec/process/release-log.md` capturing tag,
+      date, included PRs, and the user who approved.
+    irreversible: false
+    stop_signals: []
+    expected_artifacts:
+      - openspec/process/release-log.md updated

@@ -1,0 +1,48 @@
+name: sync-upstream
+description: Sync the fork with Soju06/codex-lb upstream.
+trigger: /process sync-upstream
+history_target: openspec-change-notes
+interruption_commands:
+  - stop
+  - rollback
+  - explain
+  - skip
+phases:
+  - name: preflight
+    description: |
+      Confirm GITHUB_TOKEN is set, on `main`, working tree is clean,
+      and `gh auth status` succeeds.
+    irreversible: false
+    stop_signals: []
+    expected_artifacts: []
+
+  - name: dry-run
+    description: |
+      Run `scripts/sync_upstream.sh --dry-run`. Surface the JSON
+      classification to the user. Wait for confirmation to proceed.
+    irreversible: false
+    stop_signals:
+      - merge_conflict
+    expected_artifacts: []
+
+  - name: classify
+    description: |
+      If the dry-run reported `stopped_blocker`, file an audit issue
+      with label `audit/sync-upstream` and wait for user decision.
+      Otherwise proceed.
+    irreversible: false
+    stop_signals:
+      - merge_conflict
+    expected_artifacts:
+      - Audit issue (only on stopped_blocker)
+
+  - name: run-sync
+    description: |
+      Run `scripts/sync_upstream.sh` (no `--dry-run`). Push the branch,
+      open the sync-PR, file the audit issue if not yet filed.
+    irreversible: true
+    confirmation_phrase: "sync upstream now"
+    stop_signals:
+      - merge_conflict
+    expected_artifacts:
+      - Sync PR opened (if upstream moved)

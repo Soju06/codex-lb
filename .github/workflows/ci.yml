@@ -30,6 +30,7 @@ jobs:
       helm: ${{ steps.force.outputs.full_suite || steps.filter.outputs.helm }}
       docker: ${{ steps.force.outputs.full_suite || steps.filter.outputs.docker }}
       migrations: ${{ steps.force.outputs.full_suite || steps.filter.outputs.migrations }}
+      process: ${{ steps.force.outputs.full_suite || steps.filter.outputs.process }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
@@ -85,6 +86,12 @@ jobs:
               - 'app/db/alembic/**'
               - 'pyproject.toml'
               - 'uv.lock'
+              - '.github/workflows/ci.yml'
+            process:
+              - 'openspec/process/**'
+              - 'pyproject.toml'
+              - 'uv.lock'
+              - 'Makefile'
               - '.github/workflows/ci.yml'
 
   contributors:
@@ -731,6 +738,12 @@ jobs:
       - name: Helm smoke install
         run: make helm-smoke-kind
 
+  process-check:
+    name: Process contracts check
+    needs: changes
+    if: needs.changes.outputs.process == 'true'
+    uses: ./.github/workflows/process-check.yml
+
   ci-required:
     name: CI Required
     runs-on: ubuntu-24.04
@@ -754,6 +767,7 @@ jobs:
       - publish-test-image
       - helm-lint
       - helm-smoke-kind
+      - process-check
 
     steps:
       - name: Require every CI job to pass

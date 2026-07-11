@@ -14851,6 +14851,50 @@ def test_websocket_continuity_state_reuses_codex_session_scope():
     assert unscoped is not first
 
 
+def test_websocket_continuity_state_seeds_generated_turn_state_alias():
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    generated_turn_state = "turn_0123456789abcdef0123456789abcdef"
+
+    first = service._websocket_continuity_state_for_request(
+        {"x-codex-turn-state": generated_turn_state},
+        api_key=None,
+        codex_session_affinity=True,
+        synthesized_turn_state=generated_turn_state,
+    )
+    first.last_completed_response_id = "resp_generated_anchor"
+
+    echoed = service._websocket_continuity_state_for_request(
+        {"x-codex-turn-state": generated_turn_state},
+        api_key=None,
+        codex_session_affinity=True,
+    )
+
+    assert echoed is first
+    assert echoed.last_completed_response_id == "resp_generated_anchor"
+
+
+def test_websocket_continuity_state_does_not_seed_generated_turn_state_when_affinity_disabled():
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    generated_turn_state = "turn_0123456789abcdef0123456789abcdef"
+
+    unscoped = service._websocket_continuity_state_for_request(
+        {"x-codex-turn-state": generated_turn_state},
+        api_key=None,
+        codex_session_affinity=False,
+        synthesized_turn_state=generated_turn_state,
+    )
+    unscoped.last_completed_response_id = "resp_unscoped"
+
+    echoed = service._websocket_continuity_state_for_request(
+        {"x-codex-turn-state": generated_turn_state},
+        api_key=None,
+        codex_session_affinity=True,
+    )
+
+    assert echoed is not unscoped
+    assert echoed.last_completed_response_id is None
+
+
 def test_record_websocket_continuity_completion_keeps_anchor_fields_in_sync():
     continuity_state = proxy_service._WebSocketContinuityState(
         last_completed_input_count=2,

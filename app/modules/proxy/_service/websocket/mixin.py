@@ -595,21 +595,27 @@ class _WebSocketMixin:
         if not codex_session_affinity:
             return _WebSocketContinuityState()
         session_id = _owner_lookup_session_id_from_headers(headers, synthesized_turn_state=synthesized_turn_state)
-        # The generated value is deliberately not the first connection's
-        # routing key, but it is the only continuity key when the client did
-        # not supply a session header.  Save the state under it so a later
-        # reconnect that echoes the accepted turn state can recover the
-        # completed-response anchor and pending tool outputs.
-        if session_id is None:
-            session_id = synthesized_turn_state
-        if session_id is None:
+        api_key_id = api_key.id if api_key is not None else None
+        cache_keys: list[tuple[str, str | None]] = []
+        if session_id is not None:
+            cache_keys.append((session_id, api_key_id))
+        if synthesized_turn_state is not None:
+            generated_key = (synthesized_turn_state, api_key_id)
+            if generated_key not in cache_keys:
+                cache_keys.append(generated_key)
+        if not cache_keys:
             return _WebSocketContinuityState()
-        key = (session_id, api_key.id if api_key is not None else None)
-        continuity_state = proxy._websocket_continuity_index.get(key)
+        continuity_state = next(
+            (
+                existing_state
+                for key in cache_keys
+                if (existing_state := proxy._websocket_continuity_index.get(key)) is not None
+            ),
+            None,
+        )
         if continuity_state is None:
             continuity_state = _WebSocketContinuityState()
-            proxy._websocket_continuity_index[key] = continuity_state
-        else:
+        for key in cache_keys:
             proxy._websocket_continuity_index.pop(key, None)
             proxy._websocket_continuity_index[key] = continuity_state
         while len(proxy._websocket_continuity_index) > _facade()._WEBSOCKET_CONTINUITY_CACHE_LIMIT:

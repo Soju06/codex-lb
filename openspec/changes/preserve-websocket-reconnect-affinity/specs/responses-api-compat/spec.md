@@ -14,7 +14,9 @@ upstream prompt-cache routing can coexist. Accepted session headers are
 
 A turn state synthesized by the proxy for the current downstream WebSocket
 handshake MUST NOT override a client-supplied session header or prompt-cache
-key for routing or WebSocket continuity selection. The proxy MUST continue to
+key for routing or WebSocket continuity selection. The proxy MUST seed
+WebSocket continuity storage under that synthesized turn state so a later
+client echo can reuse the completed-turn owner. The proxy MUST continue to
 forward that synthesized turn state upstream. A turn state sent by the client,
 including one that the proxy generated and the client later echoed, remains a
 client-supplied turn-state affinity key.
@@ -39,6 +41,8 @@ MUST recover the same continuity state.
   received from an earlier proxy handshake
 - **THEN** that turn state remains the routing and WebSocket continuity key
   ahead of a broader accepted session header
+- **AND** full-resend continuity for that echoed turn state can reuse the
+  earlier completed response anchor
 
 #### Scenario: generated turn state seeds continuity without a session header
 

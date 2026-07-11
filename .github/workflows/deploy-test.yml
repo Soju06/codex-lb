@@ -32,7 +32,7 @@ jobs:
       DEPLOY_USER: root
       SERVER_DIR: /srv/codex-lb
       IMAGE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.image_tag || 'main' }}
-      IMAGE_REF: ghcr.io/${{ github.repository }}:${{ env.IMAGE_TAG }}
+      IMAGE_REF: ghcr.io/${{ github.repository }}:${{ github.event_name == 'workflow_dispatch' && inputs.image_tag || 'main' }}
       # Optional: required only if the GHCR package is private.
       # Leave unset on the repo to assume the package is public.
       GHCR_USER: ${{ secrets.GHCR_USER }}

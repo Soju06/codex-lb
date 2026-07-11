@@ -684,10 +684,12 @@ async def responses_websocket(
     if denial is not None:
         await websocket.send_denial_response(denial)
         return
+    client_turn_state = proxy_affinity_module._sticky_key_from_turn_state_header(websocket.headers)
     turn_state = proxy_affinity_module.ensure_downstream_turn_state(websocket.headers)
     await websocket.accept(headers=proxy_affinity_module.build_downstream_turn_state_accept_headers(turn_state))
     forwarded_headers = dict(websocket.headers)
-    forwarded_headers.setdefault("x-codex-turn-state", turn_state)
+    if client_turn_state is None:
+        forwarded_headers["x-codex-turn-state"] = turn_state
     await context.service.proxy_responses_websocket(
         websocket,
         forwarded_headers,
@@ -695,6 +697,7 @@ async def responses_websocket(
         openai_cache_affinity=True,
         api_key=api_key,
         client_ip=resolve_request_client_host(websocket),
+        synthesized_turn_state=turn_state if client_turn_state is None else None,
     )
 
 
@@ -872,10 +875,12 @@ async def v1_responses_websocket(
     if denial is not None:
         await websocket.send_denial_response(denial)
         return
+    client_turn_state = proxy_affinity_module._sticky_key_from_turn_state_header(websocket.headers)
     turn_state = proxy_affinity_module.ensure_downstream_turn_state(websocket.headers)
     await websocket.accept(headers=proxy_affinity_module.build_downstream_turn_state_accept_headers(turn_state))
     forwarded_headers = dict(websocket.headers)
-    forwarded_headers.setdefault("x-codex-turn-state", turn_state)
+    if client_turn_state is None:
+        forwarded_headers["x-codex-turn-state"] = turn_state
     await context.service.proxy_responses_websocket(
         websocket,
         forwarded_headers,
@@ -883,6 +888,7 @@ async def v1_responses_websocket(
         openai_cache_affinity=True,
         api_key=api_key,
         client_ip=resolve_request_client_host(websocket),
+        synthesized_turn_state=turn_state if client_turn_state is None else None,
     )
 
 

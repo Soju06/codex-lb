@@ -312,6 +312,88 @@ async def test_http_bridge_create_passes_security_work_requirement_to_selection(
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_stream_reads_sticky_security_requirement_without_durable_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    app_settings = _make_app_settings()
+    dashboard_settings = SimpleNamespace(
+        sticky_threads_enabled=False,
+        openai_cache_affinity_max_age_seconds=1800,
+        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,
+        http_responses_session_bridge_gateway_safe_mode=False,
+    )
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {"model": "gpt-5.6-sol", "instructions": "hi", "input": "continue"}
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="sticky-security-without-durable-lookup",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        event_queue=asyncio.Queue(),
+        transport="http",
+    )
+    assert request_state.event_queue is not None
+    await request_state.event_queue.put(None)
+    session = _make_bridge_session(key_value="sticky-security-root")
+    sticky_requirement = AsyncMock(return_value=True)
+    get_or_create = AsyncMock(return_value=session)
+
+    def prepare_request(
+        _payload: proxy_service.ResponsesRequest,
+        _headers: dict[str, str] | Any,
+        *,
+        api_key: proxy_service.ApiKeyData | None,
+        api_key_reservation: proxy_service.ApiKeyUsageReservationData | None,
+        request_id: str,
+        client_ip: str | None = None,
+    ) -> tuple[proxy_service._WebSocketRequestState, str]:
+        del api_key, api_key_reservation, request_id, client_ip
+        request_state.security_lineage_id = "sticky-security-root"
+        return request_state, '{"type":"response.create"}'
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: app_settings)
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: SimpleNamespace(get=AsyncMock(return_value=dashboard_settings)),
+    )
+    monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_security_lineage_requires_security_work_authorized", sticky_requirement)
+    monkeypatch.setattr(service, "_prepare_http_bridge_request", prepare_request)
+    monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_get_or_create_http_bridge_session", get_or_create)
+    monkeypatch.setattr(service, "_submit_http_bridge_request", AsyncMock())
+    monkeypatch.setattr(service, "_detach_http_bridge_request", AsyncMock())
+
+    chunks = [
+        chunk
+        async for chunk in service._stream_via_http_bridge(
+            payload,
+            headers={"session_id": "sticky-security-root"},
+            codex_session_affinity=True,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            idle_ttl_seconds=120.0,
+            codex_idle_ttl_seconds=1800.0,
+            max_sessions=8,
+            queue_limit=4,
+        )
+    ]
+
+    assert chunks == []
+    sticky_requirement.assert_awaited_once_with("sticky-security-root")
+    assert get_or_create.await_args.kwargs["durable_lookup"] is None
+    assert get_or_create.await_args.kwargs["require_security_work_authorized"] is True
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("require_security_work_authorized", [False, True])
 async def test_previous_response_recovery_applies_security_account_gate(
     monkeypatch: pytest.MonkeyPatch,

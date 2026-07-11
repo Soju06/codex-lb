@@ -719,6 +719,12 @@ class _CompactMixin:
                                 "No security-work-authorized account available for classified compact request_id=%s",
                                 request_id,
                             )
+                            await proxy._settle_compact_api_key_usage(
+                                api_key=api_key,
+                                api_key_reservation=api_key_reservation,
+                                response=None,
+                                request_service_tier=request_service_tier,
+                            )
                             raise last_exc
                         logger.info(
                             "No security-work-authorized account available for unrooted compact retry; "

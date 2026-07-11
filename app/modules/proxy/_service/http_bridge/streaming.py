@@ -844,6 +844,10 @@ class _HTTPBridgeStreamingMixin:
         request_state.require_security_work_authorized = bool(
             durable_lookup is not None and durable_lookup.requires_security_work_authorized
         )
+        if not request_state.require_security_work_authorized:
+            request_state.require_security_work_authorized = (
+                await self._security_lineage_requires_security_work_authorized(request_state.security_lineage_id)
+            )
         request_state.preferred_account_id = (
             durable_lookup.account_id
             if (
@@ -1284,6 +1288,7 @@ class _HTTPBridgeStreamingMixin:
         ):
             previous_preferred_account_id = request_state.preferred_account_id
             previous_file_required_preferred_account = request_state.file_required_preferred_account
+            previous_security_requirement = request_state.require_security_work_authorized
             fresh_upstream_request_text = text_data
             effective_payload = effective_payload.model_copy(
                 update={"previous_response_id": session.last_completed_response_id}
@@ -1298,9 +1303,7 @@ class _HTTPBridgeStreamingMixin:
                 payload=effective_payload,
                 durable_lookup=durable_lookup,
             )
-            request_state.require_security_work_authorized = bool(
-                durable_lookup is not None and durable_lookup.requires_security_work_authorized
-            )
+            request_state.require_security_work_authorized = previous_security_requirement
             request_state.preferred_account_id = (
                 previous_preferred_account_id
                 if previous_file_required_preferred_account

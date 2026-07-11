@@ -11896,7 +11896,8 @@ async def test_compact_responses_does_not_fallback_to_ordinary_pool_after_securi
     monkeypatch.setattr(service._load_balancer, "record_error", AsyncMock())
     monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
     monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=lambda account, **kwargs: account))
-    monkeypatch.setattr(service, "_settle_compact_api_key_usage", AsyncMock())
+    settle_compact_usage = AsyncMock()
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", settle_compact_usage)
 
     async def fake_compact(payload, headers, access_token, account_id):
         del payload, headers, access_token
@@ -11914,9 +11915,20 @@ async def test_compact_responses_does_not_fallback_to_ordinary_pool_after_securi
     monkeypatch.setattr(proxy_service, "core_compact_responses", fake_compact)
 
     payload = ResponsesCompactRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
+    api_key = _make_api_key_data("compact-security-rooted")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv-compact-security-rooted",
+        key_id=api_key.id,
+        model=payload.model,
+    )
 
     with pytest.raises(proxy_module.ProxyResponseError):
-        await service.compact_responses(payload, {"session_id": "sid-compact"})
+        await service.compact_responses(
+            payload,
+            {"session_id": "sid-compact"},
+            api_key=api_key,
+            api_key_reservation=reservation,
+        )
 
     assert [call.kwargs["require_security_work_authorized"] for call in select_account.await_args_list] == [
         False,
@@ -11925,6 +11937,12 @@ async def test_compact_responses_does_not_fallback_to_ordinary_pool_after_securi
     assert select_account.await_args_list[1].kwargs["exclude_account_ids"] == {regular_account.id}
     assert request_logs.calls[-1]["account_id"] == regular_account.id
     assert request_logs.calls[-1]["error_code"] == "invalid_request_error"
+    settle_compact_usage.assert_awaited_once_with(
+        api_key=api_key,
+        api_key_reservation=reservation,
+        response=None,
+        request_service_tier=None,
+    )
 
 
 @pytest.mark.asyncio

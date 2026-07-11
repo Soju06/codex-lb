@@ -15275,6 +15275,54 @@ async def test_http_bridge_startup_timeout_retires_bridge_with_healthy_sibling(
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_startup_timeout_retires_bridge_when_single_replay_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    expired_request = proxy_service._WebSocketRequestState(
+        request_id="req-startup-expired-replay-failed",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        upstream_sent_at=1.0,
+        awaiting_response_created=True,
+    )
+    session = _make_bridge_session(
+        pending_requests=deque([expired_request]),
+        queued_request_count=1,
+    )
+    session.upstream = cast(UpstreamResponsesWebSocket, SimpleNamespace(receive=AsyncMock(), close=AsyncMock()))
+    next_timeout = AsyncMock(
+        return_value=proxy_service._WebSocketReceiveTimeout(
+            timeout_seconds=0.0,
+            error_code="response_created_timeout",
+            error_message="Upstream did not create a response within the startup window",
+            response_created_request_ids=frozenset({expired_request.request_id}),
+        )
+    )
+
+    async def fail_expired_requests(*args: Any, **kwargs: Any) -> None:
+        del args, kwargs
+        session.pending_requests.clear()
+        session.queued_request_count = 0
+
+    retire = AsyncMock()
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(service, "_next_websocket_receive_timeout", next_timeout)
+    monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", AsyncMock(return_value=False))
+    monkeypatch.setattr(service, "_fail_response_created_timeout_requests", fail_expired_requests)
+    monkeypatch.setattr(service, "_fail_pending_websocket_requests", AsyncMock())
+    monkeypatch.setattr(service, "_retire_stale_pending_http_bridge_session", retire)
+
+    await service._relay_http_bridge_upstream_messages(session)
+
+    assert session.closed is True
+    retire.assert_awaited_once_with(session, detail="response_created_timeout")
+
+
+@pytest.mark.asyncio
 async def test_websocket_reader_unexpected_processing_error_fails_pending_request(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -803,7 +803,7 @@ def _http_bridge_session_reusable_for_request(
     previous_response_id: str | None,
     require_security_work_authorized: bool = False,
 ) -> bool:
-    if require_security_work_authorized and not bool(getattr(session.account, "security_work_authorized", False)):
+    if not _http_bridge_session_meets_security_requirement(session, require_security_work_authorized):
         return False
     if session.upstream_control.retire_after_drain:
         return False

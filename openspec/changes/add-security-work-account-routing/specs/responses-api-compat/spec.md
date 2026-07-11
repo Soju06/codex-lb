@@ -62,3 +62,11 @@ The classifier MUST recognize both the legacy cybersecurity-risk message and the
 - **THEN** codex-lb forwards the terminal denial for that request
 - **AND** codex-lb MUST retire the ordinary upstream connection before accepting another turn for the classified lineage
 - **AND** the next turn MUST pass through security-work-authorized account selection
+
+#### Scenario: Classified local bridge cannot satisfy ordinary reuse
+
+- **GIVEN** a local HTTP bridge session is marked as requiring security-work authorization
+- **AND** its current account is not security-work-authorized
+- **WHEN** durable reattach checks whether the bridge can preserve local continuity
+- **THEN** codex-lb MUST treat the local bridge as non-reusable
+- **AND** it MUST preserve or inject the durable response anchor before selecting an authorized bridge

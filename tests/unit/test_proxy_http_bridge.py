@@ -103,10 +103,22 @@ def test_http_bridge_reuse_honors_security_requirement_stored_on_session() -> No
     assert not http_bridge_helpers_module._http_bridge_session_meets_security_requirement(
         session, require_security_work_authorized=False
     )
+    assert not http_bridge_helpers_module._http_bridge_session_reusable_for_request(
+        session=session,
+        key=session.key,
+        incoming_turn_state=None,
+        previous_response_id=None,
+    )
 
     session.account.security_work_authorized = True
     assert http_bridge_helpers_module._http_bridge_session_meets_security_requirement(
         session, require_security_work_authorized=False
+    )
+    assert http_bridge_helpers_module._http_bridge_session_reusable_for_request(
+        session=session,
+        key=session.key,
+        incoming_turn_state=None,
+        previous_response_id=None,
     )
 
 

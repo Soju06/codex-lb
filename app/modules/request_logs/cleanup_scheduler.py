@@ -98,7 +98,8 @@ class RequestLogCleanupScheduler:
             return 0
         leader_election = _get_leader_election()
         _STATE.currently_responsible = await leader_election.try_acquire()
-        _STATE.last_leader_error = getattr(leader_election, "last_acquire_error", None)
+        leader_error = getattr(leader_election, "last_acquire_error", None)
+        _STATE.last_leader_error = leader_error if isinstance(leader_error, str) else None
         if _STATE.last_leader_error is not None:
             _STATE.last_attempt_at = utcnow()
             return 0

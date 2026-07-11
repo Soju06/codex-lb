@@ -38,6 +38,8 @@ the existing pre-visible forced-refresh and eligible-account failover behavior.
 - **THEN** the proxy keeps the anchored request owner-bound instead of stripping
   the anchor, excluding the owner, and replaying the file reference on another
   account
+- **AND** if the file owner cannot be reselected, the retry fails closed instead
+  of reconnecting the bridge on a replacement account
 
 #### Scenario: verified owner refresh failover releases the failed stream lease
 

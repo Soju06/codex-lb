@@ -91,6 +91,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_owner_instance,
     _http_bridge_owner_lookup_unavailable_error_envelope,
     _http_bridge_previous_response_alias_key,
+    _http_bridge_previous_response_owner_unavailable_error,
     _http_bridge_request_budget_seconds,
     _http_bridge_request_needs_unanchored_handoff,
     _http_bridge_session_account_active,
@@ -2100,6 +2101,7 @@ class _HTTPBridgeMixin(
         restart_reader: bool = False,
         require_security_work_authorized: bool = False,
         require_same_account: bool = False,
+        require_preferred_account: bool = False,
     ) -> None:
         old_account_id = session.account.id
         old_upstream = session.upstream
@@ -2122,11 +2124,16 @@ class _HTTPBridgeMixin(
         )
         settings = await _service_get_settings_cache().get()
         session.api_key = request_state.api_key
-        close_skips_account = session.last_upstream_close_code in _UPSTREAM_CLOSE_CODES_SKIP_SAME_ACCOUNT_RETRY
-        hard_close_account_bound = session.key.strength == "hard" and (close_skips_account or require_same_account)
-        skip_same_account = session.key.strength != "hard" and close_skips_account
         forced_refresh_account_id = request_state.force_refresh_account_id
         excluded_account_ids: set[str] = set(request_state.excluded_account_ids)
+        required_preferred_account_id = request_state.preferred_account_id if require_preferred_account else None
+        close_skips_account = session.last_upstream_close_code in _UPSTREAM_CLOSE_CODES_SKIP_SAME_ACCOUNT_RETRY
+        hard_close_account_bound = session.key.strength == "hard" and (close_skips_account or require_same_account)
+        skip_same_account = (
+            session.key.strength != "hard" and close_skips_account and required_preferred_account_id is None
+        )
+        if required_preferred_account_id is not None and required_preferred_account_id in excluded_account_ids:
+            raise _http_bridge_previous_response_owner_unavailable_error()
         _require_http_bridge_bound_account_not_excluded(
             hard_close_account_bound, session.account.id, excluded_account_ids
         )
@@ -2137,6 +2144,8 @@ class _HTTPBridgeMixin(
             preferred_candidate_id: str | None = None
         elif hard_close_account_bound and session.account.id not in excluded_account_ids:
             preferred_candidate_id = session.account.id
+        elif required_preferred_account_id is not None:
+            preferred_candidate_id = required_preferred_account_id
         elif forced_refresh_account_id is not None:
             preferred_candidate_id = forced_refresh_account_id
         elif request_state.preferred_account_id is not None:
@@ -2196,7 +2205,9 @@ class _HTTPBridgeMixin(
                     request_state.request_usage_budget
                 ),
                 fallback_on_preferred_account_unavailable=(
-                    not reuse_current_account_lease and not hard_close_account_bound
+                    not reuse_current_account_lease
+                    and not hard_close_account_bound
+                    and required_preferred_account_id is None
                 ),
             )
             account = selection.account
@@ -2205,6 +2216,7 @@ class _HTTPBridgeMixin(
                 if (
                     reuse_current_account_lease
                     and not hard_close_account_bound
+                    and required_preferred_account_id is None
                     and _remaining_budget_seconds(deadline) > 0
                 ):
                     preferred_candidate_id = None
@@ -2219,6 +2231,8 @@ class _HTTPBridgeMixin(
                     request_state=request_state,
                 ):
                     excluded_account_ids.update(request_state.excluded_account_ids)
+                    if required_preferred_account_id in excluded_account_ids:
+                        raise _http_bridge_previous_response_owner_unavailable_error()
                     if skip_same_account:
                         excluded_account_ids.add(session.account.id)
                     _require_http_bridge_bound_account_not_excluded(
@@ -2229,6 +2243,8 @@ class _HTTPBridgeMixin(
                         preferred_candidate_id = None
                     elif hard_close_account_bound and session.account.id not in excluded_account_ids:
                         preferred_candidate_id = session.account.id
+                    elif required_preferred_account_id is not None:
+                        preferred_candidate_id = required_preferred_account_id
                     elif forced_refresh_account_id is not None:
                         preferred_candidate_id = forced_refresh_account_id
                     elif request_state.preferred_account_id is not None:
@@ -2251,6 +2267,14 @@ class _HTTPBridgeMixin(
                         error_type="rate_limit_error" if status_code == 429 else "server_error",
                     ),
                 )
+            if required_preferred_account_id is not None and account.id != required_preferred_account_id:
+                if selection.lease is not None:
+                    await self._load_balancer.release_account_lease(selection.lease)
+                _record_same_account_takeover(
+                    preferred_account_id=required_preferred_account_id,
+                    selected_account_id=account.id,
+                )
+                raise _http_bridge_previous_response_owner_unavailable_error()
             selected_account_lease = (
                 session.account_lease
                 if reuse_current_account_lease and account.id == session.account.id

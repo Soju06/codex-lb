@@ -28029,7 +28029,11 @@ async def test_retry_http_bridge_precreated_request_keeps_file_backed_injected_a
     retried = await service._retry_http_bridge_precreated_request(session)
 
     assert retried is True
-    reconnect.assert_awaited_once_with(session, request_state=request_state)
+    reconnect.assert_awaited_once_with(
+        session,
+        request_state=request_state,
+        require_preferred_account=True,
+    )
     send_text.assert_awaited_once_with(original_text)
     assert request_state.request_text == original_text
     assert request_state.previous_response_id == "resp_anchor"
@@ -28038,6 +28042,121 @@ async def test_retry_http_bridge_precreated_request_keeps_file_backed_injected_a
     assert request_state.proxy_injected_previous_response_id is True
     assert request_state.fresh_upstream_request_is_retry_safe is True
     assert request_state.replay_count == 1
+
+
+@pytest.mark.asyncio
+async def test_retry_http_bridge_precreated_request_fails_closed_when_file_owner_unavailable(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    owner_account = _make_account("acc_bridge_file_owner_required")
+    replacement_account = _make_account("acc_bridge_file_owner_wrong_replacement")
+    original_input: list[JsonValue] = [
+        {"role": "user", "content": [{"type": "input_text", "text": "anchored file turn"}]}
+    ]
+    original_payload = {
+        "type": "response.create",
+        "model": "gpt-5.1",
+        "previous_response_id": "resp_file_anchor",
+        "input": original_input,
+    }
+    fresh_payload = {
+        "type": "response.create",
+        "model": "gpt-5.1",
+        "input": [
+            {
+                "role": "user",
+                "content": [{"type": "input_file", "file_id": "file_owner_required"}],
+            }
+        ],
+    }
+    original_text = json.dumps(original_payload, separators=(",", ":"))
+    fresh_text = json.dumps(fresh_payload, separators=(",", ":"))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_bridge_file_owner_required",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=10.0,
+        awaiting_response_created=True,
+        request_text=original_text,
+        previous_response_id="resp_file_anchor",
+        preferred_account_id=owner_account.id,
+        proxy_injected_previous_response_id=True,
+        fresh_upstream_request_text=fresh_text,
+        fresh_upstream_request_is_retry_safe=True,
+        input_item_count=1,
+        input_full_fingerprint=proxy_service._fingerprint_input_items(original_input),
+    )
+    owner_lease = proxy_service.AccountLease(
+        lease_id="lease_existing_file_owner_stream",
+        account_id=owner_account.id,
+        kind="stream",
+        acquired_at=10.0,
+    )
+    wrong_send_text = AsyncMock()
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "bridge-file-owner-key", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(key="bridge-file-owner-key"),
+        request_model="gpt-5.1",
+        account=owner_account,
+        upstream=AsyncMock(),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=0.0,
+        idle_ttl_seconds=30.0,
+        last_upstream_close_code=1011,
+        account_lease=owner_lease,
+    )
+    selection_calls: list[dict[str, object]] = []
+
+    async def select_account(_deadline: float, **kwargs: object) -> AccountSelection:
+        selection_calls.append(dict(kwargs))
+        if len(selection_calls) == 1:
+            assert kwargs["preferred_account_id"] == owner_account.id
+            assert kwargs["fallback_on_preferred_account_unavailable"] is False
+            assert kwargs["lease_kind"] is None
+            return AccountSelection(
+                account=None,
+                error_message="Previous response owner account is unavailable",
+                error_code="no_accounts",
+            )
+        return AccountSelection(account=replacement_account, error_message=None)
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 10.0)
+    monkeypatch.setattr(service, "_select_account_with_budget_for_stream", select_account)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=replacement_account))
+    monkeypatch.setattr(
+        service,
+        "_open_upstream_websocket_with_budget",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                response_header=lambda _name: None,
+                send_text=wrong_send_text,
+                send_bytes=AsyncMock(),
+            )
+        ),
+    )
+
+    retried = await service._retry_http_bridge_precreated_request(session)
+
+    assert retried is False
+    assert len(selection_calls) == 1
+    wrong_send_text.assert_not_awaited()
+    assert session.account is owner_account
+    assert session.account_lease is owner_lease
+    assert request_state.request_text == original_text
+    assert request_state.previous_response_id == "resp_file_anchor"
+    assert request_state.preferred_account_id == owner_account.id
+    assert request_state.excluded_account_ids == set()
+    assert request_state.error_code_override == "no_accounts"
 
 
 @pytest.mark.asyncio

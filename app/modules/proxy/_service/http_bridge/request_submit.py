@@ -1234,6 +1234,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 )
                 return False
             if request_state.previous_response_id is not None:
+                require_preferred_reconnect = False
                 switch_text = _prepare_websocket_request_state_for_account_switch(request_state)
                 if switch_text is None:
                     # The retained full body may be retry-safe for continuity
@@ -1248,12 +1249,14 @@ class _HTTPBridgeRequestSubmitMixin:
                         request_state.fresh_upstream_request_is_retry_safe = fresh_retry_safe
                     if request_text is None:
                         return False
+                    require_preferred_reconnect = request_state.preferred_account_id is not None
                 else:
                     request_text = _prepare_websocket_request_state_for_visible_output_replay(request_state)
                     if request_text is None:
                         return False
                     request_state.excluded_account_ids.add(session.account.id)
             else:
+                require_preferred_reconnect = False
                 request_text = _prepare_websocket_request_state_for_visible_output_replay(request_state)
                 if request_text is None:
                     return False
@@ -1270,7 +1273,14 @@ class _HTTPBridgeRequestSubmitMixin:
             model_class=_extract_model_class(session.request_model) if session.request_model else None,
         )
         try:
-            await self._reconnect_http_bridge_session(session, request_state=request_state)
+            if require_preferred_reconnect:
+                await self._reconnect_http_bridge_session(
+                    session,
+                    request_state=request_state,
+                    require_preferred_account=True,
+                )
+            else:
+                await self._reconnect_http_bridge_session(session, request_state=request_state)
             request_text = self._http_bridge_text_with_account_installation_id(session, request_state, request_text)
             await _send_http_bridge_request_text_with_archive_id(session, request_state, request_text)
             session.last_used_at = _service_time().monotonic()

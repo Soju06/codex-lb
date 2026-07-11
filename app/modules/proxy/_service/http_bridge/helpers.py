@@ -1564,6 +1564,17 @@ def _http_bridge_owner_lookup_unavailable_error_envelope() -> OpenAIErrorEnvelop
     )
 
 
+def _http_bridge_previous_response_owner_unavailable_error() -> ProxyResponseError:
+    return ProxyResponseError(
+        502,
+        openai_error(
+            "previous_response_owner_unavailable",
+            "Previous response owner account is unavailable; retry later.",
+            error_type="server_error",
+        ),
+    )
+
+
 def _http_bridge_should_attempt_local_previous_response_recovery(exc: ProxyResponseError) -> bool:
     payload = exc.payload
     if not isinstance(payload, dict):

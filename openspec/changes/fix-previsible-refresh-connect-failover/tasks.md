@@ -7,6 +7,8 @@
 - [x] 1.3 Include issue trace for PR #822.
 - [x] 1.4 Cover owner-bound bridge replay, stream lease release, and websocket
   response-create admission release edge cases raised in PR #1207 review.
+- [x] 1.5 Require file-backed HTTP bridge precreated retries to reconnect on the
+  pinned owner or fail closed.
 
 ## 2. Verification
 

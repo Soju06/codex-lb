@@ -17,11 +17,16 @@ carries no independent account identifier and is fetched per-account token, so
 paid plans (Plus -> Pro) is a legitimate upgrade, not a mismatch, so the guard
 wrongly blocks it and the stored plan never updates until a manual re-import.
 
+Issue #1215 exposes the same guard on a Free -> Plus upgrade. The payload is
+fetched with that account's token and reports a recognized paid plan, but the
+guard only trusts paid -> paid transitions, so Force probe discards the new
+plan until the operator signs in again.
+
 ## What Changes
 
-- Allow background usage refresh to persist a plan transition between two
-  recognized paid plans (e.g. Plus -> Pro) for a workspace-less account, instead
-  of rejecting it as an identity mismatch.
+- Allow background and forced usage refresh to persist a transition from Free
+  to a recognized paid plan (e.g. Free -> Plus), as well as transitions between
+  recognized paid plans, for a workspace-less account.
 - Keep refusing workspace-less payloads that introduce `free` or an unrecognized
   plan for an account that currently holds a different plan, since those remain
   the signature of a degraded or wrong-identity usage response.
@@ -31,7 +36,7 @@ wrongly blocks it and the stored plan never updates until a manual re-import.
 ## Impact
 
 - Affected capability: `usage-refresh-policy`.
-- Plus/Pro (and other paid-tier) upgrades and downgrades now reflect on the next
-  usage refresh without a manual re-import.
+- Free-to-paid and paid-tier transitions now reflect on the next usage refresh
+  or Force probe without a manual re-import.
 - No change for workspace-bound accounts or for payloads that would drop a plan
   to `free`/unknown without workspace identity; those still skip the mutation.

@@ -862,6 +862,25 @@ def _websocket_event_error_payload(
     return None
 
 
+def _websocket_event_incomplete_reason(
+    event_type: str | None,
+    payload: dict[str, JsonValue] | None,
+) -> str | None:
+    if event_type != "response.incomplete" or not isinstance(payload, dict):
+        return None
+    response = payload.get("response")
+    if not isinstance(response, dict):
+        return None
+    incomplete_details = response.get("incomplete_details")
+    if not isinstance(incomplete_details, dict):
+        return None
+    reason = incomplete_details.get("reason")
+    if not isinstance(reason, str):
+        return None
+    stripped = reason.strip()
+    return stripped or None
+
+
 def _maybe_rewrite_websocket_previous_response_not_found_event(
     *,
     request_state: _WebSocketRequestState,

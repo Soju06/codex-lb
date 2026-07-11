@@ -489,6 +489,7 @@ class ModelRegistry:
         self._ttl_seconds = ttl_seconds
         self._snapshot: ModelRegistrySnapshot | None = None
         self._bootstrap_models: dict[str, UpstreamModel] = {m.slug: m for m in _BOOTSTRAP_STATIC_MODELS}
+        self._metadata_models: dict[str, UpstreamModel] | None = None
         self._lock = anyio.Lock()
 
     def get_snapshot(self) -> ModelRegistrySnapshot | None:
@@ -504,6 +505,11 @@ class ModelRegistry:
                 models.update(snapshot.models)
                 return models
             return snapshot.models
+        return self._bootstrap_models
+
+    def get_models_for_metadata(self) -> dict[str, UpstreamModel]:
+        if self._metadata_models is not None:
+            return self._metadata_models
         return self._bootstrap_models
 
     def plan_types_for_model(self, slug: str) -> frozenset[str] | None:
@@ -840,6 +846,19 @@ class ModelRegistry:
                     active_account_plans or per_account_results
                 ).issubset(account_plans)
 
+                metadata_models = {
+                    slug: model
+                    for slug, model in (self._metadata_models or self._bootstrap_models).items()
+                    if slug in self._bootstrap_models
+                }
+                if per_account_results is not None:
+                    account_metadata_models: dict[str, UpstreamModel] = {}
+                    for _account_id, (_plan_type, account_models) in per_account_results.items():
+                        for model in account_models:
+                            if model.slug in self._bootstrap_models:
+                                account_metadata_models.setdefault(model.slug, model)
+                    metadata_models.update(account_metadata_models)
+                metadata_models.update(models)
                 self._snapshot = ModelRegistrySnapshot(
                     models=models,
                     model_plans=frozen_model_plans,
@@ -853,6 +872,7 @@ class ModelRegistry:
                     bootstrap_floor_active=not authoritative_account_catalogs,
                     suppressed_model_slugs=frozenset(suppressed_model_slugs),
                 )
+                self._metadata_models = metadata_models
             except Exception:
                 self._snapshot = previous
                 logger.warning("Model registry refresh failed; keeping cached snapshot", exc_info=True)

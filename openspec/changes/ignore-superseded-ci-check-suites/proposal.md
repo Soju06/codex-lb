@@ -17,6 +17,8 @@ requests the missing current-head Codex review.
   superseded runs of that workflow, while preserving non-Actions status
   evidence and checks from independent workflows.
 - Keep failures from the authoritative CI run blocking.
+- Treat a manually re-run older workflow `run_id` as newer evidence when its
+  current attempt started after a later-created run.
 - Add regression coverage for the cancelled matrix-placeholder shape observed
   on a real current-head pull request.
 

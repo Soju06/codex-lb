@@ -2003,7 +2003,7 @@ def test_http_bridge_request_text_replaces_client_installation_id() -> None:
             "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
             "client_metadata": {
                 "x-codex-installation-id": "client-installation",
-                "x-codex-turn-metadata": '{"turn_id":"payload-turn"}',
+                "x-codex-turn-metadata": '{"installation_id":"client-installation","turn_id":"payload-turn"}',
             },
         }
     )
@@ -2027,7 +2027,7 @@ def test_http_bridge_request_text_replaces_client_installation_id() -> None:
 
     assert json.loads(updated_text)["client_metadata"] == {
         "x-codex-installation-id": "account-installation",
-        "x-codex-turn-metadata": '{"turn_id":"payload-turn"}',
+        "x-codex-turn-metadata": '{"installation_id":"account-installation","turn_id":"payload-turn"}',
     }
     assert request_state.fresh_upstream_request_text is not None
     assert json.loads(request_state.fresh_upstream_request_text)["client_metadata"] == {

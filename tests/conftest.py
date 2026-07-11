@@ -118,8 +118,10 @@ def _reset_model_registry():
 
     registry = get_model_registry()
     registry._snapshot = None
+    registry._metadata_models = None
     yield
     registry._snapshot = None
+    registry._metadata_models = None
 
 
 @pytest.fixture(autouse=True)

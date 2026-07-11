@@ -135,6 +135,55 @@ async def test_plan_types_for_model_returns_plans():
     assert registry.plan_types_for_model("model-c") == frozenset({"pro"})
 
 
+@pytest.mark.asyncio
+async def test_metadata_retains_full_live_model_after_later_catalog_omits_it():
+    registry = ModelRegistry(ttl_seconds=60.0)
+    sol = replace(
+        _model("gpt-5.6-sol"),
+        base_instructions="full live instructions",
+        raw={"use_responses_lite": True},
+    )
+    terra_v1 = replace(_model("gpt-5.6-terra"), description="old terra")
+    terra_v2 = replace(_model("gpt-5.6-terra"), description="new terra")
+
+    await registry.update({"plus": [sol, terra_v1]})
+    await registry.update({"plus": [terra_v2]})
+
+    assert set(registry.get_models_with_fallback()) == {"gpt-5.6-terra"}
+    assert registry.plan_types_for_model("gpt-5.6-sol") == frozenset()
+    metadata = registry.get_models_for_metadata()
+    assert metadata["gpt-5.6-sol"].base_instructions == "full live instructions"
+    assert metadata["gpt-5.6-sol"].raw["use_responses_lite"] is True
+    assert metadata["gpt-5.6-terra"].description == "new terra"
+
+
+@pytest.mark.asyncio
+async def test_first_partial_refresh_keeps_bootstrap_metadata_hidden_from_availability():
+    registry = ModelRegistry(ttl_seconds=60.0)
+
+    await registry.update({"plus": [_model("gpt-5.6-terra")]})
+
+    assert set(registry.get_models_with_fallback()) == {"gpt-5.6-terra"}
+    assert "gpt-5.6-sol" in registry.get_models_for_metadata()
+    assert registry.plan_types_for_model("gpt-5.6-sol") == frozenset()
+
+
+@pytest.mark.asyncio
+async def test_metadata_does_not_retain_non_bundled_models():
+    registry = ModelRegistry(ttl_seconds=60.0)
+    workspace_model = replace(
+        _model("workspace-private"),
+        raw={"use_responses_lite": False},
+    )
+
+    await registry.update({"enterprise": [workspace_model]})
+    assert registry.get_models_for_metadata()["workspace-private"].raw["use_responses_lite"] is False
+
+    await registry.update({"enterprise": [_model("gpt-5.6-terra")]})
+
+    assert "workspace-private" not in registry.get_models_for_metadata()
+
+
 @pytest.mark.parametrize("model_slug", ["gpt-5.5", "gpt-5.3-codex-spark"])
 @pytest.mark.asyncio
 async def test_plan_types_for_bootstrap_model_uses_live_snapshot_after_refresh(model_slug: str):
@@ -453,6 +502,31 @@ async def test_partial_first_refresh_degrades_account_capabilities_to_unknown():
     assert "gpt-5.6-sol" in bootstrap_models
     assert registry.plan_types_for_model("gpt-5.6-sol") == EXPECTED_GPT56_MODEL_PLANS
     assert registry.prefers_websockets("gpt-5.6-sol") is True
+
+
+@pytest.mark.asyncio
+async def test_per_account_bundled_model_refreshes_metadata_without_availability():
+    live_sol = replace(
+        _model("gpt-5.6-sol"),
+        base_instructions="live per-account sol metadata",
+        raw={"use_responses_lite": False},
+    )
+    registry = ModelRegistry(ttl_seconds=60.0)
+
+    await registry.update(
+        {"pro": []},
+        per_account_results={
+            "account-sol": ("pro", [live_sol]),
+            "account-without-sol": ("pro", [_model("gpt-5.6-terra")]),
+        },
+    )
+
+    snapshot = registry.get_snapshot()
+    assert snapshot is not None
+    assert "gpt-5.6-sol" not in snapshot.models
+    metadata_sol = registry.get_models_for_metadata()["gpt-5.6-sol"]
+    assert metadata_sol.base_instructions == "live per-account sol metadata"
+    assert metadata_sol.raw["use_responses_lite"] is False
 
 
 @pytest.mark.asyncio

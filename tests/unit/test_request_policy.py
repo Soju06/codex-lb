@@ -167,7 +167,7 @@ def test_enforced_non_lite_model_rejects_responses_lite_payload() -> None:
     registry = cast(
         ModelRegistry,
         SimpleNamespace(
-            get_models_with_fallback=lambda: {"gpt-5.5": SimpleNamespace(raw={"use_responses_lite": False})}
+            get_models_for_metadata=lambda: {"gpt-5.5": SimpleNamespace(raw={"use_responses_lite": False})}
         ),
     )
 
@@ -203,7 +203,7 @@ def test_alias_equivalent_enforced_non_lite_model_rejects_responses_lite_payload
     registry = cast(
         ModelRegistry,
         SimpleNamespace(
-            get_models_with_fallback=lambda: {"gpt-5.5": SimpleNamespace(raw={"use_responses_lite": False})}
+            get_models_for_metadata=lambda: {"gpt-5.5": SimpleNamespace(raw={"use_responses_lite": False})}
         ),
     )
 

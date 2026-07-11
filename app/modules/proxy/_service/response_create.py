@@ -19,6 +19,7 @@ from app.core.clients.proxy import (
     ProxyResponseError,
     _inline_content_images,
     _normalize_responses_lite_websocket_client_metadata,
+    apply_codex_installation_metadata,
 )
 from app.core.config.settings import DEFAULT_HOME_DIR, get_settings
 from app.core.errors import OpenAIErrorEnvelope, openai_error
@@ -223,12 +224,7 @@ def _response_create_text_with_account_installation_id(
         return text_data
     upstream_payload = cast(dict[str, JsonValue], raw_payload)
 
-    raw_metadata = upstream_payload.get("client_metadata")
-    client_metadata: dict[str, JsonValue] = {}
-    if is_json_mapping(raw_metadata):
-        client_metadata.update({key: value for key, value in raw_metadata.items() if isinstance(key, str)})
-    client_metadata["x-codex-installation-id"] = installation_id
-    upstream_payload["client_metadata"] = client_metadata
+    apply_codex_installation_metadata(upstream_payload, installation_id)
     return json.dumps(upstream_payload, ensure_ascii=True, separators=(",", ":"))
 
 
@@ -812,8 +808,10 @@ def _response_create_client_metadata(
         if isinstance(metadata_value, str) and metadata_value.strip():
             client_metadata.setdefault(header_name, metadata_value)
 
-    if codex_installation_id:
-        client_metadata[CODEX_INSTALLATION_ID_HEADER] = codex_installation_id
+    metadata_container: dict[str, JsonValue] = {"client_metadata": client_metadata}
+    apply_codex_installation_metadata(metadata_container, codex_installation_id)
+    normalized_metadata = metadata_container.get("client_metadata")
+    client_metadata = dict(normalized_metadata) if is_json_mapping(normalized_metadata) else {}
     client_metadata = _normalize_responses_lite_websocket_client_metadata(
         payload,
         client_metadata,

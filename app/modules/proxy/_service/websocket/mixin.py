@@ -1182,9 +1182,11 @@ class _WebSocketMixin:
                         )
                     continue
                 except Exception:
+                    replay_refusal_reasons: list[str] = []
                     replay_candidate = await _pop_replayable_precreated_websocket_request_state(
                         pending_requests,
                         pending_lock=pending_lock,
+                        replay_refusal_reasons=replay_refusal_reasons,
                     )
                     if replay_candidate is not None:
                         _facade().logger.info(
@@ -1210,6 +1212,7 @@ class _WebSocketMixin:
                         await release_current_account_lease()
                         account = None
                         continue
+                    sequenced_downstream_replay_refused = "sequenced_downstream_frame" in replay_refusal_reasons
                     await proxy._fail_pending_websocket_requests(
                         account=account,
                         account_id_value=account.id if account else None,
@@ -1222,7 +1225,17 @@ class _WebSocketMixin:
                         client_send_lock=client_send_lock,
                         response_create_gate=response_create_gate,
                         downstream_activity=downstream_activity,
+                        suppress_sequenced_downstream_errors=sequenced_downstream_replay_refused,
                     )
+                    if sequenced_downstream_replay_refused:
+                        downstream_activity.mark_disconnected()
+                        try:
+                            await websocket.close(code=1011, reason="upstream replay requires a fresh request")
+                        except Exception:
+                            _facade().logger.debug(
+                                "Failed to close downstream websocket after sequenced send failure",
+                                exc_info=True,
+                            )
                     if upstream_reader is not None:
                         await _facade()._await_cancelled_task(upstream_reader, label="proxy websocket upstream reader")
                         upstream_reader = None

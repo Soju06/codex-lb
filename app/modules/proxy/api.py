@@ -2646,13 +2646,14 @@ async def _build_codex_models_response(api_key: ApiKeyData | None) -> Response:
 
     registry = get_model_registry()
     models = registry.get_models_with_fallback()
+    metadata_models = registry.get_models_for_metadata()
     source_models = [
         model
         for model in await _list_enabled_source_catalog_models(api_key, require_responses=True)
         if model.raw.get("supports_streaming") is True
     ]
 
-    if not models and not source_models:
+    if not models and not metadata_models and not source_models:
         await _release_reservation(reservation)
         return JSONResponse(content=CodexModelsResponse(models=[], data=[]).model_dump(mode="json"))
 
@@ -2679,6 +2680,13 @@ async def _build_codex_models_response(api_key: ApiKeyData | None) -> Response:
         seen_slugs.add(slug)
         if model.supported_in_api and entry.visibility == "list":
             data.append(_to_model_list_item(slug, model, created=_model_list_created_at(model)))
+    for slug, model in metadata_models.items():
+        if slug in models or not _is_codex_backend_catalog_model(model):
+            continue
+        if visibility_allowed_models is None and allowed_models is not None and slug not in allowed_models:
+            continue
+        entries.append(_to_codex_model_entry(model, visibility="hide"))
+        seen_slugs.add(slug)
     for model in source_models:
         if model.slug in seen_slugs:
             continue

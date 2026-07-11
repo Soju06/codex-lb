@@ -3266,6 +3266,8 @@ class _WebSocketMixin:
                         ]
                         upstream_control.replay_request_state = request_state
                         return downstream_text
+                request_state.require_security_work_authorized = True
+                upstream_control.reconnect_requested = True
 
         await proxy._finalize_websocket_request_state(
             request_state,

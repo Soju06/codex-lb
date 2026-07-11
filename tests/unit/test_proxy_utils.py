@@ -11624,6 +11624,61 @@ async def test_websocket_replays_created_only_previous_response_security_work_er
 
 
 @pytest.mark.asyncio
+async def test_websocket_retires_nonreplayable_security_work_connection(monkeypatch):
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_ws_security_visible")
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_security_visible",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        request_text='{"type":"response.create","input":"security review"}',
+        response_id="resp_security_visible",
+        awaiting_response_created=False,
+        response_event_count=2,
+        downstream_visible=True,
+        security_lineage_id="root-security-visible",
+    )
+    pending_requests = deque([request_state])
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    payload = {
+        "type": "response.failed",
+        "response": {
+            "id": "resp_security_visible",
+            "status": "failed",
+            "error": {
+                "code": "invalid_request_error",
+                "type": "invalid_request_error",
+                "message": (
+                    "This content can't be shown. We take extra caution with cybersecurity requests. "
+                    "Trusted Access: https://openai.com/form/enterprise-trusted-access-for-cyber/"
+                ),
+            },
+        },
+    }
+
+    downstream_text = await service._process_upstream_websocket_text(
+        json.dumps(payload, separators=(",", ":")),
+        account=account,
+        account_id_value=account.id,
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=upstream_control,
+        response_create_gate=asyncio.Semaphore(1),
+    )
+
+    assert '"type":"response.failed"' in downstream_text
+    assert upstream_control.reconnect_requested is True
+    assert upstream_control.suppress_downstream_event is False
+    assert upstream_control.replay_request_state is None
+    assert request_state.require_security_work_authorized is True
+    assert list(pending_requests) == []
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_reports_missing_security_work_pool_before_original_warning(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))

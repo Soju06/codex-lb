@@ -55,3 +55,10 @@ The classifier MUST recognize both the legacy cybersecurity-risk message and the
 - **WHEN** a downstream websocket request is eligible for security-work replay
 - **THEN** codex-lb releases the request's response-create gate before scheduling the replay
 - **AND** the replay can acquire the gate instead of blocking behind the failed first attempt
+
+#### Scenario: Non-replayable WebSocket denial retires the ordinary connection
+
+- **WHEN** a direct WebSocket request receives a security-work authorization denial after replay is no longer safe
+- **THEN** codex-lb forwards the terminal denial for that request
+- **AND** codex-lb MUST retire the ordinary upstream connection before accepting another turn for the classified lineage
+- **AND** the next turn MUST pass through security-work-authorized account selection

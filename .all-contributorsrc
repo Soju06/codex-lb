@@ -957,6 +957,24 @@
         "code",
         "test"
       ]
+    },
+    {
+      "login": "leventov",
+      "name": "Roman Leventov",
+      "avatar_url": "https://avatars.githubusercontent.com/u/609240?v=4",
+      "profile": "https://github.com/leventov",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "ATofighi",
+      "name": "AliReza Tofighi",
+      "avatar_url": "https://avatars.githubusercontent.com/u/3256261?v=4",
+      "profile": "https://t.me/Tofighi_Times",
+      "contributions": [
+        "doc"
+      ]
     }
   ],
   "contributorsPerLine": 7,

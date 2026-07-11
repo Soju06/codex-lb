@@ -120,6 +120,7 @@ def _dashboard_settings_response(settings) -> DashboardSettingsResponse:
     return DashboardSettingsResponse(
         sticky_threads_enabled=settings.sticky_threads_enabled,
         upstream_stream_transport=settings.upstream_stream_transport,
+        prohibit_fast_mode=settings.prohibit_fast_mode,
         http_downstream_transport_policy=settings.http_downstream_transport_policy,
         upstream_proxy_routing_enabled=settings.upstream_proxy_routing_enabled,
         upstream_proxy_default_pool_id=settings.upstream_proxy_default_pool_id,
@@ -569,6 +570,9 @@ async def update_settings(
                     else current.sticky_threads_enabled
                 ),
                 upstream_stream_transport=payload.upstream_stream_transport or current.upstream_stream_transport,
+                prohibit_fast_mode=(
+                    payload.prohibit_fast_mode if payload.prohibit_fast_mode is not None else current.prohibit_fast_mode
+                ),
                 http_downstream_transport_policy=(
                     payload.http_downstream_transport_policy or current.http_downstream_transport_policy
                 ),
@@ -707,6 +711,7 @@ async def update_settings(
         for field_name in (
             "sticky_threads_enabled",
             "upstream_stream_transport",
+            "prohibit_fast_mode",
             "http_downstream_transport_policy",
             "upstream_proxy_routing_enabled",
             "upstream_proxy_default_pool_id",

@@ -46,7 +46,7 @@ from app.core.openai.requests import (
     ResponsesRequest,
 )
 from app.core.types import JsonValue
-from app.core.utils.request_id import ensure_request_id
+from app.core.utils.request_id import ensure_request_id, ensure_request_scope_id
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
 from app.db.models import (
     StickySessionKind,
@@ -71,6 +71,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_payload_looks_like_full_resend,
     _http_bridge_payload_without_previous_response_id,
     _http_bridge_request_budget_seconds,
+    _http_bridge_request_needs_unanchored_handoff,
     _http_bridge_request_stage,
     _http_bridge_runtime_config,
     _http_bridge_should_attempt_local_bootstrap_rebind,
@@ -78,9 +79,13 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_should_attempt_soft_affinity_reroute,
     _http_bridge_should_rollover_after_context_overflow,
     _log_http_bridge_event,
+    _make_http_bridge_session_header_fallback_key,
     _make_http_bridge_session_key,
     _record_bridge_reattach,
     _record_continuity_fail_closed,
+    _release_http_bridge_unanchored_handoff,
+    _release_http_bridge_unanchored_handoffs_for_request,
+    _reserve_http_bridge_unanchored_handoff,
     _trim_http_bridge_previous_response_input_items,
 )
 from app.modules.proxy._service.http_bridge.service_stubs import (
@@ -183,6 +188,7 @@ from app.modules.proxy.affinity import (
     _sticky_key_from_turn_state_header,
 )
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
+from app.modules.proxy.durable_bridge_coordinator import DurableBridgeLookup
 from app.modules.proxy.helpers import (
     _normalize_error_code,
 )
@@ -322,7 +328,121 @@ def _http_bridge_interrupted_tool_outputs_input(
     )
 
 
+def _legacy_forward_upgrade_required_error() -> ProxyResponseError:
+    return ProxyResponseError(
+        409,
+        openai_error(
+            "bridge_forward_upgrade_required",
+            "Legacy owner forwarding requires a registered turn-state continuity anchor",
+            error_type="server_error",
+        ),
+    )
+
+
+async def _legacy_forward_anchor_lookup(
+    *,
+    durable_bridge: Any,
+    bridge_session_key: _HTTPBridgeSessionKey,
+    turn_state: str | None,
+    api_key: ApiKeyData | None,
+    previous_response_id: str | None,
+    forwarded_request: bool,
+    forwarded_legacy_signature: bool,
+) -> DurableBridgeLookup | None:
+    if not (
+        forwarded_request
+        and forwarded_legacy_signature
+        and bridge_session_key.affinity_kind == "session_header"
+        and previous_response_id is None
+    ):
+        return None
+
+    return await _registered_turn_state_anchor_lookup(
+        durable_bridge=durable_bridge,
+        bridge_session_key=bridge_session_key,
+        turn_state=turn_state,
+        api_key=api_key,
+    )
+
+
+async def _current_origin_legacy_owner_anchor_lookup(
+    *,
+    durable_bridge: Any,
+    bridge_session_key: _HTTPBridgeSessionKey,
+    turn_state: str | None,
+    api_key: ApiKeyData | None,
+    previous_response_id: str | None,
+    forwarded_request: bool,
+) -> DurableBridgeLookup | None:
+    """Prove a current-origin turn state before using legacy owner forwarding."""
+
+    if (
+        forwarded_request
+        or bridge_session_key.affinity_kind != "session_header"
+        or turn_state is None
+        or previous_response_id is not None
+    ):
+        return None
+    return await _registered_turn_state_anchor_lookup(
+        durable_bridge=durable_bridge,
+        bridge_session_key=bridge_session_key,
+        turn_state=turn_state,
+        api_key=api_key,
+    )
+
+
+async def _registered_turn_state_anchor_lookup(
+    *,
+    durable_bridge: Any,
+    bridge_session_key: _HTTPBridgeSessionKey,
+    turn_state: str | None,
+    api_key: ApiKeyData | None,
+) -> DurableBridgeLookup:
+    if turn_state is None:
+        raise _legacy_forward_upgrade_required_error()
+    try:
+        lookup = await durable_bridge.lookup_turn_state_target(
+            turn_state=turn_state,
+            api_key_id=api_key.id if api_key is not None else None,
+        )
+    except Exception as exc:
+        logger.warning("Legacy owner-forward turn-state proof lookup failed", exc_info=True)
+        raise _legacy_forward_upgrade_required_error() from exc
+    if (
+        lookup is None
+        or lookup.canonical_kind != bridge_session_key.affinity_kind
+        or lookup.canonical_key != bridge_session_key.affinity_key
+    ):
+        raise _legacy_forward_upgrade_required_error()
+    return lookup
+
+
 class _HTTPBridgeStreamingMixin:
+    async def validate_http_bridge_legacy_forward_anchor(
+        self: Any,
+        *,
+        original_affinity_kind: str | None,
+        original_affinity_key: str | None,
+        downstream_turn_state: str | None,
+        previous_response_id: str | None,
+        api_key: ApiKeyData | None,
+    ) -> DurableBridgeLookup | None:
+        """Prove a legacy forwarded anchor before any compact or fallback branch."""
+
+        return await _legacy_forward_anchor_lookup(
+            durable_bridge=self._durable_bridge,
+            bridge_session_key=_HTTPBridgeSessionKey(
+                original_affinity_kind or "",
+                original_affinity_key or "",
+                api_key.id if api_key is not None else None,
+            ),
+            turn_state=downstream_turn_state,
+            api_key=api_key,
+            previous_response_id=previous_response_id,
+            forwarded_request=True,
+            forwarded_legacy_signature=True,
+        )
+
     def stream_http_responses(
         self: Any,
         payload: ResponsesRequest,
@@ -336,6 +456,8 @@ class _HTTPBridgeStreamingMixin:
         suppress_text_done_events: bool = False,
         downstream_turn_state: str | None = None,
         forwarded_request: bool = False,
+        forwarded_original_request_unanchored: bool = False,
+        forwarded_legacy_signature: bool = False,
         forwarded_affinity_kind: str | None = None,
         forwarded_affinity_key: str | None = None,
         client_ip: str | None = None,
@@ -355,6 +477,8 @@ class _HTTPBridgeStreamingMixin:
             suppress_text_done_events=suppress_text_done_events,
             downstream_turn_state=downstream_turn_state,
             forwarded_request=forwarded_request,
+            forwarded_original_request_unanchored=forwarded_original_request_unanchored,
+            forwarded_legacy_signature=forwarded_legacy_signature,
             proxy_api_authorization=proxy_api_authorization,
             forwarded_affinity_kind=forwarded_affinity_kind,
             forwarded_affinity_key=forwarded_affinity_key,
@@ -375,6 +499,8 @@ class _HTTPBridgeStreamingMixin:
         suppress_text_done_events: bool,
         downstream_turn_state: str | None = None,
         forwarded_request: bool = False,
+        forwarded_original_request_unanchored: bool = False,
+        forwarded_legacy_signature: bool = False,
         proxy_api_authorization: str | None = None,
         forwarded_affinity_kind: str | None = None,
         forwarded_affinity_key: str | None = None,
@@ -430,30 +556,40 @@ class _HTTPBridgeStreamingMixin:
                 yield line
             return
 
-        async for line in self._stream_via_http_bridge(
-            payload,
-            headers,
-            codex_session_affinity=codex_session_affinity,
-            propagate_http_errors=propagate_http_errors,
-            openai_cache_affinity=openai_cache_affinity,
-            api_key=api_key,
-            api_key_reservation=api_key_reservation,
-            suppress_text_done_events=suppress_text_done_events,
-            idle_ttl_seconds=runtime_config.idle_ttl_seconds,
-            codex_idle_ttl_seconds=runtime_config.codex_idle_ttl_seconds,
-            max_sessions=runtime_config.max_sessions,
-            queue_limit=runtime_config.queue_limit,
-            prompt_cache_idle_ttl_seconds=runtime_config.prompt_cache_idle_ttl_seconds,
-            downstream_turn_state=downstream_turn_state,
-            forwarded_request=forwarded_request,
-            proxy_api_authorization=proxy_api_authorization,
-            forwarded_affinity_kind=forwarded_affinity_kind,
-            forwarded_affinity_key=forwarded_affinity_key,
-            rewritten_file_account_id=rewritten_file_account_id,
-            client_ip=client_ip,
-            enforce_openai_sdk_contract=enforce_openai_sdk_contract,
-        ):
-            yield line
+        request_scope_id = ensure_request_scope_id()
+        try:
+            async for line in self._stream_via_http_bridge(
+                payload,
+                headers,
+                codex_session_affinity=codex_session_affinity,
+                propagate_http_errors=propagate_http_errors,
+                openai_cache_affinity=openai_cache_affinity,
+                api_key=api_key,
+                api_key_reservation=api_key_reservation,
+                suppress_text_done_events=suppress_text_done_events,
+                idle_ttl_seconds=runtime_config.idle_ttl_seconds,
+                codex_idle_ttl_seconds=runtime_config.codex_idle_ttl_seconds,
+                max_sessions=runtime_config.max_sessions,
+                queue_limit=runtime_config.queue_limit,
+                prompt_cache_idle_ttl_seconds=runtime_config.prompt_cache_idle_ttl_seconds,
+                downstream_turn_state=downstream_turn_state,
+                forwarded_request=forwarded_request,
+                forwarded_original_request_unanchored=forwarded_original_request_unanchored,
+                forwarded_legacy_signature=forwarded_legacy_signature,
+                proxy_api_authorization=proxy_api_authorization,
+                forwarded_affinity_kind=forwarded_affinity_kind,
+                forwarded_affinity_key=forwarded_affinity_key,
+                rewritten_file_account_id=rewritten_file_account_id,
+                client_ip=client_ip,
+                enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+            ):
+                yield line
+        finally:
+            with anyio.CancelScope(shield=True):
+                await _release_http_bridge_unanchored_handoffs_for_request(
+                    self,
+                    request_scope_id=request_scope_id,
+                )
 
     async def _stream_via_http_bridge(
         self: Any,
@@ -473,6 +609,8 @@ class _HTTPBridgeStreamingMixin:
         prompt_cache_idle_ttl_seconds: float | None = None,
         downstream_turn_state: str | None = None,
         forwarded_request: bool = False,
+        forwarded_original_request_unanchored: bool = False,
+        forwarded_legacy_signature: bool = False,
         proxy_api_authorization: str | None = None,
         forwarded_affinity_kind: str | None = None,
         forwarded_affinity_key: str | None = None,
@@ -522,7 +660,8 @@ class _HTTPBridgeStreamingMixin:
 
         incoming_turn_state_header = _sticky_key_from_turn_state_header(headers) if not forwarded_request else None
         incoming_session_header = _sticky_key_from_session_header(headers) if not forwarded_request else None
-        had_prompt_cache_key = _prompt_cache_key_from_request_model(payload) is not None
+        explicit_prompt_cache_key = _prompt_cache_key_from_request_model(payload)
+        had_prompt_cache_key = explicit_prompt_cache_key is not None
         affinity = _sticky_key_for_responses_request(
             payload,
             headers,
@@ -554,22 +693,60 @@ class _HTTPBridgeStreamingMixin:
             affinity=affinity,
             api_key=api_key,
             request_id=request_id,
+            explicit_prompt_cache_key=explicit_prompt_cache_key,
             allow_forwarded_affinity_headers=forwarded_request,
             forwarded_affinity_kind=forwarded_affinity_kind,
             forwarded_affinity_key=forwarded_affinity_key,
         )
-        try:
-            durable_lookup = await self._durable_bridge.lookup_request_targets(
-                session_key_kind=bridge_session_key.affinity_kind,
-                session_key_value=bridge_session_key.affinity_key,
-                api_key_id=bridge_session_key.api_key_id,
-                turn_state=incoming_turn_state_header,
-                session_header=incoming_session_header,
-                previous_response_id=payload.previous_response_id,
+        session_header_fallback_key = (
+            _make_http_bridge_session_header_fallback_key(
+                headers=headers,
+                api_key=api_key,
+                explicit_prompt_cache_key=explicit_prompt_cache_key,
             )
-        except Exception:
-            logger.warning("Durable bridge lookup failed; falling back to non-durable request handling", exc_info=True)
-            durable_lookup = None
+            if not forwarded_request
+            else None
+        )
+        legacy_anchor_lookup = await _legacy_forward_anchor_lookup(
+            durable_bridge=self._durable_bridge,
+            bridge_session_key=bridge_session_key,
+            turn_state=_sticky_key_from_turn_state_header(headers),
+            api_key=api_key,
+            previous_response_id=payload.previous_response_id,
+            forwarded_request=forwarded_request,
+            forwarded_legacy_signature=forwarded_legacy_signature,
+        )
+        if legacy_anchor_lookup is not None:
+            incoming_turn_state_header = _sticky_key_from_turn_state_header(headers)
+        original_request_unanchored = _http_bridge_request_needs_unanchored_handoff(
+            bridge_session_key,
+            _sticky_key_from_turn_state_header(headers),
+            payload.previous_response_id,
+            forwarded_request,
+            forwarded_original_request_unanchored,
+        )
+        if legacy_anchor_lookup is not None:
+            durable_lookup = legacy_anchor_lookup
+        else:
+            try:
+                durable_lookup = await self._durable_bridge.lookup_request_targets(
+                    session_key_kind=bridge_session_key.affinity_kind,
+                    session_key_value=bridge_session_key.affinity_key,
+                    api_key_id=bridge_session_key.api_key_id,
+                    turn_state=incoming_turn_state_header,
+                    session_header=(
+                        session_header_fallback_key.affinity_key
+                        if explicit_prompt_cache_key is not None and session_header_fallback_key is not None
+                        else incoming_session_header
+                    ),
+                    previous_response_id=payload.previous_response_id,
+                )
+            except Exception:
+                logger.warning(
+                    "Durable bridge lookup failed; falling back to non-durable request handling",
+                    exc_info=True,
+                )
+                durable_lookup = None
         effective_payload = payload
         untrimmed_effective_payload = payload
         proxy_injected_previous_response_id = False
@@ -755,6 +932,7 @@ class _HTTPBridgeStreamingMixin:
                     gateway_safe_mode=runtime_config.gateway_safe_mode,
                     allow_forward_to_owner=True,
                     forwarded_request=forwarded_request,
+                    forwarded_original_request_unanchored=original_request_unanchored,
                     forwarded_affinity_kind=forwarded_affinity_kind,
                     forwarded_affinity_key=forwarded_affinity_key,
                     durable_lookup=durable_lookup,
@@ -763,6 +941,7 @@ class _HTTPBridgeStreamingMixin:
                     fallback_on_preferred_account_unavailable=not file_required_preferred_account,
                     request_usage_budget=request_state.request_usage_budget,
                     request_deadline=request_deadline,
+                    session_header_fallback_key=session_header_fallback_key,
                 )
             except ProxyResponseError as exc:
                 if not (
@@ -834,6 +1013,14 @@ class _HTTPBridgeStreamingMixin:
                 continue
             break
         if isinstance(session_or_forward, _HTTPBridgeOwnerForward):
+            await _current_origin_legacy_owner_anchor_lookup(
+                durable_bridge=self._durable_bridge,
+                bridge_session_key=session_or_forward.key,
+                turn_state=incoming_turn_state_header,
+                api_key=api_key,
+                previous_response_id=effective_payload.previous_response_id,
+                forwarded_request=forwarded_request,
+            )
             forwarded_any = False
             try:
                 async for line in self._forward_http_bridge_request_to_owner(
@@ -918,9 +1105,12 @@ class _HTTPBridgeStreamingMixin:
                             allow_previous_response_recovery_rebind=should_attempt_previous_response_recovery,
                             allow_bootstrap_owner_rebind=should_attempt_bootstrap_rebind,
                             durable_lookup=durable_lookup,
-                            request_stage="reattach",
+                            request_stage=(
+                                "reattach" if should_attempt_previous_response_recovery else "bootstrap_rebind"
+                            ),
                             preferred_account_id=request_state.preferred_account_id,
                             request_usage_budget=request_state.request_usage_budget,
+                            session_header_fallback_key=session_header_fallback_key,
                             request_deadline=request_deadline,
                         )
                     except ProxyResponseError as capacity_exc:
@@ -975,6 +1165,12 @@ class _HTTPBridgeStreamingMixin:
                 )
                 if recovery_injected_input is not None:
                     recovery_payload = recovery_payload.model_copy(update={"input": recovery_injected_input})
+                owner_recovery_scope_id = ensure_request_scope_id() if original_request_unanchored else None
+                if owner_recovery_scope_id is not None:
+                    _reserve_http_bridge_unanchored_handoff(
+                        session,
+                        request_scope_id=owner_recovery_scope_id,
+                    )
                 retry_request_state: _WebSocketRequestState | None = None
                 try:
                     retry_api_key_reservation = api_key_reservation
@@ -1002,66 +1198,26 @@ class _HTTPBridgeStreamingMixin:
                     retry_request_state.request_stage = "reattach"
                     retry_request_state.preferred_account_id = request_state.preferred_account_id
 
-                    while True:
-                        try:
-                            await self._submit_http_bridge_request(
-                                session,
-                                request_state=retry_request_state,
-                                text_data=retry_text_data,
-                                queue_limit=queue_limit,
-                            )
-                        except ProxyResponseError as capacity_exc:
-                            wait_plan = _http_bridge_capacity_wait_plan(
-                                capacity_exc,
-                                request_deadline=request_deadline,
-                            )
-                            if wait_plan is None:
-                                raise
-                            bounded_wait_seconds, account_capacity_wait_seconds, message = wait_plan
-                            logger.info(
-                                "Waiting for account capacity before retrying HTTP bridge owner-forward recovery "
-                                "submit request_id=%s model=%s account_id=%s sleep_seconds=%.1f "
-                                "recovery_hint_seconds=%.1f error=%s",
-                                retry_request_state.request_id,
-                                retry_request_state.model,
-                                session.account.id,
-                                bounded_wait_seconds,
-                                account_capacity_wait_seconds,
-                                message,
-                            )
-                            async for line in _iter_account_capacity_wait_sse(
-                                request_id=retry_request_state.request_id,
-                                reason=message,
-                                sleep_seconds=bounded_wait_seconds,
-                                emit_keepalives=not propagate_http_errors,
-                            ):
-                                yield line
-                            if _service_time().monotonic() >= request_deadline:
-                                raise
-                            continue
-                        break
-                    _signal_propagated_capacity_startup_ready()
-                    if downstream_turn_state is not None:
-                        await self._register_http_bridge_turn_state(session, downstream_turn_state)
-                    event_queue = retry_request_state.event_queue
-                    assert event_queue is not None
-                    while True:
-                        event_block = await event_queue.get()
-                        if event_block is None:
-                            break
-                        if retry_request_state.latency_first_token_ms is None:
-                            block_payload = parse_sse_data_json(event_block)
-                            block_event_type = _event_type_from_payload(None, block_payload)
-                            if block_event_type in _TEXT_DELTA_EVENT_TYPES:
-                                retry_request_state.latency_first_token_ms = int(
-                                    (_service_time().monotonic() - retry_request_state.started_at) * 1000
-                                )
+                    async for event_block in self._stream_http_bridge_session_events(
+                        session,
+                        request_state=retry_request_state,
+                        text_data=retry_text_data,
+                        queue_limit=queue_limit,
+                        propagate_http_errors=propagate_http_errors,
+                        downstream_turn_state=downstream_turn_state,
+                        request_deadline=request_deadline,
+                    ):
                         yield event_block
                 except BaseException:
                     if retry_reservation_reacquired and retry_api_key_reservation is not None:
                         await self._release_websocket_reservation(retry_api_key_reservation)
                     raise
                 finally:
+                    if owner_recovery_scope_id is not None:
+                        _release_http_bridge_unanchored_handoff(
+                            session,
+                            request_scope_id=owner_recovery_scope_id,
+                        )
                     if retry_request_state is not None:
                         with anyio.CancelScope(shield=True):
                             await self._detach_http_bridge_request(session, request_state=retry_request_state)
@@ -1233,6 +1389,13 @@ class _HTTPBridgeStreamingMixin:
                 request_state.fresh_upstream_request_is_retry_safe = (
                     True if store_context_trim_applied else previous_request_state.fresh_upstream_request_is_retry_safe
                 )
+        initial_handoff_session = session
+        initial_handoff_scope_id = ensure_request_scope_id() if original_request_unanchored else None
+        if initial_handoff_scope_id is not None:
+            _reserve_http_bridge_unanchored_handoff(
+                initial_handoff_session,
+                request_scope_id=initial_handoff_scope_id,
+            )
         session_events: AsyncGenerator[str, None] = self._stream_http_bridge_session_events(
             session,
             request_state=request_state,
@@ -1489,6 +1652,7 @@ class _HTTPBridgeStreamingMixin:
                         allow_forward_to_owner=False,
                         forwarded_request=False,
                         allow_previous_response_recovery_rebind=allow_previous_response_recovery_rebind,
+                        session_header_fallback_key=session_header_fallback_key,
                         durable_lookup=durable_lookup,
                         request_stage=retry_request_stage,
                         preferred_account_id=retry_preferred_account_id,
@@ -1526,6 +1690,12 @@ class _HTTPBridgeStreamingMixin:
                 break
             _record_bridge_reattach(path=recovery_path, outcome="success")
 
+            local_recovery_scope_id = ensure_request_scope_id() if original_request_unanchored else None
+            if local_recovery_scope_id is not None:
+                _reserve_http_bridge_unanchored_handoff(
+                    session,
+                    request_scope_id=local_recovery_scope_id,
+                )
             try:
                 retry_api_key_reservation = api_key_reservation
                 retry_reservation_reacquired = False
@@ -1572,7 +1742,18 @@ class _HTTPBridgeStreamingMixin:
                 if retry_reservation_reacquired and retry_api_key_reservation is not None:
                     await self._release_websocket_reservation(retry_api_key_reservation)
                 raise
+            finally:
+                if local_recovery_scope_id is not None:
+                    _release_http_bridge_unanchored_handoff(
+                        session,
+                        request_scope_id=local_recovery_scope_id,
+                    )
         finally:
+            if initial_handoff_scope_id is not None:
+                _release_http_bridge_unanchored_handoff(
+                    initial_handoff_session,
+                    request_scope_id=initial_handoff_scope_id,
+                )
             try:
                 await session_events.aclose()
             except Exception:

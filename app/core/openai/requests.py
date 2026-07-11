@@ -699,7 +699,16 @@ class ResponsesRequest(BaseModel):
             raise ValueError("Provide either 'conversation' or 'previous_response_id', not both.")
         return self
 
-    def to_payload(self) -> JsonObject:
+    def model_dump_for_forwarding(self) -> MutableJsonObject:
+        """Dump the request for re-serialization onto another wire.
+
+        Like ``model_dump(mode="json", exclude_none=True)`` but without
+        synthesizing fields the client never sent. Used by every path that
+        forwards this request as a JSON body — the multi-instance owner
+        forward (``HTTPBridgeOwnerClient``) and model-source Responses
+        egress — so that field omission survives the hop and the receiving
+        side does not re-mark ``tools`` as explicitly set.
+        """
         payload: MutableJsonObject = self.model_dump(mode="json", exclude_none=True)
         if "tools" not in self.model_fields_set:
             # ``tools`` is declared with ``default_factory=list``, so
@@ -713,7 +722,10 @@ class ResponsesRequest(BaseModel):
             # forward the field when the client actually sent it — including
             # an explicit client-sent ``[]``. See issue #1184.
             payload.pop("tools", None)
-        return _strip_unsupported_fields(payload)
+        return payload
+
+    def to_payload(self) -> JsonObject:
+        return _strip_unsupported_fields(self.model_dump_for_forwarding())
 
 
 class ResponsesCompactRequest(BaseModel):

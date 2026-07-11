@@ -226,6 +226,7 @@ class _WarmupMixin:
 
         dashboard_settings = await get_settings_cache().get()
         configured_model = dashboard_settings.warmup_model
+        prohibit_fast_mode = dashboard_settings.prohibit_fast_mode
         effective_model = api_key.enforced_model if api_key and api_key.enforced_model else configured_model
         validate_model_access(api_key, effective_model)
         filtered_headers = filter_inbound_headers(headers)
@@ -239,6 +240,7 @@ class _WarmupMixin:
                     api_key=api_key,
                     headers=filtered_headers,
                     warmup_model=effective_model,
+                    prohibit_fast_mode=prohibit_fast_mode,
                     allow_pre_submit_errors_as_result=len(accounts_to_submit) > 1,
                 )
 
@@ -290,6 +292,7 @@ class _WarmupMixin:
         api_key: ApiKeyData | None,
         headers: Mapping[str, str],
         warmup_model: str,
+        prohibit_fast_mode: bool,
         allow_pre_submit_errors_as_result: bool = False,
     ) -> _WarmupSubmitResult:
         started_at = time.monotonic()
@@ -332,7 +335,7 @@ class _WarmupMixin:
                 input="warmup",
                 store=False,
             )
-            normalize_upstream_model_alias(payload)
+            normalize_upstream_model_alias(payload, prohibit_fast_mode=prohibit_fast_mode)
             response = await _call_with_supported_optional_kwargs(
                 _service_core_compact_responses(),
                 payload,

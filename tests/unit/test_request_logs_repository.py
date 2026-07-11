@@ -1,15 +1,42 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import select
 from sqlalchemy.exc import ResourceClosedError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import ModelSource, RequestLog
 from app.db.session import SessionLocal
 from app.modules.request_logs.repository import RequestLogsRepository
+
+
+@pytest.mark.asyncio
+async def test_purge_before_disables_bulk_delete_session_synchronization() -> None:
+    statements: list[object] = []
+
+    class CountResult:
+        def scalar_one(self) -> int:
+            return 7
+
+    class FakeSession:
+        async def execute(self, statement: object) -> CountResult:
+            statements.append(statement)
+            return CountResult()
+
+        async def commit(self) -> None:
+            return None
+
+    repo = RequestLogsRepository(cast(AsyncSession, FakeSession()))
+
+    assert await repo.purge_before(datetime(2026, 7, 1, tzinfo=UTC)) == 7
+    assert len(statements) == 2
+    delete_statement = statements[1]
+    assert getattr(delete_statement, "_execution_options")["synchronize_session"] is False
 
 
 @pytest.mark.asyncio

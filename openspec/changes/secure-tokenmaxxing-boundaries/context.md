@@ -124,9 +124,13 @@ Next:
   screenshots.
 - Required Cloudflare Access assertions apply fail-closed to dashboard traffic
   and mutating internal endpoints, but health and read-only internal probes
-  remain routable with unvalidated identity headers stripped.
+  remain routable with unvalidated identity headers stripped. API-key protected
+  fleet, proxy, and internal bridge traffic also remains at its API-key
+  authentication layer rather than being rejected by the dashboard Access gate.
 - Request-log readiness allows scheduler interval grace before treating the
   oldest retained row as a retention violation.
+- Request-log retention uses an unsynchronized bulk delete so large expired
+  tables do not materialize expired ORM identities during cleanup.
 - Fleet capacity clamps each account's remaining percentage before converting
   it to used capacity and averaging.
 - The Onda compose profile runs the image through `codex-lb` so the shared

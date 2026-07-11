@@ -10,7 +10,7 @@
       domain, and JWKS failure are rejected.
 - [x] 2.4 Exempt health and read-only internal probes from required Access JWT
       while keeping dashboard fallback authentication and mutating internal
-      endpoints fail-closed.
+      endpoints fail-closed without blocking API-key fleet/proxy traffic.
 
 ## 3. Fleet capacity
 
@@ -23,7 +23,8 @@
 ## 4. Retention
 
 - [x] 4.1 Add scheduled request-log hard deletion with configurable retention.
-- [x] 4.2 Prove expired logs are deleted and recent logs are retained.
+- [x] 4.2 Prove expired logs are deleted, recent logs are retained, and bulk
+      retention deletes do not synchronize expired ORM row identities.
 - [x] 4.3 Document and verify production payload/archive settings remain off.
 - [x] 4.4 Keep readiness stable across the cleanup interval while failing on
       unhealthy cleanup or rows outside the grace window.

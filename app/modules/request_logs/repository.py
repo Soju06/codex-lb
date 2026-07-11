@@ -37,7 +37,9 @@ class RequestLogsRepository:
                 select(func.count(RequestLog.id)).where(RequestLog.requested_at < cutoff)
             )
             deleted = int(count_result.scalar_one())
-            await self._session.execute(delete(RequestLog).where(RequestLog.requested_at < cutoff))
+            await self._session.execute(
+                delete(RequestLog).where(RequestLog.requested_at < cutoff).execution_options(synchronize_session=False)
+            )
             await self._session.commit()
         return deleted
 

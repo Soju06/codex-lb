@@ -13,6 +13,7 @@ days and SHALL keep request/response payload and conversation archival disabled.
 - **THEN** request logs older than the cutoff are hard-deleted
 - **AND** request logs at or newer than the cutoff remain
 - **AND** a repeated cleanup remains successful
+- **AND** the bulk delete does not synchronize ORM session state for expired rows
 
 #### Scenario: Readiness allows cleanup interval grace
 

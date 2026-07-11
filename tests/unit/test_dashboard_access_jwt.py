@@ -109,10 +109,14 @@ async def _request_path_with_required_access(
     add_dashboard_auth_proxy_middleware(app)
 
     @app.api_route("/health/ready", methods=["GET", "POST"])
+    @app.api_route("/api/accounts", methods=["GET"])
+    @app.api_route("/api/fleet/summary", methods=["GET"])
+    @app.api_route("/backend-api/codex/responses", methods=["POST"])
     @app.api_route("/internal/bridge/responses", methods=["POST"])
     @app.api_route("/internal/drain/start", methods=["POST"])
-    @app.api_route("/internal/drain/status", methods=["GET", "POST"])
+    @app.api_route("/internal/drain/status", methods=["GET"])
     @app.api_route("/internal/drain/stop", methods=["POST"])
+    @app.api_route("/v1/responses", methods=["POST"])
     async def probe(request: Request) -> dict[str, str | None]:
         authentication = get_dashboard_request_auth(request)
         return {
@@ -220,8 +224,6 @@ async def test_required_access_jwt_exempts_health_and_read_only_internal_probes(
     [
         ("POST", "/internal/drain/start"),
         ("POST", "/internal/drain/stop"),
-        ("POST", "/internal/bridge/responses"),
-        ("POST", "/internal/drain/status"),
     ],
 )
 async def test_required_access_jwt_blocks_mutating_or_non_probe_internal_paths(
@@ -230,6 +232,37 @@ async def test_required_access_jwt_blocks_mutating_or_non_probe_internal_paths(
     path: str,
 ) -> None:
     result = await _request_path_with_required_access(monkeypatch, method=method, path=path)
+
+    assert result["status"] == 401
+    assert result["payload"] == {"detail": "A valid Cloudflare Access assertion is required"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("GET", "/api/fleet/summary"),
+        ("POST", "/backend-api/codex/responses"),
+        ("POST", "/internal/bridge/responses"),
+        ("POST", "/v1/responses"),
+    ],
+)
+async def test_required_access_jwt_preserves_api_key_protected_traffic_without_assertion(
+    monkeypatch: pytest.MonkeyPatch,
+    method: str,
+    path: str,
+) -> None:
+    result = await _request_path_with_required_access(monkeypatch, method=method, path=path)
+
+    assert result["status"] == 200
+    assert result["payload"] == {"actor": None, "forwarded_header": None}
+
+
+@pytest.mark.asyncio
+async def test_required_access_jwt_blocks_dashboard_api_without_assertion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result = await _request_path_with_required_access(monkeypatch, path="/api/accounts")
 
     assert result["status"] == 401
     assert result["payload"] == {"detail": "A valid Cloudflare Access assertion is required"}
@@ -253,7 +286,7 @@ async def test_required_access_jwt_blocks_missing_assertion_before_fallback_auth
 
 
 @pytest.mark.asyncio
-async def test_required_access_jwt_rejects_websocket_handshake_without_assertion(
+async def test_required_access_jwt_rejects_dashboard_websocket_handshake_without_assertion(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _configure_access(monkeypatch)
@@ -284,8 +317,8 @@ async def test_required_access_jwt_rejects_websocket_handshake_without_assertion
             "type": "websocket",
             "asgi": {"version": "3.0"},
             "scheme": "ws",
-            "path": "/backend-api/codex/responses",
-            "raw_path": b"/backend-api/codex/responses",
+            "path": "/api/status/socket",
+            "raw_path": b"/api/status/socket",
             "query_string": b"",
             "headers": [],
             "client": ("127.0.0.1", 50000),
@@ -315,3 +348,53 @@ async def test_required_access_jwt_rejects_websocket_handshake_without_assertion
         )
         is None
     )
+
+
+@pytest.mark.asyncio
+async def test_required_access_jwt_allows_api_key_websocket_handshake_without_assertion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_access(monkeypatch)
+    monkeypatch.setenv("CODEX_LB_DASHBOARD_ACCESS_JWT_REQUIRED", "true")
+    get_settings.cache_clear()
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    monkeypatch.setattr(jwt, "PyJWKClient", lambda *_args, **_kwargs: _StaticJwksClient(private_key.public_key()))
+    seen_scope: Scope | None = None
+
+    async def app(scope: Scope, _receive, _send) -> None:
+        nonlocal seen_scope
+        seen_scope = scope
+
+    from app.core.middleware.dashboard_auth_proxy import DashboardAuthProxyHeaderSanitizerMiddleware
+
+    middleware = DashboardAuthProxyHeaderSanitizerMiddleware(app)
+    sent: list[Message] = []
+
+    async def receive() -> Message:
+        return {"type": "websocket.connect"}
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    await middleware(
+        {
+            "type": "websocket",
+            "asgi": {"version": "3.0"},
+            "scheme": "ws",
+            "path": "/backend-api/codex/responses",
+            "raw_path": b"/backend-api/codex/responses",
+            "query_string": b"",
+            "headers": [(b"remote-user", b"forged@onda.lol")],
+            "client": ("127.0.0.1", 50000),
+            "server": ("test", 80),
+            "subprotocols": [],
+            "state": {},
+        },
+        receive,
+        send,
+    )
+
+    assert seen_scope is not None
+    assert seen_scope["headers"] == []
+    assert sent == []
+    get_settings.cache_clear()

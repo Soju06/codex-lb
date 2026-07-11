@@ -36,3 +36,11 @@ validated token and MUST NOT be taken from a separate identity header.
 - **THEN** the probe is allowed to reach its route handler
 - **AND** unvalidated trusted identity headers are stripped before forwarding
 - **AND** mutating internal endpoints still require a valid Access assertion
+
+#### Scenario: Required Access assertion preserves API-key traffic
+
+- **GIVEN** Access JWT validation is configured as required
+- **WHEN** an API-key protected fleet or proxy request lacks an Access assertion
+- **THEN** Access validation strips unvalidated trusted identity headers
+- **AND** the request is allowed to reach its API-key authentication layer
+- **AND** dashboard and mutating internal routes still fail closed without a valid Access assertion

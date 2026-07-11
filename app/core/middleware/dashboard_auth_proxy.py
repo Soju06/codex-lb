@@ -64,7 +64,7 @@ class DashboardAuthProxyHeaderSanitizerMiddleware:
         )
 
         headers = cast(list[tuple[bytes, bytes]], scope.get("headers", []))
-        access_jwt_required_for_path = self._access_jwt_required and not _is_access_jwt_optional_path(
+        access_jwt_required_for_path = self._access_jwt_required and _is_access_jwt_required_path(
             cast(str, scope.get("path", "")),
             cast(str, scope.get("method", "GET" if scope_type == "websocket" else "")),
         )
@@ -169,14 +169,28 @@ async def _deny_access_assertion_required(scope: Scope, receive: Receive, send: 
     await response(scope, receive, send)
 
 
-_READ_ONLY_ACCESS_JWT_OPTIONAL_METHODS = frozenset({"GET", "HEAD"})
-_ACCESS_JWT_OPTIONAL_INTERNAL_PROBE_PATHS = frozenset({"/internal/drain/status"})
+_ACCESS_JWT_PROTECTED_INTERNAL_MUTATION_PATHS = frozenset({"/internal/drain/start", "/internal/drain/stop"})
+_ACCESS_JWT_API_KEY_PREFIXES = (
+    "/api/fleet",
+    "/backend-api",
+    "/internal/bridge",
+    "/v1",
+)
 
 
-def _is_access_jwt_optional_path(path: str, method: str) -> bool:
-    if method.upper() not in _READ_ONLY_ACCESS_JWT_OPTIONAL_METHODS:
+def _is_access_jwt_required_path(path: str, method: str) -> bool:
+    normalized_method = method.upper()
+    if path == "/health" or path.startswith("/health/"):
         return False
-    return path == "/health" or path.startswith("/health/") or path in _ACCESS_JWT_OPTIONAL_INTERNAL_PROBE_PATHS
+    if path in _ACCESS_JWT_PROTECTED_INTERNAL_MUTATION_PATHS and normalized_method not in {"GET", "HEAD"}:
+        return True
+    if path == "/internal/drain/status":
+        return False
+    if path.startswith("/internal/"):
+        return False
+    if any(path == prefix or path.startswith(f"{prefix}/") for prefix in _ACCESS_JWT_API_KEY_PREFIXES):
+        return False
+    return True
 
 
 __all__ = ["add_dashboard_auth_proxy_middleware", "DashboardAuthProxyHeaderSanitizerMiddleware"]

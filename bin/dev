@@ -1,0 +1,156 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+STATE_DIR="$ROOT/.local/dev"
+DATA_DIR="$STATE_DIR/data"
+LOG_DIR="$ROOT/.local/logs"
+PID_FILE="$STATE_DIR/server.pid"
+PORT_FILE="$STATE_DIR/server.port"
+TOKEN_FILE="$STATE_DIR/bootstrap-token"
+LOG_FILE="$LOG_DIR/dev.log"
+HOST=127.0.0.1
+
+port_for_root() {
+  python3 - "$ROOT" <<'PY'
+import hashlib
+import sys
+
+digest = hashlib.sha256(sys.argv[1].encode()).digest()
+print(20000 + int.from_bytes(digest[:4], "big") % 10000)
+PY
+}
+
+pid_is_ours() {
+  local pid="$1"
+  [[ -r "/proc/$pid/cmdline" && -L "/proc/$pid/cwd" ]] || return 1
+  [[ "$(readlink -f "/proc/$pid/cwd")" == "$ROOT" ]] || return 1
+  tr '\0' ' ' <"/proc/$pid/cmdline" | grep -Fq 'codex-lb'
+}
+
+running_pid() {
+  [[ -s "$PID_FILE" ]] || return 1
+  local pid
+  pid="$(cat "$PID_FILE")"
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$pid" 2>/dev/null && pid_is_ours "$pid" || return 1
+  printf '%s\n' "$pid"
+}
+
+health() {
+  local port
+  port="$(cat "$PORT_FILE" 2>/dev/null || port_for_root)"
+  python3 - "$HOST" "$port" <<'PY'
+import sys
+import urllib.request
+
+url = f"http://{sys.argv[1]}:{sys.argv[2]}/health/ready"
+try:
+    with urllib.request.urlopen(url, timeout=2) as response:
+        if response.status != 200:
+            raise RuntimeError(f"HTTP {response.status}")
+except Exception as exc:
+    print(f"unhealthy url={url} reason={exc}", file=sys.stderr)
+    raise SystemExit(1)
+print(f"healthy url={url}")
+PY
+}
+
+start() {
+  local pid port
+  if pid="$(running_pid)"; then
+    echo "already-running pid=$pid host=$HOST port=$(cat "$PORT_FILE") log=$LOG_FILE"
+    return 0
+  fi
+
+  rm -f "$PID_FILE"
+  mkdir -p "$STATE_DIR" "$DATA_DIR" "$LOG_DIR"
+  chmod 700 "$STATE_DIR" "$DATA_DIR"
+  touch "$LOG_FILE"
+  chmod 600 "$LOG_FILE"
+  port="${CODEX_LB_DEV_PORT:-$(port_for_root)}"
+  [[ "$port" =~ ^[0-9]+$ && "$port" -ge 1024 && "$port" -le 65535 ]] || {
+    echo "CODEX_LB_DEV_PORT must be an integer from 1024 to 65535" >&2
+    return 2
+  }
+  printf '%s\n' "$port" >"$PORT_FILE"
+
+  if [[ ! -s "$TOKEN_FILE" ]]; then
+    umask 077
+    python3 - "$TOKEN_FILE" <<'PY'
+import secrets
+import sys
+from pathlib import Path
+
+Path(sys.argv[1]).write_text(secrets.token_urlsafe(32) + "\n", encoding="utf-8")
+PY
+  fi
+  chmod 600 "$TOKEN_FILE" "$PORT_FILE"
+
+  (
+    cd "$ROOT"
+    exec env \
+      CODEX_LB_DATA_DIR="$DATA_DIR" \
+      CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN="$(cat "$TOKEN_FILE")" \
+      CODEX_LB_LOG_FORMAT=json \
+      uv run codex-lb --host "$HOST" --port "$port"
+  ) >>"$LOG_FILE" 2>&1 &
+  pid=$!
+  printf '%s\n' "$pid" >"$PID_FILE"
+  chmod 600 "$PID_FILE"
+
+  for _ in $(seq 1 40); do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      echo "start-failed log=$LOG_FILE" >&2
+      rm -f "$PID_FILE"
+      return 1
+    fi
+    if health >/dev/null 2>&1; then
+      echo "started pid=$pid host=$HOST port=$port log=$LOG_FILE"
+      return 0
+    fi
+    sleep 0.25
+  done
+  echo "start-timeout pid=$pid log=$LOG_FILE" >&2
+  stop
+  return 1
+}
+
+stop() {
+  local pid
+  if ! pid="$(running_pid)"; then
+    rm -f "$PID_FILE"
+    echo "already-stopped"
+    return 0
+  fi
+  kill "$pid"
+  for _ in $(seq 1 40); do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      rm -f "$PID_FILE"
+      echo "stopped pid=$pid"
+      return 0
+    fi
+    sleep 0.25
+  done
+  echo "stop-timeout pid=$pid" >&2
+  return 1
+}
+
+status() {
+  local pid
+  if pid="$(running_pid)"; then
+    echo "running pid=$pid host=$HOST port=$(cat "$PORT_FILE") log=$LOG_FILE"
+    return 0
+  fi
+  echo "stopped"
+  return 1
+}
+
+case "${1:-start}" in
+  start) start ;;
+  stop) stop ;;
+  restart) stop; start ;;
+  status) status ;;
+  health) health ;;
+  *) echo "usage: bin/dev {start|stop|restart|status|health}" >&2; exit 2 ;;
+esac

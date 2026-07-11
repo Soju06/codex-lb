@@ -499,14 +499,21 @@ Fast Mode and service-tier behavior is documented in [Responses API compatibilit
 ## Development
 
 ```bash
-# Docker
-docker compose watch
+# Prepare pinned dependencies and dashboard assets (safe to repeat).
+bin/setup
 
-# Local
-uv sync && cd frontend && bun install && cd ..
-uv run fastapi run app/main.py --reload        # backend :2455
-cd frontend && bun run dev                     # frontend :5173
+# Run the loopback-only service and follow its aggregate log.
+bin/dev
+bin/logs
+
+# Fast, merge-base-aware iteration; then the full gate before delivery.
+bin/test --diff origin/main
+bin/test
 ```
+
+See [repository readiness](docs/repo-readiness.md) for the short operational
+path and [architecture](ARCHITECTURE.md) for module and trust boundaries.
+Observable behavior remains specified under [`openspec/`](openspec/).
 
 ## Contributors ✨
 

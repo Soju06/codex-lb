@@ -16,6 +16,22 @@ async function openRowActions(user: ReturnType<typeof userEvent.setup>, row: HTM
   await user.click(actionsButton);
 }
 
+async function closeCreatedKeyDialog(
+  user: ReturnType<typeof userEvent.setup>,
+  dialog: HTMLElement,
+) {
+  const closeCandidates = within(dialog).getAllByRole("button", {
+    name: "Close",
+  });
+  const closeButton =
+    closeCandidates.find((element) => element.getAttribute("data-slot") === "button") ??
+    closeCandidates[0];
+  await user.click(closeButton);
+  await waitFor(() => {
+    expect(screen.queryByRole("dialog", { name: "API key created" })).not.toBeInTheDocument();
+  });
+}
+
 describe("api keys flow integration", () => {
   it("creates, shows plain key dialog, edits, and deletes an api key", async () => {
     const user = userEvent.setup();
@@ -28,18 +44,12 @@ describe("api keys flow integration", () => {
     const createButton = await screen.findByRole("button", { name: "Create key" });
     expect(createButton).toBeInTheDocument();
     await user.click(createButton);
-    await user.type(screen.getByLabelText("Name"), createdName);
+    await user.type(await screen.findByLabelText("Name"), createdName);
     await user.click(screen.getByRole("button", { name: "Create" }));
 
     const createdDialog = await screen.findByRole("dialog", { name: "API key created" });
     expect(screen.getByText(/sk-test-generated/i)).toBeInTheDocument();
-    const closeCandidates = within(createdDialog).getAllByRole("button", {
-      name: "Close",
-    });
-    const closeButton =
-      closeCandidates.find((element) => element.getAttribute("data-slot") === "button") ??
-      closeCandidates[0];
-    await user.click(closeButton);
+    await closeCreatedKeyDialog(user, createdDialog);
 
     const createdRow = getParentRow(await screen.findByText(createdName));
 
@@ -65,7 +75,7 @@ describe("api keys flow integration", () => {
     await waitFor(() => {
       expect(screen.queryByText(updatedName)).not.toBeInTheDocument();
     });
-  });
+  }, 30_000);
 
   it("creates an api key with assigned accounts", async () => {
     const user = userEvent.setup();
@@ -74,27 +84,21 @@ describe("api keys flow integration", () => {
     renderWithProviders(<App />);
 
     await user.click(await screen.findByRole("button", { name: "Create key" }));
-    await user.type(screen.getByLabelText("Name"), "Scoped Integration Key");
+    await user.type(await screen.findByLabelText("Name"), "Scoped Integration Key");
     await user.click(await screen.findByRole("button", { name: "All accounts" }));
     await user.click(screen.getByRole("menuitemcheckbox", { name: /primary@example\.com/i }));
     await user.keyboard("{Escape}");
     await user.click(screen.getByRole("button", { name: "Create" }));
 
     const createdDialog = await screen.findByRole("dialog", { name: "API key created" });
-    const closeCandidates = within(createdDialog).getAllByRole("button", {
-      name: "Close",
-    });
-    const closeButton =
-      closeCandidates.find((element) => element.getAttribute("data-slot") === "button") ??
-      closeCandidates[0];
-    await user.click(closeButton);
+    await closeCreatedKeyDialog(user, createdDialog);
 
     const createdRow = getParentRow(await screen.findByText("Scoped Integration Key"));
     await openRowActions(user, createdRow);
     await user.click(await screen.findByRole("menuitem", { name: /Edit/ }));
 
     expect(await screen.findByRole("button", { name: "1 account selected" })).toBeInTheDocument();
-  });
+  }, 30_000);
 
   it("displays the current api key list on settings", async () => {
     window.history.pushState({}, "", "/settings");

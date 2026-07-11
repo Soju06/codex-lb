@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage:
+  bin/worktree create <branch> [base]
+  bin/worktree list
+  bin/worktree remove <branch>
+  bin/worktree prune
+
+Create task worktrees under the root checkout's ignored .worktrees directory.
+The root checkout is never switched. Removal refuses dirty worktrees.
+EOF
+}
+
+die() { printf 'error: %s\n' "$*" >&2; exit 64; }
+
+git rev-parse --is-inside-work-tree >/dev/null 2>&1 || die 'not inside a Git worktree'
+common_dir="$(git rev-parse --path-format=absolute --git-common-dir)"
+root="$(dirname -- "$common_dir")"
+worktrees_dir="$root/.worktrees"
+
+validate_branch() {
+  local branch=$1
+  [[ "$branch" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] || die "unsafe branch name: $branch"
+  [[ "$branch" != *..* && "$branch" != */ ]] || die "unsafe branch name: $branch"
+  git check-ref-format --branch "$branch" >/dev/null 2>&1 || die "invalid branch name: $branch"
+}
+
+branch_path() {
+  local branch=$1
+  printf '%s/%s\n' "$worktrees_dir" "${branch//\//--}"
+}
+
+command_name="${1:-}"
+case "$command_name" in
+  -h|--help) (($# == 1)) || die '--help accepts no other arguments'; usage ;;
+  list) (($# == 1)) || die 'list accepts no arguments'; git worktree list ;;
+  prune) (($# == 1)) || die 'prune accepts no arguments'; git worktree prune --verbose ;;
+  create)
+    (($# == 2 || $# == 3)) || die 'create requires <branch> and optional [base]'
+    branch=$2
+    base="${3:-origin/main}"
+    validate_branch "$branch"
+    path="$(branch_path "$branch")"
+    [[ ! -e "$path" ]] || die "worktree path already exists: $path"
+    ! git show-ref --verify --quiet "refs/heads/$branch" || die "local branch already exists: $branch"
+    git rev-parse --verify --quiet "${base}^{commit}" >/dev/null || die "base does not resolve to a commit: $base"
+    mkdir -p "$worktrees_dir"
+    git worktree add -b "$branch" "$path" "$base"
+    printf 'created %s at %s\n' "$branch" "$path"
+    ;;
+  remove)
+    (($# == 2)) || die 'remove requires <branch>'
+    branch=$2
+    validate_branch "$branch"
+    path="$(branch_path "$branch")"
+    [[ -d "$path" ]] || die "managed worktree does not exist: $path"
+    [[ "$(git -C "$path" rev-parse --show-toplevel)" == "$path" ]] || die "refusing unmanaged path: $path"
+    git worktree remove "$path"
+    printf 'removed worktree at %s; branch %s was retained\n' "$path" "$branch"
+    ;;
+  '') usage >&2; exit 64 ;;
+  *) die "unknown command: $command_name" ;;
+esac

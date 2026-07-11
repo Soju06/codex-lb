@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage:
+  bin/test
+  bin/test --diff [base]
+
+With no arguments, run the repository's full native `make ci` gate.
+With --diff, compare against the merge base of `base` (default: origin/main)
+and run the closest relevant native checks. Diff mode is a development
+feedback loop; it is not equivalent to the full gate.
+EOF
+}
+
+repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+cd "$repo_root"
+
+run_make() {
+  if [[ "${CODEX_LB_TEST_DRY_RUN:-0}" == 1 ]]; then
+    printf 'make'
+    printf ' %q' "$@"
+    printf '\n'
+  else
+    make "$@"
+  fi
+}
+
+if (($# == 0)); then
+  run_make ci
+  exit
+fi
+
+case "$1" in
+  -h|--help)
+    (($# == 1)) || { printf 'error: --help accepts no other arguments\n' >&2; exit 64; }
+    usage
+    exit
+    ;;
+  --diff)
+    (($# <= 2)) || { printf 'error: --diff accepts at most one base\n' >&2; usage >&2; exit 64; }
+    base="${2:-origin/main}"
+    ;;
+  *)
+    printf 'error: unknown argument: %s\n' "$1" >&2
+    usage >&2
+    exit 64
+    ;;
+esac
+
+git rev-parse --is-inside-work-tree >/dev/null
+if ! git rev-parse --verify --quiet "${base}^{commit}" >/dev/null; then
+  printf 'error: base does not resolve to a commit: %s\n' "$base" >&2
+  exit 65
+fi
+merge_base="$(git merge-base HEAD "$base")"
+mapfile -t changed < <(
+  {
+    git diff --name-only --diff-filter=ACMR "$merge_base" --
+    git ls-files --others --exclude-standard
+  } | sort -u
+)
+
+if ((${#changed[@]} == 0)); then
+  printf 'no tracked changes since merge base %s\n' "$merge_base"
+  exit
+fi
+
+# Every non-documentation diff gets the existing fast aggregate. Specialized
+# artifact checks are additive; the required full gate remains `bin/test`.
+needs_fast=0
+needs_docker=0
+needs_helm=0
+needs_migration=0
+for path in "${changed[@]}"; do
+  case "$path" in
+    *.md|docs/*|openspec/*) ;;
+    *) needs_fast=1 ;;
+  esac
+  case "$path" in
+    Dockerfile|docker-compose*.yml|scripts/docker-entrypoint.sh|scripts/distroless-entrypoint.py)
+      needs_docker=1
+      ;;
+  esac
+  case "$path" in deploy/helm/*|scripts/helm-*) needs_helm=1 ;; esac
+  case "$path" in alembic.ini|alembic/*|app/db/*) needs_migration=1 ;; esac
+done
+
+printf 'diff base: %s (%s)\n' "$base" "$merge_base"
+printf 'changed paths:\n'
+printf '  %s\n' "${changed[@]}"
+
+if ((needs_fast)); then run_make ci-fast; else run_make architecture-check; fi
+if ((needs_migration)); then run_make migration-check; fi
+if ((needs_docker)); then run_make docker; fi
+if ((needs_helm)); then run_make helm-check; fi

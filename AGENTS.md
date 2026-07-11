@@ -2,7 +2,12 @@
 
 ## Environment
 
-- Python: .venv/bin/python (uv, CPython 3.13.3)
+- Run `bin/setup` to prepare the pinned Python/frontend dependencies and built
+  dashboard assets. It is safe to repeat and does not create secrets.
+- Use `bin/dev` for a loopback-only local service and `bin/logs` for its
+  checkout-local aggregate log.
+- Run `bin/test --diff <base>` while iterating, `bin/test` before delivery, and
+  `bin/check-operability` when changing repository entry points.
 - GitHub auth for git/API is available via env vars: `GITHUB_USER`, `GITHUB_TOKEN` (PAT). Do not hardcode or commit tokens.
 - For authenticated git over HTTPS in automation, use: `https://x-access-token:${GITHUB_TOKEN}@github.com/<owner>/<repo>.git`
 
@@ -26,6 +31,18 @@ This repo uses **OpenSpec as the primary workflow and SSOT** for change-driven d
 3) Implement the tasks; keep code + specs in sync (update `spec.md` as needed).
 4) Validate specs locally: `openspec validate --specs`
 5) When done: verify + archive the change (do not archive unverified changes).
+
+Read [`ARCHITECTURE.md`](ARCHITECTURE.md) before moving module boundaries. It
+maps the live code; OpenSpec remains authoritative for observable behavior.
+
+## Worktrees
+
+- Keep the root checkout clean on the default branch. Do task work in one
+  branch/worktree lane created with `bin/worktree`.
+- Stack dependent work from its unmerged parent and target the child PR at that
+  parent. Independent work starts from the default branch.
+- Do not switch branches in place in the root checkout or delete another
+  contributor's worktree.
 
 ### Source of Truth
 

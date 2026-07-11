@@ -58,17 +58,12 @@ codex-lb is a Python project managed with [`uv`](https://docs.astral.sh/uv/).
 git clone https://github.com/<your-user>/codex-lb.git
 cd codex-lb
 
-# 2. Install Python + deps via uv
-uv sync --all-extras --dev
+# 2. Prepare pinned Python/frontend dependencies and dashboard assets
+bin/setup
 
-# 3. Activate the venv (optional — `uv run` works without activating)
-source .venv/bin/activate
-
-# 4. Install pre-commit hooks
-uv run pre-commit install
-
-# 5. Run the proxy locally
-uv run codex-lb --help
+# 3. Run aggregate proof or start the loopback-only development service
+bin/test --diff origin/main
+bin/dev
 ```
 
 Frontend (dashboard) lives under `frontend/`. Use the project's standard
@@ -189,7 +184,9 @@ PR titles must follow the same format — that's the title release-please reads.
 
 ### Pull request flow
 
-1. Create a branch from `main`: `git checkout -b <type>/<short-name>`.
+1. Keep the root checkout on `main`. Create a task branch and worktree with
+   `bin/worktree`; use one worktree per branch. Stack dependent work from its
+   unmerged parent, while independent work starts from `main`.
 2. Make atomic commits with Conventional Commit titles.
 3. Run the lint/test gate locally (see above).
 4. Open a PR using the template. Link the relevant issue.
@@ -289,6 +286,16 @@ These rules are intentionally lightweight. They don't require:
   PR open and ping the owner.
 
 ## Tests
+
+The canonical aggregate commands are:
+
+```bash
+bin/test --diff origin/main  # merge-base-aware iteration
+bin/test                     # full local gate before delivery
+```
+
+These commands delegate to the repository's native Make targets; they do not
+replace focused commands during development.
 
 - **Unit tests** live under `tests/unit/` and should be fast and hermetic.
 - **Integration tests** live under `tests/integration/` and may spin up the

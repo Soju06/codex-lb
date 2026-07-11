@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: bin/setup
+
+Prepare a checkout using the repository's locked Python and frontend dependencies.
+Creates .env.local from .env.example only when .env.local does not already exist.
+EOF
+}
+
+if (($#)); then
+  case "${1:-}" in
+    -h|--help) usage; exit 0 ;;
+    *) printf 'error: unexpected argument: %s\n' "$1" >&2; usage >&2; exit 64 ;;
+  esac
+fi
+
+for tool in uv bun; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    printf 'error: required tool "%s" is not installed or not on PATH\n' "$tool" >&2
+    case "$tool" in
+      uv) printf 'install uv from https://docs.astral.sh/uv/getting-started/installation/\n' >&2 ;;
+      bun) printf 'install Bun from https://bun.sh/docs/installation\n' >&2 ;;
+    esac
+    exit 127
+  fi
+done
+
+repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+cd "$repo_root"
+
+if [[ ! -f .env.local ]]; then
+  if [[ ! -f .env.example ]]; then
+    printf 'error: %s/.env.example is missing\n' "$repo_root" >&2
+    exit 1
+  fi
+  install -m 600 .env.example .env.local
+  printf 'created .env.local from .env.example (no secrets were generated)\n'
+else
+  printf 'kept existing .env.local\n'
+fi
+
+uv sync --dev --frozen
+(
+  cd frontend
+  bun install --frozen-lockfile
+  bun run build
+)
+printf 'setup complete\n'

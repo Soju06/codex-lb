@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+LOG_FILE="$ROOT/.local/logs/dev.log"
+
+[[ -f "$LOG_FILE" ]] || {
+  echo "no dev log yet; start the service with bin/dev start" >&2
+  exit 1
+}
+
+case "${1:-show}" in
+  show) exec tail -n "${CODEX_LB_LOG_LINES:-200}" "$LOG_FILE" ;;
+  follow) exec tail -n "${CODEX_LB_LOG_LINES:-200}" -f "$LOG_FILE" ;;
+  path) printf '%s\n' "$LOG_FILE" ;;
+  *) echo "usage: bin/logs {show|follow|path}" >&2; exit 2 ;;
+esac

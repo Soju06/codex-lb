@@ -22,6 +22,7 @@ class RequestLogCleanupState:
     last_success_at: datetime | None = None
     last_deleted_count: int = 0
     last_error: str | None = None
+    last_leader_error: str | None = None
     currently_responsible: bool = False
 
 
@@ -29,6 +30,8 @@ _STATE = RequestLogCleanupState()
 
 
 def request_log_cleanup_health() -> str:
+    if _STATE.last_leader_error is not None:
+        return f"leader_error:{_STATE.last_leader_error}"
     if _STATE.last_error is not None:
         return f"error:{_STATE.last_error}"
     if _STATE.last_success_at is None:
@@ -37,6 +40,8 @@ def request_log_cleanup_health() -> str:
 
 
 def request_log_cleanup_is_ready(*, interval_seconds: int, leader_election_enabled: bool) -> bool:
+    if _STATE.last_leader_error is not None:
+        return False
     if leader_election_enabled and not _STATE.currently_responsible:
         return True
     if _STATE.last_error is not None:
@@ -47,6 +52,8 @@ def request_log_cleanup_is_ready(*, interval_seconds: int, leader_election_enabl
 
 
 class _LeaderElectionLike(Protocol):
+    last_acquire_error: str | None
+
     async def try_acquire(self) -> bool: ...
 
 
@@ -89,7 +96,12 @@ class RequestLogCleanupScheduler:
     async def _cleanup_once(self) -> int:
         if self.retention_days is None:
             return 0
-        _STATE.currently_responsible = await _get_leader_election().try_acquire()
+        leader_election = _get_leader_election()
+        _STATE.currently_responsible = await leader_election.try_acquire()
+        _STATE.last_leader_error = getattr(leader_election, "last_acquire_error", None)
+        if _STATE.last_leader_error is not None:
+            _STATE.last_attempt_at = utcnow()
+            return 0
         if not _STATE.currently_responsible:
             return 0
         async with self._lock:
@@ -103,6 +115,7 @@ class RequestLogCleanupScheduler:
                 _STATE.last_success_at = utcnow()
                 _STATE.last_deleted_count = deleted
                 _STATE.last_error = None
+                _STATE.last_leader_error = None
                 return deleted
             except Exception as exc:
                 _STATE.last_error = type(exc).__name__

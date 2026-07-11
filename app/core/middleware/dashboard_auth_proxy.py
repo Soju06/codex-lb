@@ -12,8 +12,10 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from app.core.auth.dashboard_mode import DashboardAuthMode, DashboardRequestAuth
 from app.core.config.settings import get_settings
 from app.core.middleware.api_firewall import _is_trusted_proxy_source, _parse_trusted_proxy_networks
+from app.core.resilience.overload import deny_websocket_with_http_response
 
 logger = logging.getLogger(__name__)
+_ACCESS_ASSERTION_REQUIRED_DETAIL = "A valid Cloudflare Access assertion is required"
 
 
 class DashboardAuthProxyHeaderSanitizerMiddleware:
@@ -45,7 +47,11 @@ class DashboardAuthProxyHeaderSanitizerMiddleware:
         )
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if not self._enabled or scope["type"] != "http":
+        scope_type = cast(str, scope.get("type", ""))
+        if not self._enabled or scope_type not in {"http", "websocket"}:
+            await self.app(scope, receive, send)
+            return
+        if scope_type == "websocket" and self._access_jwks_client is None:
             await self.app(scope, receive, send)
             return
 
@@ -60,7 +66,7 @@ class DashboardAuthProxyHeaderSanitizerMiddleware:
         headers = cast(list[tuple[bytes, bytes]], scope.get("headers", []))
         access_jwt_required_for_path = self._access_jwt_required and not _is_access_jwt_optional_path(
             cast(str, scope.get("path", "")),
-            cast(str, scope.get("method", "")),
+            cast(str, scope.get("method", "GET" if scope_type == "websocket" else "")),
         )
         # A configured Access assertion is the authentication boundary. Verify
         # it cryptographically even when an earlier proxy-aware middleware has
@@ -82,11 +88,7 @@ class DashboardAuthProxyHeaderSanitizerMiddleware:
                 )
                 next_scope["state"] = state
             elif access_jwt_required_for_path:
-                response = JSONResponse(
-                    status_code=401,
-                    content={"detail": "A valid Cloudflare Access assertion is required"},
-                )
-                await response(next_scope, receive, send)
+                await _deny_access_assertion_required(next_scope, receive, send)
                 return
             await self.app(next_scope, receive, send)
             return
@@ -151,6 +153,20 @@ def _header_value(headers: list[tuple[bytes, bytes]], target: bytes) -> str | No
         if name.lower() == target:
             return value.decode("latin-1")
     return None
+
+
+async def _deny_access_assertion_required(scope: Scope, receive: Receive, send: Send) -> None:
+    content = {"detail": _ACCESS_ASSERTION_REQUIRED_DETAIL}
+    if scope["type"] == "websocket":
+        await deny_websocket_with_http_response(
+            receive,
+            send,
+            status_code=401,
+            payload=content,
+        )
+        return
+    response = JSONResponse(status_code=401, content=content)
+    await response(scope, receive, send)
 
 
 _READ_ONLY_ACCESS_JWT_OPTIONAL_METHODS = frozenset({"GET", "HEAD"})

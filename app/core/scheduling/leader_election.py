@@ -17,9 +17,15 @@ class LeaderElection:
     def __init__(self, leader_id: str | None = None) -> None:
         self._leader_id = leader_id or str(uuid.uuid4())
         self._is_leader = False
+        self._last_acquire_error: str | None = None
+
+    @property
+    def last_acquire_error(self) -> str | None:
+        return self._last_acquire_error
 
     async def try_acquire(self) -> bool:
         settings = get_settings()
+        self._last_acquire_error = None
         if not settings.leader_election_enabled:
             self._is_leader = True
             return True
@@ -56,7 +62,8 @@ class LeaderElection:
                 row = await session.scalar(select(SchedulerLeader.leader_id).where(SchedulerLeader.id == 1))
                 self._is_leader = row == self._leader_id
                 return self._is_leader
-        except Exception:
+        except Exception as exc:
+            self._last_acquire_error = type(exc).__name__
             logger.warning("Leader election failed, defaulting to non-leader", exc_info=True)
 
         self._is_leader = False

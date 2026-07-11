@@ -608,17 +608,20 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _validate_dashboard_auth_mode(self) -> "Settings":
-        if self.dashboard_auth_mode != DashboardAuthMode.TRUSTED_HEADER:
-            return self
-        if not self.firewall_trust_proxy_headers:
-            raise ValueError("dashboard_auth_mode=trusted_header requires firewall_trust_proxy_headers=true")
-        if not self.firewall_trusted_proxy_cidrs:
-            raise ValueError("dashboard_auth_mode=trusted_header requires non-empty firewall_trusted_proxy_cidrs")
         access_values = (
             self.dashboard_access_jwt_issuer,
             self.dashboard_access_jwt_audiences,
             self.dashboard_access_allowed_email_domains,
         )
+        access_configured = any(access_values) or self.dashboard_access_jwt_required
+        if self.dashboard_auth_mode != DashboardAuthMode.TRUSTED_HEADER:
+            if access_configured:
+                raise ValueError("Access JWT validation requires dashboard_auth_mode=trusted_header")
+            return self
+        if not self.firewall_trust_proxy_headers:
+            raise ValueError("dashboard_auth_mode=trusted_header requires firewall_trust_proxy_headers=true")
+        if not self.firewall_trusted_proxy_cidrs:
+            raise ValueError("dashboard_auth_mode=trusted_header requires non-empty firewall_trusted_proxy_cidrs")
         if (any(access_values) and not all(access_values)) or (
             self.dashboard_access_jwt_required and not all(access_values)
         ):

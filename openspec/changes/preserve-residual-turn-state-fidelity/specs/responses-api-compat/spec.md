@@ -20,6 +20,13 @@ placeholder MUST still resolve to its owner account.
 - **WHEN** the client submits a compact request with that token
 - **THEN** compact selection is constrained to that owner account
 
+#### Scenario: Unscoped sticky state cannot supply a turn-state owner
+
+- **GIVEN** a turn-state token has no owner in the requesting API-key-scoped local or durable bridge indexes
+- **WHEN** an unscoped sticky-session mapping exists for the same token
+- **THEN** compact owner resolution fails closed
+- **AND** the unscoped sticky-session mapping is not consulted
+
 #### Scenario: Token belongs to a different API key or is unavailable
 
 - **GIVEN** the token has no owner in the requesting API key scope

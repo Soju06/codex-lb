@@ -2801,6 +2801,23 @@ async def test_compact_turn_state_owner_lookup_is_api_key_scoped_and_fails_close
 
 
 @pytest.mark.asyncio
+async def test_compact_turn_state_owner_never_falls_back_to_unscoped_sticky_sessions() -> None:
+    def fail_repo_factory():
+        raise AssertionError("turn-state owner resolution must not query unscoped sticky sessions")
+
+    service = proxy_service.ProxyService(fail_repo_factory)
+    service._durable_bridge = SimpleNamespace(lookup_turn_state_target=AsyncMock(return_value=None))
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service._resolve_compact_turn_state_owner(
+            turn_state="turn-from-another-api-key-scope",
+            api_key=None,
+        )
+
+    assert _proxy_error_code(exc_info.value) == "turn_state_owner_unavailable"
+
+
+@pytest.mark.asyncio
 async def test_compact_turn_state_owner_is_a_strict_selection_constraint(monkeypatch: pytest.MonkeyPatch) -> None:
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))

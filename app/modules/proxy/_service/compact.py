@@ -494,24 +494,6 @@ class _CompactMixin:
         account_id = getattr(durable_lookup, "account_id", None)
         if isinstance(account_id, str) and account_id.strip():
             owner_account_ids.add(account_id)
-        if api_key is None:
-            try:
-                async with proxy._repo_factory() as repos:
-                    sticky_account_id = await repos.sticky_sessions.get_account_id(
-                        normalized_turn_state,
-                        kind=StickySessionKind.CODEX_SESSION,
-                    )
-            except Exception as exc:
-                raise ProxyResponseError(
-                    502,
-                    openai_error(
-                        "turn_state_owner_unavailable",
-                        "Turn-state owner account is unavailable; retry the logical turn.",
-                        error_type="server_error",
-                    ),
-                ) from exc
-            if isinstance(sticky_account_id, str) and sticky_account_id.strip():
-                owner_account_ids.add(sticky_account_id)
         if len(owner_account_ids) == 1:
             return next(iter(owner_account_ids))
         if len(owner_account_ids) > 1:

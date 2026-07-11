@@ -69,6 +69,7 @@ from app.modules.proxy._service.http_bridge.activity import _HTTPBridgeActivityM
 from app.modules.proxy._service.http_bridge.helpers import (
     _HTTP_BRIDGE_INFLIGHT_STARTED_AT_ATTR,
     _active_http_bridge_instance_ring,
+    _apply_http_bridge_reuse_metadata,
     _durable_bridge_lookup_active_owner,
     _durable_bridge_lookup_allows_local_reuse,
     _forwarded_http_bridge_session_key,
@@ -1287,7 +1288,6 @@ class _HTTPBridgeMixin(
                             )
                             self._http_bridge_inflight_sessions[key] = inflight_future
                             owns_creation = True
-
             try:
                 for session_to_close in sessions_to_close_before_create:
                     await self._close_http_bridge_session_bounded(session_to_close, reason="registry_detach")
@@ -1334,7 +1334,6 @@ class _HTTPBridgeMixin(
                 except Exception:
                     pass
                 continue
-
             if inflight_future is not None and not owns_creation:
                 wait_timeout_seconds = _proxy_admission_wait_timeout_seconds(settings)
                 try:
@@ -1374,6 +1373,7 @@ class _HTTPBridgeMixin(
                         key=key,
                         incoming_turn_state=incoming_turn_state,
                         previous_response_id=previous_response_id,
+                        require_security_work_authorized=require_security_work_authorized,
                     )
                     and _http_bridge_session_matches_preferred_account(
                         session=session,
@@ -1384,9 +1384,10 @@ class _HTTPBridgeMixin(
                 ):
                     current_instance = settings.http_responses_session_bridge_instance_id
                     if _durable_bridge_lookup_allows_local_reuse(durable_lookup, current_instance=current_instance):
-                        session.api_key = api_key
-                        session.request_model = request_model
-                        session.last_used_at = _service_time().monotonic()
+                        _apply_http_bridge_reuse_metadata(
+                            session, api_key, request_model, request_service_tier, require_security_work_authorized
+                        )
+                        await self._refresh_durable_http_bridge_session(session)
                         return session
                 if not session.closed and session.account.status == AccountStatus.ACTIVE:
                     old_account_id = session.account.id
@@ -1402,7 +1403,6 @@ class _HTTPBridgeMixin(
                     if detached is not None and not retiring_with_visible_requests:
                         self._schedule_http_bridge_session_closes([detached], reason="registry_detach")
                 continue
-
             created_session: _HTTPBridgeSession | None = None
             session_registered = False
             try:

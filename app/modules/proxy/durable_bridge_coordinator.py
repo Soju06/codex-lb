@@ -155,6 +155,11 @@ class DurableBridgeSessionCoordinator:
             snapshot = await DurableBridgeRepository(session).require_security_work_authorized(session_id=session_id)
         return _to_lookup(snapshot) if snapshot is not None else None
 
+    async def clear_security_work_authorized(self, *, session_id: str) -> DurableBridgeLookup | None:
+        async with self._session() as session:
+            snapshot = await DurableBridgeRepository(session).clear_security_work_authorized(session_id=session_id)
+        return _to_lookup(snapshot) if snapshot is not None else None
+
     async def renew_live_session(
         self,
         *,

@@ -1497,6 +1497,12 @@ class _HTTPBridgeRequestSubmitMixin:
                 request_state.force_refresh_account_id = previous_force_refresh_account_id
                 request_state.require_security_work_authorized = previous_request_security_requirement
                 session.requires_security_work_authorized = previous_session_security_requirement
+                if (
+                    require_security_work_authorized
+                    and not previous_session_security_requirement
+                    and session.durable_session_id is not None
+                ):
+                    await self._durable_bridge.clear_security_work_authorized(session_id=session.durable_session_id)
             if isinstance(exc, ProxyResponseError):
                 error = _parse_openai_error(exc.payload)
                 code = _normalize_error_code(error.code if error else None, error.type if error else None)

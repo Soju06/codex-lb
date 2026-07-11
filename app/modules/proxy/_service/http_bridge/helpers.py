@@ -772,7 +772,10 @@ def _http_bridge_session_reusable_for_request(
     key: "_HTTPBridgeSessionKey",
     incoming_turn_state: str | None,
     previous_response_id: str | None,
+    require_security_work_authorized: bool = False,
 ) -> bool:
+    if require_security_work_authorized and not bool(getattr(session.account, "security_work_authorized", False)):
+        return False
     if session.upstream_control.retire_after_drain:
         return False
     if key.affinity_kind != "prompt_cache":
@@ -782,6 +785,22 @@ def _http_bridge_session_reusable_for_request(
     if previous_response_id is not None:
         return True
     return not session.codex_session
+
+
+def _apply_http_bridge_reuse_metadata(
+    session: "_HTTPBridgeSession",
+    api_key: ApiKeyData | None,
+    request_model: str | None,
+    request_service_tier: str | None,
+    require_security_work_authorized: bool,
+) -> None:
+    session.api_key = api_key
+    session.request_model = request_model
+    session.request_service_tier = request_service_tier
+    session.requires_security_work_authorized = (
+        session.requires_security_work_authorized or require_security_work_authorized
+    )
+    session.last_used_at = _service_time().monotonic()
 
 
 def _http_bridge_session_matches_preferred_account(

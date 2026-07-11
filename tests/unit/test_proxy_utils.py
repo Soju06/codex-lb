@@ -11081,6 +11081,55 @@ async def test_http_bridge_retries_security_work_warning_on_authorized_account(m
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_failed_security_reconnect_rolls_back_new_durable_requirement(monkeypatch):
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_bridge_security_rollback")
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="bridge_req_security_rollback",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        awaiting_response_created=True,
+        request_text='{"type":"response.create","input":[]}',
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "security-rollback", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(),
+        request_model="gpt-5.6-sol",
+        account=account,
+        upstream=cast(proxy_service.UpstreamResponsesWebSocket, SimpleNamespace()),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=1.0,
+        idle_ttl_seconds=300.0,
+        durable_session_id="durable-security-rollback",
+    )
+    require_security = AsyncMock(return_value=SimpleNamespace(session_id=session.durable_session_id))
+    clear_security = AsyncMock(return_value=SimpleNamespace(session_id=session.durable_session_id))
+    monkeypatch.setattr(service._durable_bridge, "require_security_work_authorized", require_security)
+    monkeypatch.setattr(service._durable_bridge, "clear_security_work_authorized", clear_security)
+    monkeypatch.setattr(
+        service,
+        "_reconnect_http_bridge_session",
+        AsyncMock(side_effect=RuntimeError("replacement unavailable")),
+    )
+
+    retried = await service._retry_http_bridge_security_work_request(session, request_state)
+
+    assert retried is False
+    require_security.assert_awaited_once_with(session_id="durable-security-rollback")
+    clear_security.assert_awaited_once_with(session_id="durable-security-rollback")
+    assert request_state.require_security_work_authorized is False
+    assert session.requires_security_work_authorized is False
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_owner_error_replays_validated_full_resend_on_available_account(monkeypatch):
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     owner = _make_account("acc_bridge_owner_unavailable")

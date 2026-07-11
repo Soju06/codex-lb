@@ -315,6 +315,16 @@ class DurableBridgeRepository:
             await self._session.refresh(row)
         return _to_snapshot(row)
 
+    async def clear_security_work_authorized(self, *, session_id: str) -> DurableBridgeSessionSnapshot | None:
+        row = await self._session.get(HttpBridgeSessionRecord, session_id)
+        if row is None:
+            return None
+        if row.requires_security_work_authorized:
+            row.requires_security_work_authorized = False
+            await self._commit_writer_section()
+            await self._session.refresh(row)
+        return _to_snapshot(row)
+
     async def release_session(
         self,
         *,

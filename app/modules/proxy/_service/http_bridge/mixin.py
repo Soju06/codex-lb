@@ -1382,10 +1382,7 @@ class _HTTPBridgeMixin(
                     if detached is not None:
                         force_durable_takeover_after_detach = True
                     if detached is not None and not retiring_with_visible_requests:
-                        self._schedule_http_bridge_session_closes(
-                            [detached],
-                            reason="registry_detach",
-                        )
+                        self._schedule_http_bridge_session_closes([detached], reason="registry_detach")
                 continue
 
             created_session: _HTTPBridgeSession | None = None
@@ -1530,10 +1527,7 @@ class _HTTPBridgeMixin(
             # pruning it during admission or durable refresh would invalidate the handoff.
             if getattr(session, "unanchored_reservation_id", None) is not None:
                 continue
-            pending_count = self._http_bridge_pending_count_nowait(
-                session,
-                context="idle_prune",
-            )
+            pending_count = self._http_bridge_pending_count_nowait(session, context="idle_prune")
             if pending_count is None:
                 continue
             if pending_count:
@@ -1834,10 +1828,7 @@ class _HTTPBridgeMixin(
                 return
             raise
 
-    async def _refresh_durable_http_bridge_session(
-        self,
-        session: "_HTTPBridgeSession",
-    ) -> None:
+    async def _refresh_durable_http_bridge_session(self, session: "_HTTPBridgeSession") -> None:
         if session.durable_session_id is None or session.durable_owner_epoch is None:
             return
         try:

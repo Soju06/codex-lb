@@ -1437,6 +1437,10 @@ class _HTTPBridgeRequestSubmitMixin:
         previous_preferred_account_id = request_state.preferred_account_id
         previous_excluded_account_ids = set(request_state.excluded_account_ids)
         previous_replay_count = request_state.replay_count
+        previous_response_id_value = request_state.response_id
+        previous_response_event_count = request_state.response_event_count
+        previous_replay_downstream_response_id = request_state.replay_downstream_response_id
+        previous_suppress_next_created_downstream = request_state.suppress_next_created_downstream
         previous_awaiting_response_created = request_state.awaiting_response_created
         previous_force_refresh_account_id = request_state.force_refresh_account_id
         previous_request_security_requirement = request_state.require_security_work_authorized
@@ -1448,7 +1452,15 @@ class _HTTPBridgeRequestSubmitMixin:
         request_state.excluded_account_ids.add(owner_account_id)
 
         request_state.replay_count += 1
+        if request_state.response_id is not None and not request_state.awaiting_response_created:
+            # response.created is not user-visible output, so a created-only
+            # denial can still move to another owner.  Keep the id already
+            # emitted downstream, suppress the replacement response.created,
+            # and rewrite the replacement stream to that original id.
+            request_state.replay_downstream_response_id = request_state.response_id
+            request_state.suppress_next_created_downstream = True
         request_state.response_id = None
+        request_state.response_event_count = 0
         request_state.awaiting_response_created = True
         if retry_text != request_state.request_text:
             request_state.previous_response_id = None
@@ -1503,6 +1515,10 @@ class _HTTPBridgeRequestSubmitMixin:
                 request_state.preferred_account_id = previous_preferred_account_id
                 request_state.excluded_account_ids = previous_excluded_account_ids
                 request_state.replay_count = previous_replay_count
+                request_state.response_id = previous_response_id_value
+                request_state.response_event_count = previous_response_event_count
+                request_state.replay_downstream_response_id = previous_replay_downstream_response_id
+                request_state.suppress_next_created_downstream = previous_suppress_next_created_downstream
                 request_state.awaiting_response_created = previous_awaiting_response_created
                 request_state.force_refresh_account_id = previous_force_refresh_account_id
                 request_state.require_security_work_authorized = previous_request_security_requirement

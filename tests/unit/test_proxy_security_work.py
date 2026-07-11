@@ -274,6 +274,9 @@ async def test_http_bridge_security_retry_after_response_created_requires_no_vis
         require_security_work_authorized: bool,
     ) -> None:
         assert request_state.response_id is None
+        assert request_state.response_event_count == 0
+        assert request_state.replay_downstream_response_id == "resp-created-before-cyber-denial"
+        assert request_state.suppress_next_created_downstream is True
         assert require_security_work_authorized is True
         _session.account = authorized_account
         _session.upstream = cast(
@@ -294,6 +297,8 @@ async def test_http_bridge_security_retry_after_response_created_requires_no_vis
     else:
         mark_durable.assert_awaited_once_with(session_id="durable-security-created")
         assert request_state.response_id is None
+        assert request_state.replay_downstream_response_id == "resp-created-before-cyber-denial"
+        assert request_state.suppress_next_created_downstream is True
         assert request_state.require_security_work_authorized is True
         assert session.requires_security_work_authorized is True
         assert session.account is authorized_account
@@ -317,7 +322,9 @@ async def test_http_bridge_failed_owner_failover_restores_original_continuity_st
         api_key_reservation=None,
         started_at=1.0,
         transport="http",
-        awaiting_response_created=True,
+        awaiting_response_created=False,
+        response_id="resp-created-owner",
+        response_event_count=1,
         previous_response_id="resp-owner",
         proxy_injected_previous_response_id=True,
         preferred_account_id=owner_account.id,
@@ -351,6 +358,10 @@ async def test_http_bridge_failed_owner_failover_restores_original_continuity_st
     )
     assert request_state.responses_lite_model == "gpt-5.6-sol"
     assert request_state.replay_count == 0
+    assert request_state.response_id == "resp-created-owner"
+    assert request_state.response_event_count == 1
+    assert request_state.replay_downstream_response_id is None
+    assert request_state.suppress_next_created_downstream is False
     assert request_state.require_security_work_authorized is False
     assert session.requires_security_work_authorized is False
     assert list(session.pending_requests) == [request_state]

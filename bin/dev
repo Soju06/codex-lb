@@ -24,9 +24,16 @@ PY
 
 pid_is_ours() {
   local pid="$1"
-  [[ -r "/proc/$pid/cmdline" && -L "/proc/$pid/cwd" ]] || return 1
-  [[ "$(readlink -f "/proc/$pid/cwd")" == "$ROOT" ]] || return 1
-  tr '\0' ' ' <"/proc/$pid/cmdline" | grep -Fq 'codex-lb'
+  if [[ -r "/proc/$pid/cmdline" && -L "/proc/$pid/cwd" ]]; then
+    [[ "$(readlink -f "/proc/$pid/cwd")" == "$ROOT" ]] || return 1
+    tr '\0' ' ' <"/proc/$pid/cmdline" | grep -Fq 'codex-lb'
+    return
+  fi
+
+  local command port
+  command="$(ps -p "$pid" -o command= 2>/dev/null)" || return 1
+  port="$(cat "$PORT_FILE" 2>/dev/null)" || return 1
+  [[ "$command" == *"codex-lb"* && "$command" == *"--host $HOST"* && "$command" == *"--port $port"* ]]
 }
 
 running_pid() {

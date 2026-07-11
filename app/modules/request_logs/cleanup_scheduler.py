@@ -35,6 +35,16 @@ def request_log_cleanup_health() -> str:
     return f"ok:{_STATE.last_deleted_count}"
 
 
+def request_log_cleanup_is_ready(*, interval_seconds: int, leader_election_enabled: bool) -> bool:
+    if _STATE.last_error is not None:
+        return False
+    if leader_election_enabled and _STATE.last_success_at is None:
+        return True
+    if _STATE.last_success_at is None:
+        return False
+    return (utcnow() - _STATE.last_success_at).total_seconds() <= interval_seconds * 2
+
+
 class _LeaderElectionLike(Protocol):
     async def try_acquire(self) -> bool: ...
 

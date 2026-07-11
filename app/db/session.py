@@ -212,6 +212,19 @@ def _load_sqlite_backup_creator() -> _SqliteBackupCreator:
     return create_sqlite_pre_migration_backup
 
 
+def _prune_sqlite_backups() -> int:
+    from app.db.backup import prune_sqlite_pre_migration_backups
+
+    sqlite_path = sqlite_db_path_from_url(_settings.database_url)
+    if sqlite_path is None:
+        return 0
+    return prune_sqlite_pre_migration_backups(
+        sqlite_path,
+        max_files=_settings.database_sqlite_pre_migrate_backup_max_files,
+        max_age_days=_settings.database_sqlite_pre_migrate_backup_max_age_days,
+    )
+
+
 def init_background_db(url: str | None = None) -> None:
     """Initialize separate DB pool for background tasks (smaller pool).
 
@@ -328,6 +341,11 @@ async def init_db() -> None:
     except ImportError as exc:
         logger.exception("Failed to import database migration entrypoints from app.db.migrate")
         raise RuntimeError("Database migration entrypoint app.db.migrate is invalid") from exc
+
+    if sqlite_path is not None and _settings.database_sqlite_pre_migrate_backup_enabled:
+        pruned_backup_count = await to_thread.run_sync(_prune_sqlite_backups)
+        if pruned_backup_count:
+            logger.info("Pruned expired SQLite pre-migration backups deleted_count=%s", pruned_backup_count)
 
     if not _settings.database_migrate_on_startup:
         migration_state = await to_thread.run_sync(

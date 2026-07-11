@@ -19,7 +19,11 @@ from sqlalchemy.engine import Connection
 
 import app.db.migrate as migrate_module
 from app.db.alembic.revision_ids import OLD_TO_NEW_REVISION_MAP
-from app.db.backup import create_sqlite_pre_migration_backup, list_sqlite_pre_migration_backups
+from app.db.backup import (
+    create_sqlite_pre_migration_backup,
+    list_sqlite_pre_migration_backups,
+    prune_sqlite_pre_migration_backups,
+)
 from app.db.migrate import (
     MigrationBootstrapError,
     _build_alembic_config,
@@ -1737,6 +1741,20 @@ def test_create_sqlite_pre_migration_backup_expires_old_files_by_age(tmp_path: P
 
     assert not old_backup.exists()
     assert fresh_backup.exists()
+
+
+def test_prune_sqlite_pre_migration_backups_expires_without_creating_replacement(tmp_path: Path) -> None:
+    db_path = tmp_path / "store.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("CREATE TABLE items (id INTEGER PRIMARY KEY)")
+
+    now = datetime(2026, 7, 11, 12, 0, 0, tzinfo=timezone.utc)
+    old_backup = create_sqlite_pre_migration_backup(db_path, max_files=5, now=now - timedelta(days=31))
+    old_timestamp = (now - timedelta(days=31)).timestamp()
+    os.utime(old_backup, (old_timestamp, old_timestamp))
+
+    assert prune_sqlite_pre_migration_backups(db_path, max_files=5, max_age_days=30, now=now) == 1
+    assert list_sqlite_pre_migration_backups(db_path) == []
 
 
 def test_create_sqlite_pre_migration_backup_consolidates_wal_rows(tmp_path: Path) -> None:

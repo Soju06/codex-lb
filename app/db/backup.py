@@ -29,6 +29,36 @@ def list_sqlite_pre_migration_backups(source: Path) -> list[Path]:
     return sorted((path for path in source.parent.glob(pattern) if path.is_file()))
 
 
+def prune_sqlite_pre_migration_backups(
+    source: Path,
+    *,
+    max_files: int,
+    max_age_days: int | None = None,
+    now: datetime | None = None,
+) -> int:
+    if max_files < 1:
+        raise ValueError("max_files must be >= 1")
+    if max_age_days is not None and max_age_days < 1:
+        raise ValueError("max_age_days must be >= 1")
+    timestamp = now or datetime.now(timezone.utc)
+    backups = list_sqlite_pre_migration_backups(source)
+    removed = 0
+    if max_age_days is not None:
+        cutoff = timestamp - timedelta(days=max_age_days)
+        for old_backup in backups:
+            modified_at = datetime.fromtimestamp(old_backup.stat().st_mtime, tz=timezone.utc)
+            if modified_at < cutoff:
+                old_backup.unlink()
+                removed += 1
+        backups = list_sqlite_pre_migration_backups(source)
+    excess = len(backups) - max_files
+    if excess > 0:
+        for old_backup in backups[:excess]:
+            old_backup.unlink()
+            removed += 1
+    return removed
+
+
 def _sqlite_backup(source: Path, backup_path: Path) -> None:
     source_mode = source.stat().st_mode
     with sqlite3.connect(source) as source_conn:
@@ -57,17 +87,11 @@ def create_sqlite_pre_migration_backup(
 
     _sqlite_backup(source, backup_path)
 
-    backups = list_sqlite_pre_migration_backups(source)
-    if max_age_days is not None:
-        cutoff = timestamp - timedelta(days=max_age_days)
-        for old_backup in backups:
-            modified_at = datetime.fromtimestamp(old_backup.stat().st_mtime, tz=timezone.utc)
-            if modified_at < cutoff:
-                old_backup.unlink()
-        backups = list_sqlite_pre_migration_backups(source)
-    excess = len(backups) - max_files
-    if excess > 0:
-        for old_backup in backups[:excess]:
-            old_backup.unlink()
+    prune_sqlite_pre_migration_backups(
+        source,
+        max_files=max_files,
+        max_age_days=max_age_days,
+        now=timestamp,
+    )
 
     return backup_path

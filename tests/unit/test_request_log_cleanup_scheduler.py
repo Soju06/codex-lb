@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -56,3 +57,39 @@ async def test_disabled_cleanup_does_not_acquire_leader() -> None:
     with patch.object(cleanup_scheduler, "_get_leader_election") as leader:
         assert await scheduler._cleanup_once() == 0
     leader.assert_not_called()
+
+
+def test_cleanup_readiness_fails_closed_for_single_instance_error_or_staleness() -> None:
+    original = cleanup_scheduler.RequestLogCleanupState(
+        last_attempt_at=cleanup_scheduler._STATE.last_attempt_at,
+        last_success_at=cleanup_scheduler._STATE.last_success_at,
+        last_deleted_count=cleanup_scheduler._STATE.last_deleted_count,
+        last_error=cleanup_scheduler._STATE.last_error,
+    )
+    try:
+        cleanup_scheduler._STATE.last_success_at = None
+        cleanup_scheduler._STATE.last_error = None
+        assert (
+            cleanup_scheduler.request_log_cleanup_is_ready(interval_seconds=60, leader_election_enabled=False) is False
+        )
+
+        cleanup_scheduler._STATE.last_success_at = cleanup_scheduler.utcnow() - timedelta(seconds=121)
+        assert (
+            cleanup_scheduler.request_log_cleanup_is_ready(interval_seconds=60, leader_election_enabled=False) is False
+        )
+
+        cleanup_scheduler._STATE.last_success_at = cleanup_scheduler.utcnow()
+        cleanup_scheduler._STATE.last_error = "DatabaseError"
+        assert (
+            cleanup_scheduler.request_log_cleanup_is_ready(interval_seconds=60, leader_election_enabled=False) is False
+        )
+
+        cleanup_scheduler._STATE.last_error = None
+        assert (
+            cleanup_scheduler.request_log_cleanup_is_ready(interval_seconds=60, leader_election_enabled=False) is True
+        )
+    finally:
+        cleanup_scheduler._STATE.last_attempt_at = original.last_attempt_at
+        cleanup_scheduler._STATE.last_success_at = original.last_success_at
+        cleanup_scheduler._STATE.last_deleted_count = original.last_deleted_count
+        cleanup_scheduler._STATE.last_error = original.last_error

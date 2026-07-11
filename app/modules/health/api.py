@@ -5,13 +5,13 @@ from hashlib import sha256
 from ipaddress import ip_address
 
 from fastapi import APIRouter, HTTPException, Request
+from sqlalchemy import func, text
 from sqlalchemy import select as sa_select
-from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config.settings import get_settings
 from app.core.utils.time import utcnow
-from app.db.models import BridgeRingMember
+from app.db.models import BridgeRingMember, RequestLog
 from app.db.session import get_session
 from app.modules.health.schemas import BridgeRingInfo, HealthCheckResponse, HealthResponse
 from app.modules.proxy.ring_membership import RING_STALE_THRESHOLD_SECONDS
@@ -59,10 +59,27 @@ async def health_ready() -> HealthCheckResponse:
             try:
                 await session.execute(text("SELECT 1"))
                 checks = {"database": "ok"}
-                if get_settings().request_log_retention_days is not None:
-                    from app.modules.request_logs.cleanup_scheduler import request_log_cleanup_health
+                retention_days = get_settings().request_log_retention_days
+                if retention_days is not None:
+                    from app.modules.request_logs.cleanup_scheduler import (
+                        request_log_cleanup_health,
+                        request_log_cleanup_is_ready,
+                    )
 
                     checks["request_log_cleanup"] = request_log_cleanup_health()
+                    settings = get_settings()
+                    if not request_log_cleanup_is_ready(
+                        interval_seconds=settings.request_log_cleanup_interval_seconds,
+                        leader_election_enabled=settings.leader_election_enabled,
+                    ):
+                        raise HTTPException(status_code=503, detail="Request log retention cleanup is not healthy")
+                    oldest_requested_at = (
+                        await session.execute(sa_select(func.min(RequestLog.requested_at)))
+                    ).scalar_one_or_none()
+                    if oldest_requested_at is not None:
+                        cutoff = utcnow() - timedelta(days=retention_days)
+                        if oldest_requested_at < cutoff:
+                            raise HTTPException(status_code=503, detail="Request log retention age exceeds policy")
                 status = "ok"
 
                 # Upstream health (degradation flag, circuit breaker) is NOT

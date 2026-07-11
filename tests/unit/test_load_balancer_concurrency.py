@@ -418,6 +418,31 @@ async def test_account_stream_recovery_reserve_keeps_last_slot_for_reattach() ->
 
 
 @pytest.mark.asyncio
+async def test_account_stream_recovery_reserve_keeps_ordinary_slot_when_cap_is_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = SimpleNamespace(proxy_account_response_create_limit=64, proxy_account_stream_limit=1)
+    monkeypatch.setattr(load_balancer_module, "get_settings", lambda: settings)
+    account = _make_account("acc-stream-recovery-reserve-cap-one")
+    balancer = LoadBalancer(
+        lambda: _repo_factory(
+            _StubAccountsRepository([account]),
+            _StubUsageRepository(primary={}, secondary={}),
+        )
+    )
+
+    ordinary = await balancer.select_account(
+        routing_strategy="usage_weighted",
+        lease_kind="stream",
+        stream_reserve_slots=1,
+    )
+
+    assert ordinary.account is not None
+    assert ordinary.account.id == account.id
+    await balancer.release_account_lease(ordinary.lease)
+
+
+@pytest.mark.asyncio
 async def test_account_response_create_cap_prefers_unsaturated_account() -> None:
     now_epoch = int(datetime.now(tz=timezone.utc).timestamp())
     account_a = _make_account("acc-response-create-cap-a")

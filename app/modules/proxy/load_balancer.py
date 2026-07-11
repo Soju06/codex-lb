@@ -252,7 +252,7 @@ class LoadBalancer:
             cap = get_settings().proxy_account_response_create_limit
             return cap <= 0 or runtime.inflight_response_creates < cap
         cap = get_settings().proxy_account_stream_limit
-        effective_cap = max(0, cap - max(0, stream_reserve_slots))
+        effective_cap = max(1, cap - max(0, stream_reserve_slots))
         return cap <= 0 or runtime.inflight_streams < effective_cap
 
     def _release_account_lease_locked(self, lease: AccountLease, *, reason: str) -> bool:
@@ -1744,7 +1744,7 @@ def _filter_states_for_account_caps(
                 continue
         else:
             cap = settings.proxy_account_stream_limit
-            effective_cap = max(0, cap - max(0, stream_reserve_slots))
+            effective_cap = max(1, cap - max(0, stream_reserve_slots))
             if cap > 0 and state.inflight_streams >= effective_cap:
                 continue
         filtered.append(state)

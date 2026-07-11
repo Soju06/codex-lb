@@ -911,7 +911,9 @@ class _HTTPBridgeStreamingMixin:
                             allow_previous_response_recovery_rebind=should_attempt_previous_response_recovery,
                             allow_bootstrap_owner_rebind=should_attempt_bootstrap_rebind,
                             durable_lookup=durable_lookup,
-                            request_stage="reattach",
+                            request_stage=(
+                                "reattach" if should_attempt_previous_response_recovery else "bootstrap_rebind"
+                            ),
                             preferred_account_id=request_state.preferred_account_id,
                             request_usage_budget=request_state.request_usage_budget,
                             request_deadline=request_deadline,

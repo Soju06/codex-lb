@@ -11133,14 +11133,16 @@ async def test_select_websocket_connect_account_requires_preferred_account_for_p
         reasoning_effort=None,
         api_key_reservation=None,
         started_at=0.0,
+        request_stage="reattach",
     )
     selected_account = _make_account("acc_other")
     emit_connect_failure = AsyncMock()
+    select_account = AsyncMock(return_value=AccountSelection(account=selected_account, error_message=None))
 
     monkeypatch.setattr(
         service,
         "_select_account_with_budget",
-        AsyncMock(return_value=AccountSelection(account=selected_account, error_message=None)),
+        select_account,
     )
     monkeypatch.setattr(service, "_emit_websocket_connect_failure", emit_connect_failure)
 
@@ -11170,6 +11172,8 @@ async def test_select_websocket_connect_account_requires_preferred_account_for_p
     assert call.kwargs["status_code"] == 502
     assert call.kwargs["error_code"] == "previous_response_owner_unavailable"
     assert call.kwargs["account_id"] == "acc_owner"
+    assert select_account.await_args is not None
+    assert select_account.await_args.kwargs["request_stage"] == "reattach"
 
 
 @pytest.mark.asyncio
@@ -21912,7 +21916,10 @@ async def test_select_account_with_budget_forwards_estimated_lease_tokens(monkey
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("request_stage", "expected_reserve"), [("first_turn", 1), ("follow_up", 1), ("reattach", 0)])
+@pytest.mark.parametrize(
+    ("request_stage", "expected_reserve"),
+    [("first_turn", 1), ("follow_up", 1), ("bootstrap_rebind", 1), ("reattach", 0)],
+)
 async def test_select_account_with_budget_reserves_stream_slot_for_reattach(
     monkeypatch,
     request_stage,

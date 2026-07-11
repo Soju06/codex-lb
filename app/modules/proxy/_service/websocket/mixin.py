@@ -680,6 +680,7 @@ class _WebSocketMixin:
                 if replay_request_state is not None:
                     request_state = replay_request_state
                     replay_request_state = None
+                    request_state.request_stage = "reattach"
                     request_affinity = request_state.affinity_policy
                     text_data = request_state.request_text
                     if text_data is None:
@@ -1775,6 +1776,7 @@ class _WebSocketMixin:
                     preferred_account_id=preferred_account_id,
                     require_security_work_authorized=require_security_work_authorized,
                     lease_kind="stream",
+                    request_stage=request_state.request_stage,
                     estimated_lease_tokens=_facade()._estimated_lease_tokens_from_request_usage_budget(
                         request_state.request_usage_budget
                     ),

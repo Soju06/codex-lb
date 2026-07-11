@@ -64,6 +64,7 @@ from app.modules.proxy.load_balancer import (
     RuntimeState,
     SelectionInputs,
     _filter_accounts_for_model,
+    _mapped_model_has_registry_entry,
 )
 from app.modules.proxy.repo_bundle import ProxyRepositories
 from app.modules.proxy.sticky_repository import StickySessionsRepository
@@ -26029,6 +26030,32 @@ def test_filter_accounts_for_model_uses_authoritative_account_capabilities(monke
 
     monkeypatch.setattr("app.modules.proxy.load_balancer.get_model_registry", lambda: Registry())
 
+    assert _filter_accounts_for_model([unsupported, supported], "gpt-5.6-sol") == [supported]
+
+
+@pytest.mark.asyncio
+async def test_cleared_registry_keeps_bootstrap_plan_gating_in_new_account_window(monkeypatch):
+    # Regression for the follow-on Codex P2: after the scheduler observes zero
+    # active accounts and clears the registry, an account can be added before the
+    # next refresh tick. In that window a canonical bootstrap model must still be
+    # recognized (so model/plan filtering runs) and an account whose plan does not
+    # support the model must be filtered out instead of being selected.
+    from app.core.openai.model_registry import ModelRegistry
+
+    registry = ModelRegistry(ttl_seconds=60.0)
+    await registry.clear()
+    monkeypatch.setattr("app.modules.proxy.load_balancer.get_model_registry", lambda: registry)
+
+    # Canonical bootstrap model is still recognized (not treated as absent).
+    assert _mapped_model_has_registry_entry("gpt-5.6-sol") is True
+
+    supported = _make_account("acc_cleared_supported")
+    supported.plan_type = "pro"
+    unsupported = _make_account("acc_cleared_unsupported")
+    unsupported.plan_type = "legacy_unlisted_plan"
+
+    # Plan gating still applies via the bootstrap catalog: the unsupported plan is
+    # excluded rather than selected during the pre-refresh window.
     assert _filter_accounts_for_model([unsupported, supported], "gpt-5.6-sol") == [supported]
 
 

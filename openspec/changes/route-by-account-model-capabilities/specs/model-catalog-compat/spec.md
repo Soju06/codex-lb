@@ -33,6 +33,14 @@ capability indexes MUST NOT be treated as authoritative and selection MUST use
 the existing plan-level fallback. Operator-mapped model slugs MUST NOT be
 rejected solely because they are absent from subscription catalog discovery.
 
+When there is no authoritative account coverage — including when every account
+is removed and live capability state is cleared — the static bootstrap catalog
+MUST remain the discovery and plan-gating floor. Clearing capability state MUST
+NOT publish an authoritative-empty catalog that reports canonical models as
+absent; otherwise, in the window after an account is added but before the next
+scheduled refresh, model/plan filtering would be skipped (an unsupported plan
+could be selected) and `/v1/models` would report no models.
+
 #### Scenario: Catalog fetch partially fails after restart
 
 - **GIVEN** there is no previous registry snapshot
@@ -40,6 +48,14 @@ rejected solely because they are absent from subscription catalog discovery.
 - **WHEN** selection evaluates a model or service tier
 - **THEN** the partial index is non-authoritative
 - **AND** the failed account is not classified as lacking every capability
+
+#### Scenario: No active accounts fall back to the bootstrap floor
+
+- **GIVEN** live capability state is cleared because no active accounts remain
+- **WHEN** an account is added before the next scheduled refresh completes
+- **THEN** canonical bootstrap models remain discoverable via `/v1/models`
+- **AND** those models remain plan-gated by the bootstrap catalog
+- **AND** an account whose plan does not support the model is not selected
 
 #### Scenario: Failed refresh has last-known account data
 

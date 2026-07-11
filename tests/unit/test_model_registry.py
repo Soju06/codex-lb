@@ -604,16 +604,31 @@ async def test_stale_plan_drops_models_only_removed_account_advertised():
 
 
 @pytest.mark.asyncio
-async def test_clear_publishes_authoritative_empty_snapshot():
+async def test_clear_falls_back_to_bootstrap_floor():
+    # Regression for the follow-on Codex P2: clearing on zero active accounts must
+    # NOT publish an authoritative-empty snapshot that suppresses bootstrap. It must
+    # reset to the bootstrap floor (as if never refreshed) so that when an account is
+    # added before the next refresh tick, canonical models are still discoverable and
+    # still plan-gated (not treated as absent). Bootstrap is the floor whenever there
+    # is no authoritative account coverage.
     registry = ModelRegistry(ttl_seconds=60.0)
     await registry.update({"plus": [_model("gpt-5.4")]})
 
     await registry.clear()
 
-    assert registry.get_models_with_fallback() == {}
-    assert registry.plan_types_for_model("gpt-5.4") == frozenset()
-    assert registry.account_ids_for_model("gpt-5.4") == frozenset()
-    assert registry.account_ids_for_model_service_tier("gpt-5.4", "priority") == frozenset()
+    # No live snapshot -> readers fall back to the static bootstrap catalog.
+    assert registry.get_snapshot() is None
+    bootstrap_models = registry.get_models_with_fallback()
+    assert "gpt-5.6-sol" in bootstrap_models
+    # A canonical bootstrap model still exposes its plan gating (non-empty), so
+    # _mapped_model_has_registry_entry-style checks keep model/plan filtering on.
+    sol_plans = registry.plan_types_for_model("gpt-5.6-sol")
+    assert sol_plans is not None and len(sol_plans) > 0
+    assert "pro" in sol_plans
+    # Per-account coverage is unknown (not authoritatively empty), so routing falls
+    # back to plan-level gating instead of excluding every account.
+    assert registry.account_ids_for_model("gpt-5.6-sol") is None
+    assert registry.account_ids_for_model_service_tier("gpt-5.6-sol", "priority") is None
 
 
 def test_needs_refresh_true_initially():

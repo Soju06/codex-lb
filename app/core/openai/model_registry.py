@@ -585,19 +585,21 @@ class ModelRegistry:
         return (time.monotonic() - self._snapshot.fetched_at) >= self._ttl_seconds
 
     async def clear(self) -> None:
-        """Publish an authoritative empty snapshot when no active accounts exist."""
+        """Drop live capability state when no active accounts remain.
+
+        This resets to the bootstrap-floor state (equivalent to never having
+        refreshed): every reader falls back to the static bootstrap catalog. We
+        must NOT publish an authoritative-empty snapshot here. If we did, then in
+        the window after an account is added but before the next scheduled refresh
+        tick, ``plan_types_for_model`` / ``get_models_with_fallback`` would report
+        even canonical models as absent (because ``_snapshot`` is no longer
+        ``None``), so ``_mapped_model_has_registry_entry`` would skip model/plan
+        filtering and let an unsupported plan be selected, and ``/v1/models`` would
+        stay empty until the timer fires. Bootstrap remains the discovery/gating
+        floor whenever there is no authoritative account coverage.
+        """
         async with self._lock:
-            self._snapshot = ModelRegistrySnapshot(
-                models={},
-                model_plans={},
-                plan_models={},
-                model_service_tier_plans={},
-                model_service_tier_accounts={},
-                account_plans={},
-                fetched_at=time.monotonic(),
-                model_accounts={},
-                account_catalogs_authoritative=True,
-            )
+            self._snapshot = None
 
     async def update(
         self,

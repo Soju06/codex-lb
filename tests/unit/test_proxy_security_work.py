@@ -13,7 +13,6 @@ import pytest
 
 from app.core.clients.proxy_websocket import UpstreamResponsesWebSocket
 from app.modules.proxy import service as proxy_service
-from app.modules.proxy._service.websocket.helpers import _prepare_websocket_request_state_for_owner_failover
 from tests.unit.test_proxy_http_bridge import _make_app_settings, _make_bridge_session
 from tests.unit.test_proxy_utils import _make_account, _repo_factory, _RequestLogsRecorder
 
@@ -199,58 +198,6 @@ async def test_http_bridge_reconnect_claims_durable_owner_before_publishing_acco
     assert session.account is replacement_account
     assert session.upstream is replacement_upstream
     old_upstream_close.assert_awaited_once()
-
-
-def test_websocket_replay_safe_owner_failover_can_migrate_without_security_filter() -> None:
-    request_state = proxy_service._WebSocketRequestState(
-        request_id="ws-owner-replay",
-        model="gpt-5.6-sol",
-        service_tier=None,
-        reasoning_effort=None,
-        api_key_reservation=None,
-        started_at=1.0,
-        previous_response_id="resp-owner",
-        preferred_account_id="acc-owner",
-        request_text='{"type":"response.create","previous_response_id":"resp-owner","input":[]}',
-        fresh_upstream_request_text='{"type":"response.create","input":[]}',
-        fresh_upstream_request_is_retry_safe=True,
-    )
-    excluded_account_ids: set[str] = set()
-
-    assert _prepare_websocket_request_state_for_owner_failover(
-        request_state,
-        owner_account_id="acc-owner",
-        exclude_account_ids=excluded_account_ids,
-    )
-    assert request_state.require_security_work_authorized is False
-    assert request_state.preferred_account_id is None
-    assert excluded_account_ids == {"acc-owner"}
-
-
-def test_websocket_file_pin_owner_failover_stays_fail_closed() -> None:
-    request_state = proxy_service._WebSocketRequestState(
-        request_id="ws-file-owner",
-        model="gpt-5.6-sol",
-        service_tier=None,
-        reasoning_effort=None,
-        api_key_reservation=None,
-        started_at=1.0,
-        previous_response_id="resp-owner",
-        preferred_account_id="acc-owner",
-        file_required_preferred_account=True,
-        request_text='{"type":"response.create","previous_response_id":"resp-owner","input":[]}',
-        fresh_upstream_request_text='{"type":"response.create","input":[]}',
-        fresh_upstream_request_is_retry_safe=True,
-    )
-    excluded_account_ids: set[str] = set()
-
-    assert not _prepare_websocket_request_state_for_owner_failover(
-        request_state,
-        owner_account_id="acc-owner",
-        exclude_account_ids=excluded_account_ids,
-    )
-    assert request_state.preferred_account_id == "acc-owner"
-    assert excluded_account_ids == set()
 
 
 @pytest.mark.asyncio

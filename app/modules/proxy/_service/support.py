@@ -626,7 +626,7 @@ def _websocket_request_can_replay_before_visible_output(request_state: _WebSocke
     created_only_pending = (
         request_state.response_id is not None
         and not request_state.awaiting_response_created
-        and request_state.response_event_count == 1
+        and request_state.response_event_count <= 1
         and (request_state.previous_response_id is None or has_retry_safe_fresh_payload)
     )
     if precreated_pending and request_state.response_event_count > 0:

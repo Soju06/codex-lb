@@ -359,28 +359,10 @@ def _prepare_websocket_request_state_for_visible_output_replay(
     request_state.awaiting_response_created = True
     request_state.response_id = None
     request_state.response_event_count = 0
-    request_state.request_stage = "reattach"
     request_state.replay_downstream_response_id = downstream_response_id
     request_state.suppress_next_created_downstream = downstream_response_id is not None
     _clear_websocket_request_error_overrides(request_state)
     return request_text
-
-
-def _prepare_websocket_request_state_for_owner_failover(
-    request_state: "_WebSocketRequestState",
-    *,
-    owner_account_id: str,
-    exclude_account_ids: set[str],
-) -> bool:
-    if request_state.file_required_preferred_account:
-        return False
-    if not (request_state.fresh_upstream_request_is_retry_safe and request_state.fresh_upstream_request_text):
-        return False
-    request_state.preferred_account_id = None
-    if _prepare_websocket_request_state_for_visible_output_replay(request_state) is None:
-        return False
-    exclude_account_ids.add(owner_account_id)
-    return True
 
 
 def _websocket_continuity_anchor_for_payload(
@@ -749,7 +731,6 @@ def _prepare_websocket_request_state_for_auth_replay(
     request_state.awaiting_response_created = True
     request_state.response_id = None
     request_state.response_event_count = 0
-    request_state.request_stage = "reattach"
     _clear_websocket_request_error_overrides(request_state)
     return request_text
 

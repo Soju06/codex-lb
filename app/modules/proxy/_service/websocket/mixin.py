@@ -369,7 +369,6 @@ from app.modules.proxy._service.websocket.helpers import (
     _pop_replayable_precreated_websocket_request_state,
     _pop_terminal_websocket_request_state,
     _prepare_websocket_request_state_for_auth_replay,
-    _prepare_websocket_request_state_for_owner_failover,
     _record_websocket_continuity_completion,
     _record_websocket_responses_lite_acceptance,
     _release_websocket_response_create_gate,
@@ -1804,31 +1803,7 @@ class _WebSocketMixin:
                 raise
 
             account = selection.account
-            owner_unavailable = (
-                require_preferred_account
-                and preferred_account_id is not None
-                and (account is None or account.id != preferred_account_id)
-            )
-            if owner_unavailable:
-                if _prepare_websocket_request_state_for_owner_failover(
-                    request_state,
-                    owner_account_id=preferred_account_id,
-                    exclude_account_ids=exclude_account_ids,
-                ):
-                    await proxy._load_balancer.release_account_lease(selection.lease)
-                    preferred_account_id = None
-                    require_preferred_account = False
-                    require_security_work_authorized = request_state.require_security_work_authorized
-                    reallocate_sticky = True
-                    _facade().logger.info(
-                        "websocket_owner_unavailable_fresh_security_replay request_id=%s model=%s",
-                        request_state.request_log_id or request_state.request_id,
-                        model,
-                    )
-                    continue
-                if account is not None:
-                    break
-            elif account is not None:
+            if account is not None:
                 break
 
             async def _heartbeat(remaining_seconds: float) -> None:
@@ -3152,19 +3127,11 @@ class _WebSocketMixin:
                 payload=payload,
                 has_other_pending_requests=has_other_pending_requests,
             )
-        fresh_owner_failover = bool(
-            retry_error_code in _facade()._WEBSOCKET_TRANSPARENT_REPLAY_ERROR_CODES
-            and request_state.previous_response_id is not None
-            and request_state.preferred_account_id is not None
-            and request_state.fresh_upstream_request_is_retry_safe
-            and request_state.fresh_upstream_request_text
-        )
         if (
             retry_error_code in _facade()._WEBSOCKET_TRANSPARENT_REPLAY_ERROR_CODES
             and request_state.previous_response_id is not None
             and request_state.preferred_account_id is not None
             and not retry_safe_previous_response_not_found
-            and not fresh_owner_failover
         ):
             await proxy._handle_stream_error(
                 account,
@@ -3200,15 +3167,8 @@ class _WebSocketMixin:
                     upstream_control.suppress_downstream_event = True
                     upstream_control.replay_request_state = request_state
             else:
-                if fresh_owner_failover:
-                    fresh_owner_failover = _prepare_websocket_request_state_for_owner_failover(
-                        request_state,
-                        owner_account_id=account.id,
-                        exclude_account_ids=request_state.excluded_account_ids,
-                    )
                 upstream_control.reconnect_requested = True
-                if not fresh_owner_failover:
-                    request_state.replay_count += 1
+                request_state.replay_count += 1
                 request_state.awaiting_response_created = True
                 request_state.response_id = None
                 _clear_websocket_request_error_overrides(request_state)

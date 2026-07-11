@@ -11561,62 +11561,6 @@ async def test_websocket_keeps_previous_response_pinned_security_work_error(monk
 
 
 @pytest.mark.asyncio
-async def test_websocket_owner_error_replays_validated_full_resend_on_available_account(monkeypatch):
-    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
-    handle_stream_error = AsyncMock()
-    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
-    account = _make_account("acc_ws_owner_full_resend")
-    request_state = proxy_service._WebSocketRequestState(
-        request_id="ws_req_owner_full_resend",
-        model="gpt-5.6-sol",
-        service_tier=None,
-        reasoning_effort=None,
-        api_key_reservation=None,
-        started_at=1.0,
-        awaiting_response_created=True,
-        request_text='{"type":"response.create","previous_response_id":"resp_anchor","input":[]}',
-        previous_response_id="resp_anchor",
-        preferred_account_id=account.id,
-        fresh_upstream_request_text='{"type":"response.create","input":[]}',
-        fresh_upstream_request_is_retry_safe=True,
-    )
-    upstream_control = proxy_service._WebSocketUpstreamControl()
-    payload = {
-        "type": "response.failed",
-        "response": {
-            "status": "failed",
-            "error": {
-                "code": "usage_limit_reached",
-                "type": "usage_limit_reached",
-                "message": "The usage limit has been reached",
-            },
-        },
-    }
-
-    await service._process_upstream_websocket_text(
-        json.dumps(payload, separators=(",", ":")),
-        account=account,
-        account_id_value=account.id,
-        pending_requests=deque([request_state]),
-        pending_lock=anyio.Lock(),
-        api_key=None,
-        upstream_control=upstream_control,
-        response_create_gate=asyncio.Semaphore(1),
-    )
-
-    assert upstream_control.reconnect_requested is True
-    assert upstream_control.suppress_downstream_event is True
-    assert upstream_control.replay_request_state is request_state
-    assert request_state.previous_response_id is None
-    assert request_state.preferred_account_id is None
-    assert request_state.require_security_work_authorized is False
-    assert request_state.request_text == '{"type":"response.create","input":[]}'
-    assert request_state.excluded_account_ids == {account.id}
-    assert request_state.replay_count == 1
-    handle_stream_error.assert_awaited_once()
-
-
-@pytest.mark.asyncio
 async def test_http_bridge_reports_missing_security_work_pool_before_original_warning(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
@@ -11724,7 +11668,7 @@ async def test_http_bridge_reports_missing_security_work_pool_before_original_wa
 
 
 @pytest.mark.asyncio
-async def test_http_bridge_does_not_replay_security_work_warning_after_response_created(monkeypatch):
+async def test_http_bridge_does_not_replay_security_work_warning_after_visible_output(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     regular_account = _make_account("acc_bridge_security_created")
@@ -11750,6 +11694,8 @@ async def test_http_bridge_does_not_replay_security_work_warning_after_response_
         event_queue=asyncio.Queue(),
         transport="http",
         request_text=request_text,
+        response_event_count=2,
+        downstream_visible=True,
     )
     request_state.response_id = "resp_security_created"
     session = proxy_service._HTTPBridgeSession(
@@ -13037,68 +12983,6 @@ async def test_select_websocket_connect_account_preferred_owner_missing_fails_cl
             "value": 1.0,
         }
     ]
-
-
-@pytest.mark.asyncio
-async def test_select_websocket_connect_account_replays_full_resend_on_available_account_when_owner_missing(
-    monkeypatch,
-):
-    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
-    replacement = _make_account("acc_owner_replay_replacement")
-    request_state = proxy_service._WebSocketRequestState(
-        request_id="ws_req_owner_missing_security_replay",
-        model="gpt-5.6-sol",
-        service_tier=None,
-        reasoning_effort=None,
-        api_key_reservation=None,
-        started_at=0.0,
-        previous_response_id="resp_prev_owner",
-        preferred_account_id="acc_owner",
-        session_id="turn_ws_owner_missing_security_replay",
-        request_text='{"type":"response.create","previous_response_id":"resp_prev_owner","input":[]}',
-        fresh_upstream_request_text='{"type":"response.create","input":[]}',
-        fresh_upstream_request_is_retry_safe=True,
-    )
-    select_account = AsyncMock(
-        side_effect=[
-            AccountSelection(account=None, error_message="No active accounts available", error_code="no_accounts"),
-            AccountSelection(account=replacement, error_message=None),
-        ]
-    )
-    monkeypatch.setattr(service, "_select_account_with_budget", select_account)
-    websocket_send = AsyncMock()
-
-    result = await service._select_websocket_connect_account(
-        time.monotonic() + 10_000.0,
-        sticky_key="sticky-session",
-        sticky_kind=proxy_service.StickySessionKind.CODEX_SESSION,
-        prefer_earlier_reset=False,
-        prefer_earlier_reset_window="secondary",
-        routing_strategy="usage_weighted",
-        model="gpt-5.6-sol",
-        request_state=request_state,
-        api_key=None,
-        client_send_lock=anyio.Lock(),
-        websocket=cast(WebSocket, SimpleNamespace(send_text=websocket_send)),
-        reallocate_sticky=False,
-        sticky_max_age_seconds=None,
-        exclude_account_ids=set(),
-        preferred_account_id="acc_owner",
-        require_preferred_account=True,
-    )
-
-    assert result is replacement
-    assert request_state.previous_response_id is None
-    assert request_state.preferred_account_id is None
-    assert request_state.require_security_work_authorized is False
-    assert request_state.request_text == '{"type":"response.create","input":[]}'
-    assert request_state.replay_count == 1
-    assert select_account.await_count == 2
-    retry_call = select_account.await_args_list[1]
-    assert retry_call.kwargs["preferred_account_id"] is None
-    assert retry_call.kwargs["require_security_work_authorized"] is False
-    assert retry_call.kwargs["exclude_account_ids"] == {"acc_owner"}
-    websocket_send.assert_not_awaited()
 
 
 @pytest.mark.asyncio

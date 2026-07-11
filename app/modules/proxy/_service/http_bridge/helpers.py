@@ -770,7 +770,9 @@ def _http_bridge_session_account_active(session: "_HTTPBridgeSession") -> bool:
 def _http_bridge_session_meets_security_requirement(
     session: "_HTTPBridgeSession", require_security_work_authorized: bool
 ) -> bool:
-    effective_requirement = require_security_work_authorized or session.requires_security_work_authorized
+    effective_requirement = require_security_work_authorized or bool(
+        getattr(session, "requires_security_work_authorized", False)
+    )
     return not effective_requirement or bool(getattr(session.account, "security_work_authorized", False))
 
 

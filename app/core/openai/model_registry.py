@@ -845,6 +845,7 @@ class ModelRegistry:
                 authoritative_account_catalogs = per_account_results is not None and set(
                     active_account_plans or per_account_results
                 ).issubset(account_plans)
+                bootstrap_floor_active = per_account_results is not None and not authoritative_account_catalogs
 
                 metadata_models = {
                     slug: model
@@ -869,7 +870,7 @@ class ModelRegistry:
                     fetched_at=time.monotonic(),
                     model_accounts=frozen_model_accounts,
                     account_catalogs_authoritative=authoritative_account_catalogs,
-                    bootstrap_floor_active=not authoritative_account_catalogs,
+                    bootstrap_floor_active=bootstrap_floor_active,
                     suppressed_model_slugs=frozenset(suppressed_model_slugs),
                 )
                 self._metadata_models = metadata_models

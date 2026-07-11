@@ -1263,6 +1263,12 @@ class _HTTPBridgeRequestSubmitMixin:
                 if not request_state.file_required_preferred_account:
                     request_state.preferred_account_id = None
                     request_state.excluded_account_ids.add(session.account.id)
+            if session.account.id in request_state.excluded_account_ids:
+                session.upstream_turn_state = None
+                session.downstream_turn_state = None
+                session.headers = {
+                    key: value for key, value in session.headers.items() if key.lower() != "x-codex-turn-state"
+                }
         _log_http_bridge_event(
             "retry_precreated",
             session.key,

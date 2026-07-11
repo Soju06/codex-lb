@@ -68,3 +68,14 @@ replacement bridge.
 - **WHEN** a request arrives with that `previous_response_id`
 - **THEN** the proxy fails closed with the stream-incomplete continuity error
 - **AND** it does not create a replacement bridge for the stale response id
+
+### Requirement: Cross-account bridge retries clear turn-state
+
+When a pre-visible HTTP bridge request is proven safe to replay on another account, the proxy MUST clear the retired account's upstream and downstream turn-state before opening the replacement connection. The replacement handshake MUST NOT carry an `x-codex-turn-state` header learned from the excluded account.
+
+#### Scenario: safe bridge replay excludes the stalled account
+
+- **GIVEN** a pre-visible HTTP bridge request is proven safe to replay
+- **WHEN** the failed bridge account is excluded before reconnect
+- **THEN** the proxy clears the retired account's turn-state fields and header
+- **AND** the replacement account receives no turn-state from the retired socket

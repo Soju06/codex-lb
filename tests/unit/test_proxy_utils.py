@@ -27742,10 +27742,15 @@ async def test_retry_http_bridge_precreated_request_suppresses_retry_after_respo
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("file_owner_bound", "expected_preferred_account_id", "expected_excluded_account_ids"),
+    (
+        "file_owner_bound",
+        "expected_preferred_account_id",
+        "expected_excluded_account_ids",
+        "expected_turn_state",
+    ),
     [
-        (False, None, {"acc_bridge_stalled"}),
-        (True, "acc_bridge_stalled", set()),
+        (False, None, {"acc_bridge_stalled"}, None),
+        (True, "acc_bridge_stalled", set(), "turn_state_old_account"),
     ],
 )
 async def test_retry_http_bridge_precreated_request_migrates_only_safe_initial_turns(
@@ -27753,6 +27758,7 @@ async def test_retry_http_bridge_precreated_request_migrates_only_safe_initial_t
     file_owner_bound,
     expected_preferred_account_id,
     expected_excluded_account_ids,
+    expected_turn_state,
 ):
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     account = _make_account("acc_bridge_stalled")
@@ -27771,7 +27777,7 @@ async def test_retry_http_bridge_precreated_request_migrates_only_safe_initial_t
     upstream = AsyncMock()
     session = proxy_service._HTTPBridgeSession(
         key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "bridge-stalled-key", None),
-        headers={},
+        headers={"x-codex-turn-state": "turn_state_old_account"},
         affinity=proxy_service._AffinityPolicy(),
         request_model="gpt-5.6-sol",
         account=account,
@@ -27783,6 +27789,8 @@ async def test_retry_http_bridge_precreated_request_migrates_only_safe_initial_t
         queued_request_count=1,
         last_used_at=0.0,
         idle_ttl_seconds=30.0,
+        upstream_turn_state="turn_state_old_account",
+        downstream_turn_state="turn_state_old_account",
     )
     reconnect = AsyncMock(return_value=None)
     monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
@@ -27792,6 +27800,9 @@ async def test_retry_http_bridge_precreated_request_migrates_only_safe_initial_t
     reconnect.assert_awaited_once_with(session, request_state=request_state)
     assert request_state.preferred_account_id == expected_preferred_account_id
     assert request_state.excluded_account_ids == expected_excluded_account_ids
+    assert session.upstream_turn_state == expected_turn_state
+    assert session.downstream_turn_state == expected_turn_state
+    assert session.headers.get("x-codex-turn-state") == expected_turn_state
     upstream.send_text.assert_awaited_once_with(request_state.request_text)
 
 

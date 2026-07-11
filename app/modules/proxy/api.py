@@ -321,6 +321,25 @@ _V1_MAX_OUTPUT_TOKEN_OVERRIDES: Final[dict[str, int]] = {
     "gpt-5.4-mini": 128_000,
     "gpt-5.3-codex": 128_000,
 }
+
+
+class _CapacityStartupReadyEvent(asyncio.Event):
+    """Track when admission became ready so its startup probe cannot reset."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.set_at: float | None = None
+
+    def set(self) -> None:
+        if not self.is_set():
+            self.set_at = time.monotonic()
+        super().set()
+
+    def clear(self) -> None:
+        self.set_at = None
+        super().clear()
+
+
 _OPPORTUNISTIC_RETRY_AFTER_SECONDS = 60
 
 # OpenAI error ``type`` -> HTTP status for the /v1/images/* non-streaming
@@ -3043,7 +3062,7 @@ async def v1_chat_completions(
         else _CHAT_COMPLETIONS_STARTUP_ERROR_PROBE_SECONDS
     )
     capacity_wait_event = asyncio.Event()
-    capacity_ready_event = asyncio.Event()
+    capacity_ready_event = _CapacityStartupReadyEvent()
     capacity_wait_token = _bind_propagated_capacity_startup_wait(capacity_wait_event)
     capacity_ready_token = _bind_propagated_capacity_startup_ready(capacity_ready_event)
     try:
@@ -4160,7 +4179,7 @@ async def _stream_responses(
             enforce_openai_sdk_contract=enforce_openai_sdk_contract,
         )
     capacity_wait_event = asyncio.Event()
-    capacity_ready_event = asyncio.Event()
+    capacity_ready_event = _CapacityStartupReadyEvent()
     capacity_wait_token = _bind_propagated_capacity_startup_wait(capacity_wait_event)
     capacity_ready_token = _bind_propagated_capacity_startup_ready(capacity_ready_event)
     try:
@@ -4766,7 +4785,23 @@ async def _wait_for_first_stream_probe(
                         await asyncio.gather(recovery_ready_task, return_exceptions=True)
                 continue
             if capacity_ready_event is not None and capacity_ready_event.is_set():
-                return False
+                # Admission recovery only proves that local capacity is ready;
+                # the resumed upstream can still fail before its first item.
+                # Preserve the route's normal bounded startup-error window so
+                # an immediate 4xx / response.failed remains an HTTP startup
+                # error, while a slow healthy upstream is still handed off.
+                post_ready_timeout = timeout_seconds
+                if isinstance(capacity_ready_event, _CapacityStartupReadyEvent):
+                    ready_set_at = capacity_ready_event.set_at
+                    if ready_set_at is not None:
+                        post_ready_timeout = max(0.0, timeout_seconds - (time.monotonic() - ready_set_at))
+                if post_ready_timeout <= 0:
+                    return False
+                post_ready_done, _pending = await asyncio.wait(
+                    {first_task},
+                    timeout=post_ready_timeout,
+                )
+                return bool(post_ready_done)
 
             marker_task = asyncio.create_task(capacity_wait_event.wait())
             ready_task = asyncio.create_task(capacity_ready_event.wait()) if capacity_ready_event is not None else None

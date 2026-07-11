@@ -1773,6 +1773,106 @@ async def test_external_stream_startup_waits_for_single_account_response_create_
 
 
 @pytest.mark.asyncio
+async def test_responses_route_preserves_immediate_error_after_capacity_recovers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    settings.http_responses_stream_request_budget_seconds = 1.0
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_route_capacity_then_bad_request")
+    stream_once_calls = 0
+    capacity_ready = asyncio.Event()
+    release_startup_error = asyncio.Event()
+
+    async def skip_limits(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    async def no_rate_limit_headers(*_args: object, **_kwargs: object) -> dict[str, str]:
+        return {}
+
+    async def fake_stream_once(*_args: object, **_kwargs: object):
+        nonlocal stream_once_calls
+        stream_once_calls += 1
+        if stream_once_calls == 1:
+            raise proxy_module.ProxyResponseError(
+                429,
+                proxy_module.openai_error(
+                    "account_response_create_cap",
+                    "Account response-create concurrency limit reached",
+                    error_type="rate_limit_error",
+                ),
+            )
+        proxy_support._signal_propagated_capacity_startup_ready()
+        capacity_ready.set()
+        await release_startup_error.wait()
+        raise proxy_module.ProxyResponseError(
+            400,
+            proxy_module.openai_error(
+                "invalid_request_error",
+                "Recovered account rejected the request",
+                error_type="invalid_request_error",
+            ),
+        )
+        yield ""
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_api, "_enforce_request_limits", skip_limits)
+    monkeypatch.setattr(proxy_api, "_rate_limit_headers_for_request", no_rate_limit_headers)
+    monkeypatch.setattr(
+        streaming_retry_module,
+        "_account_selection_recovery_sleep_seconds",
+        lambda _selection: 0.1,
+    )
+    monkeypatch.setattr(streaming_retry_module, "_ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS", 0.1)
+    monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value=account.id))
+    monkeypatch.setattr(
+        service,
+        "_select_account_with_budget_compatible",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=account))
+    monkeypatch.setattr(service, "_stream_once", fake_stream_once)
+
+    request = Request({"type": "http", "method": "POST", "path": "/v1/responses", "headers": []})
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "test",
+            "input": "hello",
+            "previous_response_id": "resp_route_capacity_then_bad_request",
+            "stream": True,
+        }
+    )
+
+    response_task = asyncio.create_task(
+        proxy_api._stream_responses(
+            request,
+            payload,
+            context=cast(proxy_api.ProxyContext, SimpleNamespace(service=service)),
+            api_key=None,
+        )
+    )
+    await asyncio.wait_for(capacity_ready.wait(), timeout=0.2)
+
+    async def release_error_on_next_startup_tick() -> None:
+        await asyncio.sleep(0.02)
+        release_startup_error.set()
+
+    release_task = asyncio.create_task(release_error_on_next_startup_tick())
+    try:
+        response = await asyncio.wait_for(response_task, timeout=0.2)
+    finally:
+        await release_task
+
+    assert not isinstance(response, StreamingResponse)
+    assert response.status_code == 400
+    error_payload = json.loads(bytes(response.body).decode())
+    assert error_payload["error"]["code"] == "invalid_request_error"
+    assert stream_once_calls == 2
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("request_budget_seconds", "recovery_sleep_seconds", "minimum_selection_calls", "selection_delay_seconds"),
     [(0.2, 0.1, 2, 0.0), (0.1, 0.3, 1, 0.12)],

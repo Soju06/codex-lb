@@ -4361,8 +4361,12 @@ async def _collect_responses(
             suppress_text_done_events=suppress_text_done_events,
             client_ip=client_ip,
         )
+    captured_turn_state_headers: dict[str, str] = {}
     try:
-        response_payload = await _collect_responses_payload(stream)
+        response_payload = await _collect_responses_payload(
+            stream,
+            captured_turn_state_headers=captured_turn_state_headers,
+        )
     except ProxyResponseError as exc:
         await _release_reservation(reservation)
         error = _parse_error_envelope(exc.payload)
@@ -4371,7 +4375,7 @@ async def _collect_responses(
             request,
             status_code,
             error.model_dump(mode="json", exclude_none=True),
-            headers=rate_limit_headers,
+            headers={**captured_turn_state_headers, **rate_limit_headers},
         )
     if isinstance(response_payload, OpenAIResponsePayload):
         if response_payload.status == "failed":
@@ -4381,18 +4385,18 @@ async def _collect_responses(
                 request,
                 status_code,
                 error_payload.model_dump(mode="json", exclude_none=True),
-                headers={**turn_state_headers, **rate_limit_headers},
+                headers={**turn_state_headers, **captured_turn_state_headers, **rate_limit_headers},
             )
         return JSONResponse(
             content=response_payload.model_dump(mode="json", exclude_none=True),
-            headers={**turn_state_headers, **rate_limit_headers},
+            headers={**turn_state_headers, **captured_turn_state_headers, **rate_limit_headers},
         )
     status_code, response_payload = _mask_previous_response_not_found_error(response_payload)
     return _logged_error_json_response(
         request,
         status_code,
         response_payload.model_dump(mode="json", exclude_none=True),
-        headers={**turn_state_headers, **rate_limit_headers},
+        headers={**turn_state_headers, **captured_turn_state_headers, **rate_limit_headers},
     )
 
 
@@ -5801,7 +5805,30 @@ def _compact_request_service_tier(payload: ResponsesCompactRequest) -> str | Non
     return stripped or None
 
 
-async def _collect_responses_payload(stream: AsyncIterator[str]) -> OpenAIResponseResult:
+def _capture_response_metadata_turn_state(
+    payload: Mapping[str, JsonValue],
+    captured_turn_state_headers: dict[str, str],
+) -> None:
+    """Keep the first real upstream turn-state metadata header for the HTTP response."""
+    if captured_turn_state_headers or payload.get("type") != "response.metadata":
+        return
+    headers = payload.get("headers")
+    if not is_json_mapping(headers):
+        return
+    for name, value in headers.items():
+        if str(name).lower() != "x-codex-turn-state" or not isinstance(value, str):
+            continue
+        turn_state = value.strip()
+        if turn_state:
+            captured_turn_state_headers["x-codex-turn-state"] = turn_state
+        return
+
+
+async def _collect_responses_payload(
+    stream: AsyncIterator[str],
+    *,
+    captured_turn_state_headers: dict[str, str] | None = None,
+) -> OpenAIResponseResult:
     output_items: dict[int, dict[str, JsonValue]] = {}
     terminal_result: OpenAIResponseResult | None = None
     contract_violation_kind: str | None = None
@@ -5811,6 +5838,8 @@ async def _collect_responses_payload(stream: AsyncIterator[str]) -> OpenAIRespon
             if _looks_like_sse_data_block(line):
                 contract_violation_kind = contract_violation_kind or "invalid_json"
             continue
+        if captured_turn_state_headers is not None:
+            _capture_response_metadata_turn_state(payload, captured_turn_state_headers)
         event_type = payload.get("type")
         _collect_output_item_event(payload, output_items)
         if terminal_result is not None:

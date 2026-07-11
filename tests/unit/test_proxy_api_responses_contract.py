@@ -252,6 +252,64 @@ async def test_collect_responses_payload_returns_contract_error_on_truncated_str
 
 
 @pytest.mark.asyncio
+async def test_collect_responses_payload_captures_turn_state_metadata_before_failed_response() -> None:
+    captured_headers: dict[str, str] = {}
+
+    result = await proxy_api_module._collect_responses_payload(
+        _iter_blocks(
+            'data: {"type":"response.metadata","headers":{"X-Codex-Turn-State":" turn-owner "}}\n\n',
+            'data: {"type":"response.failed","response":{"error":{"code":"upstream_error",'
+            '"message":"failed","type":"server_error"}}}\n\n',
+        ),
+        captured_turn_state_headers=captured_headers,
+    )
+
+    assert result.error is not None
+    assert captured_headers == {"x-codex-turn-state": "turn-owner"}
+
+
+@pytest.mark.asyncio
+async def test_collect_responses_preserves_captured_turn_state_when_stream_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from app.core.clients.proxy import ProxyResponseError
+    from app.core.openai.requests import ResponsesRequest
+
+    async def failing_stream():
+        yield 'data: {"type":"response.metadata","headers":{"X-Codex-Turn-State":"turn-owner"}}\n\n'
+        raise ProxyResponseError(
+            502,
+            {"error": {"code": "upstream_error", "message": "failed", "type": "server_error"}},
+        )
+
+    service = SimpleNamespace(stream_responses=lambda *_args, **_kwargs: failing_stream())
+    context = SimpleNamespace(service=service)
+    request = SimpleNamespace(
+        headers={},
+        method="POST",
+        url=SimpleNamespace(path="/backend-api/codex/responses"),
+        client=None,
+    )
+    monkeypatch.setattr(proxy_api_module, "_opportunistic_admission_denial", AsyncMock(return_value=None))
+    monkeypatch.setattr(proxy_api_module, "_enforce_request_limits", AsyncMock(return_value=None))
+    monkeypatch.setattr(proxy_api_module, "_rate_limit_headers_for_request", AsyncMock(return_value={}))
+    monkeypatch.setattr(proxy_api_module, "_release_reservation", AsyncMock())
+
+    response = await proxy_api_module._collect_responses(
+        cast(Any, request),
+        ResponsesRequest.model_validate({"model": "gpt-5.5", "instructions": "test", "input": []}),
+        cast(Any, context),
+        None,
+    )
+
+    assert response.status_code == 502
+    assert response.headers["x-codex-turn-state"] == "turn-owner"
+
+
+@pytest.mark.asyncio
 async def test_collect_responses_payload_normalizes_unknown_output_item_to_message() -> None:
     result = await proxy_api_module._collect_responses_payload(
         _iter_blocks(
@@ -1213,6 +1271,7 @@ async def test_internal_bridge_responses_disables_openai_sdk_contract(
         AsyncMock(return_value=(None, None)),
     )
     monkeypatch.setattr(proxy_api_module, "_strip_internal_bridge_headers", lambda h: dict(h))
+    monkeypatch.setattr(proxy_api_module, "_prohibit_fast_mode_enabled", AsyncMock(return_value=False))
 
     # Minimal payload + request stubs.
     from app.core.openai.requests import ResponsesRequest

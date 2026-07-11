@@ -364,6 +364,9 @@ from app.modules.proxy._service.response_create import (
     _OVERSIZED_RESPONSE_CREATE_LARGEST_ITEMS as _OVERSIZED_RESPONSE_CREATE_LARGEST_ITEMS,
 )
 from app.modules.proxy._service.response_create import (
+    _RESPONSE_CREATE_COMPATIBILITY_METADATA_HEADERS as _RESPONSE_CREATE_COMPATIBILITY_METADATA_HEADERS,
+)
+from app.modules.proxy._service.response_create import (
     _RESPONSE_CREATE_HISTORY_OMISSION_NOTICE as _RESPONSE_CREATE_HISTORY_OMISSION_NOTICE,
 )
 from app.modules.proxy._service.response_create import (
@@ -524,6 +527,9 @@ from app.modules.proxy._service.streaming.helpers import (
 )
 from app.modules.proxy._service.streaming.helpers import (
     _should_retry_transient_stream_error as _should_retry_transient_stream_error,
+)
+from app.modules.proxy._service.streaming.helpers import (
+    _stream_iterator_after_capacity_admission as _stream_iterator_after_capacity_admission,
 )
 from app.modules.proxy._service.streaming.helpers import (
     _stream_request_budget_seconds as _stream_request_budget_seconds,

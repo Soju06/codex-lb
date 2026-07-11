@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from contextlib import asynccontextmanager
@@ -161,6 +162,12 @@ from app.modules.model_sources.repository import ModelSourcesRepository
 from app.modules.proxy import affinity as proxy_affinity_module
 from app.modules.proxy import images_service as images_service_module
 from app.modules.proxy import service as proxy_service_module
+from app.modules.proxy._service.support import (
+    _bind_propagated_capacity_startup_ready,
+    _bind_propagated_capacity_startup_wait,
+    _reset_propagated_capacity_startup_ready,
+    _reset_propagated_capacity_startup_wait,
+)
 from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
 from app.modules.proxy.helpers import _rate_limit_details
@@ -217,6 +224,15 @@ from app.modules.usage.repository import AdditionalUsageRepository, UsageReposit
 from app.modules.usage.updater import UsageUpdater
 
 logger = logging.getLogger(__name__)
+
+_REASONING_SUMMARY_BLANK_HTML_COMMENT_RE = re.compile(r"(?m)^[ \t]*<!--\s*-->[ \t]*(?:\r?\n|\Z)")
+_REASONING_SUMMARY_DELTA_TYPES = frozenset({"response.reasoning_summary_text.delta"})
+_REASONING_SUMMARY_DONE_TYPES = frozenset(
+    {
+        "response.reasoning_summary_text.done",
+        "response.reasoning_summary_part.done",
+    }
+)
 
 _PUBLIC_RESPONSE_OUTPUT_ITEM_TYPES = frozenset(
     {
@@ -302,9 +318,11 @@ _UNAVAILABLE_SELECTION_ERROR_CODES = {
     "no_additional_quota_eligible_accounts",
 }
 _STREAM_STARTUP_ERROR_PROBE_SECONDS = 0.05
+_CAPACITY_WAIT_MARKER_GRACE_SECONDS = 0.05
 # Keep bridge startup probing above tiny event-loop scheduling jitter:
 # PostgreSQL-backed failures may need a DB round trip before the first item.
 _HTTP_BRIDGE_STARTUP_ERROR_PROBE_SECONDS = 2.0
+_CAPACITY_STARTUP_SIGNAL_DISCOVERY_SECONDS = _HTTP_BRIDGE_STARTUP_ERROR_PROBE_SECONDS
 _CHAT_COMPLETIONS_STARTUP_ERROR_PROBE_SECONDS = 2.0
 _CURSOR_CHAT_COMPLETIONS_STARTUP_ERROR_PROBE_SECONDS = 15.0
 _CURSOR_CONTEXT_LIMIT_SYNTHETIC_USAGE_TOKENS: Final[int] = 1_000_000
@@ -314,6 +332,25 @@ _V1_MAX_OUTPUT_TOKEN_OVERRIDES: Final[dict[str, int]] = {
     "gpt-5.4-mini": 128_000,
     "gpt-5.3-codex": 128_000,
 }
+
+
+class _CapacityStartupReadyEvent(asyncio.Event):
+    """Track when admission became ready so its startup probe cannot reset."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.set_at: float | None = None
+
+    def set(self) -> None:
+        if not self.is_set():
+            self.set_at = time.monotonic()
+        super().set()
+
+    def clear(self) -> None:
+        self.set_at = None
+        super().clear()
+
+
 _OPPORTUNISTIC_RETRY_AFTER_SECONDS = 60
 
 # OpenAI error ``type`` -> HTTP status for the /v1/images/* non-streaming
@@ -3063,7 +3100,20 @@ async def v1_chat_completions(
         if cursor_compat_client
         else _CHAT_COMPLETIONS_STARTUP_ERROR_PROBE_SECONDS
     )
-    stream, startup_error = await _probe_chat_stream_startup_error(stream, timeout_seconds=startup_probe_timeout)
+    capacity_wait_event = asyncio.Event()
+    capacity_ready_event = _CapacityStartupReadyEvent()
+    capacity_wait_token = _bind_propagated_capacity_startup_wait(capacity_wait_event)
+    capacity_ready_token = _bind_propagated_capacity_startup_ready(capacity_ready_event)
+    try:
+        stream, startup_error = await _probe_chat_stream_startup_error(
+            stream,
+            timeout_seconds=startup_probe_timeout,
+            capacity_wait_event=capacity_wait_event,
+            capacity_ready_event=capacity_ready_event,
+        )
+    finally:
+        _reset_propagated_capacity_startup_ready(capacity_ready_token)
+        _reset_propagated_capacity_startup_wait(capacity_wait_token)
     if startup_error is not None:
         if cursor_compat_client and _is_context_length_startup_error(startup_error):
             await _release_reservation(reservation)
@@ -4168,13 +4218,23 @@ async def _stream_responses(
             client_ip=client_ip,
             enforce_openai_sdk_contract=enforce_openai_sdk_contract,
         )
-    stream, startup_error = await _probe_stream_startup_error(
-        stream,
-        convert_event_errors=bridge_active and enforce_openai_sdk_contract,
-        timeout_seconds=(
-            _HTTP_BRIDGE_STARTUP_ERROR_PROBE_SECONDS if prefer_http_bridge else _STREAM_STARTUP_ERROR_PROBE_SECONDS
-        ),
-    )
+    capacity_wait_event = asyncio.Event()
+    capacity_ready_event = _CapacityStartupReadyEvent()
+    capacity_wait_token = _bind_propagated_capacity_startup_wait(capacity_wait_event)
+    capacity_ready_token = _bind_propagated_capacity_startup_ready(capacity_ready_event)
+    try:
+        stream, startup_error = await _probe_stream_startup_error(
+            stream,
+            convert_event_errors=bridge_active and enforce_openai_sdk_contract,
+            timeout_seconds=(
+                _HTTP_BRIDGE_STARTUP_ERROR_PROBE_SECONDS if prefer_http_bridge else _STREAM_STARTUP_ERROR_PROBE_SECONDS
+            ),
+            capacity_wait_event=capacity_wait_event,
+            capacity_ready_event=capacity_ready_event,
+        )
+    finally:
+        _reset_propagated_capacity_startup_ready(capacity_ready_token)
+        _reset_propagated_capacity_startup_wait(capacity_wait_token)
     if startup_error is not None:
         if owns_reservation:
             await _release_reservation(reservation)
@@ -4717,17 +4777,135 @@ def _create_first_stream_probe_task(stream: AsyncIterator[str]) -> asyncio.Task[
     return task
 
 
+async def _wait_for_first_stream_probe(
+    first_task: asyncio.Task[str],
+    *,
+    timeout_seconds: float,
+    capacity_wait_event: asyncio.Event | None,
+    capacity_ready_event: asyncio.Event | None = None,
+) -> bool:
+    try:
+        done, _pending = await asyncio.wait({first_task}, timeout=timeout_seconds)
+        if done:
+            if capacity_wait_event is not None and capacity_wait_event.is_set():
+                capacity_wait_event.clear()
+            return True
+        if capacity_wait_event is None:
+            return False
+
+        # Account selection can include a PostgreSQL round trip before it can
+        # report either successful admission or local capacity pressure. Give
+        # those paired signals the established bounded startup-probe window,
+        # but keep one absolute deadline so unrelated/no-marker streams cannot
+        # turn the route into a request-budget-length startup wait.
+        signal_discovery_seconds = (
+            _CAPACITY_STARTUP_SIGNAL_DISCOVERY_SECONDS
+            if capacity_ready_event is not None
+            else _CAPACITY_WAIT_MARKER_GRACE_SECONDS
+        )
+        signal_discovery_deadline = asyncio.get_running_loop().time() + signal_discovery_seconds
+        while True:
+            if first_task.done():
+                if capacity_wait_event.is_set():
+                    capacity_wait_event.clear()
+                return True
+            if capacity_wait_event.is_set():
+                recovery_ready_task = (
+                    asyncio.create_task(capacity_ready_event.wait()) if capacity_ready_event is not None else None
+                )
+                try:
+                    recovery_waiters = {first_task}
+                    if recovery_ready_task is not None:
+                        recovery_waiters.add(recovery_ready_task)
+                    recovery_done, _pending = await asyncio.wait(
+                        recovery_waiters,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if first_task not in recovery_done:
+                        # Re-read the paired level state. The ready signal has
+                        # cleared the wait that recovered, but a newer wait may
+                        # already have superseded that ready before this task
+                        # resumes.
+                        continue
+                finally:
+                    if recovery_ready_task is not None and not recovery_ready_task.done():
+                        recovery_ready_task.cancel()
+                    if recovery_ready_task is not None:
+                        await asyncio.gather(recovery_ready_task, return_exceptions=True)
+                continue
+            if capacity_ready_event is not None and capacity_ready_event.is_set():
+                # Admission recovery only proves that local capacity is ready;
+                # the resumed upstream can still fail before its first item.
+                # Preserve the route's normal bounded startup-error window so
+                # an immediate 4xx / response.failed remains an HTTP startup
+                # error, while a slow healthy upstream is still handed off.
+                post_ready_timeout = timeout_seconds
+                if isinstance(capacity_ready_event, _CapacityStartupReadyEvent):
+                    ready_set_at = capacity_ready_event.set_at
+                    if ready_set_at is not None:
+                        post_ready_timeout = max(0.0, timeout_seconds - (time.monotonic() - ready_set_at))
+                if post_ready_timeout <= 0:
+                    return False
+                post_ready_done, _pending = await asyncio.wait(
+                    {first_task},
+                    timeout=post_ready_timeout,
+                )
+                return bool(post_ready_done)
+
+            marker_task = asyncio.create_task(capacity_wait_event.wait())
+            ready_task = asyncio.create_task(capacity_ready_event.wait()) if capacity_ready_event is not None else None
+            try:
+                signal_discovery_remaining = max(
+                    0.0,
+                    signal_discovery_deadline - asyncio.get_running_loop().time(),
+                )
+                if signal_discovery_remaining <= 0:
+                    return False
+                signal_waiters = {first_task, marker_task}
+                if ready_task is not None:
+                    signal_waiters.add(ready_task)
+                signal_done, _pending = await asyncio.wait(
+                    signal_waiters,
+                    timeout=signal_discovery_remaining,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if not signal_done:
+                    return False
+            finally:
+                pending_signal_tasks = [
+                    task for task in (marker_task, ready_task) if task is not None and not task.done()
+                ]
+                for task in pending_signal_tasks:
+                    task.cancel()
+                await asyncio.gather(
+                    marker_task,
+                    *(task for task in (ready_task,) if task is not None),
+                    return_exceptions=True,
+                )
+    except asyncio.CancelledError:
+        first_task.cancel()
+        await asyncio.gather(first_task, return_exceptions=True)
+        raise
+
+
 async def _probe_stream_startup_error(
     stream: AsyncIterator[str],
     *,
     convert_event_errors: bool = False,
     timeout_seconds: float | None = None,
+    capacity_wait_event: asyncio.Event | None = None,
+    capacity_ready_event: asyncio.Event | None = None,
 ) -> tuple[AsyncIterator[str], ProxyResponseError | OpenAIErrorEnvelopeModel | None]:
     if timeout_seconds is None:
         timeout_seconds = _STREAM_STARTUP_ERROR_PROBE_SECONDS
     first_task = _create_first_stream_probe_task(stream)
-    done, _pending = await asyncio.wait({first_task}, timeout=timeout_seconds)
-    if not done:
+    probe_done = await _wait_for_first_stream_probe(
+        first_task,
+        timeout_seconds=timeout_seconds,
+        capacity_wait_event=capacity_wait_event,
+        capacity_ready_event=capacity_ready_event,
+    )
+    if not probe_done:
         # Probe window elapsed before the first item arrived. Hand the still-
         # running task off to be consumed by the streamed response. asyncio.wait
         # (rather than wait_for + shield) never cancels the task on timeout,
@@ -5037,12 +5215,19 @@ async def _probe_chat_stream_startup_error(
     *,
     timeout_seconds: float = _CHAT_COMPLETIONS_STARTUP_ERROR_PROBE_SECONDS,
     max_startup_events: int = 8,
+    capacity_wait_event: asyncio.Event | None = None,
+    capacity_ready_event: asyncio.Event | None = None,
 ) -> tuple[AsyncIterator[str], ProxyResponseError | OpenAIErrorEnvelopeModel | None]:
     buffered: list[str] = []
     for _ in range(max_startup_events):
         first_task = _create_first_stream_probe_task(stream)
-        done, _pending = await asyncio.wait({first_task}, timeout=timeout_seconds)
-        if not done:
+        probe_done = await _wait_for_first_stream_probe(
+            first_task,
+            timeout_seconds=timeout_seconds,
+            capacity_wait_event=capacity_wait_event,
+            capacity_ready_event=capacity_ready_event,
+        )
+        if not probe_done:
             return _prepend_items(buffered, _prepend_first_task(first_task, stream)), None
         try:
             first = first_task.result()
@@ -5692,6 +5877,7 @@ async def _normalize_public_responses_stream(
     *,
     enforce_openai_sdk_contract: bool = True,
 ) -> AsyncIterator[str]:
+    stream = _normalize_reasoning_summary_stream(stream)
     """Normalize the upstream SSE event stream for the public /v1 surface.
 
     Args:
@@ -6115,6 +6301,18 @@ def _normalize_public_stream_payload(
     enforce_openai_sdk_contract: bool = True,
 ) -> tuple[dict[str, JsonValue] | None, str | None]:
     event_type = payload.get("type")
+    if event_type == "response.reasoning_summary_text.done" and isinstance(payload.get("text"), str):
+        normalized_payload = dict(payload)
+        normalized_payload["text"] = _strip_blank_html_comment_lines(cast(str, payload["text"]))
+        return normalized_payload, None
+    if event_type in {"response.reasoning_summary_part.added", "response.reasoning_summary_part.done"}:
+        part = payload.get("part")
+        if is_json_mapping(part) and part.get("type") == "summary_text" and isinstance(part.get("text"), str):
+            normalized_part = dict(part)
+            normalized_part["text"] = _strip_blank_html_comment_lines(cast(str, part["text"]))
+            normalized_payload = dict(payload)
+            normalized_payload["part"] = normalized_part
+            return normalized_payload, None
     # Drop Codex-internal vendor events on the public /v1 surface only. The
     # upstream Codex backend emits non-standard events (notably
     # ``codex.rate_limits``, which is throttled per rate-limit window and so
@@ -6344,6 +6542,8 @@ def _normalize_public_response_mapping(
 
 def _normalize_public_output_item(item: Mapping[str, JsonValue]) -> dict[str, JsonValue] | None:
     item_type = item.get("type")
+    if item_type == "reasoning":
+        return _normalize_reasoning_output_item(item)
     if isinstance(item_type, str) and _is_public_passthrough_output_item_type(item_type):
         return dict(item)
     text_value = _extract_public_output_item_text(item)
@@ -6359,6 +6559,158 @@ def _normalize_public_output_item(item: Mapping[str, JsonValue]) -> dict[str, Js
     if isinstance(item_id, str) and item_id:
         normalized["id"] = item_id
     return normalized
+
+
+def _normalize_reasoning_output_item(item: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
+    """Remove renderer-only blank HTML comments from reasoning summaries.
+
+    Recent Codex reasoning summaries can include a standalone ``<!-- -->``
+    markdown placeholder after the visible summary heading. The Codex TUI renders
+    reasoning summary text directly, so proxying that inert marker verbatim makes
+    it visible between tool calls. Limit the cleanup to reasoning summary text so
+    assistant/user-visible content and non-empty HTML comments remain untouched.
+    """
+
+    normalized = dict(item)
+    summary = item.get("summary")
+    if not isinstance(summary, list):
+        return normalized
+
+    normalized_summary: list[JsonValue] = []
+    changed = False
+    for part in summary:
+        if not is_json_mapping(part):
+            normalized_summary.append(part)
+            continue
+        text = part.get("text")
+        if part.get("type") != "summary_text" or not isinstance(text, str):
+            normalized_summary.append(dict(part))
+            continue
+        cleaned = _strip_blank_html_comment_lines(text)
+        normalized_part = dict(part)
+        normalized_part["text"] = cleaned
+        normalized_summary.append(normalized_part)
+        changed = changed or cleaned != text
+
+    if changed:
+        normalized["summary"] = normalized_summary
+    return normalized
+
+
+def _strip_blank_html_comment_lines(text: str) -> str:
+    terminal_match = None
+    for match in _REASONING_SUMMARY_BLANK_HTML_COMMENT_RE.finditer(text):
+        if match.end() == len(text):
+            terminal_match = match
+    cleaned, count = _REASONING_SUMMARY_BLANK_HTML_COMMENT_RE.subn("", text)
+    if count == 0:
+        return text
+    if terminal_match is not None:
+        return cleaned.rstrip("\r\n")
+    return cleaned
+
+
+def _reasoning_summary_delta_key(payload: Mapping[str, JsonValue]) -> tuple[str | None, int | None, int | None]:
+    item_id = payload.get("item_id")
+    output_index = payload.get("output_index")
+    summary_index = payload.get("summary_index")
+    return (
+        item_id if isinstance(item_id, str) else None,
+        output_index if isinstance(output_index, int) else None,
+        summary_index if isinstance(summary_index, int) else None,
+    )
+
+
+def _could_be_blank_html_comment_line(text: str) -> bool:
+    candidate = text.rsplit("\n", 1)[-1].lstrip(" \t")
+    if not candidate:
+        return False
+    if not candidate.startswith("<!--"):
+        return "<!--".startswith(candidate)
+    remainder = candidate[4:].lstrip()
+    if not remainder.startswith("-->"):
+        return "-->".startswith(remainder)
+    return not remainder[3:].strip(" \t\r")
+
+
+def _is_reasoning_summary_interleavable_event(event_type: JsonValue | None) -> bool:
+    return isinstance(event_type, str) and (event_type == "response.in_progress" or event_type.startswith("codex."))
+
+
+async def _normalize_reasoning_summary_stream(stream: AsyncIterator[str]) -> AsyncIterator[str]:
+    pending: dict[tuple[str | None, int | None, int | None], list[dict[str, JsonValue]]] = {}
+
+    def flush(key: tuple[str | None, int | None, int | None]) -> list[str]:
+        payloads = pending.pop(key, [])
+        text = "".join(cast(str, payload.get("delta")) for payload in payloads)
+        cleaned = _strip_blank_html_comment_lines(text)
+        if cleaned == text:
+            return [format_sse_event(payload) for payload in payloads]
+        if not cleaned or not payloads:
+            return []
+        normalized = dict(payloads[0])
+        normalized["delta"] = cleaned
+        return [format_sse_event(normalized)]
+
+    async for event_block in stream:
+        payload = _parse_sse_payload(event_block)
+        if payload is None:
+            yield event_block
+            continue
+        event_type = payload.get("type")
+        event_key = _reasoning_summary_delta_key(payload)
+        if (
+            pending
+            and not _is_reasoning_summary_interleavable_event(event_type)
+            and not (
+                event_type in _REASONING_SUMMARY_DELTA_TYPES | _REASONING_SUMMARY_DONE_TYPES and event_key in pending
+            )
+        ):
+            for pending_key in tuple(pending):
+                for buffered in flush(pending_key):
+                    yield buffered
+        if event_type in _REASONING_SUMMARY_DELTA_TYPES:
+            delta = payload.get("delta")
+            if not isinstance(delta, str):
+                yield event_block
+                continue
+            key = event_key
+            if key in pending:
+                pending[key].append(payload)
+                buffered_text = "".join(cast(str, item.get("delta")) for item in pending[key])
+                if _strip_blank_html_comment_lines(buffered_text) != buffered_text:
+                    for buffered in flush(key):
+                        yield buffered
+                    continue
+                if _could_be_blank_html_comment_line(buffered_text):
+                    continue
+                for buffered in flush(key):
+                    yield buffered
+                continue
+            cleaned_delta = _strip_blank_html_comment_lines(delta)
+            if cleaned_delta != delta:
+                normalized_payload = dict(payload)
+                normalized_payload["delta"] = cleaned_delta
+                yield format_sse_event(normalized_payload)
+                continue
+            if _could_be_blank_html_comment_line(delta):
+                pending[key] = [payload]
+                continue
+            yield event_block
+            continue
+        if event_type in _REASONING_SUMMARY_DONE_TYPES:
+            key = event_key
+            for buffered in flush(key):
+                yield buffered
+        elif event_type in _PUBLIC_RESPONSE_STREAM_TERMINAL_TYPES:
+            for key in tuple(pending):
+                for buffered in flush(key):
+                    yield buffered
+        yield event_block
+
+    for key in tuple(pending):
+        for buffered in flush(key):
+            yield buffered
 
 
 def _is_public_passthrough_output_item_type(item_type: str) -> bool:

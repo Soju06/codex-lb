@@ -1829,6 +1829,12 @@ class _WebSocketMixin:
                 heartbeat=_heartbeat,
             ):
                 break
+            # A wait clipped to the remaining request budget is still a
+            # completed wait. Preserve the selection error that caused it
+            # instead of performing one more selection that can only replace
+            # the original local-cap 429 with upstream_request_timeout.
+            if _facade()._remaining_budget_seconds(deadline) <= 0:
+                break
 
         account = selection.account
         if (
@@ -1865,7 +1871,7 @@ class _WebSocketMixin:
         if account:
             request_state.websocket_stream_lease = selection.lease
             return account
-        if defer_no_account_error:
+        if defer_no_account_error and not _facade()._is_local_account_cap_code(selection.error_code):
             _facade().logger.warning(
                 "Websocket account selection deferred no-account error request_id=%s model=%s "
                 "preferred_account_id=%s require_preferred=%s error_code=%s error=%s excluded_count=%s",
@@ -1890,7 +1896,7 @@ class _WebSocketMixin:
             )
             return None
         if require_preferred_account and preferred_account_id is not None:
-            if request_state.file_required_preferred_account and _facade()._is_local_account_cap_code(error_code):
+            if _facade()._is_local_account_cap_code(error_code):
                 await proxy._emit_websocket_connect_failure(
                     websocket,
                     client_send_lock=client_send_lock,

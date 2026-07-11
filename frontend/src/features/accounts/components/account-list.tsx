@@ -73,7 +73,7 @@ export function AccountList({
   }, [accounts, quotaDisplay, search, statusFilter, activeSortMode]);
 
   return (
-    <div className="flex min-h-0 min-w-0 flex-1 flex-col space-y-3">
+    <div className="flex max-h-[calc(100dvh-15rem)] min-h-0 min-w-0 flex-1 flex-col space-y-3">
       <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
         <div className="relative min-w-0 sm:col-span-2">
           <Search className="pointer-events-none absolute top-1/2 left-2.5 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground/60" aria-hidden />
@@ -147,7 +147,7 @@ export function AccountList({
       {helpOpen ? <WindowsOauthHelp /> : null}
 
       <div
-        className="flex-1 min-h-0 space-y-1 overflow-y-auto p-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden max-h-[min(32rem,calc(100dvh-16rem))]"
+        className="flex-1 min-h-0 space-y-1 overflow-y-auto p-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
         data-testid="account-list-scroll-region"
       >
         {filtered.length === 0 ? (

@@ -89,8 +89,10 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_request_counts_against_queue,
     _http_bridge_session_account_active,
     _http_bridge_session_allows_api_key,
+    _http_bridge_session_has_admission_waiter,
     _http_bridge_session_matches_preferred_account,
     _http_bridge_session_retiring_with_visible_requests,
+    _http_bridge_session_reusable_for_lookup,
     _http_bridge_session_reusable_for_request,
     _http_bridge_should_wait_for_registration,
     _http_bridge_startup_wait_timeout_error,
@@ -99,9 +101,11 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _log_http_bridge_event,
     _log_http_bridge_startup_wait_timeout,
     _preferred_http_bridge_reconnect_turn_state,
+    _raise_http_bridge_incompatible_admission_handoff,
     _record_bridge_drain_recovery_allowed,
     _record_bridge_first_turn_timeout,
     _record_bridge_reattach,
+    _require_http_bridge_bound_account_not_excluded,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_pending_count_nowait as helpers_http_bridge_pending_count_nowait,
@@ -647,40 +651,32 @@ class _HTTPBridgeMixin(
                         else:
                             key = _HTTPBridgeSessionKey("turn_state_header", incoming_turn_state, api_key_id)
                             missing_turn_state_alias = True
-
                 pruned_sessions = self._prune_http_bridge_sessions_locked()
                 if pruned_sessions:
                     if any(session.key == key for session in pruned_sessions):
                         force_durable_takeover = True
-                    self._schedule_http_bridge_session_closes(
-                        pruned_sessions,
-                        reason="registry_detach",
-                    )
-
+                    self._schedule_http_bridge_session_closes(pruned_sessions, reason="registry_detach")
                 existing = self._http_bridge_sessions.get(key)
-                if (
-                    existing is not None
-                    and not existing.closed
-                    and _http_bridge_session_account_active(existing)
-                    and _http_bridge_session_allows_api_key(existing, api_key)
-                    and _http_bridge_session_reusable_for_request(
-                        session=existing,
-                        key=key,
-                        incoming_turn_state=incoming_turn_state,
-                        previous_response_id=previous_response_id,
-                    )
-                    and _http_bridge_session_matches_preferred_account(
-                        session=existing,
-                        previous_response_id=previous_response_id,
-                        preferred_account_id=preferred_account_id,
-                        require_preferred_account=require_preferred_account,
-                    )
-                    and _http_bridge_session_supports_service_tier(
-                        existing,
-                        request_model=request_model,
-                        request_service_tier=request_service_tier,
-                    )
-                ):
+                retained_handoff = bool(
+                    existing and existing.closed and _http_bridge_session_has_admission_waiter(existing)
+                )
+                reusable = existing is not None and _http_bridge_session_reusable_for_lookup(
+                    session=existing,
+                    key=key,
+                    api_key=api_key,
+                    incoming_turn_state=incoming_turn_state,
+                    previous_response_id=previous_response_id,
+                    preferred_account_id=preferred_account_id,
+                    require_preferred_account=require_preferred_account,
+                    service_tier_supported=_http_bridge_session_supports_service_tier(
+                        existing, request_model=request_model, request_service_tier=request_service_tier
+                    ),
+                    allow_closed_admission_handoff=retained_handoff,
+                )
+                if retained_handoff and not reusable:
+                    _raise_http_bridge_incompatible_admission_handoff()
+                if reusable:
+                    assert existing is not None
                     current_instance = settings.http_responses_session_bridge_instance_id
                     if _durable_bridge_lookup_allows_local_reuse(durable_lookup, current_instance=current_instance):
                         existing.api_key = api_key
@@ -1519,6 +1515,8 @@ class _HTTPBridgeMixin(
         now = _service_time().monotonic()
         stale_keys: list[_HTTPBridgeSessionKey] = []
         for key, session in self._http_bridge_sessions.items():
+            if _http_bridge_session_has_admission_waiter(session):
+                continue
             if session.closed:
                 stale_keys.append(key)
                 continue
@@ -2125,6 +2123,7 @@ class _HTTPBridgeMixin(
         request_state: _WebSocketRequestState,
         restart_reader: bool = False,
         require_security_work_authorized: bool = False,
+        require_same_account: bool = False,
     ) -> None:
         old_account_id = session.account.id
         old_upstream = session.upstream
@@ -2148,10 +2147,13 @@ class _HTTPBridgeMixin(
         settings = await _service_get_settings_cache().get()
         session.api_key = request_state.api_key
         close_skips_account = session.last_upstream_close_code in _UPSTREAM_CLOSE_CODES_SKIP_SAME_ACCOUNT_RETRY
-        hard_close_account_bound = session.key.strength == "hard" and close_skips_account
+        hard_close_account_bound = session.key.strength == "hard" and (close_skips_account or require_same_account)
         skip_same_account = session.key.strength != "hard" and close_skips_account
         forced_refresh_account_id = request_state.force_refresh_account_id
         excluded_account_ids: set[str] = set(request_state.excluded_account_ids)
+        _require_http_bridge_bound_account_not_excluded(
+            hard_close_account_bound, session.account.id, excluded_account_ids
+        )
         if skip_same_account:
             excluded_account_ids.add(session.account.id)
         retry_same_account_once = not skip_same_account and session.account.id not in excluded_account_ids
@@ -2243,6 +2245,9 @@ class _HTTPBridgeMixin(
                     excluded_account_ids.update(request_state.excluded_account_ids)
                     if skip_same_account:
                         excluded_account_ids.add(session.account.id)
+                    _require_http_bridge_bound_account_not_excluded(
+                        hard_close_account_bound, session.account.id, excluded_account_ids
+                    )
                     retry_same_account_once = not skip_same_account and session.account.id not in excluded_account_ids
                     if skip_same_account:
                         preferred_candidate_id = None

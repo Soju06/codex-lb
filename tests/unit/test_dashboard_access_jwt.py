@@ -96,6 +96,7 @@ async def _request_path_with_required_access(
     monkeypatch: pytest.MonkeyPatch,
     *,
     path: str,
+    method: str = "GET",
     assertion: str | None = None,
 ) -> dict[str, object]:
     _configure_access(monkeypatch)
@@ -106,8 +107,11 @@ async def _request_path_with_required_access(
     app = FastAPI()
     add_dashboard_auth_proxy_middleware(app)
 
-    @app.get("/health/ready")
-    @app.get("/internal/drain/status")
+    @app.api_route("/health/ready", methods=["GET", "POST"])
+    @app.api_route("/internal/bridge/responses", methods=["POST"])
+    @app.api_route("/internal/drain/start", methods=["POST"])
+    @app.api_route("/internal/drain/status", methods=["GET", "POST"])
+    @app.api_route("/internal/drain/stop", methods=["POST"])
     async def probe(request: Request) -> dict[str, str | None]:
         authentication = get_dashboard_request_auth(request)
         return {
@@ -120,7 +124,7 @@ async def _request_path_with_required_access(
         headers["Cf-Access-Jwt-Assertion"] = assertion
     transport = ASGITransport(app=app, client=("127.0.0.1", 50000))
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.get(path, headers=headers)
+        response = await client.request(method, path, headers=headers)
     get_settings.cache_clear()
     return {"status": response.status_code, "payload": response.json()}
 
@@ -197,15 +201,37 @@ async def test_access_jwt_rejects_missing_forged_and_jwks_failure(monkeypatch: p
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("path", ["/health/ready", "/internal/drain/status"])
-async def test_required_access_jwt_exempts_health_and_internal_probes(
+@pytest.mark.parametrize(("method", "path"), [("GET", "/health/ready"), ("GET", "/internal/drain/status")])
+async def test_required_access_jwt_exempts_health_and_read_only_internal_probes(
     monkeypatch: pytest.MonkeyPatch,
+    method: str,
     path: str,
 ) -> None:
-    result = await _request_path_with_required_access(monkeypatch, path=path)
+    result = await _request_path_with_required_access(monkeypatch, method=method, path=path)
 
     assert result["status"] == 200
     assert result["payload"] == {"actor": None, "forwarded_header": None}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("POST", "/internal/drain/start"),
+        ("POST", "/internal/drain/stop"),
+        ("POST", "/internal/bridge/responses"),
+        ("POST", "/internal/drain/status"),
+    ],
+)
+async def test_required_access_jwt_blocks_mutating_or_non_probe_internal_paths(
+    monkeypatch: pytest.MonkeyPatch,
+    method: str,
+    path: str,
+) -> None:
+    result = await _request_path_with_required_access(monkeypatch, method=method, path=path)
+
+    assert result["status"] == 401
+    assert result["payload"] == {"detail": "A valid Cloudflare Access assertion is required"}
 
 
 @pytest.mark.asyncio

@@ -9,6 +9,7 @@ PID_FILE="$STATE_DIR/server.pid"
 PORT_FILE="$STATE_DIR/server.port"
 TOKEN_FILE="$STATE_DIR/bootstrap-token"
 LOG_FILE="$LOG_DIR/dev.log"
+DATABASE_URL="sqlite+aiosqlite:///$DATA_DIR/store.db"
 HOST=127.0.0.1
 
 port_for_root() {
@@ -91,6 +92,7 @@ PY
     cd "$ROOT"
     exec env \
       CODEX_LB_DATA_DIR="$DATA_DIR" \
+      CODEX_LB_DATABASE_URL="$DATABASE_URL" \
       CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN="$(cat "$TOKEN_FILE")" \
       CODEX_LB_LOG_FORMAT=json \
       uv run codex-lb --host "$HOST" --port "$port"

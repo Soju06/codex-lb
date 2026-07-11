@@ -122,9 +122,9 @@ Next:
   `openspec/changes/secure-tokenmaxxing-boundaries/context/skill-outputs/`.
   `docs/` remains limited to repository navigation/readiness and existing
   screenshots.
-- Required Cloudflare Access assertions apply fail-closed to dashboard traffic,
-  but health and internal probes remain routable with unvalidated identity
-  headers stripped.
+- Required Cloudflare Access assertions apply fail-closed to dashboard traffic
+  and mutating internal endpoints, but health and read-only internal probes
+  remain routable with unvalidated identity headers stripped.
 - Request-log readiness allows scheduler interval grace before treating the
   oldest retained row as a retention violation.
 - Fleet capacity clamps each account's remaining percentage before converting

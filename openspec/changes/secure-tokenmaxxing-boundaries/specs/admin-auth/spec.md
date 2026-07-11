@@ -29,9 +29,10 @@ validated token and MUST NOT be taken from a separate identity header.
 - **WHEN** a dashboard request has a missing or invalid assertion
 - **THEN** the request is rejected before password-session or other fallback dashboard authentication
 
-#### Scenario: Required Access assertion does not block internal probes
+#### Scenario: Required Access assertion does not block health and read-only internal probes
 
 - **GIVEN** Access JWT validation is configured as required
-- **WHEN** a health or internal readiness probe lacks an Access assertion
+- **WHEN** a health probe or read-only internal readiness probe lacks an Access assertion
 - **THEN** the probe is allowed to reach its route handler
 - **AND** unvalidated trusted identity headers are stripped before forwarding
+- **AND** mutating internal endpoints still require a valid Access assertion

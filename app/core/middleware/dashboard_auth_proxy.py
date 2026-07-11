@@ -59,7 +59,8 @@ class DashboardAuthProxyHeaderSanitizerMiddleware:
 
         headers = cast(list[tuple[bytes, bytes]], scope.get("headers", []))
         access_jwt_required_for_path = self._access_jwt_required and not _is_access_jwt_optional_path(
-            cast(str, scope.get("path", ""))
+            cast(str, scope.get("path", "")),
+            cast(str, scope.get("method", "")),
         )
         # A configured Access assertion is the authentication boundary. Verify
         # it cryptographically even when an earlier proxy-aware middleware has
@@ -152,8 +153,14 @@ def _header_value(headers: list[tuple[bytes, bytes]], target: bytes) -> str | No
     return None
 
 
-def _is_access_jwt_optional_path(path: str) -> bool:
-    return path == "/health" or path.startswith("/health/") or path == "/internal" or path.startswith("/internal/")
+_READ_ONLY_ACCESS_JWT_OPTIONAL_METHODS = frozenset({"GET", "HEAD"})
+_ACCESS_JWT_OPTIONAL_INTERNAL_PROBE_PATHS = frozenset({"/internal/drain/status"})
+
+
+def _is_access_jwt_optional_path(path: str, method: str) -> bool:
+    if method.upper() not in _READ_ONLY_ACCESS_JWT_OPTIONAL_METHODS:
+        return False
+    return path == "/health" or path.startswith("/health/") or path in _ACCESS_JWT_OPTIONAL_INTERNAL_PROBE_PATHS
 
 
 __all__ = ["add_dashboard_auth_proxy_middleware", "DashboardAuthProxyHeaderSanitizerMiddleware"]

@@ -18,7 +18,13 @@ def _make_valid_fixture(root: Path) -> None:
     commands = {
         "setup": "#!/bin/sh\nbun run build\n",
         "test": "#!/bin/sh\n",
-        "dev": '#!/bin/sh\nHOST=127.0.0.1\nLOG_DIR="$ROOT/.local/logs"\n',
+        "dev": (
+            "#!/bin/sh\n"
+            "HOST=127.0.0.1\n"
+            'LOG_DIR="$ROOT/.local/logs"\n'
+            'DATABASE_URL="sqlite+aiosqlite:///$DATA_DIR/store.db"\n'
+            'CODEX_LB_DATABASE_URL="$DATABASE_URL"\n'
+        ),
         "logs": "#!/bin/sh\n",
         "worktree": "#!/bin/sh\n",
         "check-operability": "#!/bin/sh\n",
@@ -61,3 +67,12 @@ def test_operability_guard_rejects_setup_without_frontend_build(tmp_path: Path) 
     setup.chmod(0o755)
 
     assert "bin/setup does not build frontend assets required by bin/dev" in check_repository(tmp_path)
+
+
+def test_operability_guard_rejects_dev_without_checkout_local_database_url(tmp_path: Path) -> None:
+    _make_valid_fixture(tmp_path)
+    dev = tmp_path / "bin" / "dev"
+    dev.write_text('#!/bin/sh\nHOST=127.0.0.1\nLOG_DIR="$ROOT/.local/logs"\n', encoding="utf-8")
+    dev.chmod(0o755)
+
+    assert "bin/dev does not force the checkout-local database URL" in check_repository(tmp_path)

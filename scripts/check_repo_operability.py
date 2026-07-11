@@ -63,6 +63,8 @@ def check_repository(root: Path) -> list[str]:
             errors.append("bin/dev contains an all-interface host binding")
         if ".local/logs/dev.log" not in content and 'LOG_DIR="$ROOT/.local/logs"' not in content:
             errors.append("bin/dev does not declare the checkout-local aggregate log")
+        if "CODEX_LB_DATABASE_URL" not in content or "$DATA_DIR/store.db" not in content:
+            errors.append("bin/dev does not force the checkout-local database URL")
 
     return errors
 

@@ -8,8 +8,9 @@
 - [x] 2.2 Derive the trusted dashboard actor only from the validated email claim.
 - [x] 2.3 Prove missing, forged, expired, wrong issuer, wrong audience, wrong
       domain, and JWKS failure are rejected.
-- [x] 2.4 Exempt health/internal probes from required Access JWT while keeping
-      dashboard fallback authentication fail-closed.
+- [x] 2.4 Exempt health and read-only internal probes from required Access JWT
+      while keeping dashboard fallback authentication and mutating internal
+      endpoints fail-closed.
 
 ## 3. Fleet capacity
 

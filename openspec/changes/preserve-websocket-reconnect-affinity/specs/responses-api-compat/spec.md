@@ -19,6 +19,11 @@ forward that synthesized turn state upstream. A turn state sent by the client,
 including one that the proxy generated and the client later echoed, remains a
 client-supplied turn-state affinity key.
 
+When a WebSocket handshake has neither a client-supplied turn state nor an
+accepted session header, the proxy MUST store its generated turn state as the
+WebSocket continuity key. A later connection that echoes that accepted value
+MUST recover the same continuity state.
+
 #### Scenario: backend WebSocket reconnect retains session affinity despite a generated turn state
 
 - **WHEN** two backend Codex Responses WebSocket connections include the same
@@ -34,3 +39,13 @@ client-supplied turn-state affinity key.
   received from an earlier proxy handshake
 - **THEN** that turn state remains the routing and WebSocket continuity key
   ahead of a broader accepted session header
+
+#### Scenario: generated turn state seeds continuity without a session header
+
+- **WHEN** a backend Codex Responses WebSocket handshake omits both an
+  accepted session header and `x-codex-turn-state`
+- **AND** the proxy generates and returns a turn state for that handshake
+- **THEN** the proxy stores its WebSocket continuity state under that generated
+  value
+- **AND WHEN** a later connection sends that value in `x-codex-turn-state`
+- **THEN** it recovers the stored continuity state

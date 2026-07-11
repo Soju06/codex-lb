@@ -10,6 +10,7 @@
 - [x] 2.2 Prefer durable session or prompt-cache affinity over only a
   current-handshake generated turn state.
 - [x] 2.3 Preserve upstream forwarding and client-echoed turn-state behavior.
+- [x] 2.4 Seed generated turn states for client-echoed reconnect continuity.
 
 ## 3. Verification
 

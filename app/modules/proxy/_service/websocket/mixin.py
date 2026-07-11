@@ -595,6 +595,13 @@ class _WebSocketMixin:
         if not codex_session_affinity:
             return _WebSocketContinuityState()
         session_id = _owner_lookup_session_id_from_headers(headers, synthesized_turn_state=synthesized_turn_state)
+        # The generated value is deliberately not the first connection's
+        # routing key, but it is the only continuity key when the client did
+        # not supply a session header.  Save the state under it so a later
+        # reconnect that echoes the accepted turn state can recover the
+        # completed-response anchor and pending tool outputs.
+        if session_id is None:
+            session_id = synthesized_turn_state
         if session_id is None:
             return _WebSocketContinuityState()
         key = (session_id, api_key.id if api_key is not None else None)

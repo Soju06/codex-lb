@@ -26059,6 +26059,25 @@ async def test_cleared_registry_keeps_bootstrap_plan_gating_in_new_account_windo
     assert _filter_accounts_for_model([unsupported, supported], "gpt-5.6-sol") == [supported]
 
 
+def test_suppressed_bootstrap_model_remains_an_account_selection_blocker(monkeypatch):
+    class Registry:
+        def plan_types_for_model(self, slug: str) -> frozenset[str] | None:
+            return frozenset()
+
+        def is_suppressed_bootstrap_model(self, slug: str) -> bool:
+            return slug == "gpt-5.6-sol"
+
+    monkeypatch.setattr("app.modules.proxy.load_balancer.get_model_registry", lambda: Registry())
+
+    # A suppressed known slug is not an operator-mapped unknown: it must enter
+    # model filtering and leave no eligible account to select.
+    assert _mapped_model_has_registry_entry("gpt-5.6-sol") is True
+    assert _mapped_model_has_registry_entry("operator-mapped-slug") is False
+    account = _make_account("acc_suppressed_bootstrap")
+    account.plan_type = "plus"
+    assert _filter_accounts_for_model([account], "gpt-5.6-sol") == []
+
+
 def test_http_bridge_session_rejects_account_without_requested_model(monkeypatch):
     session = cast(
         proxy_service._HTTPBridgeSession,

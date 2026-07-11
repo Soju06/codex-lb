@@ -19,3 +19,10 @@ Operator-provided model mappings remain outside this discovery contract. An
 unknown mapped slug is not rejected merely because it is absent from the live
 subscription catalog.
 
+## Retained catalog ownership
+
+Last-known capabilities belong to the account plan that produced them. A failed
+refresh after a plan-type change is therefore unknown state, not evidence that
+the account retained its previous-plan entitlements. Conversely, an explicitly
+suppressed bootstrap slug is known unavailable and must be rejected during
+selection rather than taking the operator-mapped unknown fallback.

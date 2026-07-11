@@ -524,6 +524,18 @@ class ModelRegistry:
         snapshot_plans = frozenset()
         return snapshot_plans
 
+    def is_suppressed_bootstrap_model(self, slug: str) -> bool:
+        """Whether partial-refresh evidence explicitly withdrew a bootstrap slug.
+
+        This differs from an operator-mapped slug simply absent from catalog
+        discovery: that slug keeps the existing unfiltered fallback, whereas a
+        suppressed bootstrap model must not select any account.
+        """
+        snapshot = self._snapshot
+        if snapshot is None:
+            return False
+        return slug.strip().lower() in snapshot.suppressed_bootstrap_model_slugs
+
     def plan_types_for_model_service_tier(self, slug: str, service_tier: str | None) -> frozenset[str] | None:
         if service_tier is None:
             return self.plan_types_for_model(slug)
@@ -663,8 +675,14 @@ class ModelRegistry:
                         refreshed_account_ids = set(per_account_results or {})
                         stale_account_ids.update(
                             account_id
-                            for account_id in previous.account_plans
-                            if account_id in active_account_plans and account_id not in refreshed_account_ids
+                            for account_id, previous_plan_type in previous.account_plans.items()
+                            if account_id in active_account_plans
+                            and account_id not in refreshed_account_ids
+                            # A retained catalog proves capabilities only for the
+                            # plan that produced it. A plan change without a fresh
+                            # catalog leaves the active account unknown instead of
+                            # re-labeling old entitlements as new-plan support.
+                            and active_account_plans[account_id] == previous_plan_type
                         )
                     else:
                         stale_account_ids = {

@@ -2275,7 +2275,10 @@ def _mapped_model_has_registry_entry(model: str | None) -> bool:
     plan_types_for_model = getattr(registry, "plan_types_for_model", None)
     if not callable(plan_types_for_model):
         return False
-    return bool(plan_types_for_model(model))
+    if plan_types_for_model(model):
+        return True
+    is_suppressed_bootstrap_model = getattr(registry, "is_suppressed_bootstrap_model", None)
+    return callable(is_suppressed_bootstrap_model) and is_suppressed_bootstrap_model(model)
 
 
 def _clone_account(account: Account) -> Account:

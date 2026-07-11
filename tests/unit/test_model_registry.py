@@ -694,6 +694,7 @@ async def test_suppressed_bootstrap_model_persists_across_partial_cycles_and_cle
     assert third.bootstrap_floor_active is True
     assert "gpt-5.6-sol" not in registry.get_models_with_fallback()
     assert registry.plan_types_for_model("gpt-5.6-sol") == frozenset()
+    assert registry.is_suppressed_bootstrap_model("gpt-5.6-sol") is True
     assert "gpt-5.6-sol" in third.suppressed_bootstrap_model_slugs
 
     await registry.update(
@@ -712,6 +713,37 @@ async def test_suppressed_bootstrap_model_persists_across_partial_cycles_and_cle
     assert "gpt-5.6-sol" in registry.get_models_with_fallback()
     assert "gpt-5.6-sol" not in fourth.suppressed_bootstrap_model_slugs
     assert registry.plan_types_for_model("gpt-5.6-sol") == frozenset({"pro"})
+
+
+@pytest.mark.asyncio
+async def test_plan_change_drops_failed_account_stale_catalog() -> None:
+    registry = ModelRegistry(ttl_seconds=60.0)
+    pro_only = _model("pro-only")
+    shared = _model("gpt-5.4")
+
+    await registry.update(
+        {"pro": [pro_only], "plus": [shared]},
+        per_account_results={
+            "account-changed": ("pro", [pro_only]),
+            "account-plus": ("plus", [shared]),
+        },
+        active_account_plans={"account-changed": "pro", "account-plus": "plus"},
+    )
+
+    # The account changes from pro to plus but its new catalog fetch fails. Its
+    # old pro-only catalog cannot be reinterpreted as a plus catalog.
+    await registry.update(
+        {"plus": [shared]},
+        per_account_results={"account-plus": ("plus", [shared])},
+        active_account_plans={"account-changed": "plus", "account-plus": "plus"},
+    )
+
+    snapshot = registry.get_snapshot()
+    assert snapshot is not None
+    assert snapshot.account_catalogs_authoritative is False
+    assert "account-changed" not in snapshot.account_plans
+    assert "pro-only" not in snapshot.models
+    assert registry.account_ids_for_model("pro-only") is None
 
 
 @pytest.mark.asyncio

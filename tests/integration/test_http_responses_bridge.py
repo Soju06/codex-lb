@@ -1359,7 +1359,7 @@ def _make_dummy_bridge_session(session_key: proxy_module._HTTPBridgeSessionKey) 
         key=session_key,
         headers={},
         closed=False,
-        account=SimpleNamespace(id=None, status=AccountStatus.ACTIVE),
+        account=SimpleNamespace(id=None, status=AccountStatus.ACTIVE, plan_type="plus"),
         request_model="gpt-5.4",
         pending_lock=anyio.Lock(),
         pending_requests=deque(),
@@ -2579,7 +2579,7 @@ async def test_v1_responses_http_bridge_closes_disallowed_session_before_owner_m
     stale_session = cast(proxy_module._HTTPBridgeSession, _make_dummy_bridge_session(key))
     alias_key = proxy_module._http_bridge_turn_state_alias_key("http_turn_owner_retry", key.api_key_id)
 
-    cast(Any, stale_session).account = SimpleNamespace(id="acc-stale", status=AccountStatus.ACTIVE)
+    cast(Any, stale_session).account = SimpleNamespace(id="acc-stale", status=AccountStatus.ACTIVE, plan_type="plus")
     cast(Any, stale_session).api_key = stale_api_key
     cast(Any, stale_session).upstream = upstream
     stale_session.downstream_turn_state_aliases.add("http_turn_owner_retry")

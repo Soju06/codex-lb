@@ -394,6 +394,7 @@ from app.modules.proxy._service.websocket.helpers import (
     _websocket_event_error_message,
     _websocket_event_error_param,
     _websocket_event_error_type,
+    _websocket_event_incomplete_reason,
     _websocket_full_resend_conflicts_with_visible_pending,
     _websocket_input_items_are_self_contained_fresh_replay,
     _websocket_precreated_auth_error_code,
@@ -3480,6 +3481,10 @@ class _WebSocketMixin:
             error = event.response.error if event and event.response else None
             error_code = _normalize_error_code(error.code if error else None, error.type if error else None)
             error_message = error.message if error else None
+            incomplete_reason = _websocket_event_incomplete_reason(event_type, payload)
+            if incomplete_reason is not None:
+                error_code = incomplete_reason
+                error_message = incomplete_reason
             if event_type == "response.failed":
                 error_payload = _upstream_error_from_openai(error)
             usage = event.response.usage if event and event.response else None

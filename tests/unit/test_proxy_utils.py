@@ -15873,6 +15873,7 @@ async def test_finalize_websocket_request_state_updates_balancer_state(monkeypat
         "response": {
             "id": "resp_ws_incomplete",
             "status": "incomplete",
+            "incomplete_details": {"reason": "max_output_tokens"},
             "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
         },
     }
@@ -15904,6 +15905,8 @@ async def test_finalize_websocket_request_state_updates_balancer_state(monkeypat
     handle_stream_error.assert_not_awaited()
     assert incomplete_upstream_control.reconnect_requested is False
     assert request_logs.calls[-1]["status"] == "error"
+    assert request_logs.calls[-1]["error_code"] == "max_output_tokens"
+    assert request_logs.calls[-1]["error_message"] == "max_output_tokens"
 
 
 @pytest.mark.asyncio

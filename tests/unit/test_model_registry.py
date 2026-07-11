@@ -457,6 +457,31 @@ async def test_account_ids_for_model_service_tier_tracks_account_catalogs():
 
 
 @pytest.mark.asyncio
+async def test_per_account_bundled_model_refreshes_metadata_without_availability():
+    live_sol = replace(
+        _model("gpt-5.6-sol"),
+        base_instructions="live per-account sol metadata",
+        raw={"use_responses_lite": False},
+    )
+    registry = ModelRegistry(ttl_seconds=60.0)
+
+    await registry.update(
+        {"pro": []},
+        per_account_results={
+            "account-sol": ("pro", [live_sol]),
+            "account-without-sol": ("pro", [_model("gpt-5.6-terra")]),
+        },
+    )
+
+    snapshot = registry.get_snapshot()
+    assert snapshot is not None
+    assert "gpt-5.6-sol" not in snapshot.models
+    metadata_sol = registry.get_models_for_metadata()["gpt-5.6-sol"]
+    assert metadata_sol.base_instructions == "live per-account sol metadata"
+    assert metadata_sol.raw["use_responses_lite"] is False
+
+
+@pytest.mark.asyncio
 async def test_account_ids_for_model_service_tier_preserves_missing_active_accounts():
     fast = replace(_model("gpt-5.5"), raw={"service_tiers": [{"slug": "fast"}], "additional_speed_tiers": ["fast"]})
     no_fast = replace(_model("gpt-5.5"), raw={"service_tiers": [{"slug": "default"}]})

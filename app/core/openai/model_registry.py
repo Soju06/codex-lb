@@ -690,6 +690,13 @@ class ModelRegistry:
                     for slug, model in (self._metadata_models or self._bootstrap_models).items()
                     if slug in self._bootstrap_models
                 }
+                if per_account_results is not None:
+                    account_metadata_models: dict[str, UpstreamModel] = {}
+                    for _account_id, (_plan_type, account_models) in per_account_results.items():
+                        for model in account_models:
+                            if model.slug in self._bootstrap_models:
+                                account_metadata_models.setdefault(model.slug, model)
+                    metadata_models.update(account_metadata_models)
                 metadata_models.update(models)
                 self._snapshot = ModelRegistrySnapshot(
                     models=models,

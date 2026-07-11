@@ -49,3 +49,10 @@ shadow the retained metadata.
 - **WHEN** the Codex catalog is rendered
 - **THEN** the list-visible source entry MUST take precedence for that slug
 - **AND** the earlier hidden source MUST NOT suppress or replace it
+
+#### Scenario: Bundled model appears on only one account in a plan
+
+- **GIVEN** a same-plan refresh returns a bundled Codex model from one successful account but omits it from another
+- **WHEN** the availability intersection excludes that model
+- **THEN** the model MUST remain absent from live availability indexes
+- **AND** its complete per-account live entry MUST refresh the metadata-only catalog

@@ -7378,7 +7378,7 @@ async def test_v1_responses_http_bridge_cancellation_during_durable_refresh_rele
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_http_bridge_request_key_follower_refreshes_session_model(app_instance, monkeypatch):
+async def test_v1_responses_http_bridge_request_key_follower_isolates_different_model(app_instance, monkeypatch):
     service = get_proxy_service_for_app(app_instance)
     service._http_bridge_sessions.clear()
     service._http_bridge_inflight_sessions.clear()
@@ -7418,7 +7418,6 @@ async def test_v1_responses_http_bridge_request_key_follower_refreshes_session_m
             self,
             headers,
             affinity,
-            request_model,
             idle_ttl_seconds,
             request_stage,
             preferred_account_id,
@@ -7428,19 +7427,21 @@ async def test_v1_responses_http_bridge_request_key_follower_refreshes_session_m
         create_started.set()
         await _wait_for_event(release_create)
         session = _make_dummy_bridge_session(key)
-        session.request_model = "gpt-5.1"
+        session.request_model = request_model
         return session
 
     monkeypatch.setattr(proxy_module.ProxyService, "_create_http_bridge_session", fake_create_http_bridge_session)
 
-    key = proxy_module._HTTPBridgeSessionKey("request", "shared-request", None)
+    key = proxy_module._HTTPBridgeSessionKey("session_header", "shared-request", None)
 
     try:
         creator = asyncio.create_task(
             service._get_or_create_http_bridge_session(
                 key,
-                headers={},
-                affinity=proxy_module._AffinityPolicy(),
+                headers={"x-codex-session-id": "shared-request"},
+                affinity=proxy_module._AffinityPolicy(
+                    key="shared-request", kind=proxy_module.StickySessionKind.CODEX_SESSION
+                ),
                 api_key=None,
                 request_model="gpt-5.1",
                 idle_ttl_seconds=120.0,
@@ -7451,8 +7452,10 @@ async def test_v1_responses_http_bridge_request_key_follower_refreshes_session_m
         follower = asyncio.create_task(
             service._get_or_create_http_bridge_session(
                 key,
-                headers={},
-                affinity=proxy_module._AffinityPolicy(),
+                headers={"x-codex-session-id": "shared-request"},
+                affinity=proxy_module._AffinityPolicy(
+                    key="shared-request", kind=proxy_module.StickySessionKind.CODEX_SESSION
+                ),
                 api_key=None,
                 request_model="gpt-5.4",
                 idle_ttl_seconds=120.0,
@@ -7462,8 +7465,11 @@ async def test_v1_responses_http_bridge_request_key_follower_refreshes_session_m
         release_create.set()
         created_session, follower_session = await asyncio.gather(creator, follower)
 
-        assert created_session is follower_session
+        assert created_session is not follower_session
+        assert created_session.request_model == "gpt-5.1"
         assert follower_session.request_model == "gpt-5.4"
+        assert created_session.closed is False
+        assert follower_session.key.affinity_kind == "internal_unanchored_parallel"
     finally:
         service._http_bridge_sessions.clear()
         service._http_bridge_inflight_sessions.clear()

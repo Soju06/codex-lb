@@ -35,6 +35,7 @@ class DurableBridgeLookup:
     latest_response_id: str | None
     latest_input_item_count: int | None = None
     latest_input_full_fingerprint: str | None = None
+    model: str | None = None
 
     def lease_is_active(self, *, now: datetime) -> bool:
         if self.owner_instance_id is None:
@@ -291,4 +292,5 @@ def _to_lookup(snapshot: DurableBridgeSessionSnapshot) -> DurableBridgeLookup:
         latest_response_id=snapshot.latest_response_id,
         latest_input_item_count=snapshot.latest_input_item_count,
         latest_input_full_fingerprint=snapshot.latest_input_full_fingerprint,
+        model=snapshot.model,
     )

@@ -1044,7 +1044,6 @@ class _HTTPBridgeMixin(
                     if detached is not None:
                         force_durable_takeover = True
                         self._schedule_http_bridge_session_closes([detached], reason="registry_detach")
-
                 if owner_mismatch_error is None:
                     inflight_future = self._http_bridge_inflight_sessions.get(key)
                     if (

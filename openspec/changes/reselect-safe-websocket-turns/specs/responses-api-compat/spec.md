@@ -4,9 +4,7 @@
 
 ### Requirement: WebSocket full-resend previous-response misses MUST retry without stale anchor
 
-When a direct WebSocket `response.create` request includes both
-`previous_response_id` and a self-contained full resend payload, the service
-MUST retain a safe replay body without `previous_response_id`. If upstream
+When a direct WebSocket `response.create` request includes both `previous_response_id` and a self-contained full resend payload, the service MUST retain a safe replay body without `previous_response_id`. If upstream
 rejects the anchor with `previous_response_not_found` before
 `response.created`, the service MUST reconnect and replay the retained full
 payload as a fresh turn instead of forwarding the raw upstream invalid-request
@@ -122,6 +120,29 @@ or mismatched proof MUST keep the request owner-bound.
 - **WHEN** the owner is unavailable
 - **THEN** the service keeps the request owner-bound
 
+## ADDED Requirements
+
+### Requirement: Safe HTTP bridge pre-created retries MUST avoid stalled owners
+
+When an unanchored HTTP bridge request is retried before visible output, the service MUST exclude the account that failed to create the response when the
+request has no account-scoped file requirement. A request with an account-
+scoped file requirement MUST remain bound to its file owner.
+
+#### Scenario: unanchored bridge request stalls before response creation
+
+- **WHEN** an unanchored HTTP bridge request is safely replayable before
+  `response.created`
+- **AND** it has no account-scoped file requirement
+- **THEN** the bridge excludes the stalled account before reconnecting
+
+#### Scenario: file-backed bridge request stalls before response creation
+
+- **WHEN** an unanchored HTTP bridge request requires its file-owner account
+- **AND** it is retried before `response.created`
+- **THEN** the bridge does not exclude or clear the required file owner
+
+## MODIFIED Requirements
+
 ### Requirement: Hard continuity owner lookup fails closed
 
 When a request depends on hard continuity ownership, the service MUST fail
@@ -154,8 +175,8 @@ excludes that owner.
   currently open upstream account
 - **THEN** the service retires the current upstream socket
 - **AND** reconnects the unchanged anchored request to the required owner
-- **AND** it does not forward turn-state learned from the retired account to the
-  required owner
+- **AND** it does not forward any `x-codex-turn-state` associated with the
+  retired account, whether supplied by the client or learned upstream
 
 #### Scenario: required owner matches the healthy open WebSocket account
 

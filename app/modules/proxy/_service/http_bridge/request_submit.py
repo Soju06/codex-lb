@@ -1232,9 +1232,15 @@ class _HTTPBridgeRequestSubmitMixin:
                     f"(close_code={session.last_upstream_close_code})"
                 )
                 return False
+            migrate_stalled_owner = (
+                request_state.previous_response_id is None and not request_state.file_required_preferred_account
+            )
             request_text = _prepare_websocket_request_state_for_visible_output_replay(request_state)
             if request_text is None:
                 return False
+            if migrate_stalled_owner:
+                request_state.preferred_account_id = None
+                request_state.excluded_account_ids.add(session.account.id)
         _log_http_bridge_event(
             "retry_precreated",
             session.key,

@@ -25,12 +25,15 @@ selector check excludes an otherwise healthy open owner socket.
   request contains no account-scoped file reference.
 - Carry the same verified replay boundary through durable HTTP bridge quota
   recovery, excluding the failed owner and releasing its account-local lease.
-- Prevent account-scoped file IDs, client-owned security retries, and learned
-  turn-state from crossing account boundaries.
+- Let file-free unanchored HTTP bridge retries exclude an account that stalled
+  before response creation, while keeping file-backed retries owner-bound.
+- Prevent account-scoped file IDs, client-owned security retries, and retired-
+  account turn-state from crossing account boundaries.
 
 ## Impact
 
 - Direct client-facing Responses WebSocket lifecycle and verified
   WebSocket-to-HTTP full-resend recovery.
-- Existing HTTP bridge durable-anchor behavior is unchanged.
+- Existing HTTP bridge durable-anchor behavior is unchanged; safe unanchored
+  pre-created retries may move away from a stalled account.
 - No model catalog, database, credential, or HTTP streaming change.

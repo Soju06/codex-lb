@@ -1149,6 +1149,9 @@ class _WebSocketMixin:
                         # the previous socket's account-scoped turn token while
                         # choosing and opening that replacement connection.
                         upstream_turn_state = None
+                        filtered_headers = {
+                            key: value for key, value in filtered_headers.items() if key.lower() != "x-codex-turn-state"
+                        }
                     connect_headers = _facade()._headers_with_turn_state(filtered_headers, upstream_turn_state)
                     account, upstream = await proxy._connect_proxy_websocket(
                         connect_headers,
@@ -3274,6 +3277,16 @@ class _WebSocketMixin:
         if retry_safe_owner_replay and not retry_safe_previous_response_not_found:
             safe_request_text = _prepare_websocket_request_state_for_account_switch(request_state)
             if safe_request_text is None:
+                await proxy._handle_stream_error(
+                    account,
+                    {"message": _websocket_event_error_message(event_type, payload) or "Upstream error"},
+                    retry_error_code,
+                )
+                event, payload, event_type, downstream_text = (
+                    _rewrite_websocket_previous_response_owner_unavailable_event(
+                        request_state=request_state,
+                    )
+                )
                 retry_error_code = None
             else:
                 # Keep the global response-create gate/admission while dropping

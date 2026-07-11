@@ -15,6 +15,7 @@
 - [x] Preserve file pins and client-owned anchors across security routing.
 - [x] Drop retired-account turn-state before an owner-mismatch reconnect.
 - [x] Replay durable trimmed HTTP bridge full resends after owner quota.
+- [x] Move only file-free unanchored HTTP bridge retries away from stalled owners.
 
 ## Verification
 

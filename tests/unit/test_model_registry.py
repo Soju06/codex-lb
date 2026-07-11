@@ -990,7 +990,9 @@ async def test_clear_falls_back_to_bootstrap_floor():
     # still plan-gated (not treated as absent). Bootstrap is the floor whenever there
     # is no authoritative account coverage.
     registry = ModelRegistry(ttl_seconds=60.0)
-    await registry.update({"plus": [_model("gpt-5.4")]})
+    live_only_model = _model("live-only-after-clear")
+    await registry.update({"plus": [_model("gpt-5.4"), live_only_model]})
+    assert "live-only-after-clear" in registry.get_models_for_metadata()
 
     await registry.clear()
 
@@ -1007,6 +1009,7 @@ async def test_clear_falls_back_to_bootstrap_floor():
     # back to plan-level gating instead of excluding every account.
     assert registry.account_ids_for_model("gpt-5.6-sol") is None
     assert registry.account_ids_for_model_service_tier("gpt-5.6-sol", "priority") is None
+    assert "live-only-after-clear" not in registry.get_models_for_metadata()
 
 
 def test_needs_refresh_true_initially():

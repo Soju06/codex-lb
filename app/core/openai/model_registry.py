@@ -638,6 +638,7 @@ class ModelRegistry:
         """
         async with self._lock:
             self._snapshot = None
+            self._metadata_models = None
 
     async def update(
         self,

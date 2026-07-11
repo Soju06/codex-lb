@@ -79,6 +79,8 @@ async def get_fleet_summary(
         generated_at=generated_at,
         primary_recorded_at_by_account={account_id: row.recorded_at for account_id, row in primary_usage.items()},
         secondary_recorded_at_by_account={account_id: row.recorded_at for account_id, row in secondary_usage.items()},
+        primary_used_percent_by_account={account_id: row.used_percent for account_id, row in primary_usage.items()},
+        secondary_used_percent_by_account={account_id: row.used_percent for account_id, row in secondary_usage.items()},
     )
     return FleetSummaryResponse(
         accounts=build_fleet_account_summaries(

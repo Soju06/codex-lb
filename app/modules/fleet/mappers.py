@@ -80,6 +80,8 @@ def build_fleet_capacity(
     generated_at: datetime,
     primary_recorded_at_by_account: dict[str, datetime] | None = None,
     secondary_recorded_at_by_account: dict[str, datetime] | None = None,
+    primary_used_percent_by_account: dict[str, float] | None = None,
+    secondary_used_percent_by_account: dict[str, float] | None = None,
 ) -> tuple[
     list[str],
     list[FleetExcludedAccount],
@@ -103,12 +105,14 @@ def build_fleet_capacity(
         generated_at=generated_at,
         window="primary",
         recorded_at_by_account=primary_recorded_at_by_account or {},
+        used_percent_by_account=primary_used_percent_by_account,
     )
     weekly = _capacity_headline(
         included,
         generated_at=generated_at,
         window="secondary",
         recorded_at_by_account=secondary_recorded_at_by_account or {},
+        used_percent_by_account=secondary_used_percent_by_account,
     )
     additional = [
         FleetAdditionalCapacity(
@@ -140,6 +144,7 @@ def _capacity_headline(
     generated_at: datetime,
     window: str,
     recorded_at_by_account: dict[str, datetime],
+    used_percent_by_account: dict[str, float] | None,
 ) -> FleetCapacityHeadline:
     if not accounts:
         return FleetCapacityHeadline(stale=True, stale_reason="no_included_accounts")
@@ -149,16 +154,21 @@ def _capacity_headline(
         if account.account_id not in recorded_at_by_account
         or generated_at - to_utc_naive(recorded_at_by_account[account.account_id]) > _FRESHNESS_LIMIT
     ]
-    remaining = [
-        getattr(account.usage, f"{window}_remaining_percent") if account.usage is not None else None
-        for account in accounts
-    ]
-    missing_ids = [account.account_id for account, value in zip(accounts, remaining, strict=True) if value is None]
+    if used_percent_by_account is None:
+        values_by_account = {
+            account.account_id: 100.0 - float(remaining)
+            for account in accounts
+            if account.usage is not None
+            and (remaining := getattr(account.usage, f"{window}_remaining_percent")) is not None
+        }
+    else:
+        values_by_account = used_percent_by_account
+    missing_ids = [account.account_id for account in accounts if account.account_id not in values_by_account]
     if missing_ids:
         return FleetCapacityHeadline(stale=True, stale_reason="missing_usage:" + ",".join(missing_ids))
     if stale_ids:
         return FleetCapacityHeadline(stale=True, stale_reason="stale_usage:" + ",".join(stale_ids))
-    values = [100.0 - _clamp_percent(float(value)) for value in remaining if value is not None]
+    values = [_clamp_percent(float(values_by_account[account.account_id])) for account in accounts]
     return FleetCapacityHeadline(used_percent=_round_used(sum(values) / len(values)), stale=False)
 
 

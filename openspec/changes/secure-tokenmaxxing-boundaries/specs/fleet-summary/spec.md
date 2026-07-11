@@ -21,6 +21,12 @@ clamped to 0–100, and MUST be rounded to the nearest whole display percentage.
 - **THEN** that account's remaining percentage is clamped into the 0–100 range before converting to used capacity
 - **AND** the fleet headline averages those per-account normalized used percentages
 
+#### Scenario: Headline value and freshness share one usage snapshot
+
+- **WHEN** usage refreshes concurrently with fleet-summary generation
+- **THEN** each headline percentage and its freshness timestamp come from the same persisted usage row snapshot
+- **AND** a newer timestamp cannot make an older percentage appear fresh
+
 #### Scenario: Included account data is stale or missing
 
 - **WHEN** any included active account has stale or missing five-hour data

@@ -22,6 +22,7 @@ class RequestLogCleanupState:
     last_success_at: datetime | None = None
     last_deleted_count: int = 0
     last_error: str | None = None
+    currently_responsible: bool = False
 
 
 _STATE = RequestLogCleanupState()
@@ -36,10 +37,10 @@ def request_log_cleanup_health() -> str:
 
 
 def request_log_cleanup_is_ready(*, interval_seconds: int, leader_election_enabled: bool) -> bool:
+    if leader_election_enabled and not _STATE.currently_responsible:
+        return True
     if _STATE.last_error is not None:
         return False
-    if leader_election_enabled and _STATE.last_success_at is None:
-        return True
     if _STATE.last_success_at is None:
         return False
     return (utcnow() - _STATE.last_success_at).total_seconds() <= interval_seconds * 2
@@ -86,7 +87,10 @@ class RequestLogCleanupScheduler:
                 continue
 
     async def _cleanup_once(self) -> int:
-        if self.retention_days is None or not await _get_leader_election().try_acquire():
+        if self.retention_days is None:
+            return 0
+        _STATE.currently_responsible = await _get_leader_election().try_acquire()
+        if not _STATE.currently_responsible:
             return 0
         async with self._lock:
             _STATE.last_attempt_at = utcnow()

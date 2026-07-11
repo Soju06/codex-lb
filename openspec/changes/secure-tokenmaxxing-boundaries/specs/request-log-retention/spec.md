@@ -20,3 +20,10 @@ days and SHALL keep request/response payload and conversation archival disabled.
 - **WHEN** the oldest retained request log is older than the nominal retention cutoff only because the next cleanup interval has not elapsed
 - **THEN** readiness remains healthy
 - **AND** readiness still fails when cleanup itself is unhealthy or retained rows exceed the cleanup grace window
+
+#### Scenario: Non-leader readiness ignores stale local cleanup state
+
+- **GIVEN** leader election is enabled and this replica is not currently responsible for cleanup
+- **WHEN** its local last-success or error state was left by an earlier leadership term
+- **THEN** readiness does not fail on that stale local cleanup state
+- **AND** the current cleanup leader remains responsible for retention health

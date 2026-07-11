@@ -81,6 +81,23 @@ def test_capacity_clamps_each_account_before_averaging_outliers() -> None:
     assert weekly.used_percent == 50
 
 
+def test_capacity_uses_one_usage_snapshot_for_values_and_freshness() -> None:
+    now = utcnow()
+    accounts = [_account("changed", primary_remaining=90.0)]
+
+    _included, _excluded, five_hour, _weekly, _additional = build_fleet_capacity(
+        accounts,
+        include_usage=True,
+        generated_at=now,
+        primary_recorded_at_by_account={"changed": now},
+        secondary_recorded_at_by_account={"changed": now},
+        primary_used_percent_by_account={"changed": 80.0},
+        secondary_used_percent_by_account={"changed": 20.0},
+    )
+
+    assert five_hour.used_percent == 80
+
+
 def test_capacity_excludes_unroutable_and_suppresses_stale_or_missing_headline() -> None:
     now = utcnow()
     accounts = [

@@ -65,10 +65,12 @@ def test_cleanup_readiness_fails_closed_for_single_instance_error_or_staleness()
         last_success_at=cleanup_scheduler._STATE.last_success_at,
         last_deleted_count=cleanup_scheduler._STATE.last_deleted_count,
         last_error=cleanup_scheduler._STATE.last_error,
+        currently_responsible=cleanup_scheduler._STATE.currently_responsible,
     )
     try:
         cleanup_scheduler._STATE.last_success_at = None
         cleanup_scheduler._STATE.last_error = None
+        cleanup_scheduler._STATE.currently_responsible = True
         assert (
             cleanup_scheduler.request_log_cleanup_is_ready(interval_seconds=60, leader_election_enabled=False) is False
         )
@@ -93,3 +95,29 @@ def test_cleanup_readiness_fails_closed_for_single_instance_error_or_staleness()
         cleanup_scheduler._STATE.last_success_at = original.last_success_at
         cleanup_scheduler._STATE.last_deleted_count = original.last_deleted_count
         cleanup_scheduler._STATE.last_error = original.last_error
+        cleanup_scheduler._STATE.currently_responsible = original.currently_responsible
+
+
+def test_cleanup_readiness_ignores_stale_local_state_on_non_leader() -> None:
+    original = cleanup_scheduler.RequestLogCleanupState(
+        last_attempt_at=cleanup_scheduler._STATE.last_attempt_at,
+        last_success_at=cleanup_scheduler._STATE.last_success_at,
+        last_deleted_count=cleanup_scheduler._STATE.last_deleted_count,
+        last_error=cleanup_scheduler._STATE.last_error,
+        currently_responsible=cleanup_scheduler._STATE.currently_responsible,
+    )
+    try:
+        cleanup_scheduler._STATE.currently_responsible = False
+        cleanup_scheduler._STATE.last_success_at = cleanup_scheduler.utcnow() - timedelta(days=1)
+        cleanup_scheduler._STATE.last_error = "OldLeaderFailure"
+
+        assert cleanup_scheduler.request_log_cleanup_is_ready(
+            interval_seconds=60,
+            leader_election_enabled=True,
+        )
+    finally:
+        cleanup_scheduler._STATE.last_attempt_at = original.last_attempt_at
+        cleanup_scheduler._STATE.last_success_at = original.last_success_at
+        cleanup_scheduler._STATE.last_deleted_count = original.last_deleted_count
+        cleanup_scheduler._STATE.last_error = original.last_error
+        cleanup_scheduler._STATE.currently_responsible = original.currently_responsible

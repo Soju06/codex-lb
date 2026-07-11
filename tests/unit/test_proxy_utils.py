@@ -11430,7 +11430,10 @@ async def test_http_bridge_replays_previous_response_from_validated_full_resend_
         affinity=proxy_service._AffinityPolicy(),
         request_model="gpt-5.1",
         account=account,
-        upstream=cast(proxy_service.UpstreamResponsesWebSocket, AsyncMock()),
+        upstream=cast(
+            proxy_service.UpstreamResponsesWebSocket,
+            SimpleNamespace(send_text=AsyncMock(), close=AsyncMock()),
+        ),
         upstream_control=proxy_service._WebSocketUpstreamControl(),
         pending_requests=deque([request_state]),
         pending_lock=anyio.Lock(),
@@ -11439,10 +11442,30 @@ async def test_http_bridge_replays_previous_response_from_validated_full_resend_
         last_used_at=1.0,
         idle_ttl_seconds=300.0,
     )
+    created_text = json.dumps(
+        {
+            "type": "response.created",
+            "response": {
+                "id": "resp_security_previous_pinned",
+                "status": "in_progress",
+            },
+        },
+        separators=(",", ":"),
+    )
+    await service._process_http_bridge_upstream_text(session, created_text)
+    assert request_state.response_id == "resp_security_previous_pinned"
+    assert request_state.response_event_count == 1
+    assert request_state.downstream_visible is False
+    assert request_state.event_queue is not None
+    created_block = await request_state.event_queue.get()
+    assert created_block is not None
+    assert '"type":"response.created"' in created_block
+
     cyber_message = (
-        "This chat was flagged for possible cybersecurity risk. "
-        "To get authorized for security work, join the Trusted Access for Cyber program. "
-        "https://chatgpt.com/cyber"
+        "ⓘ This content can't be shown\n"
+        "We take extra caution with cybersecurity requests. If you’re a security professional, "
+        "you may be able to apply for Trusted Access.\n"
+        "Trusted Access: https://openai.com/form/enterprise-trusted-access-for-cyber/"
     )
     text = json.dumps(
         {

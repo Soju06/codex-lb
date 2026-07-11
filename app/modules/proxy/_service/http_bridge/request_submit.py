@@ -1389,13 +1389,10 @@ class _HTTPBridgeRequestSubmitMixin:
         # replayable on another account.
         if request_state.file_required_preferred_account:
             return False
-        if request_state.response_id is not None:
-            return False
-        if request_state.replay_count >= 1:
+        if not _websocket_request_can_replay_before_visible_output(request_state):
             return False
         retry_text = request_state.request_text
-        if not retry_text:
-            return False
+        assert retry_text is not None
         if request_state.previous_response_id is not None:
             if not (
                 request_state.fresh_upstream_request_text is not None

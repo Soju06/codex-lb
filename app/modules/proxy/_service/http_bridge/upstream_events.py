@@ -102,6 +102,7 @@ from app.modules.proxy._service.support import (
     _event_type_from_payload,
     _HTTPBridgeSession,
     _record_response_event,
+    _websocket_request_can_replay_before_visible_output,
     _WebSocketRequestState,
 )
 from app.modules.proxy._service.support import (
@@ -926,16 +927,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                 can_retry_security_work = (
                     not getattr(session.account, "security_work_authorized", False)
                     and not has_other_pending_requests
-                    and terminal_request_state.response_id is None
-                    and terminal_request_state.replay_count < 1
-                    and bool(terminal_request_state.request_text)
-                    and (
-                        terminal_request_state.previous_response_id is None
-                        or (
-                            terminal_request_state.fresh_upstream_request_text is not None
-                            and terminal_request_state.fresh_upstream_request_is_retry_safe
-                        )
-                    )
+                    and _websocket_request_can_replay_before_visible_output(terminal_request_state)
                 )
                 if terminal_request_state.event_queue is not None:
                     await terminal_request_state.event_queue.put(

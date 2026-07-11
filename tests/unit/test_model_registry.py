@@ -857,6 +857,37 @@ async def test_first_authoritative_catalog_suppresses_omitted_bootstrap_model() 
 
 
 @pytest.mark.asyncio
+async def test_authoritative_empty_catalog_drops_and_suppresses_stale_model() -> None:
+    registry = ModelRegistry(ttl_seconds=60.0)
+    stale_private = _model("private-empty-removed")
+
+    await registry.update(
+        {"pro": [stale_private]},
+        per_account_results={"account-pro": ("pro", [stale_private])},
+        active_account_plans={"account-pro": "pro"},
+    )
+    assert registry.account_ids_for_model("private-empty-removed") == frozenset({"account-pro"})
+
+    await registry.update(
+        {"pro": []},
+        per_account_results={"account-pro": ("pro", [])},
+        active_account_plans={"account-pro": "pro"},
+    )
+
+    snapshot = registry.get_snapshot()
+    assert snapshot is not None
+    assert snapshot.account_catalogs_authoritative is True
+    assert snapshot.bootstrap_floor_active is False
+    assert snapshot.models == {}
+    assert snapshot.account_plans == {"account-pro": "pro"}
+    assert "private-empty-removed" not in snapshot.model_accounts
+    assert registry.plan_types_for_model("private-empty-removed") == frozenset()
+    assert registry.account_ids_for_model("private-empty-removed") == frozenset()
+    assert registry.is_suppressed_model("private-empty-removed") is True
+    assert registry.is_suppressed_model("gpt-5.6-sol") is True
+
+
+@pytest.mark.asyncio
 async def test_private_catalog_model_reappearance_clears_suppression() -> None:
     registry = ModelRegistry(ttl_seconds=60.0)
     private_alpha = _model("private-alpha")

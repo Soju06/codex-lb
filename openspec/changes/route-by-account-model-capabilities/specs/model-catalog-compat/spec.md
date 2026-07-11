@@ -88,6 +88,14 @@ an operator-mapped slug that has no catalog evidence at all.
 - **THEN** its last-known capability data is retained
 - **AND** the complete snapshot remains authoritative
 
+#### Scenario: Successful empty catalog withdraws stale capabilities
+
+- **GIVEN** an active account previously advertised a model
+- **AND** its later catalog refresh succeeds with an empty model list
+- **WHEN** the next registry snapshot is built
+- **THEN** the empty catalog is treated as successful account coverage
+- **AND** the previously advertised model leaves discovery and exact routing
+
 #### Scenario: Failed refresh follows an account plan-type change
 
 - **GIVEN** an account previously advertised a catalog while on one plan type

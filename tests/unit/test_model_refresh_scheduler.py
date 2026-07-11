@@ -265,6 +265,29 @@ async def test_fetch_with_failover_attempts_transport_recovery_once_when_retry_f
 
 
 @pytest.mark.asyncio
+async def test_fetch_with_failover_preserves_successful_empty_catalogs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    accounts = [_account("account-1"), _account("account-2")]
+    encryptor = MagicMock()
+    encryptor.decrypt.return_value = "access-token"
+    fetch_models_for_plan = AsyncMock(side_effect=[[], []])
+
+    monkeypatch.setattr(scheduler_module, "AuthManager", _StubAuthManager)
+    monkeypatch.setattr(scheduler_module, "fetch_models_for_plan", fetch_models_for_plan)
+
+    result = await scheduler_module._fetch_with_failover(accounts, encryptor, MagicMock())
+
+    assert result is not None
+    assert result.models == []
+    assert result.account_models == {
+        accounts[0].id: (accounts[0].plan_type, []),
+        accounts[1].id: (accounts[1].plan_type, []),
+    }
+    assert fetch_models_for_plan.await_count == 2
+
+
+@pytest.mark.asyncio
 async def test_fetch_with_failover_unions_same_plan_tiers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

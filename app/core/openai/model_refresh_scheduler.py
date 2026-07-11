@@ -243,7 +243,7 @@ async def _fetch_with_failover(
             )
             continue
     merged_models = _merge_same_plan_model_results(successful_results)
-    if not merged_models:
+    if not successful_results:
         return None
     return _FetchResult(models=merged_models, account_models=account_models)
 

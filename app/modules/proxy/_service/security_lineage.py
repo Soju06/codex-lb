@@ -62,9 +62,11 @@ class _SecurityLineageMixin:
                 security_lineage_id,
                 kind=StickySessionKind.CODEX_SESSION,
             )
-        # Test doubles commonly expose an unconfigured AsyncMock here. The
-        # persisted repository always returns a real ORM row or None.
-        return isinstance(entry, StickySession) and entry.requires_security_work_authorized
+            # Read ORM state before the repository context rolls back its
+            # read-only transaction and detaches/expires the loaded row.
+            # Test doubles commonly expose an unconfigured AsyncMock here; the
+            # persisted repository always returns a real ORM row or None.
+            return isinstance(entry, StickySession) and bool(entry.requires_security_work_authorized)
 
     async def _mark_security_lineage_requirement(
         self: Any,

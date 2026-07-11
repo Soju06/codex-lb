@@ -10,7 +10,9 @@ from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, StickySessionKind
 from app.db.session import SessionLocal
+from app.dependencies import _proxy_repo_context
 from app.modules.accounts.repository import AccountsRepository
+from app.modules.proxy._service.security_lineage import _SecurityLineageMixin
 from app.modules.proxy.durable_bridge_coordinator import DurableBridgeSessionCoordinator
 from app.modules.proxy.durable_bridge_repository import DurableBridgeRepository
 from app.modules.proxy.sticky_repository import StickySessionsRepository
@@ -18,6 +20,11 @@ from app.modules.settings.repository import SettingsRepository
 from app.modules.sticky_sessions.cleanup_scheduler import StickySessionCleanupScheduler
 
 pytestmark = pytest.mark.integration
+
+
+class _SecurityLineageReader(_SecurityLineageMixin):
+    def __init__(self) -> None:
+        self._repo_factory = _proxy_repo_context
 
 
 async def _create_accounts() -> list[Account]:
@@ -83,6 +90,22 @@ async def test_sticky_session_security_requirement_is_monotonic_across_normal_re
 
     assert rebound.account_id == accounts[1].id
     assert rebound.requires_security_work_authorized is True
+
+
+@pytest.mark.asyncio
+async def test_security_lineage_requirement_is_read_before_repository_context_closes(db_setup):
+    accounts = await _create_accounts()
+    root_key = "root-security-lineage-context-boundary"
+    async with SessionLocal() as session:
+        await StickySessionsRepository(session).upsert(
+            root_key,
+            accounts[0].id,
+            kind=StickySessionKind.CODEX_SESSION,
+            requires_security_work_authorized=True,
+        )
+
+    reader = _SecurityLineageReader()
+    assert await reader._security_lineage_requires_security_work_authorized(root_key) is True
 
 
 async def _insert_sticky_session(

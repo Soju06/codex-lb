@@ -21,6 +21,20 @@ The classifier MUST recognize both the legacy cybersecurity-risk message and the
 - **THEN** codex-lb emits a non-terminal `codex_lb.warning` with `code="no_security_work_authorized_accounts"`
 - **AND** codex-lb returns the original security-work authorization error without selecting an ordinary account
 
+#### Scenario: Classified Codex lineage remains classified after routing cleanup
+
+- **WHEN** a root Codex session has been classified as requiring security-work authorization
+- **AND** its ordinary account-affinity row is removed because no authorized account can currently be selected
+- **THEN** codex-lb MUST retain a separate durable security-work marker for that lineage
+- **AND** later turns and child turns MUST remain restricted to security-work-authorized accounts
+
+#### Scenario: Failed authorized reconnect preserves classification
+
+- **WHEN** codex-lb has durably classified a session as requiring security-work authorization
+- **AND** reconnecting that session to an authorized account fails
+- **THEN** codex-lb MUST preserve the durable security-work requirement
+- **AND** a later retry MUST NOT return the session to the ordinary account pool
+
 #### Scenario: Unrooted request has no authorized account
 
 - **WHEN** an unrooted request attempts a security-work-authorized retry

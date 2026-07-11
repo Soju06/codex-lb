@@ -743,8 +743,8 @@ async def test_http_bridge_failed_owner_failover_restores_original_continuity_st
     assert request_state.response_event_count == 1
     assert request_state.replay_downstream_response_id is None
     assert request_state.suppress_next_created_downstream is False
-    assert request_state.require_security_work_authorized is False
-    assert session.requires_security_work_authorized is False
+    assert request_state.require_security_work_authorized is require_security_work_authorized
+    assert session.requires_security_work_authorized is require_security_work_authorized
     assert list(session.pending_requests) == [request_state]
     assert session.queued_request_count == 1
 

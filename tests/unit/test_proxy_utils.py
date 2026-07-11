@@ -12,6 +12,7 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import Any, AsyncIterator, Iterator, Literal, Protocol, Self, cast
 from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import call as mock_call
 
 import aiohttp
 import anyio
@@ -38,7 +39,7 @@ from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
 from app.core.utils.request_id import get_request_id, reset_request_id, set_request_id
 from app.core.utils.sse import parse_sse_data_json
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus
+from app.db.models import Account, AccountStatus, StickySession, StickySessionKind
 from app.modules.accounts import auth_manager as auth_manager_module
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
@@ -11138,7 +11139,7 @@ async def test_http_bridge_retries_security_work_warning_on_authorized_account(m
 
 
 @pytest.mark.asyncio
-async def test_http_bridge_failed_security_reconnect_rolls_back_new_durable_requirement(monkeypatch):
+async def test_http_bridge_failed_security_reconnect_preserves_durable_requirement(monkeypatch):
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     account = _make_account("acc_bridge_security_rollback")
     request_state = proxy_service._WebSocketRequestState(
@@ -11181,9 +11182,9 @@ async def test_http_bridge_failed_security_reconnect_rolls_back_new_durable_requ
 
     assert retried is False
     require_security.assert_awaited_once_with(session_id="durable-security-rollback")
-    clear_security.assert_awaited_once_with(session_id="durable-security-rollback")
-    assert request_state.require_security_work_authorized is False
-    assert session.requires_security_work_authorized is False
+    clear_security.assert_not_awaited()
+    assert request_state.require_security_work_authorized is True
+    assert session.requires_security_work_authorized is True
 
 
 @pytest.mark.asyncio
@@ -23965,6 +23966,85 @@ async def test_bind_security_lineage_selection_releases_selected_lease_when_mark
     assert ordinary_selection.requires_security_work_authorized is False
     assert mark_requirement.await_count == 1
     release_account_lease.assert_awaited_once_with(lease)
+
+
+@pytest.mark.asyncio
+async def test_security_lineage_marker_survives_routing_row_cleanup():
+    request_logs = _RequestLogsRecorder()
+    sticky_sessions = AsyncMock()
+    marker = StickySession(
+        key="security-work:root-security-lineage-cleanup",
+        kind=StickySessionKind.CODEX_SESSION,
+        account_id="acc_security_lineage_cleanup",
+        requires_security_work_authorized=True,
+    )
+    sticky_sessions.get_entry.side_effect = [marker]
+
+    class _StickyRepoContext:
+        async def __aenter__(self) -> ProxyRepositories:
+            return ProxyRepositories(
+                accounts=cast(AccountsRepository, AsyncMock()),
+                usage=cast(UsageRepository, AsyncMock()),
+                request_logs=cast(RequestLogsRepository, request_logs),
+                sticky_sessions=cast(StickySessionsRepository, sticky_sessions),
+                api_keys=cast(ApiKeysRepository, AsyncMock()),
+                additional_usage=cast(AdditionalUsageRepository, AsyncMock()),
+            )
+
+        async def __aexit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+    service = proxy_service.ProxyService(cast(proxy_service.ProxyRepoFactory, lambda: _StickyRepoContext()))
+
+    required = await service._security_lineage_requires_security_work_authorized("root-security-lineage-cleanup")
+
+    assert required is True
+    sticky_sessions.get_entry.assert_awaited_once_with(
+        "security-work:root-security-lineage-cleanup",
+        kind=StickySessionKind.CODEX_SESSION,
+    )
+
+
+@pytest.mark.asyncio
+async def test_mark_security_lineage_requirement_persists_dedicated_marker():
+    request_logs = _RequestLogsRecorder()
+    sticky_sessions = AsyncMock()
+
+    class _StickyRepoContext:
+        async def __aenter__(self) -> ProxyRepositories:
+            return ProxyRepositories(
+                accounts=cast(AccountsRepository, AsyncMock()),
+                usage=cast(UsageRepository, AsyncMock()),
+                request_logs=cast(RequestLogsRepository, request_logs),
+                sticky_sessions=cast(StickySessionsRepository, sticky_sessions),
+                api_keys=cast(ApiKeysRepository, AsyncMock()),
+                additional_usage=cast(AdditionalUsageRepository, AsyncMock()),
+            )
+
+        async def __aexit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+    service = proxy_service.ProxyService(cast(proxy_service.ProxyRepoFactory, lambda: _StickyRepoContext()))
+
+    await service._mark_security_lineage_requirement(
+        "root-security-lineage-marker",
+        account_id="acc_security_lineage_marker",
+    )
+
+    assert sticky_sessions.upsert.await_args_list == [
+        mock_call(
+            "security-work:root-security-lineage-marker",
+            "acc_security_lineage_marker",
+            kind=StickySessionKind.CODEX_SESSION,
+            requires_security_work_authorized=True,
+        ),
+        mock_call(
+            "root-security-lineage-marker",
+            "acc_security_lineage_marker",
+            kind=StickySessionKind.CODEX_SESSION,
+            requires_security_work_authorized=True,
+        ),
+    ]
 
 
 @pytest.mark.asyncio

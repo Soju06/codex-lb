@@ -281,7 +281,6 @@ class _StreamingRetryMixin:
         last_security_work_retry_error: _RetryableStreamError | None = None
         excluded_account_ids: set[str] = set()
         deferred_capacity_account_id: str | None = None
-        capacity_waited_account_ids: set[str] = set()
         preferred_account_id: str | None = None
         file_preferred_account_id: str | None = rewritten_file_account_id
         require_preferred_account = False
@@ -589,7 +588,6 @@ class _StreamingRetryMixin:
                                 yield wait_event
                             if _facade()._remaining_budget_seconds(deadline) <= 0:
                                 break
-                            capacity_waited_account_ids.add(capacity_account_id)
                             deferred_capacity_account_id = None
                             continue
                     if account is not None:
@@ -1109,7 +1107,6 @@ class _StreamingRetryMixin:
                                             not require_preferred_account
                                             and account.id != file_preferred_account_id
                                             and attempt < max_attempts - 1
-                                            and account.id not in capacity_waited_account_ids
                                         )
                                         if can_try_other_account:
                                             deferred_capacity_account_id = account.id
@@ -1404,7 +1401,6 @@ class _StreamingRetryMixin:
                                 not require_preferred_account
                                 and account.id != file_preferred_account_id
                                 and attempt < max_attempts - 1
-                                and account.id not in capacity_waited_account_ids
                             )
                             async for line in _stream_post_refresh_with_capacity_recovery(
                                 account,

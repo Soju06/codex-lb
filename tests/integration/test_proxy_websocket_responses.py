@@ -698,7 +698,9 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_insta
         "instructions": "",
         "client_metadata": {
             "x-codex-installation-id": "client-installation",
-            "x-codex-turn-metadata": '{"turn_id":"turn_123","sandbox":"workspace-write"}',
+            "x-codex-turn-metadata": (
+                '{"installation_id":"client-installation","turn_id":"turn_123","sandbox":"workspace-write"}'
+            ),
             "ws_request_header_x_openai_internal_codex_responses_lite": "stale",
         },
         "service_tier": "fast",
@@ -752,7 +754,9 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_insta
                 ],
                 "reasoning": {"effort": "high"},
                 "client_metadata": {
-                    "x-codex-turn-metadata": '{"turn_id":"turn_123","sandbox":"workspace-write"}',
+                    "x-codex-turn-metadata": (
+                        '{"installation_id":"account-installation","turn_id":"turn_123","sandbox":"workspace-write"}'
+                    ),
                     "ws_request_header_x_openai_internal_codex_responses_lite": "true",
                 },
                 "service_tier": "priority",

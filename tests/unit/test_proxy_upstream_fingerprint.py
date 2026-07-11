@@ -185,6 +185,43 @@ def test_websocket_native_codex_request_is_left_unchanged():
     assert headers["x-codex-turn-state"] == "abc"
 
 
+def test_websocket_connect_preserves_canonical_installation_header_after_filtering():
+    # Regression for the Codex P2 finding: a native direct websocket request that
+    # supplies both x-codex-installation-id and x-codex-turn-metadata has its
+    # standalone installation header stripped by filter_inbound_websocket_headers
+    # (it lives in IGNORE_INBOUND_HEADERS). The connect path re-applies that filter
+    # inside _build_upstream_websocket_headers, so the selected-account header that
+    # apply_codex_installation_headers injects must survive it -- otherwise the
+    # websocket handshake loses the header parity the HTTP /codex/responses egress
+    # keeps. This mirrors what _open_upstream_websocket does before connecting.
+    from app.core.clients.proxy import apply_codex_installation_headers
+    from app.core.clients.proxy_websocket import (
+        _build_upstream_websocket_headers,
+        filter_inbound_websocket_headers,
+    )
+
+    native_ua = "codex_cli_rs/0.142.0 (Mac OS 27.0.0; arm64) iTerm.app/3.6.10"
+    client_inbound = {
+        "User-Agent": native_ua,
+        "x-codex-installation-id": "client-installation",
+        "x-codex-turn-metadata": '{"installation_id":"client-installation","turn":1}',
+    }
+    # proxy_responses_websocket first filters inbound headers (drops installation id)...
+    filtered = filter_inbound_websocket_headers(client_inbound)
+    assert "x-codex-installation-id" not in _lower_keys(filtered)
+    # ...then _open_upstream_websocket normalizes the selected account's canonical id.
+    normalized = apply_codex_installation_headers(filtered, "acct-canonical")
+
+    headers = _build_upstream_websocket_headers(normalized, "tok", "acct-1")
+
+    lowered = {key.lower(): value for key, value in headers.items()}
+    assert lowered["x-codex-installation-id"] == "acct-canonical"
+    import json
+
+    turn_metadata = json.loads(lowered["x-codex-turn-metadata"])
+    assert turn_metadata["installation_id"] == "acct-canonical"
+
+
 def test_non_native_request_strips_x_stainless_sdk_headers():
     # Regression for the Codex P2 finding: OpenAI SDKs attach an x-stainless-*
     # header family the API layer treats as an OpenAI SDK signal. Installing the

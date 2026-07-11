@@ -2834,7 +2834,7 @@ def test_response_create_client_metadata_replaces_installation_id():
         {
             "client_metadata": {
                 "x-codex-installation-id": "client-installation",
-                "x-codex-turn-metadata": '{"turn_id":"payload-turn"}',
+                "x-codex-turn-metadata": '{"installation_id":"client-installation","turn_id":"payload-turn"}',
             }
         },
         headers={},
@@ -2843,8 +2843,41 @@ def test_response_create_client_metadata_replaces_installation_id():
 
     assert metadata == {
         "x-codex-installation-id": "account-installation",
-        "x-codex-turn-metadata": '{"turn_id":"payload-turn"}',
+        "x-codex-turn-metadata": '{"installation_id":"account-installation","turn_id":"payload-turn"}',
     }
+
+
+def test_installation_headers_rewrite_canonical_turn_metadata():
+    headers = proxy_module.apply_codex_installation_headers(
+        {
+            "x-codex-installation-id": "client-installation",
+            "x-codex-turn-metadata": '{"installation_id":"client-installation","turn_id":"turn-1"}',
+        },
+        "account-installation",
+    )
+
+    assert headers["x-codex-installation-id"] == "account-installation"
+    assert json.loads(headers["x-codex-turn-metadata"]) == {
+        "installation_id": "account-installation",
+        "turn_id": "turn-1",
+    }
+
+
+@pytest.mark.parametrize(
+    "turn_metadata",
+    ["not-json", "[]", '{"turn_id":"turn-1"}'],
+)
+def test_installation_headers_preserve_turn_metadata_without_rewriteable_id(turn_metadata: str):
+    headers = proxy_module.apply_codex_installation_headers(
+        {
+            "x-codex-installation-id": "client-installation",
+            "x-codex-turn-metadata": turn_metadata,
+        },
+        "account-installation",
+    )
+
+    assert headers["x-codex-installation-id"] == "account-installation"
+    assert headers["x-codex-turn-metadata"] == turn_metadata
 
 
 def test_response_create_client_metadata_strips_installation_id_without_account_id():
@@ -5357,6 +5390,57 @@ async def test_stream_responses_falls_back_to_http_post_without_native_codex_hea
     assert upstream_headers["version"] == "0.142.0"
     assert "Version" not in upstream_headers
     assert events == ['data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n']
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_http_egress_normalizes_selected_installation_metadata(monkeypatch):
+    class Settings:
+        upstream_base_url = "https://chatgpt.com/backend-api"
+        upstream_connect_timeout_seconds = 8.0
+        stream_idle_timeout_seconds = 45.0
+        max_sse_event_bytes = 1024
+        image_inline_fetch_enabled = False
+        log_upstream_request_payload = False
+        proxy_request_budget_seconds = 15.0
+        upstream_stream_transport = "http"
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module.get_codex_version_cache(), "cached_version_or_default", lambda: "0.142.0")
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [{"role": "user", "content": "hi"}],
+        }
+    )
+    session = _SseSession(_SsePostResponse([b'data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n']))
+
+    events = [
+        event
+        async for event in proxy_module.stream_responses(
+            payload,
+            headers={
+                "x-codex-installation-id": "client-installation",
+                "x-codex-turn-metadata": '{"installation_id":"nested-client-installation","turn_id":"turn_123"}',
+            },
+            access_token="token",
+            account_id="acc_1",
+            session=cast(proxy_module.aiohttp.ClientSession, session),
+            codex_installation_id="account-installation",
+        )
+    ]
+
+    assert events == ['data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n']
+    assert len(session.calls) == 1
+    upstream_headers = cast(dict[str, str], session.calls[0]["headers"])
+    assert upstream_headers["x-codex-installation-id"] == "account-installation"
+    assert json.loads(upstream_headers["x-codex-turn-metadata"]) == {
+        "installation_id": "account-installation",
+        "turn_id": "turn_123",
+    }
 
 
 @pytest.mark.asyncio

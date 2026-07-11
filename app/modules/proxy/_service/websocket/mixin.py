@@ -36,6 +36,7 @@ from app.core.clients.proxy import (  # noqa: F401  # noqa: F401
     _payload_has_responses_lite_websocket_marker,
     _payload_uses_responses_lite,
     _ws_transport_payload_budget_bytes,
+    apply_codex_installation_headers,
     apply_codex_installation_metadata,
     filter_inbound_headers,
     pop_compact_timeout_overrides,
@@ -2286,6 +2287,7 @@ class _WebSocketMixin:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
         access_token = proxy._encryptor.decrypt(account.access_token_encrypted)
+        headers = apply_codex_installation_headers(headers, getattr(account, "codex_installation_id", None))
         account_id = _header_account_id(account.chatgpt_account_id)
         connect_lease = await proxy._get_work_admission().acquire_websocket_connect()
         try:

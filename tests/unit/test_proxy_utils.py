@@ -26135,6 +26135,50 @@ def test_http_bridge_session_treats_omit_equivalent_service_tiers_as_unfiltered(
     )
 
 
+@pytest.mark.parametrize("service_tier", [None, "auto", "default", " Default "])
+def test_http_bridge_session_preserves_model_plan_gate_for_omit_equivalent_tiers(monkeypatch, service_tier):
+    session = cast(
+        proxy_service._HTTPBridgeSession,
+        SimpleNamespace(account=_make_account("acc_bridge_bootstrap_plan_gate")),
+    )
+
+    class Registry:
+        def plan_types_for_model(self, slug: str) -> frozenset[str] | None:
+            assert slug == "gpt-5.4"
+            return frozenset({"pro"})
+
+        def account_ids_for_model(self, slug: str) -> frozenset[str] | None:
+            assert slug == "gpt-5.4"
+            return None
+
+        def account_ids_for_model_service_tier(self, slug: str, requested_tier: str) -> frozenset[str] | None:
+            raise AssertionError(f"unexpected tier-specific account lookup for {slug}:{requested_tier}")
+
+        def plan_types_for_model_service_tier(self, slug: str, requested_tier: str) -> frozenset[str] | None:
+            raise AssertionError(f"unexpected tier-specific plan lookup for {slug}:{requested_tier}")
+
+    monkeypatch.setattr(proxy_support, "get_model_registry", lambda: Registry())
+
+    assert (
+        proxy_support._http_bridge_session_supports_service_tier(
+            session,
+            request_model="gpt-5.4",
+            request_service_tier=service_tier,
+        )
+        is False
+    )
+
+    session.account.plan_type = "pro"
+    assert (
+        proxy_support._http_bridge_session_supports_service_tier(
+            session,
+            request_model="gpt-5.4",
+            request_service_tier=service_tier,
+        )
+        is True
+    )
+
+
 def test_http_bridge_session_rejects_suppressed_catalog_model(monkeypatch):
     session = cast(
         proxy_service._HTTPBridgeSession,

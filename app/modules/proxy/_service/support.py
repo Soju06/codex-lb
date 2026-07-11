@@ -548,8 +548,9 @@ def _http_bridge_session_supports_service_tier(
     # Explicitly suppressed catalog slugs must, however, not allow reuse because
     # they intentionally block account selection even when the catalog is empty.
     plan_types_for_model = getattr(registry, "plan_types_for_model", None)
+    model_allowed_plans = plan_types_for_model(request_model) if callable(plan_types_for_model) else None
     is_suppressed_model = getattr(registry, "is_suppressed_model", None)
-    if callable(plan_types_for_model) and not plan_types_for_model(request_model):
+    if callable(plan_types_for_model) and not model_allowed_plans:
         if callable(is_suppressed_model) and is_suppressed_model(request_model):
             return False
         return True
@@ -562,13 +563,13 @@ def _http_bridge_session_supports_service_tier(
     # service tier.
     normalized_service_tier = request_service_tier.strip().lower() if request_service_tier is not None else None
     if normalized_service_tier in {None, "auto", "default"}:
-        return True
+        allowed_plans = model_allowed_plans
+    else:
+        allowed_account_ids = registry.account_ids_for_model_service_tier(request_model, request_service_tier)
+        if allowed_account_ids is not None:
+            return session.account.id in allowed_account_ids
 
-    allowed_account_ids = registry.account_ids_for_model_service_tier(request_model, request_service_tier)
-    if allowed_account_ids is not None:
-        return session.account.id in allowed_account_ids
-
-    allowed_plans = registry.plan_types_for_model_service_tier(request_model, request_service_tier)
+        allowed_plans = registry.plan_types_for_model_service_tier(request_model, request_service_tier)
     if allowed_plans is None:
         return True
     return account_plan_matches_allowed(session.account.plan_type, allowed_plans)

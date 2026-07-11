@@ -137,6 +137,7 @@ from app.modules.proxy._service.support import (
     _HTTPBridgeOwnerForward,
     _HTTPBridgeSession,
     _HTTPBridgeSessionKey,
+    _signal_propagated_capacity_startup_ready,
     _signal_propagated_capacity_startup_wait,
     _WebSocketRequestState,
 )
@@ -1039,6 +1040,7 @@ class _HTTPBridgeStreamingMixin:
                                 raise
                             continue
                         break
+                    _signal_propagated_capacity_startup_ready()
                     if downstream_turn_state is not None:
                         await self._register_http_bridge_turn_state(session, downstream_turn_state)
                     event_queue = retry_request_state.event_queue
@@ -1238,6 +1240,7 @@ class _HTTPBridgeStreamingMixin:
             queue_limit=queue_limit,
             propagate_http_errors=propagate_http_errors,
             downstream_turn_state=downstream_turn_state,
+            request_deadline=request_deadline,
         )
         request_state.file_required_preferred_account = file_required_preferred_account
         request_state.bridge_soft_capacity_reroute_allowed = (
@@ -1342,6 +1345,7 @@ class _HTTPBridgeStreamingMixin:
                     queue_limit=queue_limit,
                     propagate_http_errors=propagate_http_errors,
                     downstream_turn_state=downstream_turn_state,
+                    request_deadline=request_deadline,
                 )
                 request_state.bridge_soft_capacity_reroute_allowed = False
                 try:
@@ -1554,6 +1558,7 @@ class _HTTPBridgeStreamingMixin:
                     queue_limit=queue_limit,
                     propagate_http_errors=propagate_http_errors,
                     downstream_turn_state=downstream_turn_state,
+                    request_deadline=request_deadline,
                 )
                 try:
                     async for event_block in retry_events:
@@ -1606,8 +1611,10 @@ class _HTTPBridgeStreamingMixin:
         queue_limit: int,
         propagate_http_errors: bool,
         downstream_turn_state: str | None,
+        request_deadline: float | None = None,
     ) -> AsyncGenerator[str, None]:
-        request_deadline = request_state.started_at + _http_bridge_request_budget_seconds(_service_get_settings())
+        if request_deadline is None:
+            request_deadline = request_state.started_at + _http_bridge_request_budget_seconds(_service_get_settings())
         while True:
             try:
                 await self._submit_http_bridge_request(
@@ -1644,6 +1651,7 @@ class _HTTPBridgeStreamingMixin:
                     raise
                 continue
             break
+        _signal_propagated_capacity_startup_ready()
         if downstream_turn_state is not None:
             await self._register_http_bridge_turn_state(session, downstream_turn_state)
 

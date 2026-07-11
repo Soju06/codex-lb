@@ -633,6 +633,66 @@ async def test_http_bridge_submit_leaves_soft_capacity_for_session_reroute(monke
     assert submit.await_count == 1
 
 
+@pytest.mark.asyncio
+async def test_http_bridge_submit_capacity_wait_uses_original_request_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="sid-submit-original-deadline")
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-submit-original-deadline",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=99.5,
+        transport="http",
+        event_queue=asyncio.Queue(),
+    )
+    capacity_error = ProxyResponseError(
+        429,
+        openai_error(
+            "account_response_create_cap",
+            "Account response-create concurrency limit reached",
+            error_type="rate_limit_error",
+        ),
+    )
+    submit = AsyncMock(side_effect=capacity_error)
+    clock = [100.0]
+    waited: list[float] = []
+
+    async def fake_capacity_wait(**kwargs: object):
+        waited.append(cast(float, kwargs["sleep_seconds"]))
+        clock[0] += waited[-1]
+        if False:
+            yield ""
+
+    monkeypatch.setattr(service, "_submit_http_bridge_request", submit)
+    monkeypatch.setattr(http_bridge_streaming_module, "_http_bridge_account_capacity_wait_seconds", lambda _exc: 30.0)
+    monkeypatch.setattr(http_bridge_streaming_module, "_iter_account_capacity_wait_sse", fake_capacity_wait)
+    monkeypatch.setattr(
+        http_bridge_streaming_module,
+        "_service_time",
+        lambda: SimpleNamespace(monotonic=lambda: clock[0]),
+    )
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        async for _ in service._stream_http_bridge_session_events(
+            session,
+            request_state=request_state,
+            text_data='{"type":"response.create"}',
+            queue_limit=4,
+            propagate_http_errors=True,
+            downstream_turn_state=None,
+            request_deadline=101.0,
+        ):
+            pass
+
+    assert exc_info.value is capacity_error
+    assert waited == [1.0]
+    assert submit.await_count == 1
+
+
 def _make_api_key(
     *,
     key_id: str,
@@ -2039,8 +2099,9 @@ async def test_stream_via_http_bridge_keeps_sse_alive_while_session_creation_wai
         queue_limit: int,
         propagate_http_errors: bool,
         downstream_turn_state: str | None,
+        request_deadline: float | None = None,
     ):
-        del request_state, text_data, queue_limit, propagate_http_errors, downstream_turn_state
+        del request_state, text_data, queue_limit, propagate_http_errors, downstream_turn_state, request_deadline
         yield (
             'data: {"type":"response.completed","response":{"id":"resp_capacity_create_ok",'
             '"usage":{"input_tokens":1,"output_tokens":2}}}\n\n'
@@ -2253,8 +2314,9 @@ async def test_stream_via_http_bridge_soft_prompt_cache_queue_full_reroutes(
         queue_limit: int,
         propagate_http_errors: bool,
         downstream_turn_state: str | None,
+        request_deadline: float | None = None,
     ):
-        del request_state, text_data, queue_limit, propagate_http_errors, downstream_turn_state
+        del request_state, text_data, queue_limit, propagate_http_errors, downstream_turn_state, request_deadline
         if session is saturated_session:
             raise ProxyResponseError(
                 429,
@@ -2346,8 +2408,17 @@ async def test_stream_via_http_bridge_file_pin_queue_full_does_not_reroute(
         queue_limit: int,
         propagate_http_errors: bool,
         downstream_turn_state: str | None,
+        request_deadline: float | None = None,
     ):
-        del session, request_state, text_data, queue_limit, propagate_http_errors, downstream_turn_state
+        del (
+            session,
+            request_state,
+            text_data,
+            queue_limit,
+            propagate_http_errors,
+            downstream_turn_state,
+            request_deadline,
+        )
         raise ProxyResponseError(
             429,
             proxy_service.openai_error(
@@ -5799,8 +5870,9 @@ async def test_stream_via_http_bridge_uses_generated_downstream_turn_state_for_o
         queue_limit: int,
         propagate_http_errors: bool,
         downstream_turn_state: str | None,
+        request_deadline: float | None = None,
     ):
-        del request_state, text_data, queue_limit, propagate_http_errors, downstream_turn_state
+        del request_state, text_data, queue_limit, propagate_http_errors, downstream_turn_state, request_deadline
         yield 'data: {"type":"response.completed"}\n\n'
 
     owner_lookup = AsyncMock(return_value="acc-owner-from-turn-state")
@@ -6430,8 +6502,9 @@ async def test_stream_via_http_bridge_reacquires_api_key_reservation_for_local_p
         queue_limit: int,
         propagate_http_errors: bool,
         downstream_turn_state: str | None,
+        request_deadline: float | None = None,
     ):
-        del request_state, text_data, queue_limit, propagate_http_errors, downstream_turn_state
+        del request_state, text_data, queue_limit, propagate_http_errors, downstream_turn_state, request_deadline
         stream_calls["count"] += 1
         if stream_calls["count"] == 1:
             raise ProxyResponseError(400, proxy_service.openai_error("previous_response_not_found", "missing"))
@@ -6563,9 +6636,18 @@ async def test_stream_via_http_bridge_does_not_rebind_after_downstream_visible(
         queue_limit: int,
         propagate_http_errors: bool,
         downstream_turn_state: str | None,
+        request_deadline: float | None = None,
     ):
         nonlocal stream_calls
-        del _session, request_state, text_data, queue_limit, propagate_http_errors, downstream_turn_state
+        del (
+            _session,
+            request_state,
+            text_data,
+            queue_limit,
+            propagate_http_errors,
+            downstream_turn_state,
+            request_deadline,
+        )
         stream_calls += 1
         yield 'data: {"type":"response.output_text.delta","delta":"already visible"}\n\n'
         raise ProxyResponseError(400, proxy_service.openai_error("previous_response_not_found", "missing"))
@@ -7345,8 +7427,9 @@ async def test_stream_via_http_bridge_local_previous_response_rebind_fails_exist
         queue_limit: int,
         propagate_http_errors: bool,
         downstream_turn_state: str | None,
+        request_deadline: float | None = None,
     ):
-        del request_state, text_data, queue_limit, propagate_http_errors, downstream_turn_state
+        del request_state, text_data, queue_limit, propagate_http_errors, downstream_turn_state, request_deadline
         stream_calls["count"] += 1
         if stream_calls["count"] == 1:
             raise ProxyResponseError(400, proxy_service.openai_error("previous_response_not_found", "missing"))
@@ -7485,8 +7568,9 @@ async def test_stream_via_http_bridge_rolls_over_session_after_context_length_ex
         queue_limit: int,
         propagate_http_errors: bool,
         downstream_turn_state: str | None,
+        request_deadline: float | None = None,
     ):
-        del request_state, text_data, queue_limit, propagate_http_errors, downstream_turn_state
+        del request_state, text_data, queue_limit, propagate_http_errors, downstream_turn_state, request_deadline
         raise ProxyResponseError(
             400,
             proxy_service.openai_error(
@@ -7620,8 +7704,9 @@ async def test_stream_via_http_bridge_context_overflow_keeps_hard_affinity_sessi
         queue_limit: int,
         propagate_http_errors: bool,
         downstream_turn_state: str | None,
+        request_deadline: float | None = None,
     ):
-        del request_state, text_data, queue_limit, propagate_http_errors, downstream_turn_state
+        del request_state, text_data, queue_limit, propagate_http_errors, downstream_turn_state, request_deadline
         raise ProxyResponseError(
             400,
             proxy_service.openai_error(
@@ -7754,9 +7839,10 @@ async def test_stream_via_http_bridge_context_overflow_does_not_retry_hard_affin
         queue_limit: int,
         propagate_http_errors: bool,
         downstream_turn_state: str | None,
+        request_deadline: float | None = None,
     ):
         nonlocal stream_attempt
-        del request_state, text_data, queue_limit, propagate_http_errors, downstream_turn_state
+        del request_state, text_data, queue_limit, propagate_http_errors, downstream_turn_state, request_deadline
         stream_attempt += 1
         if stream_attempt == 1:
             raise ProxyResponseError(
@@ -12369,8 +12455,9 @@ async def test_stream_via_http_bridge_replays_durable_full_resend_when_owner_is_
         queue_limit: int,
         propagate_http_errors: bool,
         downstream_turn_state: str | None,
+        request_deadline: float | None = None,
     ):
-        del queue_limit, propagate_http_errors, downstream_turn_state
+        del queue_limit, propagate_http_errors, downstream_turn_state, request_deadline
         captured_request_states.append(request_state)
         captured_text_data.append(text_data)
         yield 'data: {"type":"response.completed"}\n\n'

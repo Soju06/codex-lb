@@ -1468,11 +1468,15 @@ class _StreamingRetryMixin:
                                 if can_try_other_account:
                                     deferred_capacity_account = account
                                     deferred_capacity_lease = current_account_lease
-                                else:
-                                    await _release_tracked_stream_lease(current_account_lease)
-                                    current_account_lease = None
-                                excluded_account_ids.add(account.id)
-                                continue
+                                    excluded_account_ids.add(account.id)
+                                    continue
+                                # The same-account helper only re-raises this
+                                # neutral cap when recovery cannot continue
+                                # within the original budget. Exit the account
+                                # loop so the preserved cap is propagated or
+                                # rendered below, instead of replacing it with
+                                # a next-attempt timeout.
+                                break
                             if _facade()._is_account_neutral_error_code(error_code):
                                 raise
                             classified = await proxy._handle_stream_error(

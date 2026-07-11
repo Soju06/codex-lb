@@ -47,6 +47,10 @@ _PROPAGATED_CAPACITY_STARTUP_WAIT: ContextVar[asyncio.Event | None] = ContextVar
     "propagated_capacity_startup_wait",
     default=None,
 )
+_PROPAGATED_CAPACITY_STARTUP_READY: ContextVar[asyncio.Event | None] = ContextVar(
+    "propagated_capacity_startup_ready",
+    default=None,
+)
 
 
 def _bind_propagated_capacity_startup_wait(event: asyncio.Event) -> Token[asyncio.Event | None]:
@@ -57,8 +61,28 @@ def _reset_propagated_capacity_startup_wait(token: Token[asyncio.Event | None]) 
     _PROPAGATED_CAPACITY_STARTUP_WAIT.reset(token)
 
 
+def _bind_propagated_capacity_startup_ready(event: asyncio.Event) -> Token[asyncio.Event | None]:
+    return _PROPAGATED_CAPACITY_STARTUP_READY.set(event)
+
+
+def _reset_propagated_capacity_startup_ready(token: Token[asyncio.Event | None]) -> None:
+    _PROPAGATED_CAPACITY_STARTUP_READY.reset(token)
+
+
 def _signal_propagated_capacity_startup_wait() -> None:
+    ready_event = _PROPAGATED_CAPACITY_STARTUP_READY.get()
+    if ready_event is not None:
+        ready_event.clear()
     event = _PROPAGATED_CAPACITY_STARTUP_WAIT.get()
+    if event is not None:
+        event.set()
+
+
+def _signal_propagated_capacity_startup_ready() -> None:
+    wait_event = _PROPAGATED_CAPACITY_STARTUP_WAIT.get()
+    if wait_event is not None:
+        wait_event.clear()
+    event = _PROPAGATED_CAPACITY_STARTUP_READY.get()
     if event is not None:
         event.set()
 

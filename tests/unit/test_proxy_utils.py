@@ -415,6 +415,139 @@ async def test_chat_startup_probe_consumes_repeated_capacity_markers_before_firs
     assert await anext(stream) == 'data: {"type":"response.created"}\n\n'
 
 
+@pytest.mark.asyncio
+async def test_startup_probe_waits_for_capacity_marker_after_legacy_grace() -> None:
+    capacity_wait_event = asyncio.Event()
+    capacity_ready_event = asyncio.Event()
+
+    async def delayed_capacity_error() -> AsyncIterator[str]:
+        await asyncio.sleep(0.04)
+        capacity_wait_event.set()
+        await asyncio.sleep(0.001)
+        raise proxy_module.ProxyResponseError(
+            429,
+            openai_error("account_stream_cap", "Account stream concurrency limit reached"),
+        )
+        yield ""
+
+    _stream, startup_error = await asyncio.wait_for(
+        proxy_api._probe_stream_startup_error(
+            delayed_capacity_error(),
+            timeout_seconds=0.001,
+            capacity_wait_event=capacity_wait_event,
+            capacity_ready_event=capacity_ready_event,
+        ),
+        timeout=0.2,
+    )
+
+    assert isinstance(startup_error, proxy_module.ProxyResponseError)
+    assert startup_error.status_code == 429
+
+
+@pytest.mark.asyncio
+async def test_startup_probe_waits_for_remote_owner_headers_without_local_marker() -> None:
+    capacity_wait_event = asyncio.Event()
+    capacity_ready_event = asyncio.Event()
+
+    async def delayed_owner_error() -> AsyncIterator[str]:
+        await asyncio.sleep(0.04)
+        raise proxy_module.ProxyResponseError(
+            429,
+            openai_error("account_response_create_cap", "Remote owner capacity is exhausted"),
+        )
+        yield ""
+
+    _stream, startup_error = await asyncio.wait_for(
+        proxy_api._probe_stream_startup_error(
+            delayed_owner_error(),
+            timeout_seconds=0.001,
+            capacity_wait_event=capacity_wait_event,
+            capacity_ready_event=capacity_ready_event,
+        ),
+        timeout=0.2,
+    )
+
+    assert isinstance(startup_error, proxy_module.ProxyResponseError)
+    assert startup_error.status_code == 429
+
+
+@pytest.mark.asyncio
+async def test_startup_probe_ready_supersedes_recovered_capacity_marker() -> None:
+    capacity_wait_event = asyncio.Event()
+    recovery_ready_wait_started = asyncio.Event()
+
+    class ObservedReadyEvent(asyncio.Event):
+        def __init__(self) -> None:
+            super().__init__()
+            self.wait_calls = 0
+
+        async def wait(self) -> bool:
+            self.wait_calls += 1
+            if self.wait_calls >= 2:
+                recovery_ready_wait_started.set()
+            return await super().wait()
+
+    capacity_ready_event = ObservedReadyEvent()
+    release_first_event = asyncio.Event()
+
+    async def recovered_slow_stream() -> AsyncIterator[str]:
+        await asyncio.sleep(0.01)
+        capacity_wait_event.set()
+        await release_first_event.wait()
+        yield 'data: {"type":"response.output_text.delta","delta":"hello"}\n\n'
+
+    probe_task = asyncio.create_task(
+        proxy_api._probe_stream_startup_error(
+            recovered_slow_stream(),
+            timeout_seconds=0.001,
+            capacity_wait_event=capacity_wait_event,
+            capacity_ready_event=capacity_ready_event,
+        )
+    )
+    try:
+        await asyncio.wait_for(recovery_ready_wait_started.wait(), timeout=0.1)
+        capacity_wait_event.clear()
+        capacity_ready_event.set()
+        stream, startup_error = await asyncio.wait_for(probe_task, timeout=0.1)
+    finally:
+        release_first_event.set()
+
+    assert startup_error is None
+    assert capacity_wait_event.is_set() is False
+    first = await asyncio.wait_for(anext(stream), timeout=0.1)
+    assert "response.output_text.delta" in first
+
+
+@pytest.mark.asyncio
+async def test_startup_probe_cancellation_stops_extended_first_item_task() -> None:
+    capacity_wait_event = asyncio.Event()
+    capacity_ready_event = asyncio.Event()
+    source_finalized = asyncio.Event()
+
+    async def blocked_capacity_stream() -> AsyncIterator[str]:
+        capacity_wait_event.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            source_finalized.set()
+        yield ""
+
+    probe_task = asyncio.create_task(
+        proxy_api._probe_stream_startup_error(
+            blocked_capacity_stream(),
+            timeout_seconds=0.001,
+            capacity_wait_event=capacity_wait_event,
+            capacity_ready_event=capacity_ready_event,
+        )
+    )
+    await asyncio.sleep(0.01)
+    probe_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await probe_task
+    await asyncio.wait_for(source_finalized.wait(), timeout=0.1)
+
+
 def test_relative_availability_settings_default_when_stored_values_are_null():
     settings = cast(Any, SimpleNamespace(relative_availability_power=None, relative_availability_top_k=None))
 
@@ -1434,6 +1567,7 @@ async def test_stream_responses_returns_before_first_upstream_event(monkeypatch)
 
     async def stream_responses(*args, **kwargs):
         del args, kwargs
+        proxy_support._signal_propagated_capacity_startup_ready()
         await asyncio.sleep(10.0)
         yield 'data: {"type":"response.completed","response":{"id":"resp_slow","status":"completed"}}\n\n'
 
@@ -1469,6 +1603,7 @@ async def test_stream_responses_streams_post_startup_proxy_error_as_sse(monkeypa
 
     async def stream_responses(*args, **kwargs):
         del args, kwargs
+        proxy_support._signal_propagated_capacity_startup_ready()
         await asyncio.sleep(0.1)
         raise proxy_module.ProxyResponseError(
             429,
@@ -9130,6 +9265,126 @@ async def test_stream_with_retry_post_refresh_response_create_cap_waits_with_str
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("propagate_http_errors", [False, True])
+async def test_stream_with_retry_post_refresh_capacity_exhaustion_preserves_original_cap(
+    monkeypatch,
+    propagate_http_errors: bool,
+):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_post_refresh_capacity_exhausts")
+    stream_lease = AccountLease(
+        lease_id="lease_post_refresh_capacity_exhausts",
+        account_id=account.id,
+        kind="stream",
+        acquired_at=time.monotonic(),
+    )
+    release_account_lease = AsyncMock()
+    select_account = AsyncMock(return_value=AccountSelection(account=account, error_message=None, lease=stream_lease))
+    budget_exhausted = False
+    stream_once_calls = 0
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value=account.id))
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=[account, account]))
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release_account_lease)
+    monkeypatch.setattr(
+        streaming_retry_module,
+        "_account_selection_recovery_sleep_seconds",
+        lambda _selection: 1.0,
+    )
+    monkeypatch.setattr(
+        proxy_service,
+        "_remaining_budget_seconds",
+        lambda _deadline: 0.0 if budget_exhausted else 1.0,
+    )
+
+    async def exhaust_capacity_wait(**kwargs: object):
+        nonlocal budget_exhausted
+        budget_exhausted = True
+        if kwargs["emit_keepalives"]:
+            yield 'data: {"type":"codex.keepalive","status":"waiting_for_account_capacity"}\n\n'
+
+    async def fake_stream_once(*_args: object, **kwargs: object):
+        nonlocal stream_once_calls
+        stream_once_calls += 1
+        settlement = cast(proxy_service._StreamSettlement, kwargs["settlement"])
+        assert release_account_lease.await_count == 0
+        if stream_once_calls == 1:
+            raise proxy_module.ProxyResponseError(
+                401,
+                proxy_module.openai_error("invalid_api_key", "expired", error_type="invalid_request_error"),
+            )
+        settlement.record_success = False
+        raise proxy_module.ProxyResponseError(
+            429,
+            proxy_module.openai_error(
+                "account_response_create_cap",
+                "Account response-create concurrency limit reached",
+                error_type="rate_limit_error",
+            ),
+        )
+        yield ""
+
+    monkeypatch.setattr(streaming_retry_module, "_iter_account_capacity_recovery_wait", exhaust_capacity_wait)
+    monkeypatch.setattr(service, "_stream_once", fake_stream_once)
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [],
+            "stream": True,
+            "previous_response_id": "resp_post_refresh_capacity_exhausts",
+        }
+    )
+    chunks: list[str] = []
+
+    if propagate_http_errors:
+        with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+            async for chunk in service._stream_with_retry(
+                payload,
+                {"session_id": "sid-post-refresh-capacity-exhausts"},
+                codex_session_affinity=False,
+                propagate_http_errors=True,
+                openai_cache_affinity=False,
+                api_key=None,
+                api_key_reservation=None,
+                suppress_text_done_events=False,
+                request_transport="http",
+                upstream_stream_transport_override="http",
+            ):
+                chunks.append(chunk)
+        error = proxy_service._parse_openai_error(exc_info.value.payload)
+        assert error is not None
+        assert error.code == "account_response_create_cap"
+    else:
+        chunks = [
+            chunk
+            async for chunk in service._stream_with_retry(
+                payload,
+                {"session_id": "sid-post-refresh-capacity-exhausts"},
+                codex_session_affinity=False,
+                propagate_http_errors=False,
+                openai_cache_affinity=False,
+                api_key=None,
+                api_key_reservation=None,
+                suppress_text_done_events=False,
+                request_transport="http",
+                upstream_stream_transport_override="http",
+            )
+        ]
+        failed = json.loads(chunks[-1].split("data: ", 1)[1])
+        assert failed["response"]["error"]["code"] == "account_response_create_cap"
+
+    assert select_account.await_count == 1
+    assert stream_once_calls == 2
+    release_account_lease.assert_awaited_once_with(stream_lease)
+
+
+@pytest.mark.asyncio
 async def test_stream_with_retry_surfaces_response_create_cap_when_wait_retries_exhaust(monkeypatch):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     request_logs = _RequestLogsRecorder()
@@ -12415,6 +12670,89 @@ async def test_select_websocket_connect_account_sends_capacity_keepalive_and_ret
     assert sent_payload["type"] == "codex.keepalive"
     assert sent_payload["status"] == "waiting_for_account_capacity"
     assert sent_payload["request_id"] == "ws_req_capacity_wait"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("preferred_account_id", "require_preferred_account", "file_required", "defer_no_account_error"),
+    [
+        (None, False, False, False),
+        (None, False, False, True),
+        ("acc_ws_owner", True, False, False),
+        ("acc_ws_file", True, True, False),
+    ],
+)
+async def test_select_websocket_capacity_wait_budget_preserves_original_cap(
+    monkeypatch,
+    preferred_account_id: str | None,
+    require_preferred_account: bool,
+    file_required: bool,
+    defer_no_account_error: bool,
+):
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_capacity_budget",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        previous_response_id="resp_ws_owner" if require_preferred_account and not file_required else None,
+        preferred_account_id=preferred_account_id,
+        file_required_preferred_account=file_required,
+    )
+    selection = AccountSelection(
+        account=None,
+        error_message="Account stream capacity is exhausted; per-account limit is 8.",
+        error_code="account_stream_cap",
+    )
+    select_account = AsyncMock(return_value=selection)
+
+    async def fake_sleep_for_account_selection_recovery(*_args: object, **kwargs: object) -> bool:
+        heartbeat = cast(Callable[[float], Any] | None, kwargs.get("heartbeat"))
+        assert heartbeat is not None
+        await heartbeat(0.0)
+        return True
+
+    remaining_budget = iter([0.001, 0.0])
+    websocket_send = AsyncMock()
+    monkeypatch.setattr(service, "_select_account_with_budget", select_account)
+    monkeypatch.setattr(
+        websocket_mixin_module,
+        "_sleep_for_account_selection_recovery",
+        fake_sleep_for_account_selection_recovery,
+    )
+    monkeypatch.setattr(
+        proxy_service,
+        "_remaining_budget_seconds",
+        lambda _deadline: next(remaining_budget, 0.0),
+    )
+
+    result = await service._select_websocket_connect_account(
+        time.monotonic() + 1.0,
+        sticky_key=None,
+        sticky_kind=None,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        model="gpt-5.1",
+        request_state=request_state,
+        api_key=None,
+        client_send_lock=anyio.Lock(),
+        websocket=cast(WebSocket, SimpleNamespace(send_text=websocket_send)),
+        reallocate_sticky=False,
+        sticky_max_age_seconds=None,
+        exclude_account_ids=set(),
+        preferred_account_id=preferred_account_id,
+        require_preferred_account=require_preferred_account,
+        defer_no_account_error=defer_no_account_error,
+    )
+
+    assert result is None
+    assert select_account.await_count == 1
+    sent_payloads = [json.loads(call.args[0]) for call in websocket_send.await_args_list]
+    assert sent_payloads[0]["status"] == "waiting_for_account_capacity"
+    assert sent_payloads[-1]["status"] == 429
+    assert sent_payloads[-1]["error"]["code"] == "account_stream_cap"
 
 
 @pytest.mark.asyncio

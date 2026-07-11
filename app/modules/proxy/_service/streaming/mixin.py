@@ -295,6 +295,7 @@ from app.modules.proxy._service.support import (
     _event_type_from_payload,
     _RequestLogFailureMetadata,
     _RetryableStreamError,
+    _signal_propagated_capacity_startup_ready,
     _StreamSettlement,
     _TerminalStreamError,
     _TransientStreamError,
@@ -572,6 +573,10 @@ class _StreamingMixin(_StreamingRetryMixin):
                     raise_for_status=True,
                 )
             iterator = stream.__aiter__()
+            # Local account selection and both response-create admission gates
+            # have succeeded. A later retry that re-enters local capacity will
+            # clear this level before setting the paired wait signal.
+            _signal_propagated_capacity_startup_ready()
             try:
                 first = await iterator.__anext__()
             except StopAsyncIteration:

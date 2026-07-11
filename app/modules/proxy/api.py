@@ -162,7 +162,9 @@ from app.modules.proxy import affinity as proxy_affinity_module
 from app.modules.proxy import images_service as images_service_module
 from app.modules.proxy import service as proxy_service_module
 from app.modules.proxy._service.support import (
+    _bind_propagated_capacity_startup_ready,
     _bind_propagated_capacity_startup_wait,
+    _reset_propagated_capacity_startup_ready,
     _reset_propagated_capacity_startup_wait,
 )
 from app.modules.proxy.account_cache import get_account_selection_cache
@@ -3040,14 +3042,18 @@ async def v1_chat_completions(
         else _CHAT_COMPLETIONS_STARTUP_ERROR_PROBE_SECONDS
     )
     capacity_wait_event = asyncio.Event()
+    capacity_ready_event = asyncio.Event()
     capacity_wait_token = _bind_propagated_capacity_startup_wait(capacity_wait_event)
+    capacity_ready_token = _bind_propagated_capacity_startup_ready(capacity_ready_event)
     try:
         stream, startup_error = await _probe_chat_stream_startup_error(
             stream,
             timeout_seconds=startup_probe_timeout,
             capacity_wait_event=capacity_wait_event,
+            capacity_ready_event=capacity_ready_event,
         )
     finally:
+        _reset_propagated_capacity_startup_ready(capacity_ready_token)
         _reset_propagated_capacity_startup_wait(capacity_wait_token)
     if startup_error is not None:
         if cursor_compat_client and _is_context_length_startup_error(startup_error):
@@ -4153,7 +4159,9 @@ async def _stream_responses(
             enforce_openai_sdk_contract=enforce_openai_sdk_contract,
         )
     capacity_wait_event = asyncio.Event()
+    capacity_ready_event = asyncio.Event()
     capacity_wait_token = _bind_propagated_capacity_startup_wait(capacity_wait_event)
+    capacity_ready_token = _bind_propagated_capacity_startup_ready(capacity_ready_event)
     try:
         stream, startup_error = await _probe_stream_startup_error(
             stream,
@@ -4162,8 +4170,10 @@ async def _stream_responses(
                 _HTTP_BRIDGE_STARTUP_ERROR_PROBE_SECONDS if prefer_http_bridge else _STREAM_STARTUP_ERROR_PROBE_SECONDS
             ),
             capacity_wait_event=capacity_wait_event,
+            capacity_ready_event=capacity_ready_event,
         )
     finally:
+        _reset_propagated_capacity_startup_ready(capacity_ready_token)
         _reset_propagated_capacity_startup_wait(capacity_wait_token)
     if startup_error is not None:
         if owns_reservation:
@@ -4703,40 +4713,77 @@ async def _wait_for_first_stream_probe(
     *,
     timeout_seconds: float,
     capacity_wait_event: asyncio.Event | None,
+    capacity_ready_event: asyncio.Event | None = None,
 ) -> bool:
-    done, _pending = await asyncio.wait({first_task}, timeout=timeout_seconds)
-    if done:
-        if capacity_wait_event is not None and capacity_wait_event.is_set():
-            capacity_wait_event.clear()
-        return True
-    if capacity_wait_event is None:
-        return bool(done)
-
-    marker_task = asyncio.create_task(capacity_wait_event.wait())
     try:
-        done, _pending = await asyncio.wait(
-            {first_task, marker_task},
-            timeout=_CAPACITY_WAIT_MARKER_GRACE_SECONDS,
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        if marker_task in done and capacity_wait_event.is_set():
-            # The marker extends this probe only. Chat-completions may probe
-            # several buffered startup events, so leaving the Event set would
-            # turn every later probe into an unbounded wait. A later capacity
-            # wait can set the shared marker again.
-            capacity_wait_event.clear()
-            await asyncio.wait({first_task})
-            # Another capacity sleep may have signalled while the upstream
-            # first item was still pending. That marker belongs to this same
-            # extended probe and must not leak into the next buffered startup
-            # event probe.
-            capacity_wait_event.clear()
+        done, _pending = await asyncio.wait({first_task}, timeout=timeout_seconds)
+        if done:
+            if capacity_wait_event is not None and capacity_wait_event.is_set():
+                capacity_wait_event.clear()
             return True
-        return first_task in done
-    finally:
-        if not marker_task.done():
-            marker_task.cancel()
-        await asyncio.gather(marker_task, return_exceptions=True)
+        if capacity_wait_event is None:
+            return False
+
+        while True:
+            if first_task.done():
+                if capacity_wait_event.is_set():
+                    capacity_wait_event.clear()
+                return True
+            if capacity_wait_event.is_set():
+                recovery_ready_task = (
+                    asyncio.create_task(capacity_ready_event.wait()) if capacity_ready_event is not None else None
+                )
+                try:
+                    recovery_waiters = {first_task}
+                    if recovery_ready_task is not None:
+                        recovery_waiters.add(recovery_ready_task)
+                    recovery_done, _pending = await asyncio.wait(
+                        recovery_waiters,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if first_task not in recovery_done:
+                        # Re-read the paired level state. The ready signal has
+                        # cleared the wait that recovered, but a newer wait may
+                        # already have superseded that ready before this task
+                        # resumes.
+                        continue
+                finally:
+                    if recovery_ready_task is not None and not recovery_ready_task.done():
+                        recovery_ready_task.cancel()
+                    if recovery_ready_task is not None:
+                        await asyncio.gather(recovery_ready_task, return_exceptions=True)
+                continue
+            if capacity_ready_event is not None and capacity_ready_event.is_set():
+                return False
+
+            marker_task = asyncio.create_task(capacity_wait_event.wait())
+            ready_task = asyncio.create_task(capacity_ready_event.wait()) if capacity_ready_event is not None else None
+            try:
+                signal_waiters = {first_task, marker_task}
+                if ready_task is not None:
+                    signal_waiters.add(ready_task)
+                signal_done, _pending = await asyncio.wait(
+                    signal_waiters,
+                    timeout=None if ready_task is not None else _CAPACITY_WAIT_MARKER_GRACE_SECONDS,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if not signal_done:
+                    return False
+            finally:
+                pending_signal_tasks = [
+                    task for task in (marker_task, ready_task) if task is not None and not task.done()
+                ]
+                for task in pending_signal_tasks:
+                    task.cancel()
+                await asyncio.gather(
+                    marker_task,
+                    *(task for task in (ready_task,) if task is not None),
+                    return_exceptions=True,
+                )
+    except asyncio.CancelledError:
+        first_task.cancel()
+        await asyncio.gather(first_task, return_exceptions=True)
+        raise
 
 
 async def _probe_stream_startup_error(
@@ -4745,6 +4792,7 @@ async def _probe_stream_startup_error(
     convert_event_errors: bool = False,
     timeout_seconds: float | None = None,
     capacity_wait_event: asyncio.Event | None = None,
+    capacity_ready_event: asyncio.Event | None = None,
 ) -> tuple[AsyncIterator[str], ProxyResponseError | OpenAIErrorEnvelopeModel | None]:
     if timeout_seconds is None:
         timeout_seconds = _STREAM_STARTUP_ERROR_PROBE_SECONDS
@@ -4753,6 +4801,7 @@ async def _probe_stream_startup_error(
         first_task,
         timeout_seconds=timeout_seconds,
         capacity_wait_event=capacity_wait_event,
+        capacity_ready_event=capacity_ready_event,
     )
     if not probe_done:
         # Probe window elapsed before the first item arrived. Hand the still-
@@ -5065,6 +5114,7 @@ async def _probe_chat_stream_startup_error(
     timeout_seconds: float = _CHAT_COMPLETIONS_STARTUP_ERROR_PROBE_SECONDS,
     max_startup_events: int = 8,
     capacity_wait_event: asyncio.Event | None = None,
+    capacity_ready_event: asyncio.Event | None = None,
 ) -> tuple[AsyncIterator[str], ProxyResponseError | OpenAIErrorEnvelopeModel | None]:
     buffered: list[str] = []
     for _ in range(max_startup_events):
@@ -5073,6 +5123,7 @@ async def _probe_chat_stream_startup_error(
             first_task,
             timeout_seconds=timeout_seconds,
             capacity_wait_event=capacity_wait_event,
+            capacity_ready_event=capacity_ready_event,
         )
         if not probe_done:
             return _prepend_items(buffered, _prepend_first_task(first_task, stream)), None

@@ -9,6 +9,7 @@ The query-caching capability is broader than cache TTLs. It also owns the databa
 - Avoid related-table joins on request-log listing unless search actually needs `accounts.email` or `api_keys.name`.
 - Avoid full window-ranking scans on hot selector and dashboard aggregate reads; prefer grouped latest-id or PostgreSQL `DISTINCT ON` shapes backed by matching indexes.
 - Keep hot-path index migrations idempotent so manual production hotfix indexes do not break later schema upgrades.
+- Compute unfiltered request-log filter-option facets with recursive-CTE loose index scans (one btree probe per distinct value) instead of full `DISTINCT` passes; PostgreSQL has no native skip scan, so an unfiltered facet is otherwise a whole-index pass per facet per panel load. The gate is "no user-supplied filters": filtered requests keep the legacy `DISTINCT` shape because selective residual filters can make per-value probes degenerate. NULL second-column pair placement follows each backend's ASC NULL ordering to preserve exact result parity.
 
 ## Operational Notes
 

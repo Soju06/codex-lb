@@ -8,6 +8,7 @@ import anyio
 from sqlalchemy import Integer, String, and_, cast, func, literal_column, or_, select
 from sqlalchemy import exc as sa_exc
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import InstrumentedAttribute
 from sqlalchemy.sql.elements import ColumnElement
 
 from app.core.usage.logs import RequestLogLike, calculated_cost_from_log
@@ -480,6 +481,23 @@ class RequestLogsRepository:
             exclude_soft_deleted=True,
         )
 
+        unfiltered = not any((since, until, account_ids, api_key_ids, model_options, models, reasoning_efforts))
+        if unfiltered:
+            # PostgreSQL has no loose index scan: with no user filters each
+            # DISTINCT below is a full pass over request_logs, four times per
+            # filter-panel load. Emulate the skip scan instead — one indexed
+            # probe per distinct value.
+            return (
+                [value for value in await self._distinct_skip_scan(RequestLog.account_id, filters.conditions) if value],
+                await self._pair_facet_skip_scan(RequestLog.model, RequestLog.reasoning_effort, filters.conditions),
+                [
+                    value
+                    for value in await self._distinct_skip_scan(RequestLog.api_key_id, api_key_facet_filters.conditions)
+                    if value
+                ],
+                await self._pair_facet_skip_scan(RequestLog.status, RequestLog.error_code, filters.conditions),
+            )
+
         account_stmt = select(RequestLog.account_id).distinct().order_by(RequestLog.account_id.asc())
         model_stmt = (
             select(RequestLog.model, RequestLog.reasoning_effort)
@@ -510,6 +528,51 @@ class RequestLogsRepository:
         api_key_ids = [row[0] for row in api_key_rows.all() if row[0]]
         status_values = [(row[0], row[1]) for row in status_rows.all() if row[0]]
         return account_ids, model_options, api_key_ids, status_values
+
+    async def _distinct_skip_scan(
+        self,
+        column: InstrumentedAttribute[str] | InstrumentedAttribute[str | None],
+        conditions: list,
+    ) -> list[str]:
+        """Loose-index-scan emulation: seed min(column), then min(column) >
+        previous, one btree probe per distinct value. NULLs never seed or
+        chain (min() skips them); empty strings are preserved — the legacy
+        DISTINCT path only drops falsy values per facet, in the callers."""
+        seed = select(func.min(column).label("val")).where(*conditions)
+        skip = seed.cte("facet_skip", recursive=True)
+        successor = select(func.min(column)).where(*conditions, column > skip.c.val).scalar_subquery()
+        skip = skip.union_all(select(successor).where(skip.c.val.is_not(None)))
+        stmt = select(skip.c.val).where(skip.c.val.is_not(None)).order_by(skip.c.val.asc())
+        rows = await self._session.execute(stmt)
+        return [value for (value,) in rows.all() if value is not None]
+
+    async def _pair_facet_skip_scan(
+        self,
+        leading: InstrumentedAttribute[str] | InstrumentedAttribute[str | None],
+        second: InstrumentedAttribute[str] | InstrumentedAttribute[str | None],
+        conditions: list,
+    ) -> list[tuple[str, str | None]]:
+        """(leading, second) facet: skip-scan the leading column, then per
+        value probe a `(value, NULL)` pair and skip-scan the non-NULL second
+        values. NULL pair placement follows the backend's ORDER BY ASC NULL
+        ordering (SQLite: first, PostgreSQL: last) so results match the
+        legacy DISTINCT path exactly."""
+        nulls_first = self._session.get_bind().dialect.name == "sqlite"
+        pairs: list[tuple[str, str | None]] = []
+        for value in await self._distinct_skip_scan(leading, conditions):
+            if not value:
+                # Legacy DISTINCT drops falsy leading values in Python.
+                continue
+            value_conditions = [*conditions, leading == value]
+            null_probe = select(RequestLog.id).where(*value_conditions, second.is_(None)).limit(1)
+            has_null = (await self._session.execute(null_probe)).scalar_one_or_none() is not None
+            second_values = await self._distinct_skip_scan(second, value_conditions)
+            if has_null and nulls_first:
+                pairs.append((value, None))
+            pairs.extend((value, second_value) for second_value in second_values)
+            if has_null and not nulls_first:
+                pairs.append((value, None))
+        return pairs
 
     async def get_api_key_names_by_ids(self, api_key_ids: list[str]) -> dict[str, str]:
         unique_ids = sorted({key_id for key_id in api_key_ids if key_id})

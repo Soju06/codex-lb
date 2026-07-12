@@ -21,7 +21,7 @@ The query-caching capability is broader than cache TTLs. It also owns the databa
 - Do not hold the load-balancer runtime lock across network-bound usage refresh calls; only protect the in-memory selection and runtime-state mutation step.
 - Stale usage refreshes should collapse into one in-flight refresh per account, with followers re-checking persisted primary-window data before calling the upstream usage API again.
 - On 2026-06-29, production `10.0.0.113` saw Postgres backend OOM kills while dashboard/account-selection requests ran large `request_logs` and `additional_usage_history` window-ranking queries. The durable mitigation is to keep additional-quota latest lookups and account request usage summaries off `row_number()` hot paths, then restore any temporary production registry/timeout workarounds after deployment verification.
-- Operator escape hatch for the usage rollup: deleting all `account_usage_rollups` rows resets the fold watermark and forces the next fold pass to re-backfill from raw `request_logs`; summaries stay correct throughout because reads fall back to the full live aggregate while no rollup rows exist.
+- Operator escape hatch for the usage rollup: delete all `account_usage_rollups` rows **and** the `account_usage_rollup_state` row in one transaction; the next fold pass re-bootstraps the state row at epoch and re-backfills from raw `request_logs`, and summaries stay correct throughout because reads fall back to the full live aggregate while no state row exists. Deleting only one of the two is unsafe: rollup rows alone loses folded totals (the watermark stays advanced), and the state row alone re-folds history on top of existing sums (double count).
 
 ## Example
 

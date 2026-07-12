@@ -71,7 +71,7 @@ ChatGPT-identity duplicate consolidation (`_reconcile_chatgpt_identity_duplicate
 ## Risks / Trade-offs
 
 - [Folded rows become immutable: a row inserted or mutated with `requested_at` more than 24 h in the past is not reflected] → the 24 h lag exceeds every known late-write path (max stream duration, duplicate re-persists, post-stream rewrites); the residual failure mode is bounded to a single request's tokens. Accepted.
-- [Manual DB surgery on old `request_logs` rows no longer changes summaries] → documented in capability context; a fold-state reset (delete rollup rows) forces a full re-backfill, providing an operator escape hatch.
+- [Manual DB surgery on old `request_logs` rows no longer changes summaries] → documented in capability context; a fold-state reset (delete all rollup rows AND the state row in one transaction) forces a full re-backfill, providing an operator escape hatch. Deleting only one of the two is unsafe (lost folded totals or double-fold).
 - [Concurrent fold passes across instances double-count] → single-transaction fold with row locks on rollup rows + leader election; watermark re-read inside the transaction makes passes idempotent (a second pass sees the advanced watermark and folds nothing).
 - [Backfill load on huge tables] → sliced fold windows, background pool, leader-only; each slice is index-friendly (`requested_at` range).
 - [Clock skew between instances corrupts the boundary] → boundary computed from DB-observed `now` minus lag inside the fold transaction; only the leader computes it.

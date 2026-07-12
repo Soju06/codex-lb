@@ -47,7 +47,12 @@ from app.modules.proxy.affinity import (
 )
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
 from app.modules.proxy.helpers import _header_account_id, _normalize_error_code, _parse_openai_error
-from app.modules.proxy.load_balancer import AccountLease, AccountSelection
+from app.modules.proxy.load_balancer import (
+    AccountConcurrencyCaps,
+    AccountLease,
+    AccountSelection,
+    effective_account_concurrency_caps,
+)
 from app.modules.proxy.work_admission import AdmissionLease, WorkAdmissionController
 
 logger = logging.getLogger("app.modules.proxy.service")
@@ -78,7 +83,7 @@ class _CompactServiceProtocol(Protocol):
     ) -> str | None: ...
 
     async def _acquire_account_response_create_lease_or_overload(
-        self, *, account_id: str, request_id: str, surface: str
+        self, *, account_id: str, request_id: str, surface: str, concurrency_caps: AccountConcurrencyCaps
     ) -> AccountLease: ...
 
     async def _resolve_upstream_route_for_account(
@@ -552,6 +557,7 @@ class _CompactMixin:
         proxy._raise_for_unsupported_input_image_references(payload)
         rewritten_file_account_id = await proxy._resolve_file_account_for_responses(payload, headers)
         settings = await _service_get_settings_cache().get()
+        concurrency_caps = effective_account_concurrency_caps(settings)
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
         had_prompt_cache_key = _prompt_cache_key_from_request_model(payload) is not None
         affinity = _sticky_key_for_compact_request(
@@ -673,6 +679,7 @@ class _CompactMixin:
                             account_id=target.id,
                             request_id=request_id,
                             surface="compact",
+                            concurrency_caps=concurrency_caps,
                         )
                     create_lease = await proxy._get_work_admission().acquire_response_create(compact=True)
                     route = await proxy._resolve_upstream_route_for_account(target, operation="compact")

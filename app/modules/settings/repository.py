@@ -25,6 +25,9 @@ class SettingsRepository:
             upstream_stream_transport="default",
             prohibit_fast_mode=False,
             http_downstream_transport_policy=get_settings().http_downstream_transport_policy,
+            proxy_account_response_create_limit=get_settings().proxy_account_response_create_limit,
+            proxy_account_stream_limit=get_settings().proxy_account_stream_limit,
+            proxy_account_stream_recovery_reserve=get_settings().proxy_account_stream_recovery_reserve,
             upstream_proxy_routing_enabled=False,
             upstream_proxy_default_pool_id=None,
             prefer_earlier_reset_accounts=True,
@@ -80,6 +83,9 @@ class SettingsRepository:
         upstream_stream_transport: str | None = None,
         prohibit_fast_mode: bool | None = None,
         http_downstream_transport_policy: str | None = None,
+        proxy_account_response_create_limit: int | None = None,
+        proxy_account_stream_limit: int | None = None,
+        proxy_account_stream_recovery_reserve: int | None = None,
         upstream_proxy_routing_enabled: bool | None = None,
         upstream_proxy_default_pool_id: str | None = None,
         prefer_earlier_reset_accounts: bool | None = None,
@@ -122,6 +128,12 @@ class SettingsRepository:
             settings.prohibit_fast_mode = prohibit_fast_mode
         if http_downstream_transport_policy is not None:
             settings.http_downstream_transport_policy = http_downstream_transport_policy
+        if proxy_account_response_create_limit is not None:
+            settings.proxy_account_response_create_limit = proxy_account_response_create_limit
+        if proxy_account_stream_limit is not None:
+            settings.proxy_account_stream_limit = proxy_account_stream_limit
+        if proxy_account_stream_recovery_reserve is not None:
+            settings.proxy_account_stream_recovery_reserve = proxy_account_stream_recovery_reserve
         if upstream_proxy_routing_enabled is not None:
             settings.upstream_proxy_routing_enabled = upstream_proxy_routing_enabled
         settings.upstream_proxy_default_pool_id = upstream_proxy_default_pool_id or None

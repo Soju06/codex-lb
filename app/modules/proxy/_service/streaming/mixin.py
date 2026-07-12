@@ -409,7 +409,7 @@ from app.modules.proxy.http_bridge_forwarding import (
 from app.modules.proxy.http_bridge_forwarding import (
     OwnerForwardRelayFailure as OwnerForwardRelayFailure,
 )
-from app.modules.proxy.load_balancer import AccountLease
+from app.modules.proxy.load_balancer import AccountConcurrencyCaps, AccountLease
 from app.modules.proxy.tool_call_dedupe import (
     mark_duplicate_tool_call_downstream_event,
     rewrite_parallel_tool_call_sse_line,
@@ -480,6 +480,7 @@ class _StreamingMixin(_StreamingRetryMixin):
         suppress_text_done_events: bool,
         upstream_stream_transport: str | None,
         request_transport: str,
+        concurrency_caps: AccountConcurrencyCaps | None = None,
         useragent: str | None = None,
         useragent_group: str | None = None,
         client_ip: str | None = None,
@@ -529,13 +530,13 @@ class _StreamingMixin(_StreamingRetryMixin):
                     stop_event=api_key_reservation_heartbeat_stop,
                 )
             )
-
         try:
             route = await proxy._resolve_upstream_route_for_account(account, operation="responses")
             account_response_create_lease = await proxy._acquire_account_response_create_lease_or_overload(
                 account_id=account.id,
                 request_id=request_id,
                 surface="stream",
+                concurrency_caps=concurrency_caps or _facade().effective_account_concurrency_caps(),
             )
             response_create_lease = await proxy._get_work_admission().acquire_response_create()
             if upstream_stream_transport is not None:
@@ -775,7 +776,6 @@ class _StreamingMixin(_StreamingRetryMixin):
                     yield first
             if terminal_stream_error is not None:
                 raise terminal_stream_error
-
             async for line in iterator:
                 event_payload = parse_sse_data_json(line)
                 event = parse_sse_event(line)

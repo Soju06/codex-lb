@@ -232,6 +232,17 @@
         "placeholder": "选择账户",
         "empty": "请先导入账户再启用单账户路由。"
       },
+      "accountCapacity": {
+        "title": "单账户容量限制",
+        "description": "限制每个账户上并发的 Responses 工作。将限制设为 0 表示不限量。",
+        "responseCreateLabel": "响应创建限制",
+        "responseCreateDescription": "每个账户允许的最大并发响应创建数；0 表示不限量。",
+        "streamLabel": "流限制",
+        "streamDescription": "每个账户允许的最大并发流数；0 表示不限量。",
+        "streamRecoveryReserveLabel": "流恢复预留",
+        "streamRecoveryReserveDescription": "为恢复和重新连接工作预留流槽位。0 表示不预留；预留不能超过非零的流限制。",
+        "save": "保存容量限制"
+      },
       "stickyThresholds": {
         "primaryLabel": "粘性主阈值",
         "primaryDescription": "当主配额使用率高于此百分比时重新分配粘性会话。",

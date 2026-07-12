@@ -12,7 +12,7 @@ from alembic import op
 from sqlalchemy.engine import Connection
 
 revision = "20260711_000000_add_limit_warmup_idle_threshold"
-down_revision = "20260709_000000_add_ttft_phase_observability"
+down_revision = "20260711_000000_add_dashboard_prohibit_fast_mode"
 branch_labels = None
 depends_on = None
 

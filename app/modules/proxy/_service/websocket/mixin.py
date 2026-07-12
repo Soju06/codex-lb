@@ -431,7 +431,7 @@ from app.modules.proxy.http_bridge_forwarding import (
 from app.modules.proxy.http_bridge_forwarding import (
     OwnerForwardRelayFailure as OwnerForwardRelayFailure,
 )
-from app.modules.proxy.load_balancer import AccountLease
+from app.modules.proxy.load_balancer import AccountLease, effective_account_concurrency_caps
 from app.modules.proxy.request_policy import (
     apply_api_key_enforcement,
     normalize_responses_request_payload,
@@ -1260,11 +1260,13 @@ class _WebSocketMixin:
                         and _is_websocket_response_create(payload)
                         and request_state.account_response_create_lease is None
                     ):
+                        current_settings = await _facade().get_settings_cache().get()
                         request_state.account_response_create_lease = (
                             await proxy._acquire_account_response_create_lease_or_overload(
                                 account_id=account.id,
                                 request_id=request_state.request_log_id or request_state.request_id,
                                 surface="websocket",
+                                concurrency_caps=effective_account_concurrency_caps(current_settings),
                             )
                         )
                         request_state.account_response_create_release = proxy._load_balancer.release_account_lease
@@ -1317,9 +1319,11 @@ class _WebSocketMixin:
                         )
                     continue
                 except Exception:
+                    replay_refusal_reasons: list[str] = []
                     replay_candidate = await _pop_replayable_precreated_websocket_request_state(
                         pending_requests,
                         pending_lock=pending_lock,
+                        replay_refusal_reasons=replay_refusal_reasons,
                     )
                     if replay_candidate is not None:
                         _facade().logger.info(
@@ -1345,6 +1349,7 @@ class _WebSocketMixin:
                         await release_current_account_lease()
                         account = None
                         continue
+                    sequenced_downstream_replay_refused = "sequenced_downstream_frame" in replay_refusal_reasons
                     await proxy._fail_pending_websocket_requests(
                         account=account,
                         account_id_value=account.id if account else None,
@@ -1357,7 +1362,17 @@ class _WebSocketMixin:
                         client_send_lock=client_send_lock,
                         response_create_gate=response_create_gate,
                         downstream_activity=downstream_activity,
+                        suppress_sequenced_downstream_errors=sequenced_downstream_replay_refused,
                     )
+                    if sequenced_downstream_replay_refused:
+                        downstream_activity.mark_disconnected()
+                        try:
+                            await websocket.close(code=1011, reason="upstream replay requires a fresh request")
+                        except Exception:
+                            _facade().logger.debug(
+                                "Failed to close downstream websocket after sequenced send failure",
+                                exc_info=True,
+                            )
                     if upstream_reader is not None:
                         await _facade()._await_cancelled_task(upstream_reader, label="proxy websocket upstream reader")
                         upstream_reader = None
@@ -2807,8 +2822,12 @@ class _WebSocketMixin:
                     )
                     suppress_downstream_event = upstream_control.suppress_downstream_event
                     downstream_texts = upstream_control.downstream_texts
+                    downstream_sequence_request_state = upstream_control.downstream_sequence_request_state
+                    downstream_sequence_number = upstream_control.downstream_sequence_number
                     upstream_control.suppress_downstream_event = False
                     upstream_control.downstream_texts = None
+                    upstream_control.downstream_sequence_request_state = None
+                    upstream_control.downstream_sequence_number = None
                     if downstream_texts is not None:
                         for emitted_text in downstream_texts:
                             try:
@@ -2853,6 +2872,10 @@ class _WebSocketMixin:
                                 text=downstream_text,
                                 downstream_activity=downstream_activity,
                             )
+                            if downstream_sequence_request_state is not None and downstream_sequence_number is not None:
+                                downstream_sequence_request_state.last_downstream_sequence_number = (
+                                    downstream_sequence_number
+                                )
                         except Exception:
                             downstream_activity.mark_disconnected()
                             _facade().logger.debug(
@@ -2927,9 +2950,11 @@ class _WebSocketMixin:
                             )
                         break
                     continue
+                replay_refusal_reasons: list[str] = []
                 replay_request_state = await _pop_replayable_precreated_websocket_request_state(
                     pending_requests,
                     pending_lock=pending_lock,
+                    replay_refusal_reasons=replay_refusal_reasons,
                 )
                 if replay_request_state is not None:
                     upstream_control.reconnect_requested = True
@@ -2944,6 +2969,7 @@ class _WebSocketMixin:
                     except Exception:
                         _facade().logger.debug("Failed to close upstream websocket for replay", exc_info=True)
                     break
+                sequenced_downstream_replay_refused = "sequenced_downstream_frame" in replay_refusal_reasons
                 await proxy._fail_pending_websocket_requests(
                     account=account,
                     account_id_value=account_id_value,
@@ -2956,7 +2982,17 @@ class _WebSocketMixin:
                     client_send_lock=client_send_lock,
                     response_create_gate=response_create_gate,
                     downstream_activity=downstream_activity,
+                    suppress_sequenced_downstream_errors=sequenced_downstream_replay_refused,
                 )
+                if sequenced_downstream_replay_refused:
+                    downstream_activity.mark_disconnected()
+                    try:
+                        await websocket.close(code=1011, reason="upstream replay requires a fresh request")
+                    except Exception:
+                        _facade().logger.debug(
+                            "Failed to close downstream websocket after sequenced replay refusal",
+                            exc_info=True,
+                        )
                 break
         except asyncio.CancelledError:
             raise
@@ -3103,6 +3139,10 @@ class _WebSocketMixin:
                 if payload is not None:
                     payload = _rewrite_websocket_downstream_response_id(payload, request_state)
                     text = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+                    sequence_number = payload.get("sequence_number")
+                    if isinstance(sequence_number, int) and not isinstance(sequence_number, bool):
+                        upstream_control.downstream_sequence_request_state = request_state
+                        upstream_control.downstream_sequence_number = sequence_number
             if (
                 event_type in {"response.completed", "response.failed", "response.incomplete", "error"}
                 and pending_requests
@@ -3422,6 +3462,7 @@ class _WebSocketMixin:
                 can_retry_security_work = (
                     not account.security_work_authorized
                     and not has_other_pending_requests
+                    and request_state.last_downstream_sequence_number is None
                     and request_state.response_id is None
                     and request_state.replay_count < 1
                     and bool(request_state.request_text)
@@ -3976,6 +4017,7 @@ class _WebSocketMixin:
         downstream_activity: _DownstreamWebSocketActivity | None = None,
         status: str = "error",
         penalize_account: bool = True,
+        suppress_sequenced_downstream_errors: bool = False,
     ) -> None:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
@@ -4053,7 +4095,13 @@ class _WebSocketMixin:
                     )
                 )
                 await request_state.event_queue.put(None)
-            if websocket is not None and client_send_lock is not None:
+            if (
+                websocket is not None
+                and client_send_lock is not None
+                and not (
+                    suppress_sequenced_downstream_errors and request_state.last_downstream_sequence_number is not None
+                )
+            ):
                 await proxy._emit_websocket_terminal_error(
                     websocket,
                     client_send_lock=client_send_lock,

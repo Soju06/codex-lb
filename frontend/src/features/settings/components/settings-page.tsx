@@ -111,6 +111,9 @@ export function SettingsPage() {
                 settings.limitWarmupIdleThresholdPercent,
                 settings.limitWarmupCooldownSeconds,
                 settings.limitWarmupStaggeredIdleEnabled,
+                settings.proxyAccountResponseCreateLimit,
+                settings.proxyAccountStreamLimit,
+                settings.proxyAccountStreamRecoveryReserve,
               ].join(":")}
               settings={settings}
               accounts={accountsQuery.data ?? []}

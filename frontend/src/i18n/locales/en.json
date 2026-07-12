@@ -232,6 +232,17 @@
         "placeholder": "Choose account",
         "empty": "Import an account before enabling single-account routing."
       },
+      "accountCapacity": {
+        "title": "Per-account capacity limits",
+        "description": "Limit concurrent Responses work on each account. Set a limit to 0 for unlimited.",
+        "responseCreateLabel": "Response-create limit",
+        "responseCreateDescription": "Maximum concurrent response creates per account; 0 is unlimited.",
+        "streamLabel": "Stream limit",
+        "streamDescription": "Maximum concurrent streams per account; 0 is unlimited.",
+        "streamRecoveryReserveLabel": "Stream recovery reserve",
+        "streamRecoveryReserveDescription": "Keep stream slots for recovery and reattach work. 0 disables the reserve; it cannot exceed a nonzero stream limit.",
+        "save": "Save capacity limits"
+      },
       "stickyThresholds": {
         "primaryLabel": "Sticky primary threshold",
         "primaryDescription": "Reallocate sticky sessions above this primary usage percent.",

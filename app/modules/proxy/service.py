@@ -717,7 +717,14 @@ from app.modules.proxy.http_bridge_forwarding import (
 from app.modules.proxy.http_bridge_forwarding import (
     OwnerForwardRelayFailure as OwnerForwardRelayFailure,
 )
-from app.modules.proxy.load_balancer import AccountLease, AccountLeaseKind, AccountSelection, LoadBalancer
+from app.modules.proxy.load_balancer import (
+    AccountConcurrencyCaps,
+    AccountLease,
+    AccountLeaseKind,
+    AccountSelection,
+    LoadBalancer,
+    effective_account_concurrency_caps,
+)
 from app.modules.proxy.repo_bundle import ProxyRepoFactory
 from app.modules.proxy.ring_membership import (
     RingMembershipService,
@@ -1272,10 +1279,12 @@ class ProxyService(
         request_state.response_create_gate = response_create_gate
         request_state.response_create_gate_wait_started_at = time.monotonic()
         if account_id is not None:
+            settings = await get_settings_cache().get()
             request_state.account_response_create_lease = await self._acquire_account_response_create_lease_or_overload(
                 account_id=account_id,
                 request_id=request_state.request_id,
                 surface=surface,
+                concurrency_caps=effective_account_concurrency_caps(settings),
             )
             request_state.account_response_create_release = self._load_balancer.release_account_lease
         try:
@@ -1421,6 +1430,7 @@ class ProxyService(
             budget_threshold_pct=_sticky_reallocation_primary_budget_threshold_pct(settings),
             secondary_budget_threshold_pct=_sticky_reallocation_secondary_budget_threshold_pct(settings),
             traffic_class=traffic_class,
+            concurrency_caps=effective_account_concurrency_caps(settings),
         )
         if selection.account is None:
             return None
@@ -1732,8 +1742,13 @@ class ProxyService(
         try:
             with anyio.fail_after(remaining_budget):
                 settings = await get_settings_cache().get()
+                concurrency_caps = effective_account_concurrency_caps(settings)
                 stream_reserve_slots = (
-                    get_settings().proxy_account_stream_recovery_reserve
+                    (
+                        get_settings().proxy_account_stream_recovery_reserve
+                        if getattr(settings, "proxy_account_stream_recovery_reserve", None) is None
+                        else settings.proxy_account_stream_recovery_reserve
+                    )
                     if lease_kind == "stream" and request_stage != "reattach"
                     else 0
                 )
@@ -1806,6 +1821,7 @@ class ProxyService(
                         estimated_lease_tokens=estimated_lease_tokens,
                         stream_reserve_slots=stream_reserve_slots,
                         traffic_class=effective_traffic_class,
+                        concurrency_caps=concurrency_caps,
                     )
                     if preferred_selection.account is not None:
                         logger.info(
@@ -1850,6 +1866,7 @@ class ProxyService(
                     estimated_lease_tokens=estimated_lease_tokens,
                     stream_reserve_slots=stream_reserve_slots,
                     traffic_class=effective_traffic_class,
+                    concurrency_caps=concurrency_caps,
                 )
                 if selection.account is not None and selection.account.id in excluded_account_ids_set:
                     logger.warning(
@@ -1890,10 +1907,12 @@ class ProxyService(
         account_id: str,
         request_id: str,
         surface: str,
+        concurrency_caps: AccountConcurrencyCaps,
     ) -> AccountLease:
         lease = await self._load_balancer.acquire_account_lease(
             account_id,
             kind="response_create",
+            concurrency_caps=concurrency_caps,
         )
         if lease is not None:
             return lease
@@ -1951,6 +1970,16 @@ class ProxyService(
             budget_threshold_pct=_sticky_reallocation_primary_budget_threshold_pct(settings),
             secondary_budget_threshold_pct=_sticky_reallocation_secondary_budget_threshold_pct(settings),
             lease_kind=lease_kind,
+            concurrency_caps=effective_account_concurrency_caps(settings),
+            stream_reserve_slots=(
+                (
+                    get_settings().proxy_account_stream_recovery_reserve
+                    if getattr(settings, "proxy_account_stream_recovery_reserve", None) is None
+                    else settings.proxy_account_stream_recovery_reserve
+                )
+                if lease_kind == "stream"
+                else 0
+            ),
         )
 
     async def _handle_proxy_error(self, account: Account, exc: ProxyResponseError) -> None:

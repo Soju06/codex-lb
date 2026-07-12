@@ -14,12 +14,21 @@ import app.modules.proxy.load_balancer as load_balancer_module
 from app.core.crypto import TokenEncryptor
 from app.db.models import Account, AccountStatus, StickySessionKind, UsageHistory
 from app.modules.api_keys.repository import ApiKeysRepository
-from app.modules.proxy.load_balancer import LoadBalancer
+from app.modules.proxy.load_balancer import LoadBalancer, effective_account_concurrency_caps
 from app.modules.proxy.repo_bundle import ProxyRepositories
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.repository import AdditionalUsageRepository
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.fixture(autouse=True)
+def _use_dashboard_caps_from_test_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _SettingsCache:
+        async def get(self) -> object:
+            return load_balancer_module.get_settings()
+
+    monkeypatch.setattr(load_balancer_module, "get_settings_cache", lambda: _SettingsCache())
 
 
 def _make_account(account_id: str) -> Account:
@@ -36,6 +45,63 @@ def _make_account(account_id: str) -> Account:
         status=AccountStatus.ACTIVE,
         deactivation_reason=None,
     )
+
+
+def test_effective_account_concurrency_caps_supports_partial_settings_double(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        load_balancer_module,
+        "get_settings",
+        lambda: SimpleNamespace(circuit_breaker_enabled=False),
+    )
+
+    assert effective_account_concurrency_caps() == load_balancer_module.AccountConcurrencyCaps(
+        response_create_limit=4,
+        stream_limit=8,
+    )
+
+
+@pytest.mark.asyncio
+async def test_account_lease_uses_explicit_dashboard_cap_snapshot_not_startup_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    startup_settings = SimpleNamespace(
+        proxy_account_lease_ttl_seconds=60.0,
+        proxy_request_budget_seconds=10.0,
+        http_responses_stream_request_budget_seconds=7200.0,
+        http_responses_session_bridge_request_budget_seconds=7200.0,
+        proxy_account_response_create_limit=1,
+        proxy_account_stream_limit=1,
+    )
+    dashboard_settings = SimpleNamespace(
+        proxy_account_response_create_limit=1,
+        proxy_account_stream_limit=1,
+    )
+
+    monkeypatch.setattr(load_balancer_module, "get_settings", lambda: startup_settings)
+    balancer = LoadBalancer(lambda: _repo_factory(_StubAccountsRepository([]), _StubUsageRepository({}, {})))
+
+    first = await balancer.acquire_account_lease(
+        "acc-dashboard-caps",
+        kind="stream",
+        concurrency_caps=effective_account_concurrency_caps(dashboard_settings),
+    )
+    dashboard_settings.proxy_account_stream_limit = 2
+    second = await balancer.acquire_account_lease(
+        "acc-dashboard-caps",
+        kind="stream",
+        concurrency_caps=effective_account_concurrency_caps(dashboard_settings),
+    )
+    third = await balancer.acquire_account_lease(
+        "acc-dashboard-caps",
+        kind="stream",
+        concurrency_caps=effective_account_concurrency_caps(dashboard_settings),
+    )
+
+    assert first is not None
+    assert second is not None
+    assert third is None
 
 
 class _StubAccountsRepository:
@@ -360,7 +426,7 @@ async def test_account_stream_cap_returns_stable_local_reason_until_released() -
     assert capped.error_code == "account_stream_cap"
     assert capped.error_message == (
         "Account stream capacity is exhausted; per-account limit is 8. "
-        "Increase CODEX_LB_PROXY_ACCOUNT_STREAM_LIMIT or wait for active streams to finish."
+        "Increase the dashboard stream limit or wait for active streams to finish."
     )
     assert "all upstream accounts are unavailable" not in capped.error_message
 

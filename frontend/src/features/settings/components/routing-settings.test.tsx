@@ -41,6 +41,46 @@ const BASE_SETTINGS: DashboardSettings = {
 const BASE_UPDATE_PAYLOAD = buildSettingsUpdateRequest(BASE_SETTINGS, {});
 
 describe("RoutingSettings", () => {
+  it("saves per-account capacity limits including zero for unlimited", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={onSave} />);
+
+    await user.clear(screen.getByRole("spinbutton", { name: "Response-create limit" }));
+    await user.type(screen.getByRole("spinbutton", { name: "Response-create limit" }), "0");
+    await user.clear(screen.getByRole("spinbutton", { name: "Stream limit" }));
+    await user.type(screen.getByRole("spinbutton", { name: "Stream limit" }), "12");
+    await user.clear(screen.getByRole("spinbutton", { name: "Stream recovery reserve" }));
+    await user.type(screen.getByRole("spinbutton", { name: "Stream recovery reserve" }), "2");
+    await user.click(screen.getByRole("button", { name: "Save capacity limits" }));
+
+    expect(onSave).toHaveBeenCalledWith({
+      ...BASE_UPDATE_PAYLOAD,
+      proxyAccountResponseCreateLimit: 0,
+      proxyAccountStreamLimit: 12,
+      proxyAccountStreamRecoveryReserve: 2,
+    });
+  });
+
+  it("rejects invalid account capacity limits before saving", async () => {
+    const user = userEvent.setup();
+    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={vi.fn().mockResolvedValue(undefined)} />);
+
+    const streamLimit = screen.getByRole("spinbutton", { name: "Stream limit" });
+    const recoveryReserve = screen.getByRole("spinbutton", { name: "Stream recovery reserve" });
+    const saveButton = screen.getByRole("button", { name: "Save capacity limits" });
+
+    await user.clear(streamLimit);
+    await user.type(streamLimit, "2");
+    await user.clear(recoveryReserve);
+    await user.type(recoveryReserve, "3");
+    expect(saveButton).toBeDisabled();
+
+    await user.clear(recoveryReserve);
+    await user.type(recoveryReserve, "1.5");
+    expect(saveButton).toBeDisabled();
+  });
+
   it("saves a new prompt-cache affinity ttl from the button and Enter key", async () => {
     const user = userEvent.setup();
     const onSave = vi.fn().mockResolvedValue(undefined);

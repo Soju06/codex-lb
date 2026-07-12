@@ -122,6 +122,9 @@ def _dashboard_settings_response(settings) -> DashboardSettingsResponse:
         upstream_stream_transport=settings.upstream_stream_transport,
         prohibit_fast_mode=settings.prohibit_fast_mode,
         http_downstream_transport_policy=settings.http_downstream_transport_policy,
+        proxy_account_response_create_limit=settings.proxy_account_response_create_limit,
+        proxy_account_stream_limit=settings.proxy_account_stream_limit,
+        proxy_account_stream_recovery_reserve=settings.proxy_account_stream_recovery_reserve,
         upstream_proxy_routing_enabled=settings.upstream_proxy_routing_enabled,
         upstream_proxy_default_pool_id=settings.upstream_proxy_default_pool_id,
         prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
@@ -563,6 +566,28 @@ async def update_settings(
         single_account_id = (
             payload.single_account_id if "single_account_id" in payload.model_fields_set else current.single_account_id
         )
+        stream_limit = (
+            payload.proxy_account_stream_limit
+            if payload.proxy_account_stream_limit is not None
+            else current.proxy_account_stream_limit
+        )
+        stream_recovery_reserve = (
+            payload.proxy_account_stream_recovery_reserve
+            if payload.proxy_account_stream_recovery_reserve is not None
+            else current.proxy_account_stream_recovery_reserve
+        )
+        cap_fields_changed = bool(
+            {
+                "proxy_account_stream_limit",
+                "proxy_account_stream_recovery_reserve",
+            }
+            & payload.model_fields_set
+        )
+        if cap_fields_changed and stream_limit > 0 and stream_recovery_reserve > stream_limit:
+            raise DashboardBadRequestError(
+                "proxyAccountStreamRecoveryReserve must not exceed proxyAccountStreamLimit",
+                code="invalid_proxy_account_stream_recovery_reserve",
+            )
         updated = await context.service.update_settings(
             DashboardSettingsUpdateData(
                 sticky_threads_enabled=(
@@ -576,6 +601,21 @@ async def update_settings(
                 ),
                 http_downstream_transport_policy=(
                     payload.http_downstream_transport_policy or current.http_downstream_transport_policy
+                ),
+                proxy_account_response_create_limit=(
+                    payload.proxy_account_response_create_limit
+                    if "proxy_account_response_create_limit" in payload.model_fields_set
+                    else None
+                ),
+                proxy_account_stream_limit=(
+                    payload.proxy_account_stream_limit
+                    if "proxy_account_stream_limit" in payload.model_fields_set
+                    else None
+                ),
+                proxy_account_stream_recovery_reserve=(
+                    payload.proxy_account_stream_recovery_reserve
+                    if "proxy_account_stream_recovery_reserve" in payload.model_fields_set
+                    else None
                 ),
                 upstream_proxy_routing_enabled=(
                     payload.upstream_proxy_routing_enabled
@@ -719,6 +759,9 @@ async def update_settings(
             "upstream_stream_transport",
             "prohibit_fast_mode",
             "http_downstream_transport_policy",
+            "proxy_account_response_create_limit",
+            "proxy_account_stream_limit",
+            "proxy_account_stream_recovery_reserve",
             "upstream_proxy_routing_enabled",
             "upstream_proxy_default_pool_id",
             "prefer_earlier_reset_accounts",

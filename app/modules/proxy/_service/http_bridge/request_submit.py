@@ -81,6 +81,7 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
     _inline_top_level_input_image_urls,
     _normalize_service_tier_value,
     _normalize_session_id,
+    _prepare_websocket_request_state_for_account_switch,
     _prepare_websocket_request_state_for_auth_replay,
     _prepare_websocket_request_state_for_visible_output_replay,
     _prewarm_response_timeout_seconds,
@@ -1232,9 +1233,42 @@ class _HTTPBridgeRequestSubmitMixin:
                     f"(close_code={session.last_upstream_close_code})"
                 )
                 return False
-            request_text = _prepare_websocket_request_state_for_visible_output_replay(request_state)
-            if request_text is None:
-                return False
+            if request_state.previous_response_id is not None:
+                require_preferred_reconnect = False
+                switch_text = _prepare_websocket_request_state_for_account_switch(request_state)
+                if switch_text is None:
+                    # The retained full body may be retry-safe for continuity
+                    # while still naming an account-scoped uploaded file.  In
+                    # that case retry on the same owner-bound anchor instead of
+                    # letting visible-output replay strip the anchor and migrate.
+                    fresh_retry_safe = request_state.fresh_upstream_request_is_retry_safe
+                    request_state.fresh_upstream_request_is_retry_safe = False
+                    try:
+                        request_text = _prepare_websocket_request_state_for_visible_output_replay(request_state)
+                    finally:
+                        request_state.fresh_upstream_request_is_retry_safe = fresh_retry_safe
+                    if request_text is None:
+                        return False
+                    require_preferred_reconnect = request_state.preferred_account_id is not None
+                else:
+                    request_text = _prepare_websocket_request_state_for_visible_output_replay(request_state)
+                    if request_text is None:
+                        return False
+                    request_state.excluded_account_ids.add(session.account.id)
+            else:
+                require_preferred_reconnect = False
+                request_text = _prepare_websocket_request_state_for_visible_output_replay(request_state)
+                if request_text is None:
+                    return False
+                if not request_state.file_required_preferred_account:
+                    request_state.preferred_account_id = None
+                    request_state.excluded_account_ids.add(session.account.id)
+            if session.account.id in request_state.excluded_account_ids:
+                session.upstream_turn_state = None
+                session.downstream_turn_state = None
+                session.headers = {
+                    key: value for key, value in session.headers.items() if key.lower() != "x-codex-turn-state"
+                }
         _log_http_bridge_event(
             "retry_precreated",
             session.key,
@@ -1245,7 +1279,14 @@ class _HTTPBridgeRequestSubmitMixin:
             model_class=_extract_model_class(session.request_model) if session.request_model else None,
         )
         try:
-            await self._reconnect_http_bridge_session(session, request_state=request_state)
+            if require_preferred_reconnect:
+                await self._reconnect_http_bridge_session(
+                    session,
+                    request_state=request_state,
+                    require_preferred_account=True,
+                )
+            else:
+                await self._reconnect_http_bridge_session(session, request_state=request_state)
             request_text = self._http_bridge_text_with_account_installation_id(session, request_state, request_text)
             await _send_http_bridge_request_text_with_archive_id(session, request_state, request_text)
             session.last_used_at = _service_time().monotonic()
@@ -1345,13 +1386,12 @@ class _HTTPBridgeRequestSubmitMixin:
         retry_text = request_state.request_text
         if not retry_text:
             return False
+        if request_state.file_required_preferred_account:
+            return False
         if request_state.previous_response_id is not None:
-            if not (
-                request_state.fresh_upstream_request_text is not None
-                and request_state.fresh_upstream_request_is_retry_safe
-            ):
+            retry_text = _prepare_websocket_request_state_for_account_switch(request_state)
+            if retry_text is None:
                 return False
-            retry_text = request_state.fresh_upstream_request_text
 
         request_state.replay_count += 1
         request_state.response_id = None

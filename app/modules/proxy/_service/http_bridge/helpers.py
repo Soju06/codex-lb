@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import sys
@@ -176,6 +177,7 @@ from app.modules.proxy.ring_membership import (
 )
 
 logger = logging.getLogger("app.modules.proxy.service")
+_HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS = 5.0
 T = TypeVar("T")
 
 _HTTP_BRIDGE_INFLIGHT_STARTED_AT_ATTR = "_codex_lb_started_at"
@@ -601,6 +603,131 @@ def _http_bridge_session_has_visible_requests(session: "_HTTPBridgeSession") -> 
     )
 
 
+async def _close_http_bridge_session_bounded(
+    service: Any,
+    session: "_HTTPBridgeSession",
+    *,
+    reason: str,
+) -> None:
+    close_task = asyncio.create_task(
+        service._close_http_bridge_session(session),
+        name=f"http-bridge-close-{_hash_identifier(session.key.affinity_key)}",
+    )
+
+    def track_after_interruption(*, interruption: str) -> None:
+        if close_task.done():
+            return
+        service._background_cleanup_tasks.add(close_task)
+
+        def close_done(done_task: asyncio.Task[None]) -> None:
+            service._background_cleanup_tasks.discard(done_task)
+            try:
+                done_task.result()
+            except asyncio.CancelledError:
+                logger.warning(
+                    "http_bridge_session_close_cancelled_after_%s reason=%s bridge_kind=%s "
+                    "bridge_key=%s account_id=%s model=%s",
+                    interruption,
+                    reason,
+                    session.key.affinity_kind,
+                    _hash_identifier(session.key.affinity_key),
+                    session.account.id,
+                    session.request_model,
+                )
+            except Exception:
+                logger.warning(
+                    "http_bridge_session_close_failed_after_%s reason=%s bridge_kind=%s "
+                    "bridge_key=%s account_id=%s model=%s",
+                    interruption,
+                    reason,
+                    session.key.affinity_kind,
+                    _hash_identifier(session.key.affinity_key),
+                    session.account.id,
+                    session.request_model,
+                    exc_info=True,
+                )
+
+        close_task.add_done_callback(close_done)
+
+    try:
+        await asyncio.wait_for(
+            asyncio.shield(close_task),
+            timeout=_HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS,
+        )
+    except TimeoutError:
+        track_after_interruption(interruption="timeout")
+        logger.warning(
+            "http_bridge_session_close_timeout reason=%s bridge_kind=%s bridge_key=%s "
+            "account_id=%s model=%s timeout_seconds=%.1f background_cleanup_tasks=%d",
+            reason,
+            session.key.affinity_kind,
+            _hash_identifier(session.key.affinity_key),
+            session.account.id,
+            session.request_model,
+            _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS,
+            len(service._background_cleanup_tasks),
+        )
+    except asyncio.CancelledError:
+        track_after_interruption(interruption="cancellation")
+        raise
+    except Exception:
+        logger.warning(
+            "http_bridge_session_close_failed reason=%s bridge_kind=%s bridge_key=%s account_id=%s model=%s",
+            reason,
+            session.key.affinity_kind,
+            _hash_identifier(session.key.affinity_key),
+            session.account.id,
+            session.request_model,
+            exc_info=True,
+        )
+
+
+def _http_bridge_models_compatible(existing_model: str | None, request_model: str | None) -> bool:
+    """Never reuse a bridge across two explicitly different model slugs."""
+
+    if existing_model is None or request_model is None:
+        return True
+    return existing_model.strip().lower() == request_model.strip().lower()
+
+
+def _http_bridge_incompatible_model_fork_key(
+    *,
+    key: "_HTTPBridgeSessionKey",
+    existing_model: str | None,
+    request_model: str | None,
+    request_scope_id: str,
+) -> "_HTTPBridgeSessionKey | None":
+    if key.affinity_kind not in {
+        "session_header",
+        "turn_state_header",
+        "internal_unanchored_parallel",
+        "internal_model_parallel",
+    }:
+        return None
+    if _http_bridge_models_compatible(existing_model, request_model):
+        return None
+    if key.affinity_kind == "internal_model_parallel":
+        return None
+    fork_key = _HTTPBridgeSessionKey(
+        "internal_model_parallel",
+        sha256(
+            f"{key.affinity_kind}\0{key.affinity_key}\0{request_model or ''}\0{request_scope_id}".encode()
+        ).hexdigest(),
+        key.api_key_id,
+    )
+    _log_http_bridge_event(
+        "model_transition_fork",
+        fork_key,
+        account_id=None,
+        model=request_model,
+        detail=f"previous_model={existing_model}",
+        cache_key_family=key.affinity_kind,
+        model_class=_extract_model_class(request_model) if request_model else None,
+        owner_check_applied=False,
+    )
+    return fork_key
+
+
 def _http_bridge_unanchored_parallel_fork_key(
     *,
     key: "_HTTPBridgeSessionKey",
@@ -625,12 +752,8 @@ def _http_bridge_unanchored_parallel_fork_key(
             reservation_id := getattr(session, "unanchored_reservation_id", None)
         ) is not None and reservation_id != request_scope_id:
             reason = "session_reserved"
-        elif (
-            request_model is not None
-            and session.request_model is not None
-            and _extract_model_class(request_model) != _extract_model_class(session.request_model)
-        ):
-            reason = "model_class_change"
+        elif not _http_bridge_models_compatible(session.request_model, request_model):
+            reason = "model_change"
     if reason is None:
         return None
 
@@ -1438,6 +1561,17 @@ def _http_bridge_owner_lookup_unavailable_error_envelope() -> OpenAIErrorEnvelop
         "upstream_unavailable",
         "HTTP bridge owner metadata unavailable; retry later.",
         error_type="server_error",
+    )
+
+
+def _http_bridge_previous_response_owner_unavailable_error() -> ProxyResponseError:
+    return ProxyResponseError(
+        502,
+        openai_error(
+            "previous_response_owner_unavailable",
+            "Previous response owner account is unavailable; retry later.",
+            error_type="server_error",
+        ),
     )
 
 

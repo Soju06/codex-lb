@@ -10,8 +10,8 @@ The query-caching capability is broader than cache TTLs. It also owns the databa
 - Avoid full window-ranking scans on hot selector and dashboard aggregate reads; prefer grouped latest-id or PostgreSQL `DISTINCT ON` shapes backed by matching indexes.
 - Keep hot-path index migrations idempotent so manual production hotfix indexes do not break later schema upgrades.
 - Compute unfiltered request-log filter-option facets with recursive-CTE loose index scans (one btree probe per distinct value) instead of full `DISTINCT` passes; PostgreSQL has no native skip scan, so an unfiltered facet is otherwise a whole-index pass per facet per panel load. The gate is "no user-supplied filters": filtered requests keep the legacy `DISTINCT` shape because selective residual filters can make per-value probes degenerate. NULL second-column pair placement follows each backend's ASC NULL ordering to preserve exact result parity.
-
 - Proxy API-key auth caching is invalidation-driven: every key mutation bumps the `api_key` invalidation namespace and each instance's poller (0.5 s) clears the local cache, so the 60 s TTL is only a backstop for a broken poller. Sticky-session upserts persist and return the row in one `INSERT ... ON CONFLICT ... RETURNING` statement. Never run multiple statements concurrently on one `AsyncSession` (selection-input usage reads are awaited sequentially).
+- Serve account request-usage summaries from `account_usage_rollups` plus a live tail (`requested_at > folded_through`) instead of aggregating all `request_logs` history per read. A background fold job (15-min cadence, 24-hour safety lag, ≤7-day slices per transaction, leader-gated and serialized on the migration-seeded `account_usage_rollup_state` row lock) advances the watermark. Duplicate rows share an exact `requested_at`, so a `requested_at` boundary never splits a dedupe group; the 24 h lag must exceed the maximum request duration because log rows are written at stream end but dated at request start. Reads fetch sums + watermark in one statement to stay snapshot-consistent under READ COMMITTED; identity-merge consolidation transfers duplicates' rollup sums to the canonical account.
 
 ## Operational Notes
 
@@ -21,6 +21,7 @@ The query-caching capability is broader than cache TTLs. It also owns the databa
 - Do not hold the load-balancer runtime lock across network-bound usage refresh calls; only protect the in-memory selection and runtime-state mutation step.
 - Stale usage refreshes should collapse into one in-flight refresh per account, with followers re-checking persisted primary-window data before calling the upstream usage API again.
 - On 2026-06-29, production `10.0.0.113` saw Postgres backend OOM kills while dashboard/account-selection requests ran large `request_logs` and `additional_usage_history` window-ranking queries. The durable mitigation is to keep additional-quota latest lookups and account request usage summaries off `row_number()` hot paths, then restore any temporary production registry/timeout workarounds after deployment verification.
+- Operator escape hatch for the usage rollup: deleting all `account_usage_rollups` rows resets the fold watermark and forces the next fold pass to re-backfill from raw `request_logs`; summaries stay correct throughout because reads fall back to the full live aggregate while no rollup rows exist.
 
 ## Example
 

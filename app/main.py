@@ -46,6 +46,7 @@ from app.core.usage.refresh_scheduler import build_usage_refresh_scheduler
 from app.core.usage.reset_credits_refresh_scheduler import build_rate_limit_reset_credits_scheduler
 from app.db.session import SessionLocal, close_db, close_session, init_background_db, init_db
 from app.modules.accounts import api as accounts_api
+from app.modules.accounts.usage_rollup_scheduler import build_account_usage_rollup_scheduler
 from app.modules.api_keys import api as api_keys_api
 from app.modules.api_keys.reset_scheduler import build_api_key_limit_reset_scheduler
 from app.modules.audit import api as audit_api
@@ -166,6 +167,7 @@ async def lifespan(app: FastAPI):
     auth_guardian_scheduler = build_auth_guardian_scheduler()
     automations_scheduler = build_automations_scheduler()
     rate_limit_reset_credits_scheduler = build_rate_limit_reset_credits_scheduler()
+    account_usage_rollup_scheduler = build_account_usage_rollup_scheduler()
     await usage_scheduler.start()
     await api_key_limit_reset_scheduler.start()
     await model_scheduler.start()
@@ -174,6 +176,7 @@ async def lifespan(app: FastAPI):
     await auth_guardian_scheduler.start()
     await automations_scheduler.start()
     await rate_limit_reset_credits_scheduler.start()
+    await account_usage_rollup_scheduler.start()
     if settings.metrics_enabled and PROMETHEUS_AVAILABLE:
         import uvicorn
 
@@ -336,6 +339,7 @@ async def lifespan(app: FastAPI):
         await api_key_limit_reset_scheduler.stop()
         await usage_scheduler.stop()
         await rate_limit_reset_credits_scheduler.stop()
+        await account_usage_rollup_scheduler.stop()
         try:
             await close_http_client()
         finally:

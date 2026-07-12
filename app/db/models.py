@@ -167,6 +167,41 @@ class UsageHistory(Base):
     credits_balance: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
+class AccountUsageRollup(Base):
+    """Folded lifetime request-usage sums per account.
+
+    Request-log rows older than the fold watermark (the single
+    ``account_usage_rollup_state`` row) are summed here; account usage
+    summaries add a live aggregate over only the newer request-log tail.
+    Sums are stored unclamped; the ``cached_input_tokens <= input_tokens``
+    clamp applies after merging.
+    """
+
+    __tablename__ = "account_usage_rollups"
+
+    account_id: Mapped[str] = mapped_column(String, ForeignKey("accounts.id", ondelete="CASCADE"), primary_key=True)
+    request_count: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
+    input_tokens: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
+    output_tokens: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
+    cached_input_tokens: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
+    total_cost_usd: Mapped[float] = mapped_column(Float, default=0.0, server_default=text("0"), nullable=False)
+
+
+class AccountUsageRollupState(Base):
+    """Single-row fold watermark (naive-UTC), seeded by the migration.
+
+    Keeping the watermark on a dedicated always-present row gives fold passes
+    something to ``SELECT ... FOR UPDATE`` even before any rollup rows exist,
+    serializing concurrent backfills, and lets reads fetch sums + watermark in
+    one statement (one snapshot).
+    """
+
+    __tablename__ = "account_usage_rollup_state"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    folded_through: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
 class AdditionalUsageHistory(Base):
     __tablename__ = "additional_usage_history"
 

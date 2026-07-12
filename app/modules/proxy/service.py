@@ -745,11 +745,11 @@ from app.modules.proxy.load_balancer import (
     LoadBalancer,
     effective_account_concurrency_caps,
 )
-from app.modules.proxy.selection_errors import selection_failure_response
 from app.modules.proxy.repo_bundle import ProxyRepoFactory
 from app.modules.proxy.ring_membership import (
     RingMembershipService,
 )
+from app.modules.proxy.selection_errors import selection_failure_response
 from app.modules.proxy.work_admission import WorkAdmissionController
 
 logger = logging.getLogger(__name__)

@@ -4947,6 +4947,39 @@ async def test_iter_sse_events_accepts_cr_only_blank_line_separator():
 
 
 @pytest.mark.asyncio
+async def test_iter_sse_events_separator_straddles_chunk_boundary():
+    """The scan cursor backs up by the separator overlap, so a \r\n\r\n
+    split across two reads must still terminate the event."""
+    event = b'data: {"type":"response.completed"}\r\n\r\ndata: {"type":"next"}\n\n'
+    split = event.index(b"\r\n\r\n") + 2  # split in the middle of the separator
+    response = _DummyResponse([event[:split], event[split:]])
+    stream = proxy_module._iter_sse_events(cast(proxy_module.SSEResponse, response), 1.0, 4096)
+
+    chunks = [chunk async for chunk in stream]
+
+    assert chunks == [
+        'data: {"type":"response.completed"}\r\n\r\n',
+        'data: {"type":"next"}\n\n',
+    ]
+
+
+@pytest.mark.asyncio
+async def test_iter_sse_events_multiple_events_in_one_chunk_after_large_partial():
+    """After a large partial event completes, the residual buffer must be
+    rescanned from the start (cursor reset) so following events pop."""
+    big = b"A" * 8192
+    payload = b'data: {"big":"' + big + b'"}\n\ndata: one\n\ndata: two\n\n'
+    response = _DummyResponse([payload[:1000], payload[1000:5000], payload[5000:]])
+    stream = proxy_module._iter_sse_events(cast(proxy_module.SSEResponse, response), 1.0, 64 * 1024)
+
+    chunks = [chunk async for chunk in stream]
+
+    assert len(chunks) == 3
+    assert chunks[1] == "data: one\n\n"
+    assert chunks[2] == "data: two\n\n"
+
+
+@pytest.mark.asyncio
 async def test_iter_sse_events_raises_on_event_size_limit():
     large_data = b"A" * 1024
     response = _DummyResponse([b"data: ", large_data])

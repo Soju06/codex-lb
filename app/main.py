@@ -8,6 +8,7 @@ import sys
 import time
 from collections.abc import Awaitable
 from contextlib import asynccontextmanager
+from functools import lru_cache
 from importlib import import_module
 from ipaddress import ip_address
 from pathlib import Path, PurePosixPath
@@ -35,6 +36,7 @@ from app.core.middleware import (
     add_request_decompression_middleware,
     add_request_id_middleware,
 )
+from app.core.middleware.dashboard_gzip import add_dashboard_gzip_middleware
 from app.core.middleware.inflight import InFlightMiddleware
 from app.core.openai.model_refresh_scheduler import build_model_refresh_scheduler
 from app.core.resilience.backpressure import BackpressureMiddleware
@@ -96,12 +98,17 @@ class _RingMembershipReader(Protocol):
     ) -> Awaitable[list[str]]: ...
 
 
+@lru_cache(maxsize=4)
+def _static_files_for_root(static_root: Path) -> StaticFiles:
+    return StaticFiles(directory=static_root, check_dir=False)
+
+
 def _resolve_static_asset_path(static_root: Path, requested_path: str) -> Path | None:
     """Return a filesystem path for a SPA asset only when it stays under static_root."""
     normalized = PurePosixPath(requested_path)
     if normalized.is_absolute() or ".." in normalized.parts:
         return None
-    full_path, stat_result = StaticFiles(directory=static_root, check_dir=False).lookup_path(normalized.as_posix())
+    full_path, stat_result = _static_files_for_root(static_root).lookup_path(normalized.as_posix())
     if stat_result is None or not stat.S_ISREG(stat_result.st_mode):
         return None
     return Path(full_path)
@@ -359,6 +366,7 @@ def create_app() -> FastAPI:
     )
 
     app.add_middleware(cast(Any, InFlightMiddleware))
+    add_dashboard_gzip_middleware(app)
     add_dashboard_auth_proxy_middleware(app)
     add_request_decompression_middleware(app)
     add_request_id_middleware(app)
@@ -442,6 +450,15 @@ def create_app() -> FastAPI:
         if normalized:
             candidate = _resolve_static_asset_path(static_root, normalized)
             if candidate is not None:
+                if normalized.startswith("assets/"):
+                    # Vite content-hashes everything under assets/, so the
+                    # response for a given URL can never change: immutable
+                    # caching makes repeat dashboard loads skip ~1.7 MB of
+                    # re-downloads/revalidations. index.html stays no-cache
+                    # below, so deploys still pick up new hashes.
+                    return FileResponse(
+                        candidate, headers={"Cache-Control": "public, max-age=31536000, immutable"}
+                    )
                 return FileResponse(candidate)
             if _is_static_asset_path(normalized):
                 raise HTTPException(status_code=404, detail="Not Found")

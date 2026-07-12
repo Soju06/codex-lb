@@ -18,7 +18,6 @@ class RateLimitResetCreditsStore:
 
     def __init__(self) -> None:
         self._snapshots: dict[str, RateLimitResetCreditsSnapshot] = {}
-        self._pending_redeems: dict[tuple[str, str], str] = {}
         self._lock = anyio.Lock()
         self._clear_generation = 0
         self._account_generations: dict[str, int] = {}
@@ -71,18 +70,10 @@ class RateLimitResetCreditsStore:
     def get(self, account_id: str) -> RateLimitResetCreditsSnapshot | None:
         return self._snapshots.get(account_id)
 
-    async def remember_redeem_request(self, account_id: str, redeem_request_id: str, credit_id: str) -> None:
-        async with self._lock:
-            self._pending_redeems[(account_id, redeem_request_id)] = credit_id
-
-    def get_redeem_request_credit_id(self, account_id: str, redeem_request_id: str) -> str | None:
-        return self._pending_redeems.get((account_id, redeem_request_id))
-
     async def invalidate(self, account_id: str | None = None) -> None:
         async with self._lock:
             if account_id is None:
                 self._snapshots.clear()
-                self._pending_redeems.clear()
                 self._clear_generation += 1
                 return
             self._snapshots.pop(account_id, None)

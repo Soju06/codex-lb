@@ -41,12 +41,16 @@ from app.core.auth.dependencies import (
     validate_usage_api_key,
 )
 from app.core.auth.refresh import RefreshError
+from app.core.cache.invalidation import NAMESPACE_RESET_CREDITS, bump_cache_invalidation
 from app.core.clients.files import FileProxyError
 from app.core.clients.proxy import ProxyResponseError
 from app.core.clients.rate_limit_reset_credits import (
     ConsumeResetCreditError,
+    ResetCreditFetchError,
     ResetCreditItem,
+    build_snapshot,
     consume_reset_credit,
+    fetch_reset_credits,
 )
 from app.core.clients.usage import (
     ConsumeRateLimitResetCreditResponse as UpstreamConsumeRateLimitResetCreditResponse,
@@ -1027,6 +1031,43 @@ def _translate_v1_reset_credit_consume_error(exc: ConsumeResetCreditError) -> HT
     return HTTPException(status_code=status_code, detail=exc.message)
 
 
+def _translate_v1_reset_credit_fetch_error(exc: ResetCreditFetchError) -> HTTPException:
+    status_code = exc.status_code if exc.status_code > 0 else 503
+    return HTTPException(status_code=status_code, detail=exc.message)
+
+
+async def _fetch_authoritative_reset_credit(
+    *,
+    account_id: str,
+    redeem_id: str,
+    access_token: str,
+    chatgpt_account_id: str | None,
+    route: ResolvedUpstreamRoute | None,
+) -> ResetCreditItem | None:
+    """Resolve a redeem_id against a live upstream fetch when the local snapshot misses.
+
+    A replica-local snapshot can be empty (fresh replica) or stale (peer
+    redeemed), so upstream is authoritative before returning a 409. The fresh
+    snapshot replaces whatever this replica had cached either way.
+    """
+    try:
+        credits_response = await fetch_reset_credits(
+            access_token,
+            chatgpt_account_id,
+            route=route,
+            allow_direct_egress=route is None,
+        )
+    except ResetCreditFetchError as exc:
+        raise _translate_v1_reset_credit_fetch_error(exc) from exc
+    await get_rate_limit_reset_credits_store().set(account_id, build_snapshot(credits_response))
+    if credits_response.available_count <= 0:
+        return None
+    for credit in credits_response.credits:
+        if credit.id == redeem_id and credit.status == "available":
+            return credit
+    return None
+
+
 def _should_invalidate_v1_reset_credit_snapshot_on_consume_error(exc: ConsumeResetCreditError) -> bool:
     return exc.status_code == 409
 
@@ -1092,8 +1133,6 @@ async def v1_redeem_reset_credit(
 
         async with serialize_reset_credit_redeem(account_id, session=session):
             credit = _select_available_reset_credit_by_id(account_id, payload.redeem_id)
-            if credit is None:
-                raise HTTPException(status_code=409, detail="Requested reset credit is unavailable")
             try:
                 route = await _resolve_reset_credit_route(session, account_id)
             except UpstreamProxyRouteError as exc:
@@ -1103,6 +1142,18 @@ async def v1_redeem_reset_credit(
             except RefreshError as exc:
                 raise _translate_v1_reset_credit_refresh_error(exc) from exc
             access_token = TokenEncryptor().decrypt(redeem_credentials.access_token_encrypted)
+            if credit is None:
+                # The replica-local snapshot can be empty (fresh replica) or
+                # stale (a peer redeemed); upstream is authoritative before 409.
+                credit = await _fetch_authoritative_reset_credit(
+                    account_id=account_id,
+                    redeem_id=payload.redeem_id,
+                    access_token=access_token,
+                    chatgpt_account_id=redeem_credentials.chatgpt_account_id,
+                    route=route,
+                )
+                if credit is None:
+                    raise HTTPException(status_code=409, detail="Requested reset credit is unavailable")
             try:
                 result = await consume_reset_credit(
                     access_token,
@@ -1114,8 +1165,10 @@ async def v1_redeem_reset_credit(
             except ConsumeResetCreditError as exc:
                 if _should_invalidate_v1_reset_credit_snapshot_on_consume_error(exc):
                     await get_rate_limit_reset_credits_store().invalidate(account_id)
+                    await bump_cache_invalidation(NAMESPACE_RESET_CREDITS)
                 raise _translate_v1_reset_credit_consume_error(exc) from exc
             await get_rate_limit_reset_credits_store().invalidate(account_id)
+            await bump_cache_invalidation(NAMESPACE_RESET_CREDITS)
             try:
                 await _refresh_usage_after_v1_reset_credit_redeem(account_id)
             except Exception:

@@ -291,6 +291,7 @@ async def lifespan(app: FastAPI):
         NAMESPACE_ACCOUNT_SELECTION,
         NAMESPACE_API_KEY,
         NAMESPACE_FIREWALL,
+        NAMESPACE_RESET_CREDITS,
         NAMESPACE_SETTINGS,
         CacheInvalidationPoller,
         get_cache_invalidation_poller,
@@ -298,6 +299,7 @@ async def lifespan(app: FastAPI):
     )
     from app.core.middleware.firewall_cache import get_firewall_ip_cache
     from app.modules.proxy.account_cache import get_account_selection_cache, get_routing_availability_cache
+    from app.modules.rate_limit_reset_credits.store import get_rate_limit_reset_credits_store
 
     cache_poller = CacheInvalidationPoller(SessionLocal)
     cache_poller.on_invalidation(NAMESPACE_API_KEY, get_api_key_cache().clear)
@@ -314,6 +316,9 @@ async def lifespan(app: FastAPI):
         NAMESPACE_SETTINGS,
         lambda: get_settings_cache().invalidate(propagate=False),
     )
+    # The bus carries no payload, so a peer redeem clears this replica's whole
+    # reset-credits store; the refresh scheduler repopulates it on its next tick.
+    cache_poller.on_invalidation(NAMESPACE_RESET_CREDITS, get_rate_limit_reset_credits_store().invalidate)
     set_cache_invalidation_poller(cache_poller)
     try:
         # Seed baseline namespace versions before loading the routing snapshot

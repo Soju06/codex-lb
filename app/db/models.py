@@ -472,6 +472,47 @@ class SchedulerLeader(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
 
 
+class ResetCreditRedeemRequest(Base):
+    """Durable (account, redeem_request_id) -> credit_id idempotency ledger.
+
+    Written inside the per-account serialized redeem section BEFORE the
+    upstream consume call so a retry carrying the same redeem_request_id —
+    served by ANY replica — resolves to the originally selected credit and
+    never burns a second one. Rows are purged opportunistically after 24h.
+    """
+
+    __tablename__ = "reset_credit_redeem_requests"
+
+    account_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("accounts.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    redeem_request_id: Mapped[str] = mapped_column(String, primary_key=True)
+    credit_id: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+
+
+class ResetCreditRedeemClaim(Base):
+    """Cross-process per-account redeem serialization claim for SQLite.
+
+    A single atomic conditional upsert (INSERT ... ON CONFLICT DO UPDATE ...
+    WHERE expires_at < now) under SQLite's single-writer lock gives real
+    multi-process mutual exclusion; the lease expiry recovers crashed holders.
+    PostgreSQL deployments keep using pg_advisory_xact_lock instead.
+    """
+
+    __tablename__ = "reset_credit_redeem_claims"
+
+    account_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("accounts.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    holder_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class StickySession(Base):
     __tablename__ = "sticky_sessions"
 

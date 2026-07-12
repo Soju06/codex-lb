@@ -17,6 +17,7 @@ from app.core.clients.rate_limit_reset_credits import (
     ConsumeResetCreditResponse,
     RateLimitResetCreditsSnapshot,
     ResetCreditItem,
+    ResetCreditsResponse,
 )
 from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
@@ -470,6 +471,7 @@ async def test_v1_reset_credit_post_rejects_account_without_chatgpt_account_id(
 
 @pytest.mark.asyncio
 async def test_v1_reset_credit_post_unavailable_redeem_id_returns_409(async_client, monkeypatch: pytest.MonkeyPatch):
+    """A local snapshot miss consults upstream before 409, and caches the fresh snapshot."""
     await _enable_api_key_auth(async_client)
     account_id = await _import_account(async_client, "acc-reset-post-missing", "missing@example.com")
 
@@ -487,9 +489,20 @@ async def test_v1_reset_credit_post_unavailable_redeem_id_returns_409(async_clie
     )
 
     consume_mock = AsyncMock()
-    resolve_route_mock = AsyncMock(side_effect=AssertionError("route resolution should not run"))
+    fetch_mock = AsyncMock(
+        return_value=ResetCreditsResponse(
+            credits=[
+                ResetCreditItem(
+                    id="credit-available",
+                    status="available",
+                    expires_at=datetime(2031, 4, 1, tzinfo=timezone.utc),
+                )
+            ],
+            available_count=1,
+        )
+    )
     monkeypatch.setattr("app.modules.proxy.api.consume_reset_credit", consume_mock)
-    monkeypatch.setattr("app.modules.proxy.api._resolve_reset_credit_route", resolve_route_mock)
+    monkeypatch.setattr("app.modules.proxy.api.fetch_reset_credits", fetch_mock)
 
     response = await async_client.post(
         "/v1/reset-credit",
@@ -500,7 +513,12 @@ async def test_v1_reset_credit_post_unavailable_redeem_id_returns_409(async_clie
     assert response.status_code == 409
     assert response.json()["error"]["code"] == "invalid_request_error"
     consume_mock.assert_not_awaited()
-    resolve_route_mock.assert_not_awaited()
+    # Upstream was consulted as the authority for the missing redeem_id and the
+    # fresh snapshot replaced the local cache.
+    fetch_mock.assert_awaited_once()
+    snapshot = get_rate_limit_reset_credits_store().get(account_id)
+    assert snapshot is not None
+    assert [credit.id for credit in snapshot.credits] == ["credit-available"]
 
 
 @pytest.mark.asyncio

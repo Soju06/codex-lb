@@ -19,6 +19,7 @@ from app.core.auth.dependencies import (
     validate_dashboard_session,
 )
 from app.core.auth.refresh import RefreshError
+from app.core.cache.invalidation import NAMESPACE_RESET_CREDITS, bump_cache_invalidation
 from app.core.clients.rate_limit_reset_credits import (
     ConsumeResetCreditError,
     ConsumeResetCreditResponse,
@@ -44,6 +45,14 @@ from app.dependencies import AccountsContext, get_accounts_context
 from app.modules.accounts.auth_manager import AuthManager
 from app.modules.accounts.schemas import AccountUsageResetConsumeRequest
 from app.modules.proxy.account_cache import get_account_selection_cache
+from app.modules.rate_limit_reset_credits.redeem_coordination import (
+    RedeemClaimTimeoutError,
+    acquire_redeem_claim,
+    get_pinned_redeem_credit_id,
+    new_redeem_claim_holder_id,
+    pin_redeem_request,
+    release_redeem_claim,
+)
 from app.modules.rate_limit_reset_credits.store import (
     RateLimitResetCreditsStore,
     get_rate_limit_reset_credits_store,
@@ -217,12 +226,31 @@ async def serialize_reset_credit_redeem(
     *,
     session: AsyncSession | None,
 ):
-    if session is not None and session.get_bind().dialect.name == "postgresql":
-        await _acquire_postgresql_reset_credit_redeem_lock(session, account_id)
-        yield
-        return
+    if session is not None:
+        dialect = session.get_bind().dialect.name
+        if dialect == "postgresql":
+            await _acquire_postgresql_reset_credit_redeem_lock(session, account_id)
+            yield
+            return
+        if dialect == "sqlite":
+            # A durable claim row is the sole serializer here so processes
+            # sharing one SQLite file exclude each other, not just tasks in
+            # this process. Crashed holders are recovered via lease expiry.
+            holder_id = new_redeem_claim_holder_id()
+            try:
+                await acquire_redeem_claim(account_id, holder_id)
+            except RedeemClaimTimeoutError as exc:
+                raise DashboardConflictError(
+                    "Another reset credit redemption is already in progress for this account",
+                    code="reset_credit_redeem_in_progress",
+                ) from exc
+            try:
+                yield
+            finally:
+                await release_redeem_claim(account_id, holder_id)
+            return
 
-    # SQLite and direct unit-test callers keep the existing in-process lock.
+    # Direct callers without a DB session keep the in-process lock.
     lock = await get_reset_credit_redeem_lock(account_id)
     async with lock:
         yield
@@ -255,7 +283,7 @@ async def _redeem_soonest_reset_credit_locked(
     cached_snapshot = store.get(account.id)
     cached_credit = _select_soonest_available_credit(cached_snapshot)
     pending_credit_id = (
-        store.get_redeem_request_credit_id(account.id, redeem_request_id) if redeem_request_id is not None else None
+        await get_pinned_redeem_credit_id(account.id, redeem_request_id) if redeem_request_id is not None else None
     )
     if cached_credit is None and pending_credit_id is None:
         raise DashboardConflictError("No available reset credit", code="no_available_reset_credit")
@@ -282,12 +310,13 @@ async def _redeem_soonest_reset_credit_locked(
         await store.set(account.id, build_snapshot(credits_response))
         if cached_credit is None or redeem_request_id is None:
             raise DashboardConflictError("No available reset credit", code="no_available_reset_credit")
-        credit_id = cached_credit.id
-        await store.remember_redeem_request(account.id, redeem_request_id, credit_id)
+        # Pin (durably, before the consume call) so a lost response still
+        # resolves a same-redeem_request_id retry to this credit on any replica.
+        credit_id = await pin_redeem_request(account.id, redeem_request_id, cached_credit.id)
     else:
         credit_id = credit.id
         if redeem_request_id is not None:
-            await store.remember_redeem_request(account.id, redeem_request_id, credit_id)
+            credit_id = await pin_redeem_request(account.id, redeem_request_id, credit_id)
 
     try:
         result = await effective_consume_fn(
@@ -304,6 +333,7 @@ async def _redeem_soonest_reset_credit_locked(
     redeemed_at = result.credit.redeemed_at if result.credit else None
     available_count_after = max(0, credits_response.available_count - 1)
     await store.invalidate(account.id)
+    await bump_cache_invalidation(NAMESPACE_RESET_CREDITS)
 
     if refresh_usage is not None:
         try:

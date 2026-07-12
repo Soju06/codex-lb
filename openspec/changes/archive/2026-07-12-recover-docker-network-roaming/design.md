@@ -2,13 +2,14 @@
 
 The documented standalone `docker run` command attaches codex-lb to Docker's legacy `bridge` network. On Linux hosts using `systemd-resolved`, Docker can copy the currently active Wi-Fi resolver into that container's `/etc/resolv.conf`; an existing container may continue querying that private resolver after the host roams to another network. The observed runtime then produced repeated `socket.gaierror(EAI_AGAIN)` failures, failed over through unrelated accounts, and made continuity owners unavailable until process restart cleared transport state.
 
-Compose deployments already receive a project-scoped user-defined bridge, whose containers use Docker's embedded resolver. The application also already has a lease-safe shared HTTP client rotation mechanism, bounded Responses request budgets, SSE keepalives, and upstream WebSocket reconnect paths. The change should compose those facilities rather than introduce a second retry or health subsystem.
+Compose deployments already receive a project-scoped user-defined bridge, whose containers use Docker's embedded resolver. Live roaming validation showed that this is not sufficient on every Linux host: the container continued querying `127.0.0.11`, but Docker retained the old Wi-Fi forwarding servers until the container restarted. A host-network test on the same machine used the live `127.0.0.53` systemd-resolved stub and resolved successfully. The application also already has a lease-safe shared HTTP client rotation mechanism, bounded Responses request budgets, SSE keepalives, and upstream WebSocket reconnect paths. The change should compose those facilities rather than introduce a second retry or health subsystem.
 
 ## Goals / Non-Goals
 
 **Goals:**
 
-- Prevent the stock standalone Docker launch from binding DNS directly to one Wi-Fi network's resolver.
+- Prevent the portable standalone Docker launch from binding DNS directly to one Wi-Fi network's resolver without claiming that Docker's embedded forwarders always refresh.
+- Provide a stock Linux launch option that follows the host network namespace and live resolver across Wi-Fi changes.
 - Distinguish host/process DNS or route failures from account-specific upstream failures.
 - Recover pre-visible Responses and upstream WebSocket connection attempts on the same account within the existing request deadline.
 - Rotate stale shared HTTP connector/DNS state once per failed client generation and keep recovery observable.
@@ -17,7 +18,7 @@ Compose deployments already receive a project-scoped user-defined bridge, whose 
 
 - Guarantee replay after model output has already been exposed downstream.
 - Route a `previous_response_id` or account-owned file to a different account.
-- Bundle a public recursive resolver, bypass VPN/split-DNS policy, or require host networking.
+- Bundle a public recursive resolver or bypass VPN/split-DNS policy.
 - Keep a request alive beyond its configured proxy/request budget.
 
 ## Decisions
@@ -44,22 +45,25 @@ Once output is downstream-visible, existing fail-closed and replay-safety rules 
 
 Alternative considered: fall back from WebSocket to HTTP on DNS failure. Rejected because both transports require the same name resolution and changing transport does not repair host connectivity.
 
-### Use Docker embedded DNS rather than hard-coded public resolvers
+### Distinguish portable bridge mode from Linux roaming mode
 
-Standalone examples create and attach to a named user-defined bridge. Compose files declare an explicit default bridge and receive a configuration test so the contract cannot regress. No public DNS IP is hard-coded; this preserves host, VPN, and enterprise resolver policy.
+Portable standalone examples create and attach to a named user-defined bridge. Compose files declare an explicit default bridge and receive a configuration test so the contract cannot regress. The guidance explicitly states that Docker's embedded resolver may retain stale external forwarders. Linux operators who prioritize network roaming receive an alternative `--network host` launch, verified on systemd-resolved to preserve the host's live `127.0.0.53` resolver path. No public DNS IP is hard-coded; this preserves host, VPN, and enterprise resolver policy.
 
 Alternative considered: set Compose `dns:` to public resolvers. Rejected because public DNS can be blocked and can bypass split-DNS or organization policy.
+
+Alternative considered: claim that a user-defined bridge alone fixes resolver roaming. Rejected after live validation reproduced `EAI_AGAIN` for more than a minute while `127.0.0.11` retained the old Wi-Fi forwarder; restart immediately regenerated the new forwarder.
 
 ## Risks / Trade-offs
 
 - [A long host outage keeps safe requests pending until their request budget expires] → Existing budgets and SSE/WebSocket keepalives bound resource retention and preserve operator control.
 - [DNS error text differs across platforms after serialization] → Prefer typed exception-chain classification and cover the supported Linux/macOS resolver messages in the centralized fallback matcher.
-- [A user-defined Docker network still depends on Docker daemon DNS forwarding] → The embedded resolver tracks the daemon/host path better than a copied legacy-bridge resolver, while the application recovery loop remains the second layer.
+- [A user-defined Docker network still depends on Docker daemon DNS forwarding] → Document that it is only the portable baseline; offer Linux host networking or a host-resolver bridge listener when roaming guarantees matter.
+- [Host networking removes network-namespace isolation and is Linux-specific] → Keep it opt-in, omit incompatible port publishing, and explain the trade-off next to the command.
 - [Concurrent failures trigger excessive client rotations] → Compare against the failed session/client generation and coalesce generation-less recovery requests by cooldown.
 
 ## Migration Plan
 
-Existing Compose users receive the explicit user-defined network on normal recreate. Existing standalone users can create the named network and attach the running container without changing volumes or ports; future recreates should include `--network`. Rollback removes the network option and reverts the application recovery helper without data migration.
+Existing Compose users receive the explicit user-defined network on normal recreate. Portable standalone users can create the named network and attach the running container without changing volumes or ports, but this is not presented as a roaming guarantee. Linux users can select host networking on a future recreate, or expose systemd-resolved on the existing Docker bridge and repoint a running container without restarting it. Rollback removes the network option or host resolver listener and reverts the application recovery helper without data migration.
 
 ## Open Questions
 

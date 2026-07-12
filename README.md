@@ -80,6 +80,20 @@ uvx codex-lb
 
 Open [localhost:2455](http://localhost:2455) → Add account → Done.
 
+### Linux Wi-Fi roaming
+
+Docker's embedded DNS on a user-defined bridge can retain external forwarding servers from the Wi-Fi network that was active when the container started. If this Linux host regularly moves between networks, use host networking instead of the portable bridge command above so the container can query the host's live resolver directly:
+
+```bash
+docker volume create codex-lb-data
+docker run -d --name codex-lb \
+  --network host \
+  -v codex-lb-data:/var/lib/codex-lb \
+  ghcr.io/soju06/codex-lb:latest
+```
+
+Host networking is Linux-specific and does not use `-p`; codex-lb still listens on ports 2455 and 1455. It also removes Docker's network-namespace isolation, so use the portable bridge mode when resolver roaming is not required.
+
 ## Remote Setup
 
 When accessing the dashboard remotely for the first time, a bootstrap token is required to set the initial password.

@@ -560,7 +560,7 @@ class LoadBalancer:
                             selected_snapshot.reset_at = selected_reset_at
                     else:
                         error_message = result.error_message
-                        selection_error_code = result.error_code
+                        selection_error_code = result.error_code or selection_error_code
 
                 pre_persist_runtime_state = {
                     aid: (
@@ -776,7 +776,7 @@ class LoadBalancer:
                                     )
                     else:
                         error_message = result.error_message
-                        selection_error_code = result.error_code
+                        selection_error_code = result.error_code or selection_error_code
 
                 try:
                     async with self._repo_factory() as repos:

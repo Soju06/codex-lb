@@ -22,6 +22,7 @@ import type {
 } from "@/features/settings/schemas";
 import { formatCompactAccountId } from "@/utils/account-identifiers";
 import { isSingleAccountRoutingSelectable } from "@/utils/account-status";
+import { cn } from "@/lib/utils";
 
 const WARMUP_MODEL_MAX_LENGTH = 128;
 const LIMIT_WARMUP_MODEL_MAX_LENGTH = 128;
@@ -42,6 +43,17 @@ const WEEKLY_PACE_SMOOTHING_OPTIONS = [
   { value: 120, label: "2h" },
   { value: 240, label: "4h" },
 ] as const;
+
+const STRATEGY_GUIDE_VALUES: Record<string, string> = {
+  capacityWeighted: "capacity_weighted",
+  relativeAvailability: "relative_availability",
+  usageWeighted: "usage_weighted",
+  roundRobin: "round_robin",
+  fillFirst: "fill_first",
+  sequentialDrain: "sequential_drain",
+  resetDrain: "reset_drain",
+  singleAccount: "single_account",
+};
 
 function parseWorkingDays(value: string): Set<number> {
   const days = new Set(
@@ -393,7 +405,7 @@ export function RoutingSettings({
           </div>
           <div className="space-y-2 px-3 pb-3 text-xs text-muted-foreground">
             <p className="font-medium text-foreground">{t("settings.routing.strategy.guideTitle")}</p>
-            <dl className="grid gap-2 md:grid-cols-2">
+            <div className="grid gap-2 md:grid-cols-2">
               {[
                 "capacityWeighted",
                 "relativeAvailability",
@@ -403,13 +415,28 @@ export function RoutingSettings({
                 "sequentialDrain",
                 "resetDrain",
                 "singleAccount",
-              ].map((strategy) => (
-                <div key={strategy} className="space-y-0.5">
-                  <dt className="font-medium text-foreground">{t(`settings.routing.strategy.${strategy}`)}</dt>
-                  <dd>{t(`settings.routing.strategy.guide.${strategy}`)}</dd>
-                </div>
-              ))}
-            </dl>
+              ].map((strategy) => {
+                const strategyValue = STRATEGY_GUIDE_VALUES[strategy];
+                const isSelected = settings.routingStrategy === strategyValue;
+                return (
+                  <div
+                    key={strategy}
+                    className={cn(
+                      "space-y-0.5 rounded-md border p-2 transition-colors",
+                      isSelected
+                        ? "border-primary/40 bg-primary/5"
+                        : "border-border/40",
+                    )}
+                  >
+                    <dt className="flex items-center gap-1.5 font-medium text-foreground">
+                      {isSelected && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-primary" aria-hidden="true" />}
+                      {t(`settings.routing.strategy.${strategy}`)}
+                    </dt>
+                    <dd className="pl-3">{t(`settings.routing.strategy.guide.${strategy}`)}</dd>
+                  </div>
+                );
+              })}
+            </div>
             <p>{t("settings.routing.strategy.safetyNote")}</p>
           </div>
 

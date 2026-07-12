@@ -55,6 +55,7 @@ from app.modules.api_keys.service import (
     ApiKeyData,
     ApiKeyRequestUsageBudget,
 )
+from app.modules.proxy.selection_errors import selection_failure_response
 from app.modules.proxy._service.api_key_usage import (
     _API_KEY_RESERVATION_HEARTBEAT_SECONDS as _API_KEY_RESERVATION_HEARTBEAT_SECONDS,
 )
@@ -1895,16 +1896,8 @@ class _HTTPBridgeMixin(
                     preferred_account_id=preferred_account_id,
                     selected_account_id=None,
                 )
-                status_code = 429 if _is_local_account_cap_code(selection.error_code) else 503
-                error_type = "rate_limit_error" if status_code == 429 else "server_error"
-                raise ProxyResponseError(
-                    status_code,
-                    openai_error(
-                        selection.error_code or "no_accounts",
-                        selection.error_message or "No active accounts available",
-                        error_type=error_type,
-                    ),
-                )
+                status_code, error_payload = selection_failure_response(selection)
+                raise ProxyResponseError(status_code, error_payload)
             if require_preferred_account and preferred_account_id is not None and account.id != preferred_account_id:
                 message = "Previous response owner account is unavailable; retry later."
                 await self._load_balancer.release_account_lease(selected_account_lease)
@@ -2261,15 +2254,8 @@ class _HTTPBridgeMixin(
                         preferred_candidate_id = None
                     continue
                 record_selected_account_takeover(None)
-                status_code = 429 if _is_local_account_cap_code(selection.error_code) else 503
-                raise ProxyResponseError(
-                    status_code,
-                    openai_error(
-                        selection.error_code or "no_accounts",
-                        selection.error_message or "No active accounts available",
-                        error_type="rate_limit_error" if status_code == 429 else "server_error",
-                    ),
-                )
+                status_code, error_payload = selection_failure_response(selection)
+                raise ProxyResponseError(status_code, error_payload)
             if required_preferred_account_id is not None and account.id != required_preferred_account_id:
                 if selection.lease is not None:
                     await self._load_balancer.release_account_lease(selection.lease)

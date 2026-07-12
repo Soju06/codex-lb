@@ -145,6 +145,45 @@ class AccountState:
 class SelectionResult:
     account: AccountState | None
     error_message: str | None
+    error_code: str | None = None
+    resets_at: int | None = None
+
+
+USAGE_LIMIT_REACHED = "usage_limit_reached"
+
+
+def pool_usage_exhaustion(
+    states: Iterable[AccountState],
+    *,
+    ignore_standard_quota: bool = False,
+) -> SelectionResult | None:
+    """Describe pool-wide subscription exhaustion without parsing retry text."""
+    if ignore_standard_quota:
+        return None
+    eligible = [
+        state
+        for state in states
+        if state.status
+        not in (
+            AccountStatus.PAUSED,
+            AccountStatus.REAUTH_REQUIRED,
+            AccountStatus.DEACTIVATED,
+        )
+    ]
+    if not eligible or any(
+        state.status not in (AccountStatus.RATE_LIMITED, AccountStatus.QUOTA_EXCEEDED)
+        for state in eligible
+    ):
+        return None
+
+    # AccountState.reset_at can contain a conservative local fallback. Until
+    # reset provenance is represented explicitly, omit it rather than expose
+    # a synthetic value as an upstream reset timestamp.
+    return SelectionResult(
+        account=None,
+        error_message="Usage limit reached",
+        error_code=USAGE_LIMIT_REACHED,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -525,6 +564,16 @@ def select_account(
                     return SelectionResult(None, f"opportunistic burn window closed: {reason}")
                 available = opportunistic_available
         else:
+            usage_exhaustion = pool_usage_exhaustion(
+                all_states,
+                ignore_standard_quota=(
+                    ignore_standard_quota
+                    or bypass_quota_exceeded
+                    or bypass_quota_exceeded_account_ids is not None
+                ),
+            )
+            if usage_exhaustion is not None:
+                return usage_exhaustion
             reauth_required = [s for s in all_states if s.status == AccountStatus.REAUTH_REQUIRED]
             deactivated = [s for s in all_states if s.status == AccountStatus.DEACTIVATED]
             paused = [s for s in all_states if s.status == AccountStatus.PAUSED]

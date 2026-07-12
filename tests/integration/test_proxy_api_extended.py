@@ -377,6 +377,32 @@ async def test_thread_goal_get_propagates_selection_failures(async_client, monke
 
 
 @pytest.mark.asyncio
+async def test_thread_goal_get_maps_pool_usage_exhaustion_for_codex(async_client, monkeypatch):
+    async def fake_select(*_args, **_kwargs):
+        return proxy_module.AccountSelection(
+            account=None,
+            error_message="Usage limit reached",
+            error_code="usage_limit_reached",
+        )
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select)
+
+    response = await async_client.post(
+        "/backend-api/codex/thread/goal/get",
+        json={"threadId": "019debd9-2372-7f23-92b9-9f34002a6355"},
+    )
+
+    assert response.status_code == 429
+    assert response.json() == {
+        "error": {
+            "message": "Usage limit reached",
+            "type": "usage_limit_reached",
+            "code": "usage_limit_reached",
+        }
+    }
+
+
+@pytest.mark.asyncio
 async def test_thread_goal_set_propagates_upstream_errors(async_client, monkeypatch):
     await _import_account(async_client, "acc_goal_set_error", "goal-set-error@example.com")
 

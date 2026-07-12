@@ -67,6 +67,7 @@ from app.modules.proxy.helpers import (
     _upstream_error_from_openai,
 )
 from app.modules.proxy.load_balancer import AccountLease, AccountSelection
+from app.modules.proxy.selection_errors import USAGE_LIMIT_REACHED, selection_failure_response
 
 _REQUEST_TRANSPORT_HTTP = "http"
 _REQUEST_TRANSPORT_WEBSOCKET = "websocket"
@@ -916,6 +917,38 @@ class _StreamingRetryMixin:
                         yield await _render_account_model_rejection(
                             last_account_model_rejection,
                             account_id=last_account_model_rejection_account_id,
+                        )
+                        return
+                    if selection.error_code == USAGE_LIMIT_REACHED:
+                        no_accounts_msg = selection.error_message or "Usage limit reached"
+                        status_code, error_payload = selection_failure_response(selection)
+                        await proxy._write_request_log(
+                            account_id=None,
+                            api_key=api_key,
+                            request_id=request_id,
+                            model=payload.model,
+                            latency_ms=int((time.monotonic() - start) * 1000),
+                            status="error",
+                            error_code=USAGE_LIMIT_REACHED,
+                            error_message=no_accounts_msg,
+                            reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
+                            transport=request_transport,
+                            upstream_transport=upstream_stream_transport,
+                            service_tier=payload.service_tier,
+                            requested_service_tier=payload.service_tier,
+                            useragent=useragent,
+                            useragent_group=useragent_group,
+                            client_ip=client_ip,
+                        )
+                        if propagate_http_errors:
+                            raise ProxyResponseError(status_code, error_payload)
+                        yield format_sse_event(
+                            response_failed_event(
+                                USAGE_LIMIT_REACHED,
+                                no_accounts_msg,
+                                error_type=USAGE_LIMIT_REACHED,
+                                response_id=request_id,
+                            )
                         )
                         return
                     if selection.error_code in _LOCAL_ACCOUNT_CAP_ERROR_CODES:

@@ -97,6 +97,7 @@ from app.modules.api_keys.service import (
 from app.modules.proxy._service.api_key_usage import (
     _API_KEY_RESERVATION_HEARTBEAT_SECONDS as _API_KEY_RESERVATION_HEARTBEAT_SECONDS,
 )
+from app.modules.proxy.selection_errors import selection_failure_response
 from app.modules.proxy._service.compact import (
     _service_tier_from_compact_payload as _service_tier_from_compact_payload,
 )
@@ -2328,7 +2329,7 @@ class _WebSocketMixin:
             len(exclude_account_ids),
             api_key is not None,
         )
-        status_code = 429 if is_local_overload_error_code(error_code) else 503
+        status_code, error_payload = selection_failure_response(selection)
         await proxy._emit_websocket_connect_failure(
             websocket,
             client_send_lock=client_send_lock,
@@ -2336,11 +2337,7 @@ class _WebSocketMixin:
             api_key=api_key,
             request_state=request_state,
             status_code=status_code,
-            payload=openai_error(
-                error_code,
-                error_message,
-                error_type="rate_limit_error" if status_code == 429 else "server_error",
-            ),
+            payload=error_payload,
             error_code=error_code,
             error_message=error_message,
         )

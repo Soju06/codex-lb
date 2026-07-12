@@ -54,6 +54,7 @@ from app.modules.proxy.load_balancer import (
     AccountSelection,
     effective_account_concurrency_caps,
 )
+from app.modules.proxy.selection_errors import selection_failure_response
 from app.modules.proxy.work_admission import AdmissionLease, WorkAdmissionController
 
 logger = logging.getLogger("app.modules.proxy.service")
@@ -873,14 +874,10 @@ class _CompactMixin:
                     else:
                         log_error_code = selection.error_code or "no_accounts"
                         log_error_message = selection.error_message or "No active accounts available"
-                        status_code = 429 if log_error_code == "account_response_create_cap" else 503
+                        status_code, error_payload = selection_failure_response(selection)
                         raise ProxyResponseError(
                             status_code,
-                            openai_error(
-                                log_error_code,
-                                log_error_message,
-                                error_type="rate_limit_error" if status_code == 429 else "server_error",
-                            ),
+                            error_payload,
                         )
                 assert account is not None
                 account_id_value = account.id

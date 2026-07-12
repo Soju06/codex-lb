@@ -158,6 +158,7 @@ class AccountSelection:
     account: Account | None
     error_message: str | None
     error_code: str | None = None
+    resets_at: int | None = None
     lease: AccountLease | None = None
     catalog_omission_quota_admission: CatalogOmissionQuotaAdmission | None = None
 
@@ -559,6 +560,7 @@ class LoadBalancer:
                             selected_snapshot.reset_at = selected_reset_at
                     else:
                         error_message = result.error_message
+                        selection_error_code = result.error_code
 
                 pre_persist_runtime_state = {
                     aid: (
@@ -774,6 +776,7 @@ class LoadBalancer:
                                     )
                     else:
                         error_message = result.error_message
+                        selection_error_code = result.error_code
 
                 try:
                     async with self._repo_factory() as repos:

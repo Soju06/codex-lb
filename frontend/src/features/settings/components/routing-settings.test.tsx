@@ -247,7 +247,7 @@ describe("RoutingSettings", () => {
     const warmupModelInput = screen.getByLabelText("Warmup model");
     await user.clear(warmupModelInput);
     await user.type(warmupModelInput, "gpt-5.4-pro");
-    await user.click(screen.getByRole("button", { name: "Save warmup model" }));
+    await user.click(screen.getByRole("button", { name: "Save" }));
 
     expect(onSave).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -441,7 +441,7 @@ describe("RoutingSettings", () => {
     await user.clear(screen.getByLabelText("Warm-up cooldown"));
     await user.type(screen.getByLabelText("Warm-up cooldown"), "60.5");
 
-    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    expect(screen.getAllByRole("button", { name: "Save" }).at(-1)).toBeDisabled();
     expect(onSave).not.toHaveBeenCalled();
   });
 
@@ -458,7 +458,7 @@ describe("RoutingSettings", () => {
 
     await user.clear(screen.getByLabelText("Min usage %"));
     await user.type(screen.getByLabelText("Min usage %"), "98.5");
-    await user.click(screen.getByRole("button", { name: "Save" }));
+    await user.click(screen.getAllByRole("button", { name: "Save" }).at(-1)!);
 
     expect(onSave).toHaveBeenCalledWith({
       ...BASE_UPDATE_PAYLOAD,
@@ -481,7 +481,7 @@ describe("RoutingSettings", () => {
     await user.clear(screen.getByLabelText("Min usage %"));
     await user.type(screen.getByLabelText("Min usage %"), "100.1");
 
-    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    expect(screen.getAllByRole("button", { name: "Save" }).at(-1)).toBeDisabled();
     expect(onSave).not.toHaveBeenCalled();
   });
 

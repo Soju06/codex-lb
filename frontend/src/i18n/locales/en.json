@@ -199,7 +199,7 @@
       "warmupModel": {
         "label": "Warmup model",
         "description": "Set the model used by the normal warmup endpoint.",
-        "save": "Save warmup model"
+        "save": "Save"
       },
       "additionalQuota": {
         "title": "Additional quota routing policies",

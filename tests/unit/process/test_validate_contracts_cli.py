@@ -2,14 +2,13 @@
 
 Run the actual CLI as a subprocess and assert on exit code and stderr.
 """
+
 from __future__ import annotations
 
 import shutil
 import subprocess
 import sys
 from pathlib import Path
-
-import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 CLI = REPO_ROOT / "openspec" / "process" / "scripts" / "validate_contracts.py"

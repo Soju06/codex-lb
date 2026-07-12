@@ -185,13 +185,13 @@ class Settings(BaseSettings):
     # Anthropic OAuth refresh endpoint (subscription Max/Pro/Team).
     claude_api_base_url: str = "https://api.anthropic.com"
     claude_oauth_token_endpoint: str = "https://platform.claude.com/v1/oauth/token"
-    claude_oauth_authorize_endpoint: str = "https://platform.claude.com/oauth/authorize"
+    claude_oauth_authorize_endpoint: str = "https://claude.com/cai/oauth/authorize"
     claude_messages_path: str = "/v1/messages"
     claude_models_path: str = "/v1/models"
     claude_oauth_refresh_skew_seconds: int = 600
     claude_oauth_extra_headers: Annotated[dict[str, str], NoDecode] = Field(default_factory=dict)
     claude_oauth_client_id: str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
-    claude_oauth_redirect_uri: str = "https://console.anthropic.com/oauth/code"
+    claude_oauth_redirect_uri: str = "https://platform.claude.com/oauth/code/callback"
     claude_oauth_scopes: str = "user:profile user:inference"
     claude_oauth_flow_ttl_seconds: int = 600
     claude_oauth_authorization_code_max_length: int = 4096

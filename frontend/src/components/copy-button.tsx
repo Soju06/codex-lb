@@ -3,15 +3,22 @@ import { useState, type MouseEvent } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 import { copyToClipboard } from "@/utils/clipboard";
 
 export type CopyButtonProps = {
   value: string;
   label?: string;
   iconOnly?: boolean;
+  className?: string;
 };
 
-export function CopyButton({ value, label = "Copy", iconOnly = false }: CopyButtonProps) {
+export function CopyButton({
+  value,
+  label = "Copy",
+  iconOnly = false,
+  className,
+}: CopyButtonProps) {
   const [copied, setCopied] = useState(false);
 
   const handleCopy = async (event: MouseEvent<HTMLButtonElement>) => {
@@ -40,6 +47,7 @@ export function CopyButton({ value, label = "Copy", iconOnly = false }: CopyButt
       type="button"
       variant="outline"
       size={iconOnly ? "icon-sm" : "sm"}
+      className={cn(className)}
       onMouseDown={(event) => event.preventDefault()}
       onClick={(event) => void handleCopy(event)}
       aria-label={copied ? `${label} Copied` : label}

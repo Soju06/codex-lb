@@ -4,6 +4,7 @@ We exercise the validator CLI in isolation against synthetic contracts.
 We do not run actual GitHub Actions here — the YAML shape is checked
 in a separate unit test if needed.
 """
+
 from __future__ import annotations
 
 import shutil
@@ -53,7 +54,7 @@ def test_validator_fails_when_irreversible_missing_confirmation(
 ) -> None:
     bad = mirrored_contracts / "feature.yaml"
     text = bad.read_text(encoding="utf-8")
-    bad.write_text(text.replace("confirmation_phrase: \"merge PR #\"", ""), encoding="utf-8")
+    bad.write_text(text.replace('confirmation_phrase: "merge PR #"', ""), encoding="utf-8")
     proc = _run_with_dir(mirrored_contracts)
     assert proc.returncode != 0
     assert "feature.yaml" in proc.stderr

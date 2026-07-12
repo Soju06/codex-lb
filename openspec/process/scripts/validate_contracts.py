@@ -6,6 +6,7 @@ Exits 0 when all five required contracts validate; non-zero otherwise.
 Usage:
     uv run python openspec/process/scripts/validate_contracts.py
 """
+
 from __future__ import annotations
 
 import json
@@ -44,28 +45,21 @@ def main() -> int:
     present = {p.stem for p in CONTRACTS_DIR.glob("*.yaml")}
     missing = sorted(set(REQUIRED_CONTRACTS) - present)
     if missing:
-        errors.append(
-            "Missing required contracts: " + ", ".join(missing)
-        )
+        errors.append("Missing required contracts: " + ", ".join(missing))
 
     for contract_path in sorted(CONTRACTS_DIR.glob("*.yaml")):
         contract = load_contract(contract_path)
         try:
             validator.validate(contract)
         except ValidationError as exc:
-            errors.append(
-                f"{contract_path.relative_to(REPO_ROOT)}: {exc.message}"
-            )
+            errors.append(f"{contract_path.relative_to(REPO_ROOT)}: {exc.message}")
 
     if errors:
         for err in errors:
             print(err, file=sys.stderr)
         return 1
 
-    print(
-        f"Validated {len(REQUIRED_CONTRACTS)} contracts against "
-        f"{SCHEMA_PATH.relative_to(REPO_ROOT)}"
-    )
+    print(f"Validated {len(REQUIRED_CONTRACTS)} contracts against {SCHEMA_PATH.relative_to(REPO_ROOT)}")
     return 0
 
 

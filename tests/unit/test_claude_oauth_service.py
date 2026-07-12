@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -357,3 +358,102 @@ async def test_complete_oauth_logs_no_secrets(caplog: pytest.LogCaptureFixture) 
     joined = "\n".join(rec.getMessage() for rec in caplog.records)
     for secret in ("SECRET_AT", "SECRET_RT", "SECRET_CODE"):
         assert secret not in joined, f"log leaked token material: {secret!r}"
+
+
+# ---------------------------------------------------------------------------
+# claude-oauth-link endpoints (see openspec/changes/fix-claude-oauth-link-endpoints)
+# ---------------------------------------------------------------------------
+
+
+def _production_like_settings() -> Any:
+    """Settings shaped exactly like the production defaults.
+
+    Mirrors the values documented in ``app/core/config/settings.py`` after the
+    fix in ``openspec/changes/fix-claude-oauth-link-endpoints``. Used by the
+    URL-shape tests below so a regression in the default values is caught
+    here instead of at operator runtime.
+    """
+
+    return SimpleNamespace(
+        claude_oauth_authorize_endpoint="https://claude.com/cai/oauth/authorize",
+        claude_oauth_client_id="9d1c250a-e61b-44d9-88ed-5944d1962f5e",
+        claude_oauth_redirect_uri="https://platform.claude.com/oauth/code/callback",
+        claude_oauth_scopes="user:profile user:inference",
+        claude_oauth_flow_ttl_seconds=600,
+    )
+
+
+async def test_start_oauth_emits_claude_code_cli_url_with_code_true_flag() -> None:
+    """Regression guard for openspec/.../fix-claude-oauth-link-endpoints.
+
+    Anthropic accepts the authorization request only when the URL matches the
+    Claude Code CLI pattern: ``https://claude.com/cai/oauth/authorize?code=true&...
+    &redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&...``.
+    A previous attempt used ``https://platform.claude.com/oauth/authorize`` plus
+    ``redirect_uri=https://console.anthropic.com/oauth/code`` and was rejected
+    with "Redirect URI ... is not supported by client." (operator report).
+    """
+    from urllib.parse import parse_qs, urlparse
+
+    svc, _, _ = _make_service(settings=_production_like_settings())
+    resp = await svc.start_oauth()
+
+    parsed = urlparse(resp.authorization_url)
+    # Authorize endpoint matches Claude Code CLI.
+    assert parsed.scheme == "https"
+    assert parsed.netloc == "claude.com"
+    assert parsed.path == "/cai/oauth/authorize"
+    qs = parse_qs(parsed.query)
+    # ``code=true`` must be the first query parameter (matches Claude Code CLI).
+    assert qs.get("code") == ["true"], "code=true is required to select Anthropic's OOB code-display flow"
+    # The order of the query string matters because Anthropic's authorize
+    # endpoint requires ``code=true`` first; assert the literal substring
+    # appears right after the question mark.
+    assert resp.authorization_url.startswith("https://claude.com/cai/oauth/authorize?code=true&")
+    # Redirect URI is the one Anthropic has whitelisted for the public
+    # Claude Code client_id.
+    assert qs.get("redirect_uri") == ["https://platform.claude.com/oauth/code/callback"]
+    assert qs.get("client_id") == ["9d1c250a-e61b-44d9-88ed-5944d1962f5e"]
+    assert qs.get("response_type") == ["code"]
+    assert qs.get("code_challenge_method") == ["S256"]
+    assert resp.redirect_uri == "https://platform.claude.com/oauth/code/callback"
+
+
+def test_default_settings_pin_claude_code_compatible_endpoints(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Pin the production defaults so they cannot drift back to the rejected values.
+
+    If either default regresses, operators will hit Anthropic's
+    "Redirect URI ... is not supported by client" error at runtime.
+    """
+    from pydantic_settings import SettingsConfigDict
+
+    from app.core.config.settings import Settings
+
+    # Clear process env vars AND .env file load path so a developer-local
+    # `.env` containing a stale override cannot shadow the pinned defaults.
+    # Using the same `_env_file` override pattern as
+    # `tests/unit/test_settings_home_dir.py::_settings_from_env_file`, but
+    # pointing at an empty tmp_path file so neither `.env` nor `.env.local`
+    # in BASE_DIR is consulted (Settings model_config has env_file=ENV_FILES).
+    monkeypatch.delenv("CODEX_LB_CLAUDE_OAUTH_AUTHORIZE_ENDPOINT", raising=False)
+    monkeypatch.delenv("CODEX_LB_CLAUDE_OAUTH_REDIRECT_URI", raising=False)
+
+    empty_env = tmp_path / "empty.env"
+    empty_env.touch()
+
+    # Subclassing overrides `env_file` in the model_config to None so the
+    # parent class's `env_file=ENV_FILES` setting is bypassed entirely.
+    class _IsolatedSettings(Settings):
+        model_config = SettingsConfigDict(
+            env_prefix="CODEX_LB_",
+            env_file=None,
+            env_file_encoding="utf-8",
+            extra="ignore",
+        )
+
+    settings = _IsolatedSettings(_env_file=empty_env)  # ty: ignore[unknown-argument]
+    assert settings.claude_oauth_authorize_endpoint == "https://claude.com/cai/oauth/authorize"
+    assert settings.claude_oauth_redirect_uri == "https://platform.claude.com/oauth/code/callback"

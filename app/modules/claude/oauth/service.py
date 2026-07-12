@@ -187,6 +187,12 @@ class ClaudeOAuthService:
         client_id = str(self._settings.claude_oauth_client_id)
 
         params = {
+            # ``code=true`` selects Anthropic's OOB code-display flow on
+            # ``/cai/oauth/authorize`` (matches Claude Code CLI). Without it
+            # the authorize endpoint attempts a normal browser redirect that
+            # we cannot complete (no local callback server). See
+            # openspec/changes/fix-claude-oauth-link-endpoints for evidence.
+            "code": "true",
             "response_type": "code",
             "client_id": client_id,
             "redirect_uri": redirect_uri,

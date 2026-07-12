@@ -2,7 +2,7 @@
 
 - [x] 1.1 Add a native macOS status bar app that defaults to `http://127.0.0.1:2455`.
 - [x] 1.2 Fetch `GET /api/dashboard-auth/session` and `GET /api/dashboard/overview?timeframe=7d`.
-- [x] 1.3 Render account active count, quota status, reset timing, and additional quota rows in the menu.
+- [x] 1.3 Render account active count, quota status, and reset timing in the menu.
 - [x] 1.4 Add admin password login, guest login, configurable server URL, manual refresh, dashboard open, and quit actions.
 - [x] 1.5 Render account cards, status pills, and quota progress bars in the menu.
 - [x] 1.6 Show available reset-credit count and nearest expiry on account cards.

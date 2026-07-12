@@ -6,8 +6,8 @@ Operators sometimes only need a quick view of local codex-lb account availabilit
 
 - Add a small macOS status bar app that talks to the local codex-lb dashboard API.
 - Package the app as a DMG that can be opened locally.
-- Show active account count and the lowest visible remaining quota directly in the menu bar title.
-- Show per-account cards with progress bars, status pills, plan, routing policy, quota percentages, reset countdowns, and additional quota windows in the menu.
+- Show active account count and average visible remaining quota directly in the menu bar title.
+- Show per-account cards with progress bars, status pills, plan, routing policy, quota percentages, and reset countdowns in the menu.
 - Support dashboard password login, guest login, configurable server URL, manual refresh, and opening the full dashboard.
 
 ## Capabilities

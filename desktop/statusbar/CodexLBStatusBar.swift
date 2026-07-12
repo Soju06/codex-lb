@@ -85,7 +85,6 @@ private struct AccountSummary: Decodable {
     let windowMinutesMonthly: Int?
     let lastRefreshAt: Date?
     let deactivationReason: String?
-    let additionalQuotas: [AccountAdditionalQuota]
     let limitWarmupEnabled: Bool?
     let limitWarmup: AccountLimitWarmupStatus?
     let availableResetCredits: Int?
@@ -96,20 +95,6 @@ private struct AccountUsage: Decodable {
     let primaryRemainingPercent: Double?
     let secondaryRemainingPercent: Double?
     let monthlyRemainingPercent: Double?
-}
-
-private struct AccountAdditionalQuota: Decodable {
-    let limitName: String
-    let displayLabel: String?
-    let routingPolicy: String
-    let primaryWindow: AccountAdditionalWindow?
-    let secondaryWindow: AccountAdditionalWindow?
-}
-
-private struct AccountAdditionalWindow: Decodable {
-    let usedPercent: Double
-    let resetAt: Int?
-    let windowMinutes: Int?
 }
 
 private struct AccountLimitWarmupStatus: Decodable {
@@ -822,6 +807,9 @@ private func accountTitle(_ account: AccountSummary) -> String {
 }
 
 private func accountSubtitle(_ account: AccountSummary) -> String {
+    if accountTitle(account).localizedCaseInsensitiveCompare(account.email) != .orderedSame {
+        return "\(account.planType.capitalized) | \(account.email)"
+    }
     let accountId = account.accountId.count > 12 ? String(account.accountId.prefix(12)) + "..." : account.accountId
     return "\(account.planType.capitalized) | \(accountId)"
 }
@@ -913,9 +901,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         let wasMenuOpen = menuWasOpen ?? isMenuOpen
         isRefreshing = true
         statusItem.button?.title = "..."
-        if !wasMenuOpen {
-            rebuildMenu()
-        }
+        rebuildMenu(updateVisiblePanel: wasMenuOpen)
         defer {
             isRefreshing = false
             rebuildMenu(updateVisiblePanel: isMenuOpen)

@@ -33,3 +33,14 @@ The Reports dashboard MUST expose daily median TTFT and daily median TPS trends 
 - **GIVEN** a selected report range includes a day with no request logs or no valid timing data
 - **WHEN** the dashboard renders Reports
 - **THEN** the TTFT and TPS charts include that day with value zero
+
+### Requirement: Websocket responses capture request-log latency timings
+
+The websocket responses proxy path MUST record first-upstream-event, response-created, and first-token latency into the same request-log latency fields the HTTP bridge populates, so websocket request logs expose TTFT and generation speed. Recording MUST NOT change routing, failover, or the bytes returned to the client.
+
+#### Scenario: Websocket request log records latency timings
+
+- **GIVEN** a websocket responses request whose upstream emits a `response.created` event, then a text delta, then completion
+- **WHEN** the proxy persists the request log
+- **THEN** the log has non-null first-upstream-event, response-created, and first-token latency values
+- **AND** first-upstream-event latency is less than or equal to response-created latency, which is less than or equal to first-token latency

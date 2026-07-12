@@ -181,6 +181,13 @@ class Settings(BaseSettings):
     oauth_callback_host: str = _default_oauth_callback_host()
     oauth_callback_port: int = 1455  # Do not change the port. OpenAI dislikes changes.
     token_refresh_timeout_seconds: float = 8.0
+    # Cross-replica token-refresh claim (account_refresh_claims table).
+    # The TTL bounds how long a crashed claimant can block refresh for one
+    # account; it is validated to stay >= 2x token_refresh_timeout_seconds so
+    # a healthy claimant cannot lose its claim mid-exchange.
+    token_refresh_claim_ttl_seconds: float = Field(default=30.0, gt=0)
+    token_refresh_claim_wait_seconds: float = Field(default=8.0, gt=0)
+    token_refresh_claim_poll_seconds: float = Field(default=0.25, gt=0)
     auth_guardian_enabled: bool = False
     auth_guardian_interval_seconds: int = Field(default=21600, gt=0)
     auth_guardian_max_refresh_age_seconds: int = Field(default=43200, gt=0)
@@ -594,6 +601,16 @@ class Settings(BaseSettings):
         if self.bulkhead_proxy_compact_limit is None:
             http_limit = self.bulkhead_proxy_http_limit
             self.bulkhead_proxy_compact_limit = 0 if http_limit <= 0 else min(http_limit, 16)
+        return self
+
+    @model_validator(mode="after")
+    def _validate_token_refresh_claim_ttl(self) -> "Settings":
+        minimum_ttl = 2.0 * self.token_refresh_timeout_seconds
+        if self.token_refresh_claim_ttl_seconds < minimum_ttl:
+            raise ValueError(
+                "token_refresh_claim_ttl_seconds must be at least 2x token_refresh_timeout_seconds "
+                f"({minimum_ttl}s) so a healthy claimant cannot lose its claim mid-exchange"
+            )
         return self
 
     @model_validator(mode="after")

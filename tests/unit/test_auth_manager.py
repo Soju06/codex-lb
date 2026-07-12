@@ -35,6 +35,9 @@ class _DummyRepo:
     async def get_by_id(self, account_id: str) -> Account | None:
         return self.accounts_by_id.get(account_id)
 
+    async def get_by_id_fresh(self, account_id: str) -> Account | None:
+        return self.accounts_by_id.get(account_id)
+
     async def update_status(
         self,
         account_id: str,
@@ -43,6 +46,31 @@ class _DummyRepo:
         reset_at: int | None = None,
         blocked_at: int | None = None,
     ) -> bool:
+        self.status_payload = {
+            "account_id": account_id,
+            "status": status,
+            "deactivation_reason": deactivation_reason,
+        }
+        return True
+
+    async def update_status_if_current(
+        self,
+        account_id: str,
+        status: AccountStatus,
+        deactivation_reason: str | None = None,
+        reset_at: int | None = None,
+        *,
+        expected_status: AccountStatus,
+        expected_deactivation_reason: str | None = None,
+        expected_reset_at: int | None = None,
+    ) -> bool:
+        latest = self.accounts_by_id.get(account_id)
+        if latest is not None and (
+            latest.status != expected_status
+            or latest.deactivation_reason != expected_deactivation_reason
+            or latest.reset_at != expected_reset_at
+        ):
+            return False
         self.status_payload = {
             "account_id": account_id,
             "status": status,
@@ -60,9 +88,11 @@ class _DummyRepo:
         plan_type: str | None = None,
         email: str | None = None,
         chatgpt_account_id: str | None = None,
+        chatgpt_user_id: str | None = None,
         workspace_id: str | None = None,
         workspace_label: str | None = None,
         seat_type: str | None = None,
+        expected_refresh_token_encrypted: bytes | None = None,
     ) -> bool:
         self.tokens_payload = {
             "account_id": account_id,
@@ -73,9 +103,11 @@ class _DummyRepo:
             "plan_type": plan_type,
             "email": email,
             "chatgpt_account_id": chatgpt_account_id,
+            "chatgpt_user_id": chatgpt_user_id,
             "workspace_id": workspace_id,
             "workspace_label": workspace_label,
             "seat_type": seat_type,
+            "expected_refresh_token_encrypted": expected_refresh_token_encrypted,
         }
         return True
 
@@ -771,7 +803,10 @@ async def test_refresh_account_does_not_deactivate_when_repo_has_newer_refresh_t
 
     result = await manager.refresh_account(stale_account)
 
-    assert result is latest_account
+    # The caller's object adopts the newer rotation instead of being handed the
+    # repo-session-bound row (which would expire once that session closes).
+    assert result is stale_account
+    assert result.refresh_token_encrypted == latest_account.refresh_token_encrypted
     assert repo.status_payload is None
     assert stale_account.status == AccountStatus.ACTIVE
 

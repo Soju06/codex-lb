@@ -24,11 +24,14 @@ from app.core.upstream_proxy import UpstreamProxyRouteError, resolve_upstream_ro
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountProxyBinding, AccountStatus
 from app.db.session import get_background_session
+from app.modules.accounts.refresh_claims import RefreshClaimCoordinatorPort, get_refresh_claim_coordinator
 from app.modules.proxy.account_cache import get_account_selection_cache, mark_account_routing_unavailable
 
 
 class AccountsRepositoryPort(Protocol):
     async def get_by_id(self, account_id: str) -> Account | None: ...
+
+    async def get_by_id_fresh(self, account_id: str) -> Account | None: ...
 
     async def update_status(
         self,
@@ -37,6 +40,18 @@ class AccountsRepositoryPort(Protocol):
         deactivation_reason: str | None = None,
         reset_at: int | None = None,
         blocked_at: int | None = None,
+    ) -> bool: ...
+
+    async def update_status_if_current(
+        self,
+        account_id: str,
+        status: AccountStatus,
+        deactivation_reason: str | None = None,
+        reset_at: int | None = None,
+        *,
+        expected_status: AccountStatus,
+        expected_deactivation_reason: str | None = None,
+        expected_reset_at: int | None = None,
     ) -> bool: ...
 
     async def update_tokens(
@@ -53,6 +68,7 @@ class AccountsRepositoryPort(Protocol):
         workspace_id: str | None = None,
         workspace_label: str | None = None,
         seat_type: str | None = None,
+        expected_refresh_token_encrypted: bytes | None = None,
     ) -> bool: ...
 
     async def workspace_slot_taken(
@@ -161,6 +177,7 @@ class AuthManager:
         *,
         acquire_refresh_admission: Callable[[], Awaitable[RefreshAdmissionLeasePort]] | None = None,
         refresh_repo_factory: Callable[[], AbstractAsyncContextManager[AccountsRepositoryPort]] | None = None,
+        refresh_claims: RefreshClaimCoordinatorPort | None = None,
     ) -> None:
         self._repo = repo
         self._encryptor = TokenEncryptor()
@@ -172,6 +189,10 @@ class AuthManager:
         # from under the still-running refresh task and strand a pooled
         # connection. See _run_refresh.
         self._refresh_repo_factory = refresh_repo_factory
+        # Cross-replica refresh claim coordinator. ``None`` defers to the
+        # process default (see refresh_claims.get_refresh_claim_coordinator),
+        # which the test harness may set to ``None`` to disable claims.
+        self._refresh_claims = refresh_claims
 
     async def ensure_fresh(self, account: Account, *, force: bool = False) -> Account:
         if force or should_refresh(account.last_refresh):
@@ -201,48 +222,107 @@ class AuthManager:
         if self._refresh_repo_factory is None:
             return await self.refresh_account(account)
         async with self._refresh_repo_factory() as repo:
-            owned = AuthManager(repo, acquire_refresh_admission=self._acquire_refresh_admission)
+            owned = AuthManager(
+                repo,
+                acquire_refresh_admission=self._acquire_refresh_admission,
+                refresh_claims=self._refresh_claims,
+            )
             return await owned.refresh_account(account)
 
     async def refresh_account(self, account: Account) -> Account:
-        refresh_token = self._encryptor.decrypt(account.refresh_token_encrypted)
+        claims = self._refresh_claims if self._refresh_claims is not None else get_refresh_claim_coordinator()
+        if claims is None:
+            return await self._perform_refresh(account, refresh_token_encrypted=account.refresh_token_encrypted)
+        return await self._refresh_account_with_claim(account, claims)
+
+    async def _refresh_account_with_claim(
+        self,
+        account: Account,
+        claims: RefreshClaimCoordinatorPort,
+    ) -> Account:
+        """Serialize the upstream token exchange across replicas.
+
+        Exactly one claimant per account may run the OAuth exchange at a time;
+        everyone else waits (bounded) for the winner's rotated tokens to land
+        and adopts them without an upstream call. Refresh tokens are single-use
+        upstream, so a second concurrent exchange would receive a permanent
+        ``refresh_token_reused`` error and could revoke the token family.
+        """
+        settings = get_settings()
+        requested_fingerprint = _refresh_token_material_fingerprint(
+            self._encryptor,
+            account.refresh_token_encrypted,
+        )
+        deadline = time.monotonic() + max(0.0, float(settings.token_refresh_claim_wait_seconds))
+        poll_seconds = max(0.01, float(settings.token_refresh_claim_poll_seconds))
+        # NOTE: comparisons below use the fingerprint captured at entry, not
+        # ``account.refresh_token_encrypted``: when ``account`` is attached to
+        # the repo's session, ``get_by_id_fresh`` refreshes that very
+        # identity-map object in place, so comparing against the live attribute
+        # would compare the row with itself.
+        while True:
+            if await claims.try_acquire(account.id, ttl_seconds=settings.token_refresh_claim_ttl_seconds):
+                try:
+                    # Post-claim fresh re-read: another replica may have rotated
+                    # the material between the caller's read and our claim.
+                    latest = await self._repo.get_by_id_fresh(account.id)
+                    if latest is not None and (
+                        _refresh_token_material_fingerprint(self._encryptor, latest.refresh_token_encrypted)
+                        != requested_fingerprint
+                    ):
+                        return _adopt_account_row(account, latest)
+                    fresh_material = (
+                        latest.refresh_token_encrypted if latest is not None else account.refresh_token_encrypted
+                    )
+                    return await self._perform_refresh(account, refresh_token_encrypted=fresh_material)
+                finally:
+                    await claims.release(account.id)
+            # Claim held by another replica: adopt its rotation as soon as it
+            # commits; never write account status from the losing side.
+            latest = await self._repo.get_by_id_fresh(account.id)
+            if latest is not None and (
+                _refresh_token_material_fingerprint(self._encryptor, latest.refresh_token_encrypted)
+                != requested_fingerprint
+            ):
+                return _adopt_account_row(account, latest)
+            if time.monotonic() >= deadline:
+                raise RefreshError(
+                    "refresh_claim_timeout",
+                    f"Token refresh for account {account.id} is claimed by another replica; "
+                    f"timed out waiting {settings.token_refresh_claim_wait_seconds}s for its rotation",
+                    False,
+                    transport_error=True,
+                )
+            await asyncio.sleep(poll_seconds)
+
+    async def _perform_refresh(self, account: Account, *, refresh_token_encrypted: bytes) -> Account:
+        attempted_fingerprint = _refresh_token_material_fingerprint(self._encryptor, refresh_token_encrypted)
+        refresh_token = self._encryptor.decrypt(refresh_token_encrypted)
         try:
             result = await self._refresh_tokens(refresh_token, account=account)
         except RefreshError as exc:
             if exc.is_permanent:
-                latest = await self._repo.get_by_id(account.id)
-                if latest is not None and _refresh_token_material_changed(
-                    self._encryptor,
-                    latest.refresh_token_encrypted,
-                    account.refresh_token_encrypted,
-                ):
-                    return latest
-                reason = PERMANENT_FAILURE_CODES.get(exc.code, exc.message)
-                status = account_status_for_permanent_failure(exc.code)
-                await self._repo.update_status(account.id, status, reason)
-                account.status = status
-                account.deactivation_reason = reason
-                mark_account_routing_unavailable(account.id)
-                get_account_selection_cache().invalidate()
+                adopted = await self._handle_permanent_refresh_failure(account, exc, attempted_fingerprint)
+                if adopted is not None:
+                    return adopted
             raise
 
-        account.access_token_encrypted = self._encryptor.encrypt(result.access_token)
-        account.refresh_token_encrypted = self._encryptor.encrypt(result.refresh_token)
-        account.id_token_encrypted = self._encryptor.encrypt(result.id_token)
-        account.last_refresh = utcnow()
-        if result.account_id:
-            account.chatgpt_account_id = result.account_id
-        if result.chatgpt_user_id:
-            account.chatgpt_user_id = result.chatgpt_user_id
+        new_access_token_encrypted = self._encryptor.encrypt(result.access_token)
+        new_refresh_token_encrypted = self._encryptor.encrypt(result.refresh_token)
+        new_id_token_encrypted = self._encryptor.encrypt(result.id_token)
+        new_last_refresh = utcnow()
+        new_chatgpt_account_id = result.account_id or account.chatgpt_account_id
+        new_chatgpt_user_id = result.chatgpt_user_id or account.chatgpt_user_id
         if result.plan_type is not None:
-            account.plan_type = coerce_account_plan_type(
+            new_plan_type = coerce_account_plan_type(
                 result.plan_type,
                 account.plan_type or DEFAULT_PLAN,
             )
         elif not account.plan_type:
-            account.plan_type = DEFAULT_PLAN
-        if result.email:
-            account.email = result.email
+            new_plan_type = DEFAULT_PLAN
+        else:
+            new_plan_type = account.plan_type
+        new_email = result.email or account.email
         incoming_workspace_id = _clean_optional(result.workspace_id)
         current_workspace_id = _clean_optional(account.workspace_id)
         next_workspace_id = current_workspace_id
@@ -258,8 +338,8 @@ class AuthManager:
         elif not current_workspace_id and incoming_workspace_id:
             slot_taken = await self._repo.workspace_slot_taken(
                 account_id=account.id,
-                email=account.email,
-                chatgpt_account_id=account.chatgpt_account_id,
+                email=new_email,
+                chatgpt_account_id=new_chatgpt_account_id,
                 workspace_id=incoming_workspace_id,
             )
             if slot_taken:
@@ -271,43 +351,97 @@ class AuthManager:
                 )
             else:
                 next_workspace_id = incoming_workspace_id
-                account.workspace_id = next_workspace_id
         workspace_matches_current_slot = incoming_workspace_id is None or incoming_workspace_id == next_workspace_id
+        new_workspace_label = account.workspace_label
+        new_seat_type = account.seat_type
         if workspace_matches_current_slot and result.workspace_label:
-            account.workspace_label = result.workspace_label
+            new_workspace_label = result.workspace_label
         if workspace_matches_current_slot and result.seat_type:
-            account.seat_type = result.seat_type
+            new_seat_type = result.seat_type
 
-        if account.chatgpt_user_id:
-            await self._repo.update_tokens(
-                account.id,
-                access_token_encrypted=account.access_token_encrypted,
-                refresh_token_encrypted=account.refresh_token_encrypted,
-                id_token_encrypted=account.id_token_encrypted,
-                last_refresh=account.last_refresh,
-                plan_type=account.plan_type,
-                email=account.email,
-                chatgpt_account_id=account.chatgpt_account_id,
-                chatgpt_user_id=account.chatgpt_user_id,
-                workspace_id=next_workspace_id,
-                workspace_label=account.workspace_label,
-                seat_type=account.seat_type,
-            )
-        else:
-            await self._repo.update_tokens(
-                account.id,
-                access_token_encrypted=account.access_token_encrypted,
-                refresh_token_encrypted=account.refresh_token_encrypted,
-                id_token_encrypted=account.id_token_encrypted,
-                last_refresh=account.last_refresh,
-                plan_type=account.plan_type,
-                email=account.email,
-                chatgpt_account_id=account.chatgpt_account_id,
-                workspace_id=next_workspace_id,
-                workspace_label=account.workspace_label,
-                seat_type=account.seat_type,
-            )
+        updated = await self._repo.update_tokens(
+            account.id,
+            access_token_encrypted=new_access_token_encrypted,
+            refresh_token_encrypted=new_refresh_token_encrypted,
+            id_token_encrypted=new_id_token_encrypted,
+            last_refresh=new_last_refresh,
+            plan_type=new_plan_type,
+            email=new_email,
+            chatgpt_account_id=new_chatgpt_account_id,
+            chatgpt_user_id=new_chatgpt_user_id or None,
+            workspace_id=next_workspace_id,
+            workspace_label=new_workspace_label,
+            seat_type=new_seat_type,
+            expected_refresh_token_encrypted=refresh_token_encrypted,
+        )
+        if not updated:
+            # Compare-and-set miss: a concurrent writer rotated the material
+            # after our exchange began. Adopt the stored tokens rather than
+            # clobbering the newer rotation.
+            latest = await self._repo.get_by_id_fresh(account.id)
+            if latest is not None:
+                return _adopt_account_row(account, latest)
+
+        account.access_token_encrypted = new_access_token_encrypted
+        account.refresh_token_encrypted = new_refresh_token_encrypted
+        account.id_token_encrypted = new_id_token_encrypted
+        account.last_refresh = new_last_refresh
+        account.chatgpt_account_id = new_chatgpt_account_id
+        account.chatgpt_user_id = new_chatgpt_user_id
+        account.plan_type = new_plan_type
+        account.email = new_email
+        account.workspace_id = next_workspace_id
+        account.workspace_label = new_workspace_label
+        account.seat_type = new_seat_type
         return account
+
+    async def _handle_permanent_refresh_failure(
+        self,
+        account: Account,
+        exc: RefreshError,
+        attempted_fingerprint: str,
+    ) -> Account | None:
+        """Persist a permanent refresh failure without clobbering a concurrent rotation.
+
+        Returns the latest account row when its refresh-token material rotated
+        after this attempt began (the caller adopts it instead of raising);
+        returns ``None`` when the permanent failure stands. The comparison uses
+        the fingerprint of the material this attempt exchanged, captured before
+        the fresh re-read, because ``get_by_id_fresh`` may refresh the caller's
+        own identity-map object in place.
+        """
+        latest = await self._repo.get_by_id_fresh(account.id)
+        if latest is not None and (
+            _refresh_token_material_fingerprint(self._encryptor, latest.refresh_token_encrypted)
+            != attempted_fingerprint
+        ):
+            return _adopt_account_row(account, latest)
+        reason = PERMANENT_FAILURE_CODES.get(exc.code, exc.message)
+        status = account_status_for_permanent_failure(exc.code)
+        if latest is None:
+            # Account row is gone; nothing to downgrade.
+            return None
+        applied = await self._repo.update_status_if_current(
+            account.id,
+            status,
+            reason,
+            expected_status=latest.status,
+            expected_deactivation_reason=latest.deactivation_reason,
+            expected_reset_at=latest.reset_at,
+        )
+        if not applied:
+            logger.warning(
+                "Skipped permanent refresh-failure status write for account_id=%s code=%s: "
+                "account state changed concurrently",
+                account.id,
+                exc.code,
+            )
+            return None
+        account.status = status
+        account.deactivation_reason = reason
+        mark_account_routing_unavailable(account.id)
+        get_account_selection_cache().invalidate()
+        return None
 
     async def _refresh_tokens(self, refresh_token: str, *, account: Account) -> TokenRefreshResult:
         refresh_lease: RefreshAdmissionLeasePort | None = None
@@ -398,18 +532,21 @@ def _refresh_singleflight_key(
     )
 
 
-def _refresh_token_material_changed(
-    encryptor: TokenEncryptor,
-    latest_refresh_token_encrypted: bytes,
-    current_refresh_token_encrypted: bytes,
-) -> bool:
-    return _refresh_token_material_fingerprint(
-        encryptor,
-        latest_refresh_token_encrypted,
-    ) != _refresh_token_material_fingerprint(
-        encryptor,
-        current_refresh_token_encrypted,
-    )
+def _adopt_account_row(target: Account, source: Account) -> Account:
+    """Copy a concurrently committed row's state onto the caller's account object.
+
+    ``source`` is attached to the refresh task's short-lived session; returning
+    it directly would hand callers an object that expires when that session
+    closes. Copying onto the caller's object mirrors how a successful refresh
+    reports its result.
+    """
+    if target is source:
+        return target
+    for column in Account.__table__.columns:
+        if column.name in ("id", "created_at"):
+            continue
+        setattr(target, column.name, getattr(source, column.name))
+    return target
 
 
 def _refresh_token_material_fingerprint(encryptor: TokenEncryptor, refresh_token_encrypted: bytes) -> str:

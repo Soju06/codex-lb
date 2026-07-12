@@ -1,0 +1,211 @@
+"""Cross-replica serialization of OAuth token refresh.
+
+OpenAI refresh tokens are rotating/single-use: when two replicas exchange the
+same refresh token concurrently, the loser receives a permanent
+``refresh_token_reused``/``invalid_grant`` error and (pre-hardening) knocked a
+healthy account out of rotation. The :class:`RefreshClaimCoordinator` grants at
+most one claimant per account the right to run the upstream exchange, using a
+per-account row in ``account_refresh_claims``.
+
+Claim acquisition is a single conditional-upsert statement that is atomic on
+both backends:
+
+- PostgreSQL: ``INSERT .. ON CONFLICT DO UPDATE .. WHERE`` serializes
+  concurrent claimers on the row lock; exactly one statement's WHERE passes.
+- SQLite: the identical statement is atomic under SQLite's database-level
+  single-writer lock (safe across processes sharing one file via
+  ``busy_timeout``), additionally wrapped in ``sqlite_writer_section`` for
+  in-process serialization.
+
+No database lock or transaction is ever held across upstream network I/O: the
+claim is plain row state with a TTL (``claim_expires_at``) so a crashed
+claimant can never block refresh for longer than the TTL.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import uuid
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from typing import Protocol
+
+from sqlalchemy import delete, or_, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.sql.dml import Insert
+
+from app.core.config.settings import get_settings
+from app.core.utils.time import utcnow
+from app.db.models import AccountRefreshClaim
+from app.db.session import get_background_session, sqlite_writer_section
+
+_SQLITE_BUSY_RETRY_ATTEMPTS = 4
+_SQLITE_BUSY_RETRY_BASE_SECONDS = 0.05
+
+# Distinguishes workers/processes sharing one bridge instance id so a claim is
+# always scoped to exactly one event loop's refresh task.
+_PROCESS_SUFFIX = uuid.uuid4().hex[:12]
+
+
+@dataclass(frozen=True, slots=True)
+class RefreshClaimSnapshot:
+    claimed_by: str
+    claimed_at: datetime
+    claim_expires_at: datetime
+
+    def is_expired(self, now: datetime) -> bool:
+        return self.claim_expires_at < now
+
+
+class RefreshClaimCoordinatorPort(Protocol):
+    @property
+    def claimant_id(self) -> str: ...
+
+    async def try_acquire(self, account_id: str, *, ttl_seconds: float) -> bool: ...
+
+    async def release(self, account_id: str) -> None: ...
+
+
+def default_refresh_claimant_id() -> str:
+    instance_id = get_settings().http_responses_session_bridge_instance_id
+    return f"{instance_id}:{_PROCESS_SUFFIX}"[:128]
+
+
+class RefreshClaimCoordinator:
+    """DB-backed per-account refresh claim shared by all replicas."""
+
+    def __init__(self, *, claimant_id: str | None = None) -> None:
+        self._claimant_id = claimant_id if claimant_id is not None else default_refresh_claimant_id()
+
+    @property
+    def claimant_id(self) -> str:
+        return self._claimant_id
+
+    async def try_acquire(self, account_id: str, *, ttl_seconds: float) -> bool:
+        """Claim ``account_id`` for this claimant.
+
+        Succeeds when no claim row exists, the existing claim has expired, or
+        the existing claim is already ours (re-entrant refresh after a crash of
+        the previous refresh task in this process).
+        """
+        async with sqlite_writer_section():
+            for attempt in range(_SQLITE_BUSY_RETRY_ATTEMPTS):
+                try:
+                    async with get_background_session() as session:
+                        now = utcnow()
+                        stmt = build_refresh_claim_upsert(
+                            dialect_name=session.get_bind().dialect.name,
+                            account_id=account_id,
+                            claimed_by=self._claimant_id,
+                            now=now,
+                            claim_expires_at=now + timedelta(seconds=ttl_seconds),
+                        )
+                        result = await session.execute(stmt)
+                        claimed = result.scalar_one_or_none() is not None
+                        await session.commit()
+                        return claimed
+                except OperationalError as exc:
+                    if not _is_sqlite_database_locked(exc) or attempt == _SQLITE_BUSY_RETRY_ATTEMPTS - 1:
+                        raise
+                    await asyncio.sleep(_SQLITE_BUSY_RETRY_BASE_SECONDS * (2**attempt))
+            raise AssertionError("unreachable")
+
+    async def release(self, account_id: str) -> None:
+        """Drop our claim; a foreign claim is left untouched."""
+        async with sqlite_writer_section():
+            async with get_background_session() as session:
+                await session.execute(
+                    delete(AccountRefreshClaim).where(
+                        AccountRefreshClaim.account_id == account_id,
+                        AccountRefreshClaim.claimed_by == self._claimant_id,
+                    )
+                )
+                await session.commit()
+
+    async def current_claim(self, account_id: str) -> RefreshClaimSnapshot | None:
+        async with get_background_session() as session:
+            result = await session.execute(
+                select(
+                    AccountRefreshClaim.claimed_by,
+                    AccountRefreshClaim.claimed_at,
+                    AccountRefreshClaim.claim_expires_at,
+                ).where(AccountRefreshClaim.account_id == account_id)
+            )
+            row = result.one_or_none()
+        if row is None:
+            return None
+        return RefreshClaimSnapshot(claimed_by=row[0], claimed_at=row[1], claim_expires_at=row[2])
+
+
+def build_refresh_claim_upsert(
+    *,
+    dialect_name: str,
+    account_id: str,
+    claimed_by: str,
+    now: datetime,
+    claim_expires_at: datetime,
+) -> Insert:
+    """Conditional claim upsert; RETURNING yields a row iff the claim was won."""
+    if dialect_name == "postgresql":
+        insert_fn = pg_insert
+    elif dialect_name == "sqlite":
+        insert_fn = sqlite_insert
+    else:
+        raise RuntimeError(f"Refresh claims unsupported for dialect={dialect_name!r}")
+    return (
+        insert_fn(AccountRefreshClaim)
+        .values(
+            account_id=account_id,
+            claimed_by=claimed_by,
+            claimed_at=now,
+            claim_expires_at=claim_expires_at,
+        )
+        .on_conflict_do_update(
+            index_elements=["account_id"],
+            set_={
+                "claimed_by": claimed_by,
+                "claimed_at": now,
+                "claim_expires_at": claim_expires_at,
+            },
+            where=or_(
+                AccountRefreshClaim.claim_expires_at < now,
+                AccountRefreshClaim.claimed_by == claimed_by,
+            ),
+        )
+        .returning(AccountRefreshClaim.account_id)
+    )
+
+
+def _is_sqlite_database_locked(exc: OperationalError) -> bool:
+    return "database is locked" in str(exc).lower()
+
+
+# Process-wide default coordinator. ``_default_initialized`` distinguishes
+# "not yet initialized" from an explicit override of ``None`` (claims disabled
+# — used by the test harness so DB-less unit tests keep exercising the legacy
+# flow).
+_default_coordinator: RefreshClaimCoordinatorPort | None = None
+_default_initialized: bool = False
+
+
+def get_refresh_claim_coordinator() -> RefreshClaimCoordinatorPort | None:
+    global _default_coordinator, _default_initialized
+    if not _default_initialized:
+        _default_coordinator = RefreshClaimCoordinator()
+        _default_initialized = True
+    return _default_coordinator
+
+
+def set_refresh_claim_coordinator(coordinator: RefreshClaimCoordinatorPort | None) -> None:
+    """Override the process default (``None`` disables cross-replica claims)."""
+    global _default_coordinator, _default_initialized
+    _default_coordinator = coordinator
+    _default_initialized = True
+
+
+def reset_refresh_claim_coordinator() -> None:
+    global _default_coordinator, _default_initialized
+    _default_coordinator = None
+    _default_initialized = False

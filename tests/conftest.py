@@ -210,6 +210,23 @@ async def async_client(app_instance):
 
 
 @pytest.fixture(autouse=True)
+def _disable_default_refresh_claims():
+    """Disable the process-default cross-replica refresh-claim coordinator.
+
+    The default coordinator writes claim rows through the real database on
+    every token refresh; unit tests exercise AuthManager against stub repos
+    without a migrated schema. Tests covering claim semantics install a real
+    ``RefreshClaimCoordinator`` explicitly (constructor injection or
+    ``set_refresh_claim_coordinator``).
+    """
+    from app.modules.accounts import refresh_claims
+
+    refresh_claims.set_refresh_claim_coordinator(None)
+    yield
+    refresh_claims.reset_refresh_claim_coordinator()
+
+
+@pytest.fixture(autouse=True)
 def temp_key_file(monkeypatch):
     key_path = TEST_DB_DIR / f"encryption-{uuid4().hex}.key"
     monkeypatch.setenv("CODEX_LB_ENCRYPTION_KEY_FILE", str(key_path))

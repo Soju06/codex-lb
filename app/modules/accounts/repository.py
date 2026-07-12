@@ -70,6 +70,19 @@ class AccountsRepository:
     async def get_by_id(self, account_id: str) -> Account | None:
         return await self._session.get(Account, account_id)
 
+    async def get_by_id_fresh(self, account_id: str) -> Account | None:
+        """Re-read one account with a real SELECT, refreshing the identity map.
+
+        Unlike ``get_by_id`` (``session.get``), this never returns a cached
+        identity-map object without hitting the database, so callers checking
+        for concurrently rotated token material observe the latest committed
+        row.
+        """
+        result = await self._session.execute(
+            select(Account).where(Account.id == account_id).execution_options(populate_existing=True)
+        )
+        return result.scalar_one_or_none()
+
     async def list_accounts(self, *, refresh_existing: bool = False) -> list[Account]:
         stmt = select(Account).order_by(Account.email)
         if refresh_existing:
@@ -667,6 +680,7 @@ class AccountsRepository:
         workspace_id: str | None = None,
         workspace_label: str | None = None,
         seat_type: str | None = None,
+        expected_refresh_token_encrypted: bytes | None = None,
     ) -> bool:
         async with sqlite_writer_section():
             values: dict[str, bytes | datetime | str] = {
@@ -689,9 +703,13 @@ class AccountsRepository:
                 values["workspace_label"] = workspace_label
             if seat_type is not None:
                 values["seat_type"] = seat_type
-            result = await self._session.execute(
-                update(Account).where(Account.id == account_id).values(**values).returning(Account.id)
-            )
+            stmt = update(Account).where(Account.id == account_id).values(**values).returning(Account.id)
+            if expected_refresh_token_encrypted is not None:
+                # Compare-and-set on the exact ciphertext the caller read before
+                # the upstream exchange, so a concurrent rotation is never
+                # clobbered by a slower writer.
+                stmt = stmt.where(Account.refresh_token_encrypted == expected_refresh_token_encrypted)
+            result = await self._session.execute(stmt)
             await self._session.commit()
             return result.scalar_one_or_none() is not None
 

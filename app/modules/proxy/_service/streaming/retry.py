@@ -1495,6 +1495,16 @@ class _StreamingRetryMixin:
                         except RefreshError as refresh_exc:
                             if refresh_exc.is_permanent:
                                 await proxy._load_balancer.mark_permanent_failure(account, refresh_exc.code)
+                            elif (
+                                refresh_exc.transport_error
+                                and not require_preferred_account
+                                and preferred_account_id is None
+                            ):
+                                # Transient refresh failure (for example the
+                                # account's refresh claim is held by another
+                                # replica): fail over to a different account
+                                # instead of retrying the same one.
+                                excluded_account_ids.add(account.id)
                             continue
                         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
                             _facade().logger.warning(

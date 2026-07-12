@@ -16,6 +16,12 @@ class BackgroundAccountsRepository:
             detach_session_objects(session)
             return account
 
+    async def get_by_id_fresh(self, account_id: str) -> Account | None:
+        async with get_background_session() as session:
+            account = await AccountsRepository(session).get_by_id_fresh(account_id)
+            detach_session_objects(session)
+            return account
+
     async def list_accounts(self, *, refresh_existing: bool = False) -> list[Account]:
         async with get_background_session() as session:
             accounts = await AccountsRepository(session).list_accounts(refresh_existing=refresh_existing)
@@ -89,6 +95,7 @@ class BackgroundAccountsRepository:
         workspace_id: str | None = None,
         workspace_label: str | None = None,
         seat_type: str | None = None,
+        expected_refresh_token_encrypted: bytes | None = None,
     ) -> bool:
         async with get_background_session() as session:
             return await AccountsRepository(session).update_tokens(
@@ -104,6 +111,7 @@ class BackgroundAccountsRepository:
                 workspace_id=workspace_id,
                 workspace_label=workspace_label,
                 seat_type=seat_type,
+                expected_refresh_token_encrypted=expected_refresh_token_encrypted,
             )
 
     async def workspace_slot_taken(

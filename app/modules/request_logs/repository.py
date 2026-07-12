@@ -5,13 +5,13 @@ from datetime import datetime
 from typing import cast as typing_cast
 
 import anyio
-from sqlalchemy import Integer, String, and_, cast, func, literal_column, or_, select
+from sqlalchemy import Integer, String, and_, case, cast, func, literal_column, or_, select
 from sqlalchemy import exc as sa_exc
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
 from app.core.usage.logs import RequestLogLike, calculated_cost_from_log
-from app.core.usage.types import BucketModelAggregate, RequestActivityAggregate
+from app.core.usage.types import BucketModelAggregate, RequestActivityAggregate, UsageSummaryLogsAggregate
 from app.core.utils.request_id import ensure_request_id
 from app.core.utils.time import utcnow
 from app.db.models import Account, ApiKey, RequestKind, RequestLog
@@ -183,6 +183,61 @@ class RequestLogsRepository:
         row = result.first()
         return str(row[0]) if row and row[0] else None
 
+    async def aggregate_usage_metrics_since(self, since: datetime) -> UsageSummaryLogsAggregate:
+        """Aggregate the usage-summary window in SQL instead of hydrating
+        every RequestLog row (the secondary window is typically 7 days).
+
+        Matches the Python log helpers exactly: output tokens fall back to
+        reasoning tokens, cached tokens clamp per-row to [0, input_tokens],
+        and models whose costs are all NULL are omitted from per-model cost.
+        """
+        dialect = self._session.get_bind().dialect.name
+        # SQLite's two-argument min()/max() scalar functions are its
+        # least()/greatest().
+        least = func.least if dialect == "postgresql" else func.min
+        greatest = func.greatest if dialect == "postgresql" else func.max
+
+        window = [RequestLog.requested_at >= since, self._exclude_warmup_clause()]
+        output_expr = func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)
+        tokens_expr = func.coalesce(RequestLog.input_tokens, 0) + output_expr
+        cached_expr = case(
+            (RequestLog.cached_input_tokens.is_(None), 0),
+            (RequestLog.input_tokens.is_(None), greatest(0, RequestLog.cached_input_tokens)),
+            else_=greatest(0, least(RequestLog.cached_input_tokens, RequestLog.input_tokens)),
+        )
+        totals_row = (
+            await self._session.execute(
+                select(
+                    func.count().label("request_count"),
+                    func.coalesce(func.sum(cast(RequestLog.status != literal_column("'success'"), Integer)), 0).label(
+                        "error_count"
+                    ),
+                    func.coalesce(func.sum(tokens_expr), 0).label("total_tokens"),
+                    func.coalesce(func.sum(cached_expr), 0).label("cached_input_tokens"),
+                ).where(*window)
+            )
+        ).one()
+
+        top_error = await self.top_error_since(since)
+
+        cost_rows = (
+            await self._session.execute(
+                select(RequestLog.model, func.sum(RequestLog.cost_usd).label("cost_usd"))
+                .where(*window, RequestLog.cost_usd.is_not(None))
+                .group_by(RequestLog.model)
+                .order_by(RequestLog.model.asc())
+            )
+        ).all()
+
+        return UsageSummaryLogsAggregate(
+            request_count=int(totals_row.request_count or 0),
+            error_count=int(totals_row.error_count or 0),
+            total_tokens=int(totals_row.total_tokens or 0),
+            cached_input_tokens=int(totals_row.cached_input_tokens or 0),
+            top_error=top_error,
+            cost_by_model=[(model, float(cost or 0.0)) for model, cost in cost_rows],
+        )
+
     async def top_error_between(self, since: datetime, until: datetime) -> str | None:
         stmt = self._top_error_stmt(since, until)
         result = await self._session.execute(stmt)
@@ -340,7 +395,9 @@ class RequestLogsRepository:
             self._session.add(log)
             try:
                 await self._session.commit()
-                await self._session.refresh(log)
+                # No refresh: every column is set explicitly before insert and
+                # expire_on_commit=False, so the round trip was pure overhead
+                # on every request's log write.
                 return log
             except sa_exc.ResourceClosedError:
                 return log

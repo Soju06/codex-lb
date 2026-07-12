@@ -611,6 +611,48 @@ async def test_partial_update_preserves_stale_plans():
 
 
 @pytest.mark.asyncio
+async def test_partial_update_does_not_promote_metadata_only_stale_catalog() -> None:
+    registry = ModelRegistry(ttl_seconds=60.0)
+    routable = _model("pro-routable")
+    metadata_only = replace(
+        _model("pro-metadata-only"),
+        raw={"service_tiers": [{"slug": "priority"}]},
+    )
+    shared = _model("gpt-5.4")
+
+    await registry.update(
+        {"pro": [routable], "plus": [shared]},
+        per_account_results={
+            "account-pro": ("pro", [routable, metadata_only]),
+            "account-plus": ("plus", [shared]),
+        },
+        active_account_plans={"account-pro": "pro", "account-plus": "plus"},
+    )
+    first = registry.get_snapshot()
+    assert first is not None
+    assert "pro-metadata-only" not in first.models
+    assert registry.plan_types_for_model("pro-metadata-only") == frozenset()
+
+    await registry.update(
+        {"plus": [shared]},
+        per_account_results={"account-plus": ("plus", [shared])},
+        active_account_plans={"account-pro": "pro", "account-plus": "plus"},
+    )
+
+    snapshot = registry.get_snapshot()
+    assert snapshot is not None
+    assert snapshot.account_catalogs_authoritative is True
+    assert "pro-metadata-only" not in snapshot.models
+    assert "pro-metadata-only" not in snapshot.model_accounts
+    assert "pro-metadata-only" not in snapshot.model_service_tier_accounts
+    assert registry.plan_types_for_model("pro-metadata-only") == frozenset()
+    assert registry.plan_types_for_model_service_tier("pro-metadata-only", "priority") == frozenset()
+    assert registry.account_ids_for_model("pro-metadata-only") == frozenset()
+    assert registry.account_ids_for_model_service_tier("pro-metadata-only", "priority") == frozenset()
+    assert registry.is_suppressed_model("pro-metadata-only") is True
+
+
+@pytest.mark.asyncio
 async def test_partial_update_drops_capabilities_for_inactive_accounts():
     registry = ModelRegistry(ttl_seconds=60.0)
     sol = _model("gpt-5.6-sol")

@@ -760,6 +760,8 @@ class ModelRegistry:
                         if plan_type is not None:
                             account_plans[account_id] = plan_type
                     for slug, account_ids in previous.model_accounts.items():
+                        if slug not in previous.models:
+                            continue
                         stale_model_accounts = account_ids & stale_account_ids
                         if not stale_model_accounts:
                             continue
@@ -771,6 +773,8 @@ class ModelRegistry:
                             if plan_type is not None:
                                 model_plans.setdefault(slug, set()).add(plan_type)
                     for slug, tier_accounts in previous.model_service_tier_accounts.items():
+                        if slug not in previous.models:
+                            continue
                         for service_tier, account_ids in tier_accounts.items():
                             stale_tier_accounts = account_ids & stale_account_ids
                             if stale_tier_accounts:

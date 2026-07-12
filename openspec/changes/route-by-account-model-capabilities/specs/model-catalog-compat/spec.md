@@ -96,6 +96,13 @@ an operator-mapped slug that has no catalog evidence at all.
 - **THEN** the empty catalog is treated as successful account coverage
 - **AND** the previously advertised model leaves discovery and exact routing
 
+#### Scenario: Metadata-only account model stays unroutable during partial refresh
+
+- **GIVEN** an account catalog contains a model omitted from the plan discovery catalog
+- **AND** a later refresh retains that account's stale catalog
+- **WHEN** the next registry snapshot is built
+- **THEN** the metadata-only model does not enter model, plan, account, or service-tier routing indexes
+
 #### Scenario: Failed refresh follows an account plan-type change
 
 - **GIVEN** an account previously advertised a catalog while on one plan type

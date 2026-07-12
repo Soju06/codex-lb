@@ -17,7 +17,7 @@ When the Helm chart enables `networkPolicy`, it MUST NOT open the main HTTP ingr
 - **THEN** the rendered NetworkPolicy does not include `namespaceSelector: {}`
 - **AND** ingress remains deny-by-default unless the operator adds an explicit allow rule
 
-### Requirement: Stock Docker networking distinguishes resolver mobility
+### Requirement: Stock Docker networking explains network switching
 
 The documented portable standalone Docker deployment MUST attach codex-lb to a user-defined bridge network, and stock Compose deployments MUST declare a user-defined default bridge. The documentation MUST state that Docker's embedded resolver can retain stale external forwarding servers across a host network change. It MUST provide a Linux host-network launch option for operators who require the container to use the host's live resolver. Stock configuration MUST NOT hard-code a public recursive DNS server.
 
@@ -33,9 +33,9 @@ The documented portable standalone Docker deployment MUST attach codex-lb to a u
 - **THEN** the server is attached to a user-defined default bridge
 - **AND** the rendered service does not pin a public DNS server
 
-#### Scenario: Linux roaming launch uses the host resolver path
+#### Scenario: Linux network-switching launch uses the host resolver path
 
-- **WHEN** a Linux operator selects the documented Wi-Fi roaming launch
+- **WHEN** a Linux operator selects the documented launch for switching Wi-Fi or other networks
 - **THEN** the container uses `--network host`
 - **AND** the command does not publish ports with `-p`
 - **AND** the documentation explains the loss of Docker network-namespace isolation
@@ -43,5 +43,5 @@ The documented portable standalone Docker deployment MUST attach codex-lb to a u
 #### Scenario: Portable bridge limitations are explicit
 
 - **WHEN** an operator reads the portable bridge instructions
-- **THEN** the documentation does not claim that `127.0.0.11` guarantees forwarder refresh after Wi-Fi roaming
+- **THEN** the documentation does not claim that `127.0.0.11` guarantees forwarder refresh after switching networks
 - **AND** it identifies host networking or a host-resolver bridge listener as the stronger Linux options

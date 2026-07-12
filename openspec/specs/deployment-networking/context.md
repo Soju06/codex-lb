@@ -8,9 +8,9 @@ This capability covers the network defaults used by stock codex-lb deployments. 
 
 On Linux, a container started on Docker's legacy default `bridge` can receive the host's current resolver address directly in `/etc/resolv.conf`. If that address came from Wi-Fi DHCP, the running container can retain it after the host joins another network. The host may resolve names normally while the container repeatedly fails with `socket.gaierror: Temporary failure in name resolution`.
 
-Containers on a user-defined bridge query Docker's embedded resolver at `127.0.0.11`. This avoids placing one Wi-Fi DNS address directly in the container configuration, but it is not a roaming guarantee. Live validation on Ubuntu with Docker Engine showed that the embedded resolver retained the old network's external forwarding servers from 13:52 until the container restarted at 13:54. After restart, the generated resolver metadata changed from the old Wi-Fi servers to `192.168.110.1` and resolution recovered.
+Containers on a user-defined bridge query Docker's embedded resolver at `127.0.0.11`. This avoids placing one Wi-Fi DNS address directly in the container configuration, but it does not guarantee recovery after switching networks. Live validation on Ubuntu with Docker Engine showed that the embedded resolver retained the old network's external forwarding servers from 13:52 until the container restarted at 13:54. After restart, the generated resolver metadata changed from the old Wi-Fi servers to `192.168.110.1` and resolution recovered.
 
-Linux host networking avoids that Docker forwarding layer. On the same machine, a temporary host-network container received `nameserver 127.0.0.53` and successfully resolved `chatgpt.com` through the live systemd-resolved stub. This mode is Linux-specific and removes Docker network-namespace isolation, so it is an explicit operator choice rather than the portable default.
+Host networking on Docker Engine for Linux avoids that Docker forwarding layer. On the same machine, a temporary host-network container received `nameserver 127.0.0.53` and successfully resolved `chatgpt.com` through the live systemd-resolved stub. This mode removes Docker network-namespace isolation, so it is an explicit operator choice rather than the portable default. Docker Desktop 4.34 and later also offers opt-in host networking for Linux containers, but its layer-4, VM-backed implementation differs and this change has not verified it as a DNS-recovery guarantee after switching networks.
 
 Application-level recovery complements this deployment default. A classified DNS or host-route failure rotates stale shared connector state and retries only replay-safe, pre-visible Responses work within the existing request deadline. It does not replay output already shown to the client, extend request budgets, or move continuation/file ownership to another account.
 
@@ -19,8 +19,8 @@ Application-level recovery complements this deployment default. A classified DNS
 - Docker's embedded resolver can retain stale external forwarders even while `/etc/resolv.conf` names `127.0.0.11`; rebuilding an aiohttp client cannot repair that Docker state.
 - Application recovery prevents account-health poisoning and preserves replay-safe work, but a persistent resolver outage still ends at the existing request budget.
 - Long host outages end with the existing proxy request-timeout contract.
-- Connection refusal, reset, TLS failure, proxy endpoint failure, and upstream HTTP errors are not classified as host-wide network roaming failures.
-- Host networking is Linux-specific, does not use `-p`, and exposes codex-lb directly in the host network namespace.
+- Connection refusal, reset, TLS failure, proxy endpoint failure, and upstream HTTP errors are not classified as host-wide network-switch failures.
+- The verified Docker Engine host-network option is Linux-specific, does not use `-p`, and exposes codex-lb directly in the host network namespace; Docker Desktop support has different limitations.
 
 ## Diagnostics and Recovery
 
@@ -32,7 +32,7 @@ docker exec codex-lb getent ahostsv4 chatgpt.com
 docker exec codex-lb cat /etc/resolv.conf
 ```
 
-For portable bridge mode, `/etc/resolv.conf` normally names `127.0.0.11`. Compare the `ExtServers` comment before and after roaming; an old Wi-Fi address there explains why the embedded resolver itself is reachable but external queries fail.
+For portable bridge mode, `/etc/resolv.conf` normally names `127.0.0.11`. Compare the `ExtServers` comment before and after switching networks; an old Wi-Fi address there explains why the embedded resolver itself is reachable but external queries fail.
 
 An existing systemd-resolved host can give a running container a stable resolver without restarting codex-lb. Determine the user-defined bridge gateway, expose the host stub only on that bridge address, reload systemd-resolved, and repoint the container resolver as root:
 

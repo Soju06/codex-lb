@@ -5,7 +5,7 @@ Docker containers started on the default bridge can retain a Wi-Fi-provided DNS 
 ## What Changes
 
 - Make the portable Docker quick start use a user-defined bridge instead of the legacy default bridge, while documenting that Docker's embedded resolver can retain stale external forwarders on some Linux hosts.
-- Add a Linux roaming launch option that uses host networking and the host's live resolver without hard-coding a public DNS server.
+- Add a Linux network-switching launch option that uses host networking and the host's live resolver without hard-coding a public DNS server.
 - Classify DNS and local route failures as process-wide outbound-network failures, rotate stale shared HTTP client state, and keep those failures neutral to account health.
 - Transparently retry pre-visible Responses and upstream WebSocket connection attempts on the continuity owner within the existing request budget, allowing brief host network transitions to recover without a container restart.
 - Add low-cardinality recovery diagnostics and an operator runbook for distinguishing host DNS failures from upstream/account failures.

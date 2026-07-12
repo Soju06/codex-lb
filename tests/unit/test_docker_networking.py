@@ -36,15 +36,20 @@ def test_standalone_docker_examples_use_named_bridge() -> None:
     assert "--dns " not in readme
 
 
-def test_linux_roaming_example_uses_host_resolver_path() -> None:
+def test_network_switching_guidance_is_cross_platform_and_approachable() -> None:
     readme = (_REPO_ROOT / "README.md").read_text(encoding="utf-8")
-    roaming_section = readme.split("### Linux Wi-Fi roaming", 1)[1].split("## Remote Setup", 1)[0]
+    switching_section = readme.split("### Switching Wi-Fi or other networks", 1)[1].split("## Remote Setup", 1)[0]
 
-    assert "--network host" in roaming_section
-    assert "127.0.0.53" not in roaming_section
-    assert " -p " not in roaming_section
-    assert "embedded DNS" in roaming_section
-    assert "retain external forwarding servers" in roaming_section
+    assert "home Wi-Fi to a phone hotspot" in switching_section
+    assert "Linux, macOS, and Windows" in switching_section
+    assert "uvx codex-lb" in switching_section
+    assert "Docker Desktop on macOS or Windows" in switching_section
+    assert "Docker Desktop 4.34 and later" in switching_section
+    assert "not been verified as a reliable fix" in switching_section
+    assert "--network host" in switching_section
+    assert "127.0.0.53" not in switching_section
+    assert " -p " not in switching_section
+    assert "DNS server from the previous network" in switching_section
 
 
 def test_running_container_resolver_runbook_uses_bridge_scoped_systemd_listener() -> None:

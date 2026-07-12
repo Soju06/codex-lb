@@ -80,9 +80,17 @@ uvx codex-lb
 
 Open [localhost:2455](http://localhost:2455) → Add account → Done.
 
-### Linux Wi-Fi roaming
+### Switching Wi-Fi or other networks
 
-Docker's embedded DNS on a user-defined bridge can retain external forwarding servers from the Wi-Fi network that was active when the container started. If this Linux host regularly moves between networks, use host networking instead of the portable bridge command above so the container can query the host's live resolver directly:
+When a laptop switches from one Wi-Fi network to another—for example, from home Wi-Fi to a phone hotspot—or when a VPN connects or disconnects, existing internet connections may briefly break. Docker can also keep using a DNS server from the previous network. DNS is the service that finds the network address for names such as `chatgpt.com`; if Docker's copy is out of date, codex-lb may report timeouts while contacting OpenAI even though the host browser works.
+
+codex-lb retries a request when doing so cannot duplicate output already shown to the user. It also avoids treating a laptop-wide DNS problem as a problem with an individual account. It cannot, however, repair a Docker DNS service that remains pointed at the old network.
+
+For laptops that switch networks frequently:
+
+- **Simplest on Linux, macOS, and Windows:** run `uvx codex-lb` directly on the host. This avoids Docker's additional DNS layer.
+- **Docker Engine on Linux (verified option):** use host networking so the container follows the host's current resolver. Use the following command instead of the portable Docker command above.
+- **Docker Desktop on macOS or Windows:** Docker Desktop 4.34 and later offers opt-in host networking, but containers still run through Docker Desktop's virtual machine and its DNS behavior can vary by version and configuration. This setup has not been verified as a reliable fix for switching networks. Keep Docker Desktop current; if failures persist, prefer the native `uvx` installation.
 
 ```bash
 docker volume create codex-lb-data
@@ -92,7 +100,7 @@ docker run -d --name codex-lb \
   ghcr.io/soju06/codex-lb:latest
 ```
 
-Host networking is Linux-specific and does not use `-p`; codex-lb still listens on ports 2455 and 1455. It also removes Docker's network-namespace isolation, so use the portable bridge mode when resolver roaming is not required.
+In the verified Docker Engine setup on Linux, host networking does not use `-p`; codex-lb still listens on ports 2455 and 1455. It also removes Docker's network-namespace isolation, so use the portable bridge mode when you do not need this network-switching behavior.
 
 ## Remote Setup
 

@@ -4,12 +4,42 @@
 
 Each account SHALL have a persisted manual routing policy with one of `normal`, `burn_first`, or `preserve`. Missing or legacy values SHALL be treated as `normal`.
 
+After applying hard request eligibility gates, the selector SHALL narrow candidates
+to the highest-priority nonempty policy pool in the order `burn_first`, `normal`,
+then `preserve`. Every routing strategy, budget preference, sticky or configured
+account affinity, owner preference, and retry or reselection path SHALL operate
+only within that effective policy pool. An eligible `burn_first` account therefore
+SHALL take precedence over every non-`burn_first` account even when another
+account is explicitly configured or owns prior account-local request state.
+
 #### Scenario: expendable accounts are selected before normal accounts
 
 - **GIVEN** at least one eligible account has routing policy `burn_first`
 - **AND** at least one eligible account has routing policy `normal`
 - **WHEN** the load balancer selects an account
 - **THEN** it selects from the `burn_first` pool before considering `normal` accounts
+
+#### Scenario: burn-first overrides every routing strategy
+
+- **GIVEN** at least one eligible account has routing policy `burn_first`
+- **AND** a different eligible account would win the configured routing strategy
+- **WHEN** account selection uses any supported routing strategy, including `single_account`, `sequential_drain`, or `reset_drain`
+- **THEN** the strategy ranks only eligible accounts in the `burn_first` pool
+
+#### Scenario: burn-first overrides account affinity
+
+- **GIVEN** a sticky mapping, configured single account, preferred account, or owner lookup points to an eligible non-`burn_first` account
+- **AND** a different eligible account has routing policy `burn_first`
+- **WHEN** the proxy selects or reselects an account
+- **THEN** it selects from the `burn_first` pool
+- **AND** it updates any mutable affinity mapping to the selected `burn_first` account
+
+#### Scenario: burn-first still obeys hard eligibility
+
+- **GIVEN** an account has routing policy `burn_first`
+- **AND** the account fails an authorization, account-scope, model-plan, quota, cooldown, exclusion, or concurrency-cap gate
+- **WHEN** the proxy selects an account
+- **THEN** the account is excluded before policy precedence is evaluated
 
 #### Scenario: preserved accounts are fallback only
 

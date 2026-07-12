@@ -9,8 +9,14 @@ The system SHALL also support a separate disabled-by-default staggered idle warm
 #### Scenario: Warm-up is skipped unless reset is confirmed
 - **GIVEN** limit warm-up is enabled globally and for an account
 - **AND** the account's previous usage sample for a selected window was exhausted
-- **WHEN** background usage refresh records a newer sample for that window with `used_percent < 100` and a later `reset_at`
+- **WHEN** background usage refresh records a newer sample for that window with `used_percent < 100` and a `reset_at` that advanced by at least 60 seconds
 - **THEN** the system sends at most one warm-up request for that account/window/reset tuple
+
+#### Scenario: Warm-up is not triggered by upstream reset_at timestamp jitter
+- **GIVEN** limit warm-up is enabled globally and for an account
+- **AND** the account's previous usage sample was exhausted
+- **WHEN** background usage refresh records a newer sample whose `reset_at` advanced by less than 60 seconds (upstream timestamp jitter)
+- **THEN** the system MUST NOT send a warm-up request for that account/window/reset tuple
 
 #### Scenario: Warm-up is opt-in and safe by default
 - **GIVEN** background usage refresh is preparing to evaluate limit warm-up candidates

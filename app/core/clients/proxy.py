@@ -2032,8 +2032,11 @@ def _prepare_websocket_response_create_payload(payload_dict: JsonObject) -> Json
         )
     if payload_size <= _UPSTREAM_RESPONSE_CREATE_MAX_BYTES:
         return request_payload
+    # 400, not 413: the Codex client surfaces 400 immediately as a non-retryable
+    # invalid request, while 413 burns five full-payload retries and then pins the
+    # session to HTTP transport.
     raise ProxyResponseError(
-        413,
+        400,
         _response_create_too_large_error_envelope(payload_size, _UPSTREAM_RESPONSE_CREATE_MAX_BYTES),
         failure_phase="validation",
         failure_detail=f"response.create_bytes={payload_size}",

@@ -2081,7 +2081,7 @@ def test_http_bridge_request_text_rejects_installation_metadata_size_overflow(
             request_state.request_text or "{}",
         )
 
-    assert exc_info.value.status_code == 413
+    assert exc_info.value.status_code == 400
     assert exc_info.value.payload["error"]["code"] == "payload_too_large"
 
 

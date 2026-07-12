@@ -136,6 +136,13 @@ async def _build_http_client() -> HttpClient:
             limit=settings.http_connector_limit,
             limit_per_host=settings.http_connector_limit_per_host,
             ssl=ssl_context,
+            # aiohttp defaults (15s keepalive, 10s DNS TTL) are shorter than
+            # typical interactive Codex turn gaps, so nearly every turn paid a
+            # fresh DNS lookup + TCP/TLS handshake to the upstream host
+            # (~100-300ms of TTFT). Keep idle connections and resolved names
+            # around across turns instead.
+            keepalive_timeout=90,
+            ttl_dns_cache=300,
         )
     session = aiohttp.ClientSession(
         connector=connector,
@@ -151,7 +158,7 @@ async def _build_http_client() -> HttpClient:
             )
             ws_trust_env = False
         else:
-            ws_connector = aiohttp.TCPConnector(ssl=ssl_context)
+            ws_connector = aiohttp.TCPConnector(ssl=ssl_context, keepalive_timeout=90, ttl_dns_cache=300)
             ws_trust_env = settings.upstream_websocket_trust_env
         try:
             websocket_session = aiohttp.ClientSession(

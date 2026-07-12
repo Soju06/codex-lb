@@ -88,8 +88,14 @@ async def test_init_http_client_creates_tcp_connector_with_limits() -> None:
         "limit": 100,
         "limit_per_host": 50,
         "ssl": ssl_context,
+        "keepalive_timeout": 90,
+        "ttl_dns_cache": 300,
     }
-    assert tcp_connector_cls.call_args_list[1].kwargs == {"ssl": ssl_context}
+    assert tcp_connector_cls.call_args_list[1].kwargs == {
+        "ssl": ssl_context,
+        "keepalive_timeout": 90,
+        "ttl_dns_cache": 300,
+    }
     assert client_session_cls.call_args_list[0].kwargs["connector"] is connector
     assert client_session_cls.call_args_list[1].kwargs["connector"] is websocket_connector
 

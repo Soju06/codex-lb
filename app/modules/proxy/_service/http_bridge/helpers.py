@@ -121,6 +121,7 @@ from app.modules.proxy._service.observability import (
 from app.modules.proxy._service.support import (
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
+    _http_bridge_session_supports_service_tier,
     _HTTPBridgeSession,
     _HTTPBridgeSessionKey,
     _WebSocketRequestState,
@@ -708,6 +709,25 @@ def _http_bridge_models_compatible(existing_model: str | None, request_model: st
     if existing_model is None or request_model is None:
         return True
     return existing_model.strip().lower() == request_model.strip().lower()
+
+
+def _http_bridge_compatible(
+    session: _HTTPBridgeSession,
+    request_model: str | None,
+    request_service_tier: str | None,
+    same_model_required: bool = False,
+) -> bool:
+    """Check catalog compatibility while preserving stricter legacy reuse paths."""
+
+    model_compatible = not same_model_required or _http_bridge_models_compatible(
+        session.request_model,
+        request_model,
+    )
+    return model_compatible and _http_bridge_session_supports_service_tier(
+        session,
+        request_model=request_model,
+        request_service_tier=request_service_tier,
+    )
 
 
 def _http_bridge_incompatible_model_fork_key(

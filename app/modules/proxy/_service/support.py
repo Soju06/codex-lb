@@ -761,10 +761,8 @@ def _http_bridge_session_supports_service_tier(
             if account_indexes_cover_owner
             else None
         )
-        if allowed_account_ids is not None:
-            return session.account.id in allowed_account_ids or (
-                model_catalog_omits_account and quota_admission_matches
-            )
+        if allowed_account_ids is not None and not model_catalog_omits_account:
+            return session.account.id in allowed_account_ids
 
         allowed_plans = registry.plan_types_for_model_service_tier(request_model, request_service_tier)
     if allowed_plans is None:

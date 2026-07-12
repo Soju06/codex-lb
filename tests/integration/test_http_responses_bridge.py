@@ -30,12 +30,13 @@ from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, DashboardSettings
 from app.db.session import SessionLocal
 from app.dependencies import get_proxy_service_for_app
+from app.modules.proxy._service import support as proxy_support
 from app.modules.proxy._service.http_bridge import streaming as http_bridge_streaming_module
 from app.modules.proxy._service.http_bridge.helpers import (
     _release_http_bridge_unanchored_handoff,
     _reserve_http_bridge_unanchored_handoff,
 )
-from app.modules.proxy.load_balancer import AccountSelection
+from app.modules.proxy.load_balancer import AccountSelection, CatalogOmissionQuotaAdmission
 from app.modules.usage.repository import AdditionalUsageRepository
 
 pytestmark = pytest.mark.integration
@@ -2213,6 +2214,80 @@ async def test_v1_responses_http_bridge_stale_previous_response_alias_same_model
     }
     assert service._http_bridge_previous_response_index.get((previous_response_id, None)) is None
     assert service._http_bridge_sessions[stale_key] is stale_session
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_http_bridge_previous_response_alias_rejects_service_tier_provenance_mismatch(
+    app_instance,
+    monkeypatch,
+):
+    _install_bridge_settings_with_limits(monkeypatch, enabled=True)
+    service = get_proxy_service_for_app(app_instance)
+    service._http_bridge_sessions.clear()
+    service._http_bridge_inflight_sessions.clear()
+    service._http_bridge_turn_state_index.clear()
+    service._http_bridge_previous_response_index.clear()
+
+    account_id = "acc-previous-response-tier-owner"
+    previous_response_id = "resp_previous_response_tier_owner"
+    owner_key = proxy_module._HTTPBridgeSessionKey("prompt_cache", "bridge-old-prompt", None)
+    owner_session = cast(proxy_module._HTTPBridgeSession, _make_dummy_bridge_session(owner_key))
+    owner_session.request_model = "gpt-5.3-codex-spark"
+    owner_session.request_service_tier = None
+    owner_session.account = cast(
+        Account,
+        SimpleNamespace(id=account_id, status=AccountStatus.ACTIVE, plan_type="pro"),
+    )
+    owner_session.catalog_omission_quota_admission = CatalogOmissionQuotaAdmission(
+        normalized_model="gpt-5.3-codex-spark",
+        canonical_quota_key="codex_spark",
+        normalized_effective_service_tier=None,
+    )
+    owner_session.previous_response_ids.add(previous_response_id)
+    service._http_bridge_sessions[owner_key] = owner_session
+    service._http_bridge_previous_response_index[(previous_response_id, None)] = owner_key
+
+    class Registry:
+        def account_ids_for_model(self, model: str) -> set[str]:
+            assert model == "gpt-5.3-codex-spark"
+            return set()
+
+        def plan_types_for_model(self, model: str) -> set[str]:
+            assert model == "gpt-5.3-codex-spark"
+            return {"pro"}
+
+        def account_ids_for_model_service_tier(self, model: str, service_tier: str) -> set[str]:
+            assert (model, service_tier) == ("gpt-5.3-codex-spark", "priority")
+            return set()
+
+        def plan_types_for_model_service_tier(self, model: str, service_tier: str) -> set[str]:
+            assert (model, service_tier) == ("gpt-5.3-codex-spark", "priority")
+            return {"pro"}
+
+        def get_snapshot(self):
+            return SimpleNamespace(account_plans={account_id: "pro"})
+
+    monkeypatch.setattr(proxy_support, "get_model_registry", lambda: Registry())
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service._get_or_create_http_bridge_session(
+            proxy_module._HTTPBridgeSessionKey("prompt_cache", "bridge-new-prompt", None),
+            headers={},
+            affinity=proxy_module._AffinityPolicy(
+                key="bridge-new-prompt",
+                kind=proxy_module.StickySessionKind.PROMPT_CACHE,
+            ),
+            api_key=None,
+            request_model="gpt-5.3-codex-spark",
+            request_service_tier="priority",
+            idle_ttl_seconds=120.0,
+            max_sessions=128,
+            previous_response_id=previous_response_id,
+        )
+
+    assert exc_info.value.status_code == 502
+    assert owner_session.request_service_tier is None
+    assert service._http_bridge_sessions[owner_key] is owner_session
 
 
 @pytest.mark.asyncio
@@ -7695,6 +7770,150 @@ async def test_v1_responses_http_bridge_singleflights_same_session_key_during_cr
         assert session_one is session_two
         assert service._http_bridge_sessions[key] is session_one
     finally:
+        service._http_bridge_sessions.clear()
+        service._http_bridge_inflight_sessions.clear()
+        service._http_bridge_turn_state_index.clear()
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_http_bridge_inflight_waiter_rejects_service_tier_provenance_mismatch(
+    app_instance,
+    monkeypatch,
+):
+    service = get_proxy_service_for_app(app_instance)
+    service._http_bridge_sessions.clear()
+    service._http_bridge_inflight_sessions.clear()
+    service._http_bridge_turn_state_index.clear()
+
+    _install_proxy_settings(
+        monkeypatch,
+        app_settings=_make_app_settings(
+            enabled=True,
+            max_sessions=8,
+            admission_wait_timeout_seconds=1.0,
+            codex_idle_ttl_seconds=120.0,
+            instance_id="instance-a",
+            instance_ring=[],
+        ),
+        dashboard_settings=_make_dashboard_settings(),
+    )
+
+    account_id = None
+
+    class Registry:
+        def account_ids_for_model(self, model: str) -> set[str]:
+            assert model == "gpt-5.3-codex-spark"
+            return set()
+
+        def plan_types_for_model(self, model: str) -> set[str]:
+            assert model == "gpt-5.3-codex-spark"
+            return {"pro"}
+
+        def account_ids_for_model_service_tier(self, model: str, service_tier: str) -> set[str]:
+            assert (model, service_tier) == ("gpt-5.3-codex-spark", "priority")
+            return set()
+
+        def plan_types_for_model_service_tier(self, model: str, service_tier: str) -> set[str]:
+            assert (model, service_tier) == ("gpt-5.3-codex-spark", "priority")
+            return {"pro"}
+
+        def get_snapshot(self):
+            return SimpleNamespace(account_plans={account_id: "pro"})
+
+    monkeypatch.setattr(proxy_support, "get_model_registry", lambda: Registry())
+
+    create_service_tiers: list[str | None] = []
+    create_started_event = asyncio.Event()
+    release_first_create = asyncio.Event()
+
+    async def fake_create_http_bridge_session(
+        self,
+        key,
+        *,
+        headers,
+        affinity,
+        api_key,
+        request_model,
+        request_service_tier=None,
+        idle_ttl_seconds,
+        request_stage="first_turn",
+        preferred_account_id=None,
+        require_preferred_account=False,
+        fallback_on_preferred_account_unavailable=True,
+    ):
+        del (
+            self,
+            headers,
+            affinity,
+            api_key,
+            idle_ttl_seconds,
+            request_stage,
+            preferred_account_id,
+            require_preferred_account,
+            fallback_on_preferred_account_unavailable,
+        )
+        create_service_tiers.append(request_service_tier)
+        if len(create_service_tiers) == 1:
+            create_started_event.set()
+            await _wait_for_event(release_first_create)
+        session = cast(proxy_module._HTTPBridgeSession, _make_dummy_bridge_session(key))
+        session.account = cast(
+            Account,
+            SimpleNamespace(id=account_id, status=AccountStatus.ACTIVE, plan_type="pro"),
+        )
+        session.request_model = request_model
+        session.request_service_tier = request_service_tier
+        session.catalog_omission_quota_admission = CatalogOmissionQuotaAdmission(
+            normalized_model=request_model,
+            canonical_quota_key="codex_spark",
+            normalized_effective_service_tier=request_service_tier,
+        )
+        return session
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_create_http_bridge_session", fake_create_http_bridge_session)
+
+    key = proxy_module._HTTPBridgeSessionKey("request", "bridge-inflight-tier", None)
+
+    try:
+        first = asyncio.create_task(
+            service._get_or_create_http_bridge_session(
+                key,
+                headers={},
+                affinity=proxy_module._AffinityPolicy(),
+                api_key=None,
+                request_model="gpt-5.3-codex-spark",
+                request_service_tier=None,
+                idle_ttl_seconds=120.0,
+                max_sessions=8,
+            )
+        )
+        await _wait_for_event(create_started_event)
+
+        second = asyncio.create_task(
+            service._get_or_create_http_bridge_session(
+                key,
+                headers={},
+                affinity=proxy_module._AffinityPolicy(),
+                api_key=None,
+                request_model="gpt-5.3-codex-spark",
+                request_service_tier="priority",
+                idle_ttl_seconds=120.0,
+                max_sessions=8,
+            )
+        )
+        await asyncio.sleep(0)
+        assert not second.done()
+
+        release_first_create.set()
+        first_session, second_session = await asyncio.gather(first, second)
+
+        assert create_service_tiers == [None, "priority"]
+        assert first_session is not second_session
+        assert first_session.request_service_tier is None
+        assert second_session.request_service_tier == "priority"
+        assert service._http_bridge_sessions[key] is second_session
+    finally:
+        release_first_create.set()
         service._http_bridge_sessions.clear()
         service._http_bridge_inflight_sessions.clear()
         service._http_bridge_turn_state_index.clear()

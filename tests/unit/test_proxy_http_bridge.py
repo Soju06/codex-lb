@@ -10173,7 +10173,7 @@ async def test_get_or_create_http_bridge_session_closes_stale_session_before_pre
             kind=proxy_service.StickySessionKind.CODEX_SESSION,
         ),
         request_model="gpt-5.4",
-        account=cast(Any, SimpleNamespace(id="acc-1", status=AccountStatus.ACTIVE)),
+        account=cast(Any, SimpleNamespace(id="acc-1", status=AccountStatus.ACTIVE, plan_type="plus")),
         upstream=cast(UpstreamResponsesWebSocket, SimpleNamespace(close=AsyncMock())),
         upstream_control=proxy_service._WebSocketUpstreamControl(),
         pending_requests=deque(),

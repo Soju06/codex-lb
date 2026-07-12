@@ -79,6 +79,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_can_recover_during_drain,
     _http_bridge_can_single_instance_owner_takeover_without_anchor,
     _http_bridge_can_single_instance_prompt_cache_takeover_without_anchor,
+    _http_bridge_compatible,
     _http_bridge_continuity_lost_error_envelope,
     _http_bridge_durable_lease_ttl_seconds,
     _http_bridge_endpoint_matches_current_instance,
@@ -168,7 +169,6 @@ from app.modules.proxy._service.support import (
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
     _clear_websocket_precreated_replay_fallback,
     _copy_websocket_route_metadata_to_session,
-    _http_bridge_session_supports_service_tier,
     _HTTPBridgeOwnerForward,
     _HTTPBridgeSession,
     _HTTPBridgeSessionKey,
@@ -634,9 +634,7 @@ class _HTTPBridgeMixin(
                     previous_response_id=previous_response_id,
                     preferred_account_id=preferred_account_id,
                     require_preferred_account=require_preferred_account,
-                    service_tier_supported=_http_bridge_session_supports_service_tier(
-                        existing, request_model=request_model, request_service_tier=request_service_tier
-                    ),
+                    service_tier_supported=_http_bridge_compatible(existing, request_model, request_service_tier),
                     allow_closed_admission_handoff=retained_handoff,
                 )
                 model_fork_key = (
@@ -1068,7 +1066,7 @@ class _HTTPBridgeMixin(
                                 previous_session is not None
                                 and not previous_session.closed
                                 and _http_bridge_session_account_active(previous_session)
-                                and _http_bridge_models_compatible(previous_session.request_model, request_model)
+                                and _http_bridge_compatible(previous_session, request_model, request_service_tier, True)
                             ):
                                 key = previous_session.key
                                 existing = previous_session
@@ -1089,6 +1087,7 @@ class _HTTPBridgeMixin(
                                         ] = previous_session.key
                                 if inflight_future is None:
                                     previous_session.request_model = request_model
+                                    previous_session.request_service_tier = request_service_tier
                                     previous_session.last_used_at = _service_time().monotonic()
                                     await self._refresh_durable_http_bridge_session(previous_session)
                                     _log_http_bridge_event(
@@ -1339,7 +1338,7 @@ class _HTTPBridgeMixin(
                     not session.closed
                     and _http_bridge_session_account_active(session)
                     and _http_bridge_session_allows_api_key(session, api_key)
-                    and _http_bridge_models_compatible(session.request_model, request_model)
+                    and _http_bridge_compatible(session, request_model, request_service_tier, True)
                     and _http_bridge_session_reusable_for_request(
                         session=session,
                         key=key,
@@ -1357,6 +1356,7 @@ class _HTTPBridgeMixin(
                     if _durable_bridge_lookup_allows_local_reuse(durable_lookup, current_instance=current_instance):
                         session.api_key = api_key
                         session.request_model = request_model
+                        session.request_service_tier = request_service_tier
                         session.last_used_at = _service_time().monotonic()
                         return session
                 if not session.closed and session.account.status == AccountStatus.ACTIVE:

@@ -2,7 +2,7 @@
 
 ### Requirement: Fresh additional-quota evidence can establish account support
 
-For a model canonically mapped to a separately metered additional quota, account selection MUST allow fresh account-specific additional-quota telemetry to establish model support when an authoritative general per-account model catalog omits that model. The system MUST continue to enforce registry plan and service-tier restrictions and MUST apply the existing additional-quota freshness, exhaustion, account-health, cooldown, capacity, security, and routing gates before selecting an account. When such a selected account is bound to an HTTP bridge session, the session MUST remain reusable without synchronous quota I/O while normalized model, canonical quota key, and normalized effective service tier exactly match the recorded selection provenance. This behavior MUST NOT apply to unknown models or to an unrelated additional-limit key supplied independently of the requested model.
+For a model canonically mapped to a separately metered additional quota, account selection MUST allow fresh account-specific additional-quota telemetry to establish model support when an authoritative general per-account model catalog omits that model. The system MUST continue to enforce registry plan and service-tier restrictions and MUST apply the existing additional-quota freshness, exhaustion, account-health, cooldown, capacity, security, and routing gates before selecting an account. When such a selected account is bound to an HTTP bridge session, every existing-session reuse entry point, including direct key lookup, previous-response alias fallback, and in-flight creation waiters, MUST enforce exact normalized model, canonical quota key, and normalized effective service-tier compatibility before returning the session. For a genuinely catalog-omitted account, reuse MUST re-evaluate current registry plan and requested service-tier plan eligibility without synchronously re-reading quota telemetry. This behavior MUST NOT apply to unknown models or to an unrelated additional-limit key supplied independently of the requested model.
 
 #### Scenario: Fresh Spark quota overrides general account-catalog omission
 
@@ -23,9 +23,17 @@ For a model canonically mapped to a separately metered additional quota, account
 #### Scenario: Bridge admission provenance is narrowly bound
 
 - **GIVEN** an HTTP bridge session carries quota-backed catalog-omission provenance
-- **WHEN** a later request has a different normalized model, canonical quota key, or effective service tier
+- **WHEN** a later request reaches that session through direct key lookup, previous-response alias fallback, or an in-flight creation waiter with a different normalized model, canonical quota key, or effective service tier
 - **THEN** that provenance does not bypass the normal catalog and service-tier checks
 - **AND** a catalog-supported account rejected by the requested account-level service-tier index remains rejected
+
+#### Scenario: Reuse rechecks current plan-tier eligibility for a catalog omission
+
+- **GIVEN** an HTTP bridge session carries exact quota-backed catalog-omission provenance for a requested service tier
+- **AND** the registry's current requested service-tier plan restrictions exclude the session account's current plan
+- **WHEN** a later request reaches that session through any reuse entry point
+- **THEN** the existing session is not returned under the recorded provenance
+- **AND** the request follows the normal detach, fork, reselection, or fail-closed path without synchronously re-reading quota telemetry
 
 #### Scenario: Catalog-supported account-level service-tier exclusion remains authoritative
 

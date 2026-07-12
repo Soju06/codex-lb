@@ -31013,6 +31013,49 @@ def test_http_bridge_session_only_honors_exact_catalog_omission_quota_admission(
     )
 
 
+def test_http_bridge_session_rechecks_current_plan_tier_for_catalog_omission_admission(monkeypatch):
+    account = _make_account("acc_bridge_quota_plan_changed")
+    account.plan_type = "pro"
+    session = cast(
+        proxy_service._HTTPBridgeSession,
+        SimpleNamespace(
+            account=account,
+            catalog_omission_quota_admission=CatalogOmissionQuotaAdmission(
+                normalized_model="gpt-5.3-codex-spark",
+                canonical_quota_key="codex_spark",
+                normalized_effective_service_tier="priority",
+            ),
+        ),
+    )
+
+    class Registry:
+        def get_snapshot(self) -> SimpleNamespace:
+            return SimpleNamespace(account_plans={account.id: "pro"})
+
+        def account_ids_for_model(self, slug: str) -> frozenset[str]:
+            assert slug == "gpt-5.3-codex-spark"
+            return frozenset()
+
+        def account_ids_for_model_service_tier(self, slug: str, service_tier: str) -> frozenset[str]:
+            assert (slug, service_tier) == ("gpt-5.3-codex-spark", "priority")
+            return frozenset()
+
+        def plan_types_for_model_service_tier(self, slug: str, service_tier: str) -> frozenset[str]:
+            assert (slug, service_tier) == ("gpt-5.3-codex-spark", "priority")
+            return frozenset({"business"})
+
+    monkeypatch.setattr(proxy_support, "get_model_registry", lambda: Registry())
+
+    assert (
+        proxy_support._http_bridge_session_supports_service_tier(
+            session,
+            request_model="gpt-5.3-codex-spark",
+            request_service_tier="priority",
+        )
+        is False
+    )
+
+
 def test_http_bridge_session_degrades_when_registry_omits_owner(monkeypatch):
     session = cast(
         proxy_service._HTTPBridgeSession,

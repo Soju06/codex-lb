@@ -183,6 +183,7 @@ class AccountSelection:
     account: Account | None
     error_message: str | None
     error_code: str | None = None
+    resets_at: int | None = None
     lease: AccountLease | None = None
     catalog_omission_quota_admission: CatalogOmissionQuotaAdmission | None = None
 

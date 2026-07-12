@@ -525,6 +525,7 @@ async def run_sticky_selection_path(
                     probe_reservation_invalidated = True
             if result.account is None:
                 error_message = result.error_message
+                selection_error_code = result.error_code or selection_error_code
             elif probe_reservation_invalidated:
                 selected = None
             else:

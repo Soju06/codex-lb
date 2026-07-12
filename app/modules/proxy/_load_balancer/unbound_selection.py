@@ -266,6 +266,7 @@ async def run_unbound_selection_path(
                     selected_snapshot.reset_at = selected_reset_at
             elif result.account is None:
                 error_message = result.error_message
+                selection_error_code = result.error_code or selection_error_code
 
         if probe_reservation_invalidated:
             selected_snapshot = None

@@ -844,8 +844,7 @@ export function RoutingSettings({
               />
             </div>
 
-            {settings.limitWarmupEnabled && (
-              <>
+            <>
                 {/* --- Shared warm-up settings --- */}
                 <div className="grid gap-2 sm:grid-cols-[10rem_minmax(0,1fr)_7rem_7rem]">
                   <div className="space-y-1">
@@ -995,7 +994,6 @@ export function RoutingSettings({
                   </Button>
                 </div>
               </>
-            )}
           </div>
 
           <div className="flex flex-col gap-3 p-3 sm:flex-row sm:items-center sm:justify-between">

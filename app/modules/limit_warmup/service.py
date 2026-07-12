@@ -40,6 +40,9 @@ _IDLE_PRIMARY_WINDOW = "primary_idle"
 # Minimum reset_at forward jump (in seconds) to confirm a real quota window reset.
 # Upstream timestamp jitter of ~1 second must not trigger a warm-up.
 _RESET_CONFIRMED_MIN_JUMP_SECONDS = 60
+# Persist the upstream value, but treat nearby values as the same staggered-idle
+# cycle. This avoids every boundary inherent in stateless timestamp bucketing.
+_IDLE_RESET_AT_JITTER_TOLERANCE_SECONDS = 5
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,6 +85,7 @@ class LimitWarmupAttemptsRepository(Protocol):
         model: str,
         attempted_at,
         status: str = "pending",
+        reset_at_tolerance_seconds: int = 0,
     ) -> AccountLimitWarmup | None: ...
 
     async def complete_attempt(
@@ -386,6 +390,7 @@ class LimitWarmupService:
                         reset_at=candidate.reset_at,
                         model="auto",
                         attempted_at=utcnow(),
+                        reset_at_tolerance_seconds=_attempt_reset_at_tolerance(candidate),
                     )
                     if skipped is not None:
                         completed = await self._warmup_repo.complete_attempt(
@@ -404,6 +409,7 @@ class LimitWarmupService:
                     reset_at=candidate.reset_at,
                     model=model,
                     attempted_at=utcnow(),
+                    reset_at_tolerance_seconds=_attempt_reset_at_tolerance(candidate),
                 )
                 if attempt is None:
                     continue
@@ -833,3 +839,9 @@ def _truncate(value: str | None, limit: int = 1000) -> str | None:
     if len(value) <= limit:
         return value
     return value[: limit - 1] + "..."
+
+
+def _attempt_reset_at_tolerance(candidate: _WarmupCandidate) -> int:
+    if candidate.window == _IDLE_PRIMARY_WINDOW:
+        return _IDLE_RESET_AT_JITTER_TOLERANCE_SECONDS
+    return 0

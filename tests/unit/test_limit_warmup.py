@@ -93,8 +93,14 @@ class FakeWarmupRepo:
         model: str,
         attempted_at,
         status: str = "pending",
+        reset_at_tolerance_seconds: int = 0,
     ) -> AccountLimitWarmup | None:
-        if any(row.account_id == account_id and row.window == window and row.reset_at == reset_at for row in self.rows):
+        if any(
+            row.account_id == account_id
+            and row.window == window
+            and abs(row.reset_at - reset_at) <= reset_at_tolerance_seconds
+            for row in self.rows
+        ):
             return None
         row = AccountLimitWarmup(
             id=self.next_id,
@@ -1146,6 +1152,80 @@ async def test_staggered_idle_warmup_accepts_upstream_idle_floor(monkeypatch) ->
     assert sender.calls == [(account.id, "gpt-5.1-codex-mini")]
     assert len(repo.rows) == 1
     assert repo.rows[0].window == "primary_idle"
+
+
+@pytest.mark.asyncio
+async def test_staggered_idle_warmup_dedupes_across_reset_at_jitter(monkeypatch) -> None:
+    """Upstream reset_at can jitter by ~1 second between refresh cycles.
+    The dedupe key must be stable so a second refresh cycle within the same
+    5h window does not create a duplicate primary_idle attempt."""
+    now = datetime.fromtimestamp(6005, tz=timezone.utc).replace(tzinfo=None)
+    monkeypatch.setattr(limit_warmup_service, "utcnow", lambda: now)
+    repo = FakeWarmupRepo()
+    sender = FakeSender()
+    service = LimitWarmupService(repo, FakeRequestLogsRepo(), sender=sender)
+    accounts = [_account("acc_1"), _account("acc_2"), _account("acc_3")]
+    account = accounts[1]
+
+    # Disable cooldown so the second refresh actually reaches the dedupe path
+    settings = _settings(limit_warmup_staggered_idle_enabled=True, limit_warmup_cooldown_seconds=0)
+
+    # First refresh: reset_at = 18000
+    await service.run_after_usage_refresh(
+        accounts=accounts,
+        settings=settings,
+        before_primary={account.id: _usage(account.id, used_percent=1.0, reset_at=18_000)},
+        before_secondary={},
+        after_primary={account.id: _usage(account.id, used_percent=1.0, reset_at=18_000, recorded_at=now)},
+        after_secondary={},
+    )
+
+    assert len(sender.calls) == 1
+    assert len(repo.rows) == 1
+
+    # Second refresh: reset_at jitters by 1 second to 18001
+    await service.run_after_usage_refresh(
+        accounts=accounts,
+        settings=settings,
+        before_primary={account.id: _usage(account.id, used_percent=1.0, reset_at=18_001)},
+        before_secondary={},
+        after_primary={account.id: _usage(account.id, used_percent=1.0, reset_at=18_001, recorded_at=now)},
+        after_secondary={},
+    )
+
+    # Should NOT create a second attempt — the persisted first reset is within
+    # the staggered-idle tolerance of the refreshed value.
+    assert len(sender.calls) == 1
+    assert len(repo.rows) == 1
+    assert repo.rows[0].reset_at == 18000
+
+
+@pytest.mark.asyncio
+async def test_staggered_idle_warmup_dedupe_has_no_minute_boundary(monkeypatch) -> None:
+    """Adjacent jitter values remain one attempt even when they straddle a
+    minute boundary, where floor- or round-based canonicalization would split."""
+    now = datetime.fromtimestamp(6060, tz=timezone.utc).replace(tzinfo=None)
+    monkeypatch.setattr(limit_warmup_service, "utcnow", lambda: now)
+    repo = FakeWarmupRepo()
+    sender = FakeSender()
+    service = LimitWarmupService(repo, FakeRequestLogsRepo(), sender=sender)
+    accounts = [_account("acc_1"), _account("acc_2"), _account("acc_3")]
+    account = accounts[1]
+    settings = _settings(limit_warmup_staggered_idle_enabled=True, limit_warmup_cooldown_seconds=0)
+
+    for reset_at in (18_059, 18_060):
+        await service.run_after_usage_refresh(
+            accounts=accounts,
+            settings=settings,
+            before_primary={account.id: _usage(account.id, used_percent=1.0, reset_at=reset_at)},
+            before_secondary={},
+            after_primary={account.id: _usage(account.id, used_percent=1.0, reset_at=reset_at, recorded_at=now)},
+            after_secondary={},
+        )
+
+    assert len(sender.calls) == 1
+    assert len(repo.rows) == 1
+    assert repo.rows[0].reset_at == 18_059
 
 
 @pytest.mark.asyncio

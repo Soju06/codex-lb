@@ -6,7 +6,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import AccountLimitWarmup
+from app.db.models import Account, AccountLimitWarmup
 from app.db.session import sqlite_writer_section
 
 
@@ -57,22 +57,33 @@ class LimitWarmupRepository:
         model: str,
         attempted_at: datetime,
         status: str = "pending",
+        reset_at_tolerance_seconds: int = 0,
     ) -> AccountLimitWarmup | None:
-        existing = await self._existing_attempt(account_id=account_id, window=window, reset_at=reset_at)
-        if existing is not None:
-            return None
-
-        row = AccountLimitWarmup(
-            account_id=account_id,
-            window=window,
-            reset_at=reset_at,
-            status=status,
-            model=model,
-            attempted_at=attempted_at,
-        )
-        self._session.add(row)
+        tolerance = max(0, reset_at_tolerance_seconds)
         try:
             async with sqlite_writer_section():
+                # Serialize tolerant check-and-insert by account on databases
+                # where the SQLite process-local writer lock does not apply.
+                await self._session.execute(select(Account.id).where(Account.id == account_id).with_for_update())
+                existing = await self._existing_attempt(
+                    account_id=account_id,
+                    window=window,
+                    reset_at=reset_at,
+                    reset_at_tolerance_seconds=tolerance,
+                )
+                if existing is not None:
+                    await self._session.rollback()
+                    return None
+
+                row = AccountLimitWarmup(
+                    account_id=account_id,
+                    window=window,
+                    reset_at=reset_at,
+                    status=status,
+                    model=model,
+                    attempted_at=attempted_at,
+                )
+                self._session.add(row)
                 await self._session.commit()
                 await self._session.refresh(row)
         except IntegrityError:
@@ -111,13 +122,21 @@ class LimitWarmupRepository:
             await self._session.refresh(row)
         return row
 
-    async def _existing_attempt(self, *, account_id: str, window: str, reset_at: int) -> AccountLimitWarmup | None:
+    async def _existing_attempt(
+        self,
+        *,
+        account_id: str,
+        window: str,
+        reset_at: int,
+        reset_at_tolerance_seconds: int = 0,
+    ) -> AccountLimitWarmup | None:
+        tolerance = max(0, reset_at_tolerance_seconds)
         stmt = (
             select(AccountLimitWarmup)
             .where(
                 AccountLimitWarmup.account_id == account_id,
                 AccountLimitWarmup.window == window,
-                AccountLimitWarmup.reset_at == reset_at,
+                AccountLimitWarmup.reset_at.between(reset_at - tolerance, reset_at + tolerance),
             )
             .limit(1)
         )

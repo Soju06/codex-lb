@@ -13,7 +13,7 @@ import pytest
 import app.modules.proxy.load_balancer as load_balancer_module
 from app.core.balancer.types import UpstreamError
 from app.core.crypto import TokenEncryptor
-from app.core.openai.model_registry import ModelRegistry, ModelRegistrySnapshot
+from app.core.openai.model_registry import ModelRegistry, ModelRegistrySnapshot, UpstreamModel
 from app.core.utils.time import utcnow
 from app.db.models import (
     Account,
@@ -2752,6 +2752,59 @@ async def test_select_account_filters_model_by_authoritative_account_catalog(mon
 
     assert selection.account is not None
     assert selection.account.id == supported.id
+
+
+@pytest.mark.asyncio
+async def test_select_account_degrades_when_registry_omits_selectable_account(monkeypatch) -> None:
+    stale_account = _make_account("acc-stale-registry", "stale-registry@example.com")
+    new_account = _make_account("acc-new-selectable", "new-selectable@example.com")
+    model = UpstreamModel(
+        slug="private-new-account-model",
+        display_name="Private new account model",
+        description="",
+        context_window=128_000,
+        input_modalities=("text",),
+        supported_reasoning_levels=(),
+        default_reasoning_level=None,
+        supports_reasoning_summaries=False,
+        support_verbosity=False,
+        default_verbosity=None,
+        prefer_websockets=False,
+        supports_parallel_tool_calls=True,
+        supported_in_api=True,
+        minimal_client_version=None,
+        priority=1,
+        available_in_plans=frozenset({"plus"}),
+        raw={"service_tiers": [{"slug": "priority"}]},
+    )
+    registry = ModelRegistry(ttl_seconds=60.0)
+    await registry.update(
+        {"plus": [model]},
+        per_account_results={stale_account.id: ("plus", [model])},
+        active_account_plans={stale_account.id: "plus"},
+    )
+
+    now = utcnow()
+    primary_entry = UsageHistory(
+        id=1,
+        account_id=new_account.id,
+        recorded_at=now,
+        window="primary",
+        used_percent=5.0,
+        reset_at=int(now.replace(tzinfo=timezone.utc).timestamp()) + 300,
+        window_minutes=5,
+    )
+    accounts_repo = StubAccountsRepository([new_account])
+    usage_repo = StubUsageRepository(primary={new_account.id: primary_entry}, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+    monkeypatch.setattr("app.modules.proxy.load_balancer.get_model_registry", lambda: registry)
+
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+    selection = await balancer.select_account(model=model.slug, service_tier="priority")
+
+    assert selection.account is not None
+    assert selection.account.id == new_account.id
+    assert selection.error_code is None
 
 
 @pytest.mark.asyncio

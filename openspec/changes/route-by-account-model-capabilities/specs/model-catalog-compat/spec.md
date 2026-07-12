@@ -35,6 +35,9 @@ account has neither a current nor retained last-known catalog, account-level
 capability indexes MUST NOT be treated as authoritative and selection MUST use
 the existing plan-level fallback. Operator-mapped model slugs MUST NOT be
 rejected solely because they are absent from subscription catalog discovery.
+An otherwise authoritative snapshot whose account set does not cover every
+currently selectable account MUST likewise degrade to plan-level routing until
+account catalog coverage catches up.
 
 When there is no authoritative account coverage — including partial refreshes
 after prior successful cycles and when every account is removed and live
@@ -102,6 +105,20 @@ an operator-mapped slug that has no catalog evidence at all.
 - **AND** a later refresh retains that account's stale catalog
 - **WHEN** the next registry snapshot is built
 - **THEN** the metadata-only model does not enter model, plan, account, or service-tier routing indexes
+
+#### Scenario: Fresh metadata-only model stays out of routing indexes
+
+- **GIVEN** a refreshed account catalog contains a model omitted from the merged discovery catalog
+- **WHEN** the registry builds account and service-tier routing indexes
+- **THEN** the metadata-only model does not enter either routing index
+
+#### Scenario: Selectable account set is newer than registry coverage
+
+- **GIVEN** an authoritative registry snapshot covers the previously selectable accounts
+- **AND** a newly imported or reactivated account becomes selectable before the next catalog refresh
+- **WHEN** request selection evaluates model or service-tier support
+- **THEN** account-level indexes are treated as incomplete
+- **AND** selection degrades to plan-level routing
 
 #### Scenario: Failed refresh follows an account plan-type change
 

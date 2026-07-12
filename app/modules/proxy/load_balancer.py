@@ -2237,15 +2237,28 @@ def _filter_accounts_for_model(
     service_tier: str | None = None,
 ) -> list[Account]:
     registry = get_model_registry()
+    account_indexes_cover_selection = True
+    get_snapshot = getattr(registry, "get_snapshot", None)
+    if callable(get_snapshot):
+        snapshot = get_snapshot()
+        account_indexes_cover_selection = snapshot is not None and {account.id for account in accounts}.issubset(
+            snapshot.account_plans
+        )
     account_ids_for_model = getattr(registry, "account_ids_for_model", None)
-    model_account_ids = account_ids_for_model(model) if callable(account_ids_for_model) else None
+    model_account_ids = (
+        account_ids_for_model(model) if callable(account_ids_for_model) and account_indexes_cover_selection else None
+    )
     model_accounts = (
         accounts if model_account_ids is None else [account for account in accounts if account.id in model_account_ids]
     )
     normalized_service_tier = service_tier.strip().lower() if service_tier is not None else None
     effective_service_tier = None if normalized_service_tier in {"auto", "default"} else service_tier
     if effective_service_tier is not None:
-        allowed_account_ids = registry.account_ids_for_model_service_tier(model, effective_service_tier)
+        allowed_account_ids = (
+            registry.account_ids_for_model_service_tier(model, effective_service_tier)
+            if account_indexes_cover_selection
+            else None
+        )
         if allowed_account_ids is not None:
             return [account for account in model_accounts if account.id in allowed_account_ids]
         allowed_plans = registry.plan_types_for_model_service_tier(model, effective_service_tier)

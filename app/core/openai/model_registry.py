@@ -810,6 +810,8 @@ class ModelRegistry:
                     for account_id, (plan_type, account_models) in per_account_results.items():
                         account_plans[account_id] = plan_type
                         for model in account_models:
+                            if model.slug not in models:
+                                continue
                             model_accounts.setdefault(model.slug, set()).add(account_id)
                             for service_tier in _model_service_tier_keys(model):
                                 model_service_tier_accounts.setdefault(model.slug, {}).setdefault(
@@ -836,6 +838,10 @@ class ModelRegistry:
                     for slug in self._bootstrap_models:
                         if slug not in models:
                             suppressed_model_slugs.add(slug)
+                    for _plan_type, account_models in (per_account_results or {}).values():
+                        for model in account_models:
+                            if model.slug not in models:
+                                suppressed_model_slugs.add(model.slug)
                     if previous is not None:
                         for slug, previous_account_ids in previous.model_accounts.items():
                             if slug in models or not previous_account_ids:

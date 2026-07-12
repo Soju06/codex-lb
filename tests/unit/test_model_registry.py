@@ -509,7 +509,7 @@ async def test_per_account_bundled_model_refreshes_metadata_without_availability
     live_sol = replace(
         _model("gpt-5.6-sol"),
         base_instructions="live per-account sol metadata",
-        raw={"use_responses_lite": False},
+        raw={"use_responses_lite": False, "service_tiers": [{"slug": "priority"}]},
     )
     registry = ModelRegistry(ttl_seconds=60.0)
 
@@ -524,6 +524,11 @@ async def test_per_account_bundled_model_refreshes_metadata_without_availability
     snapshot = registry.get_snapshot()
     assert snapshot is not None
     assert "gpt-5.6-sol" not in snapshot.models
+    assert "gpt-5.6-sol" not in snapshot.model_accounts
+    assert "gpt-5.6-sol" not in snapshot.model_service_tier_accounts
+    assert registry.account_ids_for_model("gpt-5.6-sol") == frozenset()
+    assert registry.account_ids_for_model_service_tier("gpt-5.6-sol", "priority") == frozenset()
+    assert registry.is_suppressed_model("gpt-5.6-sol") is True
     metadata_sol = registry.get_models_for_metadata()["gpt-5.6-sol"]
     assert metadata_sol.base_instructions == "live per-account sol metadata"
     assert metadata_sol.raw["use_responses_lite"] is False

@@ -171,6 +171,7 @@ async def _deny_access_assertion_required(scope: Scope, receive: Receive, send: 
 
 _ACCESS_JWT_PROTECTED_INTERNAL_MUTATION_PATHS = frozenset({"/internal/drain/start", "/internal/drain/stop"})
 _ACCESS_JWT_API_KEY_PREFIXES = (
+    "/api/codex",
     "/api/fleet",
     "/backend-api",
     "/internal/bridge",

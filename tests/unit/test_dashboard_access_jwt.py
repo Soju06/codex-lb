@@ -110,6 +110,8 @@ async def _request_path_with_required_access(
 
     @app.api_route("/health/ready", methods=["GET", "POST"])
     @app.api_route("/api/accounts", methods=["GET"])
+    @app.api_route("/api/codex/usage", methods=["GET"])
+    @app.api_route("/api/codex/rate-limit-reset-credits/consume", methods=["POST"])
     @app.api_route("/api/fleet/summary", methods=["GET"])
     @app.api_route("/backend-api/codex/responses", methods=["POST"])
     @app.api_route("/internal/bridge/responses", methods=["POST"])
@@ -241,6 +243,8 @@ async def test_required_access_jwt_blocks_mutating_or_non_probe_internal_paths(
 @pytest.mark.parametrize(
     ("method", "path"),
     [
+        ("GET", "/api/codex/usage"),
+        ("POST", "/api/codex/rate-limit-reset-credits/consume"),
         ("GET", "/api/fleet/summary"),
         ("POST", "/backend-api/codex/responses"),
         ("POST", "/internal/bridge/responses"),

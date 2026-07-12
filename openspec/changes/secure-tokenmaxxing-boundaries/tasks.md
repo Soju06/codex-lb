@@ -11,6 +11,8 @@
 - [x] 2.4 Exempt health and read-only internal probes from required Access JWT
       while keeping dashboard fallback authentication and mutating internal
       endpoints fail-closed without blocking API-key fleet/proxy traffic.
+- [x] 2.5 Let Codex usage API requests reach their API-key or ChatGPT-token
+      authentication while Access is required for dashboard routes.
 
 ## 3. Fleet capacity
 

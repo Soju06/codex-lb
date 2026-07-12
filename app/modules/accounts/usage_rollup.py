@@ -113,11 +113,29 @@ def _add_sums_stmt(session: AsyncSession, account_id: str, sums: UsageRollupSums
     )
 
 
+async def lock_fold_state(session: AsyncSession) -> None:
+    """Serialize the caller's transaction against fold passes.
+
+    Bootstraps the state row if missing (no commit — the caller's
+    transaction owns the insert) and takes its row lock, so a transaction
+    that reassigns request-log ownership cannot interleave with a fold
+    slice: an in-flight fold commits first, or the fold waits and then
+    aggregates the post-commit attribution. Without this, a fold running
+    concurrently with duplicate-account consolidation can attribute the
+    duplicates' logs to a row that consolidation is about to delete,
+    leaving those logs behind the watermark and counted nowhere.
+    """
+    await session.execute(_state_bootstrap_stmt(session))
+    await _locked_state(session)
+
+
 async def merge_rollups_into(session: AsyncSession, canonical_account_id: str, duplicate_ids: list[str]) -> None:
     """Fold duplicate accounts' rollup sums into the canonical account.
 
     Must run in the same transaction that reassigns the duplicates' request
-    logs, so folded history follows the logs to the canonical account.
+    logs, so folded history follows the logs to the canonical account. The
+    caller must hold the fold-state lock (`lock_fold_state`) before its
+    first request-log reassignment.
     """
     if not duplicate_ids:
         return

@@ -31,6 +31,7 @@ from app.db.session import sqlite_writer_section
 from app.modules.accounts.usage_rollup import (
     AccountUsageRollupRepository,
     deduped_usage_aggregate_stmt,
+    lock_fold_state,
     merge_rollups_into,
 )
 from app.modules.usage.additional_quota_keys import normalize_additional_quota_routing_policy_overrides
@@ -407,6 +408,12 @@ class AccountsRepository:
         duplicate_ids = list(duplicate_accounts)
         if not duplicate_ids:
             return False
+
+        # Serialize against fold passes before reassigning any request logs:
+        # a fold overlapping this transaction could otherwise attribute the
+        # duplicates' logs to rollup rows this transaction deletes, leaving
+        # those logs behind the watermark but counted in no rollup.
+        await lock_fold_state(self._session)
 
         duplicate_api_key_ids = (
             (

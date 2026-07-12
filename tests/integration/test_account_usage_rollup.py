@@ -288,6 +288,43 @@ async def test_identity_merge_preserves_folded_usage(db_setup):
 
 
 @pytest.mark.asyncio
+async def test_identity_merge_racing_fold_loses_no_usage(db_setup):
+    """Consolidation and a concurrent fold must serialize on the fold-state
+    lock; whichever order they land in, every request-log row's contribution
+    must end up in the canonical account's totals."""
+    now = utcnow()
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        logs_repo = RequestLogsRepository(session)
+        canonical = _make_account("acc_race_m", "race-m@example.com", chatgpt_account_id="chatgpt_race_m")
+        duplicate = _make_account("acc_race_m__copy", "race-m@example.com", chatgpt_account_id="chatgpt_race_m")
+        await accounts_repo.upsert(canonical, merge_by_email=False)
+        await accounts_repo.upsert(duplicate, merge_by_email=False)
+        for index in range(4):
+            await _add_log(
+                logs_repo,
+                account_id="acc_race_m__copy",
+                request_id=f"req_race_m_{index}",
+                requested_at=now - timedelta(days=2, minutes=index),
+                input_tokens=250,
+            )
+
+    async def _merge():
+        async with SessionLocal() as session:
+            reauth = _make_account("acc_race_m", "race-m@example.com", chatgpt_account_id="chatgpt_race_m")
+            await AccountsRepository(session).upsert(reauth, merge_by_email=False, merge_by_chatgpt_identity=True)
+
+    await asyncio.gather(run_fold_pass(now=now), _merge())
+    # A second fold covers the ordering where the merge landed first.
+    await run_fold_pass(now=now)
+
+    summaries = await _summaries()
+    assert "acc_race_m__copy" not in summaries
+    assert summaries["acc_race_m"].request_count == 4
+    assert summaries["acc_race_m"].total_tokens == 4 * 300
+
+
+@pytest.mark.asyncio
 async def test_accounts_api_request_usage_unchanged_by_folding(async_client, db_setup):
     now = utcnow()
     async with SessionLocal() as session:

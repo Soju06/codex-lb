@@ -4,24 +4,34 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from inspect import isawaitable
-from typing import TYPE_CHECKING
 
 from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.metrics.prometheus import (
+    PROMETHEUS_AVAILABLE,
+    cache_invalidation_bump_failures_total,
+    cache_invalidation_poll_failures_total,
+)
 from app.db.models import CacheInvalidation
 from app.db.session import close_session
-
-if TYPE_CHECKING:
-    pass
 
 logger = logging.getLogger(__name__)
 
 NAMESPACE_API_KEY = "api_key"
 NAMESPACE_FIREWALL = "firewall"
+NAMESPACE_ACCOUNT_ROUTING = "account_routing"
+NAMESPACE_ACCOUNT_SELECTION = "account_selection"
+NAMESPACE_SETTINGS = "settings"
 type InvalidationCallback = Callable[[], None | Awaitable[None]]
+
+_BUMP_RETRY_ATTEMPTS = 3
+_BUMP_RETRY_BASE_SECONDS = 0.05
+_POLL_FAILURES_WARNING_THRESHOLD = 3
+_POLL_FAILURES_ERROR_THRESHOLD = 10
 
 
 class CacheInvalidationPoller:
@@ -34,6 +44,8 @@ class CacheInvalidationPoller:
         self._poll_interval = poll_interval_seconds
         self._known_versions: dict[str, int] = {}
         self._callbacks: dict[str, list[InvalidationCallback]] = {}
+        self._pending_bumps: set[str] = set()
+        self._consecutive_poll_failures = 0
         self._poll_initialized = False
         self._task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
@@ -58,7 +70,31 @@ class CacheInvalidationPoller:
             pass
         self._task = None
 
-    async def bump(self, namespace: str) -> None:
+    def request_bump(self, namespace: str) -> None:
+        """Enqueue a coalesced bump flushed at the start of the next poll cycle.
+
+        Multiple requests for the same namespace within one cycle collapse into a
+        single version bump. A failed flush keeps the namespace pending so it is
+        retried on subsequent cycles.
+        """
+        self._pending_bumps.add(namespace)
+
+    async def bump(self, namespace: str) -> bool:
+        for attempt in range(_BUMP_RETRY_ATTEMPTS):
+            try:
+                await self._bump_once(namespace)
+                return True
+            except OperationalError:
+                if attempt == _BUMP_RETRY_ATTEMPTS - 1:
+                    self._record_bump_failure(namespace)
+                    return False
+                await asyncio.sleep(_BUMP_RETRY_BASE_SECONDS * (2**attempt))
+            except Exception:
+                self._record_bump_failure(namespace)
+                return False
+        return False
+
+    async def _bump_once(self, namespace: str) -> None:
         session = self._session_factory()
         try:
             dialect = session.get_bind().dialect.name
@@ -95,10 +131,13 @@ class CacheInvalidationPoller:
                         .values(version=CacheInvalidation.version + 1)
                     )
             await session.commit()
-        except Exception:
-            logger.warning("cache_invalidation bump failed", exc_info=True)
         finally:
             await close_session(session)
+
+    def _record_bump_failure(self, namespace: str) -> None:
+        logger.error("cache_invalidation bump failed for namespace %s", namespace, exc_info=True)
+        if PROMETHEUS_AVAILABLE and cache_invalidation_bump_failures_total is not None:
+            cache_invalidation_bump_failures_total.labels(namespace=namespace).inc()
 
     async def _run(self) -> None:
         while not self._stop.is_set():
@@ -111,15 +150,25 @@ class CacheInvalidationPoller:
             except asyncio.TimeoutError:
                 continue
 
+    async def _flush_pending_bumps(self) -> None:
+        for namespace in sorted(self._pending_bumps):
+            if await self.bump(namespace):
+                self._pending_bumps.discard(namespace)
+
     async def _poll_once(self) -> None:
-        session = self._session_factory()
+        await self._flush_pending_bumps()
+        session: AsyncSession | None = None
         try:
+            session = self._session_factory()
             result = await session.execute(select(CacheInvalidation.namespace, CacheInvalidation.version))
             rows = result.all()
         except Exception:
+            self._record_poll_failure()
             return
         finally:
-            await close_session(session)
+            if session is not None:
+                await close_session(session)
+        self._consecutive_poll_failures = 0
 
         for namespace, version in rows:
             prev = self._known_versions.get(namespace)
@@ -142,6 +191,25 @@ class CacheInvalidationPoller:
             self._known_versions[namespace] = version
         self._poll_initialized = True
 
+    def _record_poll_failure(self) -> None:
+        self._consecutive_poll_failures += 1
+        if PROMETHEUS_AVAILABLE and cache_invalidation_poll_failures_total is not None:
+            cache_invalidation_poll_failures_total.inc()
+        if self._consecutive_poll_failures >= _POLL_FAILURES_ERROR_THRESHOLD:
+            logger.error(
+                "cache_invalidation poll failed %d consecutive times",
+                self._consecutive_poll_failures,
+                exc_info=True,
+            )
+        elif self._consecutive_poll_failures >= _POLL_FAILURES_WARNING_THRESHOLD:
+            logger.warning(
+                "cache_invalidation poll failed %d consecutive times",
+                self._consecutive_poll_failures,
+                exc_info=True,
+            )
+        else:
+            logger.debug("cache_invalidation poll failed", exc_info=True)
+
 
 _poller: CacheInvalidationPoller | None = None
 
@@ -150,6 +218,6 @@ def get_cache_invalidation_poller() -> CacheInvalidationPoller | None:
     return _poller
 
 
-def set_cache_invalidation_poller(poller: CacheInvalidationPoller) -> None:
+def set_cache_invalidation_poller(poller: CacheInvalidationPoller | None) -> None:
     global _poller
     _poller = poller

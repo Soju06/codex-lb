@@ -142,7 +142,7 @@ async def lifespan(app: FastAPI):
     startup_module._startup_complete = False
     startup_module.reset_bridge_registration()
     shutdown_state.reset()
-    await get_settings_cache().invalidate()
+    await get_settings_cache().invalidate(propagate=False)
     await get_rate_limit_headers_cache().invalidate()
     reload_additional_quota_registry()
     settings = get_settings()
@@ -269,17 +269,35 @@ async def lifespan(app: FastAPI):
 
     from app.core.auth.api_key_cache import get_api_key_cache
     from app.core.cache.invalidation import (
+        NAMESPACE_ACCOUNT_ROUTING,
+        NAMESPACE_ACCOUNT_SELECTION,
         NAMESPACE_API_KEY,
         NAMESPACE_FIREWALL,
+        NAMESPACE_SETTINGS,
         CacheInvalidationPoller,
+        get_cache_invalidation_poller,
         set_cache_invalidation_poller,
     )
     from app.core.middleware.firewall_cache import get_firewall_ip_cache
+    from app.modules.proxy.account_cache import get_account_selection_cache, get_routing_availability_cache
 
     cache_poller = CacheInvalidationPoller(SessionLocal)
     cache_poller.on_invalidation(NAMESPACE_API_KEY, get_api_key_cache().clear)
     cache_poller.on_invalidation(NAMESPACE_FIREWALL, get_firewall_ip_cache().invalidate_all)
+    routing_availability_cache = get_routing_availability_cache()
+    # Remote-bump callbacks must be non-propagating variants: a propagating callback
+    # would re-bump on every observed bump and feedback-loop across replicas.
+    cache_poller.on_invalidation(NAMESPACE_ACCOUNT_ROUTING, routing_availability_cache.refresh_from_db)
+    cache_poller.on_invalidation(
+        NAMESPACE_ACCOUNT_SELECTION,
+        lambda: get_account_selection_cache().invalidate(propagate=False),
+    )
+    cache_poller.on_invalidation(
+        NAMESPACE_SETTINGS,
+        lambda: get_settings_cache().invalidate(propagate=False),
+    )
     set_cache_invalidation_poller(cache_poller)
+    await routing_availability_cache.refresh_from_db()
     await cache_poller.start()
 
     ring_service: RingMembershipService | None = None
@@ -340,6 +358,9 @@ async def lifespan(app: FastAPI):
             metrics_server.should_exit = True
 
         await cache_poller.stop()
+        if get_cache_invalidation_poller() is cache_poller:
+            # A stopped poller must not keep receiving propagation requests.
+            set_cache_invalidation_poller(None)
         await quota_planner_scheduler.stop()
         await auth_guardian_scheduler.stop()
         await automations_scheduler.stop()

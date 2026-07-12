@@ -567,8 +567,11 @@ def _enforce_response_create_size_limit(request_state: _WebSocketRequestState) -
         error_message=error.get("message"),
         log_prefix="guarded",
     )
+    # 400, not 413: the Codex client surfaces 400 immediately as a non-retryable
+    # invalid request, while 413 burns five full-payload retries and then pins the
+    # session to HTTP transport.
     raise ProxyResponseError(
-        413,
+        400,
         payload,
         failure_phase="validation",
         failure_detail=f"response.create_bytes={payload_size}",

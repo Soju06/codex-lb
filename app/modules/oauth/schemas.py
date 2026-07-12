@@ -5,6 +5,11 @@ from app.modules.shared.schemas import DashboardModel
 
 class OauthStartRequest(DashboardModel):
     force_method: str | None = None
+    # When set, this OAuth flow is a TARGETED reauthentication of an existing
+    # local account row. The returned login's seat identity is verified against
+    # this row before any tokens are written, so a wrong browser identity cannot
+    # overwrite a different seat that shares the same Team/Business workspace.
+    account_id: str | None = None
 
 
 class OauthStartResponse(DashboardModel):

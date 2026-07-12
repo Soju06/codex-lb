@@ -13,7 +13,7 @@ import pytest
 import app.modules.proxy.load_balancer as load_balancer_module
 from app.core.balancer.types import UpstreamError
 from app.core.crypto import TokenEncryptor
-from app.core.openai.model_registry import ModelRegistry, ModelRegistrySnapshot
+from app.core.openai.model_registry import ModelRegistry, ModelRegistrySnapshot, UpstreamModel
 from app.core.utils.time import utcnow
 from app.db.models import (
     Account,
@@ -2552,6 +2552,46 @@ async def test_select_account_uses_bootstrap_plan_filter_before_registry_refresh
 
 
 @pytest.mark.asyncio
+async def test_select_account_uses_bootstrap_plan_filter_during_partial_first_refresh(monkeypatch) -> None:
+    account = _make_account("acc-bootstrap-partial-plan-filtered", "bootstrap-partial-plan-filtered@example.com")
+    account.plan_type = "free"
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    primary_entry = UsageHistory(
+        id=1,
+        account_id=account.id,
+        recorded_at=now,
+        window="primary",
+        used_percent=5.0,
+        reset_at=now_epoch + 300,
+        window_minutes=5,
+    )
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(primary={account.id: primary_entry}, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+    registry = ModelRegistry(ttl_seconds=60.0)
+    gpt54 = registry.get_models_with_fallback()["gpt-5.4"]
+    await registry.update(
+        {"pro": [gpt54]},
+        per_account_results={"acc-pro-partial": ("pro", [gpt54])},
+        active_account_plans={"acc-pro-partial": "pro", account.id: "free"},
+    )
+
+    monkeypatch.setattr("app.modules.proxy.load_balancer.get_model_registry", lambda: registry)
+
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+    selection = await balancer.select_account(model="gpt-5.3-codex")
+
+    snapshot = registry.get_snapshot()
+    assert snapshot is not None
+    assert snapshot.account_catalogs_authoritative is False
+    assert snapshot.bootstrap_floor_active is True
+    assert selection.account is None
+    assert selection.error_code == NO_PLAN_SUPPORT_FOR_MODEL
+    assert selection.error_message == "No accounts with a plan supporting model 'gpt-5.3-codex'"
+
+
+@pytest.mark.asyncio
 async def test_select_account_treats_prolite_as_pro_for_registry_plan_filter(monkeypatch) -> None:
     account = _make_account("acc-prolite-plan-filtered", "prolite-plan-filtered@example.com")
     account.plan_type = "prolite"
@@ -2670,6 +2710,130 @@ async def test_select_account_skips_plan_filter_when_registry_snapshot_lacks_mod
 
     balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
     selection = await balancer.select_account(model="gpt-5.5")
+
+    assert selection.account is not None
+    assert selection.account.id == account.id
+    assert selection.error_code is None
+
+
+@pytest.mark.asyncio
+async def test_select_account_filters_model_by_authoritative_account_catalog(monkeypatch) -> None:
+    supported = _make_account("acc-model-supported", "supported@example.com")
+    unsupported = _make_account("acc-model-unsupported", "unsupported@example.com")
+    now = utcnow()
+    reset_at = int(now.replace(tzinfo=timezone.utc).timestamp()) + 300
+    primary = {
+        account.id: UsageHistory(
+            id=index,
+            account_id=account.id,
+            recorded_at=now,
+            window="primary",
+            used_percent=5.0,
+            reset_at=reset_at,
+            window_minutes=5,
+        )
+        for index, account in enumerate((supported, unsupported), start=1)
+    }
+    accounts_repo = StubAccountsRepository([unsupported, supported])
+    usage_repo = StubUsageRepository(primary=primary, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+
+    monkeypatch.setattr(
+        "app.modules.proxy.load_balancer.get_model_registry",
+        lambda: SimpleNamespace(
+            plan_types_for_model=lambda _model: frozenset({"plus"}),
+            account_ids_for_model=lambda _model: frozenset({supported.id}),
+            account_ids_for_model_service_tier=lambda _model, _tier: None,
+        ),
+    )
+
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+    selection = await balancer.select_account(model="gpt-5.6-sol")
+
+    assert selection.account is not None
+    assert selection.account.id == supported.id
+
+
+@pytest.mark.asyncio
+async def test_select_account_degrades_when_registry_omits_selectable_account(monkeypatch) -> None:
+    stale_account = _make_account("acc-stale-registry", "stale-registry@example.com")
+    new_account = _make_account("acc-new-selectable", "new-selectable@example.com")
+    model = UpstreamModel(
+        slug="private-new-account-model",
+        display_name="Private new account model",
+        description="",
+        context_window=128_000,
+        input_modalities=("text",),
+        supported_reasoning_levels=(),
+        default_reasoning_level=None,
+        supports_reasoning_summaries=False,
+        support_verbosity=False,
+        default_verbosity=None,
+        prefer_websockets=False,
+        supports_parallel_tool_calls=True,
+        supported_in_api=True,
+        minimal_client_version=None,
+        priority=1,
+        available_in_plans=frozenset({"plus"}),
+        raw={"service_tiers": [{"slug": "priority"}]},
+    )
+    registry = ModelRegistry(ttl_seconds=60.0)
+    await registry.update(
+        {"plus": [model]},
+        per_account_results={stale_account.id: ("plus", [model])},
+        active_account_plans={stale_account.id: "plus"},
+    )
+
+    now = utcnow()
+    primary_entry = UsageHistory(
+        id=1,
+        account_id=new_account.id,
+        recorded_at=now,
+        window="primary",
+        used_percent=5.0,
+        reset_at=int(now.replace(tzinfo=timezone.utc).timestamp()) + 300,
+        window_minutes=5,
+    )
+    accounts_repo = StubAccountsRepository([new_account])
+    usage_repo = StubUsageRepository(primary={new_account.id: primary_entry}, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+    monkeypatch.setattr("app.modules.proxy.load_balancer.get_model_registry", lambda: registry)
+
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+    selection = await balancer.select_account(model=model.slug, service_tier="priority")
+
+    assert selection.account is not None
+    assert selection.account.id == new_account.id
+    assert selection.error_code is None
+
+
+@pytest.mark.asyncio
+async def test_select_account_preserves_operator_mapped_unknown_model_fallback(monkeypatch) -> None:
+    account = _make_account("acc-operator-mapped", "mapped@example.com")
+    now = utcnow()
+    primary_entry = UsageHistory(
+        id=1,
+        account_id=account.id,
+        recorded_at=now,
+        window="primary",
+        used_percent=5.0,
+        reset_at=int(now.replace(tzinfo=timezone.utc).timestamp()) + 300,
+        window_minutes=5,
+    )
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(primary={account.id: primary_entry}, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+
+    monkeypatch.setattr(
+        "app.modules.proxy.load_balancer.get_model_registry",
+        lambda: SimpleNamespace(
+            plan_types_for_model=lambda _model: frozenset(),
+            account_ids_for_model=lambda _model: frozenset(),
+        ),
+    )
+
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+    selection = await balancer.select_account(model="operator-private-slug")
 
     assert selection.account is not None
     assert selection.account.id == account.id

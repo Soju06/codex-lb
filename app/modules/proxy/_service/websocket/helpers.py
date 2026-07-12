@@ -50,6 +50,7 @@ from app.core.openai.models import OpenAIEvent
 from app.core.openai.parsing import parse_sse_event
 from app.core.openai.requests import (
     ResponsesRequest,
+    extract_input_file_ids,
 )
 from app.core.types import JsonValue
 from app.core.utils.sse import CODEX_KEEPALIVE_FRAME as CODEX_KEEPALIVE_FRAME  # noqa: F401
@@ -363,6 +364,46 @@ def _prepare_websocket_request_state_for_visible_output_replay(
     request_state.suppress_next_created_downstream = downstream_response_id is not None
     _clear_websocket_request_error_overrides(request_state)
     return request_text
+
+
+def _websocket_owner_switch_has_other_pending_requests(
+    request_state: "_WebSocketRequestState",
+    pending_requests: deque["_WebSocketRequestState"],
+) -> bool:
+    return any(pending is not request_state for pending in pending_requests)
+
+
+def _prepare_websocket_request_state_for_account_switch(
+    request_state: "_WebSocketRequestState",
+) -> str | None:
+    """Return an unsent request body only when moving accounts is proven safe."""
+    if request_state.previous_response_id is None:
+        return request_state.request_text
+    if not (
+        request_state.proxy_injected_previous_response_id
+        and request_state.fresh_upstream_request_is_retry_safe
+        and request_state.fresh_upstream_request_text
+    ):
+        return None
+    try:
+        fresh_payload = json.loads(request_state.fresh_upstream_request_text)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    fresh_input = fresh_payload.get("input")
+    if extract_input_file_ids(fresh_input):
+        # A retained full body can be replay-safe for text continuity while
+        # still naming an account-scoped uploaded file.  Keep its injected
+        # anchor instead of moving that file reference to another account.
+        return None
+
+    request_state.request_text = request_state.fresh_upstream_request_text
+    request_state.previous_response_id = None
+    request_state.preferred_account_id = None
+    request_state.proxy_injected_previous_response_id = False
+    request_state.fresh_upstream_request_is_retry_safe = False
+    request_state.responses_lite_model = request_state.fresh_upstream_request_responses_lite_model
+    _refresh_websocket_request_input_fingerprint_from_text(request_state)
+    return request_state.request_text
 
 
 def _websocket_continuity_anchor_for_payload(
@@ -696,14 +737,29 @@ def _websocket_auth_failure_permanent_code(message: str | None) -> str:
     return _facade()._WEBSOCKET_AUTH_INVALIDATED_FAILURE_CODE
 
 
-def _websocket_auth_request_can_switch_account(request_state: _WebSocketRequestState) -> bool:
-    if request_state.previous_response_id is None or request_state.preferred_account_id is None:
+def _websocket_fresh_request_blocks_account_switch(request_state: _WebSocketRequestState) -> bool:
+    try:
+        fresh_payload = json.loads(request_state.fresh_upstream_request_text or "null")
+    except (TypeError, json.JSONDecodeError):
         return True
-    return bool(
+    if not isinstance(fresh_payload, dict):
+        return True
+    fresh_input = fresh_payload.get("input") if isinstance(fresh_payload, dict) else None
+    return bool(extract_input_file_ids(fresh_input))
+
+
+def _websocket_auth_request_can_switch_account(request_state: _WebSocketRequestState) -> bool:
+    if request_state.file_required_preferred_account:
+        return False
+    if request_state.previous_response_id is None:
+        return True
+    if not (
         request_state.proxy_injected_previous_response_id
         and request_state.fresh_upstream_request_is_retry_safe
         and request_state.fresh_upstream_request_text
-    )
+    ):
+        return False
+    return not _websocket_fresh_request_blocks_account_switch(request_state)
 
 
 def _prepare_websocket_request_state_for_auth_replay(

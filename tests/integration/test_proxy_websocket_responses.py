@@ -6085,6 +6085,190 @@ def test_backend_responses_websocket_matches_previous_response_error_to_anchor_w
     assert first_upstream.closed is True
 
 
+def test_backend_responses_websocket_same_owner_followup_skips_selector_revalidation(
+    app_instance,
+    monkeypatch,
+):
+    first_upstream = _SequencedUpstreamWebSocket(
+        [],
+        deferred_message_batches=[
+            [
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.created",
+                            "response": {"id": "resp_ws_prev_anchor", "status": "in_progress"},
+                        },
+                        separators=(",", ":"),
+                    ),
+                ),
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.completed",
+                            "response": {"id": "resp_ws_prev_anchor", "status": "completed"},
+                        },
+                        separators=(",", ":"),
+                    ),
+                ),
+            ],
+            [
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.created",
+                            "response": {"id": "resp_ws_followup", "status": "in_progress"},
+                        },
+                        separators=(",", ":"),
+                    ),
+                ),
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.completed",
+                            "response": {"id": "resp_ws_followup", "status": "completed"},
+                        },
+                        separators=(",", ":"),
+                    ),
+                ),
+            ],
+        ],
+    )
+    connect_count = 0
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
+        return None
+
+    async def fake_connect_proxy_websocket(
+        self,
+        headers,
+        *,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset,
+        prefer_earlier_reset_window,
+        routing_strategy,
+        model,
+        request_state,
+        api_key,
+        client_send_lock,
+        websocket,
+    ):
+        del (
+            self,
+            headers,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset,
+            prefer_earlier_reset_window,
+            routing_strategy,
+            model,
+            request_state,
+            api_key,
+            client_send_lock,
+            websocket,
+        )
+        nonlocal connect_count
+        connect_count += 1
+        return SimpleNamespace(id="acct_ws_same_owner"), first_upstream
+
+    async def fake_resolve_previous_response_owner(
+        self,
+        *,
+        previous_response_id,
+        api_key,
+        session_id=None,
+        surface,
+    ):
+        del self, api_key, session_id, surface
+        assert previous_response_id == "resp_ws_prev_anchor"
+        return "acct_ws_same_owner"
+
+    async def fail_revalidate(
+        self,
+        current_account,
+        *,
+        request_state,
+        api_key,
+    ):
+        del self, current_account, request_state, api_key
+        raise AssertionError("same-owner followup should not hit selector revalidation")
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_resolve_websocket_previous_response_owner",
+        fake_resolve_previous_response_owner,
+    )
+    monkeypatch.setattr(proxy_module.ProxyService, "_revalidate_open_websocket_account", fail_revalidate)
+
+    with TestClient(app_instance) as client:
+        with client.websocket_connect("/backend-api/codex/responses") as websocket:
+            websocket.send_text(json.dumps({"type": "response.create", "model": "gpt-5.4", "input": "anchor"}))
+            created_1 = json.loads(websocket.receive_text())
+            completed_1 = json.loads(websocket.receive_text())
+
+            websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "response.create",
+                        "model": "gpt-5.4",
+                        "input": "continue",
+                        "previous_response_id": "resp_ws_prev_anchor",
+                        "stream": True,
+                    }
+                )
+            )
+            created_2 = json.loads(websocket.receive_text())
+            completed_2 = json.loads(websocket.receive_text())
+
+    assert created_1["response"]["id"] == "resp_ws_prev_anchor"
+    assert completed_1["response"]["id"] == "resp_ws_prev_anchor"
+    assert created_2["response"]["id"] == "resp_ws_followup"
+    assert completed_2["response"]["id"] == "resp_ws_followup"
+    assert connect_count == 1
+    _assert_upstream_payloads(
+        first_upstream.sent_text,
+        [
+            {
+                "model": "gpt-5.4",
+                "instructions": "",
+                "input": [{"role": "user", "content": [{"type": "input_text", "text": "anchor"}]}],
+                "store": False,
+                "include": [],
+                "type": "response.create",
+            },
+            {
+                "model": "gpt-5.4",
+                "instructions": "",
+                "input": [{"role": "user", "content": [{"type": "input_text", "text": "continue"}]}],
+                "previous_response_id": "resp_ws_prev_anchor",
+                "store": False,
+                "include": [],
+                "type": "response.create",
+            },
+        ],
+    )
+
+
 def test_backend_responses_websocket_masks_anonymous_previous_response_not_found_for_same_anchor_followups_and_recovers(
     app_instance,
     monkeypatch,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 from fnmatch import fnmatchcase
 
@@ -55,6 +56,10 @@ class ModelRegistrySnapshot:
     model_service_tier_accounts: dict[str, dict[str, frozenset[str]]]
     account_plans: dict[str, str]
     fetched_at: float
+    model_accounts: dict[str, frozenset[str]] = field(default_factory=dict)
+    account_catalogs_authoritative: bool = False
+    bootstrap_floor_active: bool = False
+    suppressed_model_slugs: frozenset[str] = field(default_factory=frozenset)
 
 
 _BOOTSTRAP_WEBSOCKET_PREFERRED_MODEL_PATTERNS = (
@@ -493,6 +498,12 @@ class ModelRegistry:
     def get_models_with_fallback(self) -> dict[str, UpstreamModel]:
         snapshot = self._snapshot
         if snapshot is not None:
+            if snapshot.bootstrap_floor_active:
+                models = dict(self._bootstrap_models)
+                for slug in snapshot.suppressed_model_slugs:
+                    models.pop(slug, None)
+                models.update(snapshot.models)
+                return models
             return snapshot.models
         return self._bootstrap_models
 
@@ -506,10 +517,30 @@ class ModelRegistry:
         bootstrap_model = self._bootstrap_models.get(slug) or self._bootstrap_models.get(normalized_slug)
         if self._snapshot is None:
             return bootstrap_model.available_in_plans if bootstrap_model is not None else None
-        snapshot_plans = self._snapshot.model_plans.get(slug) or self._snapshot.model_plans.get(
-            normalized_slug, frozenset()
-        )
+        if slug in self._snapshot.model_plans:
+            return self._snapshot.model_plans[slug]
+        if normalized_slug in self._snapshot.model_plans:
+            return self._snapshot.model_plans[normalized_slug]
+        if (
+            self._snapshot.bootstrap_floor_active
+            and bootstrap_model is not None
+            and normalized_slug not in self._snapshot.suppressed_model_slugs
+        ):
+            return bootstrap_model.available_in_plans
+        snapshot_plans = frozenset()
         return snapshot_plans
+
+    def is_suppressed_model(self, slug: str) -> bool:
+        """Whether catalog evidence explicitly withdrew a previously known slug.
+
+        This differs from an operator-mapped slug simply absent from catalog
+        discovery: that slug keeps the existing unfiltered fallback, whereas a
+        suppressed model must not select any account.
+        """
+        snapshot = self._snapshot
+        if snapshot is None:
+            return False
+        return slug.strip().lower() in snapshot.suppressed_model_slugs
 
     def plan_types_for_model_service_tier(self, slug: str, service_tier: str | None) -> frozenset[str] | None:
         if service_tier is None:
@@ -523,6 +554,8 @@ class ModelRegistry:
 
         if self._snapshot is None:
             return self.plan_types_for_model(slug)
+        if not self._snapshot.account_catalogs_authoritative and self._snapshot.account_plans:
+            return self.plan_types_for_model(slug)
 
         tier_plans = self._snapshot.model_service_tier_plans.get(slug) or self._snapshot.model_service_tier_plans.get(
             normalized_slug
@@ -534,6 +567,8 @@ class ModelRegistry:
     def account_ids_for_model_service_tier(self, slug: str, service_tier: str | None) -> frozenset[str] | None:
         if service_tier is None or self._snapshot is None:
             return None
+        if not self._snapshot.account_catalogs_authoritative:
+            return None
         normalized_slug = slug.strip().lower()
         normalized_service_tier = _canonical_service_tier_value(service_tier)
         if not normalized_slug or not normalized_service_tier:
@@ -543,8 +578,21 @@ class ModelRegistry:
             slug
         ) or self._snapshot.model_service_tier_accounts.get(normalized_slug)
         if tier_accounts is None:
+            if self._snapshot.account_catalogs_authoritative:
+                return frozenset()
             return None
         return tier_accounts.get(normalized_service_tier, frozenset())
+
+    def account_ids_for_model(self, slug: str) -> frozenset[str] | None:
+        """Return exact supporting accounts, or ``None`` while coverage is incomplete."""
+        if self._snapshot is None or not self._snapshot.account_catalogs_authoritative:
+            return None
+        normalized_slug = slug.strip().lower()
+        if not normalized_slug:
+            return None
+        return self._snapshot.model_accounts.get(slug) or self._snapshot.model_accounts.get(
+            normalized_slug, frozenset()
+        )
 
     def prefers_websockets(self, slug: str | None) -> bool:
         if not isinstance(slug, str):
@@ -557,6 +605,10 @@ class ModelRegistry:
             model = self._snapshot.models.get(slug) or self._snapshot.models.get(normalized_slug)
             if model is not None:
                 return model.prefer_websockets
+            if self._snapshot.bootstrap_floor_active and normalized_slug not in self._snapshot.suppressed_model_slugs:
+                bootstrap_model = self._bootstrap_models.get(slug) or self._bootstrap_models.get(normalized_slug)
+                if bootstrap_model is not None:
+                    return bootstrap_model.prefer_websockets
             return False
 
         bootstrap_model = self._bootstrap_models.get(slug) or self._bootstrap_models.get(normalized_slug)
@@ -569,6 +621,24 @@ class ModelRegistry:
         if self._snapshot is None:
             return True
         return (time.monotonic() - self._snapshot.fetched_at) >= self._ttl_seconds
+
+    async def clear(self) -> None:
+        """Drop live capability state when no active accounts remain.
+
+        This resets to the bootstrap-floor state (equivalent to never having
+        refreshed): every reader falls back to the static bootstrap catalog. We
+        must NOT publish an authoritative-empty snapshot here. If we did, then in
+        the window after an account is added but before the next scheduled refresh
+        tick, ``plan_types_for_model`` / ``get_models_with_fallback`` would report
+        even canonical models as absent (because ``_snapshot`` is no longer
+        ``None``), so ``_mapped_model_has_registry_entry`` would skip model/plan
+        filtering and let an unsupported plan be selected, and ``/v1/models`` would
+        stay empty until the timer fires. Bootstrap remains the discovery/gating
+        floor whenever there is no authoritative account coverage.
+        """
+        async with self._lock:
+            self._snapshot = None
+            self._metadata_models = None
 
     async def update(
         self,
@@ -588,28 +658,89 @@ class ModelRegistry:
                 model_plans: dict[str, set[str]] = {}
                 model_service_tier_plans: dict[str, dict[str, set[str]]] = {}
                 model_service_tier_accounts: dict[str, dict[str, set[str]]] = {}
+                model_accounts: dict[str, set[str]] = {}
                 account_plans: dict[str, str] = {}
+                suppressed_model_slugs: set[str] = (
+                    set(previous.suppressed_model_slugs) if previous is not None else set()
+                )
 
                 # Carry over data from plans not present in per_plan_results
                 if previous is not None:
                     previous_plans = set(previous.plan_models.keys())
                     refreshed_plans = set(per_plan_results.keys())
                     stale_plans = previous_plans - refreshed_plans
-                    stale_account_ids = {
-                        account_id
-                        for account_id, plan_type in previous.account_plans.items()
-                        if plan_type in stale_plans
-                    }
                     if active_account_plans is not None:
+                        stale_plans.intersection_update(active_account_plans.values())
+                        stale_account_ids = {
+                            account_id
+                            for account_id, plan_type in previous.account_plans.items()
+                            if account_id in active_account_plans
+                            and plan_type in stale_plans
+                            and active_account_plans[account_id] == plan_type
+                        }
                         refreshed_account_ids = set(per_account_results or {})
                         stale_account_ids.update(
                             account_id
-                            for account_id in previous.account_plans
-                            if account_id in active_account_plans and account_id not in refreshed_account_ids
+                            for account_id, previous_plan_type in previous.account_plans.items()
+                            if account_id in active_account_plans
+                            and account_id not in refreshed_account_ids
+                            # A retained catalog proves capabilities only for the
+                            # plan that produced it. A plan change without a fresh
+                            # catalog leaves the active account unknown instead of
+                            # re-labeling old entitlements as new-plan support.
+                            and active_account_plans[account_id] == previous_plan_type
                         )
+                    else:
+                        stale_account_ids = {
+                            account_id
+                            for account_id, plan_type in previous.account_plans.items()
+                            if plan_type in stale_plans
+                        }
+
+                    # Carryover invariant: never carry forward a stale-plan model
+                    # that no currently-active account of that plan advertises, per
+                    # the last-known per-account catalogs in ``previous.model_accounts``.
+                    #
+                    # This runs whenever we know the active account set
+                    # (``active_account_plans`` is not None), REGARDLESS of whether the
+                    # previous snapshot was authoritative. The authoritative flag governs
+                    # whether per-account *routing* is trusted (see ``account_ids_for_model``),
+                    # not whether a dead model is dropped from discovery: a first-refresh
+                    # (non-authoritative) snapshot can still record that a private model
+                    # was advertised only by an account that is now removed/paused, and
+                    # that model must not linger in discovery once no active account serves it.
+                    #
+                    # An active account whose refresh transiently failed keeps its
+                    # last-known models (it is in ``stale_account_ids`` and still appears
+                    # in ``previous.model_accounts``). A model with NO per-account
+                    # provenance at all (an older/plan-only snapshot that never captured
+                    # per-account catalogs) is preserved rather than dropped, so we
+                    # degrade safe when we cannot attribute a model to any account.
+                    supported_stale_slugs: dict[str, set[str]] | None = None
+                    if active_account_plans is not None:
+                        supported_stale_slugs = {}
+                        for slug, account_ids in previous.model_accounts.items():
+                            for account_id in account_ids:
+                                if account_id not in stale_account_ids:
+                                    continue
+                                plan_of_account = active_account_plans.get(
+                                    account_id, previous.account_plans.get(account_id)
+                                )
+                                if plan_of_account in stale_plans:
+                                    supported_stale_slugs.setdefault(plan_of_account, set()).add(slug)
 
                     for plan_type in stale_plans:
-                        stale_slugs = previous.plan_models.get(plan_type, frozenset())
+                        stale_slugs: Iterable[str] = previous.plan_models.get(plan_type, frozenset())
+                        if supported_stale_slugs is not None:
+                            supported = supported_stale_slugs.get(plan_type, set())
+                            stale_slugs = [
+                                slug
+                                for slug in stale_slugs
+                                # Unknown per-account provenance -> keep (degrade safe).
+                                if not previous.model_accounts.get(slug)
+                                # Known provenance -> keep only with an active advertiser.
+                                or slug in supported
+                            ]
                         for slug in stale_slugs:
                             if slug not in models and slug in previous.models:
                                 models[slug] = previous.models[slug]
@@ -628,13 +759,34 @@ class ModelRegistry:
                         )
                         if plan_type is not None:
                             account_plans[account_id] = plan_type
+                    for slug, account_ids in previous.model_accounts.items():
+                        if slug not in previous.models:
+                            continue
+                        stale_model_accounts = account_ids & stale_account_ids
+                        if not stale_model_accounts:
+                            continue
+                        model_accounts.setdefault(slug, set()).update(stale_model_accounts)
+                        if slug in previous.models:
+                            models.setdefault(slug, previous.models[slug])
+                        for account_id in stale_model_accounts:
+                            plan_type = account_plans.get(account_id)
+                            if plan_type is not None:
+                                model_plans.setdefault(slug, set()).add(plan_type)
                     for slug, tier_accounts in previous.model_service_tier_accounts.items():
+                        if slug not in previous.models:
+                            continue
                         for service_tier, account_ids in tier_accounts.items():
                             stale_tier_accounts = account_ids & stale_account_ids
                             if stale_tier_accounts:
                                 model_service_tier_accounts.setdefault(slug, {}).setdefault(service_tier, set()).update(
                                     stale_tier_accounts
                                 )
+                                for account_id in stale_tier_accounts:
+                                    plan_type = account_plans.get(account_id)
+                                    if plan_type is not None:
+                                        model_service_tier_plans.setdefault(slug, {}).setdefault(
+                                            service_tier, set()
+                                        ).add(plan_type)
 
                 # Merge newly fetched results, aggregating service-tier metadata
                 # across plans refreshed in this pass. Stale plan slugs still map
@@ -658,6 +810,9 @@ class ModelRegistry:
                     for account_id, (plan_type, account_models) in per_account_results.items():
                         account_plans[account_id] = plan_type
                         for model in account_models:
+                            if model.slug not in models:
+                                continue
+                            model_accounts.setdefault(model.slug, set()).add(account_id)
                             for service_tier in _model_service_tier_keys(model):
                                 model_service_tier_accounts.setdefault(model.slug, {}).setdefault(
                                     service_tier, set()
@@ -674,6 +829,27 @@ class ModelRegistry:
                     slug: {service_tier: frozenset(account_ids) for service_tier, account_ids in tier_accounts.items()}
                     for slug, tier_accounts in model_service_tier_accounts.items()
                 }
+                frozen_model_accounts = {slug: frozenset(account_ids) for slug, account_ids in model_accounts.items()}
+                authoritative_account_catalogs = per_account_results is not None and set(
+                    active_account_plans or per_account_results
+                ).issubset(account_plans)
+
+                if authoritative_account_catalogs:
+                    for slug in self._bootstrap_models:
+                        if slug not in models:
+                            suppressed_model_slugs.add(slug)
+                    for _plan_type, account_models in (per_account_results or {}).values():
+                        for model in account_models:
+                            if model.slug not in models:
+                                suppressed_model_slugs.add(model.slug)
+                if previous is not None:
+                    for slug, previous_account_ids in previous.model_accounts.items():
+                        if slug in models or not previous_account_ids:
+                            continue
+                        suppressed_model_slugs.add(slug)
+                for slug in tuple(suppressed_model_slugs):
+                    if slug in models:
+                        suppressed_model_slugs.discard(slug)
 
                 # Build reverse index: plan_type -> set of slugs
                 plan_models_index: dict[str, set[str]] = {}
@@ -684,6 +860,7 @@ class ModelRegistry:
                 frozen_plan_models: dict[str, frozenset[str]] = {
                     plan_type: frozenset(slugs) for plan_type, slugs in plan_models_index.items()
                 }
+                bootstrap_floor_active = per_account_results is not None and not authoritative_account_catalogs
 
                 metadata_models = {
                     slug: model
@@ -706,6 +883,10 @@ class ModelRegistry:
                     model_service_tier_accounts=frozen_model_service_tier_accounts,
                     account_plans=account_plans,
                     fetched_at=time.monotonic(),
+                    model_accounts=frozen_model_accounts,
+                    account_catalogs_authoritative=authoritative_account_catalogs,
+                    bootstrap_floor_active=bootstrap_floor_active,
+                    suppressed_model_slugs=frozenset(suppressed_model_slugs),
                 )
                 self._metadata_models = metadata_models
             except Exception:

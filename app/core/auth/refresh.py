@@ -14,6 +14,7 @@ from app.core.auth import (
     clean_account_identity_part,
     extract_id_token_claims,
     normalize_seat_type,
+    resolve_seat_identity,
 )
 from app.core.auth.models import OAuthTokenPayload
 from app.core.balancer import PERMANENT_FAILURE_CODES
@@ -50,6 +51,7 @@ class TokenRefreshResult:
     workspace_id: str | None = None
     workspace_label: str | None = None
     seat_type: str | None = None
+    chatgpt_user_id: str | None = None
 
 
 class RefreshError(Exception):
@@ -166,6 +168,7 @@ async def refresh_access_token(
     workspace_id = clean_account_identity_part(auth_claims.workspace_id or claims.workspace_id)
     workspace_label = clean_account_identity_part(auth_claims.workspace_label or claims.workspace_label)
     seat_type = normalize_seat_type(auth_claims.seat_type or claims.seat_type)
+    chatgpt_user_id = resolve_seat_identity(claims, auth_claims)
 
     return TokenRefreshResult(
         access_token=payload_data.access_token,
@@ -177,6 +180,7 @@ async def refresh_access_token(
         workspace_id=workspace_id,
         workspace_label=workspace_label,
         seat_type=seat_type,
+        chatgpt_user_id=chatgpt_user_id,
     )
 
 

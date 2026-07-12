@@ -265,6 +265,29 @@ async def test_fetch_with_failover_attempts_transport_recovery_once_when_retry_f
 
 
 @pytest.mark.asyncio
+async def test_fetch_with_failover_preserves_successful_empty_catalogs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    accounts = [_account("account-1"), _account("account-2")]
+    encryptor = MagicMock()
+    encryptor.decrypt.return_value = "access-token"
+    fetch_models_for_plan = AsyncMock(side_effect=[[], []])
+
+    monkeypatch.setattr(scheduler_module, "AuthManager", _StubAuthManager)
+    monkeypatch.setattr(scheduler_module, "fetch_models_for_plan", fetch_models_for_plan)
+
+    result = await scheduler_module._fetch_with_failover(accounts, encryptor, MagicMock())
+
+    assert result is not None
+    assert result.models == []
+    assert result.account_models == {
+        accounts[0].id: (accounts[0].plan_type, []),
+        accounts[1].id: (accounts[1].plan_type, []),
+    }
+    assert fetch_models_for_plan.await_count == 2
+
+
+@pytest.mark.asyncio
 async def test_fetch_with_failover_unions_same_plan_tiers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -302,7 +325,7 @@ async def test_fetch_with_failover_unions_same_plan_tiers(
 
 
 @pytest.mark.asyncio
-async def test_fetch_with_failover_excludes_same_plan_private_model_slug(
+async def test_fetch_with_failover_unions_same_plan_account_specific_model_slug(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     accounts = [_account("account-1"), _account("account-2")]
@@ -319,7 +342,11 @@ async def test_fetch_with_failover_excludes_same_plan_private_model_slug(
     result = await scheduler_module._fetch_with_failover(accounts, encryptor, MagicMock())
 
     assert result is not None
-    assert [model.slug for model in result.models] == ["gpt-5.4"]
+    assert [model.slug for model in result.models] == ["gpt-5.4", "private-alpha"]
+    assert result.account_models == {
+        accounts[0].id: (accounts[0].plan_type, first_models),
+        accounts[1].id: (accounts[1].plan_type, second_models),
+    }
     assert fetch_models_for_plan.await_count == 2
 
 
@@ -418,3 +445,45 @@ async def test_refresh_once_closes_account_read_session_before_fetch_models(
 
     scheduler = scheduler_module.ModelRefreshScheduler(interval_seconds=60, enabled=True)
     await scheduler._refresh_once()
+
+
+@pytest.mark.asyncio
+async def test_refresh_once_clears_registry_when_no_active_accounts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Leader:
+        async def try_acquire(self) -> bool:
+            return True
+
+    class _Session:
+        def expunge_all(self) -> None:
+            return None
+
+    @contextlib.asynccontextmanager
+    async def _background_session():
+        yield _Session()
+
+    class _AccountsRepo:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def list_accounts(self) -> list[Account]:
+            return []
+
+    clear = AsyncMock()
+    invalidate = MagicMock()
+    monkeypatch.setattr(scheduler_module, "_get_leader_election", lambda: _Leader())
+    monkeypatch.setattr(scheduler_module, "get_background_session", _background_session)
+    monkeypatch.setattr(scheduler_module, "AccountsRepository", _AccountsRepo)
+    monkeypatch.setattr(scheduler_module, "get_model_registry", lambda: SimpleNamespace(clear=clear))
+    monkeypatch.setattr(
+        scheduler_module,
+        "get_account_selection_cache",
+        lambda: SimpleNamespace(invalidate=invalidate),
+    )
+
+    scheduler = scheduler_module.ModelRefreshScheduler(interval_seconds=60, enabled=True)
+    await scheduler._refresh_once()
+
+    clear.assert_awaited_once_with()
+    invalidate.assert_called_once_with()

@@ -68,6 +68,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _effective_http_bridge_idle_ttl_seconds,
     _http_bridge_is_context_overflow_error,
     _http_bridge_is_previous_response_owner_unavailable,
+    _http_bridge_models_compatible,
     _http_bridge_payload_looks_like_full_resend,
     _http_bridge_payload_without_previous_response_id,
     _http_bridge_request_budget_seconds,
@@ -755,6 +756,23 @@ class _HTTPBridgeStreamingMixin:
         previous_response_trimmed_input_fingerprint: str | None = None
         durable_full_resend_anchor_count: int | None = None
         durable_full_resend_anchor_fingerprint: str | None = None
+        durable_model_transition_lookup = (
+            durable_lookup
+            if durable_lookup is not None and not _http_bridge_models_compatible(durable_lookup.model, payload.model)
+            else None
+        )
+        if durable_model_transition_lookup is not None:
+            _log_http_bridge_event(
+                "model_transition_isolated",
+                bridge_session_key,
+                account_id=durable_model_transition_lookup.account_id,
+                model=payload.model,
+                detail=f"previous_model={durable_model_transition_lookup.model}",
+                cache_key_family=bridge_session_key.affinity_kind,
+                model_class=_extract_model_class(payload.model) if payload.model else None,
+                owner_check_applied=True,
+            )
+            durable_lookup = None
         if durable_lookup is not None:
             bridge_session_key = _HTTPBridgeSessionKey(
                 durable_lookup.canonical_kind,
@@ -857,6 +875,8 @@ class _HTTPBridgeStreamingMixin:
             )
             else request_state.preferred_account_id
         )
+        if request_state.preferred_account_id is None and durable_model_transition_lookup is not None:
+            request_state.preferred_account_id = durable_model_transition_lookup.account_id
         if request_state.previous_response_id is not None and request_state.preferred_account_id is None:
             request_state.preferred_account_id = await self._http_bridge_local_owner_account_id(
                 key=bridge_session_key,

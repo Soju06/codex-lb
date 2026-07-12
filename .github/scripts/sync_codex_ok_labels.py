@@ -787,7 +787,7 @@ def authoritative_ci_workflow_run_id(
 def github_actions_workflow_run_recency_key(item: dict[str, Any]) -> tuple[str, tuple[str, str], int]:
     run_id = github_actions_workflow_run_id(item)
     return (
-        str(item.get("_github_actions_run_created_at") or ""),
+        str(item.get("_github_actions_run_started_at") or item.get("_github_actions_run_created_at") or ""),
         check_run_recency_key(item),
         int(run_id) if isinstance(run_id, str) and run_id.isdigit() else 0,
     )
@@ -816,10 +816,12 @@ def annotate_github_actions_workflow_ids(repo: str, check_runs: list[dict[str, A
             continue
         workflow_id = workflow_run.get("workflow_id") if isinstance(workflow_run, dict) else None
         if isinstance(workflow_id, (int, str)):
-            run_created_at = workflow_run.get("created_at") or workflow_run.get("run_started_at")
+            # GitHub preserves ``created_at`` when an existing run id is rerun,
+            # while ``run_started_at`` advances to the current attempt.
+            run_started_at = workflow_run.get("run_started_at") or workflow_run.get("created_at")
             workflow_metadata_by_run[run_id] = (
                 str(workflow_id),
-                str(run_created_at) if isinstance(run_created_at, str) else None,
+                str(run_started_at) if isinstance(run_started_at, str) else None,
             )
 
     annotated: list[dict[str, Any]] = []
@@ -829,10 +831,10 @@ def annotate_github_actions_workflow_ids(repo: str, check_runs: list[dict[str, A
         if metadata is None:
             annotated.append(item)
             continue
-        workflow_id, run_created_at = metadata
+        workflow_id, run_started_at = metadata
         annotated_item = {**item, "_github_actions_workflow_id": workflow_id}
-        if run_created_at is not None:
-            annotated_item["_github_actions_run_created_at"] = run_created_at
+        if run_started_at is not None:
+            annotated_item["_github_actions_run_started_at"] = run_started_at
         annotated.append(annotated_item)
     return annotated
 

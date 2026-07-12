@@ -22,6 +22,7 @@ import type {
 } from "@/features/settings/schemas";
 import { formatCompactAccountId } from "@/utils/account-identifiers";
 import { isSingleAccountRoutingSelectable } from "@/utils/account-status";
+import { cn } from "@/lib/utils";
 
 const WARMUP_MODEL_MAX_LENGTH = 128;
 const LIMIT_WARMUP_MODEL_MAX_LENGTH = 128;
@@ -42,6 +43,17 @@ const WEEKLY_PACE_SMOOTHING_OPTIONS = [
   { value: 120, label: "2h" },
   { value: 240, label: "4h" },
 ] as const;
+
+const STRATEGY_GUIDE_VALUES: Record<string, string> = {
+  capacityWeighted: "capacity_weighted",
+  relativeAvailability: "relative_availability",
+  usageWeighted: "usage_weighted",
+  roundRobin: "round_robin",
+  fillFirst: "fill_first",
+  sequentialDrain: "sequential_drain",
+  resetDrain: "reset_drain",
+  singleAccount: "single_account",
+};
 
 function parseWorkingDays(value: string): Set<number> {
   const days = new Set(
@@ -362,51 +374,12 @@ export function RoutingSettings({
             </Select>
           </div>
 
-          <div className="flex items-center justify-between gap-4 p-3">
+          <div className="space-y-2 p-3">
             <div>
               <p className="text-sm font-medium">{t("settings.routing.strategy.label")}</p>
               <p className="text-xs text-muted-foreground">{t("settings.routing.strategy.description")}</p>
             </div>
-            <Select
-              value={settings.routingStrategy}
-              onValueChange={(value) => {
-                const routingStrategy = value as DashboardSettings["routingStrategy"];
-                if (routingStrategy === "single_account") {
-                  const selectedAccountId = settings.singleAccountId ?? firstAccountId;
-                  if (!selectedAccountId) {
-                    return;
-                  }
-                  save({
-                    routingStrategy,
-                    singleAccountId: selectedAccountId,
-                  });
-                  return;
-                }
-                save({
-                  routingStrategy,
-                });
-              }}
-            >
-              <SelectTrigger className="h-8 w-48 text-xs" disabled={busy}>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent align="end">
-                <SelectItem value="capacity_weighted">{t("settings.routing.strategy.capacityWeighted")}</SelectItem>
-                <SelectItem value="relative_availability">{t("settings.routing.strategy.relativeAvailability")}</SelectItem>
-                <SelectItem value="fill_first">{t("settings.routing.strategy.fillFirst")}</SelectItem>
-                <SelectItem value="sequential_drain">{t("settings.routing.strategy.sequentialDrain")}</SelectItem>
-                <SelectItem value="reset_drain">{t("settings.routing.strategy.resetDrain")}</SelectItem>
-                <SelectItem value="single_account" disabled={!settings.singleAccountId && !firstAccountId}>
-                  {t("settings.routing.strategy.singleAccount")}
-                </SelectItem>
-                <SelectItem value="usage_weighted">{t("settings.routing.strategy.usageWeighted")}</SelectItem>
-                <SelectItem value="round_robin">{t("settings.routing.strategy.roundRobin")}</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="space-y-2 px-3 pb-3 text-xs text-muted-foreground">
-            <p className="font-medium text-foreground">{t("settings.routing.strategy.guideTitle")}</p>
-            <dl className="grid gap-2 md:grid-cols-2">
+            <div className="grid gap-2 md:grid-cols-2">
               {[
                 "capacityWeighted",
                 "relativeAvailability",
@@ -416,14 +389,43 @@ export function RoutingSettings({
                 "sequentialDrain",
                 "resetDrain",
                 "singleAccount",
-              ].map((strategy) => (
-                <div key={strategy} className="space-y-0.5">
-                  <dt className="font-medium text-foreground">{t(`settings.routing.strategy.${strategy}`)}</dt>
-                  <dd>{t(`settings.routing.strategy.guide.${strategy}`)}</dd>
-                </div>
-              ))}
-            </dl>
-            <p>{t("settings.routing.strategy.safetyNote")}</p>
+              ].map((strategy) => {
+                const strategyValue = STRATEGY_GUIDE_VALUES[strategy];
+                const isSelected = settings.routingStrategy === strategyValue;
+                const isDisabled = strategyValue === "single_account" && !settings.singleAccountId && !firstAccountId;
+                return (
+                  <button
+                    key={strategy}
+                    type="button"
+                    disabled={busy || isDisabled}
+                    onClick={() => {
+                      if (strategyValue === "single_account") {
+                        const selectedAccountId = settings.singleAccountId ?? firstAccountId;
+                        if (!selectedAccountId) return;
+                        save({ routingStrategy: strategyValue as DashboardSettings["routingStrategy"], singleAccountId: selectedAccountId });
+                        return;
+                      }
+                      save({ routingStrategy: strategyValue as DashboardSettings["routingStrategy"] });
+                    }}
+                    className={cn(
+                      "space-y-0.5 rounded-md border p-2 text-left text-xs transition-colors",
+                      isSelected
+                        ? "border-primary/40 bg-primary/5"
+                        : "border-border/40 hover:border-border hover:bg-muted/30",
+                      (busy || isDisabled) && "cursor-not-allowed opacity-50",
+                    )}
+                    aria-pressed={isSelected}
+                  >
+                    <span className="flex items-center gap-1.5 font-medium text-foreground text-xs">
+                      {isSelected && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-primary" aria-hidden="true" />}
+                      {t(`settings.routing.strategy.${strategy}`)}
+                    </span>
+                    <span className="block pl-3 text-muted-foreground text-xs">{t(`settings.routing.strategy.guide.${strategy}`)}</span>
+                  </button>
+                );
+              })}
+            </div>
+            <p className="text-xs text-muted-foreground">{t("settings.routing.strategy.safetyNote")}</p>
           </div>
 
           <div className="space-y-3 p-3">

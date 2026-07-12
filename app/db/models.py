@@ -71,6 +71,12 @@ class Account(Base):
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
     chatgpt_account_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    # Stable per-seat OpenAI principal identity (chatgpt_user_id / auth sub).
+    # Distinct from chatgpt_account_id, which is the shared Team/Business
+    # WORKSPACE identity. Two seats in one workspace share chatgpt_account_id
+    # but have different chatgpt_user_id. Used to target and verify reauth so
+    # repairing one seat cannot overwrite another seat sharing the workspace.
+    chatgpt_user_id: Mapped[str | None] = mapped_column(String, nullable=True)
     codex_installation_id: Mapped[str] = mapped_column(
         String(36),
         default=new_codex_installation_id,

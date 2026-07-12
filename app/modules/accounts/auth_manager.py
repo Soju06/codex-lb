@@ -49,6 +49,7 @@ class AccountsRepositoryPort(Protocol):
         plan_type: str | None = None,
         email: str | None = None,
         chatgpt_account_id: str | None = None,
+        chatgpt_user_id: str | None = None,
         workspace_id: str | None = None,
         workspace_label: str | None = None,
         seat_type: str | None = None,
@@ -231,6 +232,8 @@ class AuthManager:
         account.last_refresh = utcnow()
         if result.account_id:
             account.chatgpt_account_id = result.account_id
+        if result.chatgpt_user_id:
+            account.chatgpt_user_id = result.chatgpt_user_id
         if result.plan_type is not None:
             account.plan_type = coerce_account_plan_type(
                 result.plan_type,
@@ -275,19 +278,35 @@ class AuthManager:
         if workspace_matches_current_slot and result.seat_type:
             account.seat_type = result.seat_type
 
-        await self._repo.update_tokens(
-            account.id,
-            access_token_encrypted=account.access_token_encrypted,
-            refresh_token_encrypted=account.refresh_token_encrypted,
-            id_token_encrypted=account.id_token_encrypted,
-            last_refresh=account.last_refresh,
-            plan_type=account.plan_type,
-            email=account.email,
-            chatgpt_account_id=account.chatgpt_account_id,
-            workspace_id=next_workspace_id,
-            workspace_label=account.workspace_label,
-            seat_type=account.seat_type,
-        )
+        if account.chatgpt_user_id:
+            await self._repo.update_tokens(
+                account.id,
+                access_token_encrypted=account.access_token_encrypted,
+                refresh_token_encrypted=account.refresh_token_encrypted,
+                id_token_encrypted=account.id_token_encrypted,
+                last_refresh=account.last_refresh,
+                plan_type=account.plan_type,
+                email=account.email,
+                chatgpt_account_id=account.chatgpt_account_id,
+                chatgpt_user_id=account.chatgpt_user_id,
+                workspace_id=next_workspace_id,
+                workspace_label=account.workspace_label,
+                seat_type=account.seat_type,
+            )
+        else:
+            await self._repo.update_tokens(
+                account.id,
+                access_token_encrypted=account.access_token_encrypted,
+                refresh_token_encrypted=account.refresh_token_encrypted,
+                id_token_encrypted=account.id_token_encrypted,
+                last_refresh=account.last_refresh,
+                plan_type=account.plan_type,
+                email=account.email,
+                chatgpt_account_id=account.chatgpt_account_id,
+                workspace_id=next_workspace_id,
+                workspace_label=account.workspace_label,
+                seat_type=account.seat_type,
+            )
         return account
 
     async def _refresh_tokens(self, refresh_token: str, *, account: Account) -> TokenRefreshResult:

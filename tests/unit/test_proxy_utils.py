@@ -18239,6 +18239,7 @@ async def test_process_upstream_websocket_text_owner_replay_releases_old_account
         account_id="acc_ws_owner_new",
         request_id="ws_req_owner_replay_release_old_lease_replay",
         surface="websocket",
+        concurrency_caps=proxy_service.effective_account_concurrency_caps(),
     )
     assert replacement_lease is not None
     await service._load_balancer.release_account_lease(replacement_lease)

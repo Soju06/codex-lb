@@ -1,7 +1,7 @@
 """add dashboard account concurrency caps
 
-Revision ID: 20260711_010000_add_dashboard_account_concurrency_caps
-Revises: 20260711_000000_add_dashboard_prohibit_fast_mode
+Revision ID: 20260711_020000_add_dashboard_account_concurrency_caps
+Revises: 20260711_010000_add_account_chatgpt_user_id
 Create Date: 2026-07-11
 """
 
@@ -11,8 +11,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.engine import Connection
 
-revision = "20260711_010000_add_dashboard_account_concurrency_caps"
-down_revision = "20260711_000000_add_dashboard_prohibit_fast_mode"
+revision = "20260711_020000_add_dashboard_account_concurrency_caps"
+down_revision = "20260711_010000_add_account_chatgpt_user_id"
 branch_labels = None
 depends_on = None
 

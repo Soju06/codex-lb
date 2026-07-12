@@ -950,11 +950,12 @@ class LoadBalancer:
                 )
                 return selection_inputs
 
-            standard_latest_primary, standard_latest_secondary, latest_monthly = await asyncio.gather(
-                repos.usage.latest_by_account(),
-                repos.usage.latest_by_account(window="secondary"),
-                repos.usage.latest_by_account(window="monthly"),
-            )
+            # These share one AsyncSession: concurrent execution on a single
+            # session is unsafe (asyncpg) and gains nothing — the driver
+            # serializes statements per connection anyway.
+            standard_latest_primary = await repos.usage.latest_by_account()
+            standard_latest_secondary = await repos.usage.latest_by_account(window="secondary")
+            latest_monthly = await repos.usage.latest_by_account(window="monthly")
             if effective_limit_name:
                 model_allowed_plans = get_model_registry().plan_types_for_model(model) if model else None
                 latest_primary = additional_filter.latest_primary

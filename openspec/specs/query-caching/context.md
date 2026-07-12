@@ -10,6 +10,8 @@ The query-caching capability is broader than cache TTLs. It also owns the databa
 - Avoid full window-ranking scans on hot selector and dashboard aggregate reads; prefer grouped latest-id or PostgreSQL `DISTINCT ON` shapes backed by matching indexes.
 - Keep hot-path index migrations idempotent so manual production hotfix indexes do not break later schema upgrades.
 
+- Proxy API-key auth caching is invalidation-driven: every key mutation bumps the `api_key` invalidation namespace and each instance's poller (0.5 s) clears the local cache, so the 60 s TTL is only a backstop for a broken poller. Sticky-session upserts persist and return the row in one `INSERT ... ON CONFLICT ... RETURNING` statement. Never run multiple statements concurrently on one `AsyncSession` (selection-input usage reads are awaited sequentially).
+
 ## Operational Notes
 
 - Primary-window usage reads should normalize on `coalesce(window, 'primary')`.

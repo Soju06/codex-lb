@@ -456,9 +456,7 @@ def create_app() -> FastAPI:
                     # caching makes repeat dashboard loads skip ~1.7 MB of
                     # re-downloads/revalidations. index.html stays no-cache
                     # below, so deploys still pick up new hashes.
-                    return FileResponse(
-                        candidate, headers={"Cache-Control": "public, max-age=31536000, immutable"}
-                    )
+                    return FileResponse(candidate, headers={"Cache-Control": "public, max-age=31536000, immutable"})
                 return FileResponse(candidate)
             if _is_static_asset_path(normalized):
                 raise HTTPException(status_code=404, detail="Not Found")

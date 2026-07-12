@@ -1,7 +1,7 @@
 """add limit warm-up idle threshold setting
 
-Revision ID: 20260711_000000_add_limit_warmup_idle_threshold
-Revises: 20260709_000000_add_ttft_phase_observability
+Revision ID: 20260711_030000_add_limit_warmup_idle_threshold
+Revises: 20260711_020000_add_dashboard_account_concurrency_caps
 Create Date: 2026-07-11
 """
 
@@ -11,8 +11,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.engine import Connection
 
-revision = "20260711_000000_add_limit_warmup_idle_threshold"
-down_revision = "20260711_000000_add_dashboard_prohibit_fast_mode"
+revision = "20260711_030000_add_limit_warmup_idle_threshold"
+down_revision = "20260711_020000_add_dashboard_account_concurrency_caps"
 branch_labels = None
 depends_on = None
 

@@ -2189,9 +2189,7 @@ class _HTTPBridgeMixin(
             await release_selected_account_lease()
 
         while True:
-            reuse_current_account_lease = (
-                preferred_candidate_id == session.account.id and session.account_lease is not None
-            )
+            reuse_current_account_lease = preferred_candidate_id == session.account.id and bool(session.account_lease)
             selection = await self._select_account_with_budget_for_stream(
                 deadline,
                 request_id=request_state.request_log_id or request_state.request_id,

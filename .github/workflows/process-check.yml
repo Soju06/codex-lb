@@ -1,6 +1,10 @@
 name: process-check
 
 on:
+  # Allow this workflow to be invoked as a reusable workflow from ci.yml.
+  # Without `workflow_call`, GitHub cannot resolve `uses: ./.github/workflows/process-check.yml`
+  # and fails validation of ci.yml instantly (0 jobs, "workflow file issue").
+  workflow_call:
   pull_request:
     paths:
       - "openspec/process/**"

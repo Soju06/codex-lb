@@ -133,6 +133,7 @@ class AccountSelection:
     error_message: str | None
     error_code: str | None = None
     lease: AccountLease | None = None
+    routing_policy: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -297,6 +298,7 @@ class LoadBalancer:
         prefer_earlier_reset_accounts: bool = False,
         prefer_earlier_reset_window: ResetPreferenceWindow = "secondary",
         routing_strategy: RoutingStrategy = "capacity_weighted",
+        single_account_id: str | None = None,
         relative_availability_power: float = 2.0,
         relative_availability_top_k: int = 5,
         model: str | None = None,
@@ -304,6 +306,8 @@ class LoadBalancer:
         additional_limit_name: str | None = None,
         account_ids: Collection[str] | None = None,
         exclude_account_ids: Collection[str] | None = None,
+        preferred_account_id: str | None = None,
+        require_preferred_account: bool = False,
         require_security_work_authorized: bool = False,
         budget_threshold_pct: float = 95.0,
         secondary_budget_threshold_pct: float = 100.0,
@@ -441,11 +445,14 @@ class LoadBalancer:
                         _record_account_cap_rejection(lease_kind)
                     else:
                         selection_error_code = None
-                        result = _select_account_preferring_budget_safe(
+                        result = _select_account_with_preference(
                             selection_states,
+                            preferred_account_id=preferred_account_id,
+                            require_preferred_account=require_preferred_account,
                             prefer_earlier_reset=prefer_earlier_reset_accounts,
                             prefer_earlier_reset_window=prefer_earlier_reset_window,
                             routing_strategy=routing_strategy,
+                            single_account_id=single_account_id,
                             relative_availability_power=relative_availability_power,
                             relative_availability_top_k=relative_availability_top_k,
                             budget_threshold_pct=budget_threshold_pct,
@@ -454,6 +461,8 @@ class LoadBalancer:
                             ignore_standard_quota=False,
                             routing_costs_by_account_id=effective_routing_costs,
                         )
+                        if result.account is None and require_preferred_account:
+                            selection_error_code = "preferred_account_unavailable"
 
                     selected_account_map = account_map
                     selected_states = []
@@ -617,8 +626,14 @@ class LoadBalancer:
                 hard_sticky = sticky_kind == StickySessionKind.CODEX_SESSION and isinstance(
                     sticky_existing_account_id, str
                 )
-                selection_states = (
-                    states if hard_sticky else _filter_states_for_account_caps(states, lease_kind=lease_kind)
+                selection_states = _filter_states_for_sticky_account_caps(
+                    states,
+                    lease_kind=lease_kind,
+                    pinned_account_id=(
+                        sticky_existing_account_id
+                        if hard_sticky and isinstance(sticky_existing_account_id, str)
+                        else None
+                    ),
                 )
                 if not selection_states and states:
                     selection_error_code = _account_cap_error_code(lease_kind)
@@ -645,14 +660,19 @@ class LoadBalancer:
                             prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
                             prefer_earlier_reset_window=prefer_earlier_reset_window,
                             routing_strategy=routing_strategy,
+                            single_account_id=single_account_id,
                             relative_availability_power=relative_availability_power,
                             relative_availability_top_k=relative_availability_top_k,
                             sticky_repo=repos.sticky_sessions,
                             sticky_existing_account_id=sticky_existing_account_id,
+                            preferred_account_id=preferred_account_id,
+                            require_preferred_account=require_preferred_account,
                             traffic_class=traffic_class,
                             ignore_standard_quota=False,
                             routing_costs_by_account_id=effective_routing_costs,
                         )
+                        if result.account is None and require_preferred_account:
+                            selection_error_code = "preferred_account_unavailable"
                 selected_account_map = account_map
                 selected_states = []
                 async with self._runtime_lock:
@@ -773,7 +793,17 @@ class LoadBalancer:
             bool(sticky_key),
             model,
         )
-        return AccountSelection(account=selected_snapshot, error_message=None, error_code=None, lease=selected_lease)
+        selected_routing_policy = next(
+            (state.routing_policy for state in selected_states if state.account_id == selected_snapshot.id),
+            None,
+        )
+        return AccountSelection(
+            account=selected_snapshot,
+            error_message=None,
+            error_code=None,
+            lease=selected_lease,
+            routing_policy=selected_routing_policy,
+        )
 
     async def _load_selection_inputs(
         self,
@@ -980,6 +1010,7 @@ class LoadBalancer:
         account_ids: Collection[str] | None,
         prefer_earlier_reset_accounts: bool,
         routing_strategy: RoutingStrategy,
+        single_account_id: str | None = None,
         budget_threshold_pct: float,
         prefer_earlier_reset_window: ResetPreferenceWindow = "secondary",
         secondary_budget_threshold_pct: float = 100.0,
@@ -1026,6 +1057,7 @@ class LoadBalancer:
             prefer_earlier_reset=prefer_earlier_reset_accounts,
             prefer_earlier_reset_window=prefer_earlier_reset_window,
             routing_strategy=routing_strategy,
+            single_account_id=single_account_id,
             budget_threshold_pct=budget_threshold_pct,
             secondary_budget_threshold_pct=secondary_budget_threshold_pct,
             apply_secondary_budget_threshold=True,
@@ -1046,7 +1078,12 @@ class LoadBalancer:
                 error_message=result.error_message or "opportunistic burn window closed: no account available",
                 error_code=OPPORTUNISTIC_BURN_WINDOW_CLOSED,
             )
-        return AccountSelection(account=_clone_account(account), error_message=None, error_code=None)
+        return AccountSelection(
+            account=_clone_account(account),
+            error_message=None,
+            error_code=None,
+            routing_policy=result.account.routing_policy,
+        )
 
     async def _filter_accounts_for_additional_limit(
         self,
@@ -1217,20 +1254,53 @@ class LoadBalancer:
         prefer_earlier_reset_accounts: bool,
         prefer_earlier_reset_window: ResetPreferenceWindow,
         routing_strategy: RoutingStrategy,
+        single_account_id: str | None = None,
         relative_availability_power: float = 2.0,
         relative_availability_top_k: int = 5,
         sticky_repo: StickySessionsRepository | None,
         routing_costs_by_account_id: RoutingCostsByAccount | None = None,
         sticky_existing_account_id: str | None | object = _STICKY_EXISTING_UNSET,
+        preferred_account_id: str | None = None,
+        require_preferred_account: bool = False,
         traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
         ignore_standard_quota: bool = False,
     ) -> SelectionResult:
+        if sticky_key and sticky_repo and sticky_kind is None:
+            raise ValueError("sticky_kind is required when sticky_key is provided")
+        if preferred_account_id is not None:
+            preferred = _select_account_with_preference(
+                states,
+                preferred_account_id=preferred_account_id,
+                require_preferred_account=require_preferred_account,
+                prefer_earlier_reset=prefer_earlier_reset_accounts,
+                prefer_earlier_reset_window=prefer_earlier_reset_window,
+                routing_strategy=routing_strategy,
+                single_account_id=single_account_id,
+                relative_availability_power=relative_availability_power,
+                relative_availability_top_k=relative_availability_top_k,
+                budget_threshold_pct=budget_threshold_pct,
+                secondary_budget_threshold_pct=secondary_budget_threshold_pct,
+                traffic_class=traffic_class,
+                ignore_standard_quota=ignore_standard_quota,
+                routing_costs_by_account_id=routing_costs_by_account_id,
+            )
+            if preferred.account is None and require_preferred_account:
+                return preferred
+            if preferred.account is not None and (
+                preferred.account.routing_policy == ROUTING_POLICY_BURN_FIRST
+                or preferred.account.account_id == preferred_account_id
+            ):
+                if sticky_key and sticky_repo:
+                    assert sticky_kind is not None
+                    await sticky_repo.upsert(sticky_key, preferred.account.account_id, kind=sticky_kind)
+                return preferred
         if not sticky_key or not sticky_repo:
             return _select_account_preferring_budget_safe(
                 states,
                 prefer_earlier_reset=prefer_earlier_reset_accounts,
                 prefer_earlier_reset_window=prefer_earlier_reset_window,
                 routing_strategy=routing_strategy,
+                single_account_id=single_account_id,
                 relative_availability_power=relative_availability_power,
                 relative_availability_top_k=relative_availability_top_k,
                 budget_threshold_pct=budget_threshold_pct,
@@ -1238,9 +1308,7 @@ class LoadBalancer:
                 ignore_standard_quota=ignore_standard_quota,
                 routing_costs_by_account_id=routing_costs_by_account_id,
             )
-        if sticky_kind is None:
-            raise ValueError("sticky_kind is required when sticky_key is provided")
-
+        assert sticky_kind is not None
         if sticky_existing_account_id is _STICKY_EXISTING_UNSET:
             existing = await sticky_repo.get_account_id(
                 sticky_key,
@@ -1289,8 +1357,8 @@ class LoadBalancer:
                     and pinned.reset_at - now >= 600  # 10 minutes
                 )
 
-                burn_first_reallocate = pinned.routing_policy != ROUTING_POLICY_BURN_FIRST
-                if burn_first_reallocate:
+                selectable_burn_first = False
+                if pinned.routing_policy != ROUTING_POLICY_BURN_FIRST:
                     burn_first_candidates = [
                         state for state in states if state.routing_policy == ROUTING_POLICY_BURN_FIRST
                     ]
@@ -1299,6 +1367,7 @@ class LoadBalancer:
                             burn_first_candidates,
                             prefer_earlier_reset=prefer_earlier_reset_accounts,
                             routing_strategy=routing_strategy,
+                            single_account_id=single_account_id,
                             allow_backoff_fallback=False,
                             deterministic_probe=True,
                             relative_availability_power=relative_availability_power,
@@ -1306,14 +1375,15 @@ class LoadBalancer:
                             traffic_class=traffic_class,
                             ignore_standard_quota=ignore_standard_quota,
                         )
-                        burn_first_reallocate = burn_first.account is not None
+                        selectable_burn_first = burn_first.account is not None
 
-                if not ((budget_pressured or rate_limit_far_away) and burn_first_reallocate):
+                if not selectable_burn_first and not (budget_pressured or rate_limit_far_away):
                     pinned_result = select_account(
                         [pinned],
                         prefer_earlier_reset=prefer_earlier_reset_accounts,
                         prefer_earlier_reset_window=prefer_earlier_reset_window,
                         routing_strategy=routing_strategy,
+                        single_account_id=single_account_id,
                         allow_backoff_fallback=False,
                         relative_availability_power=relative_availability_power,
                         relative_availability_top_k=relative_availability_top_k,
@@ -1325,10 +1395,11 @@ class LoadBalancer:
                         if sticky_max_age_seconds is not None:
                             await sticky_repo.upsert(sticky_key, pinned.account_id, kind=sticky_kind)
                         return pinned_result
+                elif selectable_burn_first:
+                    reallocate_sticky = True
                 else:
-                    # Reallocate only when a burn-first target exists and can
-                    # currently be selected, avoiding sticky churn to
-                    # ineligible targets.
+                    # Preserve the existing budget/rate-pressure reallocation
+                    # behavior when no burn-first target is selectable.
                     # Before reallocating, check whether the pool has a
                     # meaningfully better candidate.  When every account
                     # is above the budget threshold, reallocating just
@@ -1341,6 +1412,7 @@ class LoadBalancer:
                             prefer_earlier_reset=prefer_earlier_reset_accounts,
                             prefer_earlier_reset_window=prefer_earlier_reset_window,
                             routing_strategy=routing_strategy,
+                            single_account_id=single_account_id,
                             relative_availability_power=relative_availability_power,
                             relative_availability_top_k=relative_availability_top_k,
                             deterministic_probe=True,
@@ -1365,6 +1437,7 @@ class LoadBalancer:
                                 prefer_earlier_reset=prefer_earlier_reset_accounts,
                                 prefer_earlier_reset_window=prefer_earlier_reset_window,
                                 routing_strategy=routing_strategy,
+                                single_account_id=single_account_id,
                                 allow_backoff_fallback=False,
                                 relative_availability_power=relative_availability_power,
                                 relative_availability_top_k=relative_availability_top_k,
@@ -1395,6 +1468,7 @@ class LoadBalancer:
                         prefer_earlier_reset=prefer_earlier_reset_accounts,
                         prefer_earlier_reset_window=prefer_earlier_reset_window,
                         routing_strategy=routing_strategy,
+                        single_account_id=single_account_id,
                         allow_backoff_fallback=False,
                         relative_availability_power=relative_availability_power,
                         relative_availability_top_k=relative_availability_top_k,
@@ -1429,6 +1503,7 @@ class LoadBalancer:
             prefer_earlier_reset=prefer_earlier_reset_accounts,
             prefer_earlier_reset_window=prefer_earlier_reset_window,
             routing_strategy=routing_strategy,
+            single_account_id=single_account_id,
             relative_availability_power=relative_availability_power,
             relative_availability_top_k=relative_availability_top_k,
             budget_threshold_pct=budget_threshold_pct,
@@ -1725,6 +1800,27 @@ def _filter_states_for_account_caps(
                 continue
         filtered.append(state)
     return filtered
+
+
+def _filter_states_for_sticky_account_caps(
+    states: Iterable[AccountState],
+    *,
+    lease_kind: AccountLeaseKind | None,
+    pinned_account_id: str | None,
+) -> list[AccountState]:
+    state_list = list(states)
+    if pinned_account_id is None:
+        return _filter_states_for_account_caps(state_list, lease_kind=lease_kind)
+
+    non_pinned = [state for state in state_list if state.account_id != pinned_account_id]
+    selectable_non_pinned_ids = {
+        state.account_id for state in _filter_states_for_account_caps(non_pinned, lease_kind=lease_kind)
+    }
+    return [
+        state
+        for state in state_list
+        if state.account_id == pinned_account_id or state.account_id in selectable_non_pinned_ids
+    ]
 
 
 def _account_cap_error_code(lease_kind: AccountLeaseKind | None) -> str | None:
@@ -2423,6 +2519,7 @@ def _select_account_preferring_budget_safe(
     prefer_earlier_reset: bool,
     prefer_earlier_reset_window: ResetPreferenceWindow = "secondary",
     routing_strategy: RoutingStrategy,
+    single_account_id: str | None = None,
     relative_availability_power: float = 2.0,
     relative_availability_top_k: int = 5,
     budget_threshold_pct: float,
@@ -2446,34 +2543,14 @@ def _select_account_preferring_budget_safe(
         if apply_secondary_budget_threshold
         else (lambda state: _state_above_budget_threshold(state, budget_threshold_pct))
     )
-    if routing_strategy in ("sequential_drain", "reset_drain", "single_account"):
-        budget_safe_states = [
-            state
-            for state in state_list
-            if state.routing_policy != ROUTING_POLICY_PRESERVE and not state_budget_threshold(state)
-        ]
-        return select_account(
-            budget_safe_states or state_list,
-            prefer_earlier_reset=prefer_earlier_reset,
-            prefer_earlier_reset_window=prefer_earlier_reset_window,
-            routing_strategy=routing_strategy,
-            allow_backoff_fallback=allow_backoff_fallback,
-            deterministic_probe=deterministic_probe,
-            relative_availability_power=relative_availability_power,
-            relative_availability_top_k=relative_availability_top_k,
-            traffic_class=traffic_class,
-            ignore_standard_quota=ignore_standard_quota,
-            routing_costs=routing_costs_by_account_id,
-        )
-
-    best_health_states = _best_health_tier_states(state_list)
-    burn_first_states = [state for state in best_health_states if state.routing_policy == ROUTING_POLICY_BURN_FIRST]
+    burn_first_states = [state for state in state_list if state.routing_policy == ROUTING_POLICY_BURN_FIRST]
     if burn_first_states:
         burn_first = select_account(
             burn_first_states,
             prefer_earlier_reset=prefer_earlier_reset,
             prefer_earlier_reset_window=prefer_earlier_reset_window,
             routing_strategy=routing_strategy,
+            single_account_id=single_account_id,
             allow_backoff_fallback=False,
             deterministic_probe=deterministic_probe,
             relative_availability_power=relative_availability_power,
@@ -2497,6 +2574,7 @@ def _select_account_preferring_budget_safe(
             prefer_earlier_reset=prefer_earlier_reset,
             prefer_earlier_reset_window=prefer_earlier_reset_window,
             routing_strategy=routing_strategy,
+            single_account_id=single_account_id,
             allow_backoff_fallback=allow_backoff_fallback,
             deterministic_probe=deterministic_probe,
             relative_availability_power=relative_availability_power,
@@ -2515,6 +2593,7 @@ def _select_account_preferring_budget_safe(
             prefer_earlier_reset=prefer_earlier_reset,
             prefer_earlier_reset_window=prefer_earlier_reset_window,
             routing_strategy=routing_strategy,
+            single_account_id=single_account_id,
             allow_backoff_fallback=allow_backoff_fallback,
             deterministic_probe=deterministic_probe,
             usage_weighted_order="primary_first",
@@ -2527,6 +2606,7 @@ def _select_account_preferring_budget_safe(
         prefer_earlier_reset=prefer_earlier_reset,
         prefer_earlier_reset_window=prefer_earlier_reset_window,
         routing_strategy=routing_strategy,
+        single_account_id=single_account_id,
         allow_backoff_fallback=allow_backoff_fallback,
         deterministic_probe=deterministic_probe,
         relative_availability_power=relative_availability_power,
@@ -2535,6 +2615,77 @@ def _select_account_preferring_budget_safe(
         ignore_standard_quota=ignore_standard_quota,
         routing_costs=routing_costs_by_account_id,
     )
+
+
+def _select_account_with_preference(
+    states: Iterable[AccountState],
+    *,
+    preferred_account_id: str | None,
+    require_preferred_account: bool,
+    prefer_earlier_reset: bool,
+    prefer_earlier_reset_window: ResetPreferenceWindow,
+    routing_strategy: RoutingStrategy,
+    single_account_id: str | None,
+    relative_availability_power: float,
+    relative_availability_top_k: int,
+    budget_threshold_pct: float,
+    secondary_budget_threshold_pct: float,
+    apply_secondary_budget_threshold: bool = False,
+    deterministic_probe: bool = False,
+    traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
+    ignore_standard_quota: bool = False,
+    routing_costs_by_account_id: RoutingCostsByAccount | None = None,
+) -> SelectionResult:
+    state_list = list(states)
+    selected = _select_account_preferring_budget_safe(
+        state_list,
+        prefer_earlier_reset=prefer_earlier_reset,
+        prefer_earlier_reset_window=prefer_earlier_reset_window,
+        routing_strategy=routing_strategy,
+        single_account_id=single_account_id,
+        relative_availability_power=relative_availability_power,
+        relative_availability_top_k=relative_availability_top_k,
+        budget_threshold_pct=budget_threshold_pct,
+        secondary_budget_threshold_pct=secondary_budget_threshold_pct,
+        apply_secondary_budget_threshold=apply_secondary_budget_threshold,
+        deterministic_probe=deterministic_probe,
+        traffic_class=traffic_class,
+        ignore_standard_quota=ignore_standard_quota,
+        routing_costs_by_account_id=routing_costs_by_account_id,
+    )
+    if preferred_account_id is None:
+        return selected
+    if selected.account is not None and selected.account.routing_policy == ROUTING_POLICY_BURN_FIRST:
+        return selected
+
+    preferred_state = next(
+        (state for state in state_list if state.account_id == preferred_account_id),
+        None,
+    )
+    if preferred_state is not None and (
+        selected.account is None or preferred_state.routing_policy == selected.account.routing_policy
+    ):
+        preferred = _select_account_preferring_budget_safe(
+            [preferred_state],
+            prefer_earlier_reset=prefer_earlier_reset,
+            prefer_earlier_reset_window=prefer_earlier_reset_window,
+            routing_strategy=routing_strategy,
+            single_account_id=single_account_id,
+            relative_availability_power=relative_availability_power,
+            relative_availability_top_k=relative_availability_top_k,
+            budget_threshold_pct=budget_threshold_pct,
+            secondary_budget_threshold_pct=secondary_budget_threshold_pct,
+            apply_secondary_budget_threshold=apply_secondary_budget_threshold,
+            deterministic_probe=deterministic_probe,
+            traffic_class=traffic_class,
+            ignore_standard_quota=ignore_standard_quota,
+            routing_costs_by_account_id=routing_costs_by_account_id,
+        )
+        if preferred.account is not None:
+            return preferred
+    if require_preferred_account:
+        return SelectionResult(None, "Preferred account is not available")
+    return selected
 
 
 def _best_health_tier_states(states: list[AccountState]) -> list[AccountState]:

@@ -27,7 +27,9 @@ from app.modules.proxy.load_balancer import (
     _AdditionalLimitFilterResult,
     _build_states,
     _extract_credit_status,
+    _filter_states_for_sticky_account_caps,
     _select_account_preferring_budget_safe,
+    _select_account_with_preference,
     _select_long_window_entry,
     _state_above_sticky_budget_threshold,
     _state_from_account,
@@ -307,7 +309,7 @@ def test_budget_safe_selection_keeps_burn_first_ahead_of_threshold():
     assert result.account.account_id == "temp"
 
 
-def test_budget_safe_selection_applies_burn_first_after_health_tier_filtering():
+def test_budget_safe_selection_applies_burn_first_before_health_tier_filtering():
     states = [
         AccountState(
             "normal",
@@ -333,7 +335,83 @@ def test_budget_safe_selection_applies_burn_first_after_health_tier_filtering():
     )
 
     assert result.account is not None
-    assert result.account.account_id == "normal"
+    assert result.account.account_id == "temp"
+
+
+@pytest.mark.parametrize(
+    "routing_strategy",
+    [
+        "single_account",
+        "sequential_drain",
+        "reset_drain",
+        "round_robin",
+        "capacity_weighted",
+        "relative_availability",
+        "fill_first",
+        "usage_weighted",
+    ],
+)
+def test_select_account_burn_first_overrides_every_routing_strategy(routing_strategy):
+    now = 1_700_000_000.0
+    states = [
+        AccountState(
+            "configured-normal",
+            AccountStatus.ACTIVE,
+            used_percent=99.0,
+            secondary_used_percent=99.0,
+            secondary_reset_at=int(now + 300),
+            last_selected_at=0.0,
+            capacity_credits=1.0,
+            health_tier=HEALTH_TIER_HEALTHY,
+            routing_policy="normal",
+        ),
+        AccountState(
+            "burn",
+            AccountStatus.ACTIVE,
+            used_percent=10.0,
+            secondary_used_percent=10.0,
+            secondary_reset_at=int(now + 86_400),
+            last_selected_at=now,
+            capacity_credits=50_400.0,
+            health_tier=HEALTH_TIER_DRAINING,
+            routing_policy="burn_first",
+        ),
+    ]
+
+    result = select_account(
+        states,
+        now=now,
+        routing_strategy=routing_strategy,
+        single_account_id="configured-normal",
+        deterministic_probe=True,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "burn"
+
+
+def test_burn_first_overrides_required_owner_preference():
+    states = [
+        AccountState("file-owner", AccountStatus.ACTIVE, used_percent=1.0, routing_policy="normal"),
+        AccountState("burn", AccountStatus.ACTIVE, used_percent=99.0, routing_policy="burn_first"),
+    ]
+
+    result = _select_account_with_preference(
+        states,
+        preferred_account_id="file-owner",
+        require_preferred_account=True,
+        prefer_earlier_reset=False,
+        prefer_earlier_reset_window="secondary",
+        routing_strategy="usage_weighted",
+        single_account_id=None,
+        relative_availability_power=2.0,
+        relative_availability_top_k=5,
+        budget_threshold_pct=95.0,
+        secondary_budget_threshold_pct=100.0,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "burn"
 
 
 def test_budget_safe_selection_falls_back_when_burn_first_unavailable():
@@ -616,7 +694,7 @@ def test_select_account_single_account_returns_selected_candidate():
     states = [
         AccountState("selected", AccountStatus.ACTIVE, used_percent=10.0, secondary_used_percent=20.0),
     ]
-    result = select_account(states, routing_strategy="single_account")
+    result = select_account(states, routing_strategy="single_account", single_account_id="selected")
     assert result.account is not None
     assert result.account.account_id == "selected"
 
@@ -625,7 +703,7 @@ def test_select_account_single_account_uses_active_candidate_even_if_local_usage
     states = [
         AccountState("selected", AccountStatus.ACTIVE, used_percent=100.0, secondary_used_percent=20.0),
     ]
-    result = select_account(states, routing_strategy="single_account")
+    result = select_account(states, routing_strategy="single_account", single_account_id="selected")
     assert result.account is not None
     assert result.account.account_id == "selected"
 
@@ -1292,6 +1370,62 @@ def test_bypass_quota_exceeded_does_not_bypass_error_backoff_fallback():
     assert result.account is None
 
 
+def test_error_backoff_fallback_prefers_burn_first_before_recovery_time():
+    now = 1_000.0
+    normal = AccountState(
+        "normal",
+        AccountStatus.ACTIVE,
+        error_count=3,
+        last_error_at=971.0,
+        routing_policy="normal",
+    )
+    burn = AccountState(
+        "burn",
+        AccountStatus.ACTIVE,
+        error_count=3,
+        last_error_at=999.0,
+        routing_policy="burn_first",
+    )
+
+    result = select_account([normal, burn], now=now, allow_backoff_fallback=True)
+
+    assert result.account is not None
+    assert result.account.account_id == "burn"
+
+
+def test_bound_sticky_cap_filter_excludes_saturated_burn_but_keeps_owner(monkeypatch):
+    monkeypatch.setattr(
+        "app.modules.proxy.load_balancer.get_settings",
+        lambda: SimpleNamespace(proxy_account_stream_limit=1),
+    )
+    pinned = AccountState(
+        "pinned",
+        AccountStatus.ACTIVE,
+        inflight_streams=1,
+        routing_policy="normal",
+    )
+    saturated_burn = AccountState(
+        "burn",
+        AccountStatus.ACTIVE,
+        inflight_streams=1,
+        routing_policy="burn_first",
+    )
+    available_normal = AccountState(
+        "normal",
+        AccountStatus.ACTIVE,
+        inflight_streams=0,
+        routing_policy="normal",
+    )
+
+    filtered = _filter_states_for_sticky_account_caps(
+        [pinned, saturated_burn, available_normal],
+        lease_kind="stream",
+        pinned_account_id="pinned",
+    )
+
+    assert [state.account_id for state in filtered] == ["pinned", "normal"]
+
+
 def test_bypass_quota_exceeded_can_be_scoped_to_account_ids():
     now = 1_700_000_000.0
     blocked = AccountState("blocked", AccountStatus.QUOTA_EXCEEDED, used_percent=100.0, reset_at=int(now) + 3600)
@@ -1515,7 +1649,7 @@ def test_state_from_account_keeps_active_account_selectable_when_primary_usage_s
     assert state.used_percent == 100.0
     assert state.reset_at is None
     assert state.primary_reset_at == future_reset
-    selection = select_account([state], routing_strategy="single_account")
+    selection = select_account([state], routing_strategy="single_account", single_account_id=state.account_id)
     assert selection.account is not None
     assert selection.account.account_id == state.account_id
 
@@ -1603,7 +1737,7 @@ def test_state_from_account_keeps_active_account_selectable_when_secondary_usage
     assert state.reset_at is None
     assert state.secondary_used_percent == 100.0
     assert state.secondary_reset_at == future_reset
-    selection = select_account([state], routing_strategy="single_account")
+    selection = select_account([state], routing_strategy="single_account", single_account_id=state.account_id)
     assert selection.account is not None
     assert selection.account.account_id == state.account_id
 

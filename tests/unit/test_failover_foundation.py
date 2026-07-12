@@ -320,7 +320,7 @@ class TestSelectAccountHealthTier:
         assert result.account is not None
         assert result.account.account_id == "b"
 
-    def test_prefers_healthy_normal_over_draining_burn_first(self) -> None:
+    def test_prefers_draining_burn_first_over_healthy_normal(self) -> None:
         states = [
             AccountState(
                 "drain",
@@ -333,7 +333,7 @@ class TestSelectAccountHealthTier:
         ]
         result = select_account(states, routing_strategy="fill_first")
         assert result.account is not None
-        assert result.account.account_id == "healthy"
+        assert result.account.account_id == "drain"
 
     def test_prefers_healthy_over_probing(self) -> None:
         states = [

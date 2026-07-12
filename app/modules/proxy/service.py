@@ -1396,13 +1396,11 @@ class ProxyService(
             else None
         )
         settings = await get_settings_cache().get()
-        if _routing_strategy(settings) == "single_account":
-            selected_account_id = (settings.single_account_id or "").strip()
-            if not selected_account_id:
-                return None
-            if scoped_account_ids is not None and selected_account_id not in scoped_account_ids:
-                return None
-            scoped_account_ids = {selected_account_id}
+        single_account_id = (
+            (settings.single_account_id or "").strip() or None
+            if _routing_strategy(settings) == "single_account"
+            else None
+        )
         selection = await self._load_balancer.select_account(
             sticky_key=affinity.key,
             sticky_kind=affinity.kind,
@@ -1411,6 +1409,7 @@ class ProxyService(
             account_ids=scoped_account_ids,
             prefer_earlier_reset_window=prefer_earlier_reset_window,
             routing_strategy=_routing_strategy(settings),
+            single_account_id=single_account_id,
             budget_threshold_pct=_sticky_reallocation_primary_budget_threshold_pct(settings),
             secondary_budget_threshold_pct=_sticky_reallocation_secondary_budget_threshold_pct(settings),
             traffic_class=traffic_class,
@@ -1728,93 +1727,10 @@ class ProxyService(
                 required_preferred_account = (
                     preferred_account_id is not None and not fallback_on_preferred_account_unavailable
                 )
+                single_account_id: str | None = None
                 if _routing_strategy(settings) == "single_account" and not required_preferred_account:
-                    selected_account_id = (settings.single_account_id or "").strip()
-                    if not selected_account_id:
-                        return AccountSelection(
-                            account=None,
-                            error_message="Single account routing is enabled but no account is selected",
-                            error_code="single_account_not_configured",
-                        )
-                    if selected_account_id in excluded_account_ids_set:
-                        return AccountSelection(
-                            account=None,
-                            error_message="Selected single account is unavailable",
-                            error_code="single_account_unavailable",
-                        )
-                    if scoped_account_ids is not None and selected_account_id not in scoped_account_ids:
-                        return AccountSelection(
-                            account=None,
-                            error_message="Selected single account is outside the API key account scope",
-                            error_code="single_account_scope_mismatch",
-                        )
-                    scoped_account_ids = {selected_account_id}
+                    single_account_id = (settings.single_account_id or "").strip() or None
                     routing_strategy = "single_account"
-                preferred_eligible = (
-                    preferred_account_id is not None
-                    and preferred_account_id not in excluded_account_ids_set
-                    and (scoped_account_ids is None or preferred_account_id in scoped_account_ids)
-                )
-                if preferred_account_id is not None and not preferred_eligible:
-                    logger.warning(
-                        "Proxy preferred account skipped request_id=%s kind=%s request_stage=%s "
-                        "preferred_account_id=%s excluded=%s outside_api_key_scope=%s",
-                        request_id,
-                        kind,
-                        request_stage,
-                        preferred_account_id,
-                        preferred_account_id in excluded_account_ids_set,
-                        scoped_account_ids is not None and preferred_account_id not in scoped_account_ids,
-                    )
-                    if not fallback_on_preferred_account_unavailable:
-                        return AccountSelection(
-                            account=None,
-                            error_message="Preferred account is not available",
-                            error_code="preferred_account_unavailable",
-                        )
-                if preferred_eligible:
-                    preferred_selection = await self._load_balancer.select_account(
-                        sticky_key=sticky_key,
-                        sticky_kind=sticky_kind,
-                        reallocate_sticky=reallocate_sticky,
-                        sticky_max_age_seconds=sticky_max_age_seconds,
-                        prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
-                        prefer_earlier_reset_window=prefer_earlier_reset_window,
-                        routing_strategy=routing_strategy,
-                        relative_availability_power=_relative_availability_power(settings),
-                        relative_availability_top_k=_relative_availability_top_k(settings),
-                        model=model,
-                        service_tier=service_tier,
-                        additional_limit_name=additional_limit_name,
-                        account_ids={preferred_account_id},
-                        require_security_work_authorized=require_security_work_authorized,
-                        budget_threshold_pct=_sticky_reallocation_primary_budget_threshold_pct(settings),
-                        secondary_budget_threshold_pct=_sticky_reallocation_secondary_budget_threshold_pct(settings),
-                        lease_kind=lease_kind,
-                        estimated_lease_tokens=estimated_lease_tokens,
-                        traffic_class=effective_traffic_class,
-                    )
-                    if preferred_selection.account is not None:
-                        logger.info(
-                            "Selected preferred account request_id=%s kind=%s request_stage=%s account_id=%s",
-                            request_id,
-                            kind,
-                            request_stage,
-                            preferred_account_id,
-                        )
-                        return preferred_selection
-                    if not fallback_on_preferred_account_unavailable:
-                        logger.warning(
-                            "Proxy preferred account unavailable request_id=%s kind=%s request_stage=%s "
-                            "preferred_account_id=%s error_code=%s error=%s",
-                            request_id,
-                            kind,
-                            request_stage,
-                            preferred_account_id,
-                            preferred_selection.error_code,
-                            preferred_selection.error_message,
-                        )
-                        return preferred_selection
                 selection = await self._load_balancer.select_account(
                     sticky_key=sticky_key,
                     sticky_kind=sticky_kind,
@@ -1823,6 +1739,7 @@ class ProxyService(
                     prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
                     prefer_earlier_reset_window=prefer_earlier_reset_window,
                     routing_strategy=routing_strategy,
+                    single_account_id=single_account_id,
                     relative_availability_power=_relative_availability_power(settings),
                     relative_availability_top_k=_relative_availability_top_k(settings),
                     model=model,
@@ -1830,6 +1747,8 @@ class ProxyService(
                     additional_limit_name=additional_limit_name,
                     account_ids=scoped_account_ids,
                     exclude_account_ids=excluded_account_ids_set,
+                    preferred_account_id=preferred_account_id,
+                    require_preferred_account=required_preferred_account,
                     require_security_work_authorized=require_security_work_authorized,
                     budget_threshold_pct=_sticky_reallocation_primary_budget_threshold_pct(settings),
                     secondary_budget_threshold_pct=_sticky_reallocation_secondary_budget_threshold_pct(settings),
@@ -1837,6 +1756,35 @@ class ProxyService(
                     estimated_lease_tokens=estimated_lease_tokens,
                     traffic_class=effective_traffic_class,
                 )
+                if (
+                    selection.account is None
+                    and routing_strategy == "single_account"
+                    and not required_preferred_account
+                ):
+                    if single_account_id is None:
+                        return AccountSelection(
+                            account=None,
+                            error_message="Single account routing is enabled but no account is selected",
+                            error_code="single_account_not_configured",
+                        )
+                    if single_account_id in excluded_account_ids_set:
+                        return AccountSelection(
+                            account=None,
+                            error_message="Selected single account is unavailable",
+                            error_code="single_account_unavailable",
+                        )
+                    if scoped_account_ids is not None and single_account_id not in scoped_account_ids:
+                        return AccountSelection(
+                            account=None,
+                            error_message="Selected single account is outside the API key account scope",
+                            error_code="single_account_scope_mismatch",
+                        )
+                    if selection.error_code is None:
+                        return AccountSelection(
+                            account=None,
+                            error_message="Selected single account is unavailable",
+                            error_code="single_account_unavailable",
+                        )
                 if selection.account is not None and selection.account.id in excluded_account_ids_set:
                     logger.warning(
                         "Proxy account selection returned excluded account request_id=%s kind=%s request_stage=%s "
@@ -1918,22 +1866,18 @@ class ProxyService(
             if api_key is not None and api_key.account_assignment_scope_enabled
             else None
         )
-        if _routing_strategy(settings) == "single_account":
-            selected_account_id = (settings.single_account_id or "").strip()
-            if selected_account_id:
-                scoped_account_ids = (
-                    {selected_account_id}
-                    if scoped_account_ids is None or selected_account_id in scoped_account_ids
-                    else set()
-                )
-            else:
-                scoped_account_ids = set()
+        single_account_id = (
+            (settings.single_account_id or "").strip() or None
+            if _routing_strategy(settings) == "single_account"
+            else None
+        )
         return await self._load_balancer.check_opportunistic_admission(
             model=model,
             account_ids=scoped_account_ids,
             prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
             prefer_earlier_reset_window=_prefer_earlier_reset_window(settings),
             routing_strategy=_routing_strategy(settings),
+            single_account_id=single_account_id,
             budget_threshold_pct=_sticky_reallocation_primary_budget_threshold_pct(settings),
             secondary_budget_threshold_pct=_sticky_reallocation_secondary_budget_threshold_pct(settings),
             lease_kind=lease_kind,

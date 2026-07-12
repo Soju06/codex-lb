@@ -11,7 +11,7 @@ from typing import Any, AsyncIterator, Mapping, cast
 import aiohttp
 
 from app.core.auth.refresh import RefreshError
-from app.core.balancer import failover_decision
+from app.core.balancer import ROUTING_POLICY_BURN_FIRST, failover_decision
 from app.core.balancer.types import UpstreamError
 from app.core.clients.proxy import ProxyResponseError, _resolve_stream_transport, pop_stream_timeout_overrides
 from app.core.errors import openai_error, response_failed_event
@@ -618,6 +618,7 @@ class _StreamingRetryMixin:
                     require_preferred_account
                     and preferred_account_id is not None
                     and account.id != preferred_account_id
+                    and selection.routing_policy != ROUTING_POLICY_BURN_FIRST
                 ):
                     message = "Previous response owner account is unavailable; retry later."
                     _record_continuity_fail_closed(

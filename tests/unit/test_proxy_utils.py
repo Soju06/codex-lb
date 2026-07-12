@@ -1435,7 +1435,7 @@ async def test_opportunistic_admission_uses_api_key_enforced_model():
 
 
 @pytest.mark.asyncio
-async def test_opportunistic_admission_scopes_single_account_to_selected_account(monkeypatch):
+async def test_opportunistic_admission_keeps_scope_visible_for_burn_first_override(monkeypatch):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     settings.routing_strategy = "single_account"
     settings.single_account_id = "acc_selected"
@@ -1465,11 +1465,12 @@ async def test_opportunistic_admission_scopes_single_account_to_selected_account
     admission_mock.assert_awaited_once()
     await_args = admission_mock.await_args
     assert await_args is not None
-    assert await_args.kwargs["account_ids"] == {"acc_selected"}
+    assert await_args.kwargs["account_ids"] == {"acc_other", "acc_selected"}
+    assert await_args.kwargs["single_account_id"] == "acc_selected"
 
 
 @pytest.mark.asyncio
-async def test_opportunistic_admission_empty_scope_when_single_account_is_outside_api_key_scope(monkeypatch):
+async def test_opportunistic_admission_preserves_api_key_scope_when_single_account_is_outside_it(monkeypatch):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     settings.routing_strategy = "single_account"
     settings.single_account_id = "acc_selected"
@@ -1505,7 +1506,8 @@ async def test_opportunistic_admission_empty_scope_when_single_account_is_outsid
     admission_mock.assert_awaited_once()
     await_args = admission_mock.await_args
     assert await_args is not None
-    assert await_args.kwargs["account_ids"] == set()
+    assert await_args.kwargs["account_ids"] == {"acc_other"}
+    assert await_args.kwargs["single_account_id"] == "acc_selected"
 
 
 @pytest.mark.asyncio
@@ -3248,6 +3250,7 @@ async def test_select_codex_control_account_without_budget_uses_balancer(monkeyp
         sticky_max_age_seconds=123,
         prefer_earlier_reset_window="primary",
         routing_strategy="usage_weighted",
+        single_account_id=None,
         account_ids=None,
         budget_threshold_pct=95.0,
         secondary_budget_threshold_pct=100.0,
@@ -9449,7 +9452,9 @@ async def test_stream_responses_does_not_move_file_pinned_security_work_request(
     assert event["response"]["error"]["code"] == "security_work_authorization_required"
     assert select_account.await_count == 1
     only_call = select_account.await_args_list[0]
-    assert only_call.kwargs["account_ids"] == {regular_account.id}
+    assert only_call.kwargs["account_ids"] is None
+    assert only_call.kwargs["preferred_account_id"] == regular_account.id
+    assert only_call.kwargs["require_preferred_account"] is True
     assert only_call.kwargs["require_security_work_authorized"] is False
 
 
@@ -10683,7 +10688,7 @@ async def test_connect_proxy_websocket_clears_stale_forced_refresh_when_fallback
 
     assert selected_account == fallback_account
     assert selected_upstream is upstream
-    assert seen_account_id_filters == [{force_refresh_account.id}, None]
+    assert seen_account_id_filters == [None]
     assert ensure_calls == [(fallback_account.id, False)]
     assert request_state.force_refresh_account_id is None
     assert request_state.preferred_account_id is None
@@ -20450,7 +20455,8 @@ async def test_stream_previous_response_owner_usage_limit_fails_closed(monkeypat
     assert request_logs.calls[0]["error_code"] == "previous_response_owner_unavailable"
     assert request_logs.calls[0]["account_id"] == account_owner.id
     assert len(select_account_calls) == 1
-    assert select_account_calls[0]["account_ids"] == {account_owner.id}
+    assert select_account_calls[0]["account_ids"] is None
+    assert select_account_calls[0]["preferred_account_id"] == account_owner.id
     handle_stream_error.assert_awaited_once()
     handle_await_args = handle_stream_error.await_args
     assert handle_await_args is not None

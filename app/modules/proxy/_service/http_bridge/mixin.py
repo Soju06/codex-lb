@@ -12,6 +12,7 @@ import anyio
 
 from app.core import shutdown as shutdown_state
 from app.core.auth.refresh import RefreshError
+from app.core.balancer import ROUTING_POLICY_BURN_FIRST
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
 from app.core.clients.files import finalize_file as core_finalize_file  # noqa: F401
 from app.core.clients.proxy import CodexControlResponse as CodexControlResponse
@@ -1929,7 +1930,12 @@ class _HTTPBridgeMixin(
                         error_type=error_type,
                     ),
                 )
-            if require_preferred_account and preferred_account_id is not None and account.id != preferred_account_id:
+            if (
+                require_preferred_account
+                and preferred_account_id is not None
+                and account.id != preferred_account_id
+                and selection.routing_policy != ROUTING_POLICY_BURN_FIRST
+            ):
                 message = "Previous response owner account is unavailable; retry later."
                 await self._load_balancer.release_account_lease(selected_account_lease)
                 selected_account_lease = None

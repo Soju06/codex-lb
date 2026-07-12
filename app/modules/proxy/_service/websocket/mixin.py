@@ -17,6 +17,7 @@ from app.core.auth.refresh import (
     RefreshError,
 )
 from app.core.balancer import (
+    ROUTING_POLICY_BURN_FIRST,
     ResetPreferenceWindow,
     RoutingStrategy,
     failover_decision,
@@ -1828,6 +1829,7 @@ class _WebSocketMixin:
             and require_preferred_account
             and preferred_account_id is not None
             and account.id != preferred_account_id
+            and selection.routing_policy != ROUTING_POLICY_BURN_FIRST
         ):
             await proxy._load_balancer.release_account_lease(selection.lease)
             message = "Previous response owner account is unavailable; retry later."

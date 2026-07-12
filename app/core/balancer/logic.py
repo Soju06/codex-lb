@@ -361,6 +361,7 @@ def select_account(
     prefer_earlier_reset: bool = False,
     prefer_earlier_reset_window: ResetPreferenceWindow = "secondary",
     routing_strategy: RoutingStrategy = "capacity_weighted",
+    single_account_id: str | None = None,
     allow_backoff_fallback: bool = True,
     deterministic_probe: bool = False,
     relative_availability_power: float = DEFAULT_RELATIVE_AVAILABILITY_POWER,
@@ -394,6 +395,9 @@ def select_account(
             pool (``"capacity_weighted"``, ``"sequential_drain"``,
             ``"reset_drain"``, ``"single_account"``, ``"relative_availability"``,
             ``"fill_first"``, ``"round_robin"``, or ``"usage_weighted"``).
+        single_account_id: Configured account used as the fallback target for
+            ``single_account`` after any eligible ``burn_first`` pool is
+            exhausted.
         allow_backoff_fallback: Whether to allow a fallback attempt with the
             backoff account nearest to recovery when no fully available
             account exists.
@@ -506,7 +510,15 @@ def select_account(
                 backoff = min(300, 30 * (2 ** (s.error_count - 3)))
                 return (s.last_error_at or 0.0) + backoff
 
-            available.append(min(in_error_backoff, key=_backoff_expires_at))
+            burn_first_backoff = [
+                state for state in in_error_backoff if _routing_policy(state) == ROUTING_POLICY_BURN_FIRST
+            ]
+            normal_backoff = [state for state in in_error_backoff if _routing_policy(state) == ROUTING_POLICY_NORMAL]
+            preserve_backoff = [
+                state for state in in_error_backoff if _routing_policy(state) == ROUTING_POLICY_PRESERVE
+            ]
+            backoff_pool = burn_first_backoff or normal_backoff or preserve_backoff or in_error_backoff
+            available.append(min(backoff_pool, key=_backoff_expires_at))
             if traffic_class == TRAFFIC_CLASS_OPPORTUNISTIC:
                 opportunistic_available, reason = _filter_opportunistic_candidates(available, current)
                 if not opportunistic_available:
@@ -581,26 +593,34 @@ def select_account(
         # Pick the least recently selected account, then stabilize by account_id.
         return _planner_cost(state, routing_costs), state.last_selected_at or 0.0, state.account_id
 
+    burn_first = [s for s in available if _routing_policy(s) == ROUTING_POLICY_BURN_FIRST]
+    normal = [s for s in available if _routing_policy(s) == ROUTING_POLICY_NORMAL]
+    preserve = [s for s in available if _routing_policy(s) == ROUTING_POLICY_PRESERVE]
+    policy_pool = burn_first or normal or preserve or available
+
     if routing_strategy == "single_account":
-        selected = min(available, key=lambda state: state.account_id)
+        if burn_first:
+            selected = min(policy_pool, key=lambda state: state.account_id)
+        elif single_account_id is None:
+            return SelectionResult(None, "Single account routing is enabled but no account is selected")
+        else:
+            selected = next((state for state in policy_pool if state.account_id == single_account_id), None)
+            if selected is None:
+                return SelectionResult(None, "Configured single account is unavailable")
         return SelectionResult(selected, None)
 
     if routing_strategy == "sequential_drain":
-        selected = min(available, key=_sequential_drain_sort_key)
+        selected = min(policy_pool, key=_sequential_drain_sort_key)
         return SelectionResult(selected, None)
 
     if routing_strategy == "reset_drain":
-        selected = min(available, key=lambda state: _reset_drain_sort_key(state, current))
+        selected = min(policy_pool, key=lambda state: _reset_drain_sort_key(state, current))
         return SelectionResult(selected, None)
 
-    healthy = [s for s in available if s.health_tier == HEALTH_TIER_HEALTHY]
-    probing = [s for s in available if s.health_tier == HEALTH_TIER_PROBING]
-    draining = [s for s in available if s.health_tier == HEALTH_TIER_DRAINING]
-    health_pool = healthy or probing or draining or available
-    burn_first = [s for s in health_pool if _routing_policy(s) == ROUTING_POLICY_BURN_FIRST]
-    normal = [s for s in health_pool if _routing_policy(s) == ROUTING_POLICY_NORMAL]
-    preserve = [s for s in health_pool if _routing_policy(s) == ROUTING_POLICY_PRESERVE]
-    effective_pool = burn_first or normal or preserve or health_pool
+    healthy = [s for s in policy_pool if s.health_tier == HEALTH_TIER_HEALTHY]
+    probing = [s for s in policy_pool if s.health_tier == HEALTH_TIER_PROBING]
+    draining = [s for s in policy_pool if s.health_tier == HEALTH_TIER_DRAINING]
+    effective_pool = healthy or probing or draining or policy_pool
     effective_prefer_earlier_reset = prefer_earlier_reset and routing_strategy != "relative_availability"
 
     if routing_strategy == "round_robin":

@@ -2324,7 +2324,8 @@ async def test_select_account_with_budget_prefers_durable_account_id_when_availa
     assert selection.account.id == "acc-preferred"
     assert select_account.await_count == 1
     first_call = select_account.await_args_list[0]
-    assert first_call.kwargs["account_ids"] == {"acc-preferred"}
+    assert first_call.kwargs["account_ids"] is None
+    assert first_call.kwargs["preferred_account_id"] == "acc-preferred"
 
 
 @pytest.mark.asyncio
@@ -3033,7 +3034,9 @@ async def test_select_account_with_budget_required_file_pin_does_not_fallback_on
     assert selection.error_code == "account_stream_cap"
     assert select_account.await_count == 1
     first_call = select_account.await_args_list[0]
-    assert first_call.kwargs["account_ids"] == {"acc-file-owner"}
+    assert first_call.kwargs["account_ids"] is None
+    assert first_call.kwargs["preferred_account_id"] == "acc-file-owner"
+    assert first_call.kwargs["require_preferred_account"] is True
 
 
 @pytest.mark.asyncio
@@ -3078,8 +3081,55 @@ async def test_select_account_with_budget_required_file_pin_overrides_single_acc
     assert selection.account.id == "acc-file-owner"
     assert select_account.await_count == 1
     first_call = select_account.await_args_list[0]
-    assert first_call.kwargs["account_ids"] == {"acc-file-owner"}
-    assert first_call.kwargs["routing_strategy"] == "capacity_weighted"
+    assert first_call.kwargs["account_ids"] is None
+    assert first_call.kwargs["preferred_account_id"] == "acc-file-owner"
+    assert first_call.kwargs["require_preferred_account"] is True
+
+
+@pytest.mark.asyncio
+async def test_select_account_with_budget_keeps_burn_pool_visible_for_single_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    burn_account = cast(Any, SimpleNamespace(id="acc-burn"))
+    select_account = AsyncMock(
+        return_value=proxy_service.AccountSelection(
+            account=burn_account,
+            error_message=None,
+            error_code=None,
+            routing_policy="burn_first",
+        )
+    )
+    service._load_balancer = cast(Any, SimpleNamespace(select_account=select_account))
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: SimpleNamespace(
+            get=AsyncMock(
+                return_value=SimpleNamespace(
+                    routing_strategy="single_account",
+                    single_account_id="acc-configured",
+                    sticky_reallocation_budget_threshold_pct=95.0,
+                )
+            )
+        ),
+    )
+
+    selection = await service._select_account_with_budget(
+        time.monotonic() + 60.0,
+        request_id="req-single-account-burn",
+        kind="stream",
+        request_stage="first_turn",
+        prefer_earlier_reset_window="secondary",
+        lease_kind="stream",
+    )
+
+    assert selection.account is burn_account
+    call = select_account.await_args
+    assert call is not None
+    assert call.kwargs["account_ids"] is None
+    assert call.kwargs["routing_strategy"] == "single_account"
+    assert call.kwargs["single_account_id"] == "acc-configured"
 
 
 @pytest.mark.asyncio
@@ -3089,9 +3139,9 @@ async def test_select_account_with_budget_required_preferred_does_not_fallback_w
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     select_account = AsyncMock(
         return_value=proxy_service.AccountSelection(
-            account=cast(Any, SimpleNamespace(id="acc-other")),
-            error_message=None,
-            error_code=None,
+            account=None,
+            error_message="Preferred account is not available",
+            error_code="preferred_account_unavailable",
         )
     )
     service._load_balancer = cast(Any, SimpleNamespace(select_account=select_account))
@@ -3115,7 +3165,12 @@ async def test_select_account_with_budget_required_preferred_does_not_fallback_w
 
     assert selection.account is None
     assert selection.error_code == "preferred_account_unavailable"
-    select_account.assert_not_awaited()
+    select_account.assert_awaited_once()
+    call = select_account.await_args
+    assert call is not None
+    assert call.kwargs["exclude_account_ids"] == {"acc-file-owner"}
+    assert call.kwargs["preferred_account_id"] == "acc-file-owner"
+    assert call.kwargs["require_preferred_account"] is True
 
 
 @pytest.mark.asyncio
@@ -3124,18 +3179,11 @@ async def test_select_account_with_budget_soft_preference_can_fallback_after_acc
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     select_account = AsyncMock(
-        side_effect=[
-            proxy_service.AccountSelection(
-                account=None,
-                error_message="Account stream capacity is exhausted",
-                error_code="account_stream_cap",
-            ),
-            proxy_service.AccountSelection(
-                account=cast(Any, SimpleNamespace(id="acc-other")),
-                error_message=None,
-                error_code=None,
-            ),
-        ]
+        return_value=proxy_service.AccountSelection(
+            account=cast(Any, SimpleNamespace(id="acc-other")),
+            error_message=None,
+            error_code=None,
+        )
     )
     service._load_balancer = cast(Any, SimpleNamespace(select_account=select_account))
     monkeypatch.setattr(
@@ -3158,11 +3206,12 @@ async def test_select_account_with_budget_soft_preference_can_fallback_after_acc
 
     assert selection.account is not None
     assert selection.account.id == "acc-other"
-    assert select_account.await_count == 2
-    first_call = select_account.await_args_list[0]
-    second_call = select_account.await_args_list[1]
-    assert first_call.kwargs["account_ids"] == {"acc-soft"}
-    assert second_call.kwargs["account_ids"] is None
+    assert select_account.await_count == 1
+    call = select_account.await_args
+    assert call is not None
+    assert call.kwargs["account_ids"] is None
+    assert call.kwargs["preferred_account_id"] == "acc-soft"
+    assert call.kwargs["require_preferred_account"] is False
 
 
 def test_headers_with_authorization_restores_missing_proxy_api_header() -> None:

@@ -24,6 +24,12 @@ topologySpreadConstraints:
       matchLabels: {}
 networkPolicy:
   enabled: true
+  # Allow ingress-controller traffic to the HTTP port. Without this allowlist the
+  # fail-closed NetworkPolicy denies all external traffic while probes stay green.
+  # Adjust the label to the namespace your ingress controller runs in
+  # (this default matches ingress-nginx installed in the "ingress-nginx" namespace).
+  ingressNSMatchLabels:
+    kubernetes.io/metadata.name: ingress-nginx
 metrics:
   serviceMonitor:
     enabled: true
@@ -33,6 +39,9 @@ metrics:
     enabled: true
 ingress:
   enabled: true
+  # Render the full nginx annotation set (streaming safety + sticky hashing).
+  nginx:
+    enabled: true
   certManager:
     enabled: true
 config:

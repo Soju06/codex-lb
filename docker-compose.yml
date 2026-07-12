@@ -1,3 +1,7 @@
+# NOTE: This Compose file defines a SINGLE-REPLICA topology.
+# Do not use `docker compose up --scale server=N` — the SQLite default supports
+# only one writer and the published host ports collide. Multi-replica deployments
+# require the Helm chart with PostgreSQL and leader election (deploy/helm/codex-lb).
 services:
   server:
     build:

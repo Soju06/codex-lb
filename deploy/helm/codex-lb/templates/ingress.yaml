@@ -18,12 +18,14 @@
 {{- $_ := set $baseAnnotations $key $value }}
 {{- end }}
 {{- $apiAnnotations := deepCopy $baseAnnotations }}
+{{- if .Values.ingress.nginx.enabled }}
 {{- if .Values.ingress.nginx.upstreamHashBy }}
 {{- $_ := set $apiAnnotations "nginx.ingress.kubernetes.io/upstream-hash-by" .Values.ingress.nginx.upstreamHashBy }}
 {{- end }}
 {{- if .Values.ingress.nginx.upstreamHashBySubset }}
 {{- $_ := set $apiAnnotations "nginx.ingress.kubernetes.io/upstream-hash-by-subset" "true" }}
 {{- $_ := set $apiAnnotations "nginx.ingress.kubernetes.io/upstream-hash-by-subset-size" (.Values.ingress.nginx.upstreamHashBySubsetSize | toString) }}
+{{- end }}
 {{- end }}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -62,6 +64,7 @@ spec:
 {{- if .Values.ingress.responses.enabled }}
 ---
 {{- $responsesAnnotations := deepCopy $baseAnnotations }}
+{{- if .Values.ingress.nginx.enabled }}
 {{- if .Values.ingress.responses.nginx.upstreamHashBy }}
 {{- $_ := set $responsesAnnotations "nginx.ingress.kubernetes.io/upstream-hash-by" .Values.ingress.responses.nginx.upstreamHashBy }}
 {{- end }}
@@ -77,6 +80,7 @@ spec:
 {{- end }}
 {{- if .Values.ingress.responses.nginx.proxyNextUpstreamTries }}
 {{- $_ := set $responsesAnnotations "nginx.ingress.kubernetes.io/proxy-next-upstream-tries" (.Values.ingress.responses.nginx.proxyNextUpstreamTries | toString) }}
+{{- end }}
 {{- end }}
 apiVersion: networking.k8s.io/v1
 kind: Ingress

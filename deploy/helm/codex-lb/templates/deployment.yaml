@@ -1,3 +1,23 @@
+{{- /*
+Static bridge ring guard: a manual config.sessionBridgeInstanceRing must list every
+pod or Settings validation crashloops pods at startup. Fail loudly at render time
+instead of shipping a stalled rollout.
+*/}}
+{{- if .Values.config.sessionBridgeInstanceRing }}
+{{- $ringEntries := list }}
+{{- range splitList "," .Values.config.sessionBridgeInstanceRing }}
+{{- $entry := trim . }}
+{{- if $entry }}
+{{- $ringEntries = append $ringEntries $entry }}
+{{- end }}
+{{- end }}
+{{- if .Values.autoscaling.enabled }}
+{{- fail "config.sessionBridgeInstanceRing is a static ring and is incompatible with autoscaling.enabled=true: the HPA can create pods that are missing from the ring and crashloop at startup. Remove the static ring (database-backed ring discovery is automatic) or disable autoscaling." }}
+{{- end }}
+{{- if gt (int .Values.replicaCount) (len $ringEntries) }}
+{{- fail (printf "config.sessionBridgeInstanceRing lists %d entries but replicaCount is %d: every pod name must be present in the static ring or the missing pods fail Settings validation at startup. List every pod or remove the static ring (database-backed ring discovery is automatic)." (len $ringEntries) (int .Values.replicaCount)) }}
+{{- end }}
+{{- end }}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:

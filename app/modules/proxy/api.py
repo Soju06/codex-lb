@@ -561,6 +561,15 @@ async def codex_safety_arc(
     return await _codex_control_proxy(request, "safety/arc", context, api_key)
 
 
+@router.post("/alpha/search")
+async def codex_alpha_search(
+    request: Request,
+    context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    return await _codex_control_proxy(request, "alpha/search", context, api_key)
+
+
 @router.get("/agent-identities/jwks")
 async def codex_agent_identities_jwks(
     request: Request,

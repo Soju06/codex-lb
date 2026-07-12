@@ -914,7 +914,7 @@ export function RoutingSettings({
                       Fires when an exhausted account's quota resets. Accounts at or above this usage before reset qualify.
                     </p>
                     <label className="flex items-center gap-2">
-                      <span className="text-[11px] font-medium text-muted-foreground whitespace-nowrap">Exhausted at %</span>
+                      <span className="text-[11px] font-medium text-muted-foreground whitespace-nowrap">Min usage %</span>
                       <Input
                         type="number"
                         min={1}
@@ -925,7 +925,7 @@ export function RoutingSettings({
                         disabled={busy}
                         onChange={(event) => updateDraft({ limitWarmupExhaustedThreshold: event.target.value })}
                         className="h-8 w-full text-xs"
-                        aria-label="Exhausted at %"
+                        aria-label="Min usage %"
                       />
                     </label>
                   </div>
@@ -949,7 +949,7 @@ export function RoutingSettings({
                           Pre-starts the 5h window for idle accounts before traffic arrives. Accounts at or below this usage are considered idle.
                         </p>
                         <label className="flex items-center gap-2">
-                          <span className="text-[11px] font-medium text-muted-foreground whitespace-nowrap">Idle at %</span>
+                          <span className="text-[11px] font-medium text-muted-foreground whitespace-nowrap">Max usage %</span>
                           <Input
                             type="number"
                             min={0.1}
@@ -960,7 +960,7 @@ export function RoutingSettings({
                             disabled={busy}
                             onChange={(event) => updateDraft({ limitWarmupIdleThreshold: event.target.value })}
                             className="h-8 w-full text-xs"
-                            aria-label="Idle at %"
+                            aria-label="Max usage %"
                           />
                         </label>
                       </>

@@ -378,7 +378,7 @@ describe("RoutingSettings", () => {
     expect(screen.getByRole("combobox", { name: "Warm-up windows" })).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "Pace gap average" })).toBeInTheDocument();
     expect(screen.getByLabelText("Model")).toHaveAttribute("maxLength", "128");
-    expect(screen.getByLabelText("Exhausted at %")).toHaveAttribute("max", "100");
+    expect(screen.getByLabelText("Min usage %")).toHaveAttribute("max", "100");
     expect(screen.getByLabelText("Warm-up prompt")).toHaveAttribute("maxLength", "512");
   });
 
@@ -456,8 +456,8 @@ describe("RoutingSettings", () => {
       />,
     );
 
-    await user.clear(screen.getByLabelText("Exhausted at %"));
-    await user.type(screen.getByLabelText("Exhausted at %"), "98.5");
+    await user.clear(screen.getByLabelText("Min usage %"));
+    await user.type(screen.getByLabelText("Min usage %"), "98.5");
     await user.click(screen.getByRole("button", { name: "Save" }));
 
     expect(onSave).toHaveBeenCalledWith({
@@ -478,8 +478,8 @@ describe("RoutingSettings", () => {
       />,
     );
 
-    await user.clear(screen.getByLabelText("Exhausted at %"));
-    await user.type(screen.getByLabelText("Exhausted at %"), "100.1");
+    await user.clear(screen.getByLabelText("Min usage %"));
+    await user.type(screen.getByLabelText("Min usage %"), "100.1");
 
     expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
     expect(onSave).not.toHaveBeenCalled();

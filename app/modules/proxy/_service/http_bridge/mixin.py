@@ -54,7 +54,6 @@ from app.modules.api_keys.service import (
     ApiKeyData,
     ApiKeyRequestUsageBudget,
 )
-from app.modules.proxy.selection_errors import selection_failure_response
 from app.modules.proxy._service.api_key_usage import (
     _API_KEY_RESERVATION_HEARTBEAT_SECONDS as _API_KEY_RESERVATION_HEARTBEAT_SECONDS,
 )
@@ -126,7 +125,6 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
     _await_cancelled_task,
     _call_with_supported_optional_kwargs,
     _estimated_lease_tokens_from_request_usage_budget,
-    _is_local_account_cap_code,
     _prefer_earlier_reset_window,
     _proxy_admission_wait_timeout_seconds,
     _raise_proxy_unavailable,
@@ -220,6 +218,7 @@ from app.modules.proxy.durable_bridge_coordinator import (
     DurableBridgeLookup,
 )
 from app.modules.proxy.load_balancer import CONTINUITY_OWNER_UNAVAILABLE, AccountLease
+from app.modules.proxy.selection_errors import selection_failure_response
 
 logger = logging.getLogger("app.modules.proxy.service")
 T = TypeVar("T")

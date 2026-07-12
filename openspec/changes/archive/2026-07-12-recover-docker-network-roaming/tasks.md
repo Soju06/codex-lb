@@ -1,0 +1,23 @@
+## 1. Network Failure Classification and Client Recovery
+
+- [x] 1.1 Add typed DNS/host-route failure classification with serialized-message fallback coverage.
+- [x] 1.2 Add compare-and-swap/coalesced shared HTTP client rotation for process-wide network failures.
+- [x] 1.3 Mark classified process-wide failures account-neutral and add unit coverage proving health state is unchanged.
+
+## 2. Responses and WebSocket Recovery
+
+- [x] 2.1 Retry pre-visible HTTP/SSE Responses attempts on the same account within the existing deadline.
+- [x] 2.2 Retry upstream WebSocket opens centrally on the same account within the existing deadline.
+- [x] 2.3 Add regression tests for recovery, timeout bounding, continuity-owner preservation, and coalesced diagnostics.
+
+## 3. Docker Deployment and Operations
+
+- [x] 3.1 Update standalone Docker examples to use an idempotently created user-defined bridge.
+- [x] 3.2 Declare and test user-defined default bridges in stock Compose deployments without hard-coded public DNS.
+- [x] 3.3 Add OpenSpec context with rationale, failure modes, diagnostics, and a concrete host-versus-container DNS check.
+- [x] 3.4 Attach the current local codex-lb container to the dedicated user-defined bridge and verify embedded DNS resolution.
+
+## 4. Validation
+
+- [x] 4.1 Run focused unit tests for HTTP client, proxy stream/WebSocket recovery, and deployment configuration.
+- [x] 4.2 Run formatting, lint/type checks, full relevant test gates, and strict OpenSpec validation.

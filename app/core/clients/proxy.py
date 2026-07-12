@@ -74,6 +74,12 @@ from app.core.resilience.circuit_breaker import (
     _is_server_error,
     get_circuit_breaker_for_account,
 )
+from app.core.resilience.network_recovery import (
+    PROCESS_NETWORK_UNAVAILABLE_CODE,
+    is_process_network_failure,
+    process_network_error_code,
+    rotate_shared_http_transport,
+)
 from app.core.types import JsonObject, JsonValue
 from app.core.upstream_proxy import ResolvedUpstreamRoute
 from app.core.utils.json_guards import is_json_mapping
@@ -2989,7 +2995,7 @@ async def _stream_responses_with_session(
         )
         return
     except aiohttp.ClientError as exc:
-        error_code = "upstream_unavailable"
+        error_code = process_network_error_code(exc, fallback="upstream_unavailable")
         error_message = _codex_route_transport_error_message(
             route=route,
             route_trace=route_trace,
@@ -3001,8 +3007,16 @@ async def _stream_responses_with_session(
         failure_detail = "transport_error"
         failure_exception_type = type(exc).__name__
         retryable_same_contract = True
+        if error_code == PROCESS_NETWORK_UNAVAILABLE_CODE:
+            await rotate_shared_http_transport(
+                transport="http",
+                request_id=get_request_id(),
+                failed_session=client_session,
+            )
         yield format_sse_event(
-            response_failed_event("upstream_unavailable", response_error_message, response_id=get_request_id()),
+            response_failed_event(
+                error_code or "upstream_unavailable", response_error_message, response_id=get_request_id()
+            ),
         )
         return
     except asyncio.CancelledError:
@@ -3099,7 +3113,7 @@ async def _stream_responses_with_session(
         retryable_same_contract = False
         raise
     except OSError as exc:
-        error_code = "upstream_unavailable"
+        error_code = process_network_error_code(exc, fallback="upstream_unavailable")
         error_message = _codex_route_transport_error_message(
             route=route,
             route_trace=route_trace,
@@ -3111,8 +3125,16 @@ async def _stream_responses_with_session(
         failure_detail = "transport_error"
         failure_exception_type = type(exc).__name__
         retryable_same_contract = True
+        if is_process_network_failure(exc):
+            await rotate_shared_http_transport(
+                transport="http",
+                request_id=get_request_id(),
+                failed_session=client_session,
+            )
         yield format_sse_event(
-            response_failed_event("upstream_unavailable", response_error_message, response_id=get_request_id()),
+            response_failed_event(
+                error_code or "upstream_unavailable", response_error_message, response_id=get_request_id()
+            ),
         )
         return
     except Exception as exc:

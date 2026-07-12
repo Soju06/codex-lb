@@ -50,6 +50,9 @@ from app.core.errors import (
 )
 from app.core.openai.models import OpenAIEvent
 from app.core.openai.parsing import parse_sse_event
+from app.core.resilience.network_recovery import (
+    PROCESS_NETWORK_UNAVAILABLE_CODE,
+)
 from app.core.types import JsonValue
 from app.core.upstream_proxy import ResolvedUpstreamRoute
 from app.core.utils.request_id import get_request_id
@@ -425,6 +428,8 @@ def _should_penalize_stream_error(code: str | None) -> bool:
 def _should_retry_transient_stream_error(code: str | None, message: str | None) -> bool:
     if code is None or code == "stream_idle_timeout":
         return False
+    if code == PROCESS_NETWORK_UNAVAILABLE_CODE:
+        return True
     if code in _facade()._TRANSIENT_RETRY_CODES:
         return True
     if code != "upstream_unavailable" or not message:

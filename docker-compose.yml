@@ -112,6 +112,10 @@ services:
       - codex-lb-postgres-data:/var/lib/postgresql
     restart: "no"
 
+networks:
+  default:
+    driver: bridge
+
 volumes:
   codex-lb-data:
     name: codex-lb-data

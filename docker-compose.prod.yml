@@ -31,6 +31,10 @@ services:
         reservations:
           memory: 256M
 
+networks:
+  default:
+    driver: bridge
+
 volumes:
   codex-lb-data:
     name: codex-lb-data

@@ -67,7 +67,9 @@ For low-volume, policy-compliant personal use, start with **Capacity weighted** 
 ```bash
 # Docker (recommended)
 docker volume create codex-lb-data
+docker network inspect codex-lb-net >/dev/null 2>&1 || docker network create codex-lb-net
 docker run -d --name codex-lb \
+  --network codex-lb-net \
   -p 2455:2455 -p 1455:1455 \
   -v codex-lb-data:/var/lib/codex-lb \
   ghcr.io/soju06/codex-lb:latest
@@ -97,7 +99,9 @@ Open the dashboard → enter the token + new password → done. The token is sha
 **Manual token:** To use a fixed token instead, set the env var before starting:
 
 ```bash
+docker network inspect codex-lb-net >/dev/null 2>&1 || docker network create codex-lb-net
 docker run -d --name codex-lb \
+  --network codex-lb-net \
   -e CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN=your-secret-token \
   -p 2455:2455 -p 1455:1455 \
   -v codex-lb-data:/var/lib/codex-lb \
@@ -443,7 +447,9 @@ If the trusted header is missing and no fallback password is configured, the das
 **Authelia / trusted header**
 
 ```bash
+docker network inspect codex-lb-net >/dev/null 2>&1 || docker network create codex-lb-net
 docker run -d --name codex-lb \
+  --network codex-lb-net \
   -p 2455:2455 -p 1455:1455 \
   -e CODEX_LB_DASHBOARD_AUTH_MODE=trusted_header \
   -e CODEX_LB_DASHBOARD_AUTH_PROXY_HEADER=Remote-User \
@@ -456,7 +462,9 @@ docker run -d --name codex-lb \
 **Hard override / no app-level dashboard auth**
 
 ```bash
+docker network inspect codex-lb-net >/dev/null 2>&1 || docker network create codex-lb-net
 docker run -d --name codex-lb \
+  --network codex-lb-net \
   -p 2455:2455 -p 1455:1455 \
   -e CODEX_LB_DASHBOARD_AUTH_MODE=disabled \
   -v codex-lb-data:/var/lib/codex-lb \

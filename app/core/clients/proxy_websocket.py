@@ -41,6 +41,7 @@ from app.core.conversation_archive import archive_bytes, archive_text
 from app.core.errors import OpenAIErrorDetail, OpenAIErrorEnvelope, openai_error
 from app.core.openai.models import OpenAIError
 from app.core.openai.parsing import parse_error_payload
+from app.core.resilience.network_recovery import process_network_error_code
 from app.core.upstream_proxy import ResolvedUpstreamRoute
 from app.core.utils.proxy_env import resolve_websocket_proxy_from_env
 from app.core.utils.request_id import get_request_id
@@ -521,9 +522,10 @@ async def connect_responses_websocket(
             openai_error("upstream_unavailable", message, error_type="server_error"),
         ) from exc
     except OSError as exc:
+        error_code = process_network_error_code(exc, fallback="upstream_unavailable")
         raise ProxyResponseError(
             502,
-            openai_error("upstream_unavailable", str(exc)),
+            openai_error(error_code, str(exc)),
         ) from exc
 
     return ArchivingResponsesWebSocket(

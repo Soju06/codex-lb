@@ -593,7 +593,7 @@ def test_select_account_reports_pool_wide_usage_exhaustion_structurally():
 
     assert result.account is None
     assert result.error_code == "usage_limit_reached"
-    assert result.error_message == "Usage limit reached"
+    assert result.error_message == "Rate limit exceeded. Try again in 60s"
     assert result.resets_at is None
 
 

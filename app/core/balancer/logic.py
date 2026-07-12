@@ -155,6 +155,7 @@ USAGE_LIMIT_REACHED = "usage_limit_reached"
 def pool_usage_exhaustion(
     states: Iterable[AccountState],
     *,
+    current: float,
     ignore_standard_quota: bool = False,
 ) -> SelectionResult | None:
     """Describe pool-wide subscription exhaustion without parsing retry text."""
@@ -179,9 +180,13 @@ def pool_usage_exhaustion(
     # AccountState.reset_at can contain a conservative local fallback. Until
     # reset provenance is represented explicitly, omit it rather than expose
     # a synthetic value as an upstream reset timestamp.
+    reset_candidates = [state.reset_at for state in eligible if state.reset_at is not None]
+    message = "Usage limit reached"
+    if reset_candidates:
+        message = _format_retry_hint(max(0.0, min(reset_candidates) - current))
     return SelectionResult(
         account=None,
-        error_message="Usage limit reached",
+        error_message=message,
         error_code=USAGE_LIMIT_REACHED,
     )
 
@@ -566,6 +571,7 @@ def select_account(
         else:
             usage_exhaustion = pool_usage_exhaustion(
                 all_states,
+                current=current,
                 ignore_standard_quota=(
                     ignore_standard_quota
                     or bypass_quota_exceeded

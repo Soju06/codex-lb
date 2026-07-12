@@ -1220,6 +1220,10 @@ async def test_regular_warmup_boundary_60_seconds_accepted(monkeypatch) -> None:
     assert len(sender.calls) == 1
     assert len(repo.rows) == 1
     assert repo.rows[0].window == "primary"
+
+
+@pytest.mark.asyncio
+async def test_staggered_idle_warmup_catches_slot_between_refresh_ticks(monkeypatch) -> None:
     now = datetime.fromtimestamp(6065, tz=timezone.utc).replace(tzinfo=None)
     monkeypatch.setattr(limit_warmup_service, "utcnow", lambda: now)
     repo = FakeWarmupRepo()

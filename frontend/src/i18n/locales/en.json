@@ -271,6 +271,13 @@
         "promptAria": "Warm-up prompt",
         "save": "Save",
         "saveAria": "Save warm-up settings",
+        "shared": {
+          "windowsLabel": "Windows",
+          "windowsAria": "Warm-up windows",
+          "modelLabel": "Model",
+          "cooldownLabel": "Cooldown (sec)",
+          "promptLabel": "Prompt"
+        },
         "resetConfirmed": {
           "badge": "After reset",
           "title": "Reset-confirmed warm-up",

@@ -271,6 +271,13 @@
         "promptAria": "预热 prompt",
         "save": "保存",
         "saveAria": "保存预热设置",
+        "shared": {
+          "windowsLabel": "窗口",
+          "windowsAria": "预热窗口",
+          "modelLabel": "模型",
+          "cooldownLabel": "冷却时间（秒）",
+          "promptLabel": "Prompt"
+        },
         "resetConfirmed": {
           "badge": "重置后",
           "title": "重置确认预热",

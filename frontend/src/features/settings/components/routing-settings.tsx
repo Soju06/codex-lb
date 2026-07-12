@@ -849,12 +849,12 @@ export function RoutingSettings({
                 {/* --- Shared warm-up settings --- */}
                 <div className="grid gap-2 sm:grid-cols-[10rem_minmax(0,1fr)_7rem_7rem]">
                   <div className="space-y-1">
-                    <span className="block text-[11px] font-medium text-muted-foreground">Windows</span>
+                    <span className="block text-[11px] font-medium text-muted-foreground">{t("settings.routing.limitWarmup.shared.windowsLabel")}</span>
                     <Select
                       value={settings.limitWarmupWindows}
                       onValueChange={(value) => save({ limitWarmupWindows: value as "primary" | "secondary" | "both" })}
                     >
-                      <SelectTrigger className="h-8 text-xs" disabled={busy} aria-label="Warm-up windows">
+                      <SelectTrigger className="h-8 text-xs" disabled={busy} aria-label={t("settings.routing.limitWarmup.shared.windowsAria")}>
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent align="start">
@@ -865,7 +865,7 @@ export function RoutingSettings({
                     </Select>
                   </div>
                   <label className="block space-y-1">
-                    <span className="block text-[11px] font-medium text-muted-foreground">Model</span>
+                    <span className="block text-[11px] font-medium text-muted-foreground">{t("settings.routing.limitWarmup.shared.modelLabel")}</span>
                     <Input
                       value={draft.limitWarmupModel}
                       disabled={busy}
@@ -876,7 +876,7 @@ export function RoutingSettings({
                     />
                   </label>
                   <label className="block space-y-1">
-                    <span className="block text-[11px] font-medium text-muted-foreground">Cooldown (sec)</span>
+                    <span className="block text-[11px] font-medium text-muted-foreground">{t("settings.routing.limitWarmup.shared.cooldownLabel")}</span>
                     <Input
                       type="number"
                       min={60}
@@ -890,7 +890,7 @@ export function RoutingSettings({
                     />
                   </label>
                   <label className="block space-y-1">
-                    <span className="block text-[11px] font-medium text-muted-foreground">Prompt</span>
+                    <span className="block text-[11px] font-medium text-muted-foreground">{t("settings.routing.limitWarmup.shared.promptLabel")}</span>
                     <Input
                       value={draft.limitWarmupPrompt}
                       disabled={busy}

@@ -19,7 +19,9 @@ from app.db.models import (
     AdditionalUsageHistory,
     ApiKeyAccountAssignment,
     DashboardSettings,
+    HttpBridgeSessionAlias,
     HttpBridgeSessionRecord,
+    HttpBridgeSessionState,
     RequestLog,
     StickySession,
     UsageHistory,
@@ -270,6 +272,17 @@ class AccountsRepository:
     async def upsert_reauthorized(self, account: Account) -> Account:
         return await self.upsert_account_slot(account, preserve_unknown_workspace_duplicates=False)
 
+    async def replace_reauthorized(self, account_id: str, account: Account) -> Account | None:
+        """Replace credentials on the exact local row selected for reauthentication."""
+        async with sqlite_writer_section():
+            existing = await self._session.get(Account, account_id)
+            if existing is None:
+                return None
+            _apply_account_updates(existing, account)
+            await self._session.commit()
+            await self._session.refresh(existing)
+            return existing
+
     async def upsert_account_slot(
         self,
         account: Account,
@@ -499,6 +512,9 @@ class AccountsRepository:
             result = await self._session.execute(
                 update(Account).where(Account.id == account_id).values(**values).returning(Account.id)
             )
+            if status in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
+                await self._session.execute(delete(StickySession).where(StickySession.account_id == account_id))
+                await self._close_http_bridge_sessions_for_account(account_id)
             await self._session.commit()
             return result.scalar_one_or_none() is not None
 
@@ -555,8 +571,33 @@ class AccountsRepository:
                 else:
                     stmt = stmt.where(Account.blocked_at == expected_blocked_at)
             result = await self._session.execute(stmt)
+            updated_id = result.scalar_one_or_none()
+            if updated_id is not None and status in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
+                await self._session.execute(delete(StickySession).where(StickySession.account_id == account_id))
+                await self._close_http_bridge_sessions_for_account(account_id)
             await self._session.commit()
-            return result.scalar_one_or_none() is not None
+            return updated_id is not None
+
+    async def _close_http_bridge_sessions_for_account(self, account_id: str) -> None:
+        session_ids = select(HttpBridgeSessionRecord.id).where(HttpBridgeSessionRecord.account_id == account_id)
+        await self._session.execute(
+            delete(HttpBridgeSessionAlias).where(HttpBridgeSessionAlias.session_id.in_(session_ids))
+        )
+        await self._session.execute(
+            update(HttpBridgeSessionRecord)
+            .where(HttpBridgeSessionRecord.account_id == account_id)
+            .values(
+                account_id=None,
+                state=HttpBridgeSessionState.CLOSED,
+                closed_at=utcnow(),
+                owner_instance_id=None,
+                lease_expires_at=None,
+                latest_turn_state=None,
+                latest_response_id=None,
+                latest_input_item_count=None,
+                latest_input_full_fingerprint=None,
+            )
+        )
 
     async def update_alias(self, account_id: str, alias: str | None) -> bool:
         async with sqlite_writer_section():
@@ -617,6 +658,7 @@ class AccountsRepository:
         plan_type: str | None = None,
         email: str | None = None,
         chatgpt_account_id: str | None = None,
+        chatgpt_user_id: str | None = None,
         workspace_id: str | None = None,
         workspace_label: str | None = None,
         seat_type: str | None = None,
@@ -634,6 +676,8 @@ class AccountsRepository:
                 values["email"] = email
             if chatgpt_account_id is not None:
                 values["chatgpt_account_id"] = chatgpt_account_id
+            if chatgpt_user_id is not None:
+                values["chatgpt_user_id"] = chatgpt_user_id
             if workspace_id is not None:
                 values["workspace_id"] = workspace_id
             if workspace_label is not None:
@@ -798,6 +842,8 @@ class AccountsRepository:
 def _apply_account_updates(target: Account, source: Account) -> None:
     if source.chatgpt_account_id is not None:
         target.chatgpt_account_id = source.chatgpt_account_id
+    if source.chatgpt_user_id is not None:
+        target.chatgpt_user_id = source.chatgpt_user_id
     target.email = source.email
     if source.workspace_id is not None or target.workspace_id is None:
         target.workspace_id = source.workspace_id

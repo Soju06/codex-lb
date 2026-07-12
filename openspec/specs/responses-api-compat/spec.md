@@ -871,13 +871,13 @@ When a Codex or OpenAI-compatible Responses WebSocket request receives an upstre
 
 The proxy MUST recover from account-local compact authentication failures before
 surfacing them to the compact client. When a `/backend-api/codex/responses/compact`
-request receives an upstream `401 invalid_api_key` response for the selected
-account, the proxy MUST attempt one forced token refresh and retry the compact
-request on that same account. If the refreshed retry also returns `401`, the
-proxy MUST classify and record the account failure, exclude that account from
-the current compact request, and try another eligible account when one is
-available. The proxy MUST NOT surface the repeated account-local `401` to the
-compact client before exhausting eligible accounts.
+request receives an upstream `401 invalid_api_key` or `401 token_invalidated`
+response for the selected account, the proxy MUST attempt one forced token
+refresh and retry the compact request on that same account. If the refreshed
+retry also returns `401`, the proxy MUST classify and record the account
+failure, exclude that account from the current compact request, and try another
+eligible account when one is available. The proxy MUST NOT surface the repeated
+account-local `401` to the compact client before exhausting eligible accounts.
 
 #### Scenario: Refreshed compact auth failure uses another account
 
@@ -885,6 +885,15 @@ compact client before exhausting eligible accounts.
 - **AND** the selected account returns `401 invalid_api_key` for compact before and after a forced refresh
 - **WHEN** another eligible account can complete the compact request
 - **THEN** the downstream compact response succeeds from the second account
+- **AND** the selected account is excluded from further attempts for that compact request
+
+#### Scenario: Refreshed compact token invalidation uses another account
+
+- **GIVEN** at least two accounts are eligible for a compact request
+- **AND** the selected account returns `401 token_invalidated` for compact before and after a forced refresh
+- **WHEN** another eligible account can complete the compact request
+- **THEN** the downstream compact response succeeds from the second account
+- **AND** the selected account is marked `reauth_required`
 - **AND** the selected account is excluded from further attempts for that compact request
 
 #### Scenario: Compact 401 is not a generic same-contract retry
@@ -898,11 +907,11 @@ compact client before exhausting eligible accounts.
 The proxy MUST treat repeated account-local authentication failures as
 per-request account failures before any downstream-visible output is emitted.
 When a proxy request on a non-compact surface retries with a refreshed token and
-the refreshed retry still returns upstream `401 invalid_api_key`, the proxy MUST
-classify and record the selected account failure, exclude that account from the
-current request, and try another eligible account when one is available. The
-proxy MUST preserve the existing no-replay rule after downstream-visible stream
-or websocket output has been emitted.
+the refreshed retry still returns upstream `401 invalid_api_key` or
+`401 token_invalidated`, the proxy MUST classify and record the selected account
+failure, exclude that account from the current request, and try another eligible
+account when one is available. The proxy MUST preserve the existing no-replay
+rule after downstream-visible stream or websocket output has been emitted.
 
 #### Scenario: Pre-visible streaming auth failure uses another account
 
@@ -911,6 +920,14 @@ or websocket output has been emitted.
 - **WHEN** another eligible account can complete the request
 - **THEN** the downstream stream succeeds from another account
 - **AND** the selected account is excluded from further attempts for that request
+
+#### Scenario: Pre-visible token invalidation uses another account
+
+- **GIVEN** at least two accounts are eligible for a pre-visible proxy request
+- **AND** the selected account returns `401 token_invalidated` before and after a forced refresh
+- **WHEN** another eligible account can complete the request
+- **THEN** the downstream request succeeds from another account
+- **AND** the selected account is marked `reauth_required`
 
 #### Scenario: Non-stream proxy auth failure uses another account
 
@@ -2709,4 +2726,302 @@ When an upstream Responses WebSocket terminal `response.incomplete` event contai
   `max_output_tokens`
 - **AND** the account is not marked unhealthy solely because of that
   incomplete event
+
+### Requirement: OpenAI-compatible sources route only compatible public routes
+
+OpenAI-compatible model sources SHALL be eligible for public OpenAI-compatible
+routes only when the source declares support for the route shape. Chat
+Completions-compatible sources MAY serve `/v1/chat/completions`.
+Responses-compatible sources MAY serve `/v1/responses` and
+`/backend-api/codex/responses`. Audio-transcriptions-compatible sources MAY
+serve `/v1/audio/transcriptions`. Codex-native compaction, file upload,
+control-plane, and websocket bridge paths MUST remain subscription-backed unless
+a later requirement explicitly defines OpenAI-compatible source behavior for
+those paths.
+
+#### Scenario: Chat completions routes to OpenAI-compatible source
+
+- **GIVEN** an enabled OpenAI-compatible source declares chat-completions support
+- **AND** the authenticated API key is allowed to use that source/model
+- **WHEN** the client calls `POST /v1/chat/completions` with that model
+- **THEN** the proxy forwards the request to the source's configured base URL
+  using the source's upstream API key
+
+#### Scenario: Codex-native Responses route uses Responses-compatible source
+
+- **GIVEN** an enabled OpenAI-compatible source declares Responses support
+- **AND** it exposes model `deepseek-v4-flash`
+- **WHEN** a client calls `POST /backend-api/codex/responses` with model `deepseek-v4-flash`
+- **THEN** the proxy forwards the request to that source's Responses endpoint
+
+#### Scenario: Chat-only source is not used for Codex-native Responses route
+
+- **GIVEN** an enabled OpenAI-compatible source exposes model `local-coder`
+- **AND** the source declares Chat Completions support only
+- **WHEN** a client calls `POST /backend-api/codex/responses` with model `local-coder`
+- **THEN** the request is not routed to that source
+- **AND** subscription-backed Codex routing rules continue to apply
+
+#### Scenario: Compaction request is not source-routed
+
+- **GIVEN** an enabled Responses-compatible source exposes model `deepseek-v4-flash`
+- **AND** a client calls `POST /backend-api/codex/responses` for that model whose
+  input contains a `compaction_trigger` item
+- **THEN** the request is not forwarded to the external source
+- **AND** it follows the subscription-backed Codex compaction path instead
+
+#### Scenario: File-referencing request is not source-routed
+
+- **GIVEN** an enabled Responses-compatible source exposes model `deepseek-v4-flash`
+- **AND** a client calls `/backend-api/codex/responses` or `/v1/responses` for that
+  model whose input references an uploaded `input_file`/`input_image` `file_id`
+- **THEN** the request is not forwarded to the external source
+- **AND** it follows the subscription path so the account-scoped file pin is honored
+
+#### Scenario: Audio transcription routes to OpenAI-compatible source
+
+- **GIVEN** an enabled OpenAI-compatible source declares audio transcriptions support
+- **AND** it exposes model `whisper-large-v3`
+- **WHEN** the client calls `POST /v1/audio/transcriptions` with multipart
+  field `model=whisper-large-v3`
+- **THEN** the proxy forwards the multipart request to the source's
+  `/audio/transcriptions` endpoint
+- **AND** the request uses the source's upstream API key
+
+#### Scenario: Non-source transcription model keeps subscription validation
+
+- **GIVEN** no audio-transcriptions-compatible source exposes model `gpt-4o-mini`
+- **WHEN** the client calls `POST /v1/audio/transcriptions` with
+  `model=gpt-4o-mini`
+- **THEN** the proxy returns the existing unsupported transcription model error
+
+### Requirement: Source-routed chat payloads are sanitized before forwarding
+
+Source-routed `/v1/chat/completions` requests SHALL forward the client's
+OpenAI-compatible payload with the following sanitization applied to the
+outbound body:
+
+- An empty `tools` array MUST be omitted, together with `tool_choice` and
+  `parallel_tool_calls`, so tool-less requests reach the source without
+  tool-calling artifacts.
+- Non-standard reasoning toggles (`include_reasoning`, `separate_reasoning`,
+  `stream_reasoning`, `reasoning`, and `reasoning_effort`) MUST be stripped
+  unless the source model's catalog entry opts into reasoning via
+  `raw_metadata_json` containing `"supports_reasoning": true`.
+- An API key's enforced reasoning effort MAY still be applied after
+  sanitization; explicit operator policy overrides the default strip.
+
+#### Scenario: Empty tools array is not forwarded
+
+- **GIVEN** an enabled OpenAI-compatible source exposes model `local-coder`
+- **WHEN** a client calls `POST /v1/chat/completions` for that model without
+  tools (or with `"tools": []`) and `"tool_choice": "none"`
+- **THEN** the body forwarded to the source contains no `tools`, `tool_choice`,
+  or `parallel_tool_calls` keys
+
+#### Scenario: Reasoning toggles are stripped for non-reasoning source models
+
+- **GIVEN** a source model whose catalog entry does not declare
+  `"supports_reasoning": true`
+- **WHEN** a client sends `include_reasoning`, `separate_reasoning`,
+  `stream_reasoning`, `reasoning`, or `reasoning_effort` in the request
+- **THEN** none of those keys appear in the body forwarded to the source
+
+#### Scenario: Catalog opt-in preserves reasoning toggles
+
+- **GIVEN** a source model whose `raw_metadata_json` contains
+  `"supports_reasoning": true`
+- **WHEN** a client sends `include_reasoning: true`
+- **THEN** the forwarded body preserves the client's reasoning fields
+
+### Requirement: Source-routed audio transcriptions preserve OpenAI-compatible multipart semantics
+
+Source-routed `/v1/audio/transcriptions` requests SHALL forward the inbound
+audio file and non-file multipart fields to the selected source's
+`/audio/transcriptions` endpoint. The proxy MUST use the stored source API key
+for upstream authorization and MUST NOT forward the downstream client's
+authorization credential. JSON and non-JSON successful upstream response bodies
+SHALL be returned to the client with the upstream content type when present.
+
+#### Scenario: Text transcription response passes through
+
+- **GIVEN** an enabled OpenAI-compatible source exposes model `whisper-large-v3`
+- **AND** the client requests `response_format=text`
+- **WHEN** the source returns a plain text response
+- **THEN** the proxy returns that response body without requiring JSON parsing
+
+#### Scenario: Limited key requires token usage
+
+- **GIVEN** an API key has token or cost limits
+- **AND** a source-routed audio transcription response has no token-compatible
+  usage fields
+- **AND** the source model declares no per-minute audio rate
+- **WHEN** the upstream source returns a successful transcription response
+- **THEN** the proxy releases the reservation
+- **AND** returns `usage_unavailable` instead of allowing unaccounted limited-key usage
+
+### Requirement: Audio transcription sources MAY bill by duration
+
+The proxy SHALL support per-minute audio billing for source models that
+declare an `audio_per_minute` rate. When the rate is set and a source-routed
+`/v1/audio/transcriptions` response carries a positive audio duration
+(top-level `duration` seconds, or a `usage.seconds`/`usage.duration` fallback),
+the proxy MUST settle cost as `duration_minutes * audio_per_minute` with zero
+tokens, and MUST record that cost on the request log and against the API key's
+`cost_usd` limit. Duration billing MUST take precedence over token pricing on
+the transcription route. A model with no `audio_per_minute` rate MUST fall back
+to token-usage settlement.
+
+#### Scenario: Duration-priced model settles cost from audio length
+
+- **GIVEN** an audio-transcriptions source model with `audio_per_minute = 0.30`
+- **AND** an API key with a `cost_usd` limit
+- **WHEN** a transcription response reports `duration = 120` seconds and no token usage
+- **THEN** the API-key reservation is finalized with 0 tokens and $0.60 cost
+- **AND** the request log records `cost_usd = 0.60`
+
+#### Scenario: Duration billing does not require token usage for limited keys
+
+- **GIVEN** an audio-transcriptions source model with an `audio_per_minute` rate
+- **AND** an API key with token or cost limits
+- **WHEN** a transcription response carries a positive duration but no token usage
+- **THEN** the request succeeds and settles from duration
+- **AND** the proxy does not return `usage_unavailable`
+
+### Requirement: Upstream Responses payloads omit client-omitted request fields
+
+The service MUST NOT emit top-level request fields the client omitted onto
+upstream Responses payloads when the field's absence is meaningful upstream.
+In particular, the proxy MUST NOT synthesize a top-level `"tools": []` from
+the request model's default for clients that did not send the `tools` field,
+on any upstream transport (websocket `response.create` frames, HTTP-bridge
+bodies, and direct HTTP stream requests). An explicit client-sent
+`"tools": []` MUST be forwarded as `[]`. `tool_choice` and
+`parallel_tool_calls` MUST be forwarded only when the client sent them;
+an explicit client-sent `parallel_tool_calls: false` MUST reach upstream.
+The OpenAI-compatible `/v1/responses` conversion MUST propagate `tools`
+omission into the native request so both routes behave identically.
+Field omission MUST survive every re-serialization hop: the multi-instance
+owner-forward body (internal bridge forward) MUST NOT contain fields the
+client omitted, the owner instance receiving a forwarded request MUST NOT
+re-mark `tools` as explicitly set, and model-source Responses egress payloads
+MUST likewise omit fields the client never sent. The owner forward MUST carry
+a v2 signature (`x-codex-bridge-signature-v2`) computed over the same
+forwarding serialization that is posted as the body, and the forwarding
+origin MUST NOT relay externally supplied `x-codex-bridge-*` headers. The
+receiving instance MUST treat the v2 signature as authoritative only when it
+validates: a valid v2 signature accepts the forward (proving the received
+body was not rewritten, including an injected `"tools": []`); an absent or
+invalid v2 header falls back to the legacy signature verification; the
+forward is rejected only when neither verifies. Mere v2-header presence MUST
+NOT block a legacy-signed forward, because pre-v2 origins relay unknown
+inbound bridge headers verbatim and an external client could otherwise deny
+legitimate forwards by planting a garbage v2 header. For rolling-upgrade
+compatibility the origin MUST also keep sending the legacy signature headers
+(computed over the plain dump with the synthesized `"tools": []`) so pre-v2
+owners verify unchanged. ROLLOUT SHIM: the legacy header emission and the
+legacy fallback are a one-release compatibility shim and MUST be removed in a
+follow-up change once fleets are homogeneous on a v2-signing release (grep
+for `ROLLOUT SHIM` / `HTTP_BRIDGE_SIGNATURE_V2_HEADER`); while the shim is
+active the legacy fallback is exactly as strong as the pre-v2 scheme (a
+body-only rewrite injecting `"tools": []` into a dual-signed forward
+downgrades to the legacy digest and verifies), and removing the shim restores
+strict v2-only rejection.
+
+#### Scenario: Responses Lite request reaches upstream without a tools key
+
+- **WHEN** a `/backend-api/codex/responses` request omits top-level `tools`
+  and carries its tool bundle in an `additional_tools` input item
+- **THEN** the upstream websocket `response.create` frame contains no
+  top-level `tools` key
+- **AND** the HTTP-bridge request body contains no top-level `tools` key
+
+#### Scenario: Explicit empty tools array is forwarded
+
+- **WHEN** a client sends `"tools": []` explicitly
+- **THEN** the upstream payload contains `"tools": []`
+
+#### Scenario: Unset optional tool fields stay absent
+
+- **WHEN** a client omits `tool_choice` and `parallel_tool_calls`
+- **THEN** the upstream payload contains neither field
+
+#### Scenario: Owner-forwarded request keeps tools omitted across instances
+
+- **WHEN** a request that omits top-level `tools` is forwarded to its owner
+  instance over the internal HTTP bridge (multi-instance owner forward)
+- **THEN** the owner-forward request body contains no top-level `tools` key
+- **AND** the owner instance parses the forwarded body without marking
+  `tools` as explicitly set, so its upstream payload contains no top-level
+  `tools` key
+- **AND** the owner-forward signature still verifies on the owner instance
+
+#### Scenario: Owner-forward v2 signature covers the posted body
+
+- **WHEN** an owner-forward body that omitted top-level `tools` is rewritten
+  in transit to carry an injected explicit `"tools": []`
+- **THEN** the v2 signature verification fails
+- **AND** absent a valid legacy shim signature, the owner instance rejects
+  the forwarded request with an invalid bridge-forward-signature error
+  instead of re-marking `tools` as explicitly set
+- **AND** generic body rewrites outside the synthesized-tools equivalence
+  class fail both digests and are rejected even while the shim headers are
+  present
+
+#### Scenario: Mixed-version fleets keep verifying during a rolling upgrade
+
+- **WHEN** an updated origin forwards a dual-signed tools-less body to an
+  owner still running pre-v2 code
+- **THEN** the legacy signature header matches the pre-v2 owner's
+  recomputation over the plain dump, so the forward verifies unchanged
+- **WHEN** a pre-v2 origin forwards a legacy-signed body (no v2 header) to
+  an updated owner
+- **THEN** the updated owner falls back to legacy verification and accepts
+  the forward
+
+#### Scenario: Spoofed v2 header does not deny legacy forwards
+
+- **WHEN** a legacy-signed forward from a pre-v2 origin arrives carrying a
+  garbage `x-codex-bridge-signature-v2` header that an external client
+  planted (pre-v2 origins relay unknown inbound bridge headers verbatim)
+- **THEN** the updated owner treats the invalid v2 signature as
+  non-authoritative, falls back to legacy verification, and accepts the
+  forward
+- **AND** an updated origin strips externally supplied `x-codex-bridge-*`
+  headers before forwarding, so its own forwards never relay a planted
+  header
+
+#### Scenario: Model-source Responses egress omits unsent tools
+
+- **WHEN** a Responses request that omits top-level `tools` is routed to an
+  openai-compatible model source
+- **THEN** the payload sent to the model source contains no top-level
+  `tools` key
+
+### Requirement: Client tool entries are forwarded byte-preserved
+
+The service MUST forward client-sent top-level `tools` entries to upstream
+byte-preserved: the tool array order, per-object key order, unknown keys
+(including unknown tool types such as `namespace` entries and non-standard
+schema markers), and array-value order (for example `parameters.required`)
+MUST reach upstream exactly as the client sent them. Tool canonicalization
+(array sorting and recursive key sorting) MUST be used only for prompt-cache
+affinity and observability hashing and MUST NOT mutate the outgoing payload.
+The affinity/observability hash MUST remain insensitive to tool array order
+and object key order.
+
+#### Scenario: Reserved namespace tool survives byte-identical
+
+- **WHEN** a client sends top-level `tools` containing a reserved
+  `{"type": "namespace", "name": "collaboration", ...}` entry with nested
+  function entries, `strict: false`, unknown property markers, and a
+  non-alphabetical `required` array
+- **THEN** the upstream `response.create` frame serializes that `tools` array
+  byte-identical to the client's serialization
+
+#### Scenario: Affinity hash ignores tool ordering
+
+- **WHEN** two requests differ only in tool array order or tool object key
+  order
+- **THEN** their tools affinity/observability hash is identical
 

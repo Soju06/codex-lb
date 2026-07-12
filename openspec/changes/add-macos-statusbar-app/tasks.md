@@ -13,6 +13,7 @@
 - [x] 1.11 Keep routing and status badge widths stable across in-place refreshes.
 - [x] 1.12 Match dashboard routing badge colors and symbols for burn-first and preserve policies.
 - [x] 1.13 Add a native macOS launch-at-login menu toggle.
+- [x] 1.14 Show the trusted-security shield only for authorized accounts.
 
 ## 2. Packaging
 

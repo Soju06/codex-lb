@@ -85,6 +85,7 @@ private struct AccountSummary: Decodable {
     let windowMinutesMonthly: Int?
     let lastRefreshAt: Date?
     let deactivationReason: String?
+    let securityWorkAuthorized: Bool?
     let limitWarmupEnabled: Bool?
     let limitWarmup: AccountLimitWarmupStatus?
     let availableResetCredits: Int?
@@ -519,11 +520,15 @@ private final class AccountCardView: NSView {
             tone: routingTone,
             symbolName: routingPresentation.symbolName
         )
-        let shield = shieldView()
         let statusTone: BadgeView.Tone = account.status == "active" ? .active : .warning
         let status = BadgeView(text: account.status.capitalized, tone: statusTone, dot: account.status == "active")
 
-        let topRow = NSStackView(views: [identity, routing, shield, status])
+        var topViews: [NSView] = [identity, routing]
+        if account.securityWorkAuthorized == true {
+            topViews.append(shieldView())
+        }
+        topViews.append(status)
+        let topRow = NSStackView(views: topViews)
         topRow.orientation = .horizontal
         topRow.alignment = .centerY
         topRow.distribution = .fill

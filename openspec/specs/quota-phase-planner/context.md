@@ -44,8 +44,9 @@ selectors instead of being persisted on account state.
 
 ## Scheduler
 
-The scheduler runs through the existing durable leader-election path every `CODEX_LB_QUOTA_PLANNER_TICK_SECONDS`
-seconds, defaulting to five minutes. It can be disabled with `CODEX_LB_QUOTA_PLANNER_SCHEDULER_ENABLED=false`.
+The scheduler gates every tick on the enabled-by-default scheduler leader lease (see the `scheduler-coordination`
+capability), ticking every `CODEX_LB_QUOTA_PLANNER_TICK_SECONDS` seconds and defaulting to five minutes. It can be
+disabled with `CODEX_LB_QUOTA_PLANNER_SCHEDULER_ENABLED=false`.
 
 Each tick:
 

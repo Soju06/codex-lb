@@ -10,7 +10,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Protocol, cast
+from typing import Protocol, TypeVar, cast
 
 from app.core.auth.refresh import RefreshError
 from app.core.utils.time import to_utc_naive, utcnow
@@ -23,8 +23,11 @@ from app.modules.proxy.account_cache import get_account_selection_cache
 logger = logging.getLogger(__name__)
 
 
+_T = TypeVar("_T")
+
+
 class _LeaderElectionLike(Protocol):
-    async def try_acquire(self) -> bool: ...
+    async def run_if_leader(self, fn: Callable[[], Awaitable[_T]]) -> _T | None: ...
 
 
 class _AccountsRepositoryLike(Protocol):
@@ -112,8 +115,6 @@ class AuthGuardianScheduler:
                 continue
 
     async def _refresh_once(self) -> None:
-        if not await self.leader_election_factory().try_acquire():
-            return
         if not self.leader_election_enabled:
             live_replicas = await self.live_replica_count()
             if live_replicas > 1:
@@ -124,6 +125,9 @@ class AuthGuardianScheduler:
                     live_replicas,
                 )
                 return
+        await self.leader_election_factory().run_if_leader(self._refresh_as_leader)
+
+    async def _refresh_as_leader(self) -> None:
         async with self._lock:
             async with self.repo_factory() as repo:
                 accounts = await repo.list_accounts(refresh_existing=True)

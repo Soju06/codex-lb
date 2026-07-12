@@ -306,8 +306,8 @@ class Settings(BaseSettings):
     log_format: str = "text"  # "text" or "json"
 
     # Leader election
-    leader_election_enabled: bool = False
-    leader_election_ttl_seconds: int = 600
+    leader_election_enabled: bool = True
+    leader_election_ttl_seconds: int = Field(default=60, ge=5)
 
     # Circuit breaker
     circuit_breaker_enabled: bool = False

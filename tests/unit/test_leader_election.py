@@ -1,142 +1,271 @@
 from __future__ import annotations
 
-import asyncio
 import importlib
-from datetime import UTC, datetime, timedelta
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from typing import TypedDict
+from typing import Any
 
 import pytest
+from sqlalchemy.dialects import postgresql, sqlite
+from sqlalchemy.sql.dml import Delete, Insert, Update
+from sqlalchemy.sql.elements import TextClause
 
 leader_election_module = importlib.import_module("app.core.scheduling.leader_election")
 
 pytestmark = pytest.mark.unit
 
 
-@pytest.mark.asyncio
-async def test_try_acquire_returns_true_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
-    settings = SimpleNamespace(
-        leader_election_enabled=False,
-        database_url="postgresql+asyncpg://db",
-        leader_election_ttl_seconds=30,
-    )
-    monkeypatch.setattr(leader_election_module, "get_settings", lambda: settings)
-
-    election = leader_election_module.LeaderElection(leader_id="node-a")
-
-    assert await election.try_acquire() is True
+class _FakeResult:
+    def __init__(self, rowcount: int) -> None:
+        self.rowcount = rowcount
 
 
-@pytest.mark.asyncio
-async def test_try_acquire_returns_true_for_sqlite(monkeypatch: pytest.MonkeyPatch) -> None:
-    settings = SimpleNamespace(
-        leader_election_enabled=True,
-        database_url="sqlite+aiosqlite:///tmp/test.db",
-        leader_election_ttl_seconds=30,
-    )
-    monkeypatch.setattr(leader_election_module, "get_settings", lambda: settings)
+class _FakeSession:
+    def __init__(self, dialect_name: str, rowcounts: list[int]) -> None:
+        self._dialect_name = dialect_name
+        self._rowcounts = rowcounts
+        self.statements: list[Any] = []
+        self.params: list[Any] = []
+        self.commits = 0
 
-    election = leader_election_module.LeaderElection(leader_id="node-a")
+    def get_bind(self) -> SimpleNamespace:
+        return SimpleNamespace(dialect=SimpleNamespace(name=self._dialect_name))
 
-    assert await election.try_acquire() is True
-
-
-class _LeaseSession:
-    def __init__(self, shared: "_SharedLease", lock: asyncio.Lock) -> None:
-        self._shared = shared
-        self._lock = lock
-
-    async def execute(self, _statement: object, params: dict[str, object]) -> object:
-        async with self._lock:
-            row = self._shared.row
-            now_obj = params["now"]
-            leader_id_obj = params["leader_id"]
-            expires_at_obj = params["expires_at"]
-
-            assert isinstance(now_obj, datetime)
-            assert isinstance(leader_id_obj, str)
-            assert isinstance(expires_at_obj, datetime)
-
-            now = now_obj
-            leader_id = leader_id_obj
-            expires_at = expires_at_obj
-
-            if row is None:
-                new_row: _LeaseRow = {"leader_id": leader_id, "expires_at": expires_at}
-                self._shared.row = new_row
-            else:
-                expired = row["expires_at"] < now
-                same_leader = row["leader_id"] == leader_id
-                if expired or same_leader:
-                    row["leader_id"] = leader_id
-                    row["expires_at"] = expires_at
-
-        return object()
+    async def execute(self, statement: Any, params: Any = None) -> _FakeResult:
+        self.statements.append(statement)
+        self.params.append(params)
+        return _FakeResult(self._rowcounts.pop(0))
 
     async def commit(self) -> None:
-        return None
-
-    async def scalar(self, _statement: object) -> str | None:
-        row = self._shared.row
-        if row is None:
-            return None
-        return row["leader_id"]
+        self.commits += 1
 
 
-class _LeaseRow(TypedDict):
-    leader_id: str
-    expires_at: datetime
+def _install(
+    monkeypatch: pytest.MonkeyPatch,
+    session: _FakeSession,
+    *,
+    enabled: bool = True,
+    ttl: int = 30,
+) -> None:
+    settings = SimpleNamespace(leader_election_enabled=enabled, leader_election_ttl_seconds=ttl)
+    monkeypatch.setattr(leader_election_module, "get_settings", lambda: settings)
 
+    @asynccontextmanager
+    async def _session_cm():
+        yield session
 
-class _SharedLease:
-    def __init__(self, row: _LeaseRow | None = None) -> None:
-        self.row = row
-
-
-def _build_session_provider(shared: _SharedLease, lock: asyncio.Lock):
-    async def _provider():
-        yield _LeaseSession(shared, lock)
-
-    return _provider
+    monkeypatch.setattr(leader_election_module, "get_background_session", _session_cm)
 
 
 @pytest.mark.asyncio
-async def test_try_acquire_concurrent_only_one_wins(monkeypatch: pytest.MonkeyPatch) -> None:
-    settings = SimpleNamespace(
-        leader_election_enabled=True,
-        database_url="postgresql+asyncpg://db",
-        leader_election_ttl_seconds=30,
-    )
-    monkeypatch.setattr(leader_election_module, "get_settings", lambda: settings)
-
-    shared = _SharedLease()
-    lock = asyncio.Lock()
-    monkeypatch.setattr(leader_election_module, "get_session", _build_session_provider(shared, lock))
-
-    election_a = leader_election_module.LeaderElection(leader_id="node-a")
-    election_b = leader_election_module.LeaderElection(leader_id="node-b")
-
-    result_a, result_b = await asyncio.gather(election_a.try_acquire(), election_b.try_acquire())
-
-    assert (result_a, result_b).count(True) == 1
-    assert (result_a, result_b).count(False) == 1
-
-
-@pytest.mark.asyncio
-async def test_try_acquire_sets_is_leader_on_success(monkeypatch: pytest.MonkeyPatch) -> None:
-    settings = SimpleNamespace(
-        leader_election_enabled=True,
-        database_url="postgresql+asyncpg://db",
-        leader_election_ttl_seconds=30,
-    )
-    monkeypatch.setattr(leader_election_module, "get_settings", lambda: settings)
-
-    now = datetime.now(UTC)
-    shared = _SharedLease(row={"leader_id": "node-a", "expires_at": now + timedelta(seconds=30)})
-    lock = asyncio.Lock()
-    monkeypatch.setattr(leader_election_module, "get_session", _build_session_provider(shared, lock))
+async def test_try_acquire_returns_true_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    session = _FakeSession("postgresql", [])
+    _install(monkeypatch, session, enabled=False)
 
     election = leader_election_module.LeaderElection(leader_id="node-a")
 
     assert await election.try_acquire() is True
-    assert election._is_leader is True
+    assert session.statements == []
+
+
+@pytest.mark.asyncio
+async def test_try_acquire_uses_database_clock_sql_on_postgres_dialect(monkeypatch: pytest.MonkeyPatch) -> None:
+    session = _FakeSession("postgresql", [1])
+    _install(monkeypatch, session)
+
+    election = leader_election_module.LeaderElection(leader_id="node-a")
+
+    assert await election.try_acquire() is True
+    assert election.is_leader is True
+    assert session.commits == 1
+    [statement] = session.statements
+    assert isinstance(statement, TextClause)
+    sql = str(statement)
+    assert "now()" in sql
+    assert "make_interval" in sql
+    assert "expires_at < now()" in sql
+    [params] = session.params
+    assert params["leader_id"] == "node-a"
+    assert params["ttl"] == 30
+
+
+@pytest.mark.asyncio
+async def test_try_acquire_binds_host_clock_upsert_on_sqlite_dialect(monkeypatch: pytest.MonkeyPatch) -> None:
+    session = _FakeSession("sqlite", [1])
+    _install(monkeypatch, session)
+
+    election = leader_election_module.LeaderElection(leader_id="node-a")
+
+    assert await election.try_acquire() is True
+    [statement] = session.statements
+    assert isinstance(statement, Insert)
+    compiled = str(statement.compile(dialect=sqlite.dialect()))
+    assert "INSERT INTO scheduler_leader" in compiled
+    assert "ON CONFLICT (id) DO UPDATE" in compiled
+
+
+@pytest.mark.asyncio
+async def test_dialect_selection_ignores_database_url_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A postgres engine whose URL merely contains the substring "sqlite"
+    # (e.g. in credentials) must still take the postgres arbitration path:
+    # selection derives from the engine dialect, never from URL text.
+    session = _FakeSession("postgresql", [1])
+    settings = SimpleNamespace(
+        leader_election_enabled=True,
+        leader_election_ttl_seconds=30,
+        database_url="postgresql+asyncpg://sqlite-user:pw@db/codex",
+    )
+    monkeypatch.setattr(leader_election_module, "get_settings", lambda: settings)
+
+    @asynccontextmanager
+    async def _session_cm():
+        yield session
+
+    monkeypatch.setattr(leader_election_module, "get_background_session", _session_cm)
+
+    election = leader_election_module.LeaderElection(leader_id="node-a")
+
+    assert await election.try_acquire() is True
+    [statement] = session.statements
+    assert isinstance(statement, TextClause)
+    assert "make_interval" in str(statement)
+
+
+@pytest.mark.asyncio
+async def test_try_acquire_loses_on_rowcount_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    session = _FakeSession("postgresql", [0])
+    _install(monkeypatch, session)
+
+    election = leader_election_module.LeaderElection(leader_id="node-b")
+
+    assert await election.try_acquire() is False
+    assert election.is_leader is False
+
+
+@pytest.mark.asyncio
+async def test_try_acquire_defaults_to_non_leader_on_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _BrokenSession(_FakeSession):
+        async def execute(self, statement: Any, params: Any = None) -> _FakeResult:
+            raise RuntimeError("db down")
+
+    session = _BrokenSession("postgresql", [])
+    _install(monkeypatch, session)
+
+    election = leader_election_module.LeaderElection(leader_id="node-a")
+    election._is_leader = True
+
+    assert await election.try_acquire() is False
+    assert election.is_leader is False
+
+
+@pytest.mark.asyncio
+async def test_renew_demotes_on_rowcount_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    session = _FakeSession("postgresql", [1, 0])
+    _install(monkeypatch, session)
+
+    election = leader_election_module.LeaderElection(leader_id="node-a")
+    assert await election.try_acquire() is True
+
+    assert await election.renew() is False
+    assert election.is_leader is False
+
+
+@pytest.mark.asyncio
+async def test_renew_extends_on_rowcount_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    session = _FakeSession("sqlite", [1, 1])
+    _install(monkeypatch, session)
+
+    election = leader_election_module.LeaderElection(leader_id="node-a")
+    assert await election.try_acquire() is True
+
+    assert await election.renew() is True
+    assert election.is_leader is True
+    assert isinstance(session.statements[1], Update)
+
+
+@pytest.mark.asyncio
+async def test_renew_returns_false_when_not_leader_without_db_access(monkeypatch: pytest.MonkeyPatch) -> None:
+    session = _FakeSession("postgresql", [])
+    _install(monkeypatch, session)
+
+    election = leader_election_module.LeaderElection(leader_id="node-a")
+
+    assert await election.renew() is False
+    assert session.statements == []
+
+
+@pytest.mark.asyncio
+async def test_release_deletes_own_row_and_demotes(monkeypatch: pytest.MonkeyPatch) -> None:
+    session = _FakeSession("sqlite", [1, 1])
+    _install(monkeypatch, session)
+
+    election = leader_election_module.LeaderElection(leader_id="node-a")
+    assert await election.try_acquire() is True
+
+    await election.release()
+
+    assert election.is_leader is False
+    assert isinstance(session.statements[1], Delete)
+    compiled = str(session.statements[1].compile(dialect=postgresql.dialect()))
+    assert "DELETE FROM scheduler_leader" in compiled
+
+
+@pytest.mark.asyncio
+async def test_release_swallows_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _BrokenSession(_FakeSession):
+        async def execute(self, statement: Any, params: Any = None) -> _FakeResult:
+            raise RuntimeError("db down")
+
+    session = _BrokenSession("sqlite", [])
+    _install(monkeypatch, session)
+
+    election = leader_election_module.LeaderElection(leader_id="node-a")
+    election._is_leader = True
+
+    await election.release()
+
+    assert election.is_leader is False
+
+
+@pytest.mark.asyncio
+async def test_run_if_leader_skips_body_when_not_leader(monkeypatch: pytest.MonkeyPatch) -> None:
+    session = _FakeSession("postgresql", [0])
+    _install(monkeypatch, session)
+
+    election = leader_election_module.LeaderElection(leader_id="node-b")
+    ran = False
+
+    async def _body() -> str:
+        nonlocal ran
+        ran = True
+        return "ran"
+
+    assert await election.run_if_leader(_body) is None
+    assert ran is False
+
+
+@pytest.mark.asyncio
+async def test_run_if_leader_returns_body_result(monkeypatch: pytest.MonkeyPatch) -> None:
+    session = _FakeSession("postgresql", [1])
+    _install(monkeypatch, session)
+
+    election = leader_election_module.LeaderElection(leader_id="node-a")
+
+    async def _body() -> float:
+        return 12.5
+
+    assert await election.run_if_leader(_body) == 12.5
+
+
+@pytest.mark.asyncio
+async def test_run_if_leader_runs_body_directly_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    session = _FakeSession("postgresql", [])
+    _install(monkeypatch, session, enabled=False)
+
+    election = leader_election_module.LeaderElection(leader_id="node-a")
+
+    async def _body() -> str:
+        return "ran"
+
+    assert await election.run_if_leader(_body) == "ran"
+    assert session.statements == []

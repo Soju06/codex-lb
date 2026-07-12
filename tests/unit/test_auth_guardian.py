@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from types import SimpleNamespace
@@ -49,8 +49,8 @@ class _Repo:
 
 
 class _Leader:
-    async def try_acquire(self) -> bool:
-        return True
+    async def run_if_leader(self, fn: Callable[[], Awaitable[object]]) -> object:
+        return await fn()
 
 
 class _AuthManager:

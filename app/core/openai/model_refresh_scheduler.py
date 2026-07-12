@@ -4,8 +4,9 @@ import asyncio
 import contextlib
 import importlib
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Protocol, cast
+from typing import Protocol, TypeVar, cast
 
 from app.core.auth.refresh import RefreshError
 from app.core.cache.invalidation import NAMESPACE_MODEL_REGISTRY, get_cache_invalidation_poller
@@ -34,8 +35,11 @@ from app.modules.proxy.account_cache import get_account_selection_cache
 logger = logging.getLogger(__name__)
 
 
+_T = TypeVar("_T")
+
+
 class _LeaderElectionLike(Protocol):
-    async def try_acquire(self) -> bool: ...
+    async def run_if_leader(self, fn: Callable[[], Awaitable[_T]]) -> _T | None: ...
 
 
 @dataclass(slots=True)
@@ -87,13 +91,16 @@ class ModelRefreshScheduler:
                 continue
 
     async def _refresh_once(self) -> None:
-        is_leader = await _get_leader_election().try_acquire()
-        if not is_leader:
+        ran_as_leader = await _get_leader_election().run_if_leader(self._refresh_as_leader)
+        if not ran_as_leader:
             # Never fetch upstream on a non-leader; reconcile from the persisted
             # snapshot instead. This is the TTL backstop for a lost invalidation
-            # bump — the 0.5s cache-invalidation poller is the fast path.
+            # bump — the 0.5s cache-invalidation poller is the fast path. Also
+            # covers losing the lease mid-refresh, where run_if_leader returns
+            # None after cancelling the body.
             await reconcile_model_registry_from_store()
-            return
+
+    async def _refresh_as_leader(self) -> bool:
         try:
             async with get_background_session() as session:
                 accounts_repo = AccountsRepository(session)
@@ -105,7 +112,7 @@ class ModelRefreshScheduler:
                 get_account_selection_cache().invalidate()
                 logger.info("Model registry cleared because no active accounts remain")
                 await _persist_registry_state_and_bump()
-                return
+                return True
 
             encryptor = TokenEncryptor()
             per_plan_results: dict[str, list[UpstreamModel]] = {}
@@ -152,6 +159,9 @@ class ModelRefreshScheduler:
                 await reconcile_model_registry_from_store()
         except Exception:
             logger.exception("Model registry refresh loop failed")
+        # Ran as leader (even on internal failure): signal completion so the
+        # caller does not additionally reconcile from the persisted snapshot.
+        return True
 
 
 async def _persist_registry_state_and_bump() -> None:

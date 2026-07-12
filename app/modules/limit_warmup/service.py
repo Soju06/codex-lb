@@ -37,6 +37,9 @@ _MAX_CONCURRENT_WARMUP_SENDS = 4
 _ROLLING_WINDOW_SECONDS = 300 * 60
 _STAGGER_SLOT_GRACE_SECONDS = 60
 _IDLE_PRIMARY_WINDOW = "primary_idle"
+# Minimum reset_at forward jump (in seconds) to confirm a real quota window reset.
+# Upstream timestamp jitter of ~1 second must not trigger a warm-up.
+_RESET_CONFIRMED_MIN_JUMP_SECONDS = 60
 
 
 @dataclass(frozen=True, slots=True)
@@ -678,7 +681,10 @@ def _build_candidate(
     available_percent = 100.0 - after.used_percent
     if min_available_percent < 100.0 and available_percent < min_available_percent:
         return None
-    if after.reset_at <= before.reset_at:
+    # Require a meaningful reset_at forward jump (not just upstream timestamp jitter).
+    # Upstream can report reset_at values that fluctuate by ~1 second between
+    # refresh cycles; only treat a jump of at least 60 seconds as a real reset.
+    if after.reset_at - before.reset_at < _RESET_CONFIRMED_MIN_JUMP_SECONDS:
         return None
     return _WarmupCandidate(reset_at=after.reset_at, window=window)
 

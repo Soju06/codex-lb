@@ -1149,6 +1149,31 @@ async def test_staggered_idle_warmup_accepts_upstream_idle_floor(monkeypatch) ->
 
 
 @pytest.mark.asyncio
+async def test_regular_warmup_ignores_reset_at_jitter(monkeypatch) -> None:
+    """Upstream reset_at can fluctuate by ~1 second between refresh cycles.
+    A 1-second jitter must not trigger a reset-confirmed warm-up."""
+    repo = FakeWarmupRepo()
+    sender = FakeSender()
+    service = LimitWarmupService(repo, FakeRequestLogsRepo(), sender=sender)
+    account = _account("acc_1")
+
+    await service.run_after_usage_refresh(
+        accounts=[account],
+        settings=_settings(
+            limit_warmup_exhausted_threshold_percent=1.0,
+            limit_warmup_windows="primary",
+        ),
+        before_primary={account.id: _usage(account.id, used_percent=45.0, reset_at=1783829221)},
+        before_secondary={},
+        after_primary={account.id: _usage(account.id, used_percent=45.0, reset_at=1783829222)},
+        after_secondary={},
+    )
+
+    assert sender.calls == []
+    assert repo.rows == []
+
+
+@pytest.mark.asyncio
 async def test_staggered_idle_warmup_catches_slot_between_refresh_ticks(monkeypatch) -> None:
     now = datetime.fromtimestamp(6065, tz=timezone.utc).replace(tzinfo=None)
     monkeypatch.setattr(limit_warmup_service, "utcnow", lambda: now)

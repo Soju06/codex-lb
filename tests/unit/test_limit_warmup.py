@@ -1118,7 +1118,7 @@ async def test_staggered_idle_warmup_requires_unused_primary_window(monkeypatch)
 @pytest.mark.asyncio
 async def test_staggered_idle_warmup_accepts_upstream_idle_floor(monkeypatch) -> None:
     """Upstream reports a 1.0% floor for idle primary windows; the configurable
-    exhausted threshold lets operators treat that as idle so staggered idle
+    idle threshold lets operators treat that as idle so staggered idle
     warm-up actually fires instead of being dead code."""
     monkeypatch.setattr(
         limit_warmup_service,

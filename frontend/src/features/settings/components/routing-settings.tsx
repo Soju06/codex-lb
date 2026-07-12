@@ -2,6 +2,7 @@ import { useReducer } from "react";
 import { Route, Zap } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
@@ -826,147 +827,174 @@ export function RoutingSettings({
             </Select>
           </div>
 
-          <div className="space-y-3 p-3">
-            <div className="flex items-center justify-between gap-4">
-              <div className="flex min-w-0 items-center gap-2.5">
-                <Zap className="h-4 w-4 shrink-0 text-primary" aria-hidden="true" />
-                <div>
-                  <p className="text-sm font-medium">{t("settings.routing.limitWarmup.label")}</p>
-                  <p className="text-xs text-muted-foreground">{t("settings.routing.limitWarmup.description")}</p>
-                </div>
+          <div className="space-y-4 p-3">
+            {/* --- Section header --- */}
+            <div className="flex items-center gap-2">
+              <Zap className="h-4 w-4 shrink-0 text-primary" aria-hidden="true" />
+              <div>
+                <p className="text-sm font-medium">{t("settings.routing.limitWarmup.label")}</p>
+                <p className="text-xs text-muted-foreground">{t("settings.routing.limitWarmup.description")}</p>
               </div>
               <Switch
                 aria-label={t("settings.routing.limitWarmup.ariaLabel")}
                 checked={settings.limitWarmupEnabled}
                 disabled={busy}
                 onCheckedChange={(checked) => save({ limitWarmupEnabled: checked })}
+                className="ml-auto"
               />
             </div>
-            <div className="flex items-center justify-between gap-4">
-              <div className="min-w-0">
-                <p className="text-sm font-medium">Stagger idle warm-up</p>
-                <p className="text-xs text-muted-foreground">
-                  Spread opted-in account warm-ups across the rolling 5h window.
-                </p>
-              </div>
-              <Switch
-                aria-label="Enable staggered idle warm-up"
-                checked={settings.limitWarmupStaggeredIdleEnabled}
-                disabled={busy || !settings.limitWarmupEnabled}
-                onCheckedChange={(checked) => save({ limitWarmupStaggeredIdleEnabled: checked })}
-              />
-            </div>
-            {settings.limitWarmupStaggeredIdleEnabled && (
-              <div className="flex items-center justify-between gap-4 pl-4">
-                <div className="min-w-0">
-                  <span className="block text-[11px] font-medium text-muted-foreground">Idle at %</span>
-                  <p className="text-[10px] text-muted-foreground">
-                    Treat accounts at or below this usage as idle for staggered warm-up.
-                  </p>
-                </div>
-                <Input
-                  type="number"
-                  min={0.1}
-                  max={100}
-                  step={0.1}
-                  inputMode="decimal"
-                  value={draft.limitWarmupIdleThreshold}
-                  disabled={busy}
-                  onChange={(event) => updateDraft({ limitWarmupIdleThreshold: event.target.value })}
-                  className="h-8 w-24 text-xs"
-                  aria-label="Staggered idle warm-up idle threshold percent"
-                />
-              </div>
-            )}
 
-            <div className="grid gap-2 sm:grid-cols-[10rem_minmax(0,1fr)_7rem_7rem]">
-              <div className="space-y-1">
-                <span className="block text-[11px] font-medium text-muted-foreground">Windows</span>
-                <Select
-                  value={settings.limitWarmupWindows}
-                  onValueChange={(value) => save({ limitWarmupWindows: value as "primary" | "secondary" | "both" })}
-                >
-                  <SelectTrigger className="h-8 text-xs" disabled={busy} aria-label="Warm-up windows">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent align="start">
-                    <SelectItem value="both">{t("settings.routing.limitWarmup.windows.both")}</SelectItem>
-                    <SelectItem value="primary">{t("settings.routing.limitWarmup.windows.primary")}</SelectItem>
-                    <SelectItem value="secondary">{t("settings.routing.limitWarmup.windows.secondary")}</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-              <label className="block space-y-1">
-                <span className="block text-[11px] font-medium text-muted-foreground">Model</span>
-                <Input
-                  value={draft.limitWarmupModel}
-                  disabled={busy}
-                  maxLength={LIMIT_WARMUP_MODEL_MAX_LENGTH}
-                  onChange={(event) => updateDraft({ limitWarmupModel: event.target.value })}
-                  className="h-8 text-xs"
-                  aria-label={t("settings.routing.limitWarmup.modelAria")}
-                />
-              </label>
-              <label className="block space-y-1">
-                <span className="block text-[11px] font-medium text-muted-foreground">Exhausted at %</span>
-                <Input
-                  type="number"
-                  min={1}
-                  max={100}
-                  step={0.1}
-                  inputMode="decimal"
-                  value={draft.limitWarmupExhaustedThreshold}
-                  disabled={busy}
-                  onChange={(event) => updateDraft({ limitWarmupExhaustedThreshold: event.target.value })}
-                  className="h-8 text-xs"
-                />
-              </label>
-              <label className="block space-y-1">
-                <span className="block text-[11px] font-medium text-muted-foreground">Cooldown (sec)</span>
-                <Input
-                  type="number"
-                  min={60}
-                  step={60}
-                  inputMode="numeric"
-                  value={draft.limitWarmupCooldown}
-                  disabled={busy}
-                  onChange={(event) => updateDraft({ limitWarmupCooldown: event.target.value })}
-                  className="h-8 text-xs"
-                  aria-label={t("settings.routing.limitWarmup.cooldownAria")}
-                />
-              </label>
-            </div>
-            <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
-              <label className="block space-y-1 sm:flex-1">
-                <span className="block text-[11px] font-medium text-muted-foreground">Prompt</span>
-                <Input
-                  value={draft.limitWarmupPrompt}
-                  disabled={busy}
-                  maxLength={LIMIT_WARMUP_PROMPT_MAX_LENGTH}
-                  onChange={(event) => updateDraft({ limitWarmupPrompt: event.target.value })}
-                  className="h-8 text-xs"
-                  aria-label={t("settings.routing.limitWarmup.promptAria")}
-                />
-              </label>
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                className="h-8 text-xs sm:w-24"
-                disabled={busy || !limitWarmupFieldsChanged || !limitWarmupFieldsValid}
-                onClick={() =>
-                  void save({
-                    limitWarmupModel: draft.limitWarmupModel.trim(),
-                    limitWarmupPrompt: draft.limitWarmupPrompt.trim(),
-                    limitWarmupExhaustedThresholdPercent: parsedLimitWarmupExhaustedThreshold,
-                    limitWarmupIdleThresholdPercent: parsedLimitWarmupIdleThreshold,
-                    limitWarmupCooldownSeconds: parsedLimitWarmupCooldown,
-                  })
-                }
-              >
-                {t("settings.routing.limitWarmup.save")}
-              </Button>
-            </div>
+            {settings.limitWarmupEnabled && (
+              <>
+                {/* --- Shared warm-up settings --- */}
+                <div className="grid gap-2 sm:grid-cols-[10rem_minmax(0,1fr)_7rem_7rem]">
+                  <div className="space-y-1">
+                    <span className="block text-[11px] font-medium text-muted-foreground">Windows</span>
+                    <Select
+                      value={settings.limitWarmupWindows}
+                      onValueChange={(value) => save({ limitWarmupWindows: value as "primary" | "secondary" | "both" })}
+                    >
+                      <SelectTrigger className="h-8 text-xs" disabled={busy} aria-label="Warm-up windows">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent align="start">
+                        <SelectItem value="both">{t("settings.routing.limitWarmup.windows.both")}</SelectItem>
+                        <SelectItem value="primary">{t("settings.routing.limitWarmup.windows.primary")}</SelectItem>
+                        <SelectItem value="secondary">{t("settings.routing.limitWarmup.windows.secondary")}</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <label className="block space-y-1">
+                    <span className="block text-[11px] font-medium text-muted-foreground">Model</span>
+                    <Input
+                      value={draft.limitWarmupModel}
+                      disabled={busy}
+                      maxLength={LIMIT_WARMUP_MODEL_MAX_LENGTH}
+                      onChange={(event) => updateDraft({ limitWarmupModel: event.target.value })}
+                      className="h-8 text-xs"
+                      aria-label={t("settings.routing.limitWarmup.modelAria")}
+                    />
+                  </label>
+                  <label className="block space-y-1">
+                    <span className="block text-[11px] font-medium text-muted-foreground">Cooldown (sec)</span>
+                    <Input
+                      type="number"
+                      min={60}
+                      step={60}
+                      inputMode="numeric"
+                      value={draft.limitWarmupCooldown}
+                      disabled={busy}
+                      onChange={(event) => updateDraft({ limitWarmupCooldown: event.target.value })}
+                      className="h-8 text-xs"
+                      aria-label={t("settings.routing.limitWarmup.cooldownAria")}
+                    />
+                  </label>
+                  <label className="block space-y-1">
+                    <span className="block text-[11px] font-medium text-muted-foreground">Prompt</span>
+                    <Input
+                      value={draft.limitWarmupPrompt}
+                      disabled={busy}
+                      maxLength={LIMIT_WARMUP_PROMPT_MAX_LENGTH}
+                      onChange={(event) => updateDraft({ limitWarmupPrompt: event.target.value })}
+                      className="h-8 text-xs"
+                      aria-label={t("settings.routing.limitWarmup.promptAria")}
+                    />
+                  </label>
+                </div>
+
+                {/* --- Two warm-up modes side by side --- */}
+                <div className="grid gap-2 sm:grid-cols-2">
+                  {/* Mode 1: Reset-confirmed warm-up */}
+                  <div className="space-y-2 rounded-lg border border-border/60 p-2.5">
+                    <div className="flex items-center gap-2">
+                      <Badge variant="secondary" className="text-[10px]">After reset</Badge>
+                      <p className="text-xs font-medium">Reset-confirmed warm-up</p>
+                    </div>
+                    <p className="text-[11px] text-muted-foreground">
+                      Fires when an exhausted account's quota resets. Accounts at or above this usage before reset qualify.
+                    </p>
+                    <label className="flex items-center gap-2">
+                      <span className="text-[11px] font-medium text-muted-foreground whitespace-nowrap">Exhausted at %</span>
+                      <Input
+                        type="number"
+                        min={1}
+                        max={100}
+                        step={0.1}
+                        inputMode="decimal"
+                        value={draft.limitWarmupExhaustedThreshold}
+                        disabled={busy}
+                        onChange={(event) => updateDraft({ limitWarmupExhaustedThreshold: event.target.value })}
+                        className="h-8 w-full text-xs"
+                        aria-label="Exhausted at %"
+                      />
+                    </label>
+                  </div>
+
+                  {/* Mode 2: Staggered idle warm-up */}
+                  <div className="space-y-2 rounded-lg border border-border/60 p-2.5">
+                    <div className="flex items-center gap-2">
+                      <Badge variant="secondary" className="text-[10px]">Proactive</Badge>
+                      <p className="text-xs font-medium">Staggered idle warm-up</p>
+                      <Switch
+                        aria-label="Enable staggered idle warm-up"
+                        checked={settings.limitWarmupStaggeredIdleEnabled}
+                        disabled={busy}
+                        onCheckedChange={(checked) => save({ limitWarmupStaggeredIdleEnabled: checked })}
+                        className="ml-auto"
+                      />
+                    </div>
+                    {settings.limitWarmupStaggeredIdleEnabled ? (
+                      <>
+                        <p className="text-[11px] text-muted-foreground">
+                          Pre-starts the 5h window for idle accounts before traffic arrives. Accounts at or below this usage are considered idle.
+                        </p>
+                        <label className="flex items-center gap-2">
+                          <span className="text-[11px] font-medium text-muted-foreground whitespace-nowrap">Idle at %</span>
+                          <Input
+                            type="number"
+                            min={0.1}
+                            max={100}
+                            step={0.1}
+                            inputMode="decimal"
+                            value={draft.limitWarmupIdleThreshold}
+                            disabled={busy}
+                            onChange={(event) => updateDraft({ limitWarmupIdleThreshold: event.target.value })}
+                            className="h-8 w-full text-xs"
+                            aria-label="Idle at %"
+                          />
+                        </label>
+                      </>
+                    ) : (
+                      <p className="text-[11px] text-muted-foreground">
+                        Pre-starts the 5h window for idle accounts before traffic arrives. Enable to configure.
+                      </p>
+                    )}
+                  </div>
+                </div>
+
+                {/* --- Save button --- */}
+                <div className="flex justify-end">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="h-8 text-xs sm:w-24"
+                    disabled={busy || !limitWarmupFieldsChanged || !limitWarmupFieldsValid}
+                    onClick={() =>
+                      void save({
+                        limitWarmupModel: draft.limitWarmupModel.trim(),
+                        limitWarmupPrompt: draft.limitWarmupPrompt.trim(),
+                        limitWarmupExhaustedThresholdPercent: parsedLimitWarmupExhaustedThreshold,
+                        limitWarmupIdleThresholdPercent: parsedLimitWarmupIdleThreshold,
+                        limitWarmupCooldownSeconds: parsedLimitWarmupCooldown,
+                      })
+                    }
+                  >
+                    {t("settings.routing.limitWarmup.save")}
+                  </Button>
+                </div>
+              </>
+            )}
           </div>
 
           <div className="flex flex-col gap-3 p-3 sm:flex-row sm:items-center sm:justify-between">

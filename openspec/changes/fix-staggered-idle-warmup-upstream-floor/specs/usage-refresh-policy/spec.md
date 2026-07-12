@@ -37,6 +37,8 @@ The system SHALL also support a separate disabled-by-default staggered idle warm
 - **GIVEN** limit warm-up and staggered idle warm-up are enabled globally
 - **AND** multiple active accounts are opted into limit warm-up
 - **AND** an opted-in account has a healthy idle primary 5h usage sample with `used_percent` at or below the configured `limit_warmup_idle_threshold_percent`
+- **AND** no prior warm-up attempt places the account inside the configured cooldown
+- **AND** the usage sample was refreshed for the current cycle
 - **WHEN** background usage refresh evaluates that account inside its deterministic stagger slot
 - **THEN** the system MUST attempt to send one minimal upstream warm-up request for that account's current 300-minute cycle
 - **AND** the system MUST NOT send another staggered idle warm-up for that same account/cycle tuple

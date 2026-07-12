@@ -362,10 +362,16 @@ describe("RoutingSettings", () => {
   });
 
   it("names limit warm-up controls for assistive technology", () => {
-    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={vi.fn().mockResolvedValue(undefined)} />);
+    render(
+      <RoutingSettings
+        settings={{ ...BASE_SETTINGS, limitWarmupEnabled: true }}
+        busy={false}
+        onSave={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
 
     expect(screen.getByRole("switch", { name: "Enable limit warm-up" })).toBeInTheDocument();
-    expect(screen.getByRole("switch", { name: "Enable staggered idle warm-up" })).toBeDisabled();
+    expect(screen.getByRole("switch", { name: "Enable staggered idle warm-up" })).toBeInTheDocument();
     expect(screen.getByRole("switch", { name: "Prefer earlier reset accounts" })).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "Reset preference window" })).toBeInTheDocument();
     expect(screen.getByLabelText("Warm-up model")).toHaveAttribute("maxLength", "128");
@@ -424,7 +430,13 @@ describe("RoutingSettings", () => {
   it("does not silently truncate decimal warm-up cooldown values", async () => {
     const user = userEvent.setup();
     const onSave = vi.fn().mockResolvedValue(undefined);
-    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={onSave} />);
+    render(
+      <RoutingSettings
+        settings={{ ...BASE_SETTINGS, limitWarmupEnabled: true }}
+        busy={false}
+        onSave={onSave}
+      />,
+    );
 
     await user.clear(screen.getByLabelText("Warm-up cooldown"));
     await user.type(screen.getByLabelText("Warm-up cooldown"), "60.5");
@@ -436,7 +448,13 @@ describe("RoutingSettings", () => {
   it("saves warm-up exhausted threshold changes", async () => {
     const user = userEvent.setup();
     const onSave = vi.fn().mockResolvedValue(undefined);
-    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={onSave} />);
+    render(
+      <RoutingSettings
+        settings={{ ...BASE_SETTINGS, limitWarmupEnabled: true }}
+        busy={false}
+        onSave={onSave}
+      />,
+    );
 
     await user.clear(screen.getByLabelText("Exhausted at %"));
     await user.type(screen.getByLabelText("Exhausted at %"), "98.5");
@@ -444,6 +462,7 @@ describe("RoutingSettings", () => {
 
     expect(onSave).toHaveBeenCalledWith({
       ...BASE_UPDATE_PAYLOAD,
+      limitWarmupEnabled: true,
       limitWarmupExhaustedThresholdPercent: 98.5,
     });
   });
@@ -451,7 +470,13 @@ describe("RoutingSettings", () => {
   it("rejects invalid warm-up exhausted thresholds", async () => {
     const user = userEvent.setup();
     const onSave = vi.fn().mockResolvedValue(undefined);
-    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={onSave} />);
+    render(
+      <RoutingSettings
+        settings={{ ...BASE_SETTINGS, limitWarmupEnabled: true }}
+        busy={false}
+        onSave={onSave}
+      />,
+    );
 
     await user.clear(screen.getByLabelText("Exhausted at %"));
     await user.type(screen.getByLabelText("Exhausted at %"), "100.1");

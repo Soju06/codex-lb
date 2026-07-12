@@ -697,7 +697,7 @@ def _build_staggered_idle_candidate(
     after_primary: dict[str, UsageHistory],
     refresh_started_at: datetime | None,
     usage_refresh_interval_seconds: int,
-    idle_threshold_percent: float = 0.0,
+    idle_threshold_percent: float = 1.0,
 ) -> _WarmupCandidate | None:
     after = after_primary.get(account.id)
     if after is None:

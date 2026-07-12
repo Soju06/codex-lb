@@ -378,7 +378,7 @@ describe("RoutingSettings", () => {
     expect(screen.getByRole("combobox", { name: "Warm-up windows" })).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "Pace gap average" })).toBeInTheDocument();
     expect(screen.getByLabelText("Model")).toHaveAttribute("maxLength", "128");
-    expect(screen.getByLabelText("Min usage %")).toHaveAttribute("max", "100");
+    expect(screen.getByLabelText("Min usage percent")).toHaveAttribute("max", "100");
     expect(screen.getByLabelText("Warm-up prompt")).toHaveAttribute("maxLength", "512");
   });
 
@@ -441,7 +441,7 @@ describe("RoutingSettings", () => {
     await user.clear(screen.getByLabelText("Warm-up cooldown"));
     await user.type(screen.getByLabelText("Warm-up cooldown"), "60.5");
 
-    expect(screen.getAllByRole("button", { name: "Save" }).at(-1)).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Save warm-up settings" })).toBeDisabled();
     expect(onSave).not.toHaveBeenCalled();
   });
 
@@ -456,9 +456,9 @@ describe("RoutingSettings", () => {
       />,
     );
 
-    await user.clear(screen.getByLabelText("Min usage %"));
-    await user.type(screen.getByLabelText("Min usage %"), "98.5");
-    await user.click(screen.getAllByRole("button", { name: "Save" }).at(-1)!);
+    await user.clear(screen.getByLabelText("Min usage percent"));
+    await user.type(screen.getByLabelText("Min usage percent"), "98.5");
+    await user.click(screen.getByRole("button", { name: "Save warm-up settings" }));
 
     expect(onSave).toHaveBeenCalledWith({
       ...BASE_UPDATE_PAYLOAD,
@@ -478,11 +478,34 @@ describe("RoutingSettings", () => {
       />,
     );
 
-    await user.clear(screen.getByLabelText("Min usage %"));
-    await user.type(screen.getByLabelText("Min usage %"), "100.1");
+    await user.clear(screen.getByLabelText("Min usage percent"));
+    await user.type(screen.getByLabelText("Min usage percent"), "100.1");
 
-    expect(screen.getAllByRole("button", { name: "Save" }).at(-1)).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Save warm-up settings" })).toBeDisabled();
     expect(onSave).not.toHaveBeenCalled();
+  });
+
+  it("saves staggered idle warm-up idle threshold changes", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(
+      <RoutingSettings
+        settings={{ ...BASE_SETTINGS, limitWarmupEnabled: true, limitWarmupStaggeredIdleEnabled: true }}
+        busy={false}
+        onSave={onSave}
+      />,
+    );
+
+    await user.clear(screen.getByLabelText("Max usage percent"));
+    await user.type(screen.getByLabelText("Max usage percent"), "2.5");
+    await user.click(screen.getByRole("button", { name: "Save warm-up settings" }));
+
+    expect(onSave).toHaveBeenCalledWith({
+      ...BASE_UPDATE_PAYLOAD,
+      limitWarmupEnabled: true,
+      limitWarmupStaggeredIdleEnabled: true,
+      limitWarmupIdleThresholdPercent: 2.5,
+    });
   });
 
   it("saves the reset preference window", async () => {

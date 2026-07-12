@@ -907,14 +907,14 @@ export function RoutingSettings({
                   {/* Mode 1: Reset-confirmed warm-up */}
                   <div className="space-y-2 rounded-lg border border-border/60 p-2.5">
                     <div className="flex items-center gap-2">
-                      <Badge variant="secondary" className="text-[10px]">After reset</Badge>
-                      <p className="text-xs font-medium">Reset-confirmed warm-up</p>
+                      <Badge variant="secondary" className="text-[10px]">{t("settings.routing.limitWarmup.resetConfirmed.badge")}</Badge>
+                      <p className="text-xs font-medium">{t("settings.routing.limitWarmup.resetConfirmed.title")}</p>
                     </div>
                     <p className="text-[11px] text-muted-foreground">
-                      Fires when an exhausted account's quota resets. Accounts at or above this usage before reset qualify.
+                      {t("settings.routing.limitWarmup.resetConfirmed.description")}
                     </p>
                     <label className="flex items-center gap-2">
-                      <span className="text-[11px] font-medium text-muted-foreground whitespace-nowrap">Min usage %</span>
+                      <span className="text-[11px] font-medium text-muted-foreground whitespace-nowrap">{t("settings.routing.limitWarmup.resetConfirmed.thresholdLabel")}</span>
                       <Input
                         type="number"
                         min={1}
@@ -925,7 +925,7 @@ export function RoutingSettings({
                         disabled={busy}
                         onChange={(event) => updateDraft({ limitWarmupExhaustedThreshold: event.target.value })}
                         className="h-8 w-full text-xs"
-                        aria-label="Min usage %"
+                        aria-label={t("settings.routing.limitWarmup.resetConfirmed.thresholdAria")}
                       />
                     </label>
                   </div>
@@ -933,10 +933,10 @@ export function RoutingSettings({
                   {/* Mode 2: Staggered idle warm-up */}
                   <div className="space-y-2 rounded-lg border border-border/60 p-2.5">
                     <div className="flex items-center gap-2">
-                      <Badge variant="secondary" className="text-[10px]">Proactive</Badge>
-                      <p className="text-xs font-medium">Staggered idle warm-up</p>
+                      <Badge variant="secondary" className="text-[10px]">{t("settings.routing.limitWarmup.staggeredIdle.badge")}</Badge>
+                      <p className="text-xs font-medium">{t("settings.routing.limitWarmup.staggeredIdle.title")}</p>
                       <Switch
-                        aria-label="Enable staggered idle warm-up"
+                        aria-label={t("settings.routing.limitWarmup.staggeredIdle.toggleAria")}
                         checked={settings.limitWarmupStaggeredIdleEnabled}
                         disabled={busy}
                         onCheckedChange={(checked) => save({ limitWarmupStaggeredIdleEnabled: checked })}
@@ -946,10 +946,10 @@ export function RoutingSettings({
                     {settings.limitWarmupStaggeredIdleEnabled ? (
                       <>
                         <p className="text-[11px] text-muted-foreground">
-                          Pre-starts the 5h window for idle accounts before traffic arrives. Accounts at or below this usage are considered idle.
+                          {t("settings.routing.limitWarmup.staggeredIdle.description")}
                         </p>
                         <label className="flex items-center gap-2">
-                          <span className="text-[11px] font-medium text-muted-foreground whitespace-nowrap">Max usage %</span>
+                          <span className="text-[11px] font-medium text-muted-foreground whitespace-nowrap">{t("settings.routing.limitWarmup.staggeredIdle.thresholdLabel")}</span>
                           <Input
                             type="number"
                             min={0.1}
@@ -960,13 +960,13 @@ export function RoutingSettings({
                             disabled={busy}
                             onChange={(event) => updateDraft({ limitWarmupIdleThreshold: event.target.value })}
                             className="h-8 w-full text-xs"
-                            aria-label="Max usage %"
+                            aria-label={t("settings.routing.limitWarmup.staggeredIdle.thresholdAria")}
                           />
                         </label>
                       </>
                     ) : (
                       <p className="text-[11px] text-muted-foreground">
-                        Pre-starts the 5h window for idle accounts before traffic arrives. Enable to configure.
+                        {t("settings.routing.limitWarmup.staggeredIdle.disabledDescription")}
                       </p>
                     )}
                   </div>
@@ -980,6 +980,7 @@ export function RoutingSettings({
                     variant="outline"
                     className="h-8 text-xs sm:w-24"
                     disabled={busy || !limitWarmupFieldsChanged || !limitWarmupFieldsValid}
+                    aria-label={t("settings.routing.limitWarmup.saveAria")}
                     onClick={() =>
                       void save({
                         limitWarmupModel: draft.limitWarmupModel.trim(),

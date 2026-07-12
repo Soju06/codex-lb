@@ -1174,7 +1174,52 @@ async def test_regular_warmup_ignores_reset_at_jitter(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_staggered_idle_warmup_catches_slot_between_refresh_ticks(monkeypatch) -> None:
+async def test_regular_warmup_boundary_59_seconds_rejected(monkeypatch) -> None:
+    """A reset_at jump of exactly 59 seconds must NOT trigger a warm-up."""
+    repo = FakeWarmupRepo()
+    sender = FakeSender()
+    service = LimitWarmupService(repo, FakeRequestLogsRepo(), sender=sender)
+    account = _account("acc_1")
+
+    await service.run_after_usage_refresh(
+        accounts=[account],
+        settings=_settings(
+            limit_warmup_exhausted_threshold_percent=1.0,
+            limit_warmup_windows="primary",
+        ),
+        before_primary={account.id: _usage(account.id, used_percent=45.0, reset_at=1000)},
+        before_secondary={},
+        after_primary={account.id: _usage(account.id, used_percent=0.0, reset_at=1059)},
+        after_secondary={},
+    )
+
+    assert sender.calls == []
+    assert repo.rows == []
+
+
+@pytest.mark.asyncio
+async def test_regular_warmup_boundary_60_seconds_accepted(monkeypatch) -> None:
+    """A reset_at jump of exactly 60 seconds MUST trigger a warm-up."""
+    repo = FakeWarmupRepo()
+    sender = FakeSender()
+    service = LimitWarmupService(repo, FakeRequestLogsRepo(), sender=sender)
+    account = _account("acc_1")
+
+    await service.run_after_usage_refresh(
+        accounts=[account],
+        settings=_settings(
+            limit_warmup_exhausted_threshold_percent=1.0,
+            limit_warmup_windows="primary",
+        ),
+        before_primary={account.id: _usage(account.id, used_percent=45.0, reset_at=1000)},
+        before_secondary={},
+        after_primary={account.id: _usage(account.id, used_percent=0.0, reset_at=1060)},
+        after_secondary={},
+    )
+
+    assert len(sender.calls) == 1
+    assert len(repo.rows) == 1
+    assert repo.rows[0].window == "primary"
     now = datetime.fromtimestamp(6065, tz=timezone.utc).replace(tzinfo=None)
     monkeypatch.setattr(limit_warmup_service, "utcnow", lambda: now)
     repo = FakeWarmupRepo()

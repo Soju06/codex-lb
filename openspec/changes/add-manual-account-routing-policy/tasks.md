@@ -4,3 +4,9 @@
 - [x] 4. Apply routing policy in account selection.
 - [x] 5. Add additional-quota routing policy inheritance and overrides.
 - [x] 6. Run focused backend/frontend validation.
+- [x] 7. Enforce absolute `burn_first` precedence across all selection paths.
+  - [x] 7.1 Centralize policy-pool narrowing before routing strategy, health, and budget ranking.
+  - [x] 7.2 Make `burn_first` override configured `single_account` selection while preserving hard eligibility scopes.
+  - [x] 7.3 Rebind soft and owner-derived affinity to an eligible `burn_first` account.
+  - [x] 7.4 Add strategy, budget, sticky, configured-account, and owner-preference regression coverage.
+  - [x] 7.5 Run focused tests and strict OpenSpec validation.

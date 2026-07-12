@@ -5,86 +5,58 @@
 Define dashboard surface contracts so settings, account management, and operational views stay coherent across the SPA.
 ## Requirements
 ### Requirement: Settings page
-The Settings page SHALL include sections for: routing settings (sticky threads, reset priority, prompt-cache affinity TTL, and Fast Mode prohibition), password management (setup/change/remove), TOTP management (setup/disable), API key auth toggle, API key management (table, create, edit, delete, regenerate), and sticky-session administration.
 
-#### Scenario: Save prompt-cache affinity TTL
-- **WHEN** a user updates the prompt-cache affinity TTL from the routing settings section
-- **THEN** the app calls `PUT /api/settings` with the updated TTL and reflects the saved value
+The Settings page SHALL include sections for: routing settings (sticky threads,
+reset priority, prompt-cache affinity TTL, weekly pace controls), password
+management (setup/change/remove), TOTP management (setup/disable), API key auth
+toggle, API key management (table, create, edit, delete, regenerate), and
+sticky-session administration. API key create/edit controls that expose
+reasoning effort choices MUST include upstream-supported extended efforts such
+as `max` and `ultra`.
 
-#### Scenario: Save Fast Mode prohibition
-- **WHEN** a user enables or disables the Fast Mode prohibition control in the routing settings section
-- **THEN** the app calls `PUT /api/settings` with `prohibitFastMode`
-- **AND** reflects the saved value
+#### Scenario: API key dialog offers extended reasoning efforts
 
-#### Scenario: View sticky-session mappings
-- **WHEN** a user opens the sticky-session section on the Settings page
-- **THEN** the app fetches sticky-session entries and displays each mapping's kind, account, timestamps, and stale/expiry state
+- **WHEN** an operator opens the API key create or edit dialog
+- **THEN** the enforced reasoning control offers `Max` and `Ultra` in addition to existing reasoning efforts
 
-#### Scenario: Purge stale prompt-cache mappings
-- **WHEN** a user requests a stale purge from the sticky-session section
-- **THEN** the app calls the sticky-session purge API and refreshes the list afterward
+#### Scenario: Save weekly pace gap smoothing window
+
+- **WHEN** a user selects a weekly pace gap smoothing window from the routing settings section
+- **THEN** the app calls `PUT /api/settings` with `weeklyPaceSmoothingMinutes`
+- **AND** the saved settings response reflects the selected value
 
 ### Requirement: Accounts page
 
-The Accounts page SHALL display a two-column layout: left panel with searchable account list, import button, and add account button; right panel with selected account details including usage, token info, and actions (pause/resume/delete/re-authenticate). The browser OAuth stage SHALL show an authorization URL with a copy action that remains functional in secure and non-secure contexts.
+The Accounts page SHALL display a two-column layout: left panel with searchable account list, import button, and add account button; right panel with selected account details including usage, token info, and actions (pause/resume/delete/re-authenticate). The Accounts page SHALL also let operators view and update whether an account is authorized for upstream cybersecurity work without losing existing account actions such as pause, resume, re-authenticate, export, and delete.
 
-The Accounts page SHALL also allow exporting a selected account as an OpenCode-compatible `auth.json` payload with explicit raw-token warnings.
+#### Scenario: Account security-work authorization is toggled
 
-#### Scenario: Account selection
+- **WHEN** an operator toggles Trusted Access for Cyber for an account
+- **THEN** the app sends the account update request with the requested `securityWorkAuthorized` value
+- **AND** the account list and dashboard overview data are invalidated after the update succeeds
 
-- **WHEN** a user clicks an account in the list
-- **THEN** the right panel shows the selected account's details
+#### Scenario: Security-work authorization appears in account summaries
 
-#### Scenario: Account import
+- **WHEN** an account summary has `securityWorkAuthorized=true`
+- **THEN** the Accounts page shows that account as eligible for Trusted Access for Cyber routing
 
-- **WHEN** a user clicks the import button and uploads an auth.json file
-- **THEN** the app calls `POST /api/accounts/import` and refreshes the account list on success
+#### Scenario: Same-email workspace slots are distinguishable
 
-#### Scenario: OAuth add account
+- **WHEN** the account list contains multiple accounts with the same email
+- **AND** at least one account has workspace metadata
+- **THEN** the list and detail views show workspace identity or compact account id context sufficient to distinguish the credential slots
 
-- **WHEN** a user clicks the add account button
-- **THEN** an OAuth dialog opens with browser and device code flow options
+#### Scenario: Same-login workspace slots are preserved
 
-#### Scenario: OAuth browser authorization URL copy fallback
+- **WHEN** multiple imported or OAuth-completed credentials share the same ChatGPT account identity
+- **AND** they carry distinct workspace ids or workspace labels
+- **THEN** each workspace credential is preserved as a separate local account slot
 
-- **WHEN** a user clicks Copy for the browser authorization URL inside the OAuth dialog
-- **THEN** the copy operation succeeds using secure Clipboard API when available
-- **AND** falls back to dialog-scoped `execCommand("copy")` when secure Clipboard API is unavailable or blocked
+#### Scenario: Import copy reflects credential slots
 
-#### Scenario: OAuth browser authorization URL copy failure feedback
+- **WHEN** a user views import settings
+- **THEN** the copy describes preserving separate workspace or unknown credential slots instead of email-level duplicates
 
-- **WHEN** both clipboard copy paths fail for the browser authorization URL inside the OAuth dialog
-- **THEN** the dialog surfaces a visible copy failure message
-
-#### Scenario: Device OAuth start begins polling
-
-- **WHEN** the app starts Device Code OAuth with `POST /api/oauth/start`
-- **AND** the response includes a `deviceAuthId` and `userCode`
-- **THEN** the backend starts polling for the device token without requiring a separate `/api/oauth/complete` call
-- **AND** a later `/api/oauth/complete` call remains safe and does not start a duplicate polling task
-
-#### Scenario: Account actions
-
-- **WHEN** a user clicks pause/resume/delete on an account
-- **THEN** the corresponding API is called and the account list is refreshed
-
-#### Scenario: Concurrent browser OAuth sessions stay isolated
-- **WHEN** two browser PKCE OAuth sessions are started concurrently from separate dashboard tabs or operators
-- **AND** each session later submits its own callback URL
-- **THEN** each callback is matched against the flow that minted its `state` token
-- **AND** one flow does not invalidate or overwrite the other flow's callback state
-
-#### Scenario: Browser OAuth link refresh
-- **WHEN** a user is on the browser PKCE step of the OAuth dialog
-- **AND** the current authorization URL has already been used or needs to be replaced
-- **THEN** the dialog offers a refresh action that starts the browser OAuth flow again without leaving the dialog
-- **AND** the dialog updates to the newly generated authorization URL
-
-#### Scenario: Export selected account from dashboard
-- **WHEN** a user clicks the OpenCode export action for a selected account
-- **THEN** the dashboard requests a per-account export from the backend
-- **AND** shows copy/download controls for the official OpenCode `auth.json` payload
-- **AND** warns that the payload contains raw account tokens
 ### Requirement: Request logs display account plan tier
 When a request log entry is associated with an account, the dashboard request-log API response MUST expose the persisted request-log `planType` snapshot, and the recent-requests table MUST render the plan tier in a visible request-log column or badge.
 
@@ -109,7 +81,8 @@ When a request log entry includes service-tier data, the dashboard request-log A
 - **AND** the dashboard also shows that the request asked for `priority`
 
 ### Requirement: Accounts list surfaces quota reset timing
-The Accounts page account list SHALL render a compact 5h quota row and a weekly quota row for accounts that have both quota windows, and SHALL include the time remaining until reset for each rendered row when a reset timestamp is available. Weekly-only accounts SHALL omit the 5h row.
+
+The Accounts page account list SHALL render a compact 5h quota row and a weekly quota row for accounts that have both quota windows, and SHALL include the time remaining until reset for each rendered row when a reset timestamp is available. Weekly-only accounts SHALL omit the 5h row. Account cards SHALL also surface whether the account is opted in to limit warm-up.
 
 #### Scenario: Regular account shows both quota rows
 - **WHEN** the account list renders an account with both primary and weekly quota windows
@@ -120,6 +93,10 @@ The Accounts page account list SHALL render a compact 5h quota row and a weekly 
 - **WHEN** the account list renders an account whose primary window is absent
 - **THEN** the list item does not render a 5h quota row
 - **AND** the weekly quota row still renders
+
+#### Scenario: Limit warm-up opt-in is visible
+- **WHEN** the account list renders an account with limit warm-up opt-in enabled
+- **THEN** the account card shows the opt-in state
 
 ### Requirement: Accounts list respects compact row appearance preference
 The Accounts page account list SHALL honor a locally stored appearance preference that selects which compact quota rows are shown: 5h, weekly, or both. The default preference SHALL be Both. When the selected row is unavailable for a given account, the list MAY fall back to the available row so the account still shows quota information.
@@ -161,18 +138,24 @@ The dashboard request logs view SHALL allow operators to filter rows by one or m
 
 ### Requirement: Dashboard weekly credits pace
 
-The dashboard SHALL show weekly quota pace when account weekly capacity credits, remaining credits, reset time, and window length are available. The pace calculation MUST use credit totals rather than averaging per-account percentages, because weekly ChatGPT quota credits are not the same unit as raw request tokens. The dashboard MUST prefer the backend-provided `weeklyCreditPace` object from `GET /api/dashboard/overview` when present, and MAY fall back to a local calculation only for older responses that do not include that field.
+The dashboard SHALL show weekly quota pace when account weekly capacity credits, remaining credits, reset time, and window length are available. The pace calculation MUST use credit totals rather than averaging per-account percentages, because weekly ChatGPT quota credits are not the same unit as raw request tokens. The dashboard MUST prefer the backend-provided `weeklyCreditPace` object from `GET /api/dashboard/overview` when present, and MAY fall back to a local calculation only for older responses that do not include that field. The dashboard projections payload SHALL expose smoothed weekly pace gap fields for display while preserving instantaneous live usage fields.
 
 #### Scenario: Weekly credits pace uses account reset deadlines
 
 - **WHEN** multiple accounts have weekly quota data with different `resetAtSecondary` values
 - **THEN** the system computes each account's expected remaining weekly credits from that account's own reset time and window length before summing totals
 
-#### Scenario: Weekly credits pace excludes inactive or stale usage rows
+#### Scenario: Weekly credits pace excludes hard-blocked or stale usage rows
 
-- **WHEN** an account is not active or its latest weekly usage sample is older than the freshness window derived from the usage refresh interval
+- **WHEN** an account is `reauth_required`, paused, deactivated, missing from the account table, or its latest weekly usage sample is older than the freshness window derived from the usage refresh interval
 - **THEN** the account is not included in weekly pace totals or forecasts
 - **AND** the response reports the excluded stale account count separately from the included account count
+
+#### Scenario: Exhausted accounts still count in weekly credits pace
+
+- **WHEN** an account is `rate_limited` or `quota_exceeded`
+- **AND** it has complete, fresh weekly capacity, remaining credits, reset time, and window length
+- **THEN** the account is included in weekly pace totals and forecasts
 
 #### Scenario: Current schedule gap is separate from forecast shortfall
 
@@ -180,6 +163,20 @@ The dashboard SHALL show weekly quota pace when account weekly capacity credits,
 - **THEN** the response reports `scheduleGapCredits` for the current deficit against the linear schedule
 - **AND** the response reports `projectedShortfallCredits` only for a future shortfall forecast based on recent burn
 - **AND** the dashboard labels the two concepts separately
+- **AND** the dashboard describes the current deficit as over planned usage, fewer credits remaining than scheduled, or equivalent over-consumption wording rather than "behind schedule"
+
+#### Scenario: Displayed pace gap uses configured smoothing
+
+- **GIVEN** the weekly pace gap smoothing window is configured
+- **WHEN** recent weekly usage samples are available for the current weekly reset/window segment
+- **THEN** the response includes `smoothedDeltaPercent`, `smoothedScheduleGapCredits`, and `paceGapSmoothingMinutes`
+- **AND** the Weekly credits pace card displays the smoothed gap while keeping `actualUsedPercent` as the live current value
+
+#### Scenario: Weekly pace smoothing resets with quota window
+
+- **GIVEN** a smoothing time window contains samples from before and after a weekly quota reset
+- **WHEN** the latest sample belongs to the new reset/window segment
+- **THEN** the smoothed pace gap excludes the samples from the previous reset/window segment
 
 #### Scenario: Forecast burn uses recent weekly usage slope
 
@@ -198,7 +195,7 @@ The dashboard SHALL show weekly quota pace when account weekly capacity credits,
 
 #### Scenario: No valid weekly credit data hides pace
 
-- **WHEN** no account has complete, active, fresh weekly credits pace data
+- **WHEN** no account has complete, fresh weekly credits pace data for an `active`, `rate_limited`, or `quota_exceeded` account
 - **THEN** the dashboard does not render a fake weekly pace value
 
 ### Requirement: Account weekly trend planned line
@@ -405,15 +402,15 @@ The account delete confirmation dialog SHALL include a checkbox labeled "Delete 
 
 ### Requirement: Dashboard limit warm-up controls
 
-The dashboard SHALL expose global limit warm-up controls in Settings and per-account opt-in/status in account views. The global default SHALL be disabled.
+The dashboard SHALL expose global limit warm-up controls in Settings and per-account opt-in/status in account views. The global default SHALL be disabled. Settings SHALL include an exhausted-threshold percent control that determines which pre-reset usage samples count as exhausted for reset-confirmed warm-up.
 
 #### Scenario: Configure warm-up behavior
 - **WHEN** an operator opens Settings
-- **THEN** the dashboard shows controls for enabling limit warm-up, enabling staggered idle warm-up, selecting primary/secondary/both windows, setting the warm-up model, setting the prompt, and setting the cooldown
+- **THEN** the dashboard shows controls for enabling limit warm-up, selecting primary/secondary/both windows, setting the warm-up model, setting the prompt, setting the exhausted threshold, and setting the cooldown
 
 #### Scenario: Validate warm-up settings before save
-- **WHEN** an operator edits warm-up model, prompt, or cooldown fields
-- **THEN** the dashboard enforces the same non-empty, max-length, and integer cooldown bounds as the backend API before enabling save
+- **WHEN** an operator edits warm-up model, prompt, exhausted threshold, or cooldown fields
+- **THEN** the dashboard enforces the same non-empty, max-length, percent, and integer cooldown bounds as the backend API before enabling save
 
 #### Scenario: Show per-account opt-in and last attempt
 - **WHEN** account summaries include limit warm-up status
@@ -662,12 +659,30 @@ The `/reports` page SHALL load and refetch report data from `GET /api/reports`.
 
 ### Requirement: Reports page exposes visible filter controls
 
-The `/reports` page SHALL expose visible filter controls for start date, end date, account, and model.
+The `/reports` page SHALL expose visible filter controls for `7d`, `30d`, and `90d` quick presets, start date, end date, account, and model. When an authenticated operator clicks one of the quick presets, the page SHALL visibly highlight that preset. When the operator manually edits the start date or end date afterward, the page SHALL clear the quick-preset highlight until another quick preset is clicked. The start and end date inputs SHALL disallow selecting dates later than the browser's current local calendar date.
 
 #### Scenario: Reports page shows report filter controls
 
 - **WHEN** an authenticated operator opens `/reports`
-- **THEN** the page exposes visible filter controls for start date, end date, account, and model
+- **THEN** the page exposes visible filter controls for `7d`, `30d`, and `90d` quick presets, start date, end date, account, and model
+
+#### Scenario: Quick preset highlight follows the selected preset
+
+- **WHEN** an authenticated operator clicks the `30d` quick preset on `/reports`
+- **THEN** the page visibly highlights the `30d` preset
+- **AND** the page updates the start and end dates to the `30d` preset range
+
+#### Scenario: Quick preset highlight clears after manual date edits
+
+- **WHEN** an authenticated operator clicks a quick preset on `/reports`
+- **AND** then manually edits the start date or end date
+- **THEN** the page clears the quick-preset highlight
+- **AND** the page keeps the edited date range values
+
+#### Scenario: Report date inputs disallow future dates
+
+- **WHEN** an authenticated operator opens `/reports`
+- **THEN** the start date and end date inputs prevent selecting a date later than the browser's current local calendar date
 
 ### Requirement: Reports page preserves reports query parameter names
 
@@ -687,3 +702,1007 @@ The reports `ChartTooltip` component SHALL type its props as `Partial<TooltipCon
 - **WHEN** a reports chart passes `<ChartTooltip names={...} formatValue={...} />` via the recharts `<Tooltip content={...}>` prop
 - **THEN** TypeScript compilation succeeds without errors about missing `payload`, `active`, `label`, or `coordinate`
 - **AND** recharts injects those properties at runtime before calling the component
+
+### Requirement: Accounts page unified export action
+
+The Accounts page SHALL render a single "Export" button in the account actions area. Clicking the export button SHALL open a modal dialog titled "Auth Export" with a format mode selector ("codex" / "opencode"). The page SHALL use a single API call to `POST /api/accounts/{id}/export/auth` before opening the modal, and SHALL pass the full response to the modal for display. No auto-download SHALL occur without user interaction in the modal.
+
+#### Scenario: Single export button replaces dual buttons
+
+- **WHEN** a user views the account actions for a selected account
+- **THEN** exactly one "Export" button is visible
+- **AND** no separate "Export OpenCode auth" button is present
+
+#### Scenario: Export opens modal after API success
+
+- **WHEN** a user clicks the "Export" button
+- **THEN** the frontend calls `POST /api/accounts/{id}/export/auth`
+- **AND** on success the "Auth Export" modal opens with the response data
+- **AND** no file is downloaded until the user clicks Download in the modal
+
+#### Scenario: Export error shows toast
+
+- **WHEN** the `POST /api/accounts/{id}/export/auth` call fails
+- **THEN** a toast notification shows the error message
+- **AND** no modal opens
+
+### Requirement: Reset-window routing setting UI
+The dashboard routing settings UI SHALL expose a control for the earlier-reset
+preference window whenever earlier-reset routing preference is configurable. The
+control SHALL allow only `primary` and `secondary` values and SHALL submit the
+selected value using the settings API field `preferEarlierResetWindow`.
+
+#### Scenario: Operator selects primary reset window
+- **GIVEN** the routing settings UI is open
+- **WHEN** the operator selects `primary` as the earlier-reset window
+- **THEN** the settings update payload includes `preferEarlierResetWindow: "primary"`
+
+#### Scenario: Imported settings preserve reset-window preference
+- **GIVEN** an imported settings payload includes `preferEarlierResetWindow`
+- **WHEN** the settings import is applied
+- **THEN** the imported value is sent to the backend instead of being dropped
+
+### Requirement: Dashboard account cards show live credit state
+
+Account summary responses SHALL expose the latest upstream credit metadata for
+each account as nullable `creditsHas`, `creditsUnlimited`, and `creditsBalance`
+fields. The dashboard account schema SHALL accept those fields.
+
+The dashboard account card SHALL render a compact Credits row. If
+`creditsUnlimited` is true, the value SHALL be `Unlimited`. Otherwise, when a
+numeric credit balance is available it SHALL render that balance. If no credit
+balance is available, the card MAY fall back to the account's remaining weekly
+or primary credit value, and SHALL render `-` when no credit value is known.
+
+#### Scenario: Unlimited credits render explicitly
+
+- **WHEN** an account summary has `creditsUnlimited = true`
+- **THEN** the dashboard account card shows `Credits: Unlimited`
+
+#### Scenario: Positive credit balance renders on the card
+
+- **WHEN** an account summary includes `creditsBalance = 1.5`
+- **THEN** the dashboard account card shows that numeric credit balance
+
+#### Scenario: Missing credit data renders a placeholder
+
+- **WHEN** an account summary has no credit balance and no remaining credit fallback
+- **THEN** the dashboard account card shows `Credits: -`
+
+### Requirement: Dashboard settings must expose upstream proxy routing controls
+The settings dashboard MUST allow operators to inspect upstream proxy routing state, enable or disable routing, choose the default proxy pool, create proxy endpoints, create proxy pools, and add endpoints to pools.
+
+#### Scenario: Operator creates a pool from existing endpoints
+- **GIVEN** the upstream proxy admin API returns at least one endpoint
+- **WHEN** an operator creates a pool and selects endpoint members
+- **THEN** the dashboard MUST call the pool creation API with the selected endpoint ids
+- **AND** refresh the displayed upstream proxy admin state.
+
+### Requirement: Dashboard accounts must expose account proxy bindings
+The accounts dashboard MUST allow operators to bind an account to a proxy pool and disable an existing account binding.
+
+#### Scenario: Operator binds an account to a pool
+- **GIVEN** upstream proxy routing has at least one proxy pool
+- **WHEN** an operator selects a pool for an account and saves the binding
+- **THEN** the dashboard MUST call the account binding API for that account
+- **AND** display the selected pool as the account binding.
+
+### Requirement: Accounts list supports explicit sort modes
+
+The Accounts page account list SHALL expose sort modes for reset time
+soonest-first, reset time latest-first, account name ascending, and account name
+descending. The default sort mode SHALL remain reset time soonest-first. The
+same selected sort mode SHALL apply to both the rendered account list and the
+page-level selected-account fallback.
+
+#### Scenario: Reset soonest remains the default
+
+- **WHEN** the account list renders without an explicit sort mode
+- **THEN** accounts with the earliest upcoming visible quota reset sort first
+
+#### Scenario: Reset latest sorts finite resets descending
+
+- **WHEN** a user selects reset time latest-first
+- **THEN** accounts with later upcoming visible quota resets sort before
+  accounts with earlier upcoming visible quota resets
+- **AND** accounts without an upcoming visible reset timestamp sort after
+  accounts with finite upcoming reset timestamps
+
+#### Scenario: Name sort modes order by account label
+
+- **WHEN** a user selects account name ascending or descending
+- **THEN** the account list orders accounts by display name, email, or account
+  identifier in the selected direction
+
+### Requirement: API key overview SHALL show lifetime usage aggregates
+
+The dashboard API key overview SHALL present usage totals using the API key list
+`usageSummary` values as lifetime aggregates (all non-warmup request-log history),
+unless the backend contract is changed to provide a bounded window explicitly.
+
+#### Scenario: Overview usage labels reflect lifetime scope
+
+- **WHEN** the API key overview renders `usageSummary` values for request count,
+  token count, and cost
+- **THEN** the section labels SHALL read as lifetime usage (for example:
+  "Lifetime Requests", "Lifetime Cost", "Lifetime Cost by API Key", "Lifetime Tokens
+  by API Key"), and SHALL NOT be labeled as 7-day totals.
+
+### Requirement: Dashboard request-log details expose user-agent metadata
+The dashboard request-log API response MUST expose the persisted request-log `useragent` and `useragentGroup` values when present. The Request Details dialog MUST render the full `useragent` value in a `User Agent` field below the `Transport`, `Time`, and `Error Code` row, and MUST render `—` when no full user-agent value is stored.
+
+#### Scenario: Request details show the full stored user-agent
+- **WHEN** a request log entry is stored with `useragent: "opencode/1.15.13 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"` and `useragentGroup: "opencode"`
+- **THEN** the `GET /api/request-logs` response includes both values for that row
+- **AND** the Request Details dialog shows `User Agent` with the full stored string
+
+#### Scenario: Request details show a placeholder for legacy rows
+- **WHEN** a request log entry has `useragent: null`
+- **THEN** the `GET /api/request-logs` response includes `useragent: null` and `useragentGroup: null` or omits them as nullable fields
+- **AND** the Request Details dialog renders `User Agent` as `—`
+
+### Requirement: `/api/reports` returns nullable account buckets safely
+
+`GET /api/reports` SHALL return an `accountId` field for each `byAccount` item that is either a string account identifier or `null`.
+The system MUST preserve rows with `account_id IS NULL` and return them as a separate account bucket with `accountId: null` so historical usage is still represented.
+
+#### Scenario: Null accountId is serialized for historical rows
+- **WHEN** request logs in the selected period include rows with `account_id = NULL`
+- **AND** those rows have non-null `cost_usd`
+- **THEN** the `byAccount` response includes an item with `accountId: null`
+- **AND** response serialization succeeds without schema validation failure
+
+### Requirement: Reports data path uses backend-side date grouping
+
+`GET /api/reports` SHALL use backend-side date grouping logic for both PostgreSQL and SQLite, producing `YYYY-MM-DD` daily buckets for stable trend display and CSV export.
+
+#### Scenario: SQLite report request returns date buckets
+- **WHEN** the repository is SQLite
+- **AND** `/api/reports` is called with a valid date range
+- **THEN** the response contains `daily` entries with `date` values in `YYYY-MM-DD` format
+- **AND** the endpoint responds with HTTP 200
+
+### Requirement: Reports API is accessible through the dashboard route map
+
+The dashboard surface SHALL expose a reports page at route `/reports` and route to data loaded from `GET /api/reports` with `startDate`, `endDate`, `accountId`, and `model` filters.
+
+#### Scenario: Dashboard reports page uses `/api/reports`
+- **WHEN** an authenticated operator opens `/reports`
+- **THEN** the page loads the aggregated reports payload from `GET /api/reports`
+- **AND** allows filtering by date range, model, and account
+- **AND** uses the returned payload to render summary cards, daily charts, and model and user-agent distribution donuts
+
+### Requirement: Reports distribution donuts show active-metric totals
+
+The `/reports` page SHALL render both `Distribution by Model` and `Distribution by UserAgent` cards.
+Each card SHALL show `Total` above the donut center value.
+When the distribution metric toggle is `cost`, the center value and legend values SHALL show compact USD formatting with up to two decimal places and `K`, `M`, or `B` suffixes when applicable.
+When the distribution metric toggle is `req`, the center value and legend values SHALL show compact request formatting with up to two decimal places and `K`, `M`, or `B` suffixes when applicable.
+Each distribution legend SHALL keep at most four rows visible before vertical scrolling, and any overflow scrollbar SHALL remain visually hidden while preserving scroll interaction.
+Hovering a donut slice SHALL highlight the matching legend row, and hovering a legend row SHALL highlight the matching donut slice.
+
+#### Scenario: Distribution donuts follow the active metric
+- **WHEN** report data includes model and user-agent distribution rows
+- **THEN** `/reports` renders both `Distribution by Model` and `Distribution by UserAgent`
+- **AND** each donut center shows `Total` on one line and the active metric total on the next line
+- **AND** switching a donut card from `cost` to `req` updates that card's center and legend values from compact USD totals to compact request totals
+
+#### Scenario: Distribution donuts sync hover state with a scrollable legend
+- **WHEN** report data includes more than four model or user-agent distribution rows
+- **THEN** each distribution legend shows four visible rows before vertical scrolling the remainder
+- **AND** the scrollbar stays visually hidden while scrolling still works
+- **AND** hovering any donut slice highlights the matching legend row
+- **AND** hovering any legend row highlights the matching donut slice
+
+### Requirement: Dashboard accounts section shows account availability summary
+
+The dashboard `Accounts` section SHALL render a compact summary derived from the existing dashboard overview accounts collection. The summary SHALL show the total registered account count, the active account count, and the unavailable account count.
+
+An account SHALL count as active only when its dashboard status normalizes to `active`. Accounts whose normalized status is `paused`, `limited`, `exceeded`, `reauth`, or `deactivated` SHALL count as unavailable.
+
+The summary SHALL render in the `Accounts` section header row and SHALL use the project's existing foreground, muted, positive, and negative theme color conventions for light and dark mode.
+
+#### Scenario: Mixed account states show registered, active, and unavailable counts
+
+- **WHEN** `GET /api/dashboard/overview` returns three accounts with statuses `active`, `paused`, and `rate_limited`
+- **THEN** the dashboard `Accounts` section header shows `3 registered`
+- **AND** shows `1 active`
+- **AND** shows `2 unavailable`
+
+#### Scenario: Only normalized active accounts count as active
+
+- **WHEN** `GET /api/dashboard/overview` returns accounts with statuses `active`, `quota_exceeded`, `reauth_required`, and `deactivated`
+- **THEN** only the `active` account contributes to the active count
+- **AND** the other three accounts contribute to the unavailable count
+
+#### Scenario: Theme-aware colors match dashboard conventions
+
+- **WHEN** the dashboard renders in light mode or dark mode
+- **THEN** the registered count uses foreground styling
+- **AND** the labels use muted-foreground styling
+- **AND** the active count uses the dashboard positive green styling
+- **AND** the unavailable count uses the dashboard negative red styling
+
+### Requirement: Dashboard overview summary cards show previous-window usage deltas
+
+The dashboard overview API SHALL expose previous-window comparison data for the existing `Requests`, `Tokens`, and `Est. API Cost` summary cards returned by `GET /api/dashboard/overview`. The comparison SHALL be tied to the selected overview timeframe so that `1d` compares the current 1-day window with the immediately preceding 1-day window, `7d` compares the current 7-day window with the immediately preceding 7-day window, and `30d` compares the current 30-day window with the immediately preceding 30-day window.
+
+The overview response SHALL include a comparison block that exposes whether previous-window comparison is allowed and the previous-window totals for requests, tokens, and estimated API cost. The dashboard SHALL use that block to render a compact percentage-change indicator on the existing `Requests`, `Tokens`, and `Est. API Cost` cards only. The dashboard MUST NOT add this indicator to `Error rate` or `Account burn projection`.
+
+If the immediately preceding window is not fully covered by eligible request-log history for the selected timeframe, the overview response SHALL mark the comparison as unavailable and the dashboard SHALL hide the percentage-change indicator for those cards.
+
+If previous-window comparison is available and the previous total for a card is greater than zero, the dashboard SHALL calculate the displayed change from the current total relative to the previous total, SHALL show increases with an upward indicator using the project's positive `emerald` styling, and SHALL show decreases with a downward indicator using the project's negative `red` styling.
+
+#### Scenario: Daily overview renders increase from previous window
+
+- **WHEN** `GET /api/dashboard/overview?timeframe=1d` returns current totals for requests, tokens, and estimated API cost plus comparison data with `canCompare: true`
+- **AND** the previous-window totals are lower than the current-window totals
+- **THEN** the dashboard renders percentage-change indicators on the `Requests`, `Tokens`, and `Est. API Cost` cards
+- **AND** each increase uses an upward indicator with positive `emerald` styling
+
+#### Scenario: Weekly overview renders decrease from previous window
+
+- **WHEN** `GET /api/dashboard/overview?timeframe=7d` returns comparison data with `canCompare: true`
+- **AND** at least one of the previous-window totals for requests, tokens, or estimated API cost is higher than the current-window total for that same card
+- **THEN** the dashboard renders a downward percentage-change indicator for that card
+- **AND** that decrease uses negative `red` styling
+
+#### Scenario: Partial previous window suppresses comparison
+
+- **WHEN** `GET /api/dashboard/overview?timeframe=7d` or `GET /api/dashboard/overview?timeframe=30d` cannot prove the immediately preceding same-length window is fully covered by eligible request-log history
+- **THEN** the overview response marks the comparison as unavailable
+- **AND** the dashboard does not render percentage-change indicators on the `Requests`, `Tokens`, or `Est. API Cost` cards
+
+#### Scenario: Non-comparison cards remain unchanged
+
+- **WHEN** the dashboard renders overview cards from `GET /api/dashboard/overview` with or without comparison data
+- **THEN** `Error rate` and `Account burn projection` do not render previous-window percentage-change indicators
+
+### Requirement: Dashboard estimated cost card meta avoids duplicate estimate and cache copy
+
+The dashboard overview `Est. API Cost` summary card SHALL render its meta text as only the averaged cost for the selected overview timeframe. The meta text MUST NOT append duplicate estimate wording or cached-token counts.
+
+#### Scenario: Weekly estimated cost card shows only average-per-day text
+
+- **WHEN** `GET /api/dashboard/overview?timeframe=7d` returns an `Est. API Cost` total and the summary metrics also include cached input tokens
+- **THEN** the dashboard renders the cost-card meta text as `Avg/day <currency value>`
+- **AND** the same meta text does not include `API estimate`
+- **AND** the same meta text does not include `cached`
+
+#### Scenario: Daily estimated cost card shows only average-per-hour text
+
+- **WHEN** `GET /api/dashboard/overview?timeframe=1d` returns an `Est. API Cost` total
+- **THEN** the dashboard renders the cost-card meta text as `Avg/hr <currency value>`
+- **AND** the same meta text does not include any extra suffix text
+
+### Requirement: Upstream proxy admin creation flows use modal dialogs
+
+The Settings upstream proxy section SHALL present endpoint creation, pool creation, and
+pool-member addition as modal dialogs opened from explicit trigger buttons. The creation form
+fields (endpoint name/scheme/host/port/credentials, pool name/member selection, pool-member
+pool/endpoint selectors) SHALL NOT be rendered in the always-visible Settings layout; they
+SHALL only mount when their dialog is open. Submitting a creation dialog SHALL call the existing
+upstream proxy admin mutation, refresh the displayed admin state, and close the dialog on success;
+a failed submission SHALL keep the dialog open so the operator can retry.
+
+#### Scenario: Creation forms are hidden until a dialog opens
+
+- **WHEN** an operator views the Settings page upstream proxy section
+- **THEN** no endpoint, pool, or pool-member creation input fields are present in the document
+- **AND** the section shows trigger buttons for adding an endpoint, creating a pool, and adding a pool member
+
+#### Scenario: Operator creates a pool from a dialog
+
+- **GIVEN** the upstream proxy admin API returns at least one endpoint
+- **WHEN** an operator opens the create-pool dialog, names the pool, selects endpoint members, and submits
+- **THEN** the dashboard calls the pool creation API with the selected endpoint ids
+- **AND** refreshes the displayed upstream proxy admin state
+- **AND** closes the dialog
+
+#### Scenario: Failed creation keeps the dialog open
+
+- **WHEN** a creation dialog submission rejects with an error
+- **THEN** the dialog remains open
+- **AND** the entered values are preserved so the operator can retry
+
+### Requirement: Upstream proxy admin section summarizes configured endpoints and pools
+
+The always-visible Settings upstream proxy section SHALL render a summary/management view that
+shows the routing-enabled toggle, the default-pool selector, and readable lists of the configured
+endpoints and pools (including each pool's active state and endpoint count). When no endpoints or
+no pools are configured, the section SHALL show an explicit empty state for that list rather than
+a blank region.
+
+#### Scenario: Configured endpoints and pools are listed
+
+- **WHEN** the upstream proxy admin state includes endpoints and pools
+- **THEN** the section lists each endpoint with its scheme, host, and port
+- **AND** lists each pool with its active state and endpoint count
+
+#### Scenario: Empty proxy configuration shows an empty state
+
+- **WHEN** the upstream proxy admin state has no endpoints and no pools
+- **THEN** the section shows an explicit empty-state message for endpoints and for pools
+
+### Requirement: Account routing and proxy-binding controls size predictably
+
+The account detail routing-policy selector and the account proxy-pool selector SHALL size
+themselves responsively within their container instead of using an arbitrary fixed pixel width,
+and SHALL truncate long option labels gracefully rather than overflowing their container or
+collapsing below a usable minimum width.
+
+#### Scenario: Routing-policy select fills its control row
+
+- **WHEN** the account detail panel renders the routing-policy selector
+- **THEN** the selector trigger constrains its width to its container with a usable minimum
+- **AND** does not hardcode a fixed `w-44` width
+
+#### Scenario: Long proxy-pool name is truncated
+
+- **WHEN** the account proxy-pool selector renders a pool whose name is longer than the trigger width
+- **THEN** the selected label is truncated with an ellipsis within the trigger
+- **AND** the selector does not overflow its container
+
+### Requirement: Account proxy binding can test the selected pool
+
+The account detail proxy-binding panel SHALL expose an in-place test action for the selected proxy
+pool when that pool has at least one endpoint. Activating the action SHALL call the existing upstream
+proxy endpoint-test API for the selected pool's first endpoint and SHALL display the latest bounded
+reachability result without showing proxy credentials or account tokens.
+
+#### Scenario: Operator tests the selected account proxy pool
+
+- **GIVEN** an account proxy binding panel has a selected pool with at least one endpoint
+- **WHEN** an operator activates the pool test action
+- **THEN** the dashboard calls the existing endpoint-test API with the selected pool's first endpoint id
+- **AND** displays whether the endpoint was reachable, plus bounded status/latency details when provided
+
+#### Scenario: Pool test is disabled when no endpoint is available
+
+- **WHEN** the selected account proxy pool has no endpoints
+- **THEN** the pool test action is disabled
+
+### Requirement: Account list presents a single add-account entry point with a chooser dialog
+
+The account list SHALL present account creation through a single dashed-border placeholder control
+rendered at the bottom of the list, instead of separate always-visible "Import" and "Add Account"
+buttons. Activating the placeholder SHALL open a modal chooser dialog offering two options: adding
+an account via OAuth and importing an exported `auth.json` file. Selecting an option SHALL close the
+chooser and open the corresponding existing flow (the OAuth dialog or the import dialog) via the
+existing handlers, without changing those flows' behavior.
+
+#### Scenario: Add-account placeholder opens the chooser
+
+- **WHEN** an operator views the account list
+- **THEN** a single "Add account" placeholder control is shown at the bottom of the list
+- **AND** no separate always-visible "Import" or "Add Account" buttons are present
+- **WHEN** the operator activates the placeholder
+- **THEN** a chooser dialog opens offering an "Add account" (OAuth) option and an "Import" option
+
+#### Scenario: Choosing an option opens its existing flow
+
+- **GIVEN** the add-account chooser dialog is open
+- **WHEN** the operator selects the "Add account" option
+- **THEN** the chooser closes and the existing OAuth sign-in dialog opens
+- **WHEN** the operator instead selects the "Import" option
+- **THEN** the chooser closes and the existing `auth.json` import dialog opens
+
+### Requirement: Account list status filter shares the help row
+
+The account list search input SHALL span the full width of the list controls, and the account
+status filter SHALL be positioned on the same row as the "Need help?" toggle rather than beside the
+search input.
+
+#### Scenario: Status filter renders on the help row
+
+- **WHEN** an operator views the account list
+- **THEN** the search input occupies the full width of the controls row
+- **AND** the account status filter control is rendered on the same row as the "Need help?" toggle
+
+### Requirement: Account alias is edited inline from the detail header
+
+The account detail header SHALL display the account's local label (the alias when set, otherwise the
+display name or email) next to an edit (pencil) control, and SHALL NOT render a separate always-visible
+alias form. Activating the edit control SHALL replace the label with an inline text input pre-filled
+with the current alias plus confirm and cancel controls. Confirming SHALL persist the alias via the
+existing alias handler (an empty value clears the alias) and return to the display state; cancelling
+SHALL discard the edit without a network call. When an alias is set, the header SHALL still surface the
+account email as a subtitle so the underlying account remains identifiable.
+
+#### Scenario: Pencil reveals the inline alias editor
+
+- **WHEN** an operator views the account detail header
+- **THEN** the account local label is shown next to an "Edit alias" control
+- **AND** no separate "Account alias" form card is rendered
+- **WHEN** the operator activates the "Edit alias" control
+- **THEN** the label is replaced by a text input pre-filled with the current alias, with save and cancel controls
+
+#### Scenario: Saving and clearing the alias inline
+
+- **GIVEN** the inline alias editor is open
+- **WHEN** the operator enters a label and confirms
+- **THEN** the alias is persisted via the existing alias handler and the header returns to the display state
+- **WHEN** the operator clears the input and confirms
+- **THEN** the alias is cleared via the existing alias handler
+
+#### Scenario: Cancelling discards the edit
+
+- **GIVEN** the inline alias editor is open with unsaved changes
+- **WHEN** the operator cancels
+- **THEN** the editor closes without calling the alias handler
+- **AND** the displayed label is unchanged
+
+### Requirement: Dashboard accounts section supports card and list views
+
+The Dashboard Accounts section SHALL allow operators to choose between the existing card layout and a compact list layout. The default mode SHALL remain cards. The selected account view mode SHALL persist locally and apply on later dashboard visits.
+
+The list layout SHALL use the same dashboard overview account collection as the card layout and SHALL expose account identity, status, plan, quota remaining, credits, limit warm-up state, and the same account actions available from the card layout. The list quota cells SHALL include compact visual meters for each rendered quota row while preserving numeric percent and reset timing text. The Account, Status, Plan, Quota, Credits, and Warm-up list headers SHALL be clickable sort controls. The selected list sort column and direction SHALL persist locally and apply on later dashboard visits that render the compact list layout.
+
+#### Scenario: Dashboard defaults to card view
+
+- **WHEN** the account view-mode preference is unset
+- **THEN** the Dashboard Accounts section renders account cards
+- **AND** the card/list control indicates card mode is selected
+
+#### Scenario: Operator switches to list view
+
+- **WHEN** an operator selects list mode in the Dashboard Accounts section
+- **THEN** the account cards are replaced by a compact list of the same accounts
+- **AND** the list exposes each account's status, quota, credits, warm-up state, and available actions
+- **AND** each quota row includes a compact visual remaining-capacity meter
+
+#### Scenario: Operator sorts account list columns
+
+- **WHEN** an operator clicks a sortable list header
+- **THEN** the account list sorts by that column in ascending order
+- **AND** clicking the same header again toggles the sort direction
+- **AND** the active sort header exposes its sort direction to assistive technology
+
+#### Scenario: Account list sort persists locally
+
+- **WHEN** an operator sorts the compact account list by a column and direction
+- **AND** later returns to the dashboard in the same browser profile with list mode selected
+- **THEN** the compact account list renders with the same active sort column and direction
+
+#### Scenario: Account view mode persists locally
+
+- **WHEN** an operator selects list mode
+- **AND** later returns to the dashboard in the same browser profile
+- **THEN** the Dashboard Accounts section renders in list mode without requiring another selection
+
+### Requirement: Reports page exposes a visible user-agent filter
+
+The dashboard SHALL render `/reports` with a visible `UserAgent` filter beside the existing `Model` filter. The `UserAgent` filter SHALL be single-select, SHALL use normalized `request_logs.useragent_group` values for its choices, and SHALL filter the reports payload by sending `useragent_group` on `GET /api/reports` requests.
+
+#### Scenario: Reports page shows the user-agent filter
+- **WHEN** an authenticated operator opens `/reports`
+- **THEN** the page exposes a visible `UserAgent` filter beside `Model`
+
+#### Scenario: Reports page requests filtered data by normalized user-agent group
+- **WHEN** an authenticated operator selects a `UserAgent` value on `/reports`
+- **THEN** the page refetches `GET /api/reports` with `useragent_group` set to the selected normalized `request_logs.useragent_group` value
+
+#### Scenario: Reports page reuses the relaxed reports query for user-agent filter choices
+- **WHEN** `/reports` loads or refreshes filter choices
+- **THEN** the page obtains `UserAgent` filter options from the same relaxed `GET /api/reports` query flow used for report filter-option discovery
+- **AND** the page does not require a separate endpoint to load `UserAgent` choices
+
+#### Scenario: Reports page shows one shared relaxed-catalog error for report filter choices
+- **WHEN** the relaxed `GET /api/reports` query for report filter-option discovery fails
+- **THEN** the page shows one page-owned error describing the combined `Model` and `UserAgent` option loading failure
+- **AND** the page does not show separate duplicate relaxed-catalog errors for `Model` and `UserAgent`
+
+### Requirement: Reports page renders a user-agent distribution card
+
+The dashboard SHALL render `/reports` with a `Distribution by UserAgent` card placed below `Distribution by Model`, using aggregated `request_logs.useragent_group` values from `GET /api/reports`.
+
+#### Scenario: Reports page shows user-agent distribution data
+- **WHEN** an authenticated operator opens `/reports`
+- **THEN** the page renders `Distribution by UserAgent` below `Distribution by Model`
+
+### Requirement: Reports distribution cards toggle between cost and requests
+
+The dashboard SHALL render both `/reports` distribution cards with an upper-right `cost` / `req` toggle that defaults to `cost` and changes the donut slices, percentages, and legend values to match the selected metric. The `Distribution by Model` and `Distribution by UserAgent` donuts SHALL NOT render hover tooltips.
+
+#### Scenario: Distribution cards default to cost mode
+- **WHEN** an authenticated operator opens `/reports`
+- **THEN** both distribution cards render in `cost` mode by default
+
+#### Scenario: Distribution cards can switch to request mode
+- **WHEN** an authenticated operator activates `req` on either distribution card
+- **THEN** that card renders request-count slices, request-count values, and request-based percentages
+
+### Requirement: Reports user-agent distribution preserves unknown buckets without collisions
+
+`GET /api/reports` SHALL aggregate request-log rows whose normalized `request_logs.useragent_group` is `null` into a `byUseragent` bucket labeled `Missing User-Agent`. Real normalized `request_logs.useragent_group = "Unknown"` rows SHALL remain in a separate `Unknown` bucket. When `/reports` or `GET /api/reports` is filtered with `useragent_group=Missing User-Agent`, the system SHALL match those same null-backed rows, while `useragent_group=Unknown` SHALL match only real `"Unknown"` rows. The `/reports` `Distribution by UserAgent` card SHALL render the `Missing User-Agent` bucket with a fixed gray legend marker and slice color instead of a rotated palette color.
+
+#### Scenario: Reports payload includes missing and real Unknown user-agent traffic
+
+- **WHEN** `GET /api/reports` aggregates request logs that include one or more rows with `request_logs.useragent_group = null`
+- **AND** one or more rows with normalized `request_logs.useragent_group = "Unknown"`
+- **THEN** the response `byUseragent` array includes an entry with `useragent: "Missing User-Agent"`
+- **AND** that entry aggregates only the null-backed rows' request counts and costs
+- **AND** the response separately includes an entry with `useragent: "Unknown"` for the real normalized `"Unknown"` rows
+
+#### Scenario: Reports filters distinguish missing and real Unknown user-agent traffic
+
+- **WHEN** `/reports` or `GET /api/reports` requests `useragent_group=Missing User-Agent`
+- **THEN** the returned report aggregates include only rows whose normalized `request_logs.useragent_group` is `null`
+- **WHEN** `/reports` or `GET /api/reports` requests `useragent_group=Unknown`
+- **THEN** the returned report aggregates include only rows whose normalized `request_logs.useragent_group` is the real string `"Unknown"`
+
+#### Scenario: Reports page renders the missing user-agent bucket with fixed gray styling
+
+- **WHEN** `/reports` renders `Distribution by UserAgent` data that includes `useragent: "Missing User-Agent"`
+- **THEN** the `Missing User-Agent` legend dot uses a fixed gray color
+- **AND** the matching donut slice uses that same fixed gray color
+
+### Requirement: Reports daily charts fill missing selected days with zero-value rows
+
+The dashboard SHALL render `/reports` `Cost by Day` and `Tokens by Day` charts from a continuous daily series covering every selected day from the current `startDate` through `endDate`. When `GET /api/reports` omits a selected date, the page SHALL insert a zero-value daily row for that date before rendering both charts.
+
+#### Scenario: Missing API dates render as zero-value chart points
+
+- **WHEN** an authenticated operator views `/reports` for a selected date range and the `daily` response omits one or more selected dates
+- **THEN** the `Cost by Day` chart includes a point for every selected day from `startDate` through `endDate`
+- **AND** each omitted date renders with `costUsd = 0`
+- **AND** the `Tokens by Day` chart includes a point for every selected day from `startDate` through `endDate`
+- **AND** each omitted date renders with `inputTokens = 0`, `outputTokens = 0`, `cachedInputTokens = 0`, `requests = 0`, `activeAccounts = 0`, and `errorCount = 0`
+
+### Requirement: Daily Breakdown supports explicit visible-column sorting
+
+The dashboard SHALL render `/reports` `Daily Breakdown` with sortable visible columns for `Day`, `Reqs`, `Input Tokens`, `Output Tokens`, `Cost`, and `Accounts`. The default sort SHALL be `Day` descending.
+
+#### Scenario: Daily Breakdown defaults to newest day first
+
+- **WHEN** an authenticated operator opens `/reports`
+- **THEN** the `Daily Breakdown` rows are ordered by `Day` descending by default
+
+#### Scenario: Daily Breakdown toggles sorting for a visible column
+
+- **WHEN** an authenticated operator activates any `Daily Breakdown` visible-column header
+- **THEN** the table sorts by that column
+- **AND** activating the same header again toggles the sort direction between ascending and descending
+
+### Requirement: Reports Tokens summary subtitle shows cached totals
+
+The dashboard SHALL render the `/reports` `Tokens` summary-card subtitle as `Input <value> · Cache <value> · Output <value>` using the current report summary totals for input, cached input, and output tokens.
+
+#### Scenario: Tokens subtitle includes cached total
+
+- **WHEN** an authenticated operator opens `/reports`
+- **THEN** the `Tokens` summary card subtitle includes formatted `Input`, `Cache`, and `Output` token totals in that order
+
+### Requirement: Daily Breakdown shows cached input tokens inline
+
+The dashboard SHALL render `/reports` `Daily Breakdown` `Input Tokens` cells as the input-token total followed by the cached input-token total in parentheses using muted secondary text.
+
+#### Scenario: Input Tokens cell shows cached input token count
+
+- **WHEN** a `Daily Breakdown` row has non-zero `inputTokens` and `cachedInputTokens`
+- **THEN** the `Input Tokens` cell renders `<formatted inputTokens> (<formatted cachedInputTokens>)`
+
+#### Scenario: Input Tokens cell shows zero cached tokens explicitly
+
+- **WHEN** a `Daily Breakdown` row has `cachedInputTokens = 0`
+- **THEN** the `Input Tokens` cell renders the primary input-token value followed by `(0)`
+- **AND** if `inputTokens = 0` the full rendered value is `0 (0)`
+
+### Requirement: Daily Breakdown CSV export stays chronological
+
+The dashboard SHALL export `/reports` `Daily Breakdown` CSV rows in ascending `Day` order regardless of the current visible table sort key or direction.
+
+#### Scenario: CSV export ignores visible descending day sort
+
+- **WHEN** an authenticated operator exports the `Daily Breakdown` CSV while the visible table is sorted newest-first
+- **THEN** the CSV rows are written from the earliest day to the latest day
+
+#### Scenario: CSV export ignores non-day visible sort
+
+- **WHEN** an authenticated operator exports the `Daily Breakdown` CSV while the visible table is sorted by another column
+- **THEN** the CSV rows are still written from the earliest day to the latest day
+
+### Requirement: Daily Breakdown sortable headers show visible sort state
+
+The dashboard SHALL render a visible sort icon on every sortable `/reports` `Daily Breakdown` header. Inactive sortable headers SHALL show a muted gray unsorted indicator, and the active sorted header SHALL show a bright directional indicator matching the current ascending or descending sort direction.
+
+#### Scenario: Inactive sortable headers show unsorted indicator
+
+- **WHEN** an authenticated operator views `/reports`
+- **THEN** each sortable `Daily Breakdown` header shows a visible unsorted icon when that column is not the active sort column
+
+#### Scenario: Active sortable header shows ascending indicator
+
+- **WHEN** an authenticated operator activates a `Daily Breakdown` header and the table sort is ascending for that column
+- **THEN** that header shows the active ascending sort icon instead of the muted unsorted icon
+
+#### Scenario: Active sortable header shows descending indicator
+
+- **WHEN** an authenticated operator activates the same `Daily Breakdown` header again and the table sort becomes descending
+- **THEN** that header shows the active descending sort icon instead of the muted unsorted icon
+
+### Requirement: Dashboard supports runtime locale selection
+
+The dashboard SHALL load translations through `i18next` + `react-i18next`, support at least `en` (default) and `zh-CN` locales, persist the user's selection in `localStorage` under the key `codex-lb-language`, and apply the active locale to the document's `lang` attribute. When no persisted preference exists, the dashboard SHALL detect the browser language and use `zh-CN` for any `zh*` tag and `en` otherwise.
+
+#### Scenario: First visit with a Chinese browser
+
+- **WHEN** a user opens the dashboard for the first time with `navigator.language = "zh-CN"` and no persisted preference
+- **THEN** the in-scope surface (header, status-bar labels, auth screens) renders in Simplified Chinese
+- **AND** `localStorage` contains `codex-lb-language=zh-CN`
+
+#### Scenario: First visit with an unsupported browser language
+
+- **WHEN** a user opens the dashboard for the first time with `navigator.language` set to anything that does not start with `zh`
+- **THEN** the in-scope surface renders in English
+- **AND** the dashboard does not raise locale-loading errors
+
+#### Scenario: User toggles the language
+
+- **WHEN** the user activates the language switcher in the app header and selects `简体中文`
+- **THEN** the in-scope surface re-renders in Simplified Chinese without a full page reload
+- **AND** `localStorage.codex-lb-language` is set to `zh-CN`
+- **AND** `document.documentElement.lang` is set to `zh-CN`
+
+#### Scenario: Selection persists across reloads
+
+- **WHEN** the user reloads the dashboard after selecting a language
+- **THEN** the previously selected language is reapplied before the first paint
+
+### Requirement: Settings page renders in the active locale
+
+The Settings page and its constituent sections (`Appearance`, `Routing`, `Import`, `Session`, `Password`, `TOTP`) SHALL render all user-visible strings — page title and subtitle, section headings and descriptions, switch and select labels, button labels, dialog titles and descriptions, validation messages, warning banners, and toast messages — through the active i18n locale. Selecting `zh-CN` MUST translate the entire surface above to Simplified Chinese, with the explicit exceptions of the embedded `ApiKeysSection`, `FirewallSection`, `QuotaPlannerSection`, `StickySessionsSection`, and `UpstreamProxySettings` rendered inside Settings, which belong to other capabilities and remain English until their own migrations.
+
+#### Scenario: Switching to Simplified Chinese translates the Settings page
+
+- **WHEN** a user opens the Settings page with `zh-CN` selected as the active language
+- **THEN** the page heading reads `设置`
+- **AND** every section heading inside the page (`外观`, `路由`, `导入`, `会话`, `密码`, `TOTP`) renders in Simplified Chinese
+- **AND** every dialog opened from the page (`Set password`, `Change password`, `Remove password`, `Verify password`, `Enable TOTP`, `Disable TOTP`) renders its title, description, field labels, and submit button in Simplified Chinese
+
+#### Scenario: Session lifetime invalid-input warning preserves the inline example
+
+- **WHEN** a user enters a non-integer hour value such as `1.5` into the dashboard session lifetime input
+- **THEN** the inline warning renders with `1.5` wrapped in `<code>` regardless of the active locale
+- **AND** the surrounding sentence is translated according to the active locale
+
+#### Scenario: TOTP code-length validation respects the active locale
+
+- **WHEN** a user submits the Enable TOTP or Disable TOTP form with a code shorter than 6 characters and the active locale is `zh-CN`
+- **THEN** the form-level validation message renders as `请输入 6 位验证码`
+- **AND** the same submission with `en` active renders as `Enter a 6-digit code`
+
+### Requirement: Dashboard request details expose client IP
+
+The dashboard request-log API response MUST expose the persisted `clientIp` value when present. The Request Details dialog MUST render `Client IP` with the full value when present, MUST allow copying the value, and MUST render `—` when no client IP is stored.
+
+#### Scenario: Request details show client IP
+
+- **WHEN** a request log entry has `clientIp: "203.0.113.7"`
+- **THEN** the Request Details dialog renders `Client IP` with value `203.0.113.7`
+- **AND** the value can be copied
+
+#### Scenario: Request details show missing client IP
+
+- **WHEN** a request log entry has `clientIp: null`
+- **THEN** the Request Details dialog renders `Client IP` with value `—`
+
+### Requirement: Account usage panel supports confirmed usage reset
+
+The Accounts page selected-account Usage panel SHALL expose a Reset action
+inside the Usage resets row when reset-credit availability is shown. The action
+SHALL require operator confirmation, SHALL consume one upstream usage reset
+credit for the selected account, SHALL force-fetch upstream usage after a
+successful or idempotently successful consume without sending model probe
+traffic, and SHALL refresh account-related dashboard queries after success. The
+dashboard SHALL NOT reduce or add permanent polling intervals to make this
+reset appear sooner.
+
+#### Scenario: Confirmed account usage reset consumes one credit
+
+- **GIVEN** an active selected account is visible on the Accounts page
+- **AND** the selected account has at least one available usage reset credit
+- **WHEN** the operator clicks the Usage panel Reset action
+- **AND** confirms the dialog
+- **THEN** the dashboard sends a usage reset consume request for the selected account
+- **AND** codex-lb does not send a model probe request
+- **AND** account-related usage, trend, reset-credit, and dashboard summary
+  queries are invalidated after success
+- **AND** no reset-credit availability query is configured with a permanent
+  refetch interval
+
+#### Scenario: Dismissed account usage reset does not consume a credit
+
+- **GIVEN** an active selected account is visible on the Accounts page
+- **WHEN** the operator clicks the Usage panel Reset action
+- **AND** cancels the dialog
+- **THEN** the dashboard does not send a usage reset consume request
+
+### Requirement: Automations page is available from top-level navigation
+
+The SPA MUST expose an `Automations` top-level navigation item that routes to `/automations`.
+
+#### Scenario: Open Automations page from header
+
+- **WHEN** a signed-in user selects `Automations` in the header navigation
+- **THEN** the SPA navigates to `/automations`
+- **AND** the app requests the automation job list from `/api/automations`
+
+### Requirement: Automations page supports job lifecycle actions
+
+The `Automations` page MUST let operators create, edit, enable/disable, delete, and run jobs, including selecting accounts and model.
+
+#### Scenario: Create job in GUI
+
+- **WHEN** a user creates a daily ping automation with schedule, model, and account set
+- **THEN** the SPA submits `POST /api/automations`
+- **AND** the new job appears in the jobs table with `nextRunAt`
+
+#### Scenario: Toggle enablement
+
+- **WHEN** a user toggles a job off or on from the jobs table
+- **THEN** the SPA submits `PATCH /api/automations/{id}`
+- **AND** the table reflects the updated enabled state
+
+#### Scenario: Trigger manual run
+
+- **WHEN** a user selects `Run now` for a job
+- **THEN** the SPA submits `POST /api/automations/{id}/run-now`
+- **AND** latest run status updates in the jobs table
+
+### Requirement: Automations page surfaces run failures
+
+The UI MUST present recent run outcomes and show failure details to the user.
+
+#### Scenario: Inspect failed run
+
+- **WHEN** a user opens run history for a job with a failed run
+- **THEN** the UI shows run status, timestamps, and failure details (`errorCode`, `errorMessage`)
+- **AND** the jobs table highlights the latest failed state
+
+### Requirement: Automations form validates required scheduling inputs
+
+The Automations create/edit form MUST prevent submission when required fields are missing or invalid.
+
+#### Scenario: All-accounts selection is allowed
+
+- **WHEN** a user leaves `accountIds` empty in the create/edit form
+- **THEN** the SPA treats the selection as `All accounts`
+- **AND** submit remains allowed when other required fields are valid
+
+#### Scenario: Block submit when there are no available accounts
+
+- **WHEN** the accounts catalog is empty
+- **THEN** the SPA blocks submit and shows a validation message
+
+#### Scenario: Block submit when schedule time or timezone is invalid
+
+- **WHEN** a user provides an invalid schedule time or timezone value
+- **THEN** the SPA blocks submit and shows a validation message
+
+### Requirement: Automations page accepts extended reasoning efforts
+
+The Automations page SHALL allow operators to create and update scheduled
+refresh jobs using any reasoning effort advertised by the selected model,
+including extended GPT-5.6 efforts such as `max` and `ultra`.
+
+#### Scenario: Automation dialog offers extended model reasoning efforts
+
+- **WHEN** a selected model advertises `max` or `ultra` in `supportedReasoningEfforts`
+- **THEN** the automation create/edit dialog offers those efforts as selectable values
+
+### Requirement: Accounts list uses available tall-viewport space
+
+The Accounts page MUST size its scrollable account rows from the available
+viewport height without imposing a smaller fixed height ceiling. The bound MUST
+leave the page controls and fixed status bar visible, so account rows cannot
+extend below the viewport even when the selected-account detail panel makes the
+page taller. Optional controls MUST consume space from that bound according to
+their rendered height. The search, filter, sort, help, and Add account controls
+MUST remain outside the rows scroll region, and a list longer than the available
+region MUST continue to scroll internally. When the controls and rows require
+less height than the selected account details, the left card MUST remain
+content-sized instead of stretching an empty bordered area to the bottom of the
+details column.
+
+#### Scenario: Tall desktop viewport expands the rows region
+
+- **WHEN** the Accounts page renders a long account list in a 1200px-tall desktop viewport
+- **THEN** the account rows region is taller than 32rem
+- **AND** the region uses the otherwise-empty space beneath the list controls
+- **AND** the final visible account row region ends above the fixed status bar
+
+#### Scenario: Expanded help panel consumes rows space
+
+- **WHEN** a user expands Windows OAuth Help above a long account list in a 1200px-tall desktop viewport
+- **THEN** the help panel remains visible outside the rows scroll region
+- **AND** the rows region shrinks by the rendered help-panel height
+- **AND** the rows region still ends above the fixed status bar
+- **AND** the final account remains reachable through internal scrolling
+
+#### Scenario: Shorter account list does not stretch its card
+
+- **WHEN** all account rows fit within the viewport-aware region
+- **AND** the selected-account details are taller than the list controls and rows
+- **THEN** the left card ends after the account rows and its normal bottom padding
+- **AND** it does not render a large empty bordered area beneath the final account
+
+#### Scenario: Account pool still exceeds the available height
+
+- **WHEN** the account rows require more space than the viewport-aware region provides
+- **THEN** the rows remain internally scrollable through the final account
+- **AND** the Add account action remains visible outside the scroll region
+
+### Requirement: Account management page supports account import and OAuth add flows
+
+The Accounts page SHALL support account import, untargeted OAuth account
+addition, and targeted OAuth reauthentication. Reauthentication MUST preserve
+separate local seats that share one workspace `chatgpt_account_id`.
+
+#### Scenario: Account import
+
+- **WHEN** a user opens the import flow and uploads an auth.json file
+- **THEN** the app calls `POST /api/accounts/import` and refreshes the account list on success
+
+#### Scenario: OAuth add account
+
+- **WHEN** a user clicks the add account button
+- **THEN** an OAuth dialog opens with browser and device code flow options
+- **AND** the OAuth start request does not target an existing local account
+
+#### Scenario: Reauthentication targets the selected local seat
+
+- **GIVEN** two local Team seats share one upstream `chatgpt_account_id`
+- **AND** each seat has a distinct `chatgpt_user_id`
+- **WHEN** an operator starts reauthentication from one selected account row
+- **THEN** the selected local account ID is retained in server-side OAuth flow state
+- **AND** successful OAuth replaces credentials only on that selected row
+
+#### Scenario: Wrong browser seat is rejected
+
+- **GIVEN** reauthentication targets seat A
+- **WHEN** OAuth returns seat B from the same Team workspace
+- **THEN** the flow fails without writing seat B's credentials to seat A
+- **AND** neither local account row is merged or deleted
+
+#### Scenario: Token refresh preserves seat identity
+
+- **WHEN** a refresh response contains a stable user principal
+- **THEN** the service persists that principal as `chatgpt_user_id`
+- **AND** continues using `chatgpt_account_id` as the upstream workspace identity
+
+### Requirement: Dashboard tolerates browser translation DOM mutation
+
+The dashboard HTML shell SHALL allow browser/extension translation while protecting React reconciliation from external DOM node moves.
+
+#### Scenario: Dashboard permits browser translation
+
+- **WHEN** the browser loads the dashboard HTML shell
+- **THEN** the document, body, and React root do not opt out of browser translation
+
+#### Scenario: Dashboard tolerates externally moved React nodes
+
+- **WHEN** an extension moves a React-owned DOM node before React removes or inserts around it
+- **THEN** the dashboard startup guard logs the external mutation
+- **AND** the guarded DOM operation returns without throwing a reconciliation-stopping exception
+
+### Requirement: Reports page sends browser-local timezone context
+
+The `/reports` page SHALL detect the browser's current IANA timezone, cache the latest detected valid value locally for convenience, and include a valid timezone in `GET /api/reports` requests whenever one is available. The page SHALL prefer the browser's current valid timezone over any cached value, SHALL reuse the cached valid timezone when live detection is unavailable or invalid, and SHALL omit the `timezone` query parameter only when neither the live nor cached value is valid.
+
+#### Scenario: Reports page includes browser timezone on requests
+
+- **WHEN** an authenticated operator opens `/reports` or changes a report filter
+- **THEN** the request to `GET /api/reports` includes the browser's current IANA timezone in the `timezone` query parameter when detection succeeds
+
+#### Scenario: Reports page reuses cached timezone when live detection fails
+
+- **WHEN** the browser cannot provide a valid IANA timezone name
+- **AND** the page has a cached valid timezone from an earlier successful detection
+- **THEN** the reports page still requests `GET /api/reports`
+- **AND** the request uses the cached valid timezone in the `timezone` query parameter
+
+#### Scenario: Reports page omits timezone only when no valid timezone is available
+
+- **WHEN** the browser cannot provide a valid IANA timezone name
+- **AND** the page does not have a cached valid timezone
+- **THEN** the reports page still requests `GET /api/reports`
+- **AND** the request omits the `timezone` query parameter
+
+### Requirement: Reports endpoint applies timezone-aware ranges and daily bucketing
+
+`GET /api/reports` SHALL interpret `start_date` and `end_date` as calendar dates in the supplied IANA timezone, convert those local-midnight boundaries to UTC for filtering, and group `daily` rows by calendar day in that same timezone. When the timezone is missing or invalid, the endpoint MUST fall back to UTC.
+
+#### Scenario: Reports endpoint uses local-day buckets before UTC midnight
+
+- **WHEN** `/api/reports` receives `start_date`, `end_date`, and `timezone=America/Los_Angeles`
+- **AND** a request log row falls on `2026-06-02T01:30:00Z`
+- **THEN** the row is included in the `2026-06-01` daily bucket for that response
+
+#### Scenario: Reports endpoint falls back to UTC for invalid timezone
+
+- **WHEN** `/api/reports` receives an invalid `timezone` value
+- **THEN** the endpoint still returns a successful response
+- **AND** it interprets the report range and daily buckets in UTC
+
+### Requirement: Reports summary cards show previous-window deltas conservatively
+
+`GET /api/reports` SHALL expose a `comparison` block for the `Total Cost`, `Tokens`, and `Requests` summary cards that includes `canCompare` plus the previous-window totals for cost, tokens, and requests. The current window and previous window SHALL use equal calendar-window lengths derived from the selected report date range. The endpoint SHALL set `canCompare` to `true` only when eligible report history fully covers the immediately preceding window. When `canCompare` is `false`, the `/reports` summary cards SHALL hide the previous-window percentage indicators. Even when `canCompare` is `true`, an individual summary card SHALL hide its own percentage indicator when that card's previous-window total is zero.
+
+#### Scenario: Reports summary cards show previous-window increase
+
+- **WHEN** `GET /api/reports` returns current summary totals plus `comparison.canCompare: true`
+- **AND** a previous-window total for `Total Cost`, `Tokens`, or `Requests` is lower than the current total for that same card
+- **THEN** the matching summary card renders a visible percentage-change increase indicator
+
+#### Scenario: Incomplete previous window suppresses comparison
+
+- **WHEN** the earliest eligible report activity is later than the start of the immediately preceding report window
+- **THEN** `GET /api/reports` returns `comparison.canCompare: false`
+- **AND** the `/reports` summary cards do not render previous-window percentage indicators
+
+#### Scenario: Zero previous total suppresses the matching card indicator
+
+- **WHEN** `GET /api/reports` returns `comparison.canCompare: true`
+- **AND** the previous-window total for one of `Total Cost`, `Tokens`, or `Requests` is `0`
+- **THEN** that summary card does not render a previous-window percentage indicator
+- **AND** the other summary cards may still render percentage indicators when their own previous-window totals are greater than `0`
+
+### Requirement: Reports daily breakdown renders a continuous calendar window
+
+The `/reports` daily breakdown table SHALL render one row per calendar day in the selected date range. Each row SHALL display its date as an ISO `yyyy-mm-dd` calendar date string. If the reports API omits one or more days inside that range, the table SHALL synthesize zero-valued rows for those days using the same row styling as API-backed rows. The table SHALL keep the header visible while only the data rows scroll, with a default visible body height of seven row heights.
+
+#### Scenario: Daily breakdown fills missing days with zero-valued rows
+
+- **WHEN** the selected reports window spans `2026-06-05` through `2026-06-12`
+- **AND** the reports API returns daily rows for every day except `2026-06-06`
+- **THEN** the daily breakdown renders a row for `2026-06-06`
+- **AND** that row shows zero requests, zero input tokens, zero output tokens, zero cost, and zero accounts
+- **AND** that row uses the same row styling as neighboring rows
+
+#### Scenario: Daily breakdown header stays visible while rows scroll
+
+- **WHEN** the daily breakdown contains more than seven rows
+- **THEN** the table header remains visible
+- **AND** only the table body scrolls vertically through the remaining rows
+
+#### Scenario: Daily breakdown preserves ISO bucket dates
+
+- **WHEN** the reports API returns a daily bucket row with `date` set to `2026-06-01`
+- **THEN** the daily breakdown table renders that row label as `2026-06-01`
+
+### Requirement: Reports daily charts use symmetric horizontal padding
+
+The `/reports` `Cost by Day` and `Tokens by Day` charts SHALL use equal left and right horizontal plot padding within their chart cards.
+
+#### Scenario: Daily charts render with balanced left and right inset
+
+- **WHEN** an authenticated operator opens `/reports`
+- **THEN** the `Cost by Day` and `Tokens by Day` charts render with equal left and right horizontal padding around the plotted area
+
+### Requirement: API keys settings expose quota privacy toggle
+The Settings page SHALL include a toggle in the API Keys section that controls `hide_upstream_quota_from_api_keys`.
+
+#### Scenario: Toggle is visible with the API keys controls
+
+- **WHEN** the Settings page renders the API Keys section
+- **THEN** the quota privacy toggle SHALL be shown alongside the API key auth toggle
+
+#### Scenario: Toggle persists through settings save
+
+- **WHEN** the user changes the quota privacy toggle
+- **THEN** the settings update request SHALL include `hideUpstreamQuotaFromApiKeys`
+
+### Requirement: Dashboard request-log archive lookup
+The dashboard request-log detail dialog SHALL use each row's `archiveRequestId` for conversation archive lookup when that field is present. For older API responses that omit `archiveRequestId`, it SHALL fall back to the row's `requestId`.
+
+#### Scenario: Detail dialog uses archive lookup id
+- **WHEN** a request-log row has `requestId: "resp_123"` and `archiveRequestId: "req_123"`
+- **AND** the operator opens the request detail dialog
+- **THEN** the archive panel queries archive records for `req_123`
+
+#### Scenario: Detail dialog remains backward compatible
+- **WHEN** a request-log row does not include `archiveRequestId`
+- **AND** the operator opens the request detail dialog
+- **THEN** the archive panel queries archive records for the row's `requestId`
+

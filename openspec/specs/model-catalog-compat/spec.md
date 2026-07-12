@@ -43,6 +43,32 @@ when the requested slug matches a bootstrap entry.
 - **THEN** the response is built from the refreshed snapshot
 - **AND** bootstrap-only entries are not added to the response
 
+#### Scenario: Non-authoritative refresh preserves bootstrap floor
+
+- **GIVEN** the model registry does not have authoritative account-catalog coverage
+- **WHEN** a client calls `GET /v1/models`, `GET /backend-api/codex/models`, or a routing path checks websocket preference or allowed plans for a bootstrap model that is absent from the partial snapshot
+- **THEN** the system still uses the bootstrap catalog entry for that model as the discovery and plan-gating floor
+- **AND** exact supporting-account routing remains unknown until authoritative account-catalog coverage exists
+
+#### Scenario: Non-authoritative refresh does not resurrect dead bootstrap models
+
+- **GIVEN** the latest non-authoritative snapshot knows that every last-known advertiser of a bootstrap model is inactive or removed
+- **WHEN** discovery or plan gating is evaluated for that model before any authoritative refresh completes
+- **THEN** the model remains absent instead of reappearing from the bootstrap floor
+
+#### Scenario: Repeated non-authoritative refreshes keep removed bootstrap models suppressed
+
+- **GIVEN** a non-authoritative snapshot suppressed a bootstrap model because every last-known advertiser left the active account set
+- **WHEN** later refresh cycles still lack authoritative account-catalog coverage and still do not produce fresh active evidence for that model
+- **THEN** the model stays absent from discovery and plan gating across those repeated refreshes
+
+#### Scenario: Fresh active evidence clears bootstrap suppression
+
+- **GIVEN** a bootstrap model was previously suppressed after its last-known advertisers left the active account set
+- **WHEN** a later refresh records that an active account advertises that model again
+- **THEN** the suppression is cleared
+- **AND** the model returns to discovery and plan gating from live registry data
+
 #### Scenario: Bootstrap websocket preference is honored before refresh
 
 - **GIVEN** the model registry has no refreshed upstream snapshot
@@ -101,4 +127,3 @@ When serving `GET /backend-api/codex/models`, the system MUST keep Codex-native 
 - **WHEN** the upstream model catalog contains `gpt-5.5` with `context_window=272000`
 - **THEN** `GET /backend-api/codex/models` returns `gpt-5.5.context_window=272000`
 - **AND** it does not replace that field with `400000`
-

@@ -7,6 +7,7 @@ import pytest
 
 from app.core.auth import generate_unique_account_id
 from app.core.auth.refresh import RefreshError
+from app.core.usage.models import UsagePayload
 from app.modules.accounts.service import AccountsService
 
 pytestmark = pytest.mark.integration
@@ -18,11 +19,11 @@ def _encode_jwt(payload: dict) -> str:
     return f"header.{body}.sig"
 
 
-async def _import_test_account(async_client, *, email: str, account_id: str) -> str:
+async def _import_test_account(async_client, *, email: str, account_id: str, plan_type: str = "pro") -> str:
     payload = {
         "email": email,
         "chatgpt_account_id": account_id,
-        "https://api.openai.com/auth": {"chatgpt_plan_type": "pro"},
+        "https://api.openai.com/auth": {"chatgpt_plan_type": plan_type},
     }
     auth_json = {
         "tokens": {
@@ -120,6 +121,33 @@ async def test_probe_active_account_returns_snapshot(async_client, monkeypatch):
     assert captured["model"] == "gpt-5.5-test"
     assert captured["chatgpt_account_id"] == "acc_probe_active"
     assert captured["had_token"] is True
+
+
+@pytest.mark.asyncio
+async def test_force_probe_persists_free_to_plus_plan_upgrade(async_client, monkeypatch):
+    async def _fake_probe(self, *, access_token, chatgpt_account_id, model):  # noqa: ARG001
+        return 200
+
+    async def _fake_fetch_usage(**_kwargs):
+        return UsagePayload.model_validate({"plan_type": "plus"})
+
+    monkeypatch.setattr(AccountsService, "_send_probe_request", _fake_probe)
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", _fake_fetch_usage)
+
+    account_id = await _import_test_account(
+        async_client,
+        email="probe-plan-upgrade@example.com",
+        account_id="acc_probe_plan_upgrade",
+        plan_type="free",
+    )
+
+    response = await async_client.post(f"/api/accounts/{account_id}/probe")
+    assert response.status_code == 200, response.text
+
+    listing = await async_client.get("/api/accounts")
+    assert listing.status_code == 200
+    account = next(item for item in listing.json()["accounts"] if item["accountId"] == account_id)
+    assert account["planType"] == "plus"
 
 
 @pytest.mark.asyncio

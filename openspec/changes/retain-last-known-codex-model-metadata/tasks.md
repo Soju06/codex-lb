@@ -1,0 +1,6 @@
+- [x] Preserve last-known complete live model metadata across partial refreshes.
+- [x] Keep live availability and plan indexes authoritative to the current refresh.
+- [x] Emit retained-only Codex catalog entries with hidden visibility.
+- [x] Keep `/v1/models` limited to currently available models.
+- [x] Resolve Responses Lite capability from the metadata view.
+- [x] Add unit and integration regression coverage.

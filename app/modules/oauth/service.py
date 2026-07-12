@@ -23,6 +23,7 @@ from app.core.auth import (
     extract_id_token_claims,
     generate_unique_account_id,
     normalize_seat_type,
+    resolve_seat_identity,
 )
 from app.core.auth.api_key_cache import get_api_key_cache
 from app.core.cache.invalidation import NAMESPACE_API_KEY, get_cache_invalidation_poller
@@ -62,6 +63,11 @@ _PENDING_BROWSER_OAUTH_FLOW_TTL_SECONDS = 15 * 60
 _ACCOUNT_IDENTITY_CONFLICT_MESSAGE = (
     "Multiple accounts match the authenticated identity. Remove duplicate accounts and retry OAuth."
 )
+_REAUTH_SEAT_MISMATCH_MESSAGE = (
+    "The account you signed in as is not the one being re-authenticated. "
+    "No changes were made. Sign out of ChatGPT (or use a private window), then re-run "
+    "reauthentication and log in as the exact account that needs repair."
+)
 
 
 async def _has_active_proxy_bindings(session: AsyncSession) -> bool:
@@ -90,6 +96,18 @@ async def _oauth_route() -> ResolvedUpstreamRoute | None:
             raise OAuthError(exc.reason, str(exc), status_code=502) from exc
 
 
+class ReauthSeatMismatchError(Exception):
+    """Raised when a targeted reauth callback returns a different seat than intended."""
+
+    def __init__(self, intended_email: str | None, returned_email: str | None) -> None:
+        self.intended_email = intended_email
+        self.returned_email = returned_email
+        super().__init__(
+            "Reauthentication returned a different account than the one being repaired "
+            f"(expected {intended_email or 'the selected seat'}, got {returned_email or 'unknown'})."
+        )
+
+
 @dataclass
 class OAuthState:
     flow_id: str | None = None
@@ -97,6 +115,7 @@ class OAuthState:
     method: str | None = None
     error_message: str | None = None
     state_token: str | None = None
+    intended_account_id: str | None = None
     code_verifier: str | None = None
     device_auth_id: str | None = None
     user_code: str | None = None
@@ -296,7 +315,8 @@ class OauthService:
 
     async def start_oauth(self, request: OauthStartRequest) -> OauthStartResponse:
         force_method = (request.force_method or "").lower()
-        if not force_method:
+        intended_account_id = clean_account_identity_part(request.account_id)
+        if not force_method and not intended_account_id:
             accounts = await self._accounts_repo.list_accounts()
             if accounts:
                 server: OAuthCallbackServer | None = None
@@ -311,11 +331,17 @@ class OauthService:
                 return OauthStartResponse(method="browser")
 
         if force_method == "device":
+            if intended_account_id:
+                return await self._start_device_flow(intended_account_id=intended_account_id)
             return await self._start_device_flow()
 
         try:
+            if intended_account_id:
+                return await self._start_browser_flow(intended_account_id=intended_account_id)
             return await self._start_browser_flow()
         except OSError:
+            if intended_account_id:
+                return await self._start_device_flow(intended_account_id=intended_account_id)
             return await self._start_device_flow()
 
     async def oauth_status(self, flow_id: str | None = None) -> OauthStatusResponse:
@@ -356,7 +382,7 @@ class OauthService:
                 return OauthCompleteResponse(status="error")
             return OauthCompleteResponse(status="pending")
 
-    async def _start_browser_flow(self) -> OauthStartResponse:
+    async def _start_browser_flow(self, *, intended_account_id: str | None = None) -> OauthStartResponse:
         await self._wait_for_callback_server_stop()
 
         flow_id = secrets.token_urlsafe(12)
@@ -374,6 +400,7 @@ class OauthService:
                     method="browser",
                     state_token=state_token,
                     code_verifier=code_verifier,
+                    intended_account_id=intended_account_id,
                     expires_at=time.time() + _PENDING_BROWSER_OAUTH_FLOW_TTL_SECONDS,
                 )
             )
@@ -449,13 +476,16 @@ class OauthService:
                 route=route,
                 allow_direct_egress=route is None,
             )
-            await self._persist_tokens(tokens)
+            await self._persist_tokens(tokens, intended_account_id=flow.intended_account_id)
             await self._set_success(flow.flow_id)
             asyncio.create_task(self._stop_callback_server_if_idle())
             return ManualCallbackResponse(status="success")
         except OAuthError as exc:
             await self._set_error(exc.message, flow_id=flow.flow_id)
             return ManualCallbackResponse(status="error", error_message=exc.message)
+        except ReauthSeatMismatchError:
+            await self._set_error(_REAUTH_SEAT_MISMATCH_MESSAGE, flow_id=flow.flow_id)
+            return ManualCallbackResponse(status="error", error_message=_REAUTH_SEAT_MISMATCH_MESSAGE)
         except AccountIdentityConflictError:
             await self._set_error(_ACCOUNT_IDENTITY_CONFLICT_MESSAGE, flow_id=flow.flow_id)
             return ManualCallbackResponse(status="error", error_message=_ACCOUNT_IDENTITY_CONFLICT_MESSAGE)
@@ -465,7 +495,7 @@ class OauthService:
             await self._set_error(message, flow_id=flow.flow_id)
             return ManualCallbackResponse(status="error", error_message=message)
 
-    async def _start_device_flow(self) -> OauthStartResponse:
+    async def _start_device_flow(self, *, intended_account_id: str | None = None) -> OauthStartResponse:
         flow_id = secrets.token_urlsafe(12)
         try:
             route = await _oauth_route()
@@ -482,6 +512,7 @@ class OauthService:
                 device_auth_id=device.device_auth_id,
                 user_code=device.user_code,
                 interval_seconds=device.interval_seconds,
+                intended_account_id=intended_account_id,
                 expires_at=time.time() + device.expires_in_seconds,
             )
             self._store.remove_pending_device_flows_locked()
@@ -524,12 +555,15 @@ class OauthService:
                 route=route,
                 allow_direct_egress=route is None,
             )
-            await self._persist_tokens(tokens)
+            await self._persist_tokens(tokens, intended_account_id=flow.intended_account_id)
             await self._set_success(flow.flow_id)
             html = _success_html()
         except OAuthError as exc:
             await self._set_error(exc.message, flow_id=flow.flow_id)
             html = _error_html(exc.message)
+        except ReauthSeatMismatchError:
+            await self._set_error(_REAUTH_SEAT_MISMATCH_MESSAGE, flow_id=flow.flow_id)
+            html = _error_html(_REAUTH_SEAT_MISMATCH_MESSAGE)
         except AccountIdentityConflictError:
             await self._set_error(_ACCOUNT_IDENTITY_CONFLICT_MESSAGE, flow_id=flow.flow_id)
             html = _error_html(_ACCOUNT_IDENTITY_CONFLICT_MESSAGE)
@@ -548,13 +582,15 @@ class OauthService:
                     allow_direct_egress=route is None,
                 )
                 if tokens:
-                    await self._persist_tokens(tokens)
+                    await self._persist_tokens(tokens, intended_account_id=context.intended_account_id)
                     await self._set_success(flow_id)
                     return
                 await _async_sleep(context.interval_seconds)
             await self._set_error("Device code expired.", flow_id=flow_id)
         except OAuthError as exc:
             await self._set_error(exc.message, flow_id=flow_id)
+        except ReauthSeatMismatchError:
+            await self._set_error(_REAUTH_SEAT_MISMATCH_MESSAGE, flow_id=flow_id)
         except AccountIdentityConflictError:
             await self._set_error(_ACCOUNT_IDENTITY_CONFLICT_MESSAGE, flow_id=flow_id)
         finally:
@@ -577,14 +613,21 @@ class OauthService:
             user_code=state.user_code,
             interval_seconds=max(interval, 0),
             expires_at=state.expires_at,
+            intended_account_id=state.intended_account_id,
         )
         state.poll_task = asyncio.create_task(self._poll_device_tokens(state.flow_id, poll_context))
         return True
 
-    async def _persist_tokens(self, tokens: OAuthTokens) -> None:
+    async def _persist_tokens(
+        self,
+        tokens: OAuthTokens,
+        *,
+        intended_account_id: str | None = None,
+    ) -> None:
         claims = extract_id_token_claims(tokens.id_token)
         auth_claims = claims.auth or OpenAIAuthClaims()
         raw_account_id = auth_claims.chatgpt_account_id or claims.chatgpt_account_id
+        chatgpt_user_id = resolve_seat_identity(claims, auth_claims)
         email = claims.email or DEFAULT_EMAIL
         workspace_id = clean_account_identity_part(auth_claims.workspace_id or claims.workspace_id)
         workspace_label = clean_account_identity_part(auth_claims.workspace_label or claims.workspace_label)
@@ -596,8 +639,9 @@ class OauthService:
         )
 
         account = Account(
-            id=account_id,
+            id=intended_account_id or account_id,
             chatgpt_account_id=raw_account_id,
+            chatgpt_user_id=chatgpt_user_id,
             email=email,
             workspace_id=workspace_id,
             workspace_label=workspace_label,
@@ -612,22 +656,87 @@ class OauthService:
         )
         if self._repo_factory:
             async with self._repo_factory() as repo:
-                saved = await repo.upsert_account_slot(
-                    account,
-                    preserve_unknown_workspace_duplicates=False,
-                    preserve_identity_slots=True,
-                )
+                saved = await self._save_oauth_account(repo, account, intended_account_id=intended_account_id)
                 saved_id = saved.id
         else:
-            saved = await self._accounts_repo.upsert_account_slot(
+            saved = await self._save_oauth_account(
+                self._accounts_repo,
                 account,
-                preserve_unknown_workspace_duplicates=False,
-                preserve_identity_slots=True,
+                intended_account_id=intended_account_id,
             )
             saved_id = saved.id
 
         clear_account_routing_unavailable(saved_id)
         await self._invalidate_account_routing_caches()
+
+    async def _save_oauth_account(
+        self,
+        repo: AccountsRepository,
+        account: Account,
+        *,
+        intended_account_id: str | None,
+    ) -> Account:
+        if intended_account_id is None:
+            return await repo.upsert_account_slot(
+                account,
+                preserve_unknown_workspace_duplicates=False,
+                preserve_identity_slots=True,
+            )
+
+        intended = await repo.get_by_id(intended_account_id)
+        if intended is None:
+            raise ReauthSeatMismatchError(None, account.email)
+
+        intended_user_id = intended.chatgpt_user_id
+        intended_claims = None
+        if intended_user_id is None:
+            try:
+                intended_token = self._encryptor.decrypt(intended.id_token_encrypted)
+                intended_claims = extract_id_token_claims(intended_token)
+                intended_user_id = resolve_seat_identity(intended_claims, intended_claims.auth)
+            except Exception:
+                intended_user_id = None
+        if intended_claims is None:
+            try:
+                intended_claims = extract_id_token_claims(self._encryptor.decrypt(intended.id_token_encrypted))
+            except Exception:
+                intended_claims = None
+
+        intended_workspace = clean_account_identity_part(intended.workspace_id or intended.workspace_label)
+        callback_workspace = clean_account_identity_part(account.workspace_id or account.workspace_label)
+        callback_claims = None
+        try:
+            callback_claims = extract_id_token_claims(self._encryptor.decrypt(account.id_token_encrypted))
+        except Exception:
+            callback_claims = None
+
+        intended_seat_ids = {
+            clean_account_identity_part(value)
+            for value in (intended_user_id, intended_claims.sub if intended_claims else None)
+            if clean_account_identity_part(value)
+        }
+        callback_seat_ids = {
+            clean_account_identity_part(value)
+            for value in (
+                account.chatgpt_user_id,
+                callback_claims.sub if callback_claims else None,
+            )
+            if clean_account_identity_part(value)
+        }
+
+        workspace_matches = (
+            intended.chatgpt_account_id is None or intended.chatgpt_account_id == account.chatgpt_account_id
+        )
+        if workspace_matches and intended.chatgpt_account_id is None and intended_workspace is not None:
+            workspace_matches = bool(callback_workspace is not None and callback_workspace == intended_workspace)
+        seat_matches = bool(intended_seat_ids & callback_seat_ids)
+        if not workspace_matches or not seat_matches:
+            raise ReauthSeatMismatchError(intended.email, account.email)
+
+        saved = await repo.replace_reauthorized(intended_account_id, account)
+        if saved is None:
+            raise ReauthSeatMismatchError(intended.email, account.email)
+        return saved
 
     async def _invalidate_account_routing_caches(self) -> None:
         get_account_selection_cache().invalidate()
@@ -713,6 +822,7 @@ class DevicePollContext:
     user_code: str
     interval_seconds: int
     expires_at: float
+    intended_account_id: str | None = None
 
 
 def _success_html() -> str:

@@ -5,6 +5,7 @@ from datetime import timedelta
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
@@ -15,7 +16,9 @@ from app.db.models import (
     AdditionalUsageHistory,
     ApiKey,
     ApiKeyAccountAssignment,
+    HttpBridgeSessionAlias,
     HttpBridgeSessionRecord,
+    HttpBridgeSessionState,
     RequestLog,
     StickySession,
     StickySessionKind,
@@ -29,6 +32,8 @@ from app.modules.accounts.repository import (
     _slot_lock_key,
     _slot_lock_keys,
 )
+from app.modules.proxy.durable_bridge_coordinator import DurableBridgeSessionCoordinator
+from app.modules.proxy.durable_bridge_repository import durable_bridge_api_key_scope, durable_bridge_hash
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.repository import UsageRepository
 
@@ -418,6 +423,185 @@ def _make_account_with_chatgpt_id(account_id: str, email: str, chatgpt_id: str) 
     account = _make_account(account_id, email)
     account.chatgpt_account_id = chatgpt_id
     return account
+
+
+def _add_durable_bridge_session(session: AsyncSession, *, account_id: str, session_id: str) -> HttpBridgeSessionRecord:
+    api_key_scope = durable_bridge_api_key_scope(None)
+    session_key_value = f"sid-{session_id}"
+    turn_state = f"http_turn_{session_id}"
+    response_id = f"resp_{session_id}"
+    record = HttpBridgeSessionRecord(
+        id=session_id,
+        session_key_kind="session_header",
+        session_key_value=session_key_value,
+        session_key_hash=durable_bridge_hash(session_key_value),
+        api_key_scope=api_key_scope,
+        owner_instance_id="instance-a",
+        owner_epoch=1,
+        lease_expires_at=utcnow() + timedelta(minutes=5),
+        state=HttpBridgeSessionState.ACTIVE,
+        account_id=account_id,
+        latest_turn_state=turn_state,
+        latest_response_id=response_id,
+        latest_input_item_count=3,
+        latest_input_full_fingerprint="a" * 64,
+        last_seen_at=utcnow(),
+    )
+    session.add(record)
+    session.add_all(
+        [
+            HttpBridgeSessionAlias(
+                session_id=session_id,
+                alias_kind="turn_state",
+                alias_value=turn_state,
+                alias_hash=durable_bridge_hash(turn_state),
+                api_key_scope=api_key_scope,
+            ),
+            HttpBridgeSessionAlias(
+                session_id=session_id,
+                alias_kind="previous_response_id",
+                alias_value=response_id,
+                alias_hash=durable_bridge_hash(response_id),
+                api_key_scope=api_key_scope,
+            ),
+            HttpBridgeSessionAlias(
+                session_id=session_id,
+                alias_kind="session_header",
+                alias_value=session_key_value,
+                alias_hash=durable_bridge_hash(session_key_value),
+                api_key_scope=api_key_scope,
+            ),
+        ]
+    )
+    return record
+
+
+async def _get_bridge_session(session: AsyncSession, session_id: str) -> HttpBridgeSessionRecord:
+    result = await session.execute(
+        select(HttpBridgeSessionRecord)
+        .where(HttpBridgeSessionRecord.id == session_id)
+        .execution_options(populate_existing=True)
+    )
+    return result.scalar_one()
+
+
+async def _get_bridge_aliases(session: AsyncSession, session_id: str) -> list[HttpBridgeSessionAlias]:
+    result = await session.execute(
+        select(HttpBridgeSessionAlias)
+        .where(HttpBridgeSessionAlias.session_id == session_id)
+        .execution_options(populate_existing=True)
+    )
+    return list(result.scalars().all())
+
+
+def _assert_bridge_session_closed_without_continuity(record: HttpBridgeSessionRecord) -> None:
+    assert record.account_id is None
+    assert record.state == HttpBridgeSessionState.CLOSED
+    assert record.closed_at is not None
+    assert record.owner_instance_id is None
+    assert record.lease_expires_at is None
+    assert record.latest_turn_state is None
+    assert record.latest_response_id is None
+    assert record.latest_input_item_count is None
+    assert record.latest_input_full_fingerprint is None
+
+
+@pytest.mark.asyncio
+async def test_accounts_update_status_closes_bridge_without_durable_aliases(db_setup):
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        account = _make_account("acc_bridge_close", "bridge-close@example.com")
+        session_id = "bridge-update-status-close"
+        session.add(account)
+        bridge = _add_durable_bridge_session(
+            session,
+            account_id=account.id,
+            session_id=session_id,
+        )
+        await session.commit()
+
+        updated = await repo.update_status(
+            account.id,
+            AccountStatus.REAUTH_REQUIRED,
+            "Refresh token was revoked - re-login required",
+        )
+
+        assert updated is True
+        assert await _get_bridge_aliases(session, bridge.id) == []
+        _assert_bridge_session_closed_without_continuity(await _get_bridge_session(session, bridge.id))
+        assert (
+            await DurableBridgeSessionCoordinator(SessionLocal).lookup_request_targets(
+                session_key_kind="request",
+                session_key_value="req-after-close",
+                api_key_id=None,
+                turn_state=f"http_turn_{session_id}",
+                session_header=f"sid-{session_id}",
+                previous_response_id=f"resp_{session_id}",
+            )
+            is None
+        )
+
+
+@pytest.mark.asyncio
+async def test_accounts_update_status_if_current_closes_bridge_only_after_match(db_setup):
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        account = _make_account("acc_bridge_cas", "bridge-cas@example.com")
+        session_id = "bridge-update-status-if-current"
+        session.add(account)
+        bridge = _add_durable_bridge_session(
+            session,
+            account_id=account.id,
+            session_id=session_id,
+        )
+        await session.commit()
+
+        stale_update = await repo.update_status_if_current(
+            account.id,
+            AccountStatus.DEACTIVATED,
+            "Refresh token was revoked - re-login required",
+            expected_status=AccountStatus.PAUSED,
+        )
+
+        assert stale_update is False
+        unchanged = await _get_bridge_session(session, bridge.id)
+        assert unchanged.account_id == account.id
+        assert unchanged.state == HttpBridgeSessionState.ACTIVE
+        assert unchanged.latest_turn_state == "http_turn_bridge-update-status-if-current"
+        assert unchanged.latest_response_id == "resp_bridge-update-status-if-current"
+        assert len(await _get_bridge_aliases(session, bridge.id)) == 3
+        unchanged_lookup = await DurableBridgeSessionCoordinator(SessionLocal).lookup_request_targets(
+            session_key_kind="request",
+            session_key_value="req-stale-cas",
+            api_key_id=None,
+            turn_state=f"http_turn_{session_id}",
+            session_header=f"sid-{session_id}",
+            previous_response_id=f"resp_{session_id}",
+        )
+        assert unchanged_lookup is not None
+        assert unchanged_lookup.account_id == account.id
+
+        matched_update = await repo.update_status_if_current(
+            account.id,
+            AccountStatus.DEACTIVATED,
+            "Refresh token was revoked - re-login required",
+            expected_status=AccountStatus.ACTIVE,
+        )
+
+        assert matched_update is True
+        assert await _get_bridge_aliases(session, bridge.id) == []
+        _assert_bridge_session_closed_without_continuity(await _get_bridge_session(session, bridge.id))
+        assert (
+            await DurableBridgeSessionCoordinator(SessionLocal).lookup_request_targets(
+                session_key_kind="request",
+                session_key_value="req-after-cas-close",
+                api_key_id=None,
+                turn_state=f"http_turn_{session_id}",
+                session_header=f"sid-{session_id}",
+                previous_response_id=f"resp_{session_id}",
+            )
+            is None
+        )
 
 
 @pytest.mark.asyncio

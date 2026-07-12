@@ -212,7 +212,7 @@ def _model_responses_lite_capability(
     registry: ModelRegistry,
 ) -> bool | None:
     normalized_model = model.strip().lower()
-    models = registry.get_models_with_fallback()
+    models = registry.get_models_for_metadata()
     model_entry = models.get(model) or models.get(normalized_model)
     if model_entry is None:
         return None

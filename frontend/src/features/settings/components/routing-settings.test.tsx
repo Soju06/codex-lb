@@ -384,14 +384,7 @@ describe("RoutingSettings", () => {
       />,
     );
 
-    const routingStrategySelect = screen
-      .getAllByRole("combobox")
-      .find((element) => element.textContent?.includes("Capacity weighted"));
-    if (!routingStrategySelect) {
-      throw new Error("Routing strategy select not found");
-    }
-    await user.click(routingStrategySelect);
-    await user.click(await screen.findByRole("option", { name: "Single account" }));
+    await user.click(screen.getByRole("button", { name: /Single account/i }));
 
     expect(onSave).toHaveBeenCalledWith({
       ...BASE_UPDATE_PAYLOAD,
@@ -550,7 +543,6 @@ describe("RoutingSettings", () => {
   it("explains routing strategy trade-offs and account-safety guidance", () => {
     render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={vi.fn().mockResolvedValue(undefined)} />);
 
-    expect(screen.getByText("Strategy guide")).toBeInTheDocument();
     expect(screen.getByText(/Good default for compliant mixed-account pools/i)).toBeInTheDocument();
     expect(screen.getByText(/No strategy can guarantee account-safety outcomes/i)).toBeInTheDocument();
   });

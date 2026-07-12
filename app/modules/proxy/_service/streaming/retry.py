@@ -6,6 +6,7 @@ import json
 import logging
 import sys
 import time
+from dataclasses import replace
 from typing import Any, AsyncIterator, Mapping, cast
 
 import aiohttp
@@ -15,7 +16,7 @@ from app.core.balancer import failover_decision
 from app.core.balancer.types import UpstreamError
 from app.core.clients.proxy import ProxyResponseError, _resolve_stream_transport, pop_stream_timeout_overrides
 from app.core.errors import openai_error, response_failed_event
-from app.core.openai.requests import ResponsesRequest
+from app.core.openai.requests import ResponsesRequest, extract_input_file_ids
 from app.core.upstream_proxy import UpstreamProxyRouteError
 from app.core.utils.request_id import ensure_request_id
 from app.core.utils.retry import backoff_seconds
@@ -41,6 +42,9 @@ from app.modules.proxy._service.support import (
     _TerminalStreamError,
     _TransientStreamError,
     _WebSocketUpstreamControl,
+)
+from app.modules.proxy._service.websocket.helpers import (
+    _websocket_input_items_are_self_contained_fresh_replay,
 )
 from app.modules.proxy.affinity import (
     _owner_lookup_session_id_from_headers,
@@ -88,6 +92,49 @@ def _resolve_http_downstream_transport(policy: str, *, payload: ResponsesRequest
     if normalized_policy == "always_websocket":
         return "websocket"
     return "websocket" if _http_downstream_request_is_sticky(payload, headers) else "http"
+
+
+def _verified_cross_transport_fresh_replay(
+    proxy: _StreamingServiceProtocol,
+    *,
+    payload: ResponsesRequest,
+    headers: Mapping[str, str],
+    api_key: ApiKeyData | None,
+) -> ResponsesRequest | None:
+    """Return an unanchored body only when local WS continuity proves its prefix."""
+    previous_response_id = payload.previous_response_id
+    input_value = payload.input
+    if previous_response_id is None or not isinstance(input_value, list):
+        return None
+    if extract_input_file_ids(input_value):
+        return None
+    input_items = cast(list[Any], input_value)
+    if not _websocket_input_items_are_self_contained_fresh_replay(input_items):
+        return None
+    session_id = _owner_lookup_session_id_from_headers(headers)
+    if session_id is None:
+        return None
+    api_key_id = api_key.id if api_key is not None else None
+    continuity_state = proxy._websocket_continuity_index.get((session_id, api_key_id))
+    if continuity_state is None or continuity_state.last_completed_response_id != previous_response_id:
+        # HTTP and WebSocket entry points synthesize different turn-state
+        # headers. The response id remains globally specific within the API-key
+        # scope, so use its unique retained state when the direct key differs.
+        matching_states = [
+            state
+            for (_continuity_key, continuity_api_key_id), state in proxy._websocket_continuity_index.items()
+            if continuity_api_key_id == api_key_id and state.last_completed_response_id == previous_response_id
+        ]
+        if len(matching_states) != 1:
+            return None
+        continuity_state = matching_states[0]
+    if not _facade()._input_prefix_matches_stored_context(
+        input_value,
+        stored_count=continuity_state.last_completed_input_count,
+        stored_fingerprint=continuity_state.last_completed_input_prefix_fingerprint,
+    ):
+        return None
+    return payload.model_copy(update={"previous_response_id": None})
 
 
 def _effective_http_downstream_transport_policy(
@@ -292,6 +339,12 @@ class _StreamingRetryMixin:
         estimated_lease_tokens = _facade()._estimated_lease_tokens_from_request_usage_budget(
             estimate_api_key_request_usage(payload)
         )
+        verified_fresh_replay_payload = _verified_cross_transport_fresh_replay(
+            proxy,
+            payload=payload,
+            headers=headers,
+            api_key=api_key,
+        )
 
         async def _release_tracked_stream_lease(lease: AccountLease | None) -> None:
             if lease is None:
@@ -301,6 +354,31 @@ class _StreamingRetryMixin:
             except ValueError:
                 pass
             await proxy._load_balancer.release_account_lease(lease)
+
+        def _move_verified_fresh_replay_from_owner(*, account_id: str, outcome: str) -> bool:
+            # Only a proxy-injected owner anchor with locally verified full
+            # input may move; the failed owner stays excluded so sticky
+            # selection cannot immediately loop back to it.
+            nonlocal affinity, payload, preferred_account_id, require_preferred_account, verified_fresh_replay_payload
+            if not (
+                require_preferred_account
+                and preferred_account_id == account_id
+                and verified_fresh_replay_payload is not None
+            ):
+                return False
+            payload = verified_fresh_replay_payload
+            verified_fresh_replay_payload = None
+            excluded_account_ids.add(account_id)
+            preferred_account_id = None
+            require_preferred_account = False
+            affinity = replace(affinity, reallocate_sticky=True)
+            logger.info(
+                "cross_transport_verified_fresh_replay request_id=%s outcome=%s account_id=%s",
+                request_id,
+                outcome,
+                account_id,
+            )
+            return True
 
         async def _stream_post_refresh_with_capacity_recovery(
             account: Account,
@@ -365,7 +443,7 @@ class _StreamingRetryMixin:
                         error_message=error.message if error else None,
                         recovery_sleep_seconds=recovery_sleep_seconds,
                         deadline=deadline,
-                        emit_keepalives=not propagate_http_errors,
+                        emit_keepalives=not propagate_http_errors or not enforce_openai_sdk_contract,
                         stage="post_refresh_response_create",
                     ):
                         yield wait_event
@@ -596,7 +674,7 @@ class _StreamingRetryMixin:
                                 error_message=deferred_error.message if deferred_error else None,
                                 recovery_sleep_seconds=recovery_sleep_seconds,
                                 deadline=deadline,
-                                emit_keepalives=not propagate_http_errors,
+                                emit_keepalives=not propagate_http_errors or not enforce_openai_sdk_contract,
                                 stage="response_create_no_alternate",
                             ):
                                 yield wait_event
@@ -643,7 +721,7 @@ class _StreamingRetryMixin:
                                 error_message=selection.error_message,
                                 recovery_sleep_seconds=recovery_sleep_seconds,
                                 deadline=deadline,
-                                emit_keepalives=not propagate_http_errors,
+                                emit_keepalives=not propagate_http_errors or not enforce_openai_sdk_contract,
                                 stage="selection",
                             ):
                                 yield wait_event
@@ -690,6 +768,22 @@ class _StreamingRetryMixin:
                             )
                         yield format_sse_event(event)
                         return
+                    if (
+                        require_preferred_account
+                        and preferred_account_id is not None
+                        and verified_fresh_replay_payload is not None
+                    ):
+                        excluded_account_ids.add(preferred_account_id)
+                        payload = verified_fresh_replay_payload
+                        verified_fresh_replay_payload = None
+                        preferred_account_id = None
+                        require_preferred_account = False
+                        affinity = replace(affinity, reallocate_sticky=True)
+                        logger.info(
+                            "cross_transport_verified_fresh_replay request_id=%s outcome=owner_unavailable",
+                            request_id,
+                        )
+                        continue
                     if require_preferred_account and preferred_account_id is not None:
                         message = "Previous response owner account is unavailable; retry later."
                         _record_continuity_fail_closed(
@@ -823,39 +917,51 @@ class _StreamingRetryMixin:
                     and preferred_account_id is not None
                     and account.id != preferred_account_id
                 ):
-                    message = "Previous response owner account is unavailable; retry later."
-                    _record_continuity_fail_closed(
-                        surface="http_stream",
-                        reason="owner_account_unavailable",
-                        previous_response_id=payload.previous_response_id,
-                        session_id=headers.get("x-codex-turn-state") or headers.get("session_id"),
-                        upstream_error_code="upstream_unavailable",
-                    )
-                    event = response_failed_event(
-                        "previous_response_owner_unavailable",
-                        message,
-                        response_id=request_id,
-                    )
-                    yield format_sse_event(event)
-                    await proxy._write_request_log(
-                        account_id=preferred_account_id,
-                        api_key=api_key,
-                        request_id=request_id,
-                        model=payload.model,
-                        latency_ms=int((time.monotonic() - start) * 1000),
-                        status="error",
-                        error_code="previous_response_owner_unavailable",
-                        error_message=message,
-                        reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
-                        transport=request_transport,
-                        upstream_transport=upstream_stream_transport,
-                        service_tier=payload.service_tier,
-                        requested_service_tier=payload.service_tier,
-                        useragent=useragent,
-                        useragent_group=useragent_group,
-                        client_ip=client_ip,
-                    )
-                    return
+                    if verified_fresh_replay_payload is not None:
+                        payload = verified_fresh_replay_payload
+                        verified_fresh_replay_payload = None
+                        excluded_account_ids.add(preferred_account_id)
+                        preferred_account_id = None
+                        require_preferred_account = False
+                        affinity = replace(affinity, reallocate_sticky=True)
+                        logger.info(
+                            "cross_transport_verified_fresh_replay request_id=%s outcome=alternate_selected",
+                            request_id,
+                        )
+                    else:
+                        message = "Previous response owner account is unavailable; retry later."
+                        _record_continuity_fail_closed(
+                            surface="http_stream",
+                            reason="owner_account_unavailable",
+                            previous_response_id=payload.previous_response_id,
+                            session_id=headers.get("x-codex-turn-state") or headers.get("session_id"),
+                            upstream_error_code="upstream_unavailable",
+                        )
+                        event = response_failed_event(
+                            "previous_response_owner_unavailable",
+                            message,
+                            response_id=request_id,
+                        )
+                        yield format_sse_event(event)
+                        await proxy._write_request_log(
+                            account_id=preferred_account_id,
+                            api_key=api_key,
+                            request_id=request_id,
+                            model=payload.model,
+                            latency_ms=int((time.monotonic() - start) * 1000),
+                            status="error",
+                            error_code="previous_response_owner_unavailable",
+                            error_message=message,
+                            reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
+                            transport=request_transport,
+                            upstream_transport=upstream_stream_transport,
+                            service_tier=payload.service_tier,
+                            requested_service_tier=payload.service_tier,
+                            useragent=useragent,
+                            useragent_group=useragent_group,
+                            client_ip=client_ip,
+                        )
+                        return
                 try:
                     remaining_budget = _facade()._remaining_budget_seconds(deadline)
                     if remaining_budget <= 0:
@@ -921,6 +1027,27 @@ class _StreamingRetryMixin:
                             exc_info=True,
                         )
                         message = str(exc) or "Request to upstream timed out"
+                        if (
+                            _facade()._should_retry_transient_stream_error("upstream_unavailable", message)
+                            and attempt + 1 < max_attempts
+                            and _move_verified_fresh_replay_from_owner(
+                                account_id=account.id,
+                                outcome="owner_refresh_connect_failure",
+                            )
+                        ):
+                            await proxy._handle_stream_error(
+                                account,
+                                {"message": message},
+                                "upstream_unavailable",
+                            )
+                            await _release_tracked_stream_lease(current_account_lease)
+                            current_account_lease = None
+                            last_retryable_stream_error = _RetryableStreamError(
+                                "upstream_unavailable",
+                                {"message": message},
+                                exclude_account=True,
+                            )
+                            continue
                         if (
                             not require_preferred_account
                             and preferred_account_id is None
@@ -1021,7 +1148,21 @@ class _StreamingRetryMixin:
                                 useragent=useragent,
                                 useragent_group=useragent_group,
                                 client_ip=client_ip,
-                                preferred_account_id=preferred_account_id,
+                                # Let the retry path observe a pre-visible
+                                # account-recovery error only for the one case
+                                # where this owner anchor has a locally
+                                # verified, unanchored replacement body.  All
+                                # other continuations retain the normal
+                                # fail-closed owner-error rewrite.
+                                preferred_account_id=(
+                                    None
+                                    if (
+                                        require_preferred_account
+                                        and preferred_account_id == account.id
+                                        and verified_fresh_replay_payload is not None
+                                    )
+                                    else preferred_account_id
+                                ),
                                 tool_call_dedupe=tool_call_dedupe,
                                 enforce_openai_sdk_contract=enforce_openai_sdk_contract,
                             ):
@@ -1152,7 +1293,8 @@ class _StreamingRetryMixin:
                                             error_message=error_message,
                                             recovery_sleep_seconds=recovery_sleep_seconds,
                                             deadline=deadline,
-                                            emit_keepalives=not propagate_http_errors,
+                                            emit_keepalives=not propagate_http_errors
+                                            or not enforce_openai_sdk_contract,
                                             stage="response_create",
                                         ):
                                             yield wait_event
@@ -1194,6 +1336,10 @@ class _StreamingRetryMixin:
                                     await _release_tracked_stream_lease(current_account_lease)
                                     current_account_lease = None
                                     excluded_account_ids.add(account.id)
+                                    _move_verified_fresh_replay_from_owner(
+                                        account_id=account.id,
+                                        outcome="owner_previsible_failure",
+                                    )
                                     break
                                 raise
                             transient_retries += 1
@@ -1302,6 +1448,10 @@ class _StreamingRetryMixin:
                         await _release_tracked_stream_lease(current_account_lease)
                         current_account_lease = None
                         excluded_account_ids.add(account.id)
+                    _move_verified_fresh_replay_from_owner(
+                        account_id=account.id,
+                        outcome="owner_previsible_retryable_failure",
+                    )
                     continue
                 except _TerminalStreamError as exc:
                     if _facade()._should_penalize_stream_error(exc.code):
@@ -1532,6 +1682,10 @@ class _StreamingRetryMixin:
                                 last_transient_exc = retry_exc
                                 await _release_tracked_stream_lease(current_account_lease)
                                 current_account_lease = None
+                                _move_verified_fresh_replay_from_owner(
+                                    account_id=account.id,
+                                    outcome="owner_post_refresh_failure",
+                                )
                                 excluded_account_ids.add(account.id)
                                 continue
                             if propagate_http_errors:

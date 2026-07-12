@@ -684,10 +684,12 @@ async def responses_websocket(
     if denial is not None:
         await websocket.send_denial_response(denial)
         return
+    client_turn_state = proxy_affinity_module._sticky_key_from_turn_state_header(websocket.headers)
     turn_state = proxy_affinity_module.ensure_downstream_turn_state(websocket.headers)
     await websocket.accept(headers=proxy_affinity_module.build_downstream_turn_state_accept_headers(turn_state))
     forwarded_headers = dict(websocket.headers)
-    forwarded_headers.setdefault("x-codex-turn-state", turn_state)
+    if client_turn_state is None:
+        forwarded_headers["x-codex-turn-state"] = turn_state
     await context.service.proxy_responses_websocket(
         websocket,
         forwarded_headers,
@@ -695,6 +697,7 @@ async def responses_websocket(
         openai_cache_affinity=True,
         api_key=api_key,
         client_ip=resolve_request_client_host(websocket),
+        synthesized_turn_state=turn_state if client_turn_state is None else None,
     )
 
 
@@ -872,10 +875,12 @@ async def v1_responses_websocket(
     if denial is not None:
         await websocket.send_denial_response(denial)
         return
+    client_turn_state = proxy_affinity_module._sticky_key_from_turn_state_header(websocket.headers)
     turn_state = proxy_affinity_module.ensure_downstream_turn_state(websocket.headers)
     await websocket.accept(headers=proxy_affinity_module.build_downstream_turn_state_accept_headers(turn_state))
     forwarded_headers = dict(websocket.headers)
-    forwarded_headers.setdefault("x-codex-turn-state", turn_state)
+    if client_turn_state is None:
+        forwarded_headers["x-codex-turn-state"] = turn_state
     await context.service.proxy_responses_websocket(
         websocket,
         forwarded_headers,
@@ -883,6 +888,7 @@ async def v1_responses_websocket(
         openai_cache_affinity=True,
         api_key=api_key,
         client_ip=resolve_request_client_host(websocket),
+        synthesized_turn_state=turn_state if client_turn_state is None else None,
     )
 
 
@@ -2646,13 +2652,43 @@ async def _build_codex_models_response(api_key: ApiKeyData | None) -> Response:
 
     registry = get_model_registry()
     models = registry.get_models_with_fallback()
+    metadata_models = registry.get_models_for_metadata()
     source_models = [
         model
         for model in await _list_enabled_source_catalog_models(api_key, require_responses=True)
         if model.raw.get("supports_streaming") is True
     ]
+    visible_source_models = []
+    for source_model in source_models:
+        if visibility_allowed_models is None:
+            if exact_source_allowed_models is not None:
+                if source_model.slug not in exact_source_allowed_models:
+                    continue
+            elif not is_public_model(source_model, allowed_models):
+                continue
+        visible_source_models.append(source_model)
+    visible_source_models.sort(
+        key=lambda model: (
+            _effective_source_codex_visibility(
+                model,
+                visibility_allowed_models=visibility_allowed_models,
+                exact_source_allowed_models=exact_source_allowed_models,
+            )
+            != "list"
+        )
+    )
+    source_model_slugs = {
+        model.slug
+        for model in visible_source_models
+        if _effective_source_codex_visibility(
+            model,
+            visibility_allowed_models=visibility_allowed_models,
+            exact_source_allowed_models=exact_source_allowed_models,
+        )
+        == "list"
+    }
 
-    if not models and not source_models:
+    if not models and not metadata_models and not source_models:
         await _release_reservation(reservation)
         return JSONResponse(content=CodexModelsResponse(models=[], data=[]).model_dump(mode="json"))
 
@@ -2679,15 +2715,17 @@ async def _build_codex_models_response(api_key: ApiKeyData | None) -> Response:
         seen_slugs.add(slug)
         if model.supported_in_api and entry.visibility == "list":
             data.append(_to_model_list_item(slug, model, created=_model_list_created_at(model)))
-    for model in source_models:
+    for slug, model in metadata_models.items():
+        if slug in models or slug in source_model_slugs or not _is_codex_backend_catalog_model(model):
+            continue
+        if visibility_allowed_models is None and allowed_models is not None and slug not in allowed_models:
+            continue
+        entries.append(_to_codex_model_entry(model, visibility="hide"))
+        seen_slugs.add(slug)
+    for model in visible_source_models:
         if model.slug in seen_slugs:
             continue
         if visibility_allowed_models is None:
-            if exact_source_allowed_models is not None:
-                if model.slug not in exact_source_allowed_models:
-                    continue
-            elif not is_public_model(model, allowed_models):
-                continue
             entry = _to_codex_model_entry(model)
             entries.append(entry)
             seen_slugs.add(model.slug)
@@ -2696,8 +2734,10 @@ async def _build_codex_models_response(api_key: ApiKeyData | None) -> Response:
             continue
         entry = _to_codex_model_entry(
             model,
-            visibility=(
-                "list" if exact_source_allowed_models is None or model.slug in exact_source_allowed_models else "hide"
+            visibility=_effective_source_codex_visibility(
+                model,
+                visibility_allowed_models=visibility_allowed_models,
+                exact_source_allowed_models=exact_source_allowed_models,
             ),
         )
         entries.append(entry)
@@ -2962,6 +3002,24 @@ def _v1_supports_vision(model: UpstreamModel) -> bool:
 def _model_visibility(model: UpstreamModel) -> str:
     visibility = model.raw.get("visibility")
     return visibility if isinstance(visibility, str) else "list"
+
+
+def _effective_source_codex_visibility(
+    model: UpstreamModel,
+    *,
+    visibility_allowed_models: set[str] | None,
+    exact_source_allowed_models: set[str] | None,
+) -> str:
+    raw_visibility = _model_visibility(model)
+    if raw_visibility != "list":
+        return raw_visibility
+    if (
+        visibility_allowed_models is not None
+        and exact_source_allowed_models is not None
+        and model.slug not in exact_source_allowed_models
+    ):
+        return "hide"
+    return "list"
 
 
 def _to_model_metadata(model: UpstreamModel) -> ModelMetadata:
@@ -4361,8 +4419,12 @@ async def _collect_responses(
             suppress_text_done_events=suppress_text_done_events,
             client_ip=client_ip,
         )
+    captured_turn_state_headers: dict[str, str] = {}
     try:
-        response_payload = await _collect_responses_payload(stream)
+        response_payload = await _collect_responses_payload(
+            stream,
+            captured_turn_state_headers=captured_turn_state_headers,
+        )
     except ProxyResponseError as exc:
         await _release_reservation(reservation)
         error = _parse_error_envelope(exc.payload)
@@ -4371,7 +4433,7 @@ async def _collect_responses(
             request,
             status_code,
             error.model_dump(mode="json", exclude_none=True),
-            headers=rate_limit_headers,
+            headers={**captured_turn_state_headers, **rate_limit_headers},
         )
     if isinstance(response_payload, OpenAIResponsePayload):
         if response_payload.status == "failed":
@@ -4381,18 +4443,18 @@ async def _collect_responses(
                 request,
                 status_code,
                 error_payload.model_dump(mode="json", exclude_none=True),
-                headers={**turn_state_headers, **rate_limit_headers},
+                headers={**turn_state_headers, **captured_turn_state_headers, **rate_limit_headers},
             )
         return JSONResponse(
             content=response_payload.model_dump(mode="json", exclude_none=True),
-            headers={**turn_state_headers, **rate_limit_headers},
+            headers={**turn_state_headers, **captured_turn_state_headers, **rate_limit_headers},
         )
     status_code, response_payload = _mask_previous_response_not_found_error(response_payload)
     return _logged_error_json_response(
         request,
         status_code,
         response_payload.model_dump(mode="json", exclude_none=True),
-        headers={**turn_state_headers, **rate_limit_headers},
+        headers={**turn_state_headers, **captured_turn_state_headers, **rate_limit_headers},
     )
 
 
@@ -5801,7 +5863,30 @@ def _compact_request_service_tier(payload: ResponsesCompactRequest) -> str | Non
     return stripped or None
 
 
-async def _collect_responses_payload(stream: AsyncIterator[str]) -> OpenAIResponseResult:
+def _capture_response_metadata_turn_state(
+    payload: Mapping[str, JsonValue],
+    captured_turn_state_headers: dict[str, str],
+) -> None:
+    """Keep the first real upstream turn-state metadata header for the HTTP response."""
+    if captured_turn_state_headers or payload.get("type") != "response.metadata":
+        return
+    headers = payload.get("headers")
+    if not is_json_mapping(headers):
+        return
+    for name, value in headers.items():
+        if str(name).lower() != "x-codex-turn-state" or not isinstance(value, str):
+            continue
+        turn_state = value.strip()
+        if turn_state:
+            captured_turn_state_headers["x-codex-turn-state"] = turn_state
+        return
+
+
+async def _collect_responses_payload(
+    stream: AsyncIterator[str],
+    *,
+    captured_turn_state_headers: dict[str, str] | None = None,
+) -> OpenAIResponseResult:
     output_items: dict[int, dict[str, JsonValue]] = {}
     terminal_result: OpenAIResponseResult | None = None
     contract_violation_kind: str | None = None
@@ -5811,6 +5896,8 @@ async def _collect_responses_payload(stream: AsyncIterator[str]) -> OpenAIRespon
             if _looks_like_sse_data_block(line):
                 contract_violation_kind = contract_violation_kind or "invalid_json"
             continue
+        if captured_turn_state_headers is not None:
+            _capture_response_metadata_turn_state(payload, captured_turn_state_headers)
         event_type = payload.get("type")
         _collect_output_item_event(payload, output_items)
         if terminal_result is not None:

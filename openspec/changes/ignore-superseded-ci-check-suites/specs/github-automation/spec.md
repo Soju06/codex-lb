@@ -4,10 +4,11 @@
 
 The Codex review label synchronizer SHALL identify the CI workflow from the
 most recent `CI Required` check and SHALL treat the newest same-head run of
-that workflow (ordered by workflow-run creation time, then check recency, then
-run id) as the authoritative CI suite when multiple runs of the same GitHub
-Actions CI workflow exist for one pull-request head, even when that run has
-not yet produced its own `CI Required` check. It MUST ignore Actions checks —
+that workflow (ordered by the current attempt's start time, falling back to
+workflow-run creation time, then check recency and run id) as the authoritative
+CI suite when multiple runs of the same GitHub Actions CI workflow exist for
+one pull-request head, even when that run has not yet produced its own
+`CI Required` check. It MUST ignore Actions checks —
 including stale required contexts — only from superseded (older) runs of that
 workflow, while checks from the authoritative run, checks that cannot be
 attributed to a workflow run, non-Actions status evidence, and failures from
@@ -37,6 +38,14 @@ independent workflows remain blocking evidence.
 - **WHEN** Codex review labels are synchronized
 - **THEN** the newer run is the authoritative CI suite and the older run's completed checks are ignored
 - **AND** the current head remains classified as pending until the newer run's `CI Required` completes
+
+#### Scenario: An older workflow run id is manually rerun
+
+- **GIVEN** a newer-created CI workflow run completed successfully for the current head
+- **AND** an older workflow `run_id` is manually rerun afterward
+- **WHEN** the older run's new attempt has the latest `run_started_at`
+- **THEN** that rerun is the authoritative CI suite
+- **AND** its pending or failed checks remain blocking evidence
 
 #### Scenario: Independent workflow on the same head fails
 

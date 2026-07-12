@@ -15,8 +15,8 @@ When a streaming `/v1/responses` request encounters upstream instability, the pr
 - **AND** an owner-bound, file-pinned, or otherwise same-account retry MUST keep or reacquire its stream lease while waiting within the original request budget
 - **AND** the same behavior applies after a forced token refresh
 
-#### Scenario: Propagated startup errors remain observable
-- **WHEN** a route requests HTTP error propagation and waits for local account capacity before startup
+#### Scenario: SDK-contract propagated startup errors remain observable
+- **WHEN** a route requests HTTP error propagation, enforces the OpenAI SDK stream contract, and waits for local account capacity before startup
 - **THEN** the route MUST perform the bounded recovery wait instead of raising the first cap error immediately
 - **AND** it MUST NOT emit an account-capacity keepalive before startup succeeds, so a terminal startup error can still use the route's structured error path
 

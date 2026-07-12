@@ -147,6 +147,7 @@ async def test_health_ready_succeeds_when_degraded() -> None:
 async def test_model_registry_keeps_cached_models_when_refresh_fails(monkeypatch: pytest.MonkeyPatch) -> None:
     registry = ModelRegistry(ttl_seconds=60.0)
     await registry.update({"plus": [_model("cached-model")]})
+    cached_models = set(registry.get_models_with_fallback())
 
     def _raise_runtime_error(*args, **kwargs):
         raise RuntimeError("boom")
@@ -156,7 +157,8 @@ async def test_model_registry_keeps_cached_models_when_refresh_fails(monkeypatch
     with pytest.raises(RuntimeError, match="boom"):
         await registry.update({"pro": [_model("new-model")]})
 
-    assert set(registry.get_models_with_fallback()) == {"cached-model"}
+    assert "cached-model" in cached_models
+    assert set(registry.get_models_with_fallback()) == cached_models
 
 
 @pytest.mark.asyncio

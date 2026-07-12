@@ -26236,6 +26236,34 @@ async def test_open_upstream_websocket_dns_failure_recovers_on_same_account(monk
 
 
 @pytest.mark.asyncio
+async def test_open_upstream_websocket_recomputes_budget_after_failed_attempt(monkeypatch):
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_ws_dns_near_deadline")
+    network_error = proxy_module.ProxyResponseError(
+        502,
+        openai_error("proxy_network_unavailable", "Temporary failure in name resolution"),
+    )
+    open_upstream = AsyncMock(side_effect=network_error)
+    wait_for_recovery = AsyncMock(return_value="not_applicable")
+    monotonic = MagicMock(side_effect=[100.0, 100.0, 109.8])
+    monkeypatch.setattr(service, "_open_upstream_websocket", open_upstream)
+    monkeypatch.setattr(websocket_mixin_module, "_wait_for_process_network_recovery", wait_for_recovery)
+    monkeypatch.setattr(websocket_mixin_module, "time", SimpleNamespace(monotonic=monotonic))
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service._open_upstream_websocket_with_budget(
+            account,
+            {},
+            timeout_seconds=10.0,
+        )
+
+    assert exc_info.value is network_error
+    recovery_call = wait_for_recovery.await_args
+    assert recovery_call is not None
+    assert recovery_call.kwargs["remaining_budget_seconds"] == pytest.approx(0.2)
+
+
+@pytest.mark.asyncio
 async def test_open_upstream_websocket_network_recovery_respects_zero_budget(monkeypatch):
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     account = _make_account("acc_ws_dns_timeout")

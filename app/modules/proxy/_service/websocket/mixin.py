@@ -2534,6 +2534,7 @@ class _WebSocketMixin:
                 recovery.log_recovered()
                 return upstream
             except ProxyResponseError as exc:
+                remaining_seconds = timeout_seconds - (time.monotonic() - started_at)
                 decision = await _wait_for_process_network_recovery(
                     recovery,
                     exc,

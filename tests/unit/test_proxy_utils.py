@@ -26471,6 +26471,42 @@ def test_http_bridge_session_rejects_account_without_requested_model(monkeypatch
     )
 
 
+def test_http_bridge_session_degrades_when_registry_omits_owner(monkeypatch):
+    session = cast(
+        proxy_service._HTTPBridgeSession,
+        SimpleNamespace(account=_make_account("acc_bridge_new_owner")),
+    )
+
+    class Registry:
+        def get_snapshot(self) -> SimpleNamespace:
+            return SimpleNamespace(account_plans={"acc_stale_owner": "plus"})
+
+        def plan_types_for_model(self, slug: str) -> frozenset[str] | None:
+            assert slug == "gpt-5.5"
+            return frozenset({"plus"})
+
+        def account_ids_for_model(self, slug: str) -> frozenset[str] | None:
+            raise AssertionError(f"stale model-account index enforced for {slug}")
+
+        def account_ids_for_model_service_tier(self, slug: str, requested_tier: str) -> frozenset[str] | None:
+            raise AssertionError(f"stale tier-account index enforced for {slug}:{requested_tier}")
+
+        def plan_types_for_model_service_tier(self, slug: str, requested_tier: str) -> frozenset[str] | None:
+            assert (slug, requested_tier) == ("gpt-5.5", "priority")
+            return frozenset({"plus"})
+
+    monkeypatch.setattr(proxy_support, "get_model_registry", lambda: Registry())
+
+    assert (
+        proxy_support._http_bridge_session_supports_service_tier(
+            session,
+            request_model="gpt-5.5",
+            request_service_tier="priority",
+        )
+        is True
+    )
+
+
 @pytest.mark.parametrize("service_tier", ["auto", "default", " Auto "])
 def test_http_bridge_session_treats_omit_equivalent_service_tiers_as_unfiltered(monkeypatch, service_tier):
     session = cast(

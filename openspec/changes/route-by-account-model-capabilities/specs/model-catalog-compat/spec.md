@@ -120,6 +120,13 @@ an operator-mapped slug that has no catalog evidence at all.
 - **THEN** account-level indexes are treated as incomplete
 - **AND** selection degrades to plan-level routing
 
+#### Scenario: Bridge owner is newer than registry coverage
+
+- **GIVEN** an HTTP bridge session belongs to a selectable account absent from the registry snapshot
+- **WHEN** a compatible follow-up evaluates model or service-tier support
+- **THEN** stale account-level indexes do not detach the bridge owner
+- **AND** compatibility degrades to plan-level routing
+
 #### Scenario: Failed refresh follows an account plan-type change
 
 - **GIVEN** an account previously advertised a catalog while on one plan type

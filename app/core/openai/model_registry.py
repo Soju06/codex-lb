@@ -842,11 +842,11 @@ class ModelRegistry:
                         for model in account_models:
                             if model.slug not in models:
                                 suppressed_model_slugs.add(model.slug)
-                    if previous is not None:
-                        for slug, previous_account_ids in previous.model_accounts.items():
-                            if slug in models or not previous_account_ids:
-                                continue
-                            suppressed_model_slugs.add(slug)
+                if previous is not None:
+                    for slug, previous_account_ids in previous.model_accounts.items():
+                        if slug in models or not previous_account_ids:
+                            continue
+                        suppressed_model_slugs.add(slug)
                 for slug in tuple(suppressed_model_slugs):
                     if slug in models:
                         suppressed_model_slugs.discard(slug)

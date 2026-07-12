@@ -554,8 +554,17 @@ def _http_bridge_session_supports_service_tier(
         if callable(is_suppressed_model) and is_suppressed_model(request_model):
             return False
         return True
+    account_indexes_cover_owner = True
+    get_snapshot = getattr(registry, "get_snapshot", None)
+    if callable(get_snapshot):
+        snapshot = get_snapshot()
+        account_indexes_cover_owner = snapshot is not None and session.account.id in snapshot.account_plans
     account_ids_for_model = getattr(registry, "account_ids_for_model", None)
-    model_account_ids = account_ids_for_model(request_model) if callable(account_ids_for_model) else None
+    model_account_ids = (
+        account_ids_for_model(request_model)
+        if callable(account_ids_for_model) and account_indexes_cover_owner
+        else None
+    )
     if model_account_ids is not None and session.account.id not in model_account_ids:
         return False
     # Keep bridge reuse aligned with account selection: clients commonly send
@@ -565,7 +574,11 @@ def _http_bridge_session_supports_service_tier(
     if normalized_service_tier in {None, "auto", "default"}:
         allowed_plans = model_allowed_plans
     else:
-        allowed_account_ids = registry.account_ids_for_model_service_tier(request_model, request_service_tier)
+        allowed_account_ids = (
+            registry.account_ids_for_model_service_tier(request_model, request_service_tier)
+            if account_indexes_cover_owner
+            else None
+        )
         if allowed_account_ids is not None:
             return session.account.id in allowed_account_ids
 

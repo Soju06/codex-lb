@@ -56,7 +56,13 @@ _FIRST_TOKEN_EVENT_TYPES = frozenset(
 _WEBSOCKET_FULL_REPLAY_WAIT_MIN_ITEMS = 20
 _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS = 0.05
 _HARD_HTTP_BRIDGE_AFFINITY_KINDS = frozenset(
-    {"turn_state_header", "session_header", "internal_unanchored_parallel", "internal_model_parallel"}
+    {
+        "turn_state_header",
+        "session_header",
+        "internal_unanchored_parallel",
+        "internal_model_parallel",
+        "internal_request_parallel",
+    }
 )
 _ACCOUNT_SELECTION_RECOVERY_MIN_SLEEP_SECONDS = 1.0
 _ACCOUNT_SELECTION_RECOVERY_DEFAULT_SLEEP_SECONDS = 30.0

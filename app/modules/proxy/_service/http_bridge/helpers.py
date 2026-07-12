@@ -730,6 +730,10 @@ def _http_bridge_compatible(
     )
 
 
+def _http_bridge_alias_target_is_stale(session: _HTTPBridgeSession | None) -> bool:
+    return session is None or session.closed or not _http_bridge_session_account_active(session)
+
+
 def _http_bridge_incompatible_model_fork_key(
     *,
     key: "_HTTPBridgeSessionKey",
@@ -768,7 +772,7 @@ def _http_bridge_incompatible_model_fork_key(
     return fork_key
 
 
-def _http_bridge_unanchored_parallel_fork_key(
+def _http_bridge_parallel_fork_key(
     *,
     key: "_HTTPBridgeSessionKey",
     session: "_HTTPBridgeSession | None",
@@ -776,38 +780,76 @@ def _http_bridge_unanchored_parallel_fork_key(
     incoming_turn_state: str | None,
     previous_response_id: str | None,
     request_model: str | None,
+    request_service_tier: str | None,
     request_scope_id: str,
+    allow_model_fork: bool = True,
+    same_model_required: bool = False,
 ) -> "_HTTPBridgeSessionKey | None":
-    """Give independent process-session requests separate websocket lanes."""
+    """Give incompatible or concurrent requests an independent websocket lane."""
 
-    if key.affinity_kind != "session_header" or incoming_turn_state is not None or previous_response_id is not None:
-        return None
     reason: str | None = None
-    if inflight_creation:
-        reason = "session_creation_inflight"
-    elif session is not None and not session.closed:
-        if _http_bridge_session_has_visible_requests(session):
-            reason = "active_request"
-        elif (
-            reservation_id := getattr(session, "unanchored_reservation_id", None)
-        ) is not None and reservation_id != request_scope_id:
-            reason = "session_reserved"
-        elif not _http_bridge_models_compatible(session.request_model, request_model):
-            reason = "model_change"
-    if reason is None:
+    if key.affinity_kind == "session_header" and incoming_turn_state is None and previous_response_id is None:
+        if inflight_creation:
+            reason = "session_creation_inflight"
+        elif session is not None and not session.closed:
+            if _http_bridge_session_has_visible_requests(session):
+                reason = "active_request"
+            elif (
+                reservation_id := getattr(session, "unanchored_reservation_id", None)
+            ) is not None and reservation_id != request_scope_id:
+                reason = "session_reserved"
+            elif not _http_bridge_models_compatible(session.request_model, request_model):
+                reason = "model_change"
+    if reason is not None:
+        fork_key = _HTTPBridgeSessionKey(
+            "internal_unanchored_parallel",
+            sha256(f"{key.affinity_key}\0{request_scope_id}".encode()).hexdigest(),
+            key.api_key_id,
+        )
+        _log_http_bridge_event(
+            "unanchored_parallel_fork",
+            fork_key,
+            account_id=None,
+            model=request_model,
+            detail=f"reason={reason}",
+            cache_key_family=key.affinity_kind,
+            model_class=_extract_model_class(request_model) if request_model else None,
+            owner_check_applied=False,
+        )
+        return fork_key
+
+    if session is None or session.closed or not _http_bridge_session_account_active(session):
         return None
+    if allow_model_fork:
+        model_fork_key = _http_bridge_incompatible_model_fork_key(
+            key=key,
+            existing_model=session.request_model,
+            request_model=request_model,
+            request_scope_id=request_scope_id,
+        )
+        if model_fork_key is not None:
+            return model_fork_key
+    if _http_bridge_compatible(
+        session,
+        request_model,
+        request_service_tier,
+        same_model_required,
+    ):
+        return None
+    if incoming_turn_state is not None or previous_response_id is not None:
+        raise ProxyResponseError(502, _http_bridge_continuity_lost_error_envelope())
 
     fork_key = _HTTPBridgeSessionKey(
-        "internal_unanchored_parallel",
-        sha256(f"{key.affinity_key}\0{request_scope_id}".encode()).hexdigest(),
+        "internal_request_parallel",
+        sha256(f"{key.affinity_kind}\0{key.affinity_key}\0{request_scope_id}".encode()).hexdigest(),
         key.api_key_id,
     )
     _log_http_bridge_event(
-        "unanchored_parallel_fork",
-        key,
-        account_id=None,
+        "request_compatibility_fork",
+        fork_key,
+        account_id=session.account.id,
         model=request_model,
-        detail=f"reason={reason}",
+        detail=f"source_kind={key.affinity_kind}",
         cache_key_family=key.affinity_kind,
         model_class=_extract_model_class(request_model) if request_model else None,
         owner_check_applied=False,

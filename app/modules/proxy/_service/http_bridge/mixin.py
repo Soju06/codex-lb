@@ -74,6 +74,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _durable_bridge_lookup_active_owner,
     _durable_bridge_lookup_allows_local_reuse,
     _forwarded_http_bridge_session_key,
+    _http_bridge_alias_target_is_stale,
     _http_bridge_allow_durable_takeover,
     _http_bridge_can_local_recover_without_ring,
     _http_bridge_can_recover_during_drain,
@@ -85,12 +86,12 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_endpoint_matches_current_instance,
     _http_bridge_eviction_priority,
     _http_bridge_has_durable_recovery_anchor,
-    _http_bridge_incompatible_model_fork_key,
     _http_bridge_key_strength,
     _http_bridge_models_compatible,
     _http_bridge_owner_check_required,
     _http_bridge_owner_instance,
     _http_bridge_owner_lookup_unavailable_error_envelope,
+    _http_bridge_parallel_fork_key,
     _http_bridge_previous_response_alias_key,
     _http_bridge_previous_response_owner_unavailable_error,
     _http_bridge_request_budget_seconds,
@@ -105,7 +106,6 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_should_wait_for_registration,
     _http_bridge_startup_wait_timeout_error,
     _http_bridge_turn_state_alias_key,
-    _http_bridge_unanchored_parallel_fork_key,
     _is_missing_durable_bridge_table_error,
     _log_http_bridge_event,
     _log_http_bridge_startup_wait_timeout,
@@ -524,20 +524,18 @@ class _HTTPBridgeMixin(
                     if alias_key is not None:
                         key = alias_key
                         alias_session = self._http_bridge_sessions.get(alias_key)
-                        if (
-                            alias_session is None
-                            or alias_session.closed
-                            or not _http_bridge_session_account_active(alias_session)
-                            or not _http_bridge_models_compatible(alias_session.request_model, request_model)
-                            or not _http_bridge_session_matches_preferred_account(
-                                session=alias_session,
-                                previous_response_id=previous_response_id,
-                                preferred_account_id=preferred_account_id,
-                                require_preferred_account=require_preferred_account,
-                            )
-                        ):
+                        if _http_bridge_alias_target_is_stale(alias_session):
                             self._http_bridge_turn_state_index.pop(alias_index_key, None)
                             key = _HTTPBridgeSessionKey("turn_state_header", incoming_turn_state, api_key_id)
+                        elif not _http_bridge_compatible(
+                            alias_session, request_model, request_service_tier, True
+                        ) or not _http_bridge_session_matches_preferred_account(
+                            session=alias_session,
+                            previous_response_id=previous_response_id,
+                            preferred_account_id=preferred_account_id,
+                            require_preferred_account=require_preferred_account,
+                        ):
+                            raise ProxyResponseError(502, _http_bridge_continuity_lost_error_envelope())
                         else:
                             self._promote_http_bridge_session_to_codex_affinity(
                                 alias_session,
@@ -563,7 +561,7 @@ class _HTTPBridgeMixin(
                                 previous_session is not None
                                 and not previous_session.closed
                                 and _http_bridge_session_account_active(previous_session)
-                                and _http_bridge_models_compatible(previous_session.request_model, request_model)
+                                and _http_bridge_compatible(previous_session, request_model, request_service_tier, True)
                                 and _http_bridge_session_matches_preferred_account(
                                     session=previous_session,
                                     previous_response_id=previous_response_id,
@@ -590,7 +588,7 @@ class _HTTPBridgeMixin(
                                 previous_session.request_model, request_model
                             ):
                                 model_transition_rebind = True
-                            elif previous_key is not None:
+                            elif previous_key is not None and _http_bridge_alias_target_is_stale(previous_session):
                                 self._http_bridge_previous_response_index.pop(previous_alias_key, None)
                         if model_transition_rebind:
                             key = _HTTPBridgeSessionKey("turn_state_header", incoming_turn_state, api_key_id)
@@ -608,21 +606,6 @@ class _HTTPBridgeMixin(
                         force_durable_takeover = True
                     self._schedule_http_bridge_session_closes(pruned_sessions, reason="registry_detach")
                 existing = self._http_bridge_sessions.get(key)
-                fork_key = _http_bridge_unanchored_parallel_fork_key(
-                    key=key,
-                    session=existing,
-                    inflight_creation=key in self._http_bridge_inflight_sessions,
-                    incoming_turn_state=incoming_turn_state,
-                    previous_response_id=previous_response_id,
-                    request_model=request_model,
-                    request_scope_id=request_scope_id,
-                )
-                if fork_key is not None:
-                    key = fork_key
-                    durable_lookup = None
-                    force_durable_takeover_after_detach = False
-                    own_fork_locally = forwarded_request and forwarded_original_request_unanchored
-                    continue
                 retained_handoff = bool(
                     existing and existing.closed and _http_bridge_session_has_admission_waiter(existing)
                 )
@@ -637,21 +620,23 @@ class _HTTPBridgeMixin(
                     service_tier_supported=_http_bridge_compatible(existing, request_model, request_service_tier),
                     allow_closed_admission_handoff=retained_handoff,
                 )
-                model_fork_key = (
-                    _http_bridge_incompatible_model_fork_key(
-                        key=key,
-                        existing_model=existing.request_model,
-                        request_model=request_model,
-                        request_scope_id=request_scope_id,
-                    )
-                    if reusable and existing is not None
-                    else None
+                fork_key = _http_bridge_parallel_fork_key(
+                    key=key,
+                    session=existing,
+                    inflight_creation=key in self._http_bridge_inflight_sessions,
+                    incoming_turn_state=incoming_turn_state,
+                    previous_response_id=previous_response_id,
+                    request_model=request_model,
+                    request_service_tier=request_service_tier,
+                    request_scope_id=request_scope_id,
+                    allow_model_fork=reusable,
                 )
-                if model_fork_key is not None:
+                if fork_key is not None:
                     model_transition_parent_key = key
-                    key = model_fork_key
+                    key = fork_key
                     durable_lookup = None
                     force_durable_takeover_after_detach = False
+                    own_fork_locally = forwarded_request and forwarded_original_request_unanchored
                     continue
                 if retained_handoff and not reusable:
                     _raise_http_bridge_incompatible_admission_handoff()
@@ -1109,7 +1094,7 @@ class _HTTPBridgeMixin(
                                 previous_session.request_model, request_model
                             ):
                                 model_transition_rebind = True
-                            else:
+                            elif previous_key is not None and _http_bridge_alias_target_is_stale(previous_session):
                                 self._http_bridge_previous_response_index.pop(previous_alias_key, None)
                     if (
                         session_to_return_after_close is None
@@ -1323,14 +1308,19 @@ class _HTTPBridgeMixin(
                     raise
                 if session is None:
                     continue
-                model_fork_key = _http_bridge_incompatible_model_fork_key(
+                fork_key = _http_bridge_parallel_fork_key(
                     key=key,
-                    existing_model=session.request_model,
+                    session=session,
+                    inflight_creation=False,
+                    incoming_turn_state=incoming_turn_state,
+                    previous_response_id=previous_response_id,
                     request_model=request_model,
+                    request_service_tier=request_service_tier,
                     request_scope_id=request_scope_id,
+                    same_model_required=True,
                 )
-                if model_fork_key is not None:
-                    model_transition_parent_key, key = key, model_fork_key
+                if fork_key is not None:
+                    model_transition_parent_key, key = key, fork_key
                     durable_lookup = None
                     force_durable_takeover_after_detach = False
                     continue

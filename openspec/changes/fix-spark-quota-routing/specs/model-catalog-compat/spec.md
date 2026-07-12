@@ -33,7 +33,17 @@ For a model canonically mapped to a separately metered additional quota, account
 - **AND** the registry's current requested service-tier plan restrictions exclude the session account's current plan
 - **WHEN** a later request reaches that session through any reuse entry point
 - **THEN** the existing session is not returned under the recorded provenance
-- **AND** the request follows the normal detach, fork, reselection, or fail-closed path without synchronously re-reading quota telemetry
+- **AND** the current request follows a request-scope fork or fail-closed path without synchronously re-reading quota telemetry or mutating the existing live session
+
+#### Scenario: Incompatible request preserves another request's live bridge state
+
+- **GIVEN** a live or in-flight HTTP bridge session is compatible with its creator request
+- **AND** another direct, previous-response-alias, turn-state-alias, or in-flight-waiter request has mismatched quota-backed admission provenance or current plan-tier eligibility
+- **WHEN** bridge request compatibility rejects that second request
+- **THEN** an unanchored request uses an independent collision-resistant request-scope session, or an anchored request alone fails closed
+- **AND** the creator's session remains registered, open, and unscheduled for close with its request model, service tier, and transport unchanged
+- **AND** live previous-response and turn-state aliases remain unchanged so a subsequent compatible request can resolve and reuse the owner
+- **AND** an alias mapping is removed only when its target is missing, closed, or inactive
 
 #### Scenario: Catalog-supported account-level service-tier exclusion remains authoritative
 

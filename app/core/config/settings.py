@@ -223,6 +223,10 @@ class Settings(BaseSettings):
     http_responses_session_bridge_advertise_base_url: str | None = None
     sticky_session_cleanup_enabled: bool = True
     sticky_session_cleanup_interval_seconds: int = Field(default=300, gt=0)
+    # Data retention (0 = disabled). Non-zero values have safety floors so
+    # every in-product consumer window stays inside retained data.
+    request_log_retention_days: int = Field(default=0, ge=0, le=3650)
+    usage_history_retention_days: int = Field(default=0, ge=0, le=3650)
     quota_planner_scheduler_enabled: bool = True
     quota_planner_tick_seconds: int = Field(default=300, gt=0)
     automations_scheduler_enabled: bool = True
@@ -343,6 +347,20 @@ class Settings(BaseSettings):
     # HTTP connector limits
     http_connector_limit: int = 100
     http_connector_limit_per_host: int = 50
+
+    @field_validator("request_log_retention_days")
+    @classmethod
+    def _validate_request_log_retention(cls, value: int) -> int:
+        if value != 0 and value < 30:
+            raise ValueError("request_log_retention_days must be 0 (disabled) or >= 30")
+        return value
+
+    @field_validator("usage_history_retention_days")
+    @classmethod
+    def _validate_usage_history_retention(cls, value: int) -> int:
+        if value != 0 and value < 45:
+            raise ValueError("usage_history_retention_days must be 0 (disabled) or >= 45")
+        return value
 
     @field_validator("data_dir", mode="before")
     @classmethod

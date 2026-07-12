@@ -187,6 +187,26 @@ class AccountUsageRollup(Base):
     total_cost_usd: Mapped[float] = mapped_column(Float, default=0.0, server_default=text("0"), nullable=False)
 
 
+class ApiKeyUsageRollup(Base):
+    """Folded lifetime request-usage sums per API key.
+
+    Governed by the same fold watermark as ``AccountUsageRollup`` (the single
+    ``account_usage_rollup_state`` row); sums use the API-key summary
+    semantics (no dedupe, soft-deleted rows included, warmup kinds excluded).
+    Stored unclamped; the ``cached <= input`` clamp applies after merging
+    with the live tail.
+    """
+
+    __tablename__ = "api_key_usage_rollups"
+
+    api_key_id: Mapped[str] = mapped_column(String, ForeignKey("api_keys.id", ondelete="CASCADE"), primary_key=True)
+    request_count: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
+    input_tokens: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
+    output_tokens: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
+    cached_input_tokens: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
+    total_cost_usd: Mapped[float] = mapped_column(Float, default=0.0, server_default=text("0"), nullable=False)
+
+
 class AccountUsageRollupState(Base):
     """Single-row fold watermark (naive-UTC), seeded by the migration.
 

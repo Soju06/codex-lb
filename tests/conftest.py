@@ -89,6 +89,13 @@ def _disable_account_usage_rollup_scheduler_startup(monkeypatch):
     monkeypatch.setattr(main_module, "build_account_usage_rollup_scheduler", lambda: _NoopScheduler())
 
 
+@pytest.fixture(autouse=True)
+def _disable_data_retention_scheduler_startup(monkeypatch):
+    import app.main as main_module
+
+    monkeypatch.setattr(main_module, "build_data_retention_scheduler", lambda: _NoopScheduler())
+
+
 @pytest_asyncio.fixture(scope="session", autouse=True)
 async def dispose_engine():
     yield

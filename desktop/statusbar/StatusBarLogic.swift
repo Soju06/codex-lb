@@ -63,6 +63,20 @@ func compactResetCreditLabel(count: Int, expiresAt: Date?, now: Date = Date()) -
     return "Reset \(count) / \(value)"
 }
 
+func elapsedTime(since date: Date, now: Date = Date()) -> String {
+    let seconds = max(0, Int(now.timeIntervalSince(date)))
+    let days = seconds / 86_400
+    let hours = (seconds % 86_400) / 3_600
+    let minutes = (seconds % 3_600) / 60
+    if days > 0 {
+        return "\(days)d \(hours)h"
+    }
+    if hours > 0 {
+        return "\(hours)h \(minutes)m"
+    }
+    return "\(max(1, minutes))m"
+}
+
 func refreshStatusLabel(isRefreshing: Bool, lastRefreshedAt: Date?) -> String? {
     if isRefreshing {
         return "Refreshing..."

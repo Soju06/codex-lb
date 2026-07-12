@@ -855,9 +855,9 @@ private func warmupAttempt(_ account: AccountSummary) -> String {
         return "No attempts"
     }
     if let completedAt = warmup.completedAt {
-        return "\(warmup.status.capitalized) \(relativeTime(completedAt)) ago"
+        return "\(warmup.status.capitalized) \(elapsedTime(since: completedAt)) ago"
     }
-    return "\(warmup.status.capitalized) \(relativeTime(warmup.attemptedAt)) ago"
+    return "\(warmup.status.capitalized) \(elapsedTime(since: warmup.attemptedAt)) ago"
 }
 
 @MainActor

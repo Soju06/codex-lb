@@ -13,6 +13,8 @@ private enum StatusBarLogicTests {
         assert(compactResetCreditLabel(count: 2, expiresAt: eightDays, now: now) == "Reset 2 / 8d")
         assert(compactResetCreditLabel(count: 0, expiresAt: eightDays, now: now) == nil)
         assert(compactResetCreditLabel(count: 3, expiresAt: nil, now: now) == "Reset 3")
+        assert(elapsedTime(since: now.addingTimeInterval(-(86_400 + 3_600)), now: now) == "1d 1h")
+        assert(elapsedTime(since: now.addingTimeInterval(-3_600), now: now) == "1h 0m")
 
         assert(refreshStatusLabel(isRefreshing: true, lastRefreshedAt: nil) == "Refreshing...")
         assert(refreshStatusLabel(isRefreshing: false, lastRefreshedAt: nil) == nil)

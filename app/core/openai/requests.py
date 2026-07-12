@@ -922,7 +922,37 @@ def _trim_compact_input_for_upstream(payload: MutableJsonObject) -> None:
     preserved_indices = _compact_state_anchor_indices(input_value)
     required_indices = set(preserved_indices)
     if input_value:
-        required_indices.add(len(input_value) - 1)
+        latest_index = len(input_value) - 1
+        latest_item = input_value[latest_index]
+        latest_mapping = _json_mapping_or_none(latest_item)
+        latest_type = latest_mapping.get("type") if latest_mapping is not None else None
+        # A terminal compact trigger commonly follows a very large command
+        # result. Requiring an arbitrary non-state tool item to survive
+        # byte-identical can make compaction impossible; the paired call/output
+        # is safe to omit together and is represented by the trim marker.
+        # User messages and state-tool items remain fail-closed anchors.
+        if latest_type not in _COMPACT_TOOL_CALL_ITEM_TYPES | _COMPACT_TOOL_CALL_OUTPUT_ITEM_TYPES:
+            required_indices.add(latest_index)
+        elif latest_mapping is not None and _compact_item_is_state_anchor(latest_mapping):
+            required_indices.add(latest_index)
+        elif latest_type in _COMPACT_TOOL_CALL_ITEM_TYPES:
+            paired_tail = _compact_reconciled_tool_call_indices(
+                input_value,
+                {latest_index},
+                token_counts=token_counts,
+                token_budget=_MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS,
+            )
+            if latest_index in paired_tail or token_counts[latest_index] <= _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS:
+                required_indices.update(paired_tail or {latest_index})
+        else:
+            paired_tail = _compact_reconciled_tool_call_indices(
+                input_value,
+                {latest_index},
+                token_counts=token_counts,
+                token_budget=_MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS,
+            )
+            if latest_index in paired_tail:
+                required_indices.update(paired_tail)
     required_indices = _compact_reconciled_tool_call_indices(
         input_value,
         required_indices,

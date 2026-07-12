@@ -1466,3 +1466,39 @@ async def test_sticky_upsert_single_statement_insert_and_update(db_setup):
     # One INSERT ... RETURNING per upsert; no follow-up SELECT/refresh.
     assert len(statements) == 2
     assert all("INSERT" in stmt.upper() and "RETURNING" in stmt.upper() for stmt in statements)
+
+
+@pytest.mark.asyncio
+async def test_sticky_upsert_returning_refreshes_identity_map_instance(db_setup):
+    """Rebinding a key within one session must return the NEW account even
+    when the session's identity map already holds the row from an earlier
+    upsert (populate_existing on the RETURNING execute)."""
+    from app.db.models import StickySessionKind
+    from app.modules.proxy.sticky_repository import StickySessionsRepository
+
+    encryptor = TokenEncryptor()
+    async with SessionLocal() as session:
+        repo_accounts = AccountsRepository(session)
+        for account_id in ("acc_rebind_a", "acc_rebind_b"):
+            await repo_accounts.upsert(
+                Account(
+                    id=account_id,
+                    email=f"{account_id}@example.com",
+                    plan_type="plus",
+                    access_token_encrypted=encryptor.encrypt("access"),
+                    refresh_token_encrypted=encryptor.encrypt("refresh"),
+                    id_token_encrypted=encryptor.encrypt("id"),
+                    last_refresh=utcnow(),
+                    status=AccountStatus.ACTIVE,
+                    deactivation_reason=None,
+                )
+            )
+
+    async with SessionLocal() as session:
+        repo = StickySessionsRepository(session)
+        first = await repo.upsert("key_rebind", "acc_rebind_a", kind=StickySessionKind.PROMPT_CACHE)
+        assert first.account_id == "acc_rebind_a"
+        # Same session, same identity-map row: rebinding must not return the
+        # stale in-memory account_id.
+        second = await repo.upsert("key_rebind", "acc_rebind_b", kind=StickySessionKind.PROMPT_CACHE)
+        assert second.account_id == "acc_rebind_b"

@@ -68,9 +68,11 @@ class StickySessionsRepository:
         # RETURNING collapses the previous upsert + re-select + refresh
         # (4 round trips) into one statement; this runs inline before the
         # first upstream byte on sticky requests, so round trips are TTFT.
+        # populate_existing forces the returned row to overwrite any stale
+        # identity-map instance the session may already hold for this key.
         statement = self._build_upsert_statement(key, account_id, kind).returning(StickySession)
         async with sqlite_writer_section():
-            result = await self._session.execute(statement)
+            result = await self._session.execute(statement, execution_options={"populate_existing": True})
             row = result.scalar_one_or_none()
             await self._session.commit()
         if row is None:

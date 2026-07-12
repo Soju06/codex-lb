@@ -18,7 +18,12 @@
 - [x] 3.2 Record the incident/rationale summary in `openspec/changes/raise-ws-ingress-message-limit/context.md`
 - [x] 3.3 Validate specs: `openspec validate --specs` (delta) and strict change validation
 
-## 4. Verification
+## 4. Review follow-up (Codex P2: launcher parity)
+
+- [x] 4.1 `scripts/distroless-entrypoint.py`: exec `python -m app.cli` instead of `fastapi run` so the websocket ingress budget (and keep-alive) apply, matching `scripts/docker-entrypoint.sh`
+- [x] 4.2 `docker-compose.yml` (dev): launch via `uvicorn app.main:app --reload --ws-max-size 134217728` instead of `fastapi run` so dev keeps reload while matching the production ingress budget
+
+## 5. Verification
 
 - [x] 4.1 Run targeted test suites: `uv run pytest tests/unit/test_cli.py tests/unit/test_proxy_utils.py tests/integration/test_proxy_websocket_responses.py tests/integration/test_http_responses_bridge.py`
 - [x] 4.2 End-to-end check: start the server with default flags, open a websocket to `/backend-api/codex/responses`, send a >16 MiB `response.create`, and confirm the connection survives to an application-level response (slimmed forward or status-400 error event), not a `1009` close

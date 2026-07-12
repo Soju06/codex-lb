@@ -12,6 +12,7 @@ from app.core import usage as usage_core
 from app.core.balancer import (
     HEALTH_TIER_DRAINING,
     HEALTH_TIER_HEALTHY,
+    RATE_LIMITED_MIN_COOLDOWN_SECONDS,
     AccountState,
     RoutingCost,
     handle_permanent_failure,
@@ -843,6 +844,41 @@ def test_handle_rate_limit_uses_backoff_when_no_delay(monkeypatch):
     assert state.cooldown_until == pytest.approx(now + 0.2)
 
 
+def test_handle_rate_limit_persists_floored_deadline_without_reset_metadata(monkeypatch):
+    # Regression: a metadata-free 429 must persist a reset_at deadline so a
+    # peer replica sharing the database cannot flip the account back to
+    # ACTIVE while the cooldown is running. The sub-second backoff is floored
+    # at RATE_LIMITED_MIN_COOLDOWN_SECONDS for the persisted deadline only.
+    now = 1_700_000_000.0
+    monkeypatch.setattr("app.core.balancer.logic.time.time", lambda: now)
+    monkeypatch.setattr("app.core.balancer.logic.backoff_seconds", lambda _: 0.2)
+    state = AccountState("a", AccountStatus.ACTIVE, used_percent=5.0)
+    handle_rate_limit(state, {"message": "Rate limit exceeded."})
+    assert state.status == AccountStatus.RATE_LIMITED
+    assert state.blocked_at == pytest.approx(now)
+    assert state.reset_at == pytest.approx(now + RATE_LIMITED_MIN_COOLDOWN_SECONDS)
+    # Local cooldown keeps the raw backoff so the marking replica's own
+    # recovery gates are unchanged.
+    assert state.cooldown_until == pytest.approx(now + 0.2)
+
+
+def test_handle_rate_limit_persists_retry_after_deadline_verbatim(monkeypatch):
+    now = 1_700_000_000.0
+    monkeypatch.setattr("app.core.balancer.logic.time.time", lambda: now)
+    state = AccountState("a", AccountStatus.ACTIVE, used_percent=5.0)
+    handle_rate_limit(state, {"message": "Try again in 20m"})
+    assert state.reset_at == pytest.approx(now + 1200.0)
+    assert state.cooldown_until == pytest.approx(now + 1200.0)
+
+
+def test_handle_rate_limit_upstream_reset_metadata_still_wins(monkeypatch):
+    now = 1_700_000_000.0
+    monkeypatch.setattr("app.core.balancer.logic.time.time", lambda: now)
+    state = AccountState("a", AccountStatus.ACTIVE, used_percent=5.0)
+    handle_rate_limit(state, {"message": "Rate limit exceeded.", "resets_in_seconds": 600})
+    assert state.reset_at == pytest.approx(now + 600.0)
+
+
 def test_handle_rate_limit_cooldown_honors_word_unit_hint(monkeypatch):
     now = 1_700_000_000.0
     monkeypatch.setattr("app.core.balancer.logic.time.time", lambda: now)
@@ -1546,12 +1582,15 @@ def test_state_from_account_clears_stale_advisory_account_reset_for_active_accou
 
     handle_rate_limit(state, {"message": "rate limit"})
     assert state.status == AccountStatus.RATE_LIMITED
-    assert state.reset_at is None
+    # The stale advisory reset (now + 300) is not reused; the persisted
+    # deadline is the floored backoff fallback so peer replicas honor the
+    # cooldown even when the 429 carried no reset metadata.
+    assert state.reset_at == pytest.approx(now + RATE_LIMITED_MIN_COOLDOWN_SECONDS)
     assert state.cooldown_until is not None
     assert now + 0.18 <= state.cooldown_until <= now + 0.22
 
 
-def test_state_from_account_uses_runtime_cooldown_not_advisory_reset_after_resetless_rate_limit(
+def test_state_from_account_floors_resetless_rate_limited_row_instead_of_advisory_reset(
     monkeypatch,
 ):
     now = 1_700_000_000.0
@@ -1560,6 +1599,7 @@ def test_state_from_account_uses_runtime_cooldown_not_advisory_reset_after_reset
     monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
 
+    blocked_at = now - 1
     state = _state_from_account(
         account=_make_test_account(status=AccountStatus.RATE_LIMITED, reset_at=None),
         primary_entry=_make_test_usage(
@@ -1569,12 +1609,16 @@ def test_state_from_account_uses_runtime_cooldown_not_advisory_reset_after_reset
             recorded_at=_epoch_to_naive_utc(now - 30),
         ),
         secondary_entry=None,
-        runtime=RuntimeState(cooldown_until=cooldown_until, blocked_at=now - 1),
+        runtime=RuntimeState(cooldown_until=cooldown_until, blocked_at=blocked_at),
     )
 
-    assert state.status == AccountStatus.ACTIVE
+    # A RATE_LIMITED row without a persisted reset_at (legacy row) is held by
+    # the blocked_at + RATE_LIMITED_MIN_COOLDOWN_SECONDS floor instead of
+    # flipping straight back to ACTIVE; the stale advisory reset (now + 300)
+    # is still not reused.
+    assert state.status == AccountStatus.RATE_LIMITED
     assert state.used_percent == 100.0
-    assert state.reset_at is None
+    assert state.reset_at == pytest.approx(blocked_at + RATE_LIMITED_MIN_COOLDOWN_SECONDS)
     assert state.primary_reset_at == future_reset
     assert state.cooldown_until == cooldown_until
 

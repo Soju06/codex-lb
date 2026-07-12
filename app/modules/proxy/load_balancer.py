@@ -17,6 +17,7 @@ from app.core.balancer import (
     HEALTH_TIER_HEALTHY,
     HEALTH_TIER_PROBING,
     QUOTA_EXCEEDED_COOLDOWN_SECONDS,
+    RATE_LIMITED_MIN_COOLDOWN_SECONDS,
     ROUTING_POLICY_BURN_FIRST,
     ROUTING_POLICY_PRESERVE,
     TRAFFIC_CLASS_FOREGROUND,
@@ -1981,6 +1982,21 @@ def _state_from_account(
         effective_runtime_reset = None
     effective_blocked_at = float(account.blocked_at) if account.blocked_at is not None else runtime.blocked_at
 
+    # Defense-in-depth for RATE_LIMITED rows persisted without a reset_at
+    # deadline (written before cooldown persistence, or by an older replica):
+    # hold the account out of rotation for a minimum floor window after
+    # blocked_at instead of letting a replica with no runtime knowledge of
+    # the 429 flip it straight back to ACTIVE. Once the floor elapses,
+    # recovery proceeds through the normal CAS-guarded persistence path.
+    if (
+        status_seed == AccountStatus.RATE_LIMITED
+        and effective_runtime_reset is None
+        and effective_blocked_at is not None
+    ):
+        floor_deadline = effective_blocked_at + RATE_LIMITED_MIN_COOLDOWN_SECONDS
+        if time.time() < floor_deadline:
+            effective_runtime_reset = floor_deadline
+
     if (
         account.status == AccountStatus.QUOTA_EXCEEDED
         and effective_runtime_reset is not None
@@ -1999,8 +2015,10 @@ def _state_from_account(
     # observed and the debounce period is over.
     #
     # QUOTA_EXCEEDED uses a persisted blocked_at marker so recovery survives
-    # process restarts. RATE_LIMITED keeps the narrower runtime-only behavior,
-    # because its cooldown duration is not persisted today.
+    # process restarts. RATE_LIMITED keeps the narrower runtime-only gate: only
+    # the replica that observed the 429 (and therefore holds the runtime
+    # cooldown) may recover the account early on fresh post-block usage
+    # evidence; peers wait for the persisted reset_at deadline to elapse.
     cooldown_ready = False
     if account.status == AccountStatus.QUOTA_EXCEEDED:
         cooldown_ready = (

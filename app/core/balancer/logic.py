@@ -974,21 +974,41 @@ def _select_fill_first(available: list[AccountState]) -> AccountState:
     return min(available, key=_fill_first_sort_key)
 
 
+# Minimum persisted cooldown for a metadata-free 429. The error-count backoff
+# starts near 0.2s, which is meaningless as a cross-replica cooldown: a peer
+# replica reading the row would flip it back to ACTIVE almost immediately. The
+# floor applies only to the persisted ``reset_at`` deadline written on the
+# backoff fallback path — Retry-After hints and upstream reset metadata are
+# persisted verbatim, and the local ``cooldown_until`` keeps the raw backoff.
+RATE_LIMITED_MIN_COOLDOWN_SECONDS = 30.0
+
+
 def handle_rate_limit(state: AccountState, error: UpstreamError) -> None:
+    now = time.time()
     state.status = AccountStatus.RATE_LIMITED
     state.error_count += 1
-    state.last_error_at = time.time()
-    state.blocked_at = time.time()
+    state.last_error_at = now
+    state.blocked_at = now
 
     reset_at = _extract_reset_at(error)
-    if reset_at is not None:
-        state.reset_at = reset_at
 
     message = error.get("message")
     delay = parse_retry_after(message) if message else None
     if delay is None:
         delay = backoff_seconds(state.error_count)
-    state.cooldown_until = time.time() + delay
+        persisted_delay = max(delay, RATE_LIMITED_MIN_COOLDOWN_SECONDS)
+    else:
+        persisted_delay = delay
+    state.cooldown_until = now + delay
+
+    if reset_at is not None:
+        state.reset_at = reset_at
+    else:
+        # Persist the resolved cooldown deadline so replicas sharing the
+        # database honor it instead of flipping the account back to ACTIVE
+        # from their own (empty) runtime state. The write rides the existing
+        # ``mark_rate_limit -> _persist_state`` status update.
+        state.reset_at = now + persisted_delay
 
 
 QUOTA_EXCEEDED_COOLDOWN_SECONDS = 120.0

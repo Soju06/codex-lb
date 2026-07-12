@@ -375,3 +375,49 @@ async def test_api_key_totals_survive_pruning_and_match_pre_fold(db_setup, monke
         assert await ApiKeysRepository(session).delete("key_ret")
     async with SessionLocal() as session:
         assert (await session.execute(select(ApiKeyUsageRollup))).scalars().all() == []
+
+
+def test_api_key_rollup_migration_resets_prior_fold_state(tmp_path):
+    """Installs that folded account rollups before this migration must be
+    reset (rollup rows + watermark together) so per-key totals re-backfill
+    instead of collapsing to the live tail."""
+    import sqlalchemy as sa
+    from alembic import command
+
+    from app.db.migrate import _build_alembic_config
+
+    db_path = tmp_path / "mig-key-rollup.sqlite3"
+    url = f"sqlite:///{db_path}"
+    cfg = _build_alembic_config(url)
+
+    command.upgrade(cfg, "20260712_010000_add_account_usage_rollups")
+
+    engine = sa.create_engine(url)
+    with engine.begin() as conn:
+        conn.execute(
+            sa.text(
+                "INSERT INTO accounts (id, email, plan_type, access_token_encrypted, refresh_token_encrypted,"
+                " id_token_encrypted, last_refresh, status, codex_installation_id)"
+                " VALUES ('acc_mig', 'mig@example.com', 'plus', X'00', X'00', X'00', '2026-01-01 00:00:00',"
+                " 'active', 'inst_mig')"
+            )
+        )
+        conn.execute(
+            sa.text(
+                "INSERT INTO account_usage_rollups (account_id, request_count, input_tokens, output_tokens,"
+                " cached_input_tokens, total_cost_usd) VALUES ('acc_mig', 5, 100, 50, 0, 1.0)"
+            )
+        )
+        conn.execute(sa.text("UPDATE account_usage_rollup_state SET folded_through = '2026-07-01 00:00:00'"))
+
+    command.upgrade(cfg, "20260712_020000_add_api_key_usage_rollups")
+
+    with engine.begin() as conn:
+        rollups = conn.execute(sa.text("SELECT count(*) FROM account_usage_rollups")).scalar_one()
+        watermark = conn.execute(sa.text("SELECT folded_through FROM account_usage_rollup_state")).scalar_one()
+        key_rollups = conn.execute(sa.text("SELECT count(*) FROM api_key_usage_rollups")).scalar_one()
+    engine.dispose()
+
+    assert rollups == 0
+    assert str(watermark).startswith("1970-01-01")
+    assert key_rollups == 0

@@ -20,7 +20,8 @@ _TABLE_NAME = "api_key_usage_rollups"
 
 def upgrade() -> None:
     bind = op.get_bind()
-    if sa.inspect(bind).has_table(_TABLE_NAME):
+    inspector = sa.inspect(bind)
+    if inspector.has_table(_TABLE_NAME):
         return
     op.create_table(
         _TABLE_NAME,
@@ -33,6 +34,16 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["api_key_id"], ["api_keys.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("api_key_id"),
     )
+    # If the account-rollup fold already advanced the shared watermark (an
+    # install that ran the account-rollup change before this one), per-key
+    # reads would aggregate only the live tail while this table starts
+    # empty - collapsing every key's lifetime totals. Reset the fold state
+    # (rollup rows + watermark together, per the documented escape hatch) so
+    # the next fold pass re-backfills BOTH rollups from raw request_logs;
+    # summaries stay correct throughout via the full live-tail fallback.
+    if inspector.has_table("account_usage_rollup_state"):
+        op.execute(sa.text("DELETE FROM account_usage_rollups"))
+        op.execute(sa.text("UPDATE account_usage_rollup_state SET folded_through = '1970-01-01 00:00:00'"))
 
 
 def downgrade() -> None:

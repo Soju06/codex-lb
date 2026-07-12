@@ -36,13 +36,17 @@ Deletes run in batches (10,000 ids per transaction, id-subquery form portable ac
 
 Adversarial review caught a consumer the original inventory missed: `ApiKeysRepository.list_usage_summary_by_key` / `get_usage_summary_by_key_id` aggregate `request_logs` lifetime totals per key with no time bound, and the account rollup cannot protect them. A `api_key_usage_rollups` table is folded in the same slice transaction under the same watermark, using the API-key semantics (no dedupe, soft-deleted rows included, warmup excluded); reads merge rollup + tail. The fold's empty-window skip now requires BOTH aggregates empty, because a window can contain only soft-deleted rows that still count toward key totals. Side effect (disclosed): folded key sums persist across account hard-deletes, where the legacy live aggregate would have shrunk.
 
-### D6. Review-driven hardening
+### D6. Migration resets prior fold state (Codex P1)
+
+Installs that ran the account-rollup change first have an advanced shared watermark; creating `api_key_usage_rollups` empty under that watermark would collapse every key's totals to the live tail. The migration therefore resets the fold state — account rollup rows AND the watermark together, exactly the documented escape hatch — so the next fold pass re-backfills both rollups from raw `request_logs`, with reads falling back to the full live aggregate meanwhile. Pinned by a migration regression test that seeds an advanced watermark before upgrading.
+
+### D7. Review-driven hardening
 
 - Protected latest-row id sets are materialized once per pass and passed as literals into the batch deletes; embedding the GROUP BY subquery in every batch statement rescanned the whole table per 10k batch (under the SQLite writer lock). New identities appearing mid-pass are safe: their rows are newer than the cutoff.
 - Retention settings gained a ceiling (`le=3650`); absurd values previously validated at startup then overflowed `timedelta` every pass, silently disabling retention.
 - The `min(cutoff, watermark)` guard and the coalesce/multi-identity latest-row semantics are pinned by mutation-hardened regression tests (lagging-watermark case, NULL-window identity merge, multi-batch drains).
 
-### D7. New `data-retention` capability spec
+### D8. New `data-retention` capability spec
 
 Retention is an operator contract (what data is kept, what the floors are, what can never be deleted), not a query-shape concern — a new capability keeps `query-caching` focused.
 

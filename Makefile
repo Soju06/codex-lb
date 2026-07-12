@@ -20,6 +20,7 @@ help:
 	  '  make architecture-check      proxy architecture fitness ratchets' \
 	  '  make typecheck               ty check' \
 	  '  make frontend-test           vitest coverage, same as CI' \
+	  '  make statusbar-dmg           build the local macOS status bar DMG' \
 	  '  make test-unit               unit pytest slice, same as CI' \
 	  '  make test-integration-core   integration-core pytest slice' \
 	  '  make package                 build and verify sdist/wheel' \
@@ -125,6 +126,10 @@ package: frontend-build
 	rm -rf build dist *.egg-info
 	uvx --from build==1.3.0 python -m build
 	python scripts/verify-wheel-assets.py
+
+.PHONY: statusbar-dmg
+statusbar-dmg:
+	desktop/statusbar/build-dmg.sh
 
 .PHONY: docker
 docker:

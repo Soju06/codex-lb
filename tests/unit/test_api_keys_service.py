@@ -1836,6 +1836,7 @@ async def test_record_usage_cost_limit_uses_flex_service_tier_pricing() -> None:
 @pytest.mark.parametrize(
     ("model", "expected_reserved_microdollars", "expected_final_microdollars"),
     [
+        ("gpt-5.6", 286_720, 31_000_000),
         ("gpt-5.6-sol-snapshot", 286_720, 31_000_000),
         ("gpt-5.6-terra-snapshot", 143_360, 15_500_000),
         ("gpt-5.6-luna-snapshot", 57_344, 6_200_000),

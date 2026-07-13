@@ -98,7 +98,7 @@ DEFAULT_PRICING_MODELS: dict[str, ModelPrice] = {
         flex_input_per_1m=2.5,
         flex_cached_input_per_1m=0.25,
         flex_output_per_1m=15.0,
-        long_context_threshold_tokens=270_000,
+        long_context_threshold_tokens=272_000,
         long_context_input_per_1m=10.0,
         long_context_cached_input_per_1m=1.0,
         long_context_output_per_1m=45.0,
@@ -113,7 +113,7 @@ DEFAULT_PRICING_MODELS: dict[str, ModelPrice] = {
         flex_input_per_1m=1.25,
         flex_cached_input_per_1m=0.125,
         flex_output_per_1m=7.5,
-        long_context_threshold_tokens=270_000,
+        long_context_threshold_tokens=272_000,
         long_context_input_per_1m=5.0,
         long_context_cached_input_per_1m=0.5,
         long_context_output_per_1m=22.5,
@@ -128,7 +128,7 @@ DEFAULT_PRICING_MODELS: dict[str, ModelPrice] = {
         flex_input_per_1m=0.5,
         flex_cached_input_per_1m=0.05,
         flex_output_per_1m=3.0,
-        long_context_threshold_tokens=270_000,
+        long_context_threshold_tokens=272_000,
         long_context_input_per_1m=2.0,
         long_context_cached_input_per_1m=0.2,
         long_context_output_per_1m=9.0,
@@ -323,6 +323,7 @@ DEFAULT_PRICING_MODELS: dict[str, ModelPrice] = {
 }
 
 DEFAULT_MODEL_ALIASES: dict[str, str] = {
+    "gpt-5.6": "gpt-5.6-sol",
     "gpt-5.6-sol*": "gpt-5.6-sol",
     "gpt-5.6-terra*": "gpt-5.6-terra",
     "gpt-5.6-luna*": "gpt-5.6-luna",

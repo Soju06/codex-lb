@@ -67,6 +67,7 @@ def test_get_pricing_for_model_gpt_5_4_alias():
 @pytest.mark.parametrize(
     ("requested_model", "canonical_model"),
     [
+        ("gpt-5.6", "gpt-5.6-sol"),
         ("gpt-5.6-sol", "gpt-5.6-sol"),
         ("gpt-5.6-sol-2026-07-13", "gpt-5.6-sol"),
         ("gpt-5.6-terra", "gpt-5.6-terra"),
@@ -291,18 +292,18 @@ def test_calculate_cost_from_usage_gpt_5_6_long_context(
         ("gpt-5.6-luna", 1.0, 2.0),
     ],
 )
-def test_calculate_cost_from_usage_gpt_5_6_uses_270k_long_context_boundary(
+def test_calculate_cost_from_usage_gpt_5_6_uses_272k_long_context_boundary(
     model: str,
     standard_input_rate: float,
     long_context_input_rate: float,
 ) -> None:
     price = DEFAULT_PRICING_MODELS[model]
 
-    at_boundary = calculate_cost_from_usage(UsageTokens(input_tokens=270_000.0, output_tokens=0.0), price)
-    above_boundary = calculate_cost_from_usage(UsageTokens(input_tokens=270_001.0, output_tokens=0.0), price)
+    at_boundary = calculate_cost_from_usage(UsageTokens(input_tokens=272_000.0, output_tokens=0.0), price)
+    above_boundary = calculate_cost_from_usage(UsageTokens(input_tokens=272_001.0, output_tokens=0.0), price)
 
-    assert at_boundary == pytest.approx(270_000 / 1_000_000 * standard_input_rate)
-    assert above_boundary == pytest.approx(270_001 / 1_000_000 * long_context_input_rate)
+    assert at_boundary == pytest.approx(272_000 / 1_000_000 * standard_input_rate)
+    assert above_boundary == pytest.approx(272_001 / 1_000_000 * long_context_input_rate)
 
 
 def test_calculate_cost_from_usage_service_tier_trims_whitespace():

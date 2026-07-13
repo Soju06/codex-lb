@@ -24,9 +24,13 @@ warmups for other accounts.
   `pg_advisory_xact_lock` on a fixed warmup-budget key and on SQLite by
   single-statement single-writer atomicity.
 - Count in-flight work: the budget count includes `status='executing'`
-  decisions (by `created_at >= since`) in addition to `status='executed'`
-  (by `executed_at >= since`), so a probe reserves budget when claimed, not
-  after it finishes.
+  decisions in addition to `status='executed'` (by `executed_at >= since`),
+  so a probe reserves budget when claimed, not after it finishes. The claim
+  stamps its own timestamp into `executed_at` (overwritten with the completion
+  time when the probe finishes), and executing rows count against the day they
+  were claimed, with a `created_at` fallback for legacy executing rows claimed
+  before stamping existed — `created_at` alone would let a decision planned
+  before midnight but claimed after midnight escape the new day's budget.
 - Replace `LimitWarmupRepository.try_create_attempt`'s FOR UPDATE +
   SELECT-then-INSERT with a single conditional
   `INSERT .. SELECT .. WHERE NOT EXISTS(tolerance-window match)`;

@@ -27,17 +27,29 @@ multi-replica (or multi-process SQLite) deployments:
 
 ```sql
 UPDATE quota_planner_decisions
-SET status='executing', reason='warmup_executing'
+SET status='executing', reason='warmup_executing', executed_at=:claimed_at
 WHERE id=:id AND status='planned'
   AND (SELECT count(*) FROM quota_planner_decisions d
        WHERE d.action='warmup'
          AND ((d.status='executed' AND d.executed_at >= :since)
-           OR (d.status='executing' AND d.created_at >= :since))) < :max_warmups
+           OR (d.status='executing'
+               AND (d.executed_at >= :since
+                 OR (d.executed_at IS NULL AND d.created_at >= :since))))) < :max_warmups
   AND (SELECT coalesce(sum(cost_usd), 0.0) FROM request_logs
        WHERE request_kind='warmup' AND requested_at >= :since
          AND deleted_at IS NULL) < :max_credits
 RETURNING id
 ```
+
+The claim stamps its own timestamp into `executed_at` (no new column; the
+completion/failure transition overwrites it with the final execution time), so
+in-flight `executing` rows count against the day they were **claimed**. The
+scheduler persists future-scheduled decisions whose `created_at` can precede
+the daily boundary; counting executing rows by `created_at` let a decision
+planned before midnight but claimed after midnight escape the new day's count
+budget and reopen the double-spend window. The `executed_at IS NULL AND
+created_at >= :since` arm only covers legacy executing rows claimed by a
+version that predates claim stamping (e.g. during a rolling upgrade).
 
 Backend split:
 
@@ -62,8 +74,12 @@ migration + midnight-rollover logic for no added safety; (b) advisory lock
 around the existing separate gate reads — fixes PG but leaves SQLite
 cross-process racy since plain SELECTs take no write lock; (c) counting
 `executing` rows by `scheduled_at` — executing rows may have NULL
-`scheduled_at` on manual warm-now; `created_at` is server-defaulted and
-always present.
+`scheduled_at` on manual warm-now; (d) counting `executing` rows by
+`created_at` — server-defaulted and always present, but keyed to the decision
+creation day rather than the claim day, so scheduler-planned decisions
+crossing midnight escaped the count guard; (e) a dedicated `claimed_at`
+column — needs a migration for a timestamp `executed_at` already represents
+once the claim stamps it.
 
 Failure-reason mapping: when the claim UPDATE returns no row, re-read the
 decision with `populate_existing` (the identity map may hold a stale

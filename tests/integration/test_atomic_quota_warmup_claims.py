@@ -11,9 +11,10 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import timedelta
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
@@ -168,6 +169,74 @@ async def test_claim_counts_in_flight_executing_decisions(db_setup):
     assert claimed is None
     async with SessionLocal() as session:
         status = await session.scalar(select(QuotaPlannerDecision.status).where(QuotaPlannerDecision.id == planned.id))
+    assert status == "planned"
+
+
+@pytest.mark.asyncio
+async def test_claim_counts_cross_midnight_claim_against_claim_day(db_setup):
+    """A decision planned yesterday but claimed today consumes today's budget.
+
+    ``QuotaPlannerScheduler.run_once`` persists future-scheduled decisions, so
+    ``created_at`` can precede the daily boundary. Before this fix the
+    executing-row budget guard filtered by ``created_at >= since``: a row
+    claimed today from a yesterday-created decision escaped today's count and
+    a second same-day claim was admitted past ``max_warmups_per_day=1``.
+    """
+    del db_setup
+    await _seed_planner(_account("acc-cross-midnight"), max_warmups_per_day=1)
+    midnight = _midnight()
+    async with SessionLocal() as session:
+        repo = QuotaPlannerRepository(session)
+        planned_yesterday = await repo.log_decision(
+            mode="auto",
+            action="warmup",
+            idempotency_key="cross-midnight-yesterday",
+            account_id="acc-cross-midnight",
+            scheduled_at=midnight + timedelta(minutes=5),
+            status="planned",
+        )
+        planned_today = await repo.log_decision(
+            mode="auto",
+            action="warmup",
+            idempotency_key="cross-midnight-today",
+            account_id="acc-cross-midnight",
+            status="planned",
+        )
+        await session.execute(
+            update(QuotaPlannerDecision)
+            .where(QuotaPlannerDecision.id == planned_yesterday.id)
+            .values(created_at=midnight - timedelta(hours=1))
+        )
+        await session.commit()
+
+    async with SessionLocal() as session:
+        repo = QuotaPlannerRepository(session)
+        claimed = await repo.claim_warmup_decision(
+            planned_yesterday.id,
+            since=midnight,
+            max_warmups=1,
+            max_credits=1.0,
+        )
+        assert claimed is not None
+        assert claimed.status == "executing"
+        assert claimed.executed_at is not None
+        assert claimed.executed_at >= midnight
+        assert await repo.count_active_warmups_since(midnight) == 1
+
+    async with SessionLocal() as replica_session:
+        replica_repo = QuotaPlannerRepository(replica_session)
+        refused = await replica_repo.claim_warmup_decision(
+            planned_today.id,
+            since=midnight,
+            max_warmups=1,
+            max_credits=1.0,
+        )
+
+    assert refused is None
+    async with SessionLocal() as session:
+        status = await session.scalar(
+            select(QuotaPlannerDecision.status).where(QuotaPlannerDecision.id == planned_today.id)
+        )
     assert status == "planned"
 
 

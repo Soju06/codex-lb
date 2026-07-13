@@ -9,8 +9,10 @@
       on single-statement single-writer atomicity; issue the claim in a fresh
       transaction and commit immediately.
 - [x] 1.2 Add `count_active_warmups_since(since)` counting `executed` (by
-      `executed_at`) plus in-flight `executing` (by `created_at`) warmup
-      decisions; keep `count_executed_warmups_since` for display.
+      `executed_at`) plus in-flight `executing` warmup decisions by the claim
+      timestamp the claim stamps into `executed_at` (with a `created_at`
+      fallback for legacy executing rows without a claim stamp); keep
+      `count_executed_warmups_since` for display.
 - [x] 1.3 Add `get_decision_fresh(decision_id)` (identity-map bypass via
       `populate_existing`) for post-refusal re-reads.
 - [x] 1.4 Convert `log_decision` to a dialect-dispatched
@@ -45,6 +47,9 @@
       concurrent `log_decision` on one idempotency key converges without
       aborting, and two-process limit-warmup attempts within the reset_at
       tolerance dedup to a single row.
+- [x] 4.3 Cross-midnight regression: a warmup decision created before the
+      daily boundary but claimed after it counts against the claim day's
+      budget and blocks a second same-day claim.
 - [x] 4.2 Update the existing bound-parameter regression test for
       `log_decision`'s new insert construct.
 

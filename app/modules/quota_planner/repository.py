@@ -4,7 +4,7 @@ from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from sqlalchemy import Integer, and_, cast, func, literal, or_, select, text, update
+from sqlalchemy import ColumnElement, Integer, and_, cast, func, literal, or_, select, text, update
 from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -54,6 +54,40 @@ class DemandBin:
 
 
 _WARMUP_BUDGET_LOCK_KEY = "quota_planner:warmup_budget"
+
+
+def _active_warmup_budget_clause(since: datetime) -> ColumnElement[bool]:
+    """Filter warmup decisions consuming the daily count budget since ``since``.
+
+    ``executed`` decisions count by ``executed_at`` (completion time).
+    In-flight ``executing`` decisions count by the claim timestamp that
+    ``claim_warmup_decision`` stamps into ``executed_at`` at the
+    planned -> executing transition — not by ``created_at``, because the
+    scheduler persists future-scheduled decisions whose ``created_at`` can
+    precede the daily boundary; a decision planned before midnight but claimed
+    after midnight must consume the claim day's budget. Executing rows without
+    a claim timestamp (claimed by a version that predates claim stamping) fall
+    back to ``created_at``.
+    """
+    return and_(
+        QuotaPlannerDecision.action == "warmup",
+        or_(
+            and_(
+                QuotaPlannerDecision.status == "executed",
+                QuotaPlannerDecision.executed_at >= since,
+            ),
+            and_(
+                QuotaPlannerDecision.status == "executing",
+                or_(
+                    QuotaPlannerDecision.executed_at >= since,
+                    and_(
+                        QuotaPlannerDecision.executed_at.is_(None),
+                        QuotaPlannerDecision.created_at >= since,
+                    ),
+                ),
+            ),
+        ),
+    )
 
 
 class QuotaPlannerRepository:
@@ -175,8 +209,13 @@ class QuotaPlannerRepository:
         The planned -> executing transition is the single authoritative budget
         enforcement point: one conditional UPDATE whose WHERE clause embeds both
         daily guards. The count budget includes in-flight ``executing`` decisions
-        (by ``created_at``) in addition to ``executed`` ones (by ``executed_at``)
-        so a probe reserves budget the moment it is claimed.
+        in addition to ``executed`` ones so a probe reserves budget the moment it
+        is claimed. The claim stamps its own timestamp into ``executed_at``
+        (overwritten with the completion time when the probe finishes), and
+        executing rows count against the day they were claimed: a decision the
+        scheduler planned before midnight but that is claimed after midnight
+        consumes the new day's budget even though its ``created_at`` is
+        yesterday.
 
         PostgreSQL serializes concurrent claims with ``pg_advisory_xact_lock`` on
         a fixed warmup-budget key (released at commit); under READ COMMITTED two
@@ -191,21 +230,7 @@ class QuotaPlannerRepository:
         """
         since = to_utc_naive(since)
         active_warmups = (
-            select(func.count(QuotaPlannerDecision.id))
-            .where(
-                QuotaPlannerDecision.action == "warmup",
-                or_(
-                    and_(
-                        QuotaPlannerDecision.status == "executed",
-                        QuotaPlannerDecision.executed_at >= since,
-                    ),
-                    and_(
-                        QuotaPlannerDecision.status == "executing",
-                        QuotaPlannerDecision.created_at >= since,
-                    ),
-                ),
-            )
-            .scalar_subquery()
+            select(func.count(QuotaPlannerDecision.id)).where(_active_warmup_budget_clause(since)).scalar_subquery()
         )
         warmup_cost = (
             select(func.coalesce(func.sum(RequestLog.cost_usd), 0.0))
@@ -226,7 +251,7 @@ class QuotaPlannerRepository:
                 active_warmups < max_warmups,
                 warmup_cost < max_credits,
             )
-            .values(status="executing", reason="warmup_executing")
+            .values(status="executing", reason="warmup_executing", executed_at=to_utc_naive(utcnow()))
             .returning(QuotaPlannerDecision.id)
         )
         async with sqlite_writer_section():
@@ -284,25 +309,12 @@ class QuotaPlannerRepository:
         """Count warmup decisions consuming the daily count budget.
 
         Includes ``executed`` decisions (by ``executed_at``) and in-flight
-        ``executing`` decisions (by ``created_at``, which is server-defaulted and
-        always present, unlike ``scheduled_at`` on manual warm-now decisions).
+        ``executing`` decisions by the claim timestamp stamped into
+        ``executed_at`` when they were claimed (see
+        ``_active_warmup_budget_clause``).
         """
         since = to_utc_naive(since)
-        stmt = select(func.count(QuotaPlannerDecision.id)).where(
-            and_(
-                QuotaPlannerDecision.action == "warmup",
-                or_(
-                    and_(
-                        QuotaPlannerDecision.status == "executed",
-                        QuotaPlannerDecision.executed_at >= since,
-                    ),
-                    and_(
-                        QuotaPlannerDecision.status == "executing",
-                        QuotaPlannerDecision.created_at >= since,
-                    ),
-                ),
-            )
-        )
+        stmt = select(func.count(QuotaPlannerDecision.id)).where(_active_warmup_budget_clause(since))
         return int(await self._session.scalar(stmt) or 0)
 
     async def count_executed_warmups_since(self, since: datetime) -> int:

@@ -128,3 +128,23 @@ def test_claim_ttl_must_cover_admission_wait_plus_twice_the_refresh_timeout() ->
         token_refresh_claim_ttl_seconds=26.0,
     )
     assert settings.token_refresh_claim_ttl_seconds == 26.0
+
+
+def test_claim_ttl_default_derives_from_raised_timeouts_without_explicit_ttl() -> None:
+    # A deployment that predates the claim-TTL setting may have raised the
+    # refresh/admission timeouts without knowing to set the new field. That
+    # config must still boot: the TTL default is derived from the related
+    # timeouts (never below the invariant floor) instead of crashing against
+    # the fixed 30s default.
+    settings = Settings(
+        token_refresh_timeout_seconds=11.0,
+        proxy_admission_wait_timeout_seconds=14.0,
+    )
+    minimum_ttl = settings.proxy_admission_wait_timeout_seconds + 2.0 * settings.token_refresh_timeout_seconds
+    assert settings.token_refresh_claim_ttl_seconds >= minimum_ttl
+    assert settings.token_refresh_claim_ttl_seconds == minimum_ttl
+
+    # A default deployment keeps the fixed 30s default (which already covers
+    # the default timeout floor of 26s).
+    default_settings = Settings()
+    assert default_settings.token_refresh_claim_ttl_seconds == 30.0

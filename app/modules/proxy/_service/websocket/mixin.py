@@ -1880,6 +1880,22 @@ class _WebSocketMixin:
                 await proxy._load_balancer.release_account_lease(selected_stream_lease)
                 selected_stream_lease = None
                 excluded_account_ids.add(failover.account_id)
+                # Record a capacity-style failure so that if every account
+                # attempt hits a transient refresh-claim failover, the loop
+                # still surfaces a proper terminal error after exhaustion
+                # instead of returning (None, None) silently. The account
+                # credentials are fine (its refresh claim is just held by
+                # another replica), so this must be a 503/capacity-style
+                # upstream error, NOT a bogus 401 invalid_api_key.
+                last_failover_exc = ProxyResponseError(
+                    503,
+                    openai_error(
+                        "upstream_unavailable",
+                        "Account refresh is temporarily unavailable; no healthy account could be reached.",
+                        error_type="server_error",
+                    ),
+                )
+                last_failover_account = account
                 continue
             except ProxyResponseError as exc:
                 action = await proxy._decide_websocket_failover_action(

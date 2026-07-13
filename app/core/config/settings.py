@@ -614,6 +614,14 @@ class Settings(BaseSettings):
         # claimant stuck in admission, letting another replica claim the same
         # account and reuse the single-use refresh token.
         minimum_ttl = self.proxy_admission_wait_timeout_seconds + 2.0 * self.token_refresh_timeout_seconds
+        if "token_refresh_claim_ttl_seconds" not in self.model_fields_set:
+            # The operator has not opted into the new setting. Derive the
+            # default from the related timeouts so a deployment that only
+            # raised the refresh/admission timeouts before this setting
+            # existed still boots with a TTL that satisfies the invariant,
+            # instead of crashing at startup against the fixed 30s default.
+            self.token_refresh_claim_ttl_seconds = max(self.token_refresh_claim_ttl_seconds, minimum_ttl)
+            return self
         if self.token_refresh_claim_ttl_seconds < minimum_ttl:
             raise ValueError(
                 "token_refresh_claim_ttl_seconds must be at least proxy_admission_wait_timeout_seconds "

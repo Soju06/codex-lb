@@ -745,6 +745,126 @@ def test_backend_responses_websocket_transient_refresh_claim_fails_over_instead_
     assert permanent_failures == []
 
 
+def test_backend_responses_websocket_transient_refresh_exhaustion_emits_error_not_silence(
+    app_instance,
+    monkeypatch,
+):
+    """Regression for WebSocket transient-refresh failover exhaustion.
+
+    When every selected account (up to the WebSocket max-account-attempts of 3)
+    hits a transient transport ``RefreshError`` from a held refresh claim, the
+    connect loop previously excluded each account and ``continue``d without
+    recording a failure. After the loop, ``last_failover_exc`` stayed ``None``,
+    so ``_connect_proxy_websocket`` returned ``(None, None)`` silently and the
+    client got no error frame. The loop must instead surface a proper terminal
+    error (a 503/capacity-style upstream error, NOT a bogus 401
+    ``invalid_api_key``).
+    """
+    selected_accounts: list[str] = []
+    freshened_accounts: list[str] = []
+    opened_accounts: list[str] = []
+    permanent_failures: list[tuple[str, str]] = []
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
+        return None
+
+    async def fake_select_websocket_connect_account(
+        self,
+        deadline,
+        *,
+        request_state,
+        exclude_account_ids,
+        **_rest,
+    ):
+        del self, deadline, _rest
+        for account_id in ("acct_ws_exhaust_a", "acct_ws_exhaust_b", "acct_ws_exhaust_c"):
+            if account_id in exclude_account_ids:
+                continue
+            selected_accounts.append(account_id)
+            request_state.websocket_stream_lease = SimpleNamespace(account_id=account_id)
+            return SimpleNamespace(id=account_id)
+        return None
+
+    async def fake_ensure_fresh(self, account, *, force=False, timeout_seconds=None):
+        del self, force, timeout_seconds
+        freshened_accounts.append(account.id)
+        # Every account's refresh claim is held by another replica: transient,
+        # non-permanent, transport-level failure.
+        raise RefreshError(
+            "refresh_claim_timeout",
+            "refresh claim held by another replica",
+            False,
+            transport_error=True,
+        )
+
+    async def fake_open_upstream_with_budget(self, account, headers, *, timeout_seconds, request_state=None):
+        del self, headers, timeout_seconds, request_state
+        opened_accounts.append(account.id)
+        raise AssertionError("no upstream should open when every account transient-fails")
+
+    async def noop_release_account_lease(self, lease):
+        del self, lease
+        return None
+
+    async def fake_mark_permanent_failure(self, account, error_code):
+        del self
+        permanent_failures.append((account.id, error_code))
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_select_websocket_connect_account",
+        fake_select_websocket_connect_account,
+    )
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh)
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_open_upstream_websocket_with_budget",
+        fake_open_upstream_with_budget,
+    )
+    monkeypatch.setattr(proxy_module.LoadBalancer, "release_account_lease", noop_release_account_lease)
+    monkeypatch.setattr(proxy_module.LoadBalancer, "mark_permanent_failure", fake_mark_permanent_failure)
+
+    with TestClient(app_instance) as client:
+        with client.websocket_connect("/backend-api/codex/responses") as websocket:
+            websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "response.create",
+                        "model": "gpt-5.4",
+                        "input": "hello",
+                        "stream": True,
+                    }
+                )
+            )
+            event = json.loads(websocket.receive_text())
+
+    # The client received a proper terminal error frame, not silence.
+    assert event["type"] == "error"
+    error = event["error"]
+    # A held refresh claim is a capacity/availability failure, not bad
+    # credentials: it must NOT be surfaced as a 401 invalid_api_key.
+    assert event.get("status") == 503
+    assert error["code"] == "upstream_unavailable"
+    assert error["type"] == "server_error"
+    assert error["code"] != "invalid_api_key"
+    # All three account attempts were tried and excluded before giving up.
+    assert selected_accounts == ["acct_ws_exhaust_a", "acct_ws_exhaust_b", "acct_ws_exhaust_c"]
+    # No upstream websocket opened for a transient-claim account.
+    assert opened_accounts == []
+    # Transient claim contention must never be recorded as a permanent failure.
+    assert permanent_failures == []
+
+
 def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_instance, monkeypatch):
     upstream_messages = [
         _FakeUpstreamMessage(

@@ -4,7 +4,7 @@
 
 ### Requirement: Cross-replica token refresh serialization
 
-Before any upstream OAuth token exchange for an account, the system MUST acquire that account's row in `account_refresh_claims` via a conditional upsert that succeeds only when no unexpired claim by another claimant exists; the upsert MUST be atomic on both PostgreSQL (ON CONFLICT row lock) and SQLite (single-writer lock). After acquiring, the system MUST re-read the account's refresh-token material fresh from the database (bypassing session identity caches) and MUST skip the upstream exchange when the material has rotated since the refresh was requested, adopting the stored tokens instead. Claims MUST carry an expiry covering all work performed under the claim (TTL at least the refresh-admission wait timeout plus twice the refresh HTTP timeout, because the claim is held across the admission wait and the OAuth exchange) so a crashed claimant cannot block refresh indefinitely while a healthy claimant cannot lose its claim mid-work, MUST be released after the refreshed tokens are persisted, and MUST NOT be held as an open database transaction or lock across upstream network I/O. The claimant identity MUST remain unique per process even when the configured instance id exceeds the stored column width (truncate the instance-id portion, never the per-process suffix).
+Before any upstream OAuth token exchange for an account, the system MUST acquire that account's row in `account_refresh_claims` via a conditional upsert that succeeds only when no unexpired claim by another claimant exists; the upsert MUST be atomic on both PostgreSQL (ON CONFLICT row lock) and SQLite (single-writer lock). After acquiring, the system MUST re-read the account's refresh-token material fresh from the database (bypassing session identity caches) and MUST skip the upstream exchange when the material has rotated since the refresh was requested, adopting the stored tokens instead. Claims MUST carry an expiry covering all work performed under the claim (TTL at least the refresh-admission wait timeout plus twice the refresh HTTP timeout, because the claim is held across the admission wait and the OAuth exchange) so a crashed claimant cannot block refresh indefinitely while a healthy claimant cannot lose its claim mid-work, MUST be released after the refreshed tokens are persisted, and MUST NOT be held as an open database transaction or lock across upstream network I/O. When the claim TTL is not explicitly configured, the system MUST derive its default to at least this floor from the related timeout settings, so a deployment that predates the claim-TTL setting but raised the refresh or admission timeouts still starts up (never crashing during settings construction against a fixed default); the system MUST reject only an explicitly configured TTL below the floor. The claimant identity MUST remain unique per process even when the configured instance id exceeds the stored column width (truncate the instance-id portion, never the per-process suffix).
 
 Claim ownership MUST be per-refresh, not process-wide: the stored claim identity MUST combine the claimant (replica/process) identity with a per-refresh owner token derived from the refresh-token material being exchanged (its fingerprint). The re-entrant same-owner takeover that lets a crashed refresh reclaim its own live claim MUST match only when BOTH the claimant AND the owner token are identical; a release MUST delete only the exact composed claim. Consequently, when two refreshes for the same account run in one process with different token fingerprints (for example a re-auth/import lands while an older forced refresh is still in flight), the second refresh MUST contend for the claim (wait until the first releases or the claim expires) rather than re-entering the first refresh's live claim, and neither refresh's release MAY delete the other's claim. The composed claim identity MUST fit the stored column width without truncating either the per-process suffix or the owner token.
 
@@ -24,6 +24,14 @@ After a successful upstream exchange, the system MUST persist the newly issued t
 - **GIVEN** a replica acquired the refresh claim for an account and crashed before releasing it
 - **WHEN** another replica attempts to refresh the account after the claim TTL has elapsed
 - **THEN** the claim acquisition succeeds and the refresh proceeds
+
+#### Scenario: Timeout-only config predating the claim TTL setting still boots
+
+- **GIVEN** a deployment that raised the refresh HTTP timeout or the admission wait timeout above the values that keep the fixed 30s default above the floor
+- **AND** that deployment does not explicitly configure the claim TTL
+- **WHEN** settings are constructed
+- **THEN** construction succeeds with a claim-TTL default derived to at least the floor (admission wait plus twice the refresh timeout)
+- **AND** an explicitly configured claim TTL below the floor is still rejected
 
 #### Scenario: Two refreshes in one process with different fingerprints contend
 
@@ -69,7 +77,7 @@ A process that fails to acquire the refresh claim MUST wait by polling within a 
 
 When a proxy stream turn encounters this transient claim failure, the streaming retry loop MUST exclude the affected account and fail over to a different account rather than reselecting the claimed account until attempts are exhausted. This failover MUST apply to both the proactive freshness check on the first stream attempt (before any upstream 401) and the forced refresh on the post-401 recovery attempt. Before failing over, the loop MUST release the stream lease it already acquired for the skipped account so that account does not continue to consume one of its stream-concurrency slots for a stream that will never open.
 
-The WebSocket connect loop MUST apply the same failover for a transient, transport-level claim failure reaching the connect path (on both the proactive freshness check and the post-401 forced refresh): rather than surfacing a bogus 401 `invalid_api_key`, it MUST release the skipped account's already-acquired stream lease, exclude the account, and reselect a healthy account. This failover MUST NOT apply when the request is pinned to a preferred/required account.
+The WebSocket connect loop MUST apply the same failover for a transient, transport-level claim failure reaching the connect path (on both the proactive freshness check and the post-401 forced refresh): rather than surfacing a bogus 401 `invalid_api_key`, it MUST release the skipped account's already-acquired stream lease, exclude the account, and reselect a healthy account. This failover MUST NOT apply when the request is pinned to a preferred/required account. When every account attempt is exhausted by such transient claim failovers, the connect loop MUST emit a proper terminal error to the client (a 503/capacity-style upstream error, not a 401 `invalid_api_key` and not a silent no-op that leaves the client waiting).
 
 #### Scenario: Claim held by another replica past the wait cap
 
@@ -103,6 +111,14 @@ The WebSocket connect loop MUST apply the same failover for a transient, transpo
 - **THEN** the connect loop excludes that account and fails over to a healthy account
 - **AND** the excluded account's already-acquired stream lease is released before failover
 - **AND** the client receives the upstream response rather than a 401 `invalid_api_key`
+
+#### Scenario: WebSocket connect exhausts every account on transient claim failovers
+
+- **GIVEN** a WebSocket responses connection not pinned to a preferred/required account
+- **AND** every account attempt (up to the WebSocket max-account-attempts) raises the transient, transport-level claim error
+- **WHEN** the connect loop excludes each account and exhausts its attempts
+- **THEN** the client receives a proper terminal error frame (a 503/capacity-style upstream error), not a 401 `invalid_api_key` and not a silent no-op
+- **AND** the transient claim contention is never recorded as a permanent failure
 
 ## MODIFIED Requirements
 

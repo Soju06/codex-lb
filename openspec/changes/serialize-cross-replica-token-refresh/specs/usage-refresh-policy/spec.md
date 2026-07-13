@@ -6,6 +6,8 @@
 
 Before any upstream OAuth token exchange for an account, the system MUST acquire that account's row in `account_refresh_claims` via a conditional upsert that succeeds only when no unexpired claim by another claimant exists; the upsert MUST be atomic on both PostgreSQL (ON CONFLICT row lock) and SQLite (single-writer lock). After acquiring, the system MUST re-read the account's refresh-token material fresh from the database (bypassing session identity caches) and MUST skip the upstream exchange when the material has rotated since the refresh was requested, adopting the stored tokens instead. Claims MUST carry an expiry covering all work performed under the claim (TTL at least the refresh-admission wait timeout plus twice the refresh HTTP timeout, because the claim is held across the admission wait and the OAuth exchange) so a crashed claimant cannot block refresh indefinitely while a healthy claimant cannot lose its claim mid-work, MUST be released after the refreshed tokens are persisted, and MUST NOT be held as an open database transaction or lock across upstream network I/O. The claimant identity MUST remain unique per process even when the configured instance id exceeds the stored column width (truncate the instance-id portion, never the per-process suffix).
 
+After a successful upstream exchange, the system MUST persist the newly issued tokens with a compare-and-set conditioned on the refresh-token ciphertext the exchange was requested with. When that compare-and-set misses, the system MUST NOT assume any ciphertext change is a newer rotation: it MUST compare the freshly observed refresh-token material against the material this attempt exchanged (by decrypted-plaintext fingerprint, because token ciphertext is non-deterministic and a concurrent re-authentication or import can re-encrypt the same plaintext to different bytes). Only when the stored material is a genuinely different refresh token MUST the system adopt the stored row without persisting its own result; when the stored material is the same plaintext merely re-encrypted, the system MUST retry the compare-and-set against the freshly observed ciphertext (bounded) so its own single-use rotation is persisted rather than discarding it and leaving the account holding the token it already consumed upstream.
+
 #### Scenario: Two replicas force-refresh the same account concurrently
 
 - **GIVEN** two replicas hold the same refresh-token material for one account
@@ -27,6 +29,21 @@ Before any upstream OAuth token exchange for an account, the system MUST acquire
 - **AND** the freshly re-read refresh-token material differs from the material the refresh was requested with
 - **WHEN** the replica proceeds
 - **THEN** it returns the stored tokens without any upstream token exchange
+
+#### Scenario: Persistence compare-and-set misses on a re-encryption of the same token
+
+- **GIVEN** a replica completed a successful upstream token exchange and holds the newly issued single-use tokens
+- **AND** a concurrent re-authentication/import re-encrypted the SAME refresh-token plaintext to different ciphertext, so the persistence compare-and-set misses
+- **WHEN** the replica re-reads the stored material and finds its refresh-token fingerprint unchanged from the material it exchanged
+- **THEN** it retries the compare-and-set against the freshly observed ciphertext and persists its own newly issued tokens
+- **AND** it does not adopt the re-encrypted, already-consumed token
+
+#### Scenario: Persistence compare-and-set misses on a genuine peer rotation
+
+- **GIVEN** a replica completed a successful upstream token exchange
+- **AND** a peer committed a genuinely different refresh token, so the persistence compare-and-set misses
+- **WHEN** the replica re-reads the stored material and finds its refresh-token fingerprint changed
+- **THEN** it adopts the peer's stored tokens without persisting its own result
 
 ### Requirement: Refresh claim losers wait bounded and never degrade account status
 

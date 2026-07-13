@@ -862,6 +862,162 @@ async def test_refresh_account_deactivates_when_repo_only_reencrypted_same_refre
     assert repo.status_payload["expected_refresh_token_encrypted"] == latest_account.refresh_token_encrypted
 
 
+class _TokenCasMissRepo(_DummyRepo):
+    """Repo whose token compare-and-set only matches the *current* stored
+    ciphertext, so a stale ``expected`` misses. ``get_by_id_fresh`` returns the
+    row currently persisted so callers can re-read and retry against it."""
+
+    def __init__(self, latest: Account) -> None:
+        super().__init__()
+        self._latest = latest
+        self.accounts_by_id[latest.id] = latest
+        self.update_attempts: list[bytes | None] = []
+
+    async def get_by_id_fresh(self, account_id: str) -> Account | None:
+        return self.accounts_by_id.get(account_id)
+
+    async def update_tokens(
+        self,
+        account_id: str,
+        access_token_encrypted: bytes,
+        refresh_token_encrypted: bytes,
+        id_token_encrypted: bytes,
+        last_refresh: datetime,
+        plan_type: str | None = None,
+        email: str | None = None,
+        chatgpt_account_id: str | None = None,
+        chatgpt_user_id: str | None = None,
+        workspace_id: str | None = None,
+        workspace_label: str | None = None,
+        seat_type: str | None = None,
+        expected_refresh_token_encrypted: bytes | None = None,
+    ) -> bool:
+        self.update_attempts.append(expected_refresh_token_encrypted)
+        stored = self._latest.refresh_token_encrypted
+        if expected_refresh_token_encrypted is not None and expected_refresh_token_encrypted != stored:
+            return False
+        self._latest.refresh_token_encrypted = refresh_token_encrypted
+        return await super().update_tokens(
+            account_id,
+            access_token_encrypted=access_token_encrypted,
+            refresh_token_encrypted=refresh_token_encrypted,
+            id_token_encrypted=id_token_encrypted,
+            last_refresh=last_refresh,
+            plan_type=plan_type,
+            email=email,
+            chatgpt_account_id=chatgpt_account_id,
+            chatgpt_user_id=chatgpt_user_id,
+            workspace_id=workspace_id,
+            workspace_label=workspace_label,
+            seat_type=seat_type,
+            expected_refresh_token_encrypted=expected_refresh_token_encrypted,
+        )
+
+
+@pytest.mark.asyncio
+async def test_refresh_persists_new_tokens_when_cas_misses_on_reencrypted_same_material(monkeypatch):
+    """Regression: a successful refresh must not adopt a compare-and-set loser
+    just because the stored ciphertext changed. A concurrent re-auth/import can
+    re-encrypt the SAME refresh-token plaintext (Fernet is non-deterministic),
+    which misses the CAS without any newer rotation. Adopting that row would
+    discard the single-use token this attempt just exchanged and leave the
+    account holding the already-consumed one. The refresh must retry the CAS
+    against the observed ciphertext so its own rotation wins."""
+
+    async def _fake_refresh(_: str, **_kwargs: object) -> TokenRefreshResult:
+        return TokenRefreshResult(
+            access_token="access-new",
+            refresh_token="refresh-new",
+            id_token="id-new",
+            account_id="acc_cas_reencrypt",
+            plan_type="pro",
+            email=None,
+        )
+
+    monkeypatch.setattr(auth_manager_module, "refresh_access_token", _fake_refresh)
+
+    encryptor = TokenEncryptor()
+    account = Account(
+        id="acc_cas_reencrypt",
+        email="user@example.com",
+        plan_type="pro",
+        access_token_encrypted=encryptor.encrypt("access-old"),
+        refresh_token_encrypted=encryptor.encrypt("refresh-old"),
+        id_token_encrypted=encryptor.encrypt("id-old"),
+        last_refresh=utcnow(),
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
+    )
+    original_ciphertext = account.refresh_token_encrypted
+    # The stored row holds the SAME plaintext re-encrypted to different bytes.
+    reencrypted_same = encryptor.encrypt("refresh-old")
+    assert reencrypted_same != original_ciphertext
+    latest = Account(**{column.name: getattr(account, column.name) for column in Account.__table__.columns})
+    latest.refresh_token_encrypted = reencrypted_same
+    repo = _TokenCasMissRepo(latest)
+    manager = AuthManager(cast(AccountsRepositoryPort, repo))
+
+    result = await manager.refresh_account(account)
+
+    # Our freshly issued single-use token wins; the re-encrypted old token is
+    # never adopted.
+    assert encryptor.decrypt(result.refresh_token_encrypted) == "refresh-new"
+    assert repo.tokens_payload is not None
+    assert encryptor.decrypt(cast(bytes, repo.tokens_payload["refresh_token_encrypted"])) == "refresh-new"
+    # First attempt used the stale (pre-race) ciphertext and missed; the retry
+    # used the freshly observed ciphertext and won.
+    assert repo.update_attempts == [original_ciphertext, reencrypted_same]
+    assert result.status == AccountStatus.ACTIVE
+
+
+@pytest.mark.asyncio
+async def test_refresh_adopts_peer_rotation_when_cas_misses_on_new_material(monkeypatch):
+    """A compare-and-set miss caused by a genuinely newer refresh-token rotation
+    from a peer must be adopted (never clobbered) and must not persist this
+    attempt's now-consumed token."""
+
+    async def _fake_refresh(_: str, **_kwargs: object) -> TokenRefreshResult:
+        return TokenRefreshResult(
+            access_token="access-new",
+            refresh_token="refresh-new",
+            id_token="id-new",
+            account_id="acc_cas_peer_rotation",
+            plan_type="pro",
+            email=None,
+        )
+
+    monkeypatch.setattr(auth_manager_module, "refresh_access_token", _fake_refresh)
+
+    encryptor = TokenEncryptor()
+    account = Account(
+        id="acc_cas_peer_rotation",
+        email="user@example.com",
+        plan_type="pro",
+        access_token_encrypted=encryptor.encrypt("access-old"),
+        refresh_token_encrypted=encryptor.encrypt("refresh-old"),
+        id_token_encrypted=encryptor.encrypt("id-old"),
+        last_refresh=utcnow(),
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
+    )
+    original_ciphertext = account.refresh_token_encrypted
+    # A peer committed a DIFFERENT refresh-token plaintext.
+    peer_rotated = encryptor.encrypt("refresh-peer")
+    latest = Account(**{column.name: getattr(account, column.name) for column in Account.__table__.columns})
+    latest.refresh_token_encrypted = peer_rotated
+    repo = _TokenCasMissRepo(latest)
+    manager = AuthManager(cast(AccountsRepositoryPort, repo))
+
+    result = await manager.refresh_account(account)
+
+    # The peer's rotation is adopted; our exchanged token is not written.
+    assert result is account
+    assert encryptor.decrypt(result.refresh_token_encrypted) == "refresh-peer"
+    assert repo.tokens_payload is None
+    # Only the initial CAS ran; no retry once a real rotation was detected.
+    assert repo.update_attempts == [original_ciphertext]
+
+
 @pytest.mark.asyncio
 async def test_permanent_failure_status_cas_loses_to_rotation_after_fresh_read(monkeypatch):
     """Regression: a concurrent re-auth/import rotates the refresh token AFTER

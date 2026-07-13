@@ -94,6 +94,14 @@ class RefreshAdmissionLeasePort(Protocol):
 
 logger = logging.getLogger(__name__)
 
+# Bound on how many times a successful refresh retries its token compare-and-set
+# against freshly observed ciphertext when a concurrent re-auth/import merely
+# re-encrypts the same refresh-token plaintext (Fernet ciphertext is
+# non-deterministic, so the same plaintext yields different bytes). Genuine
+# newer rotations are adopted instead of retried, so this only guards the rare
+# same-plaintext re-encryption race and must stay small to avoid live-locking.
+_TOKEN_CAS_MAX_ATTEMPTS = 5
+
 
 _RefreshSingleflightKey: TypeAlias = tuple[str, str]
 
@@ -376,28 +384,31 @@ class AuthManager:
         if workspace_matches_current_slot and result.seat_type:
             new_seat_type = result.seat_type
 
-        updated = await self._repo.update_tokens(
-            account.id,
-            access_token_encrypted=new_access_token_encrypted,
-            refresh_token_encrypted=new_refresh_token_encrypted,
-            id_token_encrypted=new_id_token_encrypted,
-            last_refresh=new_last_refresh,
-            plan_type=new_plan_type,
-            email=new_email,
-            chatgpt_account_id=new_chatgpt_account_id,
-            chatgpt_user_id=new_chatgpt_user_id or None,
-            workspace_id=next_workspace_id,
-            workspace_label=new_workspace_label,
-            seat_type=new_seat_type,
+        async def _write_tokens(expected_refresh_token_encrypted: bytes) -> bool:
+            return await self._repo.update_tokens(
+                account.id,
+                access_token_encrypted=new_access_token_encrypted,
+                refresh_token_encrypted=new_refresh_token_encrypted,
+                id_token_encrypted=new_id_token_encrypted,
+                last_refresh=new_last_refresh,
+                plan_type=new_plan_type,
+                email=new_email,
+                chatgpt_account_id=new_chatgpt_account_id,
+                chatgpt_user_id=new_chatgpt_user_id or None,
+                workspace_id=next_workspace_id,
+                workspace_label=new_workspace_label,
+                seat_type=new_seat_type,
+                expected_refresh_token_encrypted=expected_refresh_token_encrypted,
+            )
+
+        adopted = await self._persist_refreshed_tokens(
+            account,
+            write=_write_tokens,
             expected_refresh_token_encrypted=refresh_token_encrypted,
+            attempted_fingerprint=attempted_fingerprint,
         )
-        if not updated:
-            # Compare-and-set miss: a concurrent writer rotated the material
-            # after our exchange began. Adopt the stored tokens rather than
-            # clobbering the newer rotation.
-            latest = await self._repo.get_by_id_fresh(account.id)
-            if latest is not None:
-                return _adopt_account_row(account, latest)
+        if adopted is not None:
+            return adopted
 
         account.access_token_encrypted = new_access_token_encrypted
         account.refresh_token_encrypted = new_refresh_token_encrypted
@@ -411,6 +422,59 @@ class AuthManager:
         account.workspace_label = new_workspace_label
         account.seat_type = new_seat_type
         return account
+
+    async def _persist_refreshed_tokens(
+        self,
+        account: Account,
+        *,
+        write: Callable[[bytes], Awaitable[bool]],
+        expected_refresh_token_encrypted: bytes,
+        attempted_fingerprint: str,
+    ) -> Account | None:
+        """Persist freshly rotated tokens with a compare-and-set on the exchanged material.
+
+        Returns the latest account row to adopt when a peer committed a
+        genuinely newer refresh-token rotation (different material) — that write
+        must never be clobbered. Returns ``None`` when our own rotation was
+        persisted (the caller then mirrors the new tokens onto its object), or
+        when the row vanished.
+
+        A compare-and-set miss does not by itself imply a newer rotation: a
+        concurrent re-auth/import can re-encrypt the *same* refresh-token
+        plaintext, and Fernet ciphertext is non-deterministic, so the stored
+        bytes change without any new token being issued. Adopting that row would
+        hand back the single-use token this attempt already consumed upstream,
+        leaving the account active with invalid material. So on a miss we compare
+        refresh-token fingerprints: a different fingerprint means a real peer
+        rotation to adopt; the same fingerprint means our successful exchange
+        holds the only valid tokens, and we retry the CAS against the freshly
+        observed ciphertext so our rotation wins.
+        """
+        expected = expected_refresh_token_encrypted
+        for _ in range(_TOKEN_CAS_MAX_ATTEMPTS):
+            if await write(expected):
+                return None
+            latest = await self._repo.get_by_id_fresh(account.id)
+            if latest is None:
+                # Row is gone; nothing to persist or adopt.
+                return None
+            if (
+                _refresh_token_material_fingerprint(self._encryptor, latest.refresh_token_encrypted)
+                != attempted_fingerprint
+            ):
+                # A peer stored genuinely newer refresh-token material; adopt it
+                # rather than overwriting with the token we already consumed.
+                return _adopt_account_row(account, latest)
+            # Same refresh-token plaintext, re-encrypted concurrently: retry the
+            # CAS against the observed ciphertext so our rotation lands.
+            expected = latest.refresh_token_encrypted
+        logger.warning(
+            "Token-refresh compare-and-set for account_id=%s kept missing on re-encrypted "
+            "same-plaintext material after %d attempts; leaving stored ciphertext unchanged",
+            account.id,
+            _TOKEN_CAS_MAX_ATTEMPTS,
+        )
+        return None
 
     async def _handle_permanent_refresh_failure(
         self,

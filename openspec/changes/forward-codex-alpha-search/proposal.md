@@ -15,8 +15,10 @@ Responses API use a different path and do not cover this client contract.
   authentication, account selection, refresh, affinity, failover, upstream
   routing, and response-header filtering remain consistent with other Codex
   control endpoints.
-- Preserve the inbound body and query parameters and return the upstream status,
-  body, and allowlisted response headers without defining a local search schema.
+- Preserve the inbound body and query parameters. Successful responses retain
+  the upstream status, body, and allowlisted headers; failures retain the
+  existing Codex control error normalization, refresh, health, and failover
+  behavior.
 - Add unit and integration regressions for the public route contract.
 
 ## Issue Trace

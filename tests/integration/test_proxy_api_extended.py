@@ -656,6 +656,37 @@ async def test_codex_alpha_search_forwards_request_and_response(async_client, mo
 
 
 @pytest.mark.asyncio
+async def test_codex_alpha_search_preserves_normalized_control_error_contract(async_client, monkeypatch):
+    async def fake_codex_control_request(*_args, **_kwargs):
+        raise ProxyResponseError(
+            429,
+            {
+                "error": {
+                    "code": "rate_limit_exceeded",
+                    "message": "Search rate limit exceeded",
+                    "type": "rate_limit_error",
+                }
+            },
+        )
+
+    monkeypatch.setattr(proxy_module.ProxyService, "codex_control_request", fake_codex_control_request)
+
+    response = await async_client.post(
+        "/backend-api/codex/alpha/search",
+        json={"query": "OpenAI official website"},
+    )
+
+    assert response.status_code == 429
+    assert response.json() == {
+        "error": {
+            "code": "rate_limit_exceeded",
+            "message": "Search rate limit exceeded",
+            "type": "rate_limit_error",
+        }
+    }
+
+
+@pytest.mark.asyncio
 async def test_codex_realtime_call_forwards_raw_sdp_and_location(async_client, monkeypatch):
     await _import_account(async_client, "acc_codex_realtime", "codex-realtime@example.com")
     calls = []

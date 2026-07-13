@@ -7,10 +7,12 @@ proxy-authenticated Codex control-request path used by other unary Codex control
 endpoints. The proxy MUST preserve the inbound request body and query parameters,
 MUST apply the existing API-key scope, account selection, token refresh, session
 affinity, failover, and upstream-route policies, and MUST forward the request to
-the upstream `POST /codex/alpha/search` path. The downstream response MUST
-preserve the upstream status and body and MUST include only response headers
-allowed by the existing Codex control-response policy. The proxy MUST NOT parse,
-normalize, or invent a local schema for the search request or response.
+the upstream `POST /codex/alpha/search` path. Successful downstream responses
+MUST preserve the upstream status and body and MUST include only response
+headers allowed by the existing Codex control-response policy. Final non-2xx
+responses MUST preserve their status while using the existing Codex control
+OpenAI error-envelope normalization. The proxy MUST NOT parse, normalize, or
+invent a local schema for successful search requests or responses.
 
 #### Scenario: authenticated standalone search reaches the upstream Codex path
 
@@ -27,6 +29,13 @@ normalize, or invent a local schema for the search request or response.
   a response header outside the Codex control-response allowlist
 - **THEN** the proxy returns the allowlisted metadata
 - **AND** it omits the non-allowlisted response header
+
+#### Scenario: final upstream search failures use the control error contract
+
+- **WHEN** upstream search failure handling finishes with a non-2xx response
+- **THEN** the proxy preserves the final HTTP status
+- **AND** it returns the failure through the existing OpenAI error envelope
+- **AND** existing account refresh, health, and failover handling remains active
 
 #### Scenario: unsupported methods do not enter search forwarding
 

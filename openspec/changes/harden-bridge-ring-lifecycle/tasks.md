@@ -36,10 +36,11 @@
 
 - [x] 4.1 Add helpers classifying a `bridge_owner_unreachable` forward failure
       for a turn-state-anchored request and deciding takeover from a fresh
-      durable lookup (no active lease / DRAINING / missing → takeover; live
-      lease → fail closed).
+      durable lookup (no active lease / missing → takeover; live lease → fail
+      closed, including DRAINING rows whose lease is still live).
 - [x] 4.2 Wire the takeover retry into the owner-forward failure handler in
-      `streaming.py`.
+      `streaming.py`, reusing the request-routing lookup semantics (including
+      the latest-turn-state fallback) for the freshness check.
 
 ## 5. Specs and validation
 
@@ -62,7 +63,8 @@
       purged past the cutoff while live-lease rows survive; stale ring members
       older than 24h are purged; the cleanup scheduler invokes both purges.
 - [x] 6.4 Turn-state takeover tests at the streaming product path: forward
-      failure with a released/expired/DRAINING durable lease recovers locally;
-      a live-lease owner still fails closed with the retryable 503.
+      failure with a released/expired durable lease recovers locally through
+      the routing-semantics lookup; a live-lease owner still fails closed with
+      the retryable 503, including DRAINING rows with a live lease.
 - [x] 6.5 `uv run ruff check app tests` and `uv run ruff format --check app
       tests` pass; targeted pytest selection passes.

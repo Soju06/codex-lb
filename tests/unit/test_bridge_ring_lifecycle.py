@@ -27,6 +27,9 @@ from app.db.models import (
     HttpBridgeSessionState,
 )
 from app.modules.proxy import service as proxy_service
+from app.modules.proxy._service.http_bridge.helpers import (
+    _http_bridge_durable_lookup_allows_turn_state_takeover,
+)
 from app.modules.proxy.durable_bridge_repository import DurableBridgeRepository
 from app.modules.proxy.ring_membership import RingMembershipService
 
@@ -561,11 +564,13 @@ async def _run_turn_state_forward_failure_stream(
     monkeypatch: pytest.MonkeyPatch,
     *,
     fresh_lookup: proxy_service.DurableBridgeLookup | None,
-) -> tuple[AsyncMock, AsyncMock, ProxyResponseError]:
+) -> tuple[AsyncMock, AsyncMock, AsyncMock, ProxyResponseError]:
     """Drive _stream_via_http_bridge through an owner-forward failure.
 
-    Returns the create mock, the fresh turn-state lookup mock, and the error
-    raised by the stream.
+    Returns the create mock, the request-targets lookup mock (initial routing
+    lookup plus the post-failure freshness lookup), the alias-only lookup mock
+    (must stay unused by the takeover path), and the error raised by the
+    stream.
     """
 
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
@@ -625,20 +630,19 @@ async def _run_turn_state_forward_failure_stream(
             ),
         ),
     )
-    monkeypatch.setattr(
-        service._durable_bridge,
-        "lookup_request_targets",
-        AsyncMock(
-            return_value=_durable_lookup(
-                session_id="sess-takeover",
-                owner_instance_id="instance-b",
-                owner_epoch=1,
-                latest_turn_state="http_turn_takeover",
-            )
-        ),
+    initial_lookup = _durable_lookup(
+        session_id="sess-takeover",
+        owner_instance_id="instance-b",
+        owner_epoch=1,
+        latest_turn_state="http_turn_takeover",
     )
-    fresh_lookup_mock = AsyncMock(return_value=fresh_lookup)
-    monkeypatch.setattr(service._durable_bridge, "lookup_turn_state_target", fresh_lookup_mock)
+    request_targets_mock = AsyncMock(side_effect=[initial_lookup, fresh_lookup])
+    monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", request_targets_mock)
+    # The takeover freshness check must reuse the routing lookup semantics
+    # (latest-turn-state fallback included); the alias-only lookup would miss
+    # rows whose alias registration was lost.
+    alias_only_lookup_mock = AsyncMock(return_value=None)
+    monkeypatch.setattr(service._durable_bridge, "lookup_turn_state_target", alias_only_lookup_mock)
     monkeypatch.setattr(service, "_prepare_http_bridge_request", fake_prepare)
 
     local_retry_error = ProxyResponseError(
@@ -674,7 +678,7 @@ async def _run_turn_state_forward_failure_stream(
                 queue_limit=4,
             )
         ]
-    return create_mock, fresh_lookup_mock, exc_info.value
+    return create_mock, request_targets_mock, alias_only_lookup_mock, exc_info.value
 
 
 @pytest.mark.asyncio
@@ -685,6 +689,9 @@ async def test_turn_state_forward_failure_recovers_locally_when_lease_released(
 
     Before this change the turn-state-anchored request re-raised the
     client-visible 503 even though the owner had already released its lease.
+    The freshness lookup must reuse the routing lookup (with its
+    latest-turn-state fallback) rather than the alias-only lookup, so rows
+    whose alias registration was lost keep their durable anchor.
     """
 
     released_lookup = _durable_lookup(
@@ -696,7 +703,7 @@ async def test_turn_state_forward_failure_recovers_locally_when_lease_released(
         latest_turn_state="http_turn_takeover",
     )
 
-    create_mock, fresh_lookup_mock, raised = await _run_turn_state_forward_failure_stream(
+    create_mock, request_targets_mock, alias_only_lookup_mock, raised = await _run_turn_state_forward_failure_stream(
         monkeypatch,
         fresh_lookup=released_lookup,
     )
@@ -704,7 +711,10 @@ async def test_turn_state_forward_failure_recovers_locally_when_lease_released(
     # The sentinel from the local retry proves the takeover path ran instead
     # of surfacing bridge_owner_unreachable.
     assert raised.payload["error"]["code"] == "local_takeover_attempted"
-    fresh_lookup_mock.assert_awaited()
+    assert request_targets_mock.await_count == 2
+    fresh_lookup_kwargs = request_targets_mock.await_args_list[1].kwargs
+    assert fresh_lookup_kwargs["turn_state"] == "http_turn_takeover"
+    alias_only_lookup_mock.assert_not_awaited()
     assert create_mock.await_count == 2
     retry_kwargs = create_mock.await_args_list[1].kwargs
     assert retry_kwargs["allow_forward_to_owner"] is False
@@ -726,12 +736,81 @@ async def test_turn_state_forward_failure_fails_closed_with_live_lease(
         latest_turn_state="http_turn_takeover",
     )
 
-    create_mock, fresh_lookup_mock, raised = await _run_turn_state_forward_failure_stream(
+    create_mock, request_targets_mock, _alias_only_lookup_mock, raised = await _run_turn_state_forward_failure_stream(
         monkeypatch,
         fresh_lookup=live_lookup,
     )
 
     assert raised.status_code == 503
     assert raised.payload["error"]["code"] == "bridge_owner_unreachable"
-    fresh_lookup_mock.assert_awaited()
+    assert request_targets_mock.await_count == 2
     assert create_mock.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_turn_state_forward_failure_fails_closed_when_draining_lease_is_live(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DRAINING alone must not allow takeover while the owner's lease is live.
+
+    Shutdown marks rows DRAINING before releasing them, so the draining owner
+    may still be finishing an in-flight turn; taking over here would create
+    concurrent owners for the same bridge session.
+    """
+
+    draining_live_lookup = _durable_lookup(
+        session_id="sess-takeover",
+        owner_instance_id="instance-b",
+        owner_epoch=1,
+        state=HttpBridgeSessionState.DRAINING,
+        lease_seconds_from_now=60.0,
+        latest_turn_state="http_turn_takeover",
+    )
+
+    create_mock, request_targets_mock, _alias_only_lookup_mock, raised = await _run_turn_state_forward_failure_stream(
+        monkeypatch,
+        fresh_lookup=draining_live_lookup,
+    )
+
+    assert raised.status_code == 503
+    assert raised.payload["error"]["code"] == "bridge_owner_unreachable"
+    assert request_targets_mock.await_count == 2
+    assert create_mock.await_count == 1
+
+
+def test_durable_lookup_allows_turn_state_takeover_requires_inactive_lease() -> None:
+    live_draining = _durable_lookup(
+        session_id="sess-1",
+        owner_instance_id="instance-b",
+        owner_epoch=1,
+        state=HttpBridgeSessionState.DRAINING,
+        lease_seconds_from_now=60.0,
+    )
+    expired_draining = _durable_lookup(
+        session_id="sess-2",
+        owner_instance_id="instance-b",
+        owner_epoch=1,
+        state=HttpBridgeSessionState.DRAINING,
+        lease_seconds_from_now=-1.0,
+    )
+    released_draining = _durable_lookup(
+        session_id="sess-3",
+        owner_instance_id=None,
+        owner_epoch=1,
+        state=HttpBridgeSessionState.DRAINING,
+        lease_seconds_from_now=None,
+    )
+    closed = _durable_lookup(
+        session_id="sess-4",
+        owner_instance_id="instance-b",
+        owner_epoch=1,
+        state=HttpBridgeSessionState.CLOSED,
+        lease_seconds_from_now=60.0,
+    )
+
+    allows = _http_bridge_durable_lookup_allows_turn_state_takeover
+    assert allows(None) is True
+    assert allows(live_draining) is False
+    assert allows(expired_draining) is True
+    assert allows(released_draining) is True
+    assert allows(closed) is True

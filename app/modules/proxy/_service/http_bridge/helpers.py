@@ -1574,14 +1574,13 @@ def _http_bridge_turn_state_anchor_for_owner_failure(
 def _http_bridge_durable_lookup_allows_turn_state_takeover(lookup: DurableBridgeLookup | None) -> bool:
     """Allow local takeover only when the durable lease is not actively held.
 
-    Released (owner ``None``), expired-lease, DRAINING, and missing rows allow
-    takeover; a live lease held by another instance keeps failing closed.
+    Released (owner ``None``), expired-lease, CLOSED, and missing rows allow
+    takeover. A live lease keeps failing closed even for DRAINING rows:
+    shutdown marks rows DRAINING before releasing them, so a draining owner
+    may still be finishing an in-flight turn until its lease is released or
+    lapses.
     """
 
-    if lookup is None:
-        return True
-    if lookup.state == HttpBridgeSessionState.DRAINING:
-        return True
     return _durable_bridge_lookup_active_owner(lookup) is None
 
 

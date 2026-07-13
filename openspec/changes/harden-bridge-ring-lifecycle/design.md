@@ -75,15 +75,19 @@ members.
 
 On a `bridge_owner_unreachable` forward failure for a turn-state-anchored
 request (turn-state header present, no `previous_response_id`), the streaming
-path performs a fresh durable turn-state lookup:
+path performs a fresh durable lookup using the same request-routing
+resolution semantics (`lookup_request_targets`: registered aliases, the
+canonical session key, and the latest-turn-state fallback), so a row that
+was originally resolved without a registered alias keeps its durable anchor:
 
-- lease released (owner `NULL`), lease expired, row DRAINING, or row missing →
+- lease released (owner `NULL`), lease expired, row CLOSED, or row missing →
   retry locally with `allow_bootstrap_owner_rebind` semantics and the fresh
-  lookup as the durable anchor, so the local claim path can take over
-  (`_http_bridge_allow_durable_takeover` already permits takeover for
-  expired/DRAINING rows).
+  lookup as the durable anchor, so the local claim path can take over.
 - live lease held by another instance → keep failing closed with the
-  retryable 503 (the owner is alive; local takeover would split continuity).
+  retryable 503, even when the row is DRAINING. Shutdown marks rows DRAINING
+  before releasing them, so a draining owner may still be finishing an
+  in-flight turn until its lease is released or lapses; taking over earlier
+  would split continuity across concurrent owners.
 
 ## Deviations from the original design document
 

@@ -1088,10 +1088,23 @@ class _HTTPBridgeStreamingMixin:
                         previous_response_id=effective_payload.previous_response_id,
                     )
                     if takeover_turn_state is not None:
+                        # Reuse the routing lookup semantics (alias resolution
+                        # plus the latest-turn-state fallback) so a row that was
+                        # originally found without a registered alias remains
+                        # takeover-eligible; an alias-only lookup would return
+                        # None and lose the durable anchor for the local retry.
                         try:
-                            fresh_turn_state_lookup = await self._durable_bridge.lookup_turn_state_target(
+                            fresh_turn_state_lookup = await self._durable_bridge.lookup_request_targets(
+                                session_key_kind=bridge_session_key.affinity_kind,
+                                session_key_value=bridge_session_key.affinity_key,
+                                api_key_id=bridge_session_key.api_key_id,
                                 turn_state=takeover_turn_state,
-                                api_key_id=api_key.id if api_key is not None else None,
+                                session_header=(
+                                    session_header_fallback_key.affinity_key
+                                    if explicit_prompt_cache_key is not None and session_header_fallback_key is not None
+                                    else incoming_session_header
+                                ),
+                                previous_response_id=effective_payload.previous_response_id,
                             )
                         except Exception:
                             logger.warning(

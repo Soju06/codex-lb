@@ -21,7 +21,7 @@ OpenAI publishes four token prices per GPT-5.6 model and service tier: input, ca
 ## Decisions
 
 - Add one `ModelPrice` per canonical personality slug. Sol uses standard `$5/$0.50/$30`, Flex `$2.50/$0.25/$15`, Priority `$10/$1/$60`, and long-context `$10/$1/$45`. Terra uses standard `$2.50/$0.25/$15`, Flex `$1.25/$0.125/$7.50`, Priority `$5/$0.50/$30`, and long-context `$5/$0.50/$22.50`. Luna uses standard `$1/$0.10/$6`, Flex `$0.50/$0.05/$3`, Priority `$2/$0.20/$12`, and long-context `$2/$0.20/$9`. All prices are USD per 1M tokens.
-- Use the existing `272_000`-token threshold semantics: long-context rates apply only when input tokens exceed 272K. The existing Flex path derives its published long-context rates by doubling Flex input/cached input and multiplying Flex output by 1.5. Priority pricing remains independent of the long-context path because the published Priority table exposes a single set of rates.
+- Use the published `270_000`-token threshold semantics: long-context rates apply only when input tokens exceed 270K. The existing Flex path derives its published long-context rates by doubling Flex input/cached input and multiplying Flex output by 1.5. Priority pricing remains independent of the long-context path because the published Priority table exposes a single set of rates.
 - Add `gpt-5.6-sol*`, `gpt-5.6-terra*`, and `gpt-5.6-luna*` aliases. Longest-pattern matching ensures they win over `gpt-5*` for suffixed model IDs.
 - Keep cache-write pricing out of this fix. Adding a price without a separately reported token count would create false precision; that requires a follow-up extension to the usage contract and cost breakdown.
 

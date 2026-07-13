@@ -2,7 +2,7 @@
 
 ### Requirement: GPT-5.6 personality pricing is recognized
 
-The system MUST recognize `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna` when computing request costs. Suffixed aliases for each personality model MUST resolve to the matching canonical pricing entry. Standard, Flex, Priority, and requests with more than 272K input tokens MUST use the published rates applicable to the model and tier.
+The system MUST recognize `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna` when computing request costs. Suffixed aliases for each personality model MUST resolve to the matching canonical pricing entry. Standard, Flex, Priority, and requests with more than 270K input tokens MUST use the published rates applicable to the model and tier.
 
 #### Scenario: Canonical GPT-5.6 models use personality-specific pricing
 
@@ -22,5 +22,5 @@ The system MUST recognize `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna` whe
 
 #### Scenario: GPT-5.6 long-context request uses published uplift
 
-- **WHEN** a standard-tier or Flex GPT-5.6 request completes with more than 272K input tokens
+- **WHEN** a standard-tier or Flex GPT-5.6 request completes with more than 270K input tokens
 - **THEN** the system computes cost using the published long-context input, cached-input, and output rates for that model and tier

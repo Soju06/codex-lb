@@ -283,6 +283,28 @@ def test_calculate_cost_from_usage_gpt_5_6_long_context(
     assert cost == pytest.approx(expected_cost)
 
 
+@pytest.mark.parametrize(
+    ("model", "standard_input_rate", "long_context_input_rate"),
+    [
+        ("gpt-5.6-sol", 5.0, 10.0),
+        ("gpt-5.6-terra", 2.5, 5.0),
+        ("gpt-5.6-luna", 1.0, 2.0),
+    ],
+)
+def test_calculate_cost_from_usage_gpt_5_6_uses_270k_long_context_boundary(
+    model: str,
+    standard_input_rate: float,
+    long_context_input_rate: float,
+) -> None:
+    price = DEFAULT_PRICING_MODELS[model]
+
+    at_boundary = calculate_cost_from_usage(UsageTokens(input_tokens=270_000.0, output_tokens=0.0), price)
+    above_boundary = calculate_cost_from_usage(UsageTokens(input_tokens=270_001.0, output_tokens=0.0), price)
+
+    assert at_boundary == pytest.approx(270_000 / 1_000_000 * standard_input_rate)
+    assert above_boundary == pytest.approx(270_001 / 1_000_000 * long_context_input_rate)
+
+
 def test_calculate_cost_from_usage_service_tier_trims_whitespace():
     usage = UsageTokens(input_tokens=1_000_000.0, output_tokens=1_000_000.0)
     priority_price = DEFAULT_PRICING_MODELS["gpt-5.4"]

@@ -14,6 +14,21 @@ from app.modules.proxy.repo_bundle import ProxyRepoFactory
 
 logger = logging.getLogger("app.modules.proxy.service")
 
+# _background_cleanup_tasks also tracks non-persistence work (bridge session
+# close cleanups, security-work error forwards); the shutdown drain must not
+# spend its budget on those - they have their own teardown - so it only waits
+# on tasks whose names mark them as request-log or settlement persistence.
+_PERSISTENCE_TASK_NAME_PREFIXES = (
+    "proxy-request-log-",
+    "proxy-stream-api-key-settle-",
+    "proxy-release_stream_api_key_reservation",
+)
+
+
+def _is_persistence_task(task: asyncio.Task[None]) -> bool:
+    return task.get_name().startswith(_PERSISTENCE_TASK_NAME_PREFIXES)
+
+
 _REQUEST_TRANSPORT_HTTP = "http"
 
 
@@ -73,6 +88,17 @@ class _RequestLogMixin:
             return
         proxy = cast(_RequestLogServiceProtocol, self)
         with anyio.CancelScope(shield=True):
+            # The insert is detached now: wait for this request's pending log
+            # task first, so a backed-up DB writer cannot exhaust the retry
+            # window below before the row even exists.
+            insert_task_name = f"proxy-request-log-{request_id}"
+            for pending_insert in [
+                task for task in proxy._request_log_tasks if task.get_name() == insert_task_name and not task.done()
+            ]:
+                try:
+                    await asyncio.wait_for(asyncio.shield(pending_insert), timeout=30)
+                except Exception:  # insert failures surface via the retry loop below
+                    pass
             try:
                 rowcount = 0
                 # Total wait: 0 + 50 + 100 + 200 + 400 + 800 ms = 1550 ms.
@@ -262,12 +288,20 @@ class _RequestLogMixin:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout_seconds
         while True:
-            pending = {task for task in (proxy._request_log_tasks | proxy._background_cleanup_tasks) if not task.done()}
+            pending = {
+                task
+                for task in (proxy._request_log_tasks | proxy._background_cleanup_tasks)
+                if not task.done() and _is_persistence_task(task)
+            }
             if not pending:
                 # One scheduling tick so just-finished tasks' done callbacks
                 # (which may enqueue follow-up tasks) run before we re-check.
                 await asyncio.sleep(0)
-                if not (proxy._request_log_tasks | proxy._background_cleanup_tasks):
+                if not any(
+                    _is_persistence_task(task)
+                    for task in (proxy._request_log_tasks | proxy._background_cleanup_tasks)
+                    if not task.done()
+                ):
                     return True
                 continue
             remaining = deadline - loop.time()

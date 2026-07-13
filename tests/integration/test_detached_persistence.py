@@ -96,10 +96,94 @@ async def test_drain_persistence_tasks_reports_timeout():
     async def never_finishes() -> None:
         await asyncio.Event().wait()
 
-    task = asyncio.get_running_loop().create_task(never_finishes(), name="stuck-persistence")
+    task = asyncio.get_running_loop().create_task(never_finishes(), name="proxy-request-log-stuck")
     service._request_log_tasks.add(task)
     try:
         assert await service.drain_persistence_tasks(timeout_seconds=0.05) is False
     finally:
         task.cancel()
         service._request_log_tasks.discard(task)
+
+
+@pytest.mark.asyncio
+async def test_drain_ignores_stuck_non_persistence_cleanup_tasks():
+    """A stuck bridge-close cleanup in _background_cleanup_tasks must not
+    consume the persistence drain budget: only request-log/settlement tasks
+    gate the drain."""
+    import asyncio
+    from contextlib import asynccontextmanager
+    from typing import cast
+
+    @asynccontextmanager
+    async def repo_factory():
+        yield object()
+
+    service = proxy_service_module.ProxyService(cast(proxy_service_module.ProxyRepoFactory, repo_factory))
+
+    async def never_finishes() -> None:
+        await asyncio.Event().wait()
+
+    stuck_bridge_close = asyncio.get_running_loop().create_task(
+        never_finishes(), name="proxy-http_bridge_session_close-req_x"
+    )
+    service._background_cleanup_tasks.add(stuck_bridge_close)
+    try:
+        assert await service.drain_persistence_tasks(timeout_seconds=0.2) is True
+    finally:
+        stuck_bridge_close.cancel()
+        service._background_cleanup_tasks.discard(stuck_bridge_close)
+
+
+@pytest.mark.asyncio
+async def test_image_model_rewrite_waits_for_detached_insert(raw_client, monkeypatch):
+    """rewrite_request_log_model must chain to this request's pending
+    detached insert instead of racing its bounded retry loop against it."""
+    import asyncio
+
+    client, app = raw_client
+
+    from tests.integration.test_proxy_api_extended import _import_account
+
+    account_id = await _import_account(client, "acc_img_rewrite", "img-rewrite@example.com")
+    del account_id
+
+    gate = asyncio.Event()
+    from app.modules.request_logs.repository import RequestLogsRepository
+
+    original_add_log = RequestLogsRepository.add_log
+
+    async def gated_add_log(self, *args, **kwargs):
+        await gate.wait()
+        return await original_add_log(self, *args, **kwargs)
+
+    monkeypatch.setattr(RequestLogsRepository, "add_log", gated_add_log)
+
+    from app.dependencies import get_proxy_service_for_app
+
+    service = get_proxy_service_for_app(app)
+    await service._write_request_log(
+        account_id=None,
+        api_key=None,
+        request_id="resp_img_rewrite",
+        model="gpt-5.5",
+        latency_ms=5,
+        status="success",
+    )
+
+    rewrite = asyncio.create_task(service.rewrite_request_log_model("resp_img_rewrite", "gpt-image-1"))
+    # Let the rewrite start and block on the pending insert, then release it
+    # AFTER the legacy 1.55s retry window would have expired if it were not
+    # chained to the insert task.
+    await asyncio.sleep(0.05)
+    assert not rewrite.done()
+    gate.set()
+    await asyncio.wait_for(rewrite, timeout=10)
+    assert await service.drain_persistence_tasks(timeout_seconds=5)
+
+    async with SessionLocal() as session:
+        row = (
+            (await session.execute(select(RequestLog).where(RequestLog.request_id == "resp_img_rewrite")))
+            .scalars()
+            .one()
+        )
+    assert row.model == "gpt-image-1"

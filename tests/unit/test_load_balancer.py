@@ -2527,6 +2527,36 @@ def test_background_recovery_state_recovers_without_any_primary_row(monkeypatch)
     assert state.status == AccountStatus.ACTIVE
 
 
+def test_state_from_account_keeps_resetless_rate_limit_without_primary_row(monkeypatch):
+    now = 1_700_000_000.0
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+
+    # A resetless 429 whose runtime cooldown was lost to a restart: an old
+    # sub-100% weekly row is not fresh recovery evidence, and with no reset
+    # deadline to expire the block must be preserved.
+    account = _make_test_account(
+        status=AccountStatus.RATE_LIMITED,
+        reset_at=None,
+        blocked_at=None,
+    )
+    stale_secondary = _make_test_usage(
+        window="secondary",
+        used_percent=40.0,
+        reset_at=int(now + 5 * 24 * 3600),
+        recorded_at=_epoch_to_naive_utc(now - 2 * 24 * 3600),
+    )
+
+    state = _state_from_account(
+        account=account,
+        primary_entry=None,
+        secondary_entry=stale_secondary,
+        runtime=RuntimeState(),
+    )
+
+    assert state.status == AccountStatus.RATE_LIMITED
+
+
 def test_background_recovery_state_keeps_rate_limited_without_primary_row_and_stale_secondary(monkeypatch):
     now = 1_700_000_000.0
     blocked = now - 7200.0

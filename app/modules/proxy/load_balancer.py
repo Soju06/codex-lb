@@ -2031,6 +2031,15 @@ def _state_from_account(
             if recorded_epoch > effective_blocked_at:
                 effective_runtime_reset = None
 
+    # A resetless rate limit whose runtime cooldown was lost (e.g. a restart
+    # after a 429 without reset metadata) has no deadline to expire and no
+    # post-block evidence trail; a long-window sample alone must not clear
+    # it. Evidence-gated clearing above always starts from a persisted or
+    # runtime reset, so this only matches the truly resetless case.
+    resetless_rate_limit_without_evidence = (
+        status_seed == AccountStatus.RATE_LIMITED and db_reset_at is None and runtime.reset_at is None
+    )
+
     status, used_percent, reset_at = apply_usage_quota(
         status=status_seed,
         primary_used=primary_used,
@@ -2044,6 +2053,8 @@ def _state_from_account(
         credits_balance=credits_balance,
         infer_status_from_usage=False,
     )
+    if resetless_rate_limit_without_evidence and primary_used is None and status == AccountStatus.ACTIVE:
+        status = AccountStatus.RATE_LIMITED
 
     if status == AccountStatus.QUOTA_EXCEEDED:
         next_blocked_at = effective_blocked_at

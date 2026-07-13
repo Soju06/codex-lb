@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 from sqlalchemy.dialects import postgresql, sqlite
+from sqlalchemy.engine import Dialect
 
 from app.core.config.settings import Settings
 from app.core.utils.time import utcnow
@@ -14,7 +15,7 @@ from app.modules.accounts.refresh_claims import (
 pytestmark = pytest.mark.unit
 
 
-def _compile(dialect_name: str, dialect: object) -> str:
+def _compile(dialect_name: str, dialect: Dialect) -> str:
     now = utcnow()
     stmt = build_refresh_claim_upsert(
         dialect_name=dialect_name,

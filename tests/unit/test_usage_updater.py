@@ -2022,6 +2022,9 @@ class StubAccountsRepository:
     async def get_by_id(self, account_id: str) -> Account | None:
         return self.accounts_by_id.get(account_id)
 
+    async def get_by_id_fresh(self, account_id: str) -> Account | None:
+        return self.accounts_by_id.get(account_id)
+
     async def update_status(
         self,
         account_id: str,

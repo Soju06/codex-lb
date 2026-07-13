@@ -962,6 +962,57 @@ def test_http_bridge_account_capacity_wait_treats_local_account_caps_as_recovera
     assert http_bridge_streaming_module._http_bridge_account_capacity_wait_seconds(exc) == 30.0
 
 
+def test_http_bridge_account_capacity_wait_treats_gate_timeout_as_recoverable() -> None:
+    exc = http_bridge_helpers_module._http_bridge_startup_wait_timeout_error(
+        "http_bridge_response_create_gate",
+        code="response_create_gate_timeout",
+    )
+
+    assert (
+        http_bridge_streaming_module._http_bridge_account_capacity_wait_seconds(exc)
+        == http_bridge_streaming_module._RESPONSE_CREATE_GATE_RETRY_SLEEP_SECONDS
+    )
+
+
+def test_http_bridge_capacity_wait_plan_reserves_final_gate_attempt(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        http_bridge_streaming_module,
+        "_proxy_admission_wait_timeout_seconds",
+        lambda settings=None: 10.0,
+    )
+    exc = http_bridge_helpers_module._http_bridge_startup_wait_timeout_error(
+        "http_bridge_response_create_gate",
+        code="response_create_gate_timeout",
+    )
+    now = time.monotonic()
+
+    plenty = http_bridge_streaming_module._http_bridge_capacity_wait_plan(exc, request_deadline=now + 120.0)
+    assert plenty is not None
+    assert plenty[0] == pytest.approx(
+        http_bridge_streaming_module._RESPONSE_CREATE_GATE_RETRY_SLEEP_SECONDS,
+        abs=0.5,
+    )
+
+    # With less budget left than the retry sleep, the plan reserves the tail
+    # for one final gate acquisition attempt instead of sleeping it away.
+    tail = http_bridge_streaming_module._http_bridge_capacity_wait_plan(exc, request_deadline=now + 8.0)
+    assert tail is not None
+    assert tail[0] == pytest.approx(0.0, abs=0.5)
+
+
+def test_http_bridge_account_capacity_wait_keeps_active_session_capacity_fail_fast() -> None:
+    exc = ProxyResponseError(
+        429,
+        openai_error(
+            "capacity_exhausted_active_sessions",
+            "All accounts are serving active sessions",
+            error_type="rate_limit_error",
+        ),
+    )
+
+    assert http_bridge_streaming_module._http_bridge_account_capacity_wait_seconds(exc) is None
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("propagate_http_errors", "expected_event_types"),
@@ -1026,6 +1077,283 @@ async def test_http_bridge_submit_waits_for_local_account_capacity(
     assert event_types == expected_event_types
     assert submit.await_count == 2
     detach.assert_awaited_once_with(session, request_state=request_state)
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_submit_waits_for_response_create_gate_contention(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="sid-submit-gate-contention")
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-submit-gate-contention",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        transport="http",
+        event_queue=asyncio.Queue(),
+    )
+    assert request_state.event_queue is not None
+    request_state.event_queue.put_nowait(
+        'data: {"type":"response.completed","response":{"id":"resp_submit_gate_contention"}}\n\n'
+    )
+    request_state.event_queue.put_nowait(None)
+    gate_timeout_error = http_bridge_helpers_module._http_bridge_startup_wait_timeout_error(
+        "http_bridge_response_create_gate",
+        code="response_create_gate_timeout",
+    )
+    submit = AsyncMock(side_effect=[gate_timeout_error, None])
+    detach = AsyncMock()
+
+    settings = _make_app_settings()
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(http_bridge_streaming_module, "_RESPONSE_CREATE_GATE_RETRY_SLEEP_SECONDS", 0.001)
+    monkeypatch.setattr(http_bridge_streaming_module, "_ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS", 0.001)
+    monkeypatch.setattr(service, "_submit_http_bridge_request", submit)
+    monkeypatch.setattr(service, "_detach_http_bridge_request", detach)
+
+    chunks = [
+        chunk
+        async for chunk in service._stream_http_bridge_session_events(
+            session,
+            request_state=request_state,
+            text_data='{"type":"response.create"}',
+            queue_limit=4,
+            propagate_http_errors=False,
+            downstream_turn_state=None,
+        )
+    ]
+
+    event_types = [cast(dict[str, object], proxy_service.parse_sse_data_json(chunk))["type"] for chunk in chunks]
+    assert event_types == ["codex.keepalive", "response.completed"]
+    keepalive = cast(dict[str, object], proxy_service.parse_sse_data_json(chunks[0]))
+    assert keepalive["status"] == "waiting_for_account_capacity"
+    assert submit.await_count == 2
+    detach.assert_awaited_once_with(session, request_state=request_state)
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_stream_persists_original_deadline_on_request_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="sid-deadline-persist")
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-deadline-persist",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        # Retry/recovery states are re-prepared with a fresh started_at;
+        # the original deadline must still govern budget clamps.
+        started_at=time.monotonic(),
+        transport="http",
+        event_queue=asyncio.Queue(),
+    )
+    assert request_state.event_queue is not None
+    request_state.event_queue.put_nowait(
+        'data: {"type":"response.completed","response":{"id":"resp_deadline_persist"}}\n\n'
+    )
+    request_state.event_queue.put_nowait(None)
+    submit = AsyncMock(return_value=None)
+    detach = AsyncMock()
+    settings = _make_app_settings()
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_submit_http_bridge_request", submit)
+    monkeypatch.setattr(service, "_detach_http_bridge_request", detach)
+
+    explicit_deadline = time.monotonic() + 42.0
+    async for _ in service._stream_http_bridge_session_events(
+        session,
+        request_state=request_state,
+        text_data='{"type":"response.create"}',
+        queue_limit=4,
+        propagate_http_errors=False,
+        downstream_turn_state=None,
+        request_deadline=explicit_deadline,
+    ):
+        pass
+
+    assert request_state.bridge_request_deadline == pytest.approx(explicit_deadline)
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_gate_contention_retry_fails_fast_when_queue_full(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="sid-gate-queue-full", queued_request_count=4)
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-gate-queue-full",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        transport="http",
+        event_queue=asyncio.Queue(),
+    )
+    gate_timeout_error = http_bridge_helpers_module._http_bridge_startup_wait_timeout_error(
+        "http_bridge_response_create_gate",
+        code="response_create_gate_timeout",
+    )
+    submit = AsyncMock(side_effect=gate_timeout_error)
+    settings = _make_app_settings()
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_submit_http_bridge_request", submit)
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        async for _ in service._stream_http_bridge_session_events(
+            session,
+            request_state=request_state,
+            text_data='{"type":"response.create"}',
+            queue_limit=4,
+            propagate_http_errors=True,
+            downstream_turn_state=None,
+        ):
+            pass
+
+    # A sleeping gate waiter must occupy a queue slot; at the limit the
+    # retry fails fast instead of accumulating unbounded waiters.
+    assert exc_info.value.payload["error"]["code"] == "bridge_queue_full"
+    assert submit.await_count == 1
+    assert session.queued_request_count == 4
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_gate_contention_retry_balances_queue_slot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="sid-gate-slot-balance", queued_request_count=1)
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-gate-slot-balance",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        transport="http",
+        event_queue=asyncio.Queue(),
+    )
+    assert request_state.event_queue is not None
+    request_state.event_queue.put_nowait(
+        'data: {"type":"response.completed","response":{"id":"resp_gate_slot_balance"}}\n\n'
+    )
+    request_state.event_queue.put_nowait(None)
+    gate_timeout_error = http_bridge_helpers_module._http_bridge_startup_wait_timeout_error(
+        "http_bridge_response_create_gate",
+        code="response_create_gate_timeout",
+    )
+    submit = AsyncMock(side_effect=[gate_timeout_error, None])
+    detach = AsyncMock()
+    settings = _make_app_settings()
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(http_bridge_streaming_module, "_RESPONSE_CREATE_GATE_RETRY_SLEEP_SECONDS", 0.001)
+    monkeypatch.setattr(http_bridge_streaming_module, "_ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS", 0.001)
+    monkeypatch.setattr(service, "_submit_http_bridge_request", submit)
+    monkeypatch.setattr(service, "_detach_http_bridge_request", detach)
+
+    chunks = [
+        chunk
+        async for chunk in service._stream_http_bridge_session_events(
+            session,
+            request_state=request_state,
+            text_data='{"type":"response.create"}',
+            queue_limit=4,
+            propagate_http_errors=False,
+            downstream_turn_state=None,
+        )
+    ]
+
+    assert any("response.completed" in chunk for chunk in chunks)
+    assert submit.await_count == 2
+    # The temporary sleep-slot is released after each retry.
+    assert session.queued_request_count == 1
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_gate_contention_does_not_retry_retired_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="sid-gate-retired")
+    session.closed = True
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-gate-retired",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        transport="http",
+        event_queue=asyncio.Queue(),
+    )
+    gate_timeout_error = http_bridge_helpers_module._http_bridge_startup_wait_timeout_error(
+        "http_bridge_response_create_gate",
+        code="response_create_gate_timeout",
+    )
+    submit = AsyncMock(side_effect=gate_timeout_error)
+    settings = _make_app_settings()
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_submit_http_bridge_request", submit)
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        async for _ in service._stream_http_bridge_session_events(
+            session,
+            request_state=request_state,
+            text_data='{"type":"response.create"}',
+            queue_limit=4,
+            propagate_http_errors=True,
+            downstream_turn_state=None,
+        ):
+            pass
+
+    # A gate timeout that retired the session must fail startup cleanly
+    # instead of retrying the closed session mid-stream.
+    assert exc_info.value is gate_timeout_error
+    assert submit.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_submit_gate_contention_still_reroutes_soft_sessions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="soft-submit-gate-contention")
+    session.key = proxy_service._HTTPBridgeSessionKey("prompt_cache", "soft-submit-gate-contention", None)
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-soft-submit-gate-contention",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        transport="http",
+        bridge_soft_capacity_reroute_allowed=True,
+    )
+    gate_timeout_error = http_bridge_helpers_module._http_bridge_startup_wait_timeout_error(
+        "http_bridge_response_create_gate",
+        code="response_create_gate_timeout",
+    )
+    submit = AsyncMock(side_effect=gate_timeout_error)
+    monkeypatch.setattr(service, "_submit_http_bridge_request", submit)
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        async for _ in service._stream_http_bridge_session_events(
+            session,
+            request_state=request_state,
+            text_data='{"type":"response.create"}',
+            queue_limit=4,
+            propagate_http_errors=True,
+            downstream_turn_state=None,
+        ):
+            pass
+
+    assert exc_info.value is gate_timeout_error
+    assert submit.await_count == 1
 
 
 @pytest.mark.asyncio
@@ -12186,7 +12514,9 @@ async def test_submit_http_bridge_request_rejects_unregistered_session_after_adm
         service_tier=None,
         reasoning_effort=None,
         api_key_reservation=None,
-        started_at=1.0,
+        # started_at is monotonic in production; the budget clamp on bridge
+        # gate waits treats stale values as an exhausted request budget.
+        started_at=time.monotonic(),
         awaiting_response_created=True,
         event_queue=asyncio.Queue(),
         request_text='{"type":"response.create","model":"gpt-5.5","input":"new"}',

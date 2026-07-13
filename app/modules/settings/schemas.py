@@ -77,9 +77,11 @@ class DashboardSettingsResponse(DashboardModel):
     additional_quota_policies: list[AdditionalQuotaPolicy] = Field(default_factory=list)
     guest_access_enabled: bool
     guest_password_configured: bool
+    version: int = Field(ge=1)
 
 
 class DashboardSettingsUpdateRequest(DashboardModel):
+    expected_version: int | None = Field(default=None, ge=1)
     sticky_threads_enabled: bool | None = None
     upstream_stream_transport: str | None = Field(
         default=None,

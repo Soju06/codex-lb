@@ -112,10 +112,12 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _persist_http_bridge_turn_state_alias,
     _preferred_http_bridge_reconnect_turn_state,
     _raise_http_bridge_incompatible_admission_handoff,
+    _reconcile_durable_http_bridge_ownership,
     _record_bridge_drain_recovery_allowed,
     _record_bridge_first_turn_timeout,
     _record_bridge_reattach,
     _refresh_reused_http_bridge_session_with_handoff,
+    _renew_durable_http_bridge_lease,
     _require_http_bridge_bound_account_not_excluded,
     _reserve_http_bridge_unanchored_handoff,
     _track_alias_registration,
@@ -1808,22 +1810,14 @@ class _HTTPBridgeMixin(
             raise
 
     async def _refresh_durable_http_bridge_session(self, session: "_HTTPBridgeSession") -> None:
-        if session.durable_session_id is None or session.durable_owner_epoch is None:
-            return
-        try:
-            lookup = await self._durable_bridge.renew_live_session(
-                session_id=session.durable_session_id,
-                api_key_id=session.key.api_key_id,
-                instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
-                owner_epoch=session.durable_owner_epoch,
-                lease_ttl_seconds=_http_bridge_durable_lease_ttl_seconds(),
-                latest_turn_state=session.downstream_turn_state,
-                latest_response_id=None,
-            )
-            if lookup is not None:
-                session.durable_owner_epoch = lookup.owner_epoch
-        except Exception:
-            logger.warning("Failed to renew durable HTTP bridge session lease", exc_info=True)
+        """Renew the durable lease; callers must hold ``self._http_bridge_lock``."""
+
+        await _renew_durable_http_bridge_lease(self, session)
+
+    async def reconcile_durable_http_bridge_ownership(self) -> int:
+        """Close local sessions whose durable row is owned by another instance/epoch."""
+
+        return await _reconcile_durable_http_bridge_ownership(self)
 
     async def _create_http_bridge_session(
         self,

@@ -284,13 +284,14 @@ If you deploy multiple replicas behind a load balancer, configure front-door aff
 
 Without front-door affinity, each replica will maintain its own in-memory bridge pool and HTTP continuity can fragment across instances.
 
-If you cannot guarantee front-door affinity, configure the deterministic bridge instance ring. In strict mode the proxy fails closed with `bridge_instance_mismatch` for hard continuity keys; in gateway-safe mode prompt-cache-only bridge requests can tolerate a locality miss and continue locally.
+If you cannot guarantee front-door affinity, configure the deterministic bridge instance ring. Hard continuity keys that land on a non-owner replica are proxy-forwarded to the owner replica over its advertised endpoint; the proxy fails closed (`bridge_instance_mismatch` / `bridge_forward_*` errors) only when the owner endpoint or ring membership cannot be resolved or the forward signature fails authentication. In gateway-safe mode prompt-cache-only bridge requests can tolerate a locality miss and continue locally.
 
 ### Failure interpretation
 
 - `queue_full`: one bridge key is overloaded; increase bridge capacity carefully or reduce per-session concurrency upstream.
 - `capacity_exhausted_active_sessions`: the bridge pool hit `max_sessions` while every existing session still had pending work. The proxy intentionally refused the new request with `429` instead of evicting an active session. Mitigate by increasing pool size carefully, reducing concurrent bridge fan-out, or improving front-door affinity so related calls land on the same replica.
-- `owner_mismatch` / `bridge_instance_mismatch`: a hard continuity key (`x-codex-turn-state` or explicit session header) landed on the wrong instance. Fix ingress affinity or route that continuity key to the logged owner instance.
+- `owner_mismatch`: a hard continuity key (`x-codex-turn-state` or explicit session header) landed on a non-owner instance and was proxy-forwarded to the logged owner instance (`outcome=forward`). Each forward adds an intra-cluster hop and owner-side load, so improve front-door affinity if the rate is high.
+- `bridge_instance_mismatch`: owner forwarding was not possible — the owner endpoint or ring membership could not be resolved, or the forward signature failed authentication — and the proxy failed closed. Check ring membership advertise endpoints and that every replica shares the same encryption key.
 - `prompt_cache_locality_miss` / `soft_local_rebind`: gateway-safe mode tolerated a prompt-cache locality miss and created or reused a local bridge session instead of returning `bridge_instance_mismatch`. Investigate front-door stickiness if this is frequent, because cache reuse and bridge continuity can still fragment across replicas.
 - `reconnect`: the bridge recreated an upstream websocket before response creation and retried once.
 - `terminal_error` with `previous_response_not_found`: continuity was already broken upstream; inspect replica affinity, bridge eviction timing, or upstream resets.

@@ -928,6 +928,43 @@ def test_staggered_idle_slot_is_stable_and_spread() -> None:
     assert other.slot_offset_seconds == 6000
 
 
+def test_staggered_idle_slot_uses_observed_window_duration() -> None:
+    # A 60-minute observed window spreads slots across 3600 seconds instead
+    # of the 300-minute fallback.
+    reset_at = 10_000
+    window_seconds = 3_600
+    window_start = reset_at - window_seconds
+
+    first = limit_warmup_service._staggered_idle_due(
+        "acc_1",
+        ["acc_1", "acc_2", "acc_3"],
+        now=datetime.fromtimestamp(window_start, tz=timezone.utc).replace(tzinfo=None),
+        reset_at=reset_at,
+        window_seconds=window_seconds,
+    )
+    second = limit_warmup_service._staggered_idle_due(
+        "acc_2",
+        ["acc_1", "acc_2", "acc_3"],
+        now=datetime.fromtimestamp(window_start + 1_200, tz=timezone.utc).replace(tzinfo=None),
+        reset_at=reset_at,
+        window_seconds=window_seconds,
+    )
+    outside = limit_warmup_service._staggered_idle_due(
+        "acc_1",
+        ["acc_1", "acc_2", "acc_3"],
+        now=datetime.fromtimestamp(window_start - 1, tz=timezone.utc).replace(tzinfo=None),
+        reset_at=reset_at,
+        window_seconds=window_seconds,
+    )
+
+    assert first is not None
+    assert first.cycle_end == reset_at
+    assert first.slot_offset_seconds == 0
+    assert second is not None
+    assert second.slot_offset_seconds == 1_200
+    assert outside is None
+
+
 def test_staggered_idle_slot_uses_account_reset_window() -> None:
     reset_at = 20_000
     window_start = reset_at - 18_000
@@ -1051,6 +1088,43 @@ async def test_staggered_idle_warmup_skips_when_reset_at_is_missing(monkeypatch)
                 reset_at=None,
                 window="primary",
                 window_minutes=300,
+                recorded_at=utcnow(),
+            )
+        },
+        after_secondary={},
+    )
+
+    assert sender.calls == []
+    assert repo.rows == []
+
+
+@pytest.mark.asyncio
+async def test_staggered_idle_warmup_skips_long_nonstandard_windows(monkeypatch) -> None:
+    monkeypatch.setattr(
+        limit_warmup_service,
+        "utcnow",
+        lambda: datetime.fromtimestamp(6000, tz=timezone.utc).replace(tzinfo=None),
+    )
+    repo = FakeWarmupRepo()
+    sender = FakeSender()
+    service = LimitWarmupService(repo, FakeRequestLogsRepo(), sender=sender)
+    accounts = [_account("acc_1"), _account("acc_2"), _account("acc_3")]
+    account = accounts[1]
+
+    await service.run_after_usage_refresh(
+        accounts=accounts,
+        settings=_settings(limit_warmup_staggered_idle_enabled=True),
+        before_primary={account.id: _usage(account.id, used_percent=0, reset_at=18_000)},
+        before_secondary={},
+        after_primary={
+            account.id: UsageHistory(
+                account_id=account.id,
+                used_percent=0,
+                reset_at=90_000,
+                window="primary",
+                # A 25h window is neither the weekly nor monthly default but
+                # is still too long to phase-plan.
+                window_minutes=1500,
                 recorded_at=utcnow(),
             )
         },

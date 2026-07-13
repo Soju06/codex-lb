@@ -72,8 +72,14 @@ def test_build_routing_costs_penalizes_cold_accounts_outside_work() -> None:
     )
     now = datetime(2026, 5, 18, 3, 0, tzinfo=timezone.utc)
     states = [
-        AccountState("cold", AccountStatus.ACTIVE, used_percent=0.0, reset_at=None),
-        AccountState("active", AccountStatus.ACTIVE, used_percent=50.0, reset_at=now.timestamp() + 1800),
+        AccountState("cold", AccountStatus.ACTIVE, used_percent=0.0, primary_window_minutes=300),
+        AccountState(
+            "active",
+            AccountStatus.ACTIVE,
+            used_percent=50.0,
+            primary_reset_at=int(now.timestamp() + 1800),
+            primary_window_minutes=300,
+        ),
     ]
 
     costs = build_routing_costs(settings=settings, states=states, now=now)
@@ -82,6 +88,190 @@ def test_build_routing_costs_penalizes_cold_accounts_outside_work() -> None:
     assert costs["cold"].reason == "cold_start_outside_work"
     assert costs["active"].total < 0.0
     assert costs["active"].reason == "expiring_active_window"
+
+
+def test_build_routing_costs_skips_accounts_without_short_windows() -> None:
+    settings = PlannerSettings(
+        mode="shadow",
+        timezone="UTC",
+        working_days=(0,),
+        working_hours_start="09:00",
+        working_hours_end="18:00",
+    )
+    now = datetime(2026, 5, 18, 3, 0, tzinfo=timezone.utc)
+    states = [
+        # Weekly-only account: the weekly-primary remap clears primary fields.
+        AccountState("weekly-only", AccountStatus.ACTIVE, secondary_used_percent=40.0),
+        # Short-window account stays cold-costed.
+        AccountState("cold-5h", AccountStatus.ACTIVE, used_percent=0.0, primary_window_minutes=300),
+    ]
+
+    costs = build_routing_costs(settings=settings, states=states, now=now)
+
+    assert "weekly-only" not in costs
+    assert costs["cold-5h"].total == 40.0
+
+
+def test_build_routing_costs_treats_live_primary_window_as_active() -> None:
+    settings = PlannerSettings(
+        mode="shadow",
+        timezone="UTC",
+        working_days=(0,),
+        working_hours_start="09:00",
+        working_hours_end="18:00",
+    )
+    now = datetime(2026, 5, 18, 3, 0, tzinfo=timezone.utc)
+    # A healthy ACTIVE account mid-way through a live window carries the
+    # window state in primary_reset_at (reset_at is blocked-status only).
+    states = [
+        AccountState(
+            "mid-window",
+            AccountStatus.ACTIVE,
+            used_percent=50.0,
+            primary_reset_at=int(now.timestamp() + 4 * 3600),
+            primary_window_minutes=300,
+        ),
+    ]
+
+    costs = build_routing_costs(settings=settings, states=states, now=now)
+
+    assert "mid-window" not in costs
+
+
+def test_build_routing_costs_ignores_long_window_primary_samples() -> None:
+    settings = PlannerSettings(
+        mode="shadow",
+        timezone="UTC",
+        working_days=(0,),
+        working_hours_start="09:00",
+        working_hours_end="18:00",
+    )
+    now = datetime(2026, 5, 18, 3, 0, tzinfo=timezone.utc)
+    # A long unremapped primary window (25h) is not phase-plannable: it must
+    # neither earn an expiring-active-window bonus nor a cold-start cost.
+    states = [
+        AccountState(
+            "long-window",
+            AccountStatus.ACTIVE,
+            used_percent=50.0,
+            primary_reset_at=int(now.timestamp() + 1800),
+            primary_window_minutes=1500,
+        ),
+    ]
+
+    costs = build_routing_costs(settings=settings, states=states, now=now)
+
+    assert "long-window" not in costs
+
+
+def test_plan_shadow_actions_excludes_long_window_resets_from_stagger_math() -> None:
+    settings = PlannerSettings(
+        mode="shadow",
+        timezone="UTC",
+        working_days=(0,),
+        working_hours_start="09:00",
+        working_hours_end="18:00",
+        prewarm_enabled=True,
+        prewarm_lead_minutes=300,
+        max_warmups_per_day=2,
+        min_expected_gain=1.0,
+    )
+    now = datetime(2026, 5, 18, 5, 0, tzinfo=timezone.utc)
+    peak_at = datetime(2026, 5, 18, 13, 0, tzinfo=timezone.utc)
+    long_reset = int(now.timestamp() + 1800)
+    states = [
+        AccountState(
+            "long-window",
+            AccountStatus.ACTIVE,
+            used_percent=50.0,
+            primary_reset_at=long_reset,
+            primary_window_minutes=1500,
+        ),
+        AccountState("cold-5h", AccountStatus.ACTIVE, used_percent=0.0, primary_window_minutes=300),
+    ]
+
+    actions = plan_shadow_actions(
+        settings=settings,
+        states=states,
+        demand_forecast=_forecast(now, peak_at=peak_at),
+        now=now,
+    )
+
+    assert actions
+    assert {action.account_id for action in actions} == {"cold-5h"}
+    # The long window's reset must not act as an active-reset stagger
+    # anchor: no candidate is derived from it.
+    for action in actions:
+        assert action.scheduled_at is not None
+        anchored = abs((action.scheduled_at + timedelta(seconds=action.window_seconds)).timestamp() - long_reset) in (
+            1800.0,
+        )
+        assert not anchored
+
+
+def test_plan_shadow_actions_skips_weekly_only_accounts() -> None:
+    settings = PlannerSettings(
+        mode="shadow",
+        timezone="UTC",
+        working_days=(0,),
+        working_hours_start="09:00",
+        working_hours_end="18:00",
+        prewarm_enabled=True,
+        prewarm_lead_minutes=300,
+        max_warmups_per_day=2,
+        min_expected_gain=1.0,
+    )
+    now = datetime(2026, 5, 18, 5, 0, tzinfo=timezone.utc)
+    peak_at = datetime(2026, 5, 18, 13, 0, tzinfo=timezone.utc)
+    states = [
+        AccountState("weekly-only", AccountStatus.ACTIVE, secondary_used_percent=10.0),
+        AccountState("cold-5h", AccountStatus.ACTIVE, used_percent=0.0, primary_window_minutes=300),
+    ]
+
+    actions = plan_shadow_actions(
+        settings=settings,
+        states=states,
+        demand_forecast=_forecast(now, peak_at=peak_at),
+        now=now,
+    )
+
+    assert actions
+    assert {action.account_id for action in actions} == {"cold-5h"}
+
+
+def test_plan_shadow_actions_uses_observed_window_duration() -> None:
+    settings = PlannerSettings(
+        mode="shadow",
+        timezone="UTC",
+        working_days=(0,),
+        working_hours_start="09:00",
+        working_hours_end="18:00",
+        prewarm_enabled=True,
+        prewarm_lead_minutes=300,
+        max_warmups_per_day=2,
+        min_expected_gain=1.0,
+    )
+    now = datetime(2026, 5, 18, 5, 0, tzinfo=timezone.utc)
+    peak_at = datetime(2026, 5, 18, 13, 0, tzinfo=timezone.utc)
+    states = [
+        AccountState("cold-1h", AccountStatus.ACTIVE, used_percent=0.0, primary_window_minutes=60),
+    ]
+
+    actions = plan_shadow_actions(
+        settings=settings,
+        states=states,
+        demand_forecast=_forecast(now, peak_at=peak_at),
+        now=now,
+    )
+
+    assert actions
+    action = actions[0]
+    assert action.window_seconds == pytest.approx(3600.0)
+    assert action.scheduled_at is not None
+    planned_reset = action.scheduled_at + timedelta(seconds=action.window_seconds)
+    # The one-hour window is planned so its span or reset aligns with the
+    # peak, which a 5h assumption could not do from these candidates.
+    assert abs((planned_reset - peak_at).total_seconds()) <= 3600.0
 
 
 def test_planner_settings_default_to_nonblocking_shadow_mode() -> None:
@@ -193,7 +383,6 @@ def test_candidate_start_times_do_not_floor_now_into_the_past() -> None:
 
     candidates = candidate_start_times(
         now=now,
-        account=AccountState("cold", AccountStatus.ACTIVE, used_percent=0.0, reset_at=None),
         settings=settings,
         demand_forecast=None,
     )
@@ -223,8 +412,20 @@ def test_simulation_sums_capacity_for_matching_reset_epochs() -> None:
         ),
     )
     states = [
-        AccountState("a", AccountStatus.ACTIVE, used_percent=40.0, reset_at=reset_at),
-        AccountState("b", AccountStatus.ACTIVE, used_percent=40.0, reset_at=reset_at),
+        AccountState(
+            "a",
+            AccountStatus.ACTIVE,
+            used_percent=40.0,
+            primary_reset_at=int(reset_at),
+            primary_window_minutes=300,
+        ),
+        AccountState(
+            "b",
+            AccountStatus.ACTIVE,
+            used_percent=40.0,
+            primary_reset_at=int(reset_at),
+            primary_window_minutes=300,
+        ),
     ]
 
     simulation = simulate_pool(settings=settings, states=states, demand_forecast=forecast, now=now)
@@ -295,9 +496,21 @@ def test_plan_shadow_actions_reserves_cold_accounts_for_peak_aligned_staggered_w
     now = datetime(2026, 5, 18, 5, 0, tzinfo=timezone.utc)
     peak_at = datetime(2026, 5, 18, 13, 0, tzinfo=timezone.utc)
     states = [
-        AccountState("cold-a", AccountStatus.ACTIVE, used_percent=0.0, reset_at=None),
-        AccountState("cold-b", AccountStatus.ACTIVE, used_percent=0.0, reset_at=now.timestamp() - 1),
-        AccountState("active", AccountStatus.ACTIVE, used_percent=10.0, reset_at=now.timestamp() + 60),
+        AccountState("cold-a", AccountStatus.ACTIVE, used_percent=0.0, primary_window_minutes=300),
+        AccountState(
+            "cold-b",
+            AccountStatus.ACTIVE,
+            used_percent=0.0,
+            primary_reset_at=int(now.timestamp() - 1),
+            primary_window_minutes=300,
+        ),
+        AccountState(
+            "active",
+            AccountStatus.ACTIVE,
+            used_percent=10.0,
+            primary_reset_at=int(now.timestamp() + 60),
+            primary_window_minutes=300,
+        ),
     ]
 
     actions = plan_shadow_actions(
@@ -339,8 +552,8 @@ def test_plan_shadow_actions_keeps_accounts_cold_when_flat_demand_has_no_peak_ga
     now = datetime(2026, 5, 18, 5, 0, tzinfo=timezone.utc)
     peak_at = datetime(2026, 5, 18, 13, 0, tzinfo=timezone.utc)
     states = [
-        AccountState("cold-a", AccountStatus.ACTIVE, used_percent=0.0, reset_at=None),
-        AccountState("cold-b", AccountStatus.ACTIVE, used_percent=0.0, reset_at=None),
+        AccountState("cold-a", AccountStatus.ACTIVE, used_percent=0.0, primary_window_minutes=300),
+        AccountState("cold-b", AccountStatus.ACTIVE, used_percent=0.0, primary_window_minutes=300),
     ]
 
     actions = plan_shadow_actions(
@@ -367,7 +580,7 @@ def test_plan_shadow_actions_rejects_start_that_misses_peak() -> None:
     )
     now = datetime(2026, 5, 18, 5, 0, tzinfo=timezone.utc)
     peak_at = datetime(2026, 5, 18, 23, 0, tzinfo=timezone.utc)
-    states = [AccountState("cold", AccountStatus.ACTIVE, used_percent=0.0, reset_at=None)]
+    states = [AccountState("cold", AccountStatus.ACTIVE, used_percent=0.0, primary_window_minutes=300)]
 
     actions = plan_shadow_actions(
         settings=settings,
@@ -408,8 +621,14 @@ def test_forecast_and_simulation_use_history_without_requiring_user_input() -> N
         )
     ]
     states = [
-        AccountState("cold", AccountStatus.ACTIVE, used_percent=0.0, reset_at=None),
-        AccountState("active", AccountStatus.ACTIVE, used_percent=40.0, reset_at=now.timestamp() + 3600),
+        AccountState("cold", AccountStatus.ACTIVE, used_percent=0.0, primary_window_minutes=300),
+        AccountState(
+            "active",
+            AccountStatus.ACTIVE,
+            used_percent=40.0,
+            primary_reset_at=int(now.timestamp() + 3600),
+            primary_window_minutes=300,
+        ),
     ]
 
     forecast = build_demand_forecast(settings=settings, bins=bins, now=now, horizon_hours=12)

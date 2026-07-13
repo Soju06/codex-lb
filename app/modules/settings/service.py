@@ -55,6 +55,7 @@ class DashboardSettingsData:
     guest_access_enabled: bool
     guest_password_configured: bool
     limit_warmup_staggered_idle_enabled: bool
+    version: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,13 +159,20 @@ class SettingsService:
             guest_access_enabled=row.guest_access_enabled,
             guest_password_configured=row.guest_password_hash is not None,
             limit_warmup_staggered_idle_enabled=row.limit_warmup_staggered_idle_enabled,
+            version=row.version,
         )
 
-    async def update_settings(self, payload: DashboardSettingsUpdateData) -> DashboardSettingsData:
+    async def update_settings(
+        self,
+        payload: DashboardSettingsUpdateData,
+        *,
+        expected_version: int | None = None,
+    ) -> DashboardSettingsData:
         current = await self._repository.get_or_create()
         if payload.totp_required_on_login and current.totp_secret_encrypted is None:
             raise ValueError("Configure TOTP before enabling login enforcement")
         row = await self._repository.update(
+            expected_version=expected_version,
             sticky_threads_enabled=payload.sticky_threads_enabled,
             upstream_stream_transport=payload.upstream_stream_transport,
             prohibit_fast_mode=payload.prohibit_fast_mode,
@@ -261,6 +269,7 @@ class SettingsService:
             guest_access_enabled=row.guest_access_enabled,
             guest_password_configured=row.guest_password_hash is not None,
             limit_warmup_staggered_idle_enabled=row.limit_warmup_staggered_idle_enabled,
+            version=row.version,
         )
 
 

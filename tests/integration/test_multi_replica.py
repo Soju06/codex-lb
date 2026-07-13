@@ -100,3 +100,130 @@ async def test_audit_log_records_from_different_modules(db_session):
     actions = {log.action for log in logs}
     assert "account_created" in actions
     assert "api_key_created" in actions
+
+
+@pytest.mark.asyncio
+async def test_account_caps_partition_across_two_replicas_sharing_one_database(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two replicas over one DB admit at most the configured cluster-wide account cap.
+
+    Before cap partitioning each replica enforced the full configured cap against
+    its own in-process lease counters, so two replicas admitted 2x the configured
+    per-account stream cap.
+    """
+    from types import SimpleNamespace
+    from typing import Any, cast
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.db.models import Base
+    from app.modules.proxy.cap_partitioning import CapPartitionHolder
+    from app.modules.proxy.load_balancer import LoadBalancer
+    from app.modules.proxy.load_balancer import effective_account_concurrency_caps as effective_caps
+    from app.modules.proxy.ring_membership import RingMembershipService
+
+    db_path = tmp_path / "cap-partition-ring.sqlite3"
+    engine_a = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
+    engine_b = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
+    try:
+        async with engine_a.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        maker_a = async_sessionmaker(engine_a, expire_on_commit=False)
+        maker_b = async_sessionmaker(engine_b, expire_on_commit=False)
+        services = {
+            "replica-a": RingMembershipService(lambda: maker_a()),
+            "replica-b": RingMembershipService(lambda: maker_b()),
+        }
+
+        for instance_id, service in services.items():
+            await service.register(instance_id)
+
+        configured = SimpleNamespace(proxy_account_response_create_limit=4, proxy_account_stream_limit=8)
+        admitted: dict[str, int] = {}
+        for instance_id, service in services.items():
+            members = await service.list_active()
+            assert members == ["replica-a", "replica-b"]
+            holder = CapPartitionHolder()
+            holder.observe_members(
+                members,
+                instance_id,
+                configured_caps=(
+                    configured.proxy_account_response_create_limit,
+                    configured.proxy_account_stream_limit,
+                ),
+                scale_down_seconds=60.0,
+            )
+            monkeypatch.setattr(
+                "app.modules.proxy.load_balancer.get_cap_partition",
+                lambda holder=holder: holder.current,
+            )
+            caps = effective_caps(configured)
+            assert caps.replica_count == 2
+            assert caps.stream_limit == 4
+
+            balancer = LoadBalancer(cast(Any, None))
+            admitted[instance_id] = 0
+            for _ in range(16):
+                lease = await balancer.acquire_account_lease(
+                    "acc-cluster-cap",
+                    kind="stream",
+                    concurrency_caps=caps,
+                )
+                if lease is None:
+                    break
+                admitted[instance_id] += 1
+
+        assert admitted == {"replica-a": 4, "replica-b": 4}
+        assert sum(admitted.values()) == 8
+    finally:
+        await engine_a.dispose()
+        await engine_b.dispose()
+
+
+@pytest.mark.asyncio
+async def test_cap_partition_scale_down_over_ring_waits_for_stability_window(tmp_path) -> None:
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.db.models import Base
+    from app.modules.proxy.cap_partitioning import CapPartition, CapPartitionHolder
+    from app.modules.proxy.ring_membership import RingMembershipService
+
+    db_path = tmp_path / "cap-partition-scale-down.sqlite3"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        maker = async_sessionmaker(engine, expire_on_commit=False)
+        service = RingMembershipService(lambda: maker())
+        await service.register("replica-a")
+        await service.register("replica-b")
+
+        configured_caps = (4, 8)
+        clock_now = 0.0
+        holder = CapPartitionHolder(clock=lambda: clock_now)
+        holder.observe_members(
+            await service.list_active(), "replica-a", configured_caps=configured_caps, scale_down_seconds=60.0
+        )
+        assert holder.current == CapPartition(replica_count=2, rank=0)
+
+        await service.unregister("replica-b")
+
+        members = await service.list_active()
+        assert members == ["replica-a"]
+        holder.observe_members(members, "replica-a", configured_caps=configured_caps, scale_down_seconds=60.0)
+        assert holder.current == CapPartition(replica_count=2, rank=0)
+
+        clock_now = 59.0
+        holder.observe_members(
+            await service.list_active(), "replica-a", configured_caps=configured_caps, scale_down_seconds=60.0
+        )
+        assert holder.current == CapPartition(replica_count=2, rank=0)
+
+        clock_now = 60.0
+        holder.observe_members(
+            await service.list_active(), "replica-a", configured_caps=configured_caps, scale_down_seconds=60.0
+        )
+        assert holder.current == CapPartition(replica_count=1, rank=0)
+    finally:
+        await engine.dispose()

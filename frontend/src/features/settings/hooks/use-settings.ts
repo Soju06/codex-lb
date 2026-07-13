@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 
+import { ApiError } from "@/lib/api-client";
 import {
   addUpstreamProxyPoolMember,
   createUpstreamProxyEndpoint,
@@ -37,6 +38,11 @@ export function useSettings() {
     },
     onError: (error: Error) => {
       toast.error(error.message || "Failed to save settings");
+      if (error instanceof ApiError && error.code === "settings_conflict") {
+        // Another writer committed since this form was loaded; refetch so the
+        // next save carries the fresh expectedVersion.
+        void queryClient.invalidateQueries({ queryKey: ["settings", "detail"] });
+      }
     },
   });
 

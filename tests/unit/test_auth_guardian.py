@@ -135,6 +135,60 @@ def test_build_auth_guardian_scheduler_requires_leader_election_for_multi_replic
     assert scheduler.enabled is False
 
 
+def test_build_auth_guardian_scheduler_wires_leader_election_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings(auth_guardian_enabled=True, leader_election_enabled=False)
+    monkeypatch.setattr(settings_module, "get_settings", lambda: settings)
+
+    scheduler = build_auth_guardian_scheduler()
+    assert scheduler.leader_election_enabled is False
+
+    settings.leader_election_enabled = True
+    scheduler = build_auth_guardian_scheduler()
+    assert scheduler.leader_election_enabled is True
+
+
+def test_build_auth_guardian_scheduler_warns_when_self_disabling_without_leader_election(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    settings = _settings(
+        auth_guardian_enabled=True,
+        leader_election_enabled=False,
+        instance_ring=["pod-a", "pod-b"],
+    )
+    monkeypatch.setattr(settings_module, "get_settings", lambda: settings)
+
+    with caplog.at_level(logging.WARNING, logger="app.core.auth.guardian"):
+        scheduler = build_auth_guardian_scheduler()
+
+    assert scheduler.enabled is False
+    warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    message = warnings[0].getMessage()
+    assert "Auth guardian disabled" in message
+    assert "CODEX_LB_LEADER_ELECTION_ENABLED" in message
+
+
+def test_build_auth_guardian_scheduler_does_not_warn_when_leader_election_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    settings = _settings(
+        auth_guardian_enabled=True,
+        leader_election_enabled=True,
+        instance_ring=["pod-a", "pod-b"],
+    )
+    monkeypatch.setattr(settings_module, "get_settings", lambda: settings)
+
+    with caplog.at_level(logging.WARNING, logger="app.core.auth.guardian"):
+        scheduler = build_auth_guardian_scheduler()
+
+    assert scheduler.enabled is True
+    assert not [record for record in caplog.records if record.levelno == logging.WARNING]
+
+
 @pytest.mark.asyncio
 async def test_auth_guardian_refresh_once_refreshes_stale_active_and_skips_others() -> None:
     now = datetime(2026, 1, 2, 12, 0, 0)
@@ -167,6 +221,122 @@ async def test_auth_guardian_refresh_once_refreshes_stale_active_and_skips_other
     await scheduler._refresh_once()
 
     assert calls == ["stale-active"]
+
+
+@pytest.mark.asyncio
+async def test_auth_guardian_skips_pass_when_dynamic_ring_shows_multiple_replicas(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    now = datetime(2026, 1, 2, 12, 0, 0)
+    account = _account("stale-active", status=AccountStatus.ACTIVE, last_refresh=now - timedelta(hours=13))
+    repo = _Repo([account])
+    calls: list[str] = []
+
+    @asynccontextmanager
+    async def repo_factory() -> AsyncIterator[_Repo]:
+        yield repo
+
+    async def _two_live_replicas() -> int:
+        return 2
+
+    scheduler = AuthGuardianScheduler(
+        interval_seconds=21600,
+        enabled=True,
+        max_age_seconds=12 * 3600,
+        batch_size=10,
+        concurrency=1,
+        jitter_seconds=0.0,
+        leader_election_enabled=False,
+        live_replica_count=_two_live_replicas,
+        leader_election_factory=lambda: _Leader(),
+        repo_factory=repo_factory,
+        auth_manager_factory=lambda _repo: _AuthManager(calls),
+        sleep=lambda _delay: _noop_sleep(),
+        now=lambda: now,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="app.core.auth.guardian"):
+        await scheduler._refresh_once()
+
+    assert calls == []
+    warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    message = warnings[0].getMessage()
+    assert "CODEX_LB_LEADER_ELECTION_ENABLED" in message
+
+
+@pytest.mark.asyncio
+async def test_auth_guardian_runs_when_dynamic_ring_has_single_replica() -> None:
+    now = datetime(2026, 1, 2, 12, 0, 0)
+    account = _account("stale-active", status=AccountStatus.ACTIVE, last_refresh=now - timedelta(hours=13))
+    repo = _Repo([account])
+    calls: list[str] = []
+
+    @asynccontextmanager
+    async def repo_factory() -> AsyncIterator[_Repo]:
+        yield repo
+
+    async def _one_live_replica() -> int:
+        return 1
+
+    scheduler = AuthGuardianScheduler(
+        interval_seconds=21600,
+        enabled=True,
+        max_age_seconds=12 * 3600,
+        batch_size=10,
+        concurrency=1,
+        jitter_seconds=0.0,
+        leader_election_enabled=False,
+        live_replica_count=_one_live_replica,
+        leader_election_factory=lambda: _Leader(),
+        repo_factory=repo_factory,
+        auth_manager_factory=lambda _repo: _AuthManager(calls),
+        sleep=lambda _delay: _noop_sleep(),
+        now=lambda: now,
+    )
+
+    await scheduler._refresh_once()
+
+    assert calls == ["stale-active"]
+
+
+@pytest.mark.asyncio
+async def test_auth_guardian_ignores_dynamic_ring_when_leader_election_enabled() -> None:
+    now = datetime(2026, 1, 2, 12, 0, 0)
+    account = _account("stale-active", status=AccountStatus.ACTIVE, last_refresh=now - timedelta(hours=13))
+    repo = _Repo([account])
+    calls: list[str] = []
+    ring_counted = False
+
+    @asynccontextmanager
+    async def repo_factory() -> AsyncIterator[_Repo]:
+        yield repo
+
+    async def _count_ring() -> int:
+        nonlocal ring_counted
+        ring_counted = True
+        return 5
+
+    scheduler = AuthGuardianScheduler(
+        interval_seconds=21600,
+        enabled=True,
+        max_age_seconds=12 * 3600,
+        batch_size=10,
+        concurrency=1,
+        jitter_seconds=0.0,
+        leader_election_enabled=True,
+        live_replica_count=_count_ring,
+        leader_election_factory=lambda: _Leader(),
+        repo_factory=repo_factory,
+        auth_manager_factory=lambda _repo: _AuthManager(calls),
+        sleep=lambda _delay: _noop_sleep(),
+        now=lambda: now,
+    )
+
+    await scheduler._refresh_once()
+
+    assert calls == ["stale-active"]
+    assert ring_counted is False
 
 
 @pytest.mark.asyncio

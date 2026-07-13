@@ -232,6 +232,9 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_prewarm_canary_bucket as _http_bridge_prewarm_canary_bucket,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
+    _http_bridge_request_budget_seconds as _http_bridge_request_budget_seconds,
+)
+from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_request_counts_against_queue as _http_bridge_request_counts_against_queue,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
@@ -1282,6 +1285,17 @@ class ProxyService(
         surface: str = "websocket",
     ) -> None:
         timeout_seconds = _proxy_admission_wait_timeout_seconds()
+        if bridge_session is not None:
+            # Bridged requests retry gate acquisition within the bridge
+            # request budget; a final attempt must not run past it, so each
+            # acquisition wait is clamped to the remaining budget. Retry
+            # states carry the original deadline because their started_at
+            # is reset when they are re-prepared.
+            deadline = request_state.bridge_request_deadline
+            if deadline is None:
+                deadline = request_state.started_at + _http_bridge_request_budget_seconds(get_settings())
+            remaining_budget = deadline - time.monotonic()
+            timeout_seconds = max(0.0, min(timeout_seconds, remaining_budget))
         request_state.response_create_gate = response_create_gate
         request_state.response_create_gate_wait_started_at = time.monotonic()
         if account_id is not None:

@@ -59,6 +59,14 @@ class AuthGuardianScheduler:
     jitter_seconds: float
     failure_backoff_base_seconds: float = 300.0
     failure_backoff_max_seconds: float = 3600.0
+    # When leader election is disabled, each refresh pass first counts live
+    # bridge-ring replicas and skips the pass if more than one is registered
+    # (the static instance ring is empty in Helm/compose deployments, so the
+    # build-time guard alone cannot see dynamically registered replicas).
+    # Defaults to True so directly constructed schedulers skip the dynamic
+    # check; build_auth_guardian_scheduler wires the real setting.
+    leader_election_enabled: bool = True
+    live_replica_count: Callable[[], Awaitable[int]] = field(default_factory=lambda: _count_live_bridge_ring_members)
     leader_election_factory: _LeaderElectionFactory = field(default_factory=lambda: _get_leader_election)
     repo_factory: _RepoFactory = field(default_factory=lambda: _default_accounts_repo_factory)
     auth_manager_factory: _AuthManagerFactory = field(default_factory=lambda: _default_auth_manager_factory)
@@ -106,6 +114,16 @@ class AuthGuardianScheduler:
     async def _refresh_once(self) -> None:
         if not await self.leader_election_factory().try_acquire():
             return
+        if not self.leader_election_enabled:
+            live_replicas = await self.live_replica_count()
+            if live_replicas > 1:
+                logger.warning(
+                    "Auth Guardian skipped refresh pass: %d live replicas registered in the bridge ring "
+                    "while leader election is disabled; set CODEX_LB_LEADER_ELECTION_ENABLED=true so a "
+                    "single elected replica performs proactive refresh work",
+                    live_replicas,
+                )
+                return
         async with self._lock:
             async with self.repo_factory() as repo:
                 accounts = await repo.list_accounts(refresh_existing=True)
@@ -223,6 +241,12 @@ def build_auth_guardian_scheduler() -> AuthGuardianScheduler:
 
     settings = get_settings()
     multi_replica = len(settings.http_responses_session_bridge_instance_ring) > 1
+    if settings.auth_guardian_enabled and multi_replica and not settings.leader_election_enabled:
+        logger.warning(
+            "Auth guardian disabled: the bridge instance ring has %d members but leader election is off. "
+            "Set CODEX_LB_LEADER_ELECTION_ENABLED=true so the elected replica runs proactive token refresh.",
+            len(settings.http_responses_session_bridge_instance_ring),
+        )
     return AuthGuardianScheduler(
         interval_seconds=settings.auth_guardian_interval_seconds,
         enabled=settings.auth_guardian_enabled and (settings.leader_election_enabled or not multi_replica),
@@ -232,6 +256,7 @@ def build_auth_guardian_scheduler() -> AuthGuardianScheduler:
         jitter_seconds=settings.auth_guardian_jitter_seconds,
         failure_backoff_base_seconds=settings.auth_guardian_failure_backoff_base_seconds,
         failure_backoff_max_seconds=settings.auth_guardian_failure_backoff_max_seconds,
+        leader_election_enabled=settings.leader_election_enabled,
     )
 
 
@@ -250,6 +275,20 @@ def _auth_guardian_account_is_stale_active(
 def _get_leader_election() -> _LeaderElectionLike:
     module = importlib.import_module("app.core.scheduling.leader_election")
     return cast(_LeaderElectionLike, module.get_leader_election())
+
+
+async def _count_live_bridge_ring_members() -> int:
+    from sqlalchemy import func, select
+
+    from app.db.models import BridgeRingMember
+    from app.modules.proxy.ring_membership import RING_STALE_THRESHOLD_SECONDS
+
+    cutoff = utcnow() - timedelta(seconds=RING_STALE_THRESHOLD_SECONDS)
+    async with get_background_session() as session:
+        result = await session.execute(
+            select(func.count()).select_from(BridgeRingMember).where(BridgeRingMember.last_heartbeat_at >= cutoff)
+        )
+        return int(result.scalar_one() or 0)
 
 
 @asynccontextmanager

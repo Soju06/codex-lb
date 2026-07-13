@@ -23,6 +23,7 @@ from starlette.staticfiles import StaticFiles
 from app.core.auth.guardian import build_auth_guardian_scheduler
 from app.core.bootstrap import ensure_auto_bootstrap_token, log_bootstrap_token
 from app.core.clients.http import close_http_client, init_http_client
+from app.core.config.key_fingerprint import verify_encryption_key_fingerprint
 from app.core.config.settings import _bridge_advertise_hostname_is_replica_specific, get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.handlers import add_exception_handlers
@@ -62,6 +63,7 @@ from app.modules.health import api as health_api
 from app.modules.model_sources import api as model_sources_api
 from app.modules.oauth import api as oauth_api
 from app.modules.proxy import api as proxy_api
+from app.modules.proxy.cap_partitioning import refresh_cap_partition
 from app.modules.proxy.durable_bridge_repository import missing_durable_bridge_tables
 from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
 from app.modules.proxy.ring_membership import (
@@ -116,9 +118,7 @@ def _resolve_static_asset_path(static_root: Path, requested_path: str) -> Path |
     return Path(full_path)
 
 
-def _is_benign_metrics_bind_failure(exc: BaseException) -> bool:
-    if not MULTIPROCESS_MODE:
-        return False
+def _is_metrics_bind_conflict(exc: BaseException) -> bool:
     if isinstance(exc, SystemExit):
         return exc.code == 1
     if isinstance(exc, OSError):
@@ -126,6 +126,20 @@ def _is_benign_metrics_bind_failure(exc: BaseException) -> bool:
 
         return exc.errno in (_errno.EADDRINUSE, _errno.EADDRNOTAVAIL)
     return False
+
+
+def _is_benign_metrics_bind_failure(exc: BaseException) -> bool:
+    return MULTIPROCESS_MODE and _is_metrics_bind_conflict(exc)
+
+
+def _log_non_multiproc_metrics_bind_conflict(port: int) -> None:
+    logger.error(
+        "Metrics port %d is already bound by another worker process but PROMETHEUS_MULTIPROC_DIR is not set: "
+        "/metrics reflects only the winning worker's counters (1/N of traffic). "
+        "Set PROMETHEUS_MULTIPROC_DIR to a writable directory shared by all workers to aggregate metrics "
+        "across worker processes.",
+        port,
+    )
 
 
 @asynccontextmanager
@@ -142,7 +156,7 @@ async def lifespan(app: FastAPI):
     startup_module._startup_complete = False
     startup_module.reset_bridge_registration()
     shutdown_state.reset()
-    await get_settings_cache().invalidate()
+    await get_settings_cache().invalidate(propagate=False)
     await get_rate_limit_headers_cache().invalidate()
     reload_additional_quota_registry()
     settings = get_settings()
@@ -153,6 +167,7 @@ async def lifespan(app: FastAPI):
         init_tracing(service_name="codex-lb", endpoint=settings.otel_exporter_endpoint, app=app)
     await init_db()
     init_background_db()
+    await verify_encryption_key_fingerprint()
     _auto_bootstrap_token = await ensure_auto_bootstrap_token()
     if _auto_bootstrap_token:
         log_bootstrap_token(logger, _auto_bootstrap_token)
@@ -199,6 +214,8 @@ async def lifespan(app: FastAPI):
                         "Metrics port %d unavailable (another worker likely serves metrics)",
                         settings.metrics_port,
                     )
+                elif _is_metrics_bind_conflict(exc):
+                    _log_non_multiproc_metrics_bind_conflict(settings.metrics_port)
                 else:
                     raise
             except OSError as exc:
@@ -207,6 +224,8 @@ async def lifespan(app: FastAPI):
                         "Metrics port %d already bound (another worker serves metrics)",
                         settings.metrics_port,
                     )
+                elif _is_metrics_bind_conflict(exc):
+                    _log_non_multiproc_metrics_bind_conflict(settings.metrics_port)
                 else:
                     raise
 
@@ -240,6 +259,13 @@ async def lifespan(app: FastAPI):
                 await svc.heartbeat(iid, endpoint_base_url=bridge_endpoint_base_url)
             except Exception:
                 logger.warning("Ring heartbeat failed", exc_info=True)
+            proxy_service = getattr(app.state, "proxy_service", None)
+            if proxy_service is not None and hasattr(proxy_service, "reconcile_durable_http_bridge_ownership"):
+                try:
+                    await proxy_service.reconcile_durable_http_bridge_ownership()
+                except Exception:
+                    logger.warning("HTTP bridge durable ownership reconciliation failed", exc_info=True)
+            await refresh_cap_partition(svc.list_active, iid)
 
     async def _register_and_heartbeat(svc: RingMembershipService, iid: str) -> None:
         attempt = 0
@@ -253,6 +279,7 @@ async def lifespan(app: FastAPI):
                 delay = min(5.0 * (2 ** min(attempt - 1, 5)), 60.0)
                 logger.warning("Ring registration attempt %d failed, retrying in %.0fs", attempt, delay, exc_info=True)
                 await asyncio.sleep(delay)
+        await refresh_cap_partition(svc.list_active, iid)
         await _heartbeat_only(svc, iid)
 
     async def _activate_bridge_membership(svc: RingMembershipService, iid: str) -> None:
@@ -263,17 +290,55 @@ async def lifespan(app: FastAPI):
 
     from app.core.auth.api_key_cache import get_api_key_cache
     from app.core.cache.invalidation import (
+        NAMESPACE_ACCOUNT_ROUTING,
+        NAMESPACE_ACCOUNT_SELECTION,
         NAMESPACE_API_KEY,
         NAMESPACE_FIREWALL,
+        NAMESPACE_RESET_CREDITS,
+        NAMESPACE_SETTINGS,
         CacheInvalidationPoller,
+        get_cache_invalidation_poller,
         set_cache_invalidation_poller,
     )
     from app.core.middleware.firewall_cache import get_firewall_ip_cache
+    from app.modules.proxy.account_cache import get_account_selection_cache, get_routing_availability_cache
+    from app.modules.rate_limit_reset_credits.store import get_rate_limit_reset_credits_store
 
     cache_poller = CacheInvalidationPoller(SessionLocal)
     cache_poller.on_invalidation(NAMESPACE_API_KEY, get_api_key_cache().clear)
     cache_poller.on_invalidation(NAMESPACE_FIREWALL, get_firewall_ip_cache().invalidate_all)
+    routing_availability_cache = get_routing_availability_cache()
+    # Remote-bump callbacks must be non-propagating variants: a propagating callback
+    # would re-bump on every observed bump and feedback-loop across replicas.
+    cache_poller.on_invalidation(NAMESPACE_ACCOUNT_ROUTING, routing_availability_cache.refresh_from_db)
+    cache_poller.on_invalidation(
+        NAMESPACE_ACCOUNT_SELECTION,
+        lambda: get_account_selection_cache().invalidate(propagate=False),
+    )
+    cache_poller.on_invalidation(
+        NAMESPACE_SETTINGS,
+        lambda: get_settings_cache().invalidate(propagate=False),
+    )
+    # The bus carries no payload, so a peer redeem clears this replica's whole
+    # reset-credits store; the refresh scheduler repopulates it on its next tick.
+    cache_poller.on_invalidation(NAMESPACE_RESET_CREDITS, get_rate_limit_reset_credits_store().invalidate)
     set_cache_invalidation_poller(cache_poller)
+    try:
+        # Seed baseline namespace versions before loading the routing snapshot
+        # and before serving traffic, so a peer bump committed after this point
+        # is observed as a change on the first poll instead of being silently
+        # acknowledged as pre-existing state.
+        await cache_poller.initialize()
+    except Exception:
+        # Degrades to first-poll-baselines: a peer bump landing before the first
+        # poll may be acknowledged without invalidating until the fallback TTL.
+        logger.warning("cache invalidation baseline seed failed", exc_info=True)
+    try:
+        await routing_availability_cache.refresh_from_db()
+    except Exception:
+        # Unseeded snapshot degrades to local-mark semantics; the next
+        # account_routing bump retries the refresh via the poller callback.
+        logger.warning("initial routing availability snapshot refresh failed", exc_info=True)
     await cache_poller.start()
 
     ring_service: RingMembershipService | None = None
@@ -334,6 +399,9 @@ async def lifespan(app: FastAPI):
             metrics_server.should_exit = True
 
         await cache_poller.stop()
+        if get_cache_invalidation_poller() is cache_poller:
+            # A stopped poller must not keep receiving propagation requests.
+            set_cache_invalidation_poller(None)
         await quota_planner_scheduler.stop()
         await auth_guardian_scheduler.stop()
         await automations_scheduler.stop()

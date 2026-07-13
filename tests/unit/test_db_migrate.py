@@ -1863,3 +1863,48 @@ def test_routing_policy_persistence_downgrade_does_not_drop_shared_columns(monke
     monkeypatch.setattr(migration, "op", _OpMustNotAlter())
 
     migration.downgrade()
+
+
+def test_replica_guardrails_migration_round_trips_with_version_backfill(tmp_path: Path) -> None:
+    from alembic.script import ScriptDirectory
+
+    db_path = tmp_path / "replica-guardrails.db"
+    url = _db_url(db_path)
+    parent_revision = "20260712_020000_add_api_key_usage_rollups"
+    target_revision = "20260713_040000_add_replica_guardrails"
+
+    run_upgrade(url, parent_revision, bootstrap_legacy=False)
+    config = _build_alembic_config(url)
+
+    script_directory = ScriptDirectory.from_config(config)
+    # The replica-guardrails migration now sits beneath later revisions (e.g.
+    # the reset-credit redeem tables re-parented onto it), so it is an ancestor
+    # of the single graph head rather than the head itself.
+    heads = script_directory.get_heads()
+    assert len(heads) == 1
+    ancestry = {script.revision for script in script_directory.walk_revisions()}
+    assert target_revision in ancestry
+
+    engine = create_engine(to_sync_database_url(url))
+    try:
+        with engine.connect() as connection:
+            # The parent revision already seeds the singleton settings row.
+            assert connection.execute(text("SELECT COUNT(*) FROM dashboard_settings")).scalar_one() == 1
+
+        command.upgrade(config, target_revision)
+        with engine.connect() as connection:
+            inspector = inspect(connection)
+            assert inspector.has_table("runtime_sentinels")
+            sentinel_columns = {column["name"] for column in inspector.get_columns("runtime_sentinels")}
+            assert {"name", "value", "created_at", "updated_at"} <= sentinel_columns
+            # Historical rows are backfilled to version 1 via the server default.
+            assert connection.execute(text("SELECT version FROM dashboard_settings WHERE id = 1")).scalar_one() == 1
+
+        command.downgrade(config, parent_revision)
+        with engine.connect() as connection:
+            inspector = inspect(connection)
+            assert not inspector.has_table("runtime_sentinels")
+            assert "version" not in {column["name"] for column in inspector.get_columns("dashboard_settings")}
+            assert connection.execute(text("SELECT COUNT(*) FROM dashboard_settings")).scalar_one() == 1
+    finally:
+        engine.dispose()

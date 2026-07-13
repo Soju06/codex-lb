@@ -13,6 +13,38 @@ The query-caching capability is broader than cache TTLs. It also owns the databa
 - Proxy API-key auth caching is invalidation-driven: every key mutation bumps the `api_key` invalidation namespace and each instance's poller (0.5 s) clears the local cache, so the 60 s TTL is only a backstop for a broken poller. Sticky-session upserts persist and return the row in one `INSERT ... ON CONFLICT ... RETURNING` statement. Never run multiple statements concurrently on one `AsyncSession` (selection-input usage reads are awaited sequentially).
 - Serve account request-usage summaries from `account_usage_rollups` plus a live tail (`requested_at > folded_through`) instead of aggregating all `request_logs` history per read. A background fold job (15-min cadence, 24-hour safety lag, ≤7-day slices per transaction, leader-gated and serialized on the migration-seeded `account_usage_rollup_state` row lock) advances the watermark. Duplicate rows share an exact `requested_at`, so a `requested_at` boundary never splits a dedupe group; the 24 h lag must exceed the maximum request duration because log rows are written at stream end but dated at request start. Reads fetch sums + watermark in one statement to stay snapshot-consistent under READ COMMITTED; identity-merge consolidation transfers duplicates' rollup sums to the canonical account. Per-API-key lifetime summaries fold the same way into `api_key_usage_rollups` (API-key semantics: no dedupe, soft-deleted rows included), governed by the same watermark; identity consolidation takes the fold-state row lock before reassigning logs so folds cannot interleave.
 
+## Cross-Replica Cache Invalidation Bus
+
+- The bus is the `cache_invalidation` table (`namespace` TEXT PK, `version` INTEGER) plus one
+  `CacheInvalidationPoller` per process (`app/core/cache/invalidation.py`, default poll 0.5s).
+  Mutations bump a namespace's version with a dialect-atomic upsert; every process compares
+  versions each poll and runs registered callbacks on change.
+- Registered namespaces and their callbacks (wired in `app/main.py`):
+  - `api_key` -> `ApiKeyCache.clear` (fallback TTL 60s)
+  - `firewall` -> `FirewallIPCache.invalidate_all` (fallback TTL `firewall_ip_cache_ttl_seconds`, default 30s)
+  - `account_routing` -> `RoutingAvailabilityCache.refresh_from_db` (snapshot of `accounts.id -> status`; no TTL — the snapshot is authoritative once seeded, degraded local-set semantics when unseeded)
+  - `account_selection` -> `AccountSelectionCache.invalidate(propagate=False)` (fallback TTL 5s)
+  - `settings` -> `SettingsCache.invalidate(propagate=False)` (fallback TTL 5s)
+- Two bump flavors: `await bump(namespace)` (durable before the mutation response; used by
+  security-bearing endpoints: settings/dashboard-auth mutations, account pause/reactivate/delete,
+  OAuth re-auth) and sync `request_bump(namespace)` (coalesced into a pending set flushed at the
+  start of each poll cycle; used on hot/scheduler paths). Coalescing bounds writes to <=1 per
+  namespace per poll interval; worst-case cross-replica convergence is flush (<=0.5s) + peer poll
+  (<=0.5s) ~= 1s for coalesced bumps and one poll interval for awaited bumps.
+- Failure semantics: `bump()` retries transient lock errors (3 attempts, 0.05s base backoff); a
+  final failure logs ERROR and increments
+  `codex_lb_cache_invalidation_bump_failures_total{namespace}` but never fails the mutation —
+  peers then converge via the cache's fallback TTL. Failed coalesced flushes stay pending and
+  retry next cycle. Poll failures escalate to WARNING after 3 and ERROR after 10 consecutive
+  failures and increment `codex_lb_cache_invalidation_poll_failures_total`.
+- Poller callbacks must be registered with non-propagating variants — a propagating callback
+  would re-bump on every observed bump and loop.
+- Routing-unavailable derivation: an account is routing-unavailable when the snapshot says
+  PAUSED / REAUTH_REQUIRED / DEACTIVATED, or the id is absent (deleted), or a local mark overlay
+  entry exists (covers the window before the accompanying status write commits). RATE_LIMITED and
+  QUOTA_EXCEEDED deliberately do not map to unavailable, preserving cooldown-state bridge-session
+  reuse. Bridge-session reuse checks stay pure in-memory: zero per-request DB reads.
+
 ## Operational Notes
 
 - Primary-window usage reads should normalize on `coalesce(window, 'primary')`.

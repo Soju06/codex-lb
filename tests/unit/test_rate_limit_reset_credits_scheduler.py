@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import random
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any
@@ -384,3 +385,51 @@ async def test_refresh_once_closes_account_read_session_before_fetch(monkeypatch
     snapshot = store.get(account.id)
     assert snapshot is not None
     assert snapshot.available_count == 8
+
+
+# --- tick desynchronization (replicas must not fetch in lockstep) ---
+
+
+def test_startup_delay_stays_within_one_full_interval() -> None:
+    scheduler = RateLimitResetCreditsRefreshScheduler(interval_seconds=60, rng=random.Random(1234))
+
+    delays = [scheduler._startup_delay_seconds() for _ in range(200)]
+
+    assert all(0.0 <= delay <= 60.0 for delay in delays)
+    # A uniform draw over the full interval, not a constant offset.
+    assert max(delays) - min(delays) > 1.0
+
+
+def test_tick_delay_jitter_stays_within_ten_percent() -> None:
+    scheduler = RateLimitResetCreditsRefreshScheduler(interval_seconds=60, rng=random.Random(1234))
+
+    delays = [scheduler._tick_delay_seconds() for _ in range(200)]
+
+    assert all(54.0 <= delay <= 66.0 for delay in delays)
+    assert max(delays) - min(delays) > 1.0
+
+
+def test_two_replicas_with_distinct_rngs_do_not_tick_in_lockstep() -> None:
+    replica_a = RateLimitResetCreditsRefreshScheduler(interval_seconds=60, rng=random.Random(1))
+    replica_b = RateLimitResetCreditsRefreshScheduler(interval_seconds=60, rng=random.Random(2))
+
+    assert replica_a._startup_delay_seconds() != replica_b._startup_delay_seconds()
+
+
+@pytest.mark.asyncio
+async def test_run_loop_stops_cleanly_during_startup_delay(monkeypatch: pytest.MonkeyPatch) -> None:
+    refreshed = False
+
+    scheduler = RateLimitResetCreditsRefreshScheduler(interval_seconds=3600)
+
+    async def _refresh_once(self: RateLimitResetCreditsRefreshScheduler) -> None:
+        nonlocal refreshed
+        refreshed = True
+
+    monkeypatch.setattr(RateLimitResetCreditsRefreshScheduler, "_refresh_once", _refresh_once)
+
+    await scheduler.start()
+    await asyncio.sleep(0.01)
+    await scheduler.stop()
+
+    assert refreshed is False

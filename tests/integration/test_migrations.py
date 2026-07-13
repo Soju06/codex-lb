@@ -956,3 +956,39 @@ async def test_free_account_monthly_migration_renames_only_free_usage_windows(tm
 
     assert free_windows == ["old-primary", "old-secondary", "old-primary"]
     assert paid_windows == ["primary", "secondary", None]
+
+
+@pytest.mark.asyncio
+async def test_reset_credit_redeem_tables_migration_upgrade_and_downgrade(tmp_path):
+    from alembic import command as alembic_command
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'reset-credit-redeem-tables.sqlite'}"
+    revision = "20260713_070000_add_reset_credit_redeem_tables"
+    parent_revision = "20260712_020000_add_api_key_usage_rollups"
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, revision, bootstrap_legacy=True))
+
+    async def _table_names() -> set[str]:
+        engine = create_async_engine(db_url, future=True)
+        try:
+            async with engine.connect() as conn:
+                rows = await conn.execute(text("SELECT name FROM sqlite_master WHERE type = 'table'"))
+                return {row[0] for row in rows}
+        finally:
+            await engine.dispose()
+
+    upgraded_tables = await _table_names()
+    assert "reset_credit_redeem_requests" in upgraded_tables
+    assert "reset_credit_redeem_claims" in upgraded_tables
+
+    await to_thread.run_sync(lambda: alembic_command.downgrade(_build_alembic_config(db_url), parent_revision))
+
+    downgraded_tables = await _table_names()
+    assert "reset_credit_redeem_requests" not in downgraded_tables
+    assert "reset_credit_redeem_claims" not in downgraded_tables
+
+    # Upgrading again after the downgrade must succeed (round-trip safety).
+    await to_thread.run_sync(lambda: run_upgrade(db_url, revision, bootstrap_legacy=False))
+    assert "reset_credit_redeem_requests" in await _table_names()

@@ -472,6 +472,47 @@ class SchedulerLeader(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
 
 
+class ResetCreditRedeemRequest(Base):
+    """Durable (account, redeem_request_id) -> credit_id idempotency ledger.
+
+    Written inside the per-account serialized redeem section BEFORE the
+    upstream consume call so a retry carrying the same redeem_request_id —
+    served by ANY replica — resolves to the originally selected credit and
+    never burns a second one. Rows are purged opportunistically after 24h.
+    """
+
+    __tablename__ = "reset_credit_redeem_requests"
+
+    account_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("accounts.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    redeem_request_id: Mapped[str] = mapped_column(String, primary_key=True)
+    credit_id: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+
+
+class ResetCreditRedeemClaim(Base):
+    """Cross-process per-account redeem serialization claim for SQLite.
+
+    A single atomic conditional upsert (INSERT ... ON CONFLICT DO UPDATE ...
+    WHERE expires_at < now) under SQLite's single-writer lock gives real
+    multi-process mutual exclusion; the lease expiry recovers crashed holders.
+    PostgreSQL deployments keep using pg_advisory_xact_lock instead.
+    """
+
+    __tablename__ = "reset_credit_redeem_claims"
+
+    account_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("accounts.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    holder_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class StickySession(Base):
     __tablename__ = "sticky_sessions"
 
@@ -731,6 +772,12 @@ class DashboardSettings(Base):
         server_default=text("'{}'"),
         nullable=False,
     )
+    version: Mapped[int] = mapped_column(
+        Integer,
+        default=1,
+        server_default=text("1"),
+        nullable=False,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,
@@ -738,6 +785,25 @@ class DashboardSettings(Base):
         onupdate=func.now(),
         nullable=False,
     )
+
+    __mapper_args__ = {"version_id_col": version}
+
+
+class RuntimeSentinel(Base):
+    """Cross-replica consistency sentinels stamped into the shared database.
+
+    Each row records a value every replica must agree on (for example the
+    encryption-key fingerprint). Rows are written with an atomic
+    insert-if-absent so the first replica to boot wins and later replicas
+    verify against the stored value.
+    """
+
+    __tablename__ = "runtime_sentinels"
+
+    name: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[str] = mapped_column(String(128), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class ApiFirewallAllowlist(Base):

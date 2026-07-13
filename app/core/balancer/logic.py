@@ -114,6 +114,7 @@ class AccountState:
     used_percent: float | None = None
     reset_at: float | None = None
     primary_reset_at: int | None = None
+    primary_window_minutes: int | None = None
     blocked_at: float | None = None
     cooldown_until: float | None = None
     secondary_used_percent: float | None = None

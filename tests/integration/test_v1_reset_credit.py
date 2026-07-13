@@ -17,6 +17,7 @@ from app.core.clients.rate_limit_reset_credits import (
     ConsumeResetCreditResponse,
     RateLimitResetCreditsSnapshot,
     ResetCreditItem,
+    ResetCreditsResponse,
 )
 from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
@@ -111,6 +112,19 @@ async def _seed_snapshot(
             ),
             credits=credits,
         ),
+    )
+
+
+def _upstream_available(credits: list[ResetCreditItem]) -> ResetCreditsResponse:
+    """Upstream fetch response confirming the given credits' availability.
+
+    The v1 redeem path re-validates the requested credit against a fresh
+    upstream fetch after winning the cross-replica claim, so a seeded local
+    snapshot alone is not enough — the fetch must confirm availability.
+    """
+    return ResetCreditsResponse(
+        credits=credits,
+        available_count=sum(1 for credit in credits if credit.status == "available"),
     )
 
 
@@ -470,6 +484,7 @@ async def test_v1_reset_credit_post_rejects_account_without_chatgpt_account_id(
 
 @pytest.mark.asyncio
 async def test_v1_reset_credit_post_unavailable_redeem_id_returns_409(async_client, monkeypatch: pytest.MonkeyPatch):
+    """A local snapshot miss consults upstream before 409, and caches the fresh snapshot."""
     await _enable_api_key_auth(async_client)
     account_id = await _import_account(async_client, "acc-reset-post-missing", "missing@example.com")
 
@@ -487,9 +502,20 @@ async def test_v1_reset_credit_post_unavailable_redeem_id_returns_409(async_clie
     )
 
     consume_mock = AsyncMock()
-    resolve_route_mock = AsyncMock(side_effect=AssertionError("route resolution should not run"))
+    fetch_mock = AsyncMock(
+        return_value=ResetCreditsResponse(
+            credits=[
+                ResetCreditItem(
+                    id="credit-available",
+                    status="available",
+                    expires_at=datetime(2031, 4, 1, tzinfo=timezone.utc),
+                )
+            ],
+            available_count=1,
+        )
+    )
     monkeypatch.setattr("app.modules.proxy.api.consume_reset_credit", consume_mock)
-    monkeypatch.setattr("app.modules.proxy.api._resolve_reset_credit_route", resolve_route_mock)
+    monkeypatch.setattr("app.modules.proxy.api.fetch_reset_credits", fetch_mock)
 
     response = await async_client.post(
         "/v1/reset-credit",
@@ -500,7 +526,60 @@ async def test_v1_reset_credit_post_unavailable_redeem_id_returns_409(async_clie
     assert response.status_code == 409
     assert response.json()["error"]["code"] == "invalid_request_error"
     consume_mock.assert_not_awaited()
-    resolve_route_mock.assert_not_awaited()
+    # Upstream was consulted as the authority for the missing redeem_id and the
+    # fresh snapshot replaced the local cache.
+    fetch_mock.assert_awaited_once()
+    snapshot = get_rate_limit_reset_credits_store().get(account_id)
+    assert snapshot is not None
+    assert [credit.id for credit in snapshot.credits] == ["credit-available"]
+
+
+@pytest.mark.asyncio
+async def test_v1_reset_credit_post_claim_contention_returns_openai_envelope(
+    async_client,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """SQLite claim contention on /v1/reset-credit must render the OpenAI error
+    envelope, not the dashboard one."""
+    from functools import partial
+
+    from app.modules.rate_limit_reset_credits import api as reset_credits_api
+    from app.modules.rate_limit_reset_credits.redeem_coordination import (
+        acquire_redeem_claim,
+        release_redeem_claim,
+        try_acquire_redeem_claim,
+    )
+
+    await _enable_api_key_auth(async_client)
+    account_id = await _import_account(async_client, "acc-reset-claim-contention", "claim-contention@example.com")
+    _, key = await _create_api_key(async_client, name="reset-credit-claim-contention")
+
+    consume_mock = AsyncMock()
+    monkeypatch.setattr("app.modules.proxy.api.consume_reset_credit", consume_mock)
+    # Keep the contended acquisition fast; a peer process holds the claim for
+    # the whole request.
+    monkeypatch.setattr(
+        reset_credits_api,
+        "acquire_redeem_claim",
+        partial(acquire_redeem_claim, retry_interval_seconds=0.02, timeout_seconds=0.2),
+    )
+    assert await try_acquire_redeem_claim(account_id, "peer-holder") is True
+    try:
+        response = await async_client.post(
+            "/v1/reset-credit",
+            headers={"Authorization": f"Bearer {key}"},
+            json={"account_id": account_id, "redeem_id": "credit-contended"},
+        )
+    finally:
+        await release_redeem_claim(account_id, "peer-holder")
+
+    assert response.status_code == 409
+    error = response.json()["error"]
+    # OpenAI envelope carries a "type"; the dashboard envelope does not.
+    assert error["type"] == "invalid_request_error"
+    assert error["code"] == "invalid_request_error"
+    assert "already in progress" in error["message"]
+    consume_mock.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -573,6 +652,20 @@ async def test_v1_reset_credit_post_upstream_conflict_invalidates_stale_snapshot
         del args, kwargs
         raise ConsumeResetCreditError(409, "credit already redeemed upstream", code="credit_unavailable")
 
+    monkeypatch.setattr(
+        "app.modules.proxy.api.fetch_reset_credits",
+        AsyncMock(
+            return_value=_upstream_available(
+                [
+                    ResetCreditItem(
+                        id="credit-conflict",
+                        status="available",
+                        expires_at=datetime(2031, 4, 2, tzinfo=timezone.utc),
+                    )
+                ]
+            )
+        ),
+    )
     monkeypatch.setattr("app.modules.proxy.api.consume_reset_credit", fake_consume)
 
     response = await async_client.post(
@@ -619,6 +712,17 @@ async def test_v1_reset_credit_post_consumes_exact_credit_and_invalidates_snapsh
                 "windows_reset": 1,
             }
         )
+    )
+    monkeypatch.setattr(
+        "app.modules.proxy.api.fetch_reset_credits",
+        AsyncMock(
+            return_value=_upstream_available(
+                [
+                    ResetCreditItem(id="credit-soonest", status="available", expires_at=soonest),
+                    ResetCreditItem(id="credit-later", status="available", expires_at=later),
+                ]
+            )
+        ),
     )
     monkeypatch.setattr("app.modules.proxy.api.consume_reset_credit", consume_mock)
 
@@ -690,6 +794,20 @@ async def test_v1_reset_credit_post_force_refreshes_usage_and_invalidates_select
 
     selection_cache = SelectionCache()
 
+    monkeypatch.setattr(
+        "app.modules.proxy.api.fetch_reset_credits",
+        AsyncMock(
+            return_value=_upstream_available(
+                [
+                    ResetCreditItem(
+                        id="credit-refresh",
+                        status="available",
+                        expires_at=datetime(2031, 5, 2, 1, 0, 0, tzinfo=timezone.utc),
+                    )
+                ]
+            )
+        ),
+    )
     monkeypatch.setattr("app.modules.proxy.api.consume_reset_credit", consume_mock)
     monkeypatch.setattr("app.modules.proxy.api.UsageUpdater", StubUsageUpdater)
     monkeypatch.setattr("app.modules.proxy.api.get_account_selection_cache", lambda: selection_cache)
@@ -775,6 +893,20 @@ async def test_v1_reset_credit_post_refreshes_account_before_consuming_credit(
             }
         )
 
+    monkeypatch.setattr(
+        "app.modules.proxy.api.fetch_reset_credits",
+        AsyncMock(
+            return_value=_upstream_available(
+                [
+                    ResetCreditItem(
+                        id="credit-refresh-token",
+                        status="available",
+                        expires_at=datetime(2031, 5, 2, tzinfo=timezone.utc),
+                    )
+                ]
+            )
+        ),
+    )
     monkeypatch.setattr("app.modules.proxy.api._ensure_v1_reset_credit_account_fresh", fake_ensure_fresh)
     monkeypatch.setattr("app.modules.proxy.api.consume_reset_credit", fake_consume)
 
@@ -965,6 +1097,20 @@ async def test_v1_reset_credit_post_holds_session_open_through_lock_and_upstream
     )
     monkeypatch.setattr("app.modules.proxy.api.consume_reset_credit", fake_consume)
     monkeypatch.setattr(
+        "app.modules.proxy.api.fetch_reset_credits",
+        AsyncMock(
+            return_value=_upstream_available(
+                [
+                    ResetCreditItem(
+                        id="credit-session-lifecycle",
+                        status="available",
+                        expires_at=datetime(2031, 6, 1, tzinfo=timezone.utc),
+                    )
+                ]
+            )
+        ),
+    )
+    monkeypatch.setattr(
         "app.modules.proxy.api._refresh_usage_after_v1_reset_credit_redeem",
         fake_refresh_usage_after_redeem,
     )
@@ -1061,6 +1207,20 @@ async def test_v1_reset_credit_post_preserves_success_when_post_redeem_usage_ref
     monkeypatch.setattr(
         "app.modules.proxy.api._ensure_v1_reset_credit_account_fresh",
         AsyncMock(return_value=account),
+    )
+    monkeypatch.setattr(
+        "app.modules.proxy.api.fetch_reset_credits",
+        AsyncMock(
+            return_value=_upstream_available(
+                [
+                    ResetCreditItem(
+                        id="credit-refresh-raise",
+                        status="available",
+                        expires_at=datetime(2031, 6, 2, tzinfo=timezone.utc),
+                    )
+                ]
+            )
+        ),
     )
     monkeypatch.setattr("app.modules.proxy.api.consume_reset_credit", fake_consume)
     monkeypatch.setattr(

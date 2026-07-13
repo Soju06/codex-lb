@@ -66,6 +66,7 @@ from app.modules.proxy._service.compact import (
 )
 from app.modules.proxy._service.http_bridge.helpers import (
     _effective_http_bridge_idle_ttl_seconds,
+    _http_bridge_durable_lookup_allows_turn_state_takeover,
     _http_bridge_is_context_overflow_error,
     _http_bridge_is_previous_response_owner_unavailable,
     _http_bridge_models_compatible,
@@ -79,9 +80,11 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_should_attempt_local_previous_response_recovery,
     _http_bridge_should_attempt_soft_affinity_reroute,
     _http_bridge_should_rollover_after_context_overflow,
+    _http_bridge_turn_state_anchor_for_owner_failure,
     _log_http_bridge_event,
     _make_http_bridge_session_header_fallback_key,
     _make_http_bridge_session_key,
+    _proxy_admission_wait_timeout_seconds,
     _record_bridge_reattach,
     _record_continuity_fail_closed,
     _release_http_bridge_unanchored_handoff,
@@ -213,6 +216,7 @@ _SECURITY_WORK_NO_AUTHORIZED_ACCOUNTS_MESSAGE = (
 )
 _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS = 5.0
 _HTTP_BRIDGE_BACKGROUND_CLEANUP_WARN_THRESHOLD = 100
+_RESPONSE_CREATE_GATE_RETRY_SLEEP_SECONDS = 10.0
 
 
 def _proxy_error_code_message(exc: ProxyResponseError) -> tuple[str | None, str | None]:
@@ -228,6 +232,14 @@ def _http_bridge_account_capacity_wait_seconds(exc: ProxyResponseError) -> float
     code, message = _proxy_error_code_message(exc)
     if code == "capacity_exhausted_active_sessions":
         return None
+    if code == "response_create_gate_timeout":
+        # Per-session response-create gate contention is recoverable: the
+        # in-flight turn releases the gate when it completes, so queued
+        # same-session work must wait within the bridge request budget
+        # instead of failing at the first admission-timeout expiry. Each
+        # retry re-attempts acquisition for proxy_admission_wait_timeout
+        # seconds, so the sleep only covers the window between attempts.
+        return _RESPONSE_CREATE_GATE_RETRY_SLEEP_SECONDS
     return _account_selection_recovery_sleep_seconds_from_message(
         message,
         error_code=code,
@@ -245,8 +257,18 @@ def _http_bridge_capacity_wait_plan(
     remaining_budget_seconds = max(0.0, request_deadline - _service_time().monotonic())
     if remaining_budget_seconds <= 0:
         return None
-    _code, message = _proxy_error_code_message(exc)
-    return min(account_capacity_wait_seconds, remaining_budget_seconds), account_capacity_wait_seconds, message
+    code, message = _proxy_error_code_message(exc)
+    bounded_wait_seconds = min(account_capacity_wait_seconds, remaining_budget_seconds)
+    if code == "response_create_gate_timeout":
+        # Reserve the tail of the request budget for one final gate
+        # acquisition attempt instead of sleeping it away: a same-session
+        # turn may release the gate during those last seconds.
+        attempt_reserve_seconds = _proxy_admission_wait_timeout_seconds()
+        bounded_wait_seconds = min(
+            bounded_wait_seconds,
+            max(0.0, remaining_budget_seconds - attempt_reserve_seconds),
+        )
+    return bounded_wait_seconds, account_capacity_wait_seconds, message
 
 
 async def _iter_account_capacity_wait_sse(
@@ -1078,26 +1100,70 @@ class _HTTPBridgeStreamingMixin:
                     headers=headers,
                     previous_response_id=effective_payload.previous_response_id,
                 )
+                should_attempt_turn_state_takeover = False
                 if not should_attempt_previous_response_recovery and not should_attempt_bootstrap_rebind:
+                    takeover_turn_state = _http_bridge_turn_state_anchor_for_owner_failure(
+                        exc,
+                        headers=headers,
+                        previous_response_id=effective_payload.previous_response_id,
+                    )
+                    if takeover_turn_state is not None:
+                        # Reuse the routing lookup semantics (alias resolution
+                        # plus the latest-turn-state fallback) so a row that was
+                        # originally found without a registered alias remains
+                        # takeover-eligible; an alias-only lookup would return
+                        # None and lose the durable anchor for the local retry.
+                        try:
+                            fresh_turn_state_lookup = await self._durable_bridge.lookup_request_targets(
+                                session_key_kind=bridge_session_key.affinity_kind,
+                                session_key_value=bridge_session_key.affinity_key,
+                                api_key_id=bridge_session_key.api_key_id,
+                                turn_state=takeover_turn_state,
+                                session_header=(
+                                    session_header_fallback_key.affinity_key
+                                    if explicit_prompt_cache_key is not None and session_header_fallback_key is not None
+                                    else incoming_session_header
+                                ),
+                                previous_response_id=effective_payload.previous_response_id,
+                            )
+                        except Exception:
+                            logger.warning(
+                                "Turn-state takeover lookup failed after owner forward failure; failing closed",
+                                exc_info=True,
+                            )
+                        else:
+                            if _http_bridge_durable_lookup_allows_turn_state_takeover(fresh_turn_state_lookup):
+                                should_attempt_turn_state_takeover = True
+                                durable_lookup = fresh_turn_state_lookup
+                if (
+                    not should_attempt_previous_response_recovery
+                    and not should_attempt_bootstrap_rebind
+                    and not should_attempt_turn_state_takeover
+                ):
                     raise
                 if PROMETHEUS_AVAILABLE and bridge_durable_recover_total is not None:
-                    bridge_durable_recover_total.labels(
-                        path="owner_forward_fail"
-                        if should_attempt_previous_response_recovery
-                        else "owner_forward_bootstrap"
-                    ).inc()
+                    if should_attempt_previous_response_recovery:
+                        recover_path = "owner_forward_fail"
+                    elif should_attempt_turn_state_takeover:
+                        recover_path = "owner_forward_turn_state"
+                    else:
+                        recover_path = "owner_forward_bootstrap"
+                    bridge_durable_recover_total.labels(path=recover_path).inc()
+                if should_attempt_previous_response_recovery:
+                    recover_event = "previous_response_recover_local"
+                    recover_detail = "outcome=local_rebind_after_forward_failure"
+                elif should_attempt_turn_state_takeover:
+                    recover_event = "turn_state_takeover_local"
+                    recover_detail = "outcome=local_takeover_after_forward_failure"
+                else:
+                    recover_event = "bootstrap_rebind_local"
+                    recover_detail = "outcome=local_bootstrap_after_forward_failure"
                 _log_http_bridge_event(
-                    "previous_response_recover_local"
-                    if should_attempt_previous_response_recovery
-                    else "bootstrap_rebind_local",
+                    recover_event,
                     bridge_session_key,
                     account_id=None,
                     model=effective_payload.model,
-                    detail=(
-                        "outcome=local_rebind_after_forward_failure"
-                        if should_attempt_previous_response_recovery
-                        else "outcome=local_bootstrap_after_forward_failure"
-                    ),
+                    detail=recover_detail,
                     cache_key_family=bridge_session_key.affinity_kind,
                     model_class=_extract_model_class(effective_payload.model) if effective_payload.model else None,
                     owner_check_applied=True,
@@ -1123,10 +1189,14 @@ class _HTTPBridgeStreamingMixin:
                             allow_forward_to_owner=False,
                             forwarded_request=False,
                             allow_previous_response_recovery_rebind=should_attempt_previous_response_recovery,
-                            allow_bootstrap_owner_rebind=should_attempt_bootstrap_rebind,
+                            allow_bootstrap_owner_rebind=(
+                                should_attempt_bootstrap_rebind or should_attempt_turn_state_takeover
+                            ),
                             durable_lookup=durable_lookup,
                             request_stage=(
-                                "reattach" if should_attempt_previous_response_recovery else "bootstrap_rebind"
+                                "reattach"
+                                if should_attempt_previous_response_recovery or should_attempt_turn_state_takeover
+                                else "bootstrap_rebind"
                             ),
                             preferred_account_id=request_state.preferred_account_id,
                             request_usage_budget=request_state.request_usage_budget,
@@ -1816,6 +1886,7 @@ class _HTTPBridgeStreamingMixin:
     ) -> AsyncGenerator[str, None]:
         if request_deadline is None:
             request_deadline = request_state.started_at + _http_bridge_request_budget_seconds(_service_get_settings())
+        request_state.bridge_request_deadline = request_deadline
         while True:
             try:
                 await self._submit_http_bridge_request(
@@ -1831,6 +1902,29 @@ class _HTTPBridgeStreamingMixin:
                 if wait_plan is None:
                     raise
                 bounded_wait_seconds, account_capacity_wait_seconds, message = wait_plan
+                exc_code, _exc_message = _proxy_error_code_message(exc)
+                gate_contention = exc_code == "response_create_gate_timeout"
+                if gate_contention and session.closed:
+                    # The timed-out attempt retired the session (stuck
+                    # pending work); retrying a closed session would commit
+                    # a stream and then surface upstream_unavailable. Fail
+                    # the startup cleanly instead.
+                    raise
+                if gate_contention:
+                    # A sleeping gate waiter keeps occupying its bridge
+                    # queue slot so per-session pending work stays bounded
+                    # by the queue limit across retries.
+                    async with session.pending_lock:
+                        if session.queued_request_count >= queue_limit:
+                            raise ProxyResponseError(
+                                429,
+                                openai_error(
+                                    "bridge_queue_full",
+                                    "HTTP responses session bridge queue is full",
+                                    error_type="rate_limit_error",
+                                ),
+                            )
+                        session.queued_request_count += 1
                 logger.info(
                     "Waiting for account capacity before retrying HTTP bridge submit request_id=%s model=%s "
                     "account_id=%s sleep_seconds=%.1f recovery_hint_seconds=%.1f error=%s",
@@ -1841,14 +1935,21 @@ class _HTTPBridgeStreamingMixin:
                     account_capacity_wait_seconds,
                     message,
                 )
-                async for line in _iter_account_capacity_wait_sse(
-                    request_id=request_state.request_id,
-                    reason=message,
-                    sleep_seconds=bounded_wait_seconds,
-                    emit_keepalives=not propagate_http_errors,
-                ):
-                    yield line
+                try:
+                    async for line in _iter_account_capacity_wait_sse(
+                        request_id=request_state.request_id,
+                        reason=message,
+                        sleep_seconds=bounded_wait_seconds,
+                        emit_keepalives=not propagate_http_errors,
+                    ):
+                        yield line
+                finally:
+                    if gate_contention:
+                        async with session.pending_lock:
+                            session.queued_request_count = max(0, session.queued_request_count - 1)
                 if _service_time().monotonic() >= request_deadline:
+                    raise
+                if gate_contention and session.closed:
                     raise
                 continue
             break

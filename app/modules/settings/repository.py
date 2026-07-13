@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import flag_modified
+from sqlalchemy.orm.exc import StaleDataError
 
 from app.core.auth.dashboard_session_ttl import DEFAULT_DASHBOARD_SESSION_TTL_SECONDS
 from app.core.config.settings import get_settings
+from app.core.exceptions import DashboardSettingsConflictError
 from app.db.models import DashboardSettings
 
 _SETTINGS_ID = 1
@@ -120,8 +123,17 @@ class SettingsRepository:
         weekly_pace_smoothing_minutes: int | None = None,
         guest_access_enabled: bool | None = None,
         limit_warmup_staggered_idle_enabled: bool | None = None,
+        expected_version: int | None = None,
     ) -> DashboardSettings:
         settings = await self.get_or_create()
+        if expected_version is not None and settings.version != expected_version:
+            # Bind the CAS to the row this UPDATE targets: with
+            # DashboardSettings.version as version_id_col, commit_refresh emits
+            # `UPDATE ... WHERE version = :expected`, so a writer committing in
+            # between still surfaces as StaleDataError -> 409.
+            raise DashboardSettingsConflictError(
+                "Settings were modified since this form was loaded; reload and retry",
+            )
         if sticky_threads_enabled is not None:
             settings.sticky_threads_enabled = sticky_threads_enabled
         if upstream_stream_transport is not None:
@@ -205,9 +217,24 @@ class SettingsRepository:
             settings.guest_access_enabled = guest_access_enabled
         if limit_warmup_staggered_idle_enabled is not None:
             settings.limit_warmup_staggered_idle_enabled = limit_warmup_staggered_idle_enabled
+        # Force the optimistic-version CAS to run even when the payload makes no
+        # net change. `version_id_col` only raises `StaleDataError` when the
+        # flush emits an ORM UPDATE; a full-row save that assigns values all
+        # equal to this (possibly stale) session's row would otherwise flush
+        # nothing, commit silently, and refresh over a concurrent writer's
+        # values without the required 409. Flagging a column dirty guarantees an
+        # `UPDATE ... SET version = version + 1 WHERE version = :expected`, so a
+        # stale no-op save still surfaces the conflict.
+        flag_modified(settings, "sticky_threads_enabled")
         await self.commit_refresh(settings)
         return settings
 
     async def commit_refresh(self, settings: DashboardSettings) -> None:
-        await self._session.commit()
+        try:
+            await self._session.commit()
+        except StaleDataError as exc:
+            # The optimistic version check (DashboardSettings.version) matched
+            # zero rows: another writer (replica or request) committed first.
+            await self._session.rollback()
+            raise DashboardSettingsConflictError() from exc
         await self._session.refresh(settings)

@@ -232,6 +232,20 @@ if PROMETHEUS_AVAILABLE:
         ["kind"],
         registry=REGISTRY,
     )
+    _replica_gauge_kwargs: dict[str, str] = {}
+    if MULTIPROCESS_MODE:
+        # Sibling workers share one instance identity and compute the same
+        # replica count, so a max across workers (not livesum) reports the
+        # real value. Use "livemax" rather than "max": mark_process_dead()
+        # only removes live* gauge files, so plain "max" would retain a dead
+        # worker's stale higher count forever after a scale-down.
+        _replica_gauge_kwargs["multiprocess_mode"] = "livemax"
+    cap_partition_replicas = Gauge(
+        "codex_lb_cap_partition_replicas",
+        "Live replica count currently used for account cap partitioning",
+        registry=REGISTRY,
+        **_replica_gauge_kwargs,
+    )
     proxy_phase_latency_seconds = Histogram(
         "codex_lb_proxy_phase_latency_seconds",
         "Proxy phase latency by low-cardinality phase and transport labels",
@@ -248,6 +262,17 @@ if PROMETHEUS_AVAILABLE:
         "codex_lb_http_bridge_stuck_retire_total",
         "Total HTTP bridge stuck-session retirements",
         ["reason", "affinity_kind", "model_class"],
+        registry=REGISTRY,
+    )
+    cache_invalidation_bump_failures_total = Counter(
+        "codex_lb_cache_invalidation_bump_failures_total",
+        "Total cache invalidation version bumps that failed after retries",
+        ["namespace"],
+        registry=REGISTRY,
+    )
+    cache_invalidation_poll_failures_total = Counter(
+        "codex_lb_cache_invalidation_poll_failures_total",
+        "Total cache invalidation poll cycles that failed",
         registry=REGISTRY,
     )
 
@@ -300,9 +325,12 @@ else:
     account_lease_stale_reclaimed_total: CounterLike | None = None
     account_inflight_leases: GaugeLike | None = None
     account_cap_rejections_total: CounterLike | None = None
+    cap_partition_replicas: GaugeLike | None = None
     proxy_phase_latency_seconds: HistogramLike | None = None
     http_bridge_prewarm_total: CounterLike | None = None
     http_bridge_stuck_retire_total: CounterLike | None = None
+    cache_invalidation_bump_failures_total: CounterLike | None = None
+    cache_invalidation_poll_failures_total: CounterLike | None = None
 
     def make_scrape_registry() -> None:
         return None
@@ -335,6 +363,9 @@ __all__ = [
     "bridge_reattach_total",
     "bridge_same_account_takeover_total",
     "bridge_soft_local_rebind_total",
+    "cache_invalidation_bump_failures_total",
+    "cache_invalidation_poll_failures_total",
+    "cap_partition_replicas",
     "circuit_breaker_state",
     "continuity_fail_closed_total",
     "continuity_owner_resolution_total",

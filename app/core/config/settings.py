@@ -233,6 +233,10 @@ class Settings(BaseSettings):
     automations_scheduler_enabled: bool = True
     automations_scheduler_interval_seconds: int = Field(default=30, gt=0)
     encryption_key_file: Path = DEFAULT_ENCRYPTION_KEY_FILE
+    # Startup cross-replica encryption-key consistency check against the shared
+    # database sentinel: "enforce" refuses startup on mismatch, "warn" logs an
+    # ERROR and continues, "off" disables the check.
+    encryption_key_fingerprint_mode: Literal["enforce", "warn", "off"] = "enforce"
     database_migrations_fail_fast: bool = True
     log_proxy_request_shape: bool = False
     log_proxy_request_shape_raw_cache_key: bool = False
@@ -332,6 +336,8 @@ class Settings(BaseSettings):
     proxy_account_inflight_penalty_pct: float = Field(default=2.5, ge=0)
     proxy_account_lease_token_weight: float = Field(default=1.0, ge=0)
     proxy_account_lease_ttl_seconds: float = Field(default=900.0, gt=0)
+    proxy_account_caps_scope: Literal["partitioned", "replica"] = "partitioned"
+    proxy_account_cap_partition_scale_down_seconds: int = Field(default=60, ge=30)
     proxy_refresh_failure_cooldown_seconds: float = Field(default=5.0, ge=0.0)
     usage_refresh_auth_failure_cooldown_seconds: float = Field(default=300.0, ge=0.0)
 

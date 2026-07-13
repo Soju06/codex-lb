@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Iterable, Mapping
 
@@ -238,6 +238,24 @@ def should_use_weekly_primary(
     if secondary_row is None:
         return True
     return _should_prefer_primary_row(primary_row, secondary_row)
+
+
+def expire_elapsed_window_rows(
+    rows: Iterable[UsageWindowRow],
+    *,
+    now_epoch: int,
+) -> list[UsageWindowRow]:
+    # A row whose reset_at has elapsed describes an expired window: upstream
+    # may have stopped reporting that window entirely, in which case the row
+    # is never rewritten. Treat it as a reset window (0% used, no reset) so
+    # pooled summaries and availability never freeze on stale samples.
+    expired: list[UsageWindowRow] = []
+    for row in rows:
+        if row.reset_at is not None and row.reset_at <= now_epoch:
+            expired.append(replace(row, used_percent=0.0, reset_at=None))
+        else:
+            expired.append(row)
+    return expired
 
 
 def normalize_weekly_only_rows(

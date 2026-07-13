@@ -92,19 +92,23 @@ async def _insert_http_bridge_session(
     session_id: str,
     state: str,
     last_seen_offset_seconds: int,
+    lease_seconds_remaining: int | None = None,
 ) -> None:
     timestamp = utcnow() - timedelta(seconds=last_seen_offset_seconds)
+    lease_expires_at = (
+        None if lease_seconds_remaining is None else utcnow() + timedelta(seconds=lease_seconds_remaining)
+    )
     async with SessionLocal() as session:
         await session.execute(
             text(
                 """
                 INSERT INTO http_bridge_sessions (
                     id, session_key_kind, session_key_value, session_key_hash, api_key_scope,
-                    owner_epoch, state, last_seen_at, created_at, updated_at
+                    owner_epoch, state, last_seen_at, lease_expires_at, created_at, updated_at
                 )
                 VALUES (
                     :id, 'session_header', :key_value, :key_hash, '__anonymous__',
-                    1, :state, :timestamp, :timestamp, :timestamp
+                    1, :state, :timestamp, :lease_expires_at, :timestamp, :timestamp
                 )
                 """
             ),
@@ -114,6 +118,7 @@ async def _insert_http_bridge_session(
                 "key_hash": f"{session_id}-hash",
                 "state": state,
                 "timestamp": timestamp,
+                "lease_expires_at": lease_expires_at,
             },
         )
         await session.execute(
@@ -689,6 +694,12 @@ async def test_sticky_sessions_cleanup_scheduler_removes_stale_prompt_cache_and_
         last_seen_offset_seconds=600,
     )
     await _insert_http_bridge_session(
+        session_id="active-leased-session",
+        state="active",
+        last_seen_offset_seconds=600,
+        lease_seconds_remaining=3600,
+    )
+    await _insert_http_bridge_session(
         session_id="closed-fresh-session",
         state="closed",
         last_seen_offset_seconds=10,
@@ -713,8 +724,10 @@ async def test_sticky_sessions_cleanup_scheduler_removes_stale_prompt_cache_and_
         }
 
     assert remaining == {"cleanup-durable"}
-    assert bridge_remaining == {"active-stale-session", "closed-fresh-session"}
-    assert alias_remaining == {"active-stale-session", "closed-fresh-session"}
+    # active-stale-session has no lease and stale activity, so the abandoned-row
+    # purge removes it; the leased active row and fresh closed row survive.
+    assert bridge_remaining == {"active-leased-session", "closed-fresh-session"}
+    assert alias_remaining == {"active-leased-session", "closed-fresh-session"}
 
 
 @pytest.mark.asyncio

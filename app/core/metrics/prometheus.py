@@ -232,6 +232,17 @@ if PROMETHEUS_AVAILABLE:
         ["kind"],
         registry=REGISTRY,
     )
+    _replica_gauge_kwargs: dict[str, str] = {}
+    if MULTIPROCESS_MODE:
+        # Sibling workers share one instance identity and compute the same
+        # replica count, so "max" (not livesum) reports the real value.
+        _replica_gauge_kwargs["multiprocess_mode"] = "max"
+    cap_partition_replicas = Gauge(
+        "codex_lb_cap_partition_replicas",
+        "Live replica count currently used for account cap partitioning",
+        registry=REGISTRY,
+        **_replica_gauge_kwargs,
+    )
     proxy_phase_latency_seconds = Histogram(
         "codex_lb_proxy_phase_latency_seconds",
         "Proxy phase latency by low-cardinality phase and transport labels",
@@ -311,6 +322,7 @@ else:
     account_lease_stale_reclaimed_total: CounterLike | None = None
     account_inflight_leases: GaugeLike | None = None
     account_cap_rejections_total: CounterLike | None = None
+    cap_partition_replicas: GaugeLike | None = None
     proxy_phase_latency_seconds: HistogramLike | None = None
     http_bridge_prewarm_total: CounterLike | None = None
     http_bridge_stuck_retire_total: CounterLike | None = None
@@ -350,6 +362,7 @@ __all__ = [
     "bridge_soft_local_rebind_total",
     "cache_invalidation_bump_failures_total",
     "cache_invalidation_poll_failures_total",
+    "cap_partition_replicas",
     "circuit_breaker_state",
     "continuity_fail_closed_total",
     "continuity_owner_resolution_total",

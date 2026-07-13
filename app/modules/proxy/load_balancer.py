@@ -56,6 +56,7 @@ from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, AdditionalUsageHistory, StickySessionKind, UsageHistory
 from app.modules.proxy.account_cache import get_account_selection_cache, mark_account_routing_unavailable
 from app.modules.proxy.additional_model_limits import get_additional_quota_key_for_model_id
+from app.modules.proxy.cap_partitioning import get_cap_partition, partition_cap
 from app.modules.proxy.repo_bundle import ProxyRepoFactory, ProxyRepositories
 from app.modules.quota_planner.logic import PlannerSettings, build_routing_costs
 from app.modules.usage.additional_quota_keys import (
@@ -140,6 +141,9 @@ class AccountSelection:
 class AccountConcurrencyCaps:
     response_create_limit: int
     stream_limit: int
+    configured_response_create_limit: int | None = None
+    configured_stream_limit: int | None = None
+    replica_count: int = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -1786,9 +1790,22 @@ def _account_cap_error_code(lease_kind: AccountLeaseKind | None) -> str | None:
 def _account_cap_error_message(lease_kind: AccountLeaseKind | None, caps: AccountConcurrencyCaps) -> str:
     if lease_kind == "response_create":
         cap = caps.response_create_limit
+        if caps.replica_count > 1 and caps.configured_response_create_limit is not None:
+            return (
+                f"Account response-create capacity is exhausted; this replica's share is {cap} "
+                f"of the per-account limit {caps.configured_response_create_limit} "
+                f"across {caps.replica_count} replicas"
+            )
         return f"Account response-create capacity is exhausted; per-account limit is {cap}"
     if lease_kind == "stream":
         cap = caps.stream_limit
+        if caps.replica_count > 1 and caps.configured_stream_limit is not None:
+            return (
+                f"Account stream capacity is exhausted; this replica's share is {cap} "
+                f"of the per-account limit {caps.configured_stream_limit} "
+                f"across {caps.replica_count} replicas. "
+                "Increase the dashboard stream limit or wait for active streams to finish."
+            )
         return (
             f"Account stream capacity is exhausted; per-account limit is {cap}. "
             "Increase the dashboard stream limit or wait for active streams to finish."
@@ -1802,15 +1819,27 @@ def effective_account_concurrency_caps(dashboard_settings: object | None = None)
     stream_limit = getattr(dashboard_settings, "proxy_account_stream_limit", None)
     startup_response_create_limit = getattr(startup_settings, "proxy_account_response_create_limit", 4)
     startup_stream_limit = getattr(startup_settings, "proxy_account_stream_limit", 8)
+    configured_response_create_limit = max(
+        0,
+        int(startup_response_create_limit if response_create_limit is None else response_create_limit),
+    )
+    configured_stream_limit = max(
+        0,
+        int(startup_stream_limit if stream_limit is None else stream_limit),
+    )
+    scope = getattr(startup_settings, "proxy_account_caps_scope", "partitioned")
+    partition = get_cap_partition()
+    if scope == "replica" or partition.replica_count <= 1:
+        return AccountConcurrencyCaps(
+            response_create_limit=configured_response_create_limit,
+            stream_limit=configured_stream_limit,
+        )
     return AccountConcurrencyCaps(
-        response_create_limit=max(
-            0,
-            int(startup_response_create_limit if response_create_limit is None else response_create_limit),
-        ),
-        stream_limit=max(
-            0,
-            int(startup_stream_limit if stream_limit is None else stream_limit),
-        ),
+        response_create_limit=partition_cap(configured_response_create_limit, partition.replica_count, partition.rank),
+        stream_limit=partition_cap(configured_stream_limit, partition.replica_count, partition.rank),
+        configured_response_create_limit=configured_response_create_limit,
+        configured_stream_limit=configured_stream_limit,
+        replica_count=partition.replica_count,
     )
 
 

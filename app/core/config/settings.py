@@ -336,6 +336,8 @@ class Settings(BaseSettings):
     proxy_account_inflight_penalty_pct: float = Field(default=2.5, ge=0)
     proxy_account_lease_token_weight: float = Field(default=1.0, ge=0)
     proxy_account_lease_ttl_seconds: float = Field(default=900.0, gt=0)
+    proxy_account_caps_scope: Literal["partitioned", "replica"] = "partitioned"
+    proxy_account_cap_partition_scale_down_seconds: int = Field(default=60, ge=30)
     proxy_refresh_failure_cooldown_seconds: float = Field(default=5.0, ge=0.0)
     usage_refresh_auth_failure_cooldown_seconds: float = Field(default=300.0, ge=0.0)
 

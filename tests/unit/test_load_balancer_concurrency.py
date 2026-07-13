@@ -14,6 +14,7 @@ import app.modules.proxy.load_balancer as load_balancer_module
 from app.core.crypto import TokenEncryptor
 from app.db.models import Account, AccountStatus, StickySessionKind, UsageHistory
 from app.modules.api_keys.repository import ApiKeysRepository
+from app.modules.proxy.cap_partitioning import CapPartition
 from app.modules.proxy.load_balancer import LoadBalancer, effective_account_concurrency_caps
 from app.modules.proxy.repo_bundle import ProxyRepositories
 from app.modules.request_logs.repository import RequestLogsRepository
@@ -654,3 +655,121 @@ async def test_codex_session_sticky_reallocates_under_budget_pressure() -> None:
     assert sticky_repo.deleted == [("hard-session", StickySessionKind.CODEX_SESSION)]
     assert sticky_repo.account_id == account_b.id
     await balancer.release_account_lease(result.lease)
+
+
+def test_effective_account_concurrency_caps_partitions_across_replicas(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        load_balancer_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            proxy_account_response_create_limit=4,
+            proxy_account_stream_limit=8,
+            proxy_account_caps_scope="partitioned",
+        ),
+    )
+    monkeypatch.setattr(
+        load_balancer_module,
+        "get_cap_partition",
+        lambda: CapPartition(replica_count=2, rank=0),
+    )
+
+    assert effective_account_concurrency_caps() == load_balancer_module.AccountConcurrencyCaps(
+        response_create_limit=2,
+        stream_limit=4,
+        configured_response_create_limit=4,
+        configured_stream_limit=8,
+        replica_count=2,
+    )
+
+
+def test_effective_account_concurrency_caps_replica_scope_restores_full_caps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        load_balancer_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            proxy_account_response_create_limit=4,
+            proxy_account_stream_limit=8,
+            proxy_account_caps_scope="replica",
+        ),
+    )
+    monkeypatch.setattr(
+        load_balancer_module,
+        "get_cap_partition",
+        lambda: CapPartition(replica_count=2, rank=0),
+    )
+
+    assert effective_account_concurrency_caps() == load_balancer_module.AccountConcurrencyCaps(
+        response_create_limit=4,
+        stream_limit=8,
+    )
+
+
+def test_account_cap_error_message_states_replica_share() -> None:
+    caps = load_balancer_module.AccountConcurrencyCaps(
+        response_create_limit=2,
+        stream_limit=4,
+        configured_response_create_limit=4,
+        configured_stream_limit=8,
+        replica_count=2,
+    )
+
+    stream_message = load_balancer_module._account_cap_error_message("stream", caps)
+    assert "this replica's share is 4" in stream_message
+    assert "per-account limit 8" in stream_message
+    assert "across 2 replicas" in stream_message
+
+    create_message = load_balancer_module._account_cap_error_message("response_create", caps)
+    assert "this replica's share is 2" in create_message
+    assert "per-account limit 4" in create_message
+    assert "across 2 replicas" in create_message
+
+
+@pytest.mark.asyncio
+async def test_partitioned_caps_bound_aggregate_streams_across_two_replicas(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two replicas over one account pool admit at most the configured cluster cap.
+
+    Before cap partitioning each replica enforced the full configured stream cap
+    against its own in-process counters, so two replicas admitted 16 streams for
+    a cluster-wide cap of 8.
+    """
+    now_epoch = int(datetime.now(tz=timezone.utc).timestamp())
+    admitted: dict[str, int] = {}
+    last_error: dict[str, tuple[str | None, str | None]] = {}
+
+    for rank, replica in enumerate(["replica-a", "replica-b"]):
+        account = _make_account("acc-cluster-cap")
+        accounts_repo = _StubAccountsRepository([account])
+        usage_repo = _StubUsageRepository(
+            primary={account.id: _usage_row(50, account.id, window="primary", reset_at=now_epoch + 300)},
+            secondary={account.id: _usage_row(51, account.id, window="secondary", reset_at=now_epoch + 3600)},
+        )
+        balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo))
+        monkeypatch.setattr(
+            load_balancer_module,
+            "get_cap_partition",
+            lambda rank=rank: CapPartition(replica_count=2, rank=rank),
+        )
+        admitted[replica] = 0
+        for _ in range(16):
+            result = await balancer.select_account(
+                routing_strategy="usage_weighted",
+                lease_kind="stream",
+            )
+            if result.account is None:
+                last_error[replica] = (result.error_code, result.error_message)
+                break
+            admitted[replica] += 1
+
+    assert admitted == {"replica-a": 4, "replica-b": 4}
+    assert sum(admitted.values()) == 8
+    for error_code, error_message in last_error.values():
+        assert error_code == "account_stream_cap"
+        assert error_message is not None
+        assert "this replica's share is 4" in error_message
+        assert "across 2 replicas" in error_message

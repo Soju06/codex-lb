@@ -63,6 +63,7 @@ from app.modules.health import api as health_api
 from app.modules.model_sources import api as model_sources_api
 from app.modules.oauth import api as oauth_api
 from app.modules.proxy import api as proxy_api
+from app.modules.proxy.cap_partitioning import refresh_cap_partition
 from app.modules.proxy.durable_bridge_repository import missing_durable_bridge_tables
 from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
 from app.modules.proxy.ring_membership import (
@@ -264,6 +265,7 @@ async def lifespan(app: FastAPI):
                     await proxy_service.reconcile_durable_http_bridge_ownership()
                 except Exception:
                     logger.warning("HTTP bridge durable ownership reconciliation failed", exc_info=True)
+            await refresh_cap_partition(svc.list_active, iid)
 
     async def _register_and_heartbeat(svc: RingMembershipService, iid: str) -> None:
         attempt = 0
@@ -277,6 +279,7 @@ async def lifespan(app: FastAPI):
                 delay = min(5.0 * (2 ** min(attempt - 1, 5)), 60.0)
                 logger.warning("Ring registration attempt %d failed, retrying in %.0fs", attempt, delay, exc_info=True)
                 await asyncio.sleep(delay)
+        await refresh_cap_partition(svc.list_active, iid)
         await _heartbeat_only(svc, iid)
 
     async def _activate_bridge_membership(svc: RingMembershipService, iid: str) -> None:

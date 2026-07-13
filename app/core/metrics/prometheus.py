@@ -235,8 +235,11 @@ if PROMETHEUS_AVAILABLE:
     _replica_gauge_kwargs: dict[str, str] = {}
     if MULTIPROCESS_MODE:
         # Sibling workers share one instance identity and compute the same
-        # replica count, so "max" (not livesum) reports the real value.
-        _replica_gauge_kwargs["multiprocess_mode"] = "max"
+        # replica count, so a max across workers (not livesum) reports the
+        # real value. Use "livemax" rather than "max": mark_process_dead()
+        # only removes live* gauge files, so plain "max" would retain a dead
+        # worker's stale higher count forever after a scale-down.
+        _replica_gauge_kwargs["multiprocess_mode"] = "livemax"
     cap_partition_replicas = Gauge(
         "codex_lb_cap_partition_replicas",
         "Live replica count currently used for account cap partitioning",

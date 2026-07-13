@@ -56,7 +56,7 @@ Identical by construction. Partition derivation only *reads* `bridge_ring_member
 
 ### D7: Error message and observability contract
 
-Partitioned-cap rejections keep the stable reasons `account_response_create_cap` / `account_stream_cap` and the local-overload envelope; only the human-readable message gains "this replica's share is S of the per-account limit C across R replicas" when `R > 1`, so operators do not misread a share-exhausted rejection as a misconfigured cap. New gauge `codex_lb_cap_partition_replicas` (multiprocess mode `max`: sibling workers share one instance identity and compute the same count) plus an info-level rebalance log.
+Partitioned-cap rejections keep the stable reasons `account_response_create_cap` / `account_stream_cap` and the local-overload envelope; only the human-readable message gains "this replica's share is S of the per-account limit C across R replicas" when `R > 1`, so operators do not misread a share-exhausted rejection as a misconfigured cap. New gauge `codex_lb_cap_partition_replicas` (multiprocess mode `livemax`: sibling workers share one instance identity and compute the same count, so a max across live workers reports the real value; plain `max` would keep a dead worker's stale higher count after a scale-down because `mark_process_dead()` only removes live-mode gauge files) plus an info-level rebalance log.
 
 ## Risks / trade-offs
 

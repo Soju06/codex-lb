@@ -32,11 +32,19 @@ class _MetricChild:
 
 
 class _MetricBase:
-    def __init__(self, name: str, documentation: str, labelnames: list[str] | None = None, registry=None) -> None:
+    def __init__(
+        self,
+        name: str,
+        documentation: str,
+        labelnames: list[str] | None = None,
+        registry=None,
+        multiprocess_mode: str | None = None,
+    ) -> None:
         self.name = name
         self.documentation = documentation
         self.labelnames = tuple(labelnames or [])
         self.registry = registry
+        self.multiprocess_mode = multiprocess_mode
         self.samples: dict[tuple[tuple[str, str], ...], _MetricChild] = {}
         self.root = _MetricChild()
 
@@ -150,6 +158,35 @@ def test_prometheus_metrics_defined_when_dependency_available(monkeypatch: pytes
         "status",
         "outcome",
     )
+
+
+def test_cap_partition_replicas_gauge_uses_livemax_in_multiprocess_mode(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    monkeypatch.setenv("PROMETHEUS_MULTIPROC_DIR", str(tmp_path))
+    prometheus_module, _ = _load_metrics_modules(monkeypatch, prometheus_client_module=_fake_prometheus_client_module())
+
+    assert prometheus_module.MULTIPROCESS_MODE is True
+    gauge = prometheus_module.cap_partition_replicas
+    assert gauge is not None
+    assert gauge.name == "codex_lb_cap_partition_replicas"
+    # Regression: "max" aggregates dead workers too (mark_process_dead only
+    # removes live* gauge files), so a scaled-down worker's stale higher
+    # count would be reported forever. "livemax" drops dead workers while
+    # still taking the max across live sibling workers.
+    assert gauge.multiprocess_mode == "livemax"
+
+
+def test_cap_partition_replicas_gauge_has_no_multiprocess_mode_in_single_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("PROMETHEUS_MULTIPROC_DIR", raising=False)
+    prometheus_module, _ = _load_metrics_modules(monkeypatch, prometheus_client_module=_fake_prometheus_client_module())
+
+    assert prometheus_module.MULTIPROCESS_MODE is False
+    gauge = prometheus_module.cap_partition_replicas
+    assert gauge is not None
+    assert gauge.multiprocess_mode is None
 
 
 @pytest.mark.asyncio

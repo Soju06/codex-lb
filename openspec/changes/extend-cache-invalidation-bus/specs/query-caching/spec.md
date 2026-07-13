@@ -3,7 +3,7 @@
 ## ADDED Requirements
 
 ### Requirement: Cross-replica cache invalidation bus bounds process-local cache staleness
-Every process-local cache that serves security, authorization, or routing decisions MUST either register a namespace on the cross-replica cache-invalidation bus or declare a documented maximum cross-replica staleness TTL. Mutations MUST commit durable state before (or independently of) bumping their namespace version, each process MUST poll the `cache_invalidation` version table at a bounded interval (default 0.5s) and run registered namespace callbacks on version change, and the registered namespaces MUST include `api_key`, `firewall`, `account_routing`, `account_selection`, and `settings`. A cache's TTL remains the fallback staleness bound when a bump is lost.
+Every process-local cache that serves security, authorization, or routing decisions MUST either register a namespace on the cross-replica cache-invalidation bus or declare a documented maximum cross-replica staleness TTL. Mutations MUST commit durable state before (or independently of) bumping their namespace version, each process MUST poll the `cache_invalidation` version table at a bounded interval (default 0.5s) and run registered namespace callbacks on version change, and the registered namespaces MUST include `api_key`, `firewall`, `account_routing`, `account_selection`, and `settings`. Each process MUST seed its baseline namespace versions before loading local caches / routing snapshots and before serving traffic, so a peer bump committed after that baseline is observed as a change (runs callbacks) rather than acknowledged as pre-existing state. A cache's TTL remains the fallback staleness bound when a bump is lost.
 
 #### Scenario: Selection-state change on one replica converges on peers within the bus bound
 
@@ -12,6 +12,13 @@ Every process-local cache that serves security, authorization, or routing decisi
 - **WHEN** replica A persists a state change for account X and invalidates its selection cache with propagation
 - **THEN** the `account_selection` namespace version is bumped within one poll cycle
 - **AND** replica B's selection cache is invalidated on its next poll, without waiting for the cache TTL
+
+#### Scenario: Peer bump committed before the first poll is not lost
+
+- **GIVEN** a starting replica seeds its baseline namespace versions before loading its routing snapshot and before serving traffic
+- **WHEN** a peer commits a mutation and bumps `account_routing` (or `settings`, or `account_selection`) after this replica loaded its caches but before its first poll cycle
+- **THEN** the replica's first poll observes the bumped version as a change and runs the namespace callbacks
+- **AND** the peer bump is not silently acknowledged as a baseline, so the cache is not left stale until the fallback TTL
 
 #### Scenario: New security-relevant cache without bus coverage is a spec violation
 

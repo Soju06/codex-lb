@@ -66,6 +66,34 @@ class CacheInvalidationPoller:
     def on_invalidation(self, namespace: str, callback: InvalidationCallback) -> None:
         self._callbacks.setdefault(namespace, []).append(callback)
 
+    async def initialize(self) -> None:
+        """Seed baseline namespace versions before the process serves traffic.
+
+        MUST run at lifespan startup before local caches / routing snapshots are
+        loaded and before the first poll cycle. It records the current version of
+        every ``cache_invalidation`` row as the baseline and marks the poller
+        initialized, so that any bump a peer commits after this point is observed
+        as a change (fires callbacks) rather than acknowledged as pre-existing
+        state. Without this seed the first poll would treat every existing version
+        row as a baseline and silently drop a peer bump that landed between local
+        cache load and the first poll, leaving security/selection/routing state
+        stale until the fallback TTL or a later bump.
+
+        On success ``_poll_initialized`` is set to ``True``. If the read fails the
+        method raises with state unchanged (baseline empty, ``_poll_initialized``
+        still ``False``), so the caller can degrade to the first-poll-baselines
+        behavior.
+        """
+        session = self._session_factory()
+        try:
+            result = await session.execute(select(CacheInvalidation.namespace, CacheInvalidation.version))
+            rows = result.all()
+        finally:
+            await close_session(session)
+        for namespace, version in rows:
+            self._known_versions[namespace] = version
+        self._poll_initialized = True
+
     async def start(self) -> None:
         if self._task and not self._task.done():
             return

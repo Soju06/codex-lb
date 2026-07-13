@@ -298,6 +298,16 @@ async def lifespan(app: FastAPI):
     )
     set_cache_invalidation_poller(cache_poller)
     try:
+        # Seed baseline namespace versions before loading the routing snapshot
+        # and before serving traffic, so a peer bump committed after this point
+        # is observed as a change on the first poll instead of being silently
+        # acknowledged as pre-existing state.
+        await cache_poller.initialize()
+    except Exception:
+        # Degrades to first-poll-baselines: a peer bump landing before the first
+        # poll may be acknowledged without invalidating until the fallback TTL.
+        logger.warning("cache invalidation baseline seed failed", exc_info=True)
+    try:
         await routing_availability_cache.refresh_from_db()
     except Exception:
         # Unseeded snapshot degrades to local-mark semantics; the next

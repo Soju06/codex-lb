@@ -548,3 +548,55 @@ async def test_bridge_reuse_check_is_pure_in_memory(db_setup, poller_slot) -> No
         event.remove(engine.sync_engine, "before_cursor_execute", _record_statement)
 
     assert statements == []
+
+
+@pytest.mark.asyncio
+async def test_initialize_seeds_baseline_so_bump_before_first_poll_fires(db_setup) -> None:
+    """A peer bump committed after baseline seeding but before the first poll must be
+    observed as a change, not acknowledged as pre-existing state.
+
+    Seeding the baseline at startup (before serving traffic) closes the window where
+    a peer bump landing before the first poll would otherwise be treated as a baseline
+    and silently dropped until the fallback TTL.
+    """
+    # A peer has already bumped the namespace at least once before this replica
+    # starts, so a version row exists at some baseline version V.
+    peer = CacheInvalidationPoller(SessionLocal)
+    assert await peer.bump(NAMESPACE_ACCOUNT_ROUTING) is True
+    baseline = await _namespace_version(NAMESPACE_ACCOUNT_ROUTING)
+    assert baseline is not None
+
+    calls: list[str] = []
+    poller = CacheInvalidationPoller(SessionLocal)
+    poller.on_invalidation(NAMESPACE_ACCOUNT_ROUTING, lambda: calls.append("routing"))
+
+    # Seed baseline before loading local caches / serving traffic.
+    await poller.initialize()
+    assert poller._known_versions.get(NAMESPACE_ACCOUNT_ROUTING) == baseline
+
+    # A peer commits a mutation and bumps AFTER the baseline seed but before this
+    # replica's first poll cycle.
+    assert await peer.bump(NAMESPACE_ACCOUNT_ROUTING) is True
+
+    # The first poll observes the bump as a change and runs the callback.
+    await poller._poll_once()
+    assert calls == ["routing"]
+
+    # Contrast: a poller that skips the baseline seed treats the already-bumped row
+    # as a baseline on its first poll and never fires the callback (the defect).
+    naive_calls: list[str] = []
+    naive = CacheInvalidationPoller(SessionLocal)
+    naive.on_invalidation(NAMESPACE_ACCOUNT_ROUTING, lambda: naive_calls.append("routing"))
+    await naive._poll_once()
+    assert naive_calls == []
+
+
+@pytest.mark.asyncio
+async def test_initialize_failure_leaves_poller_uninitialized(db_setup) -> None:
+    """A failed baseline seed raises with state unchanged so the caller can degrade
+    to first-poll-baselines instead of half-seeding."""
+    poller = CacheInvalidationPoller(_FlakySessionFactory(failures=100))
+    with pytest.raises(OperationalError):
+        await poller.initialize()
+    assert poller._poll_initialized is False
+    assert poller._known_versions == {}

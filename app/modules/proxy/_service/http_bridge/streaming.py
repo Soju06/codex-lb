@@ -1851,6 +1851,29 @@ class _HTTPBridgeStreamingMixin:
                 if wait_plan is None:
                     raise
                 bounded_wait_seconds, account_capacity_wait_seconds, message = wait_plan
+                exc_code, _exc_message = _proxy_error_code_message(exc)
+                gate_contention = exc_code == "response_create_gate_timeout"
+                if gate_contention and session.closed:
+                    # The timed-out attempt retired the session (stuck
+                    # pending work); retrying a closed session would commit
+                    # a stream and then surface upstream_unavailable. Fail
+                    # the startup cleanly instead.
+                    raise
+                if gate_contention:
+                    # A sleeping gate waiter keeps occupying its bridge
+                    # queue slot so per-session pending work stays bounded
+                    # by the queue limit across retries.
+                    async with session.pending_lock:
+                        if session.queued_request_count >= queue_limit:
+                            raise ProxyResponseError(
+                                429,
+                                openai_error(
+                                    "bridge_queue_full",
+                                    "HTTP responses session bridge queue is full",
+                                    error_type="rate_limit_error",
+                                ),
+                            )
+                        session.queued_request_count += 1
                 logger.info(
                     "Waiting for account capacity before retrying HTTP bridge submit request_id=%s model=%s "
                     "account_id=%s sleep_seconds=%.1f recovery_hint_seconds=%.1f error=%s",
@@ -1861,14 +1884,21 @@ class _HTTPBridgeStreamingMixin:
                     account_capacity_wait_seconds,
                     message,
                 )
-                async for line in _iter_account_capacity_wait_sse(
-                    request_id=request_state.request_id,
-                    reason=message,
-                    sleep_seconds=bounded_wait_seconds,
-                    emit_keepalives=not propagate_http_errors,
-                ):
-                    yield line
+                try:
+                    async for line in _iter_account_capacity_wait_sse(
+                        request_id=request_state.request_id,
+                        reason=message,
+                        sleep_seconds=bounded_wait_seconds,
+                        emit_keepalives=not propagate_http_errors,
+                    ):
+                        yield line
+                finally:
+                    if gate_contention:
+                        async with session.pending_lock:
+                            session.queued_request_count = max(0, session.queued_request_count - 1)
                 if _service_time().monotonic() >= request_deadline:
+                    raise
+                if gate_contention and session.closed:
                     raise
                 continue
             break

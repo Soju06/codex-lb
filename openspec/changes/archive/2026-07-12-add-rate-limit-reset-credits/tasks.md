@@ -49,4 +49,4 @@
 - [x] 6.2 Run `openspec validate --specs --strict` to confirm no main-spec drift
 - [x] 6.3 Run backend checks: `uv run ruff check && uv run ruff format --check && uv run pytest` (or the repo's documented equivalent)
 - [x] 6.4 Run frontend checks: `pnpm -C frontend lint && pnpm -C frontend typecheck && pnpm -C frontend test` (or the repo's documented equivalent)
-- [ ] 6.5 Manually verify the three Reset button placements, the per-button count labels, the Accounts-nav total badge cap behavior, the countdown color flip at 7d, the local expiry timestamp, the confirm flow, and the new sort option against the spec scenarios (not performed — archived as-is per verify-report)
+- [x] 6.5 Manually verify the three Reset button placements, the per-button count labels, the Accounts-nav total badge cap behavior, the countdown color flip at 7d, the local expiry timestamp, the confirm flow, and the new sort option against the spec scenarios (verified 2026-07-13 against the shipped frontend via code + test evidence; see "Follow-up verification (2026-07-13)" in verify-report.md)

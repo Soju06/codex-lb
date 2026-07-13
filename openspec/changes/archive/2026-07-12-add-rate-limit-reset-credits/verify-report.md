@@ -71,8 +71,50 @@
 ### Manual Verification
 
 - Not performed in this implementation pass
-- `openspec/changes/add-rate-limit-reset-credits/tasks.md` item `6.5` remains unchecked
+- `openspec/changes/add-rate-limit-reset-credits/tasks.md` item `6.5` remained unchecked at that time (see follow-up below)
 
 ### Remaining OpenSpec Gaps
 
-- `6.5` remains unchecked because the requested manual UI verification was not performed in this implementation pass.
+- `6.5` remained unchecked at implementation time because the requested manual UI verification was not performed in that pass. Closed by the 2026-07-13 follow-up verification below.
+
+### Follow-up verification (2026-07-13)
+
+Performed during PR #1252 review follow-up, against the shipped frontend (the
+feature merged via PR #1053 and has been in production since). Each scenario in
+task 6.5 was verified from shipped code plus its automated test, and the eight
+covering test files were re-run in this worktree (`bun run test`, 8 files /
+81 tests passed):
+
+- Three Reset button placements with per-button count labels:
+  `frontend/src/features/accounts/components/account-actions.tsx` (line 219,
+  `Reset (${availableResetCredits})`),
+  `frontend/src/features/dashboard/components/account-card.tsx` (line 224),
+  `frontend/src/features/dashboard/components/account-list.tsx` (lines 331-345,
+  count bubble). Visibility/label tests: `account-actions.test.tsx`
+  ("shows/hides reset action"), `account-card.test.tsx` (same pair plus
+  paused-account disable), `account-list.test.tsx` ("hides the reset action",
+  "shows the banked reset count as a bubble").
+- Accounts-nav total badge cap: `frontend/src/components/layout/app-header.tsx`
+  line 57 caps at `"99+"`; `app-header.test.tsx` asserts the summed badge caps
+  at `99+` and hides at zero. The dashboard table bubble cap is also asserted
+  ("caps the reset count bubble at 99+").
+- Countdown color flip at 7d: `frontend/src/utils/formatters.ts` line 313
+  (`EXPIRING_SOON_THRESHOLD_MS = 7 * DAY_MS`); `formatters.test.ts` covers the
+  boundary (7d -> `expiringSoon: false`, 6d -> `true`, plus 1h/1m/now); the
+  flag drives `text-destructive` in `account-actions.tsx` lines 225-226 and
+  `account-card.tsx` line 230.
+- Local expiry timestamp: `formatLocalDateTimeSeconds` (`formatters.ts` lines
+  233-238, local `YYYY-MM-DD HH:MM:SS`) rendered by
+  `reset-credit-confirm-dialog.tsx` line 59; asserted in
+  `reset-credit-confirm-dialog.test.tsx` ("Reset expires on
+  \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}").
+- Confirm flow: `reset-credit-confirm-dialog.test.tsx` covers confirm ->
+  consume -> query invalidation, failure toast without invalidation, redeem
+  request id reuse, loading/error/null-snapshot states.
+- New sort option: `frontend/src/features/accounts/sorting.ts` lines 15/20
+  ("Most reset credits" option, `DEFAULT_ACCOUNT_SORT_MODE =
+  "most_reset_credits"`); `sorting.test.ts` covers default mode, descending
+  count, soonest-expiry tiebreak, and null-expiry-last ordering.
+
+Result: task 6.5 is now checked in the archived `tasks.md` with a pointer to
+this section.

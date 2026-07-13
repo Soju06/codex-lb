@@ -1018,6 +1018,104 @@ async def test_refresh_adopts_peer_rotation_when_cas_misses_on_new_material(monk
     assert repo.update_attempts == [original_ciphertext]
 
 
+class _TokenCasAlwaysMissRepo(_DummyRepo):
+    """Repo that never lets the token compare-and-set land: every
+    ``get_by_id_fresh`` returns a row whose refresh-token ciphertext is a fresh
+    re-encryption of the SAME plaintext (Fernet is non-deterministic), so the
+    fingerprint never changes but the observed ciphertext keeps shifting under
+    the writer, and ``update_tokens`` never matches ``expected``."""
+
+    def __init__(self, account: Account, *, plaintext: str, encryptor: TokenEncryptor) -> None:
+        super().__init__()
+        self._plaintext = plaintext
+        self._encryptor = encryptor
+        self._row = account
+        self.accounts_by_id[account.id] = account
+        self.update_attempts: list[bytes | None] = []
+
+    async def get_by_id_fresh(self, account_id: str) -> Account | None:
+        row = self.accounts_by_id.get(account_id)
+        if row is not None:
+            # Re-encrypt the same plaintext to a fresh ciphertext each read.
+            row.refresh_token_encrypted = self._encryptor.encrypt(self._plaintext)
+        return row
+
+    async def update_tokens(
+        self,
+        account_id: str,
+        access_token_encrypted: bytes,
+        refresh_token_encrypted: bytes,
+        id_token_encrypted: bytes,
+        last_refresh: datetime,
+        plan_type: str | None = None,
+        email: str | None = None,
+        chatgpt_account_id: str | None = None,
+        chatgpt_user_id: str | None = None,
+        workspace_id: str | None = None,
+        workspace_label: str | None = None,
+        seat_type: str | None = None,
+        expected_refresh_token_encrypted: bytes | None = None,
+    ) -> bool:
+        # The CAS always misses: the stored ciphertext has already been rotated
+        # (re-encrypted) out from under this ``expected`` value.
+        self.update_attempts.append(expected_refresh_token_encrypted)
+        return False
+
+
+@pytest.mark.asyncio
+async def test_refresh_surfaces_transient_error_when_token_cas_never_persists(monkeypatch):
+    """Regression: when the token compare-and-set keeps missing on same-plaintext
+    re-encryption until ``_TOKEN_CAS_MAX_ATTEMPTS`` is exhausted, the rotated
+    tokens were never persisted (the DB still holds the already-consumed
+    single-use token). Returning ``None`` here would be the success sentinel, so
+    the caller would release the refresh claim and treat the account as fresh
+    while the DB retained dead material — the next request would then hit a
+    permanent refresh-token-reuse failure. The refresh must instead raise a
+    transient ``RefreshError`` so the caller retries rather than proceeding with
+    unpersisted material."""
+
+    async def _fake_refresh(_: str, **_kwargs: object) -> TokenRefreshResult:
+        return TokenRefreshResult(
+            access_token="access-new",
+            refresh_token="refresh-new",
+            id_token="id-new",
+            account_id="acc_cas_exhausted",
+            plan_type="pro",
+            email=None,
+        )
+
+    monkeypatch.setattr(auth_manager_module, "refresh_access_token", _fake_refresh)
+
+    encryptor = TokenEncryptor()
+    account = Account(
+        id="acc_cas_exhausted",
+        email="user@example.com",
+        plan_type="pro",
+        access_token_encrypted=encryptor.encrypt("access-old"),
+        refresh_token_encrypted=encryptor.encrypt("refresh-old"),
+        id_token_encrypted=encryptor.encrypt("id-old"),
+        last_refresh=utcnow(),
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
+    )
+    repo = _TokenCasAlwaysMissRepo(account, plaintext="refresh-old", encryptor=encryptor)
+    manager = AuthManager(cast(AccountsRepositoryPort, repo))
+
+    with pytest.raises(RefreshError) as excinfo:
+        await manager.refresh_account(account)
+
+    # Transient (retryable) failure, never a permanent one that would be cached
+    # or de-route the account.
+    assert excinfo.value.transport_error is True
+    assert excinfo.value.is_permanent is False
+    assert excinfo.value.code == "token_persist_conflict"
+    # The CAS was attempted the bounded number of times and never landed.
+    assert len(repo.update_attempts) == auth_manager_module._TOKEN_CAS_MAX_ATTEMPTS
+    assert repo.tokens_payload is None
+    # The in-memory account was NOT mutated to advertise unpersisted material.
+    assert encryptor.decrypt(account.refresh_token_encrypted) == "refresh-old"
+
+
 @pytest.mark.asyncio
 async def test_permanent_failure_status_cas_loses_to_rotation_after_fresh_read(monkeypatch):
     """Regression: a concurrent re-auth/import rotates the refresh token AFTER

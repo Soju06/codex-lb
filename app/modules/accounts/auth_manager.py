@@ -474,11 +474,29 @@ class AuthManager:
             expected = latest.refresh_token_encrypted
         logger.warning(
             "Token-refresh compare-and-set for account_id=%s kept missing on re-encrypted "
-            "same-plaintext material after %d attempts; leaving stored ciphertext unchanged",
+            "same-plaintext material after %d attempts; freshly rotated tokens were NOT persisted",
             account.id,
             _TOKEN_CAS_MAX_ATTEMPTS,
         )
-        return None
+        # The single-use token this attempt exchanged upstream was consumed, but
+        # the CAS never landed, so the DB still holds the already-consumed token.
+        # Returning ``None`` here would be indistinguishable from the success
+        # sentinel: the caller would mirror the new tokens onto its in-memory
+        # ``Account`` and release the refresh claim while the DB retained dead
+        # material, so the next process/request would hit a permanent
+        # refresh-token-reuse failure and de-route the account. Surface a
+        # transient failure instead so the caller retries the whole refresh
+        # rather than proceeding with unpersisted material. ``transport_error``
+        # keeps it out of the permanent-failure cooldown cache.
+        raise RefreshError(
+            "token_persist_conflict",
+            (
+                f"Token-refresh compare-and-set for account_id={account.id} could not persist "
+                f"rotated tokens after {_TOKEN_CAS_MAX_ATTEMPTS} attempts"
+            ),
+            False,
+            transport_error=True,
+        )
 
     async def _handle_permanent_refresh_failure(
         self,

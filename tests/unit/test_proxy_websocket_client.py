@@ -132,7 +132,7 @@ class _FakeCodexWebSocket:
 
 
 class _FakeCodexErrorWebSocket(_FakeCodexWebSocket):
-    def __init__(self, error: BaseException) -> None:
+    def __init__(self, error: BaseException | None) -> None:
         super().__init__()
         self.error = error
 
@@ -641,6 +641,20 @@ async def test_connect_responses_websocket_sanitizes_ws_error_payload(monkeypatc
     assert "user:pass" not in message.error
     assert "proxy.local:8080" not in message.error
     assert message.error == "Codex upstream websocket receive failed via proxy endpoint ep_1: OSError"
+    assert message.error_code is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_exception", [False, True], ids=["without-exception", "with-exception"])
+async def test_routed_websocket_error_message_defers_ordinary_code_to_relay(with_exception: bool):
+    websocket = CodexResponsesWebSocket(
+        _FakeCodexErrorWebSocket(ConnectionResetError("upstream reset") if with_exception else None)
+    )
+
+    message = await websocket.receive()
+
+    assert message.kind == "error"
+    assert message.error_code is None
 
 
 @pytest.mark.asyncio

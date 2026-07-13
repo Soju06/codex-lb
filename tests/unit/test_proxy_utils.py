@@ -30,7 +30,11 @@ import app.core.clients.proxy as proxy_module
 import app.core.resilience.network_recovery as network_recovery_module
 import app.modules.proxy.load_balancer as load_balancer_module
 from app.core.clients.proxy import _build_upstream_headers, filter_inbound_headers
-from app.core.clients.proxy_websocket import UpstreamWebSocketTransportError, WebsocketsResponsesWebSocket
+from app.core.clients.proxy_websocket import (
+    CodexResponsesWebSocket,
+    UpstreamWebSocketTransportError,
+    WebsocketsResponsesWebSocket,
+)
 from app.core.config.settings import Settings
 from app.core.crypto import TokenEncryptor
 from app.core.errors import openai_error
@@ -20503,7 +20507,11 @@ async def test_relay_upstream_websocket_network_failure_is_neutral_and_not_repla
 
 
 @pytest.mark.asyncio
-async def test_relay_upstream_websocket_ordinary_close_is_stream_incomplete_and_penalized(monkeypatch):
+@pytest.mark.parametrize("routed", [False, True], ids=["direct-close", "routed-receive-error"])
+async def test_relay_upstream_websocket_ordinary_receive_failure_is_stream_incomplete_and_penalized(
+    monkeypatch,
+    routed: bool,
+):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     handle_stream_error = AsyncMock()
@@ -20527,6 +20535,13 @@ async def test_relay_upstream_websocket_ordinary_close_is_stream_incomplete_and_
         async def close(self) -> None:
             return None
 
+    class _RoutedReceiveFailureWebSocket:
+        async def receive(self) -> aiohttp.WSMessage:
+            raise ConnectionResetError("upstream reset")
+
+        async def close(self) -> None:
+            return None
+
     request_state = proxy_service._WebSocketRequestState(
         request_id="ws_req_ordinary_close",
         model="gpt-5.1",
@@ -20542,7 +20557,11 @@ async def test_relay_upstream_websocket_ordinary_close_is_stream_incomplete_and_
     upstream_control = proxy_service._WebSocketUpstreamControl()
     downstream = _FakeDownstreamWebSocket()
     account = _make_account("acc_ws_ordinary_close")
-    upstream = WebsocketsResponsesWebSocket(cast(Any, _OrdinaryCloseConnection()))
+    upstream = (
+        CodexResponsesWebSocket(_RoutedReceiveFailureWebSocket())
+        if routed
+        else WebsocketsResponsesWebSocket(cast(Any, _OrdinaryCloseConnection()))
+    )
 
     await service._relay_upstream_websocket_messages(
         cast(WebSocket, downstream),

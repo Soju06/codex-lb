@@ -93,6 +93,14 @@ def _websocket_transport_error_code(exc: BaseException, *, uses_proxy: bool) -> 
     )
 
 
+def _relay_receive_error_code(error_code: str) -> str | None:
+    """Expose only account-neutral process failures across the adapter boundary."""
+
+    # Relay owners map an absent code to their established stream_incomplete
+    # contract. Leaking the adapter's generic fallback would bypass that path.
+    return error_code if error_code == PROCESS_NETWORK_UNAVAILABLE_CODE else None
+
+
 async def _rotate_after_websocket_network_failure(error_code: str) -> None:
     if error_code != PROCESS_NETWORK_UNAVAILABLE_CODE:
         return
@@ -160,12 +168,11 @@ class WebsocketsResponsesWebSocket:
             # ConnectionClosedError describes an incomplete close handshake,
             # not generic transport provenance. Let relay owners map ordinary
             # closes to stream_incomplete while preserving classified network failures.
-            relay_error_code = error_code if error_code == PROCESS_NETWORK_UNAVAILABLE_CODE else None
             return UpstreamWebSocketMessage(
                 kind="error",
                 close_code=_close_code_from_exception(exc),
                 error=str(exc),
-                error_code=relay_error_code,
+                error_code=_relay_receive_error_code(error_code),
             )
         except Exception as exc:
             error_code = _websocket_transport_error_code(exc, uses_proxy=self._uses_proxy)
@@ -173,7 +180,7 @@ class WebsocketsResponsesWebSocket:
             return UpstreamWebSocketMessage(
                 kind="error",
                 error=codex_transport_error_message("websocket receive", None, exc),
-                error_code=error_code,
+                error_code=_relay_receive_error_code(error_code),
             )
 
         if isinstance(message, str):
@@ -239,7 +246,7 @@ class CodexResponsesWebSocket:
             return UpstreamWebSocketMessage(
                 kind="error",
                 error=codex_transport_error_message("websocket receive", self._endpoint_id, exc),
-                error_code=error_code,
+                error_code=_relay_receive_error_code(error_code),
             )
         if msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSING, aiohttp.WSMsgType.CLOSED):
             return UpstreamWebSocketMessage(
@@ -261,7 +268,7 @@ class CodexResponsesWebSocket:
                     if exception is not None
                     else "Upstream websocket error"
                 ),
-                error_code=error_code,
+                error_code=_relay_receive_error_code(error_code),
             )
         if msg.type == aiohttp.WSMsgType.TEXT:
             text = msg.data if isinstance(msg.data, str) else str(msg.data)

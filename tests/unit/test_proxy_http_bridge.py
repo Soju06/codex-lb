@@ -14039,8 +14039,10 @@ async def test_http_bridge_reader_preserves_routed_aiohttp_close_code(
 
 
 @pytest.mark.asyncio
-async def test_http_bridge_reader_maps_ordinary_websocket_close_to_stream_incomplete(
+@pytest.mark.parametrize("routed", [False, True], ids=["direct-close", "routed-receive-error"])
+async def test_http_bridge_reader_maps_ordinary_websocket_receive_failure_to_stream_incomplete(
     monkeypatch: pytest.MonkeyPatch,
+    routed: bool,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
 
@@ -14051,8 +14053,19 @@ async def test_http_bridge_reader_maps_ordinary_websocket_close_to_stream_incomp
         async def close(self) -> None:
             return None
 
+    class _RoutedReceiveFailureWebSocket:
+        async def receive(self) -> aiohttp.WSMessage:
+            raise ConnectionResetError("upstream reset")
+
+        async def close(self) -> None:
+            return None
+
     session = _make_bridge_session(key_value="bridge-ordinary-close")
-    session.upstream = WebsocketsResponsesWebSocket(cast(Any, _OrdinaryCloseConnection()))
+    session.upstream = (
+        CodexResponsesWebSocket(_RoutedReceiveFailureWebSocket())
+        if routed
+        else WebsocketsResponsesWebSocket(cast(Any, _OrdinaryCloseConnection()))
+    )
     monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
     monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", AsyncMock(return_value=False))
     failure_calls: list[dict[str, object]] = []
@@ -14070,7 +14083,7 @@ async def test_http_bridge_reader_maps_ordinary_websocket_close_to_stream_incomp
 
     await service._relay_http_bridge_upstream_messages(session)
 
-    assert session.last_upstream_close_code == 1011
+    assert session.last_upstream_close_code == (None if routed else 1011)
     assert len(failure_calls) == 1
     assert failure_calls[0]["error_code"] == "stream_incomplete"
     assert failure_calls[0]["penalize_account"] is True

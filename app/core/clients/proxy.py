@@ -76,6 +76,8 @@ from app.core.resilience.circuit_breaker import (
 )
 from app.core.types import JsonObject, JsonValue
 from app.core.upstream_proxy import ResolvedUpstreamRoute
+from app.core.usage.live_hub import publish_live_usage
+from app.core.usage.live_snapshots import EVENT_MARKER, parse_rate_limit_event_text, parse_rate_limit_headers
 from app.core.utils.json_guards import is_json_mapping
 from app.core.utils.request_id import get_request_id
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
@@ -2510,6 +2512,11 @@ async def stream_responses(
             codex_installation_id=codex_installation_id,
             enforce_openai_sdk_contract=enforce_openai_sdk_contract,
         ):
+            if account_id and EVENT_MARKER in event_block:
+                publish_live_usage(
+                    parse_rate_limit_event_text(event_block),
+                    chatgpt_account_id=account_id,
+                )
             yield event_block
 
 
@@ -2644,6 +2651,11 @@ async def _stream_responses_with_session(
                 resp = _CodexSSEResponse(raw_resp)
                 status_code = resp.status
                 last_stream_activity_at = time.monotonic()
+                if resp.status < 400:
+                    publish_live_usage(
+                        parse_rate_limit_headers(getattr(raw_resp, "headers", None)),
+                        chatgpt_account_id=account_id,
+                    )
                 if resp.status >= 400:
                     if raise_for_status:
                         error_payload = await _error_payload_from_response(resp)

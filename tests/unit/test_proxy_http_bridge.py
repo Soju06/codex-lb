@@ -1693,6 +1693,53 @@ async def test_http_bridge_upstream_non_text_archives_with_request_archive_id(
     assert session.last_upstream_close_code == 1000
 
 
+@pytest.mark.asyncio
+async def test_http_bridge_relay_publishes_live_rate_limit_events(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.core.usage import live_hub
+
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="bridge-live-rate-limits")
+    rate_limit_text = (
+        '{"type":"codex.rate_limits","rate_limits":{"primary":'
+        '{"used_percent":72,"window_minutes":300,"reset_at":1700000300}}}'
+    )
+    messages = [
+        UpstreamWebSocketMessage(kind="text", text=rate_limit_text),
+        UpstreamWebSocketMessage(kind="close", close_code=1000),
+    ]
+    session.upstream = cast(
+        UpstreamResponsesWebSocket,
+        SimpleNamespace(
+            receive=AsyncMock(side_effect=messages),
+            close=AsyncMock(),
+            archive_received=lambda message: None,
+        ),
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(service, "_process_http_bridge_upstream_text", AsyncMock())
+    monkeypatch.setattr(service, "_retire_http_bridge_after_drain_if_ready", AsyncMock(return_value=False))
+    monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", AsyncMock(return_value=False))
+    monkeypatch.setattr(service, "_fail_http_bridge_reader_and_maybe_retire", AsyncMock())
+    monkeypatch.setattr(service, "_fail_pending_websocket_requests", AsyncMock())
+
+    captured: list[tuple[Any, str | None]] = []
+    live_hub.register_live_usage_publisher(
+        lambda snapshot, *, account_id=None, chatgpt_account_id=None: captured.append((snapshot, account_id))
+    )
+    try:
+        await service._relay_http_bridge_upstream_messages(session)
+    finally:
+        live_hub.register_live_usage_publisher(None)
+
+    assert len(captured) == 1
+    snapshot, account_id = captured[0]
+    assert account_id == session.account.id
+    assert snapshot.primary is not None
+    assert snapshot.primary.used_percent == pytest.approx(72.0)
+
+
 def test_pop_terminal_websocket_request_state_precreated_completed_does_not_guess_with_ambiguous_pending() -> None:
     draining = proxy_service._WebSocketRequestState(
         request_id="req-draining",

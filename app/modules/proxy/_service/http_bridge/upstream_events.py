@@ -29,6 +29,8 @@ from app.core.clients.proxy import compact_responses as core_compact_responses  
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
 from app.core.clients.proxy_websocket import UpstreamWebSocketMessage
 from app.core.openai.parsing import parse_sse_event_payload
+from app.core.usage.live_hub import publish_live_usage
+from app.core.usage.live_snapshots import EVENT_MARKER, parse_rate_limit_event_text
 from app.core.utils.request_id import reset_request_id, set_request_id
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
 from app.modules.proxy._service.api_key_usage import (
@@ -288,6 +290,11 @@ class _HTTPBridgeUpstreamEventsMixin:
 
                 if message.kind == "text" and message.text is not None:
                     session.last_upstream_close_code = None
+                    if EVENT_MARKER in message.text:
+                        publish_live_usage(
+                            parse_rate_limit_event_text(message.text),
+                            account_id=session.account.id,
+                        )
                     await self._process_http_bridge_upstream_text(session, message.text)
                     if await self._retire_http_bridge_after_drain_if_ready(session):
                         break

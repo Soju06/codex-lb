@@ -81,6 +81,44 @@ async def test_live_ingestor_writes_usage_rows_for_internal_account(db_setup) ->
 
 
 @pytest.mark.asyncio
+async def test_live_ingestor_carries_credits_on_secondary_only_snapshots(db_setup) -> None:
+    del db_setup
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(
+            _make_account("acc_live_secondary_only", "live-secondary-only@example.com")
+        )
+
+    now_epoch = int(utcnow().timestamp())
+    snapshot = LiveRateLimitSnapshot(
+        primary=None,
+        secondary=LiveUsageWindow(used_percent=44.0, window_minutes=10080, reset_at=now_epoch + 5 * 24 * 3600),
+        credits_has=True,
+        credits_unlimited=False,
+        credits_balance=9.25,
+    )
+
+    ingestor = live_ingest.LiveUsageIngestor(queue_size=8, write_min_interval_seconds=0.0)
+    ingestor.start()
+    try:
+        ingestor.publish(snapshot, account_id="acc_live_secondary_only")
+        deadline = asyncio.get_event_loop().time() + 5.0
+        secondary = None
+        while secondary is None and asyncio.get_event_loop().time() < deadline:
+            async with SessionLocal() as session:
+                secondary = await UsageRepository(session).latest_entry_for_account(
+                    "acc_live_secondary_only", window="secondary"
+                )
+            if secondary is None:
+                await asyncio.sleep(0.05)
+    finally:
+        await ingestor.stop()
+
+    assert secondary is not None
+    assert secondary.credits_has is True
+    assert secondary.credits_balance == pytest.approx(9.25)
+
+
+@pytest.mark.asyncio
 async def test_live_ingestor_resolves_chatgpt_account_id(db_setup) -> None:
     del db_setup
     async with SessionLocal() as session:

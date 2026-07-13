@@ -154,6 +154,10 @@ class LiveUsageIngestor:
                     credits_balance=snapshot.credits_balance,
                 )
             if snapshot.secondary is not None:
+                # Mirror the poller: credits normally ride the primary row.
+                # A secondary-only snapshot (e.g. the short window is not
+                # being reported) must still carry the fresh credit state.
+                secondary_carries_credits = snapshot.primary is None
                 await repo.add_entry(
                     account_id=account_id,
                     used_percent=float(snapshot.secondary.used_percent),
@@ -162,6 +166,9 @@ class LiveUsageIngestor:
                     window="secondary",
                     reset_at=snapshot.secondary.reset_at,
                     window_minutes=snapshot.secondary.window_minutes,
+                    credits_has=snapshot.credits_has if secondary_carries_credits else None,
+                    credits_unlimited=snapshot.credits_unlimited if secondary_carries_credits else None,
+                    credits_balance=snapshot.credits_balance if secondary_carries_credits else None,
                 )
         self._last_write[account_id] = (_fingerprint(snapshot), time.monotonic())
         now = time.monotonic()

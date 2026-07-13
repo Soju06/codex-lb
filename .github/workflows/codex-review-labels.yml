@@ -46,6 +46,7 @@ jobs:
       - name: Sync labels
         env:
           GH_TOKEN: ${{ secrets.CODEX_LABEL_SYNC_TOKEN || secrets.RELEASE_PLEASE_TOKEN || github.token }}
+          GH_FALLBACK_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
           REPO: ${{ github.repository }}
         run: |
@@ -77,6 +78,7 @@ jobs:
       - name: Sync labels
         env:
           GH_TOKEN: ${{ secrets.CODEX_LABEL_SYNC_TOKEN || secrets.RELEASE_PLEASE_TOKEN || github.token }}
+          GH_FALLBACK_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
         run: |
           if [ ! -f .github/scripts/sync_codex_ok_labels.py ]; then

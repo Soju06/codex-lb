@@ -433,10 +433,15 @@ async def test_permanent_failure_cas_loses_to_rotation_committed_during_status_w
         assert account is not None
         manager = AuthManager(repo)
 
-        with pytest.raises(RefreshError) as exc_info:
-            await manager.refresh_account(account)
+        # The permanent-failure guard re-reads inside the status-CAS retry,
+        # observes that the peer committed genuinely different refresh-token
+        # material, and adopts the repaired row instead of re-raising the
+        # permanent RefreshError. Re-raising would let the proxy caller invoke
+        # LoadBalancer.mark_permanent_failure() and clobber the valid rotation.
+        refreshed = await manager.refresh_account(account)
 
-    assert exc_info.value.code == "refresh_token_reused"
+    assert refreshed.status == AccountStatus.ACTIVE
+    assert TokenEncryptor().decrypt(refreshed.refresh_token_encrypted) == "refresh-rotated"
     status, stored_refresh_token, sticky_present = await _account_snapshot(account_id)
     assert status == AccountStatus.ACTIVE
     assert stored_refresh_token == "refresh-rotated"

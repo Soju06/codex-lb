@@ -1038,7 +1038,7 @@ async def test_account_refresh_claims_migration_upgrade_and_downgrade(tmp_path):
     from app.db.migrate import _build_alembic_config
 
     db_url = f"sqlite+aiosqlite:///{tmp_path / 'refresh-claims.sqlite'}"
-    parent_revision = "20260712_020000_add_api_key_usage_rollups"
+    parent_revision = "20260713_020000_add_model_registry_snapshot"
     claim_revision = "20260713_040000_add_account_refresh_claims"
 
     async def _has_claims_table(engine) -> bool:

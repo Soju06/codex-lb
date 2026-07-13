@@ -1,7 +1,7 @@
 """add account refresh claims coordination table
 
 Revision ID: 20260713_040000_add_account_refresh_claims
-Revises: 20260713_040000_add_replica_guardrails
+Revises: 20260713_020000_add_model_registry_snapshot
 Create Date: 2026-07-13
 """
 
@@ -11,7 +11,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "20260713_040000_add_account_refresh_claims"
-down_revision = "20260713_040000_add_replica_guardrails"
+down_revision = "20260713_020000_add_model_registry_snapshot"
 branch_labels = None
 depends_on = None
 

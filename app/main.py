@@ -89,6 +89,40 @@ from app.modules.usage.live_ingest import start_live_usage_ingestor, stop_live_u
 logger = logging.getLogger(__name__)
 
 
+def _log_abandoned_lease_release(task: asyncio.Task[None]) -> None:
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.warning("Abandoned scheduler leader lease release finished with error", exc_info=exc)
+
+
+async def _release_leader_lease_within(timeout: float) -> None:
+    """Release the scheduler leader lease without ever pinning shutdown.
+
+    ``release()`` uses a background DB session whose rollback/close shield and
+    await their own cleanup, so wrapping it in ``asyncio.wait_for`` would only
+    cancel the awaiting wrapper while a wedged database call keeps unwinding —
+    shutdown could still hang past the deadline. Run the release as a task and,
+    if it does not finish within ``timeout``, abandon it (logging its eventual
+    outcome from a done callback) so shutdown always proceeds within the
+    deadline; the lease then expires after its TTL, which is acceptable.
+    """
+    release_task: asyncio.Task[None] = asyncio.ensure_future(get_leader_election().release())
+    done, _ = await asyncio.wait({release_task}, timeout=timeout)
+    if release_task not in done:
+        logger.warning(
+            "Scheduler leader lease release did not finish within %.1fs; abandoning it so "
+            "shutdown can proceed (the lease will expire after its TTL)",
+            timeout,
+        )
+        release_task.add_done_callback(_log_abandoned_lease_release)
+        return
+    exc = release_task.exception()
+    if exc is not None:
+        logger.warning("Failed to release scheduler leader lease during shutdown", exc_info=exc)
+
+
 class _MetricsServer(Protocol):
     should_exit: bool
 
@@ -471,12 +505,12 @@ async def lifespan(app: FastAPI):
         # release() itself first drains bodies that were detached still
         # draining shielded work, and skips the early release (letting the
         # lease expire by TTL) if any is still running, so a follower cannot
-        # become leader while this process may still act as one. The timeout
-        # covers that bounded drain plus the row delete.
-        try:
-            await asyncio.wait_for(get_leader_election().release(), timeout=10)
-        except Exception:
-            logger.warning("Failed to release scheduler leader lease during shutdown", exc_info=True)
+        # become leader while this process may still act as one. The deadline
+        # covers that bounded drain plus the row delete, and — because the
+        # release path shields and awaits its own session teardown — is
+        # enforced by abandoning the release task rather than awaiting a
+        # potentially wedged cancellation, so shutdown always proceeds.
+        await _release_leader_lease_within(10)
         try:
             await close_http_client()
         finally:

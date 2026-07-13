@@ -664,6 +664,63 @@ async def test_release_skips_delete_while_detached_body_still_draining(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_run_if_leader_bounds_heartbeat_sleep_by_remaining_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Regression: the heartbeat must not sleep a full renew interval when the
+    # seeded lease deadline is closer than that. A preserved acquire can leave
+    # ``_lease_deadline`` only a fraction of a second out while renew_interval
+    # (ttl // 3) is much larger; sleeping the whole interval would keep the
+    # gated body running long after the DB row has expired, letting a follower
+    # acquire and run the same singleton work concurrently. The heartbeat must
+    # wake by the remaining lease to renew (and here, demote), not the interval.
+    ttl = 30  # renew_interval = 10s, far larger than the ~0.3s remaining lease
+
+    class _AllErrorSession(_FakeSession):
+        # Every DB call fails: try_acquire preserves the still-valid held lease
+        # (no DB write, so the stored expiry is unchanged) and every renewal
+        # errors, so the only thing that can demote promptly is a bounded sleep.
+        def __init__(self) -> None:
+            super().__init__("postgresql", [])
+            self.execute_calls = 0
+
+        async def execute(self, statement: Any, params: Any = None) -> _FakeResult:
+            self.execute_calls += 1
+            raise RuntimeError("db down")
+
+    session = _AllErrorSession()
+    _install(monkeypatch, session, ttl=ttl)
+
+    election = leader_election_module.LeaderElection(leader_id="node-a")
+    loop = asyncio.get_running_loop()
+    election._is_leader = True
+    election._lease_deadline = loop.time() + 0.3
+
+    body_cancelled = asyncio.Event()
+
+    async def _body() -> str:
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            body_cancelled.set()
+            raise
+        return "ran"
+
+    start = loop.time()
+    result = await election.run_if_leader(_body)
+
+    assert result is None
+    assert election.is_leader is False
+    assert body_cancelled.is_set()
+    # Bug: the heartbeat sleeps the full 10s renew_interval before its first
+    # renewal, running the body ~10s past the true DB expiry. Fix: it wakes by
+    # the ~0.3s deadline, renews (which fails past the deadline), and demotes.
+    assert loop.time() - start < 3.0
+    # One preserved acquire attempt + exactly one renewal attempt before demotion.
+    assert session.execute_calls == 2
+
+
+@pytest.mark.asyncio
 async def test_run_if_leader_runs_body_directly_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
     session = _FakeSession("postgresql", [])
     _install(monkeypatch, session, enabled=False)

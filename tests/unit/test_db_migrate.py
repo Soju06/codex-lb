@@ -1877,7 +1877,13 @@ def test_replica_guardrails_migration_round_trips_with_version_backfill(tmp_path
     config = _build_alembic_config(url)
 
     script_directory = ScriptDirectory.from_config(config)
-    assert script_directory.get_heads() == [target_revision]
+    # The replica-guardrails migration now sits beneath later revisions (e.g.
+    # the reset-credit redeem tables re-parented onto it), so it is an ancestor
+    # of the single graph head rather than the head itself.
+    heads = script_directory.get_heads()
+    assert len(heads) == 1
+    ancestry = {script.revision for script in script_directory.walk_revisions()}
+    assert target_revision in ancestry
 
     engine = create_engine(to_sync_database_url(url))
     try:

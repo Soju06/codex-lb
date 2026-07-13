@@ -17,6 +17,7 @@ The `scheduler_leader` lease gating seven singleton schedulers is unsound in eve
 - Release the lease in the `app/main.py` lifespan finally-block after all schedulers stop.
 - Settings: `leader_election_enabled` defaults to true; `leader_election_ttl_seconds` defaults to 60 with a minimum of 5.
 - New `scheduler-coordination` capability owning the lease contract; `usage-refresh-policy`'s "Multi-replica leader guard" references it; `quota-phase-planner/context.md` wording fixed.
+- `replica-operations` MODIFIED delta: its SQLite requirement no longer claims the lease is bypassed (SQLite now arbitrates the durable lease via the atomic conditional upsert, so exactly one process wins), and its multi-replica requirement reflects that `CODEX_LB_LEADER_ELECTION_ENABLED` defaults to `true` — keeping the main SSOT consistent with `scheduler-coordination` on archive.
 - No migration: the existing `scheduler_leader` table suffices.
 
 ## Non-goals

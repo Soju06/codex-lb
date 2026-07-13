@@ -286,7 +286,11 @@ class AuthManager:
         # identity-map object in place, so comparing against the live attribute
         # would compare the row with itself.
         while True:
-            if await claims.try_acquire(account.id, ttl_seconds=settings.token_refresh_claim_ttl_seconds):
+            if await claims.try_acquire(
+                account.id,
+                ttl_seconds=settings.token_refresh_claim_ttl_seconds,
+                owner=requested_fingerprint,
+            ):
                 try:
                     # Post-claim fresh re-read: another replica may have rotated
                     # the material between the caller's read and our claim.
@@ -301,7 +305,7 @@ class AuthManager:
                     )
                     return await self._perform_refresh(account, refresh_token_encrypted=fresh_material)
                 finally:
-                    await claims.release(account.id)
+                    await claims.release(account.id, owner=requested_fingerprint)
             # Claim held by another replica: adopt its rotation as soon as it
             # commits; never write account status from the losing side.
             latest = await self._repo.get_by_id_fresh(account.id)
@@ -490,44 +494,73 @@ class AuthManager:
         the fingerprint of the material this attempt exchanged, captured before
         the fresh re-read, because ``get_by_id_fresh`` may refresh the caller's
         own identity-map object in place.
+
+        The status downgrade uses a compare-and-set conditioned on the freshly
+        observed account state including the refresh-token ciphertext: a
+        concurrent re-auth/import can change that ciphertext between the fresh
+        re-read and the write. As with token persistence, a ciphertext change is
+        not by itself a newer rotation — Fernet is non-deterministic, so a
+        re-auth/import that re-encrypts the SAME plaintext changes the bytes
+        without issuing a new token. When the fingerprint is still unchanged the
+        account is holding the very material that just failed permanently, so we
+        re-read and retry the CAS (bounded) against the freshly observed
+        ciphertext rather than skipping the downgrade and leaving the account
+        active with dead credentials. Only a genuinely different fingerprint is
+        adopted as a peer rotation.
         """
         latest = await self._repo.get_by_id_fresh(account.id)
-        if latest is not None and (
+        if latest is None:
+            # Account row is gone; nothing to downgrade.
+            return None
+        if (
             _refresh_token_material_fingerprint(self._encryptor, latest.refresh_token_encrypted)
             != attempted_fingerprint
         ):
             return _adopt_account_row(account, latest)
         reason = PERMANENT_FAILURE_CODES.get(exc.code, exc.message)
         status = account_status_for_permanent_failure(exc.code)
-        if latest is None:
-            # Account row is gone; nothing to downgrade.
-            return None
-        # The CAS is additionally conditioned on the freshly observed
-        # refresh-token ciphertext: a concurrent re-auth/import can rotate the
-        # token material between the fresh re-read above and this write while
-        # leaving status/reason/reset untouched, and a stale REAUTH_REQUIRED
-        # write must not clobber that freshly repaired account.
-        applied = await self._repo.update_status_if_current(
-            account.id,
-            status,
-            reason,
-            expected_status=latest.status,
-            expected_deactivation_reason=latest.deactivation_reason,
-            expected_reset_at=latest.reset_at,
-            expected_refresh_token_encrypted=latest.refresh_token_encrypted,
-        )
-        if not applied:
-            logger.warning(
-                "Skipped permanent refresh-failure status write for account_id=%s code=%s: "
-                "account state changed concurrently",
+        for _ in range(_TOKEN_CAS_MAX_ATTEMPTS):
+            applied = await self._repo.update_status_if_current(
                 account.id,
-                exc.code,
+                status,
+                reason,
+                expected_status=latest.status,
+                expected_deactivation_reason=latest.deactivation_reason,
+                expected_reset_at=latest.reset_at,
+                expected_refresh_token_encrypted=latest.refresh_token_encrypted,
             )
-            return None
-        account.status = status
-        account.deactivation_reason = reason
-        mark_account_routing_unavailable(account.id)
-        get_account_selection_cache().invalidate()
+            if applied:
+                account.status = status
+                account.deactivation_reason = reason
+                mark_account_routing_unavailable(account.id)
+                get_account_selection_cache().invalidate()
+                return None
+            # CAS missed: the freshly observed account state changed between the
+            # re-read and the write. Re-read to decide why.
+            latest = await self._repo.get_by_id_fresh(account.id)
+            if latest is None:
+                return None
+            if (
+                _refresh_token_material_fingerprint(self._encryptor, latest.refresh_token_encrypted)
+                != attempted_fingerprint
+            ):
+                # A concurrent re-auth/import committed a genuinely different
+                # refresh token in the CAS window. The account is repaired; do
+                # not downgrade it. Re-raise the permanent error so the caller
+                # fails over without clobbering the freshly rotated material.
+                return None
+            # Same refresh-token plaintext, merely re-encrypted (non-deterministic
+            # Fernet) — or an unrelated status/reason/reset nudge. The account is
+            # still holding the material that just failed permanently, so retry
+            # the CAS against the freshly observed ciphertext so the downgrade
+            # lands rather than leaving a dead account active.
+        logger.warning(
+            "Permanent refresh-failure status CAS for account_id=%s code=%s kept missing on "
+            "unchanged token material after %d attempts; leaving status unchanged",
+            account.id,
+            exc.code,
+            _TOKEN_CAS_MAX_ATTEMPTS,
+        )
         return None
 
     async def _refresh_tokens(self, refresh_token: str, *, account: Account) -> TokenRefreshResult:

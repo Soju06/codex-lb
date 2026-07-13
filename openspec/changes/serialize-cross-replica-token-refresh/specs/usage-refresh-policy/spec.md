@@ -6,6 +6,8 @@
 
 Before any upstream OAuth token exchange for an account, the system MUST acquire that account's row in `account_refresh_claims` via a conditional upsert that succeeds only when no unexpired claim by another claimant exists; the upsert MUST be atomic on both PostgreSQL (ON CONFLICT row lock) and SQLite (single-writer lock). After acquiring, the system MUST re-read the account's refresh-token material fresh from the database (bypassing session identity caches) and MUST skip the upstream exchange when the material has rotated since the refresh was requested, adopting the stored tokens instead. Claims MUST carry an expiry covering all work performed under the claim (TTL at least the refresh-admission wait timeout plus twice the refresh HTTP timeout, because the claim is held across the admission wait and the OAuth exchange) so a crashed claimant cannot block refresh indefinitely while a healthy claimant cannot lose its claim mid-work, MUST be released after the refreshed tokens are persisted, and MUST NOT be held as an open database transaction or lock across upstream network I/O. The claimant identity MUST remain unique per process even when the configured instance id exceeds the stored column width (truncate the instance-id portion, never the per-process suffix).
 
+Claim ownership MUST be per-refresh, not process-wide: the stored claim identity MUST combine the claimant (replica/process) identity with a per-refresh owner token derived from the refresh-token material being exchanged (its fingerprint). The re-entrant same-owner takeover that lets a crashed refresh reclaim its own live claim MUST match only when BOTH the claimant AND the owner token are identical; a release MUST delete only the exact composed claim. Consequently, when two refreshes for the same account run in one process with different token fingerprints (for example a re-auth/import lands while an older forced refresh is still in flight), the second refresh MUST contend for the claim (wait until the first releases or the claim expires) rather than re-entering the first refresh's live claim, and neither refresh's release MAY delete the other's claim. The composed claim identity MUST fit the stored column width without truncating either the per-process suffix or the owner token.
+
 After a successful upstream exchange, the system MUST persist the newly issued tokens with a compare-and-set conditioned on the refresh-token ciphertext the exchange was requested with. When that compare-and-set misses, the system MUST NOT assume any ciphertext change is a newer rotation: it MUST compare the freshly observed refresh-token material against the material this attempt exchanged (by decrypted-plaintext fingerprint, because token ciphertext is non-deterministic and a concurrent re-authentication or import can re-encrypt the same plaintext to different bytes). Only when the stored material is a genuinely different refresh token MUST the system adopt the stored row without persisting its own result; when the stored material is the same plaintext merely re-encrypted, the system MUST retry the compare-and-set against the freshly observed ciphertext (bounded) so its own single-use rotation is persisted rather than discarding it and leaving the account holding the token it already consumed upstream.
 
 #### Scenario: Two replicas force-refresh the same account concurrently
@@ -22,6 +24,13 @@ After a successful upstream exchange, the system MUST persist the newly issued t
 - **GIVEN** a replica acquired the refresh claim for an account and crashed before releasing it
 - **WHEN** another replica attempts to refresh the account after the claim TTL has elapsed
 - **THEN** the claim acquisition succeeds and the refresh proceeds
+
+#### Scenario: Two refreshes in one process with different fingerprints contend
+
+- **GIVEN** a refresh for an account is in flight in a process, holding the account's claim under one refresh-token fingerprint
+- **WHEN** a second refresh for the same account starts in the same process with a different refresh-token fingerprint (for example after a re-auth/import)
+- **THEN** the second refresh does NOT re-enter the live claim and instead contends (waits until the first releases or the claim expires)
+- **AND** releasing either refresh's claim does not delete the other refresh's claim
 
 #### Scenario: Winner adopts a rotation that landed before its claim
 
@@ -95,6 +104,19 @@ freshly observed account state including the refresh-token ciphertext, so a
 concurrent re-authentication or rotation — even one that leaves
 status/reason/reset untouched — is never overwritten.
 
+When that status compare-and-set misses, a ciphertext change MUST NOT by itself
+be treated as a rotation to defer to: because token ciphertext is
+non-deterministic, a concurrent re-authentication or import can re-encrypt the
+SAME refresh-token plaintext to different bytes between the fresh re-read and
+the write. The system MUST compare the freshly observed refresh-token material
+against the material this attempt exchanged by decrypted-plaintext fingerprint.
+When the fingerprint is genuinely different the system MUST adopt the stored row
+without downgrading. When the fingerprint is unchanged — the account is still
+holding the very material that just failed permanently — the system MUST re-read
+and retry the compare-and-set against the freshly observed ciphertext (bounded)
+so the downgrade lands, rather than skipping the status write and leaving the
+account active with dead credentials.
+
 #### Scenario: Refresh-time `app_session_terminated` is classified as permanent
 
 - **WHEN** `classify_refresh_error("app_session_terminated")` is evaluated
@@ -118,6 +140,18 @@ status/reason/reset untouched — is never overwritten.
 - **WHEN** this replica's exchange fails with `refresh_token_reused`
 - **THEN** no `reauth_required` write occurs
 - **AND** this replica returns the rotated tokens from the database
+
+#### Scenario: Status CAS misses on a re-encryption of the same failing token
+
+- **GIVEN** this replica's exchange failed permanently and the account still
+  holds the same refresh-token plaintext that failed
+- **AND** a concurrent re-authentication/import re-encrypted that SAME plaintext
+  to different ciphertext between the fresh re-read and the status CAS, so the
+  CAS misses while status/reason/reset are unchanged
+- **WHEN** the guard re-reads and finds the refresh-token fingerprint unchanged
+- **THEN** it retries the status CAS against the freshly observed ciphertext and
+  lands the `reauth_required` downgrade
+- **AND** it does not leave the account active with the dead credentials
 
 ### Requirement: Multi-replica leader guard
 

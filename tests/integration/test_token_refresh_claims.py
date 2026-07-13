@@ -443,6 +443,62 @@ async def test_permanent_failure_cas_loses_to_rotation_committed_during_status_w
     assert sticky_present is True
 
 
+@pytest.mark.asyncio
+async def test_permanent_failure_cas_retries_when_same_plaintext_re_encrypted(db_setup, monkeypatch):
+    """Status-CAS retry regression: a concurrent re-auth/import re-encrypts the
+    SAME refresh-token plaintext (non-deterministic Fernet) in the window
+    between the permanent-failure guard's fresh re-read and its status CAS. The
+    ciphertext guard misses even though there was no genuine rotation, and the
+    account is still holding the very material that just failed permanently. The
+    guard must re-read and retry the CAS against the freshly observed ciphertext
+    and land the REAUTH_REQUIRED downgrade rather than skipping it and leaving a
+    dead account active."""
+    account_id = "acc_cas_reencrypt_retry"
+    await _create_account(account_id)
+    encryptor = TokenEncryptor()
+
+    async def fake_refresh(refresh_token: str, **_kwargs: object) -> TokenRefreshResult:
+        raise RefreshError("refresh_token_reused", "refresh token reused", True)
+
+    monkeypatch.setattr(auth_manager_module, "refresh_access_token", fake_refresh)
+
+    reencrypted = {"done": False}
+
+    class _ReEncryptWindowRepo(AccountsRepository):
+        async def get_by_id_fresh(self, account_id: str) -> Account | None:
+            latest = await super().get_by_id_fresh(account_id)
+            if not reencrypted["done"]:
+                reencrypted["done"] = True
+                # Re-auth re-encrypts the SAME plaintext to different bytes in
+                # the window between this fresh read and the status CAS. Status/
+                # reason/reset are untouched, so only the ciphertext guard trips.
+                async with SessionLocal() as reauth_session:
+                    await AccountsRepository(reauth_session).update_tokens(
+                        account_id,
+                        access_token_encrypted=encryptor.encrypt("access-old"),
+                        refresh_token_encrypted=encryptor.encrypt("refresh-old"),
+                        id_token_encrypted=encryptor.encrypt("id-old"),
+                        last_refresh=utcnow(),
+                    )
+            return latest
+
+    async with SessionLocal() as session:
+        repo = _ReEncryptWindowRepo(session)
+        account = await repo.get_by_id(account_id)
+        assert account is not None
+        manager = AuthManager(repo)
+
+        with pytest.raises(RefreshError) as exc_info:
+            await manager.refresh_account(account)
+
+    assert exc_info.value.code == "refresh_token_reused"
+    status, stored_refresh_token, sticky_present = await _account_snapshot(account_id)
+    # The downgrade landed on retry: same (dead) plaintext, account de-routed.
+    assert status == AccountStatus.REAUTH_REQUIRED
+    assert stored_refresh_token == "refresh-old"
+    assert sticky_present is False
+
+
 def _encode_jwt(payload: dict) -> str:
     import base64
     import json
@@ -680,18 +736,48 @@ async def test_claim_coordinator_win_lose_release_semantics(db_setup):
     await _create_account(account_id)
     coordinator_a = RefreshClaimCoordinator(claimant_id="replica-a")
     coordinator_b = RefreshClaimCoordinator(claimant_id="replica-b")
+    owner = "fingerprint-1"
 
-    assert await coordinator_a.try_acquire(account_id, ttl_seconds=30) is True
-    # Re-entrant for the same claimant, exclusive against others.
-    assert await coordinator_a.try_acquire(account_id, ttl_seconds=30) is True
-    assert await coordinator_b.try_acquire(account_id, ttl_seconds=30) is False
+    assert await coordinator_a.try_acquire(account_id, ttl_seconds=30, owner=owner) is True
+    # Re-entrant for the same claimant AND owner, exclusive against others.
+    assert await coordinator_a.try_acquire(account_id, ttl_seconds=30, owner=owner) is True
+    assert await coordinator_b.try_acquire(account_id, ttl_seconds=30, owner=owner) is False
 
     # A foreign release is a no-op; the owner's release frees the claim.
-    await coordinator_b.release(account_id)
-    assert await coordinator_b.try_acquire(account_id, ttl_seconds=30) is False
-    await coordinator_a.release(account_id)
-    assert await coordinator_b.try_acquire(account_id, ttl_seconds=30) is True
+    await coordinator_b.release(account_id, owner=owner)
+    assert await coordinator_b.try_acquire(account_id, ttl_seconds=30, owner=owner) is False
+    await coordinator_a.release(account_id, owner=owner)
+    assert await coordinator_b.try_acquire(account_id, ttl_seconds=30, owner=owner) is True
     snapshot = await coordinator_b.current_claim(account_id)
     assert snapshot is not None
-    assert snapshot.claimed_by == "replica-b"
-    await coordinator_b.release(account_id)
+    assert snapshot.claimed_by.startswith("replica-b")
+    await coordinator_b.release(account_id, owner=owner)
+
+
+@pytest.mark.asyncio
+async def test_claim_owner_is_per_refresh_not_process_wide(db_setup):
+    """Regression: two refreshes for one account in ONE process with different
+    token fingerprints must contend for the claim, not piggyback. Before the
+    per-refresh owner fix the claim was keyed process-wide (account only), so
+    the second owner re-entered the first owner's live claim and either
+    release() deleted the other's claim, letting a third replica in mid-exchange."""
+    account_id = "acc_claim_per_owner"
+    await _create_account(account_id)
+    # One process => one claimant identity, two distinct in-flight refreshes.
+    coordinator = RefreshClaimCoordinator(claimant_id="replica-a")
+    owner_one = "fingerprint-old"
+    owner_two = "fingerprint-reauth"
+
+    assert await coordinator.try_acquire(account_id, ttl_seconds=30, owner=owner_one) is True
+    # A different-fingerprint refresh in the same process must NOT re-enter the
+    # live claim; it contends and loses until the first owner releases/expires.
+    assert await coordinator.try_acquire(account_id, ttl_seconds=30, owner=owner_two) is False
+
+    # Releasing the second owner is a no-op: it must not delete owner_one's claim.
+    await coordinator.release(account_id, owner=owner_two)
+    assert await coordinator.try_acquire(account_id, ttl_seconds=30, owner=owner_two) is False
+
+    # Only the holding owner's release frees the claim.
+    await coordinator.release(account_id, owner=owner_one)
+    assert await coordinator.try_acquire(account_id, ttl_seconds=30, owner=owner_two) is True
+    await coordinator.release(account_id, owner=owner_two)

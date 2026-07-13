@@ -1078,12 +1078,12 @@ async def test_claim_wait_is_capped_by_caller_refresh_budget(monkeypatch):
     class _ForeignClaims:
         claimant_id = "this-replica"
 
-        async def try_acquire(self, account_id: str, *, ttl_seconds: float) -> bool:
-            del account_id, ttl_seconds
+        async def try_acquire(self, account_id: str, *, ttl_seconds: float, owner: str) -> bool:
+            del account_id, ttl_seconds, owner
             return False
 
-        async def release(self, account_id: str) -> None:
-            del account_id
+        async def release(self, account_id: str, *, owner: str) -> None:
+            del account_id, owner
 
     async def _unexpected_refresh(_: str, **_kwargs: object) -> TokenRefreshResult:
         raise AssertionError("no upstream exchange may run while a foreign claim is held")

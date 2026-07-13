@@ -109,6 +109,41 @@ async def test_live_ingestor_invalidates_rate_limit_header_cache(monkeypatch, db
 
 
 @pytest.mark.asyncio
+async def test_live_ingestor_trailing_invalidation_covers_throttled_writes(monkeypatch, db_setup) -> None:
+    del db_setup
+    from app.modules.usage import live_ingest as live_ingest_module
+
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        await repo.upsert(_make_account("acc_live_trail_a", "live-trail-a@example.com"))
+        await repo.upsert(_make_account("acc_live_trail_b", "live-trail-b@example.com"))
+
+    invalidations: list[float] = []
+
+    class _SpyHeadersCache:
+        async def invalidate(self) -> None:
+            invalidations.append(asyncio.get_event_loop().time())
+
+    monkeypatch.setattr(live_ingest_module, "get_rate_limit_headers_cache", lambda: _SpyHeadersCache())
+    monkeypatch.setattr(live_ingest_module, "_CACHE_INVALIDATION_MIN_INTERVAL_SECONDS", 0.2)
+
+    ingestor = live_ingest.LiveUsageIngestor(queue_size=8, write_min_interval_seconds=0.0)
+    ingestor.start()
+    try:
+        # Two accounts write inside one throttle window: the second write
+        # must still be covered by a trailing invalidation.
+        ingestor.publish(_snapshot(), account_id="acc_live_trail_a")
+        ingestor.publish(_snapshot(), account_id="acc_live_trail_b")
+        deadline = asyncio.get_event_loop().time() + 5.0
+        while len(invalidations) < 2 and asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(0.05)
+    finally:
+        await ingestor.stop()
+
+    assert len(invalidations) >= 2
+
+
+@pytest.mark.asyncio
 async def test_live_ingestor_carries_credits_on_secondary_only_snapshots(db_setup) -> None:
     del db_setup
     async with SessionLocal() as session:

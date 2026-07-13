@@ -65,6 +65,7 @@ class LiveUsageIngestor:
         self._consumer: asyncio.Task[None] | None = None
         self._dropped = 0
         self._last_cache_invalidation = 0.0
+        self._trailing_invalidation: asyncio.Task[None] | None = None
 
     def publish(
         self,
@@ -98,12 +99,15 @@ class LiveUsageIngestor:
     async def stop(self) -> None:
         consumer = self._consumer
         self._consumer = None
-        if consumer is not None:
-            consumer.cancel()
-            try:
-                await consumer
-            except asyncio.CancelledError:
-                pass
+        trailing = self._trailing_invalidation
+        self._trailing_invalidation = None
+        for task in (consumer, trailing):
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
 
     def _should_skip(self, account_id: str, snapshot: LiveRateLimitSnapshot) -> bool:
         last = self._last_write.get(account_id)
@@ -172,14 +176,33 @@ class LiveUsageIngestor:
                     credits_balance=snapshot.credits_balance if secondary_carries_credits else None,
                 )
         self._last_write[account_id] = (_fingerprint(snapshot), time.monotonic())
+        await self._invalidate_caches_throttled()
+
+    async def _invalidate_caches_throttled(self) -> None:
+        # Invalidations are throttled, but every write must still be covered:
+        # a write inside the throttle window schedules one trailing
+        # invalidation at window expiry, so cached selection inputs and
+        # downstream x-codex-* headers are stale for at most the throttle
+        # interval rather than the header cache TTL.
         now = time.monotonic()
-        if now - self._last_cache_invalidation >= _CACHE_INVALIDATION_MIN_INTERVAL_SECONDS:
-            self._last_cache_invalidation = now
-            get_account_selection_cache().invalidate()
-            # Downstream x-codex-* headers are served from a TTL cache that
-            # only the poller invalidates otherwise; drop it so clients see
-            # the live values before the TTL expires.
-            await get_rate_limit_headers_cache().invalidate()
+        remaining = _CACHE_INVALIDATION_MIN_INTERVAL_SECONDS - (now - self._last_cache_invalidation)
+        if remaining <= 0:
+            await self._invalidate_caches_now()
+            return
+        if self._trailing_invalidation is None or self._trailing_invalidation.done():
+            self._trailing_invalidation = asyncio.create_task(self._trailing_invalidate(remaining))
+
+    async def _trailing_invalidate(self, delay_seconds: float) -> None:
+        await asyncio.sleep(delay_seconds)
+        await self._invalidate_caches_now()
+
+    async def _invalidate_caches_now(self) -> None:
+        self._last_cache_invalidation = time.monotonic()
+        get_account_selection_cache().invalidate()
+        # Downstream x-codex-* headers are served from a TTL cache that only
+        # the poller invalidates otherwise; drop it so clients see the live
+        # values before the TTL expires.
+        await get_rate_limit_headers_cache().invalidate()
 
     async def _resolve_account_id(self, chatgpt_account_id: str | None) -> str | None:
         if not chatgpt_account_id:

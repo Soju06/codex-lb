@@ -1743,6 +1743,62 @@ def test_state_from_account_expires_stale_partial_primary_usage_after_reset(monk
     assert state.secondary_used_percent == 40.0
 
 
+def test_state_from_account_drops_stale_window_duration_when_superseded(monkeypatch):
+    now = 1_700_000_000.0
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+
+    state = _state_from_account(
+        account=_make_test_account(status=AccountStatus.ACTIVE),
+        # Upstream stopped reporting the short window: the primary row is
+        # hours older than the weekly row written by later fetches.
+        primary_entry=_make_test_usage(
+            window="primary",
+            used_percent=40.0,
+            reset_at=int(now - 7200),
+            recorded_at=_epoch_to_naive_utc(now - 3 * 3600),
+            window_minutes=300,
+        ),
+        secondary_entry=_make_test_usage(
+            window="secondary",
+            used_percent=40.0,
+            reset_at=int(now + 5 * 24 * 3600),
+            recorded_at=_epoch_to_naive_utc(now - 30),
+        ),
+        runtime=RuntimeState(),
+    )
+
+    assert state.primary_window_minutes is None
+
+
+def test_state_from_account_keeps_window_duration_for_same_fetch_rows(monkeypatch):
+    now = 1_700_000_000.0
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+
+    state = _state_from_account(
+        account=_make_test_account(status=AccountStatus.ACTIVE),
+        # Both rows came from the same fetch; the reset elapsed between
+        # refreshes, which does not mean the short window disappeared.
+        primary_entry=_make_test_usage(
+            window="primary",
+            used_percent=40.0,
+            reset_at=int(now - 10),
+            recorded_at=_epoch_to_naive_utc(now - 60),
+            window_minutes=300,
+        ),
+        secondary_entry=_make_test_usage(
+            window="secondary",
+            used_percent=40.0,
+            reset_at=int(now + 5 * 24 * 3600),
+            recorded_at=_epoch_to_naive_utc(now - 59),
+        ),
+        runtime=RuntimeState(),
+    )
+
+    assert state.primary_window_minutes == 300
+
+
 def test_state_from_account_expires_stale_partial_secondary_usage_after_reset(monkeypatch):
     now = 1_700_000_000.0
     monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)

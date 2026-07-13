@@ -32,6 +32,10 @@ from .logic import SHORT_WINDOW_MAX_MINUTES, PlannerSettings
 from .repository import QuotaPlannerRepository
 
 WARMUP_REQUEST_KIND = "warmup"
+# Rows written by the same upstream fetch land within milliseconds of each
+# other; a sibling row only proves a later fetch when it is newer by more
+# than this margin.
+_SIBLING_FETCH_MARGIN_SECONDS = 5.0
 WARMUP_DEFAULT_INPUT_BUDGET = 32
 WARMUP_DEFAULT_OUTPUT_BUDGET = 8
 
@@ -413,6 +417,8 @@ class QuotaWarmupService:
         latest = (await self._usage.latest_by_account()).get(account.id)
         if _sample_blocks_short_window_planning(latest):
             return False, "no_short_window"
+        if await self._short_window_superseded(account.id, latest):
+            return False, "no_short_window"
         if latest is not None and latest.reset_at is not None and latest.reset_at > int(utcnow().timestamp()):
             return False, "account_window_already_active"
 
@@ -430,6 +436,25 @@ class QuotaWarmupService:
         if not force_probe and (effect is None or effect.confidence not in {"observed", "known", "high"}):
             return False, "warmup_effect_unknown"
         return True, "ready"
+
+    async def _short_window_superseded(self, account_id: str, latest: object | None) -> bool:
+        # A strictly newer long-window row proves a later refresh no longer
+        # reported the short window: the stale short primary sample is not
+        # evidence of a current short window, so warm-up traffic would open
+        # nothing. Same-fetch rows land within milliseconds and stay inside
+        # the margin.
+        if latest is None:
+            return False
+        latest_recorded_at = getattr(latest, "recorded_at", None)
+        if latest_recorded_at is None:
+            return False
+        for window in ("secondary", "monthly"):
+            sibling = (await self._usage.latest_by_account(window=window)).get(account_id)
+            if sibling is None:
+                continue
+            if (sibling.recorded_at - latest_recorded_at).total_seconds() > _SIBLING_FETCH_MARGIN_SECONDS:
+                return True
+        return False
 
     async def _send_warmup_probe(self, *, account: Account, model: str, request_id: str) -> WarmupUsage:
         payload = ResponsesRequest.model_validate(

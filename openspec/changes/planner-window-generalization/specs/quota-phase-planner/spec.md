@@ -28,6 +28,20 @@ An account SHALL be phase-plannable for scheduler warmup candidacy and cold-star
 - **WHEN** a warm-now request targets an account whose latest primary-slot sample reports a weekly or monthly window duration
 - **THEN** the execution gate refuses with a stable `no_short_window` reason
 
+#### Scenario: Execution gate refuses superseded short-window samples
+
+- **GIVEN** an account whose latest primary-slot sample reports a short window
+- **AND** a strictly newer long-window row proves a later refresh no longer reported the short window
+- **WHEN** a warm-now request targets that account
+- **THEN** the execution gate refuses with `no_short_window`
+
+#### Scenario: Superseded short-window samples lose plannability
+
+- **GIVEN** an account whose expired primary sample is strictly older than its long-window row
+- **WHEN** selection state is built
+- **THEN** the derived short-window duration is cleared
+- **AND** the planner does not treat the account as a cold short-window warmup candidate
+
 ### Requirement: Phase math derives from observed window durations
 
 Candidate warmup start times, planned window resets, pool-simulation window spans, and synchronization penalties SHALL use each account's observed primary window duration. Planner actions SHALL carry the window duration they were planned with, and cross-account reset math SHALL use each action's own duration.

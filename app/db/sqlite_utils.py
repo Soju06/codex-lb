@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import urllib.parse
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -29,6 +30,14 @@ def sqlite_db_path_from_url(url: str) -> Path | None:
     path = url[marker_index + len(marker) :]
     path = path.partition("?")[0]
     path = path.partition("#")[0]
+
+    # SQLAlchemy`s `URL.render_as_string()` percent-encodes the database path on
+    # Windows (e.g. `sqlite:///C%3A%5CUsers%5C...%5Cstore.db`). Without decoding
+    # it here, the literal percent-escaped string reaches `sqlite3.connect()`,
+    # which either fails with "unable to open database file" or creates a stray
+    # 0-byte database next to the working directory. Decode the path before
+    # turning it into a `Path` so the real file is opened.
+    path = urllib.parse.unquote(path)
 
     if not path or path == ":memory:":
         return None

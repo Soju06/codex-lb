@@ -143,7 +143,16 @@ def _script_location() -> str:
 def _build_alembic_config(database_url: str) -> Config:
     config = Config()
     config.set_main_option("script_location", _script_location())
-    config.set_main_option("sqlalchemy.url", to_sync_database_url(database_url))
+    sync_database_url = to_sync_database_url(database_url)
+    # `to_sync_database_url` routes the URL through `make_url().render_as_string()`,
+    # which percent-encodes the path on Windows (e.g.
+    # `sqlite:///C%3A%5CUsers%5C...%5Cstore.db`). Alembic stores option values in
+    # a `configparser` using `BasicInterpolation`, which treats a bare `%` as
+    # interpolation syntax and raises `ValueError: invalid interpolation syntax`
+    # from `set_main_option`. Escape `%` -> `%%` so ConfigParser keeps the value
+    # verbatim; `get_main_option` decodes `%%` back to `%`, so the URL handed to
+    # SQLAlchemy is unchanged.
+    config.set_main_option("sqlalchemy.url", sync_database_url.replace("%", "%%"))
     config.attributes["configure_logger"] = False
     return config
 

@@ -266,11 +266,19 @@ class LeaderElection:
 
         Bodies detached after the cancellation grace may still be draining
         shielded singleton work as the former leader, so the early release
-        first waits up to ``_RELEASE_DRAIN_GRACE_SECONDS`` for them. If any
-        body is still draining after the grace, the row is left in place —
-        the lease then expires after its TTL — because handing it to a
-        follower while old gated work still runs would recreate the
-        duplicate-singleton overlap the lease exists to prevent.
+        first waits up to ``_RELEASE_DRAIN_GRACE_SECONDS`` for them WHILE it
+        keeps renewing the lease on the heartbeat cadence. A body detached on
+        the graceful-shutdown path is still the rightful leader, and with a
+        short TTL (the minimum is 5s) the DB lease would otherwise expire
+        during the drain wait — a follower could then acquire it and run the
+        same singleton work concurrently with the still-draining body. Renewing
+        while waiting keeps the lease alive for as long as the detached body may
+        still act as leader. If any body is still draining after the grace, the
+        row is left in place — the lease then expires after its TTL, roughly one
+        more TTL past the last renewal, after which the body is treated as
+        abandoned — because handing it to a follower while old gated work still
+        runs would recreate the duplicate-singleton overlap the lease exists to
+        prevent.
 
         Failure to release must never block shutdown; the lease then simply
         expires after the TTL.
@@ -329,7 +337,12 @@ class LeaderElection:
         the lease until the gated body has drained (bounded by the cancel
         grace); the heartbeat is stopped only after the body exits, so a body
         that honours cancellation slower than the remaining lease TTL cannot let
-        the DB lease expire while it still runs as leader.
+        the DB lease expire while it still runs as leader. If the body still has
+        not exited when the cancel grace elapses it is detached (and the
+        heartbeat stops), but the lease is not abandoned: ``release`` keeps
+        renewing it on the same cadence while it waits for the detached body to
+        drain, so the DB lease still cannot expire while a detached body may act
+        as leader.
 
         Returns the body's result, or ``None`` when this replica is not
         leader or the body was cancelled due to lease loss.
@@ -549,17 +562,78 @@ class LeaderElection:
         _log_detached_body_result(task)
 
     async def _drain_detached_bodies(self) -> bool:
-        """Wait for detached gated bodies; true when none remain running."""
+        """Wait for detached gated bodies, renewing the lease while they run.
+
+        Returns ``True`` when no detached body remains running (the row is then
+        safe to delete). A body detached on the graceful-shutdown path is still
+        the rightful leader while it drains shielded singleton work, so the DB
+        lease MUST NOT expire under it: this renews the lease on the heartbeat
+        cadence (``max(1, ttl // 3)``) for as long as it waits. The wait is
+        bounded by ``_RELEASE_DRAIN_GRACE_SECONDS`` so shutdown always proceeds;
+        if a body is still draining when the grace elapses this returns
+        ``False`` and the caller leaves the row for the lease to expire by TTL
+        (the last renewal bought roughly one more TTL, after which the body is
+        treated as abandoned). A renewal that finds rowcount 0 — the lease was
+        already taken over on the lease-loss detach path — is a harmless no-op.
+        """
         pending = {task for task in self._detached_bodies if not task.done()}
         if not pending:
             return True
+        settings = get_settings()
+        renew_interval = max(1, settings.leader_election_ttl_seconds // 3)
+        loop = asyncio.get_running_loop()
         logger.info(
-            "Waiting up to %.1fs for %d detached leader-gated task(s) before releasing the lease",
+            "Waiting up to %.1fs for %d detached leader-gated task(s), renewing the lease "
+            "meanwhile, before releasing it",
             _RELEASE_DRAIN_GRACE_SECONDS,
             len(pending),
         )
-        _, still_pending = await asyncio.wait(pending, timeout=_RELEASE_DRAIN_GRACE_SECONDS)
-        return not still_pending
+        deadline = loop.time() + _RELEASE_DRAIN_GRACE_SECONDS
+        while pending:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return False
+            # Renew BEFORE each wait slice so the database lease cannot expire
+            # while a detached body may still be acting as leader.
+            await self._renew_lease_row()
+            _, pending = await asyncio.wait(pending, timeout=min(float(renew_interval), remaining))
+        return True
+
+    async def _renew_lease_row(self) -> bool:
+        """Extend the lease row's expiry keyed on our ``leader_id``.
+
+        Unlike :meth:`renew` this consults neither the in-memory ``_is_leader``
+        flag nor the locally tracked deadline: it is used by ``release`` while a
+        body detached on the graceful-shutdown path may still be acting as
+        leader, at which point ``_is_leader`` has already been cleared but the
+        database row is still ours. Errors are swallowed (shutdown must proceed);
+        the caller treats a failure as "lease not renewed".
+        """
+        settings = get_settings()
+        ttl = settings.leader_election_ttl_seconds
+        try:
+            async with get_background_session() as session:
+                if _dialect_name(session) == "sqlite":
+                    result = await session.execute(
+                        update(SchedulerLeader)
+                        .where(SchedulerLeader.id == 1, SchedulerLeader.leader_id == self._leader_id)
+                        .values(expires_at=datetime.now(UTC) + timedelta(seconds=ttl))
+                    )
+                else:
+                    result = await session.execute(
+                        _POSTGRES_RENEW_SQL,
+                        {"leader_id": self._leader_id, "ttl": ttl},
+                    )
+                renewed = _rowcount(result) == 1
+                await session.commit()
+                return renewed
+        except Exception:
+            logger.warning(
+                "Failed to renew leader lease while draining detached bodies leader_id=%s",
+                self._leader_id,
+                exc_info=True,
+            )
+            return False
 
 
 def _log_detached_body_result(task: asyncio.Task[Any]) -> None:

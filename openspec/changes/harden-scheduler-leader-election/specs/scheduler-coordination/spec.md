@@ -153,7 +153,7 @@ When the gate is instead cancelled externally (graceful shutdown) while the leas
 
 ### Requirement: Lease is released on graceful shutdown
 
-On lifespan shutdown, after all schedulers are stopped, the process MUST delete the `scheduler_leader` row it holds (matching its own leader id). Before deleting the row, release MUST wait a bounded grace for any gated body that was detached still draining shielded singleton work; if such a body is still running after the grace, release MUST skip deleting the row entirely — the lease then expires after its TTL — so a follower cannot acquire the lease while the shutting-down process may still execute leader-gated work. Release failure MUST NOT block or fail shutdown; the lease then simply expires after the TTL.
+On lifespan shutdown, after all schedulers are stopped, the process MUST delete the `scheduler_leader` row it holds (matching its own leader id). Before deleting the row, release MUST wait a bounded grace for any gated body that was detached still draining shielded singleton work. A body detached on the graceful-shutdown path is still the rightful leader, so while release waits for it the lease MUST NOT be left to expire under it: release MUST keep renewing the lease at an interval no greater than one third of the TTL for as long as it waits, so that with the minimum TTL (5s) the database lease cannot expire during the drain wait and a follower cannot acquire it and run the same singleton work concurrently with the still-draining body. If such a body is still running after the grace, release MUST skip deleting the row entirely — the lease then expires after its TTL (roughly one further TTL past the last renewal, after which the detached body is treated as abandoned) — so a follower cannot acquire the lease while the shutting-down process may still execute leader-gated work. Release failure MUST NOT block or fail shutdown; the lease then simply expires after the TTL.
 
 The shutdown release step MUST be bounded by a deadline that holds even when the database is wedged. Because the release path opens a background session whose rollback/close shield and await their own teardown, cancelling an awaited release (e.g. via `asyncio.wait_for`) would not unwind a stuck database call and could still pin shutdown past the deadline. The release therefore MUST be run as a separate task and abandoned — not awaited — once the deadline elapses, so shutdown always proceeds within the deadline; the abandoned release's eventual outcome MAY be logged and the lease then expires after its TTL.
 
@@ -164,12 +164,20 @@ The shutdown release step MUST be bounded by a deadline that holds even when the
 - **THEN** the lease row is deleted
 - **AND** the surviving replica acquires the lease on its next tick without waiting for TTL expiry
 
+#### Scenario: Shutdown renews the lease while a detached body drains
+
+- **GIVEN** a leader shutting down with the minimum TTL while a detached gated body is still draining shielded refresh work as the rightful leader
+- **WHEN** release waits for the body across more than one renew interval
+- **THEN** release keeps renewing the lease on the heartbeat cadence so the database lease does not expire under the still-draining body
+- **AND** no follower can acquire the lease while the body may still act as leader
+- **AND** once the body drains the lease row is deleted
+
 #### Scenario: Shutdown with a detached gated body still draining
 
 - **GIVEN** a leader shutting down while a detached gated body is still draining shielded refresh work
 - **WHEN** the release drain grace elapses with the body still running
 - **THEN** the lease row is not deleted
-- **AND** shutdown proceeds and followers acquire the lease only after the TTL expires
+- **AND** shutdown proceeds and followers acquire the lease only after the TTL expires (roughly one further TTL past the last renewal, after which the body is treated as abandoned)
 
 #### Scenario: Release fails during shutdown
 

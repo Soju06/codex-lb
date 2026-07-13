@@ -683,7 +683,10 @@ async def test_release_waits_for_detached_body_then_deletes_lease(monkeypatch: p
     # detached and still draining shielded work as the former leader.
     # release() must wait for that body before deleting the lease row so a
     # follower cannot become leader while the old work still runs.
-    session = _FakeSession("postgresql", [1, 0, 1])  # acquire, stolen renewal, release delete
+    # acquire, stolen renewal, then drain-renewal(s) while waiting, then the
+    # release delete. The list is padded so any extra drain renewal caused by
+    # scheduling jitter cannot exhaust the rowcounts.
+    session = _FakeSession("postgresql", [1, 0] + [1] * 8)
     _install(monkeypatch, session, ttl=3)
     election, release, body_finished = await _detach_shielded_body(monkeypatch, session)
 
@@ -702,7 +705,9 @@ async def test_release_skips_delete_while_detached_body_still_draining(monkeypat
     # deleting the lease row would hand leadership to a follower while this
     # process may still act as leader; release() must skip the early release
     # and let the lease expire after its TTL instead.
-    session = _FakeSession("postgresql", [1, 0])  # acquire, stolen renewal; no delete expected
+    # acquire, stolen renewal, then drain-renewal(s); no delete expected. Padded
+    # so extra drain renewals from scheduling jitter cannot exhaust rowcounts.
+    session = _FakeSession("postgresql", [1, 0] + [1] * 8)
     _install(monkeypatch, session, ttl=3)
     election, release, body_finished = await _detach_shielded_body(monkeypatch, session)
     monkeypatch.setattr(leader_election_module, "_RELEASE_DRAIN_GRACE_SECONDS", 0.2)
@@ -712,8 +717,10 @@ async def test_release_skips_delete_while_detached_body_still_draining(monkeypat
 
     assert not body_finished.is_set()
     assert election.is_leader is False
-    assert len(session.statements) == statements_before_release
+    # The lease row is NOT deleted while the detached body still drains, but the
+    # lease IS renewed meanwhile so it cannot expire under the still-running body.
     assert not any(isinstance(statement, Delete) for statement in session.statements)
+    assert len(session.statements) > statements_before_release
 
     release.set()
     [detached] = election._detached_bodies
@@ -830,6 +837,82 @@ async def test_run_if_leader_keeps_renewing_during_shutdown_drain(monkeypatch: p
     # be present because the heartbeat was cancelled first.
     assert statements_at_cancel == 1
     assert len(session.statements) >= 2
+
+
+@pytest.mark.asyncio
+async def test_release_renews_lease_while_detached_body_drains(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Regression (P1): on graceful shutdown a gated body can still be draining
+    # shielded work when the cancel grace elapses; run_if_leader then DETACHES
+    # it and stops the heartbeat. The body is still the rightful leader. With
+    # the minimum TTL (5s) the DB lease would expire during release()'s
+    # drain-wait if release did not renew it, letting a follower acquire the
+    # lease and run the same singleton work concurrently. release() MUST keep
+    # renewing the lease on the heartbeat cadence for as long as the detached
+    # body may still act as leader, and only delete the row once it has drained.
+    ttl = 5  # the minimum allowed TTL; renew_interval = 1s
+    # acquire, then drain renewals while release waits, then the delete. Padded
+    # so extra renewals from scheduling jitter cannot exhaust the rowcounts.
+    session = _FakeSession("postgresql", [1] + [1] * 12)
+    _install(monkeypatch, session, ttl=ttl)
+    monkeypatch.setattr(leader_election_module, "_CANCEL_GRACE_SECONDS", 0.2)
+
+    in_shield = asyncio.Event()
+    release_body = asyncio.Event()
+    body_done = asyncio.Event()
+
+    async def _body() -> str:
+        inner = asyncio.create_task(release_body.wait())
+        in_shield.set()
+        try:
+            await asyncio.shield(inner)
+        except asyncio.CancelledError:
+            # Drain the shielded work before propagating, like the auth-guardian
+            # and usage-refresh singleflight bodies do. This outlives the cancel
+            # grace, so run_if_leader detaches it.
+            await inner
+            body_done.set()
+            raise
+        return "ran"
+
+    election = leader_election_module.LeaderElection(leader_id="node-a")
+    run_task: asyncio.Task[Any] = asyncio.ensure_future(election.run_if_leader(_body))
+
+    await in_shield.wait()
+    # Cancel before the first heartbeat renewal fires so only the acquire has
+    # touched the DB when the shutdown-cancel path begins.
+    await asyncio.sleep(0.1)
+    statements_at_cancel = len(session.statements)
+    assert statements_at_cancel == 1
+
+    # Graceful shutdown cancels the gate while the lease is still held. The body
+    # is still draining after the 0.2s cancel grace, so it is detached.
+    run_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await run_task
+    assert len(election._detached_bodies) == 1
+    assert not body_done.is_set()
+
+    # Release runs concurrently with the still-draining detached body.
+    release_task: asyncio.Task[None] = asyncio.ensure_future(election.release())
+
+    # Let release wait through several renew intervals (renew_interval = 1s)
+    # while the body is still draining. On the pre-fix code release waits without
+    # renewing, so no statement beyond the acquire appears and the DB lease would
+    # expire under the still-running body; the fix renews on every interval so a
+    # follower cannot acquire the lease.
+    await asyncio.sleep(2.5)
+    renewals_during_drain = len(session.statements) - statements_at_cancel
+    assert not body_done.is_set()
+    assert renewals_during_drain >= 2
+
+    # The body finishes draining; release then deletes the row it still owns.
+    release_body.set()
+    await release_task
+
+    assert body_done.is_set()
+    assert election.is_leader is False
+    assert any(isinstance(statement, Delete) for statement in session.statements)
+    assert election._detached_bodies == set()
 
 
 @pytest.mark.asyncio

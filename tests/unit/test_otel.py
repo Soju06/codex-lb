@@ -269,6 +269,7 @@ async def test_lifespan_runs_normally_when_otel_is_disabled(monkeypatch: pytest.
         mark_stale=AsyncMock(),
         unregister=AsyncMock(),
         heartbeat=AsyncMock(),
+        list_active=AsyncMock(return_value=[]),
     )
     call_order: list[str] = []
 
@@ -359,6 +360,7 @@ async def test_lifespan_marks_bridge_membership_stale_on_shutdown(monkeypatch: p
         mark_stale=AsyncMock(),
         unregister=AsyncMock(),
         heartbeat=AsyncMock(),
+        list_active=AsyncMock(return_value=[]),
     )
     cache_poller = SimpleNamespace(
         on_invalidation=Mock(),
@@ -445,6 +447,7 @@ async def test_lifespan_shutdown_fails_bridge_capacity_waiter_and_cancels_usage_
         mark_stale=AsyncMock(),
         unregister=AsyncMock(),
         heartbeat=AsyncMock(),
+        list_active=AsyncMock(return_value=[]),
     )
     cache_poller = SimpleNamespace(
         on_invalidation=Mock(),
@@ -617,6 +620,7 @@ async def test_lifespan_marks_bridge_membership_stale_for_hostname_shared_ids(
         mark_stale=AsyncMock(),
         unregister=AsyncMock(),
         heartbeat=AsyncMock(),
+        list_active=AsyncMock(return_value=[]),
     )
     cache_poller = SimpleNamespace(
         on_invalidation=Mock(),
@@ -688,6 +692,7 @@ async def test_lifespan_registers_bridge_without_waiting_for_advertise_self_prob
         mark_stale=AsyncMock(),
         unregister=AsyncMock(),
         heartbeat=AsyncMock(),
+        list_active=AsyncMock(return_value=[]),
     )
     cache_poller = SimpleNamespace(
         on_invalidation=Mock(),
@@ -815,7 +820,11 @@ async def test_lifespan_allows_missing_bridge_schema_when_fail_fast_disabled(mon
     model_scheduler = _DummyScheduler()
     sticky_scheduler = _DummyScheduler()
     ring_service = SimpleNamespace(
-        register=AsyncMock(), mark_stale=AsyncMock(), unregister=AsyncMock(), heartbeat=AsyncMock()
+        register=AsyncMock(),
+        mark_stale=AsyncMock(),
+        unregister=AsyncMock(),
+        heartbeat=AsyncMock(),
+        list_active=AsyncMock(return_value=[]),
     )
     cache_poller = SimpleNamespace(on_invalidation=Mock(), start=AsyncMock(), stop=AsyncMock())
 

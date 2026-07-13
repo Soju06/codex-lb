@@ -31,8 +31,10 @@ class DashboardGZipMiddleware:
 def _has_range_header(scope: Scope) -> bool:
     """Ranged requests bypass gzip: FileResponse builds the 206 and its
     Content-Range against the uncompressed file, so compressing the body
-    afterwards would describe offsets the encoded bytes no longer match."""
-    return any(name == b"range" for name, _ in scope.get("headers", ()))
+    afterwards would describe offsets the encoded bytes no longer match.
+    Header-name casing is normalized because not every ASGI server
+    lowercases request header names."""
+    return any(name.lower() == b"range" for name, _ in scope.get("headers", ()))
 
 
 def add_dashboard_gzip_middleware(app) -> None:

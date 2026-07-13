@@ -50,3 +50,15 @@ async def test_ranged_asset_requests_bypass_gzip(async_client):
 async def test_proxy_paths_never_gzipped(async_client):
     response = await async_client.get("/backend-api/codex/models", headers={"Accept-Encoding": "gzip"})
     assert "content-encoding" not in response.headers
+
+
+@pytest.mark.asyncio
+async def test_range_header_detection_is_case_insensitive():
+    """ASGI servers are not guaranteed to lowercase header names; a
+    mixed-case Range header must still bypass the compressing wrapper."""
+    from app.core.middleware.dashboard_gzip import _has_range_header
+
+    assert _has_range_header({"headers": ((b"Range", b"bytes=0-99"),)})
+    assert _has_range_header({"headers": ((b"RANGE", b"bytes=0-99"),)})
+    assert _has_range_header({"headers": ((b"range", b"bytes=0-99"),)})
+    assert not _has_range_header({"headers": ((b"accept-encoding", b"gzip"),)})

@@ -56,7 +56,11 @@ from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, AdditionalUsageHistory, StickySessionKind, UsageHistory
 from app.modules.proxy.account_cache import get_account_selection_cache, mark_account_routing_unavailable
 from app.modules.proxy.additional_model_limits import get_additional_quota_key_for_model_id
-from app.modules.proxy.cap_partitioning import get_cap_partition, partition_cap
+from app.modules.proxy.cap_partitioning import (
+    configured_account_concurrency_caps,
+    get_cap_partition,
+    partition_cap,
+)
 from app.modules.proxy.repo_bundle import ProxyRepoFactory, ProxyRepositories
 from app.modules.quota_planner.logic import PlannerSettings, build_routing_costs
 from app.modules.usage.additional_quota_keys import (
@@ -1815,17 +1819,8 @@ def _account_cap_error_message(lease_kind: AccountLeaseKind | None, caps: Accoun
 
 def effective_account_concurrency_caps(dashboard_settings: object | None = None) -> AccountConcurrencyCaps:
     startup_settings = get_settings()
-    response_create_limit = getattr(dashboard_settings, "proxy_account_response_create_limit", None)
-    stream_limit = getattr(dashboard_settings, "proxy_account_stream_limit", None)
-    startup_response_create_limit = getattr(startup_settings, "proxy_account_response_create_limit", 4)
-    startup_stream_limit = getattr(startup_settings, "proxy_account_stream_limit", 8)
-    configured_response_create_limit = max(
-        0,
-        int(startup_response_create_limit if response_create_limit is None else response_create_limit),
-    )
-    configured_stream_limit = max(
-        0,
-        int(startup_stream_limit if stream_limit is None else stream_limit),
+    configured_response_create_limit, configured_stream_limit = configured_account_concurrency_caps(
+        dashboard_settings, startup_settings=startup_settings
     )
     scope = getattr(startup_settings, "proxy_account_caps_scope", "partitioned")
     partition = get_cap_partition()

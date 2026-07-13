@@ -29,6 +29,22 @@ def _reset_partition():
     reset_cap_partition_for_tests()
 
 
+@pytest.fixture(autouse=True)
+def _stub_dashboard_settings(monkeypatch: pytest.MonkeyPatch):
+    """Keep ``refresh_cap_partition`` hermetic by default.
+
+    ``refresh_cap_partition`` fetches the dashboard-configured caps so the
+    hysteresis gates on the effective caps; tests that do not exercise dashboard
+    overrides stub the lookup to the startup defaults (``None``) so no database
+    read is attempted.
+    """
+
+    async def _no_dashboard_settings() -> None:
+        return None
+
+    monkeypatch.setattr(cap_partitioning_module, "_current_dashboard_settings", _no_dashboard_settings)
+
+
 class _Clock:
     def __init__(self) -> None:
         self.now = 0.0
@@ -460,3 +476,92 @@ async def test_refresh_cap_partition_reads_active_members(monkeypatch: pytest.Mo
     await refresh_cap_partition(_list_active, "replica-b")
 
     assert get_cap_partition() == CapPartition(replica_count=3, rank=1)
+
+
+def test_configured_account_concurrency_caps_prefers_dashboard_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        cap_partitioning_module,
+        "get_settings",
+        lambda: SimpleNamespace(proxy_account_response_create_limit=4, proxy_account_stream_limit=8),
+    )
+
+    # Dashboard override wins over the startup default; a None override falls back.
+    dashboard = SimpleNamespace(proxy_account_response_create_limit=None, proxy_account_stream_limit=19)
+    assert cap_partitioning_module.configured_account_concurrency_caps(dashboard) == (4, 19)
+    # No dashboard settings -> startup defaults.
+    assert cap_partitioning_module.configured_account_concurrency_caps(None) == (4, 8)
+
+
+def test_holder_defers_when_dashboard_cap_grows_share_but_startup_cap_would_not() -> None:
+    # Startup stream cap 8, dashboard stream cap 19. Moving from 5 replicas/rank 0
+    # to 4 replicas/rank 2 is no-growth for cap 8 (share 2 -> 2) but grows the
+    # dashboard cap-19 share (4 -> 5). Gating on the effective caps must defer.
+    startup_caps = (4, 8)
+    effective_caps = (4, 19)
+    five_rank0 = ["replica-m", "replica-n", "replica-o", "replica-p", "replica-q"]
+    four_rank2 = ["replica-a", "replica-b", "replica-m", "replica-z"]
+
+    # Sanity: the startup caps alone would (wrongly) adopt immediately.
+    startup_holder = CapPartitionHolder(clock=_Clock())
+    startup_holder.observe_members(five_rank0, "replica-m", configured_caps=startup_caps, scale_down_seconds=60.0)
+    assert (
+        startup_holder.observe_members(four_rank2, "replica-m", configured_caps=startup_caps, scale_down_seconds=60.0)
+        is True
+    )
+
+    clock = _Clock()
+    holder = CapPartitionHolder(clock=clock)
+    holder.observe_members(five_rank0, "replica-m", configured_caps=effective_caps, scale_down_seconds=60.0)
+    assert holder.current == CapPartition(replica_count=5, rank=0)
+
+    assert (
+        holder.observe_members(four_rank2, "replica-m", configured_caps=effective_caps, scale_down_seconds=60.0)
+        is False
+    )
+    assert holder.current == CapPartition(replica_count=5, rank=0)
+
+    clock.advance(60.0)
+    assert (
+        holder.observe_members(four_rank2, "replica-m", configured_caps=effective_caps, scale_down_seconds=60.0) is True
+    )
+    assert holder.current == CapPartition(replica_count=4, rank=2)
+
+
+@pytest.mark.asyncio
+async def test_refresh_cap_partition_uses_effective_dashboard_caps_for_hysteresis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        cap_partitioning_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            proxy_account_cap_partition_scale_down_seconds=60,
+            proxy_account_response_create_limit=4,
+            proxy_account_stream_limit=8,
+        ),
+    )
+    clock = _Clock()
+    monkeypatch.setattr(cap_partitioning_module, "_holder", CapPartitionHolder(clock=clock))
+
+    # Dashboard raises the stream cap to 19; the refresh must gate hysteresis on it.
+    async def _dashboard_settings() -> SimpleNamespace:
+        return SimpleNamespace(proxy_account_response_create_limit=None, proxy_account_stream_limit=19)
+
+    monkeypatch.setattr(cap_partitioning_module, "_current_dashboard_settings", _dashboard_settings)
+
+    async def _five_rank0() -> list[str]:
+        return ["replica-m", "replica-n", "replica-o", "replica-p", "replica-q"]
+
+    async def _four_rank2() -> list[str]:
+        return ["replica-a", "replica-b", "replica-m", "replica-z"]
+
+    await refresh_cap_partition(_five_rank0, "replica-m")
+    assert get_cap_partition() == CapPartition(replica_count=5, rank=0)
+
+    # 5/rank0 -> 4/rank2 grows the cap-19 share (4 -> 5): must defer, not adopt.
+    await refresh_cap_partition(_four_rank2, "replica-m")
+    assert get_cap_partition() == CapPartition(replica_count=5, rank=0)
+
+    clock.advance(60.0)
+    await refresh_cap_partition(_four_rank2, "replica-m")
+    assert get_cap_partition() == CapPartition(replica_count=4, rank=2)

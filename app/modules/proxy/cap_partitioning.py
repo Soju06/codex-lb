@@ -13,7 +13,8 @@ growth: a count decrease can be outweighed by a rank increase (more members
 sort ahead and consume the remainder), and a rank decrease can be outweighed by
 a large enough count increase. Rather than reason about count/rank directions,
 the decision compares the *prospective* share against the *current* share for
-each configured cap directly — using the same ``partition_cap`` share formula
+each configured cap directly — using the same effective caps (dashboard
+overrides over startup defaults) and the same ``partition_cap`` share formula
 the admission path enforces — and defers only when some configured cap's share
 would strictly grow. Any change whose every configured-cap share holds or
 shrinks is safe toward upstream and adopted on the next refresh; a
@@ -168,20 +169,64 @@ def get_cap_partition() -> CapPartition:
     return _holder.current
 
 
-def _configured_caps(settings: object) -> tuple[int, ...]:
-    """Return the cluster-wide per-account caps that gate share-growth hysteresis.
+def configured_account_concurrency_caps(
+    dashboard_settings: object | None,
+    *,
+    startup_settings: object | None = None,
+) -> tuple[int, int]:
+    """Return the cluster-wide per-account caps currently in effect.
 
-    These mirror the response-create and stream limits enforced on the
-    admission path so the hysteresis reasons about the shares actually in force
-    rather than an arbitrary cap.
+    Dashboard-configured overrides (when present on ``dashboard_settings``) win
+    over the startup defaults, exactly as ``effective_account_concurrency_caps``
+    derives them before partitioning. The share-growth hysteresis must gate on
+    these *same* effective caps rather than the startup defaults: when a
+    dashboard cap is higher (or lower) than the startup value, a membership
+    change that does not grow the startup-default share can still grow the
+    effective share (or vice versa), so gating on the wrong caps would adopt or
+    defer incorrectly. ``startup_settings`` supplies the startup-default source
+    when a caller already holds it (so both the admission and hysteresis paths
+    read the same settings object); it defaults to ``get_settings()``. Returns
+    ``(response_create_limit, stream_limit)``.
     """
-    response_cap = max(0, int(getattr(settings, "proxy_account_response_create_limit", 4)))
-    stream_cap = max(0, int(getattr(settings, "proxy_account_stream_limit", 8)))
+    if startup_settings is None:
+        startup_settings = get_settings()
+    response_override = getattr(dashboard_settings, "proxy_account_response_create_limit", None)
+    stream_override = getattr(dashboard_settings, "proxy_account_stream_limit", None)
+    startup_response = getattr(startup_settings, "proxy_account_response_create_limit", 4)
+    startup_stream = getattr(startup_settings, "proxy_account_stream_limit", 8)
+    response_cap = max(0, int(startup_response if response_override is None else response_override))
+    stream_cap = max(0, int(startup_stream if stream_override is None else stream_override))
     return (response_cap, stream_cap)
 
 
-def observe_ring_members(active_instance_ids: Sequence[str], self_instance_id: str) -> None:
-    """Refresh the process-wide partition from an active bridge-ring member list."""
+async def _current_dashboard_settings() -> object | None:
+    """Best-effort fetch of the dashboard-configured caps for the hysteresis gate.
+
+    Reuses the process settings cache so the common case adds no per-refresh
+    database round trip, and falls back to the startup defaults (``None``) when
+    the read fails so a settings outage never blocks a membership refresh.
+    """
+    try:
+        from app.core.config.settings_cache import get_settings_cache
+
+        return await get_settings_cache().get()
+    except Exception:
+        logger.debug("Cap partition dashboard-settings lookup failed; using startup caps", exc_info=True)
+        return None
+
+
+def observe_ring_members(
+    active_instance_ids: Sequence[str],
+    self_instance_id: str,
+    *,
+    dashboard_settings: object | None = None,
+) -> None:
+    """Refresh the process-wide partition from an active bridge-ring member list.
+
+    ``dashboard_settings`` carries the dashboard-configured per-account cap
+    overrides so the hysteresis gates on the same effective caps the admission
+    path partitions; when ``None`` the startup defaults apply.
+    """
     settings = get_settings()
     scale_down_seconds = float(
         getattr(settings, "proxy_account_cap_partition_scale_down_seconds", DEFAULT_SCALE_DOWN_SECONDS)
@@ -190,7 +235,7 @@ def observe_ring_members(active_instance_ids: Sequence[str], self_instance_id: s
     changed = _holder.observe_members(
         active_instance_ids,
         self_instance_id,
-        configured_caps=_configured_caps(settings),
+        configured_caps=configured_account_concurrency_caps(dashboard_settings, startup_settings=settings),
         scale_down_seconds=scale_down_seconds,
     )
     current = _holder.current
@@ -221,7 +266,8 @@ async def refresh_cap_partition(
         logger.warning("Cap partition refresh failed; retaining last-known partition", exc_info=True)
         _holder.note_failed_read()
         return
-    observe_ring_members(members, self_instance_id)
+    dashboard_settings = await _current_dashboard_settings()
+    observe_ring_members(members, self_instance_id, dashboard_settings=dashboard_settings)
 
 
 def reset_cap_partition_for_tests() -> None:

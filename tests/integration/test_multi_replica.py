@@ -145,7 +145,15 @@ async def test_account_caps_partition_across_two_replicas_sharing_one_database(
             members = await service.list_active()
             assert members == ["replica-a", "replica-b"]
             holder = CapPartitionHolder()
-            holder.observe_members(members, instance_id, scale_down_seconds=60.0)
+            holder.observe_members(
+                members,
+                instance_id,
+                configured_caps=(
+                    configured.proxy_account_response_create_limit,
+                    configured.proxy_account_stream_limit,
+                ),
+                scale_down_seconds=60.0,
+            )
             monkeypatch.setattr(
                 "app.modules.proxy.load_balancer.get_cap_partition",
                 lambda holder=holder: holder.current,
@@ -191,24 +199,31 @@ async def test_cap_partition_scale_down_over_ring_waits_for_stability_window(tmp
         await service.register("replica-a")
         await service.register("replica-b")
 
+        configured_caps = (4, 8)
         clock_now = 0.0
         holder = CapPartitionHolder(clock=lambda: clock_now)
-        holder.observe_members(await service.list_active(), "replica-a", scale_down_seconds=60.0)
+        holder.observe_members(
+            await service.list_active(), "replica-a", configured_caps=configured_caps, scale_down_seconds=60.0
+        )
         assert holder.current == CapPartition(replica_count=2, rank=0)
 
         await service.unregister("replica-b")
 
         members = await service.list_active()
         assert members == ["replica-a"]
-        holder.observe_members(members, "replica-a", scale_down_seconds=60.0)
+        holder.observe_members(members, "replica-a", configured_caps=configured_caps, scale_down_seconds=60.0)
         assert holder.current == CapPartition(replica_count=2, rank=0)
 
         clock_now = 59.0
-        holder.observe_members(await service.list_active(), "replica-a", scale_down_seconds=60.0)
+        holder.observe_members(
+            await service.list_active(), "replica-a", configured_caps=configured_caps, scale_down_seconds=60.0
+        )
         assert holder.current == CapPartition(replica_count=2, rank=0)
 
         clock_now = 60.0
-        holder.observe_members(await service.list_active(), "replica-a", scale_down_seconds=60.0)
+        holder.observe_members(
+            await service.list_active(), "replica-a", configured_caps=configured_caps, scale_down_seconds=60.0
+        )
         assert holder.current == CapPartition(replica_count=1, rank=0)
     finally:
         await engine.dispose()

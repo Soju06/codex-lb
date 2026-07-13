@@ -4,7 +4,7 @@
 
 ### Requirement: Reset credit redemption is serialized and idempotent across replicas
 
-Per-account redemption serialization MUST hold across all replicas and processes sharing one database. On PostgreSQL the system SHALL use `pg_advisory_xact_lock` keyed by the account id on the caller's session. On SQLite the system SHALL acquire a durable claim row via a single atomic conditional upsert (`INSERT ... ON CONFLICT(account_id) DO UPDATE ... WHERE expires_at < now`) with a 30-second lease, a bounded retry loop that surfaces a client-facing conflict on timeout, release on completion, and takeover of expired claims. The system SHALL persist the `(account_id, redeem_request_id) -> credit_id` mapping in the shared database, committed inside the serialized section BEFORE the upstream consume call; a retry carrying the same `redeem_request_id`, served by ANY replica, MUST resolve to the originally selected `credit_id` and MUST NOT consume a different credit. Ledger rows SHALL be retained at least 24 hours (including after a failed consume, so a retry retargets the same credit) and purged opportunistically afterwards. Both the dashboard consume endpoint and `POST /v1/reset-credit` SHALL redeem inside this cross-replica serialized section.
+Per-account redemption serialization MUST hold across all replicas and processes sharing one database. On PostgreSQL the system SHALL use `pg_advisory_xact_lock` keyed by the account id on the caller's session. On SQLite the system SHALL acquire a durable claim row via a single atomic conditional upsert (`INSERT ... ON CONFLICT(account_id) DO UPDATE ... WHERE expires_at < now`) with a 30-second lease, a bounded retry loop that surfaces a client-facing conflict on timeout, release on completion, and takeover of expired claims. While the redeem section runs, the claim holder SHALL renew its lease on a heartbeat cadence shorter than the lease (10 seconds) so a redemption that legitimately outlives one lease (e.g. slow upstream fetch/consume) is NOT taken over by a concurrent process; lease expiry without renewal remains the crash-recovery path. A claim-acquisition timeout SHALL surface in the caller surface's native error envelope: the dashboard error envelope on the dashboard consume endpoint and the `/v1/*` OpenAI error envelope (HTTP 409) on `POST /v1/reset-credit`. The system SHALL persist the `(account_id, redeem_request_id) -> credit_id` mapping in the shared database, committed inside the serialized section BEFORE the upstream consume call; a retry carrying the same `redeem_request_id`, served by ANY replica, MUST resolve to the originally selected `credit_id` and MUST NOT consume a different credit. Ledger rows SHALL be retained at least 24 hours (including after a failed consume, so a retry retargets the same credit) and purged opportunistically afterwards. Both the dashboard consume endpoint and `POST /v1/reset-credit` SHALL redeem inside this cross-replica serialized section.
 
 #### Scenario: Retry lands on a second replica and reuses the pinned credit
 - **GIVEN** replica A redeemed the soonest credit for `redeem_request_id` R but the client never saw the response
@@ -22,6 +22,17 @@ Per-account redemption serialization MUST hold across all replicas and processes
 - **GIVEN** a process crashed while holding the redeem claim for an account
 - **WHEN** a later consume request arrives after the claim lease has expired
 - **THEN** the request takes over the expired claim and proceeds without operator intervention
+
+#### Scenario: Slow redemption keeps its claim past the original lease
+- **GIVEN** a process holds the redeem claim and its redeem section (upstream fetch/consume, usage refresh) runs longer than one 30-second lease
+- **WHEN** a second process attempts to acquire the claim after the original lease would have expired
+- **THEN** the heartbeat-renewed lease rejects the takeover and the second process keeps waiting (or conflicts out)
+- **AND** at most one upstream consume is sent per selected credit
+
+#### Scenario: Claim contention on the v1 surface uses the OpenAI envelope
+- **GIVEN** another process holds the redeem claim for the whole acquisition timeout
+- **WHEN** a client calls `POST /v1/reset-credit` for that account
+- **THEN** the endpoint returns 409 in the `/v1/*` OpenAI error envelope, not the dashboard envelope
 
 ### Requirement: Reset credit snapshot invalidation propagates across replicas
 

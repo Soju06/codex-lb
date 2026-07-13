@@ -38,11 +38,18 @@ counter, carries no payload) and Redis/etc. (no such dependency in this repo).
   expires_at = excluded... WHERE reset_credit_redeem_claims.expires_at < :now`
   on a dedicated short session committed immediately — rowcount 1 means
   claimed, 0 means held by a live claimant; retry every 100ms up to 15s then
-  raise a 409 `reset_credit_redeem_in_progress` conflict; release in `finally`
+  raise `RedeemClaimTimeoutError`, which each surface maps to its own error
+  envelope (dashboard: 409 `reset_credit_redeem_in_progress` conflict;
+  `POST /v1/reset-credit`: `HTTPException(409)` rendered in the `/v1/*` OpenAI
+  envelope); while the section runs the holder renews the lease every 10s via
+  a heartbeat task (same renew pattern as the `scheduler_leader` lease) so a
+  redemption slower than one lease — usage-fetch retries plus the upstream
+  consume can exceed 30s — is not taken over mid-section; release in `finally`
   via `DELETE WHERE account_id = :a AND holder_id = :h`; crash recovery via the
-  30s lease expiry (same conditional-upsert shape as the `scheduler_leader`
-  lease, proven atomic under SQLite's single-writer lock). Claim statements
-  deliberately use their own sessions, never the caller's transaction.
+  30s lease expiry once renewals stop (same conditional-upsert shape as the
+  `scheduler_leader` lease, proven atomic under SQLite's single-writer lock).
+  Claim statements deliberately use their own sessions, never the caller's
+  transaction.
 - **session=None / other dialects** (direct unit-test callers): existing
   in-process `asyncio.Lock` retained.
 

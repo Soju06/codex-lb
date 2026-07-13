@@ -522,6 +522,54 @@ async def test_v1_reset_credit_post_unavailable_redeem_id_returns_409(async_clie
 
 
 @pytest.mark.asyncio
+async def test_v1_reset_credit_post_claim_contention_returns_openai_envelope(
+    async_client,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """SQLite claim contention on /v1/reset-credit must render the OpenAI error
+    envelope, not the dashboard one."""
+    from functools import partial
+
+    from app.modules.rate_limit_reset_credits import api as reset_credits_api
+    from app.modules.rate_limit_reset_credits.redeem_coordination import (
+        acquire_redeem_claim,
+        release_redeem_claim,
+        try_acquire_redeem_claim,
+    )
+
+    await _enable_api_key_auth(async_client)
+    account_id = await _import_account(async_client, "acc-reset-claim-contention", "claim-contention@example.com")
+    _, key = await _create_api_key(async_client, name="reset-credit-claim-contention")
+
+    consume_mock = AsyncMock()
+    monkeypatch.setattr("app.modules.proxy.api.consume_reset_credit", consume_mock)
+    # Keep the contended acquisition fast; a peer process holds the claim for
+    # the whole request.
+    monkeypatch.setattr(
+        reset_credits_api,
+        "acquire_redeem_claim",
+        partial(acquire_redeem_claim, retry_interval_seconds=0.02, timeout_seconds=0.2),
+    )
+    assert await try_acquire_redeem_claim(account_id, "peer-holder") is True
+    try:
+        response = await async_client.post(
+            "/v1/reset-credit",
+            headers={"Authorization": f"Bearer {key}"},
+            json={"account_id": account_id, "redeem_id": "credit-contended"},
+        )
+    finally:
+        await release_redeem_claim(account_id, "peer-holder")
+
+    assert response.status_code == 409
+    error = response.json()["error"]
+    # OpenAI envelope carries a "type"; the dashboard envelope does not.
+    assert error["type"] == "invalid_request_error"
+    assert error["code"] == "invalid_request_error"
+    assert "already in progress" in error["message"]
+    consume_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_v1_reset_credit_post_returns_503_when_route_resolution_fails_for_available_credit(
     async_client,
     monkeypatch: pytest.MonkeyPatch,

@@ -47,3 +47,14 @@
 12. [x] Run targeted `uv run pytest`, `uv run ruff`,
     `openspec validate replica-safe-reset-credits`; verify single Alembic
     head.
+13. [x] (review follow-up) Renew the SQLite claim lease while the redeem
+    section runs: `renew_redeem_claim` + `renew_redeem_claim_periodically`
+    heartbeat (10s cadence vs 30s lease) spawned by the sqlite arm of
+    `serialize_reset_credit_redeem`; cancel before release; integration
+    coverage for takeover rejection past the original lease.
+14. [x] (review follow-up) Surface claim-contention timeouts in each caller's
+    native envelope: `serialize_reset_credit_redeem` raises
+    `RedeemClaimTimeoutError`; the dashboard path maps it to the 409
+    `reset_credit_redeem_in_progress` conflict and `POST /v1/reset-credit`
+    maps it to an `HTTPException(409)` rendered in the `/v1/*` OpenAI
+    envelope; regression tests at both surfaces.

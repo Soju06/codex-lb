@@ -896,7 +896,41 @@ async def test_serialize_reset_credit_redeem_uses_durable_claim_on_sqlite(
 
 
 @pytest.mark.asyncio
-async def test_serialize_reset_credit_redeem_maps_sqlite_claim_timeout_to_conflict(
+async def test_serialize_reset_credit_redeem_renews_sqlite_claim_while_held(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The sqlite branch keeps a heartbeat task alive for the section and cancels it before release."""
+    events: list[str] = []
+    heartbeat_running = asyncio.Event()
+
+    async def fake_acquire(account_id: str, holder_id: str) -> None:
+        events.append("acquire")
+
+    async def fake_release(account_id: str, holder_id: str) -> None:
+        events.append("release")
+
+    async def fake_heartbeat(account_id: str, holder_id: str) -> None:
+        events.append("heartbeat-start")
+        heartbeat_running.set()
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            events.append("heartbeat-cancelled")
+            raise
+
+    monkeypatch.setattr(reset_credits_api, "acquire_redeem_claim", fake_acquire)
+    monkeypatch.setattr(reset_credits_api, "release_redeem_claim", fake_release)
+    monkeypatch.setattr(reset_credits_api, "renew_redeem_claim_periodically", fake_heartbeat)
+
+    async with serialize_reset_credit_redeem("acc_1", session=cast(Any, _FakeSqliteSession())):
+        await asyncio.wait_for(heartbeat_running.wait(), timeout=5)
+        events.append("locked")
+
+    assert events == ["acquire", "heartbeat-start", "locked", "heartbeat-cancelled", "release"]
+
+
+@pytest.mark.asyncio
+async def test_serialize_reset_credit_redeem_propagates_sqlite_claim_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from app.modules.rate_limit_reset_credits.redeem_coordination import RedeemClaimTimeoutError
@@ -912,12 +946,34 @@ async def test_serialize_reset_credit_redeem_maps_sqlite_claim_timeout_to_confli
     monkeypatch.setattr(reset_credits_api, "acquire_redeem_claim", fake_acquire)
     monkeypatch.setattr(reset_credits_api, "release_redeem_claim", fake_release)
 
-    with pytest.raises(DashboardConflictError) as excinfo:
+    with pytest.raises(RedeemClaimTimeoutError):
         async with serialize_reset_credit_redeem("acc_1", session=cast(Any, _FakeSqliteSession())):
             raise AssertionError("locked section must not run after a claim timeout")
 
-    assert excinfo.value.code == "reset_credit_redeem_in_progress"
     assert released == []
+
+
+@pytest.mark.asyncio
+async def test_redeem_soonest_maps_claim_timeout_to_dashboard_conflict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The dashboard surface renders claim contention as its conflict envelope."""
+    from app.modules.rate_limit_reset_credits.redeem_coordination import RedeemClaimTimeoutError
+
+    async def fake_acquire(account_id: str, holder_id: str) -> None:
+        raise RedeemClaimTimeoutError("claim held")
+
+    monkeypatch.setattr(reset_credits_api, "acquire_redeem_claim", fake_acquire)
+
+    with pytest.raises(DashboardConflictError) as excinfo:
+        await _redeem_soonest_reset_credit(
+            account=_account(),
+            store=RateLimitResetCreditsStore(),
+            encryptor=StubEncryptor(),
+            lock_session=cast(Any, _FakeSqliteSession()),
+        )
+
+    assert excinfo.value.code == "reset_credit_redeem_in_progress"
 
 
 @pytest.mark.asyncio

@@ -8,7 +8,8 @@ Two shared-database primitives back the redeem path:
   of burning a second one.
 - A per-account claim row (``reset_credit_redeem_claims``) that serializes
   redemption across processes sharing one SQLite file via a single atomic
-  conditional upsert with a lease. PostgreSQL keeps ``pg_advisory_xact_lock``.
+  conditional upsert with a lease the holder renews on a heartbeat while the
+  redeem section runs. PostgreSQL keeps ``pg_advisory_xact_lock``.
 
 All statements run on dedicated short-lived sessions committed immediately;
 they never join the caller's transaction.
@@ -21,7 +22,7 @@ import logging
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
@@ -31,6 +32,7 @@ from app.db.session import SessionLocal, close_session
 logger = logging.getLogger(__name__)
 
 REDEEM_CLAIM_LEASE_SECONDS = 30.0
+REDEEM_CLAIM_RENEW_INTERVAL_SECONDS = 10.0
 REDEEM_CLAIM_RETRY_INTERVAL_SECONDS = 0.1
 REDEEM_CLAIM_TIMEOUT_SECONDS = 15.0
 REDEEM_REQUEST_TTL = timedelta(hours=24)
@@ -99,6 +101,69 @@ async def acquire_redeem_claim(
                 f"reset-credit redeem claim for account {account_id} not acquired within {timeout_seconds}s"
             )
         await asyncio.sleep(min(retry_interval_seconds, remaining))
+
+
+async def renew_redeem_claim(
+    account_id: str,
+    holder_id: str,
+    *,
+    lease_seconds: float = REDEEM_CLAIM_LEASE_SECONDS,
+) -> bool:
+    """Extend the holder's lease; False when the row is no longer held by this holder."""
+    now = datetime.now(UTC)
+    session = SessionLocal()
+    try:
+        result = await session.execute(
+            update(ResetCreditRedeemClaim)
+            .where(
+                ResetCreditRedeemClaim.account_id == account_id,
+                ResetCreditRedeemClaim.holder_id == holder_id,
+            )
+            .values(expires_at=now + timedelta(seconds=lease_seconds))
+            .returning(ResetCreditRedeemClaim.account_id)
+        )
+        await session.commit()
+        return result.scalar_one_or_none() is not None
+    finally:
+        await close_session(session)
+
+
+async def renew_redeem_claim_periodically(
+    account_id: str,
+    holder_id: str,
+    *,
+    lease_seconds: float = REDEEM_CLAIM_LEASE_SECONDS,
+    renew_interval_seconds: float = REDEEM_CLAIM_RENEW_INTERVAL_SECONDS,
+) -> None:
+    """Heartbeat that keeps a held claim's lease alive while the redeem section runs.
+
+    Mirrors the scheduler-leader renew pattern: the holder extends
+    ``expires_at`` every ``renew_interval_seconds`` (a fraction of the lease)
+    so a legitimately slow redemption — usage fetch retries plus the upstream
+    consume can exceed one lease — is not taken over by a second process.
+    Transient renewal errors are logged and retried on the next tick; a renew
+    reporting the row gone means an expired claim was already taken over, so
+    the loop stops (exclusivity is lost and lease takeover semantics apply).
+    The caller cancels this task before releasing the claim.
+    """
+    while True:
+        await asyncio.sleep(renew_interval_seconds)
+        try:
+            renewed = await renew_redeem_claim(account_id, holder_id, lease_seconds=lease_seconds)
+        except Exception:
+            logger.warning(
+                "reset-credit redeem claim renewal failed account_id=%s (retrying next tick)",
+                account_id,
+                exc_info=True,
+            )
+            continue
+        if not renewed:
+            logger.warning(
+                "reset-credit redeem claim lost before renewal account_id=%s holder_id=%s",
+                account_id,
+                holder_id,
+            )
+            return
 
 
 async def release_redeem_claim(account_id: str, holder_id: str) -> None:

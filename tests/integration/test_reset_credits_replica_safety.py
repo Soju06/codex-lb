@@ -12,6 +12,7 @@ import asyncio
 import base64
 import json
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -35,6 +36,7 @@ from app.modules.rate_limit_reset_credits.redeem_coordination import (
     get_pinned_redeem_credit_id,
     pin_redeem_request,
     release_redeem_claim,
+    renew_redeem_claim_periodically,
     try_acquire_redeem_claim,
 )
 from app.modules.rate_limit_reset_credits.store import (
@@ -261,6 +263,100 @@ async def test_expired_redeem_claim_is_taken_over(async_client) -> None:
 
     assert await try_acquire_redeem_claim(account_id, "holder-2") is True
     await release_redeem_claim(account_id, "holder-2")
+
+
+@pytest.mark.asyncio
+async def test_redeem_claim_heartbeat_keeps_live_claim_from_takeover(async_client) -> None:
+    """A renewed lease outlives its original expiry; without the heartbeat the
+    claim would be taken over mid-section by a second process."""
+    account_id = await _import_account(
+        async_client,
+        email="claim-heartbeat@example.com",
+        account_id="acc_claim_heartbeat",
+    )
+
+    assert await try_acquire_redeem_claim(account_id, "holder-1", lease_seconds=0.5) is True
+    heartbeat = asyncio.create_task(
+        renew_redeem_claim_periodically(
+            account_id,
+            "holder-1",
+            lease_seconds=0.5,
+            renew_interval_seconds=0.1,
+        )
+    )
+    try:
+        # Well past the original 0.5s lease: renewal must still hold the claim.
+        await asyncio.sleep(1.0)
+        assert await try_acquire_redeem_claim(account_id, "holder-2") is False
+    finally:
+        heartbeat.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await heartbeat
+
+    # Once the heartbeat stops, lease expiry recovers the claim as before.
+    await asyncio.sleep(0.7)
+    assert await try_acquire_redeem_claim(account_id, "holder-2") is True
+    await release_redeem_claim(account_id, "holder-2")
+
+
+@pytest.mark.asyncio
+async def test_dashboard_consume_outliving_the_lease_keeps_the_claim(async_client, monkeypatch) -> None:
+    """A redemption slower than one lease is not taken over by a peer process."""
+    account_id = await _import_account(
+        async_client,
+        email="claim-slow-redeem@example.com",
+        account_id="acc_claim_slow_redeem",
+    )
+
+    monkeypatch.setattr(
+        reset_credits_api,
+        "acquire_redeem_claim",
+        partial(acquire_redeem_claim, lease_seconds=0.5),
+    )
+    monkeypatch.setattr(
+        reset_credits_api,
+        "renew_redeem_claim_periodically",
+        partial(renew_redeem_claim_periodically, lease_seconds=0.5, renew_interval_seconds=0.1),
+    )
+
+    only = _credit("credit-slow", expires_at="2026-07-20T00:00:00Z")
+
+    async def fake_fetch(*args: Any, **kwargs: Any) -> ResetCreditsResponse:
+        return _upstream_response([only])
+
+    consume_entered = asyncio.Event()
+    consume_release = asyncio.Event()
+    consume_calls: list[str] = []
+
+    async def fake_consume(
+        access_token: str,
+        chatgpt_account_id: str | None,
+        credit_id: str,
+        **kwargs: Any,
+    ) -> ConsumeResetCreditResponse:
+        consume_calls.append(credit_id)
+        consume_entered.set()
+        await consume_release.wait()
+        return _success_consume(credit_id)
+
+    monkeypatch.setattr(reset_credits_api, "fetch_reset_credits", fake_fetch)
+    monkeypatch.setattr(reset_credits_api, "consume_reset_credit", fake_consume)
+    monkeypatch.setattr(reset_credits_api, "_build_refresh_usage_callback", lambda _context: _noop_refresh)
+
+    await get_rate_limit_reset_credits_store().set(account_id, _snapshot([only]))
+
+    request = asyncio.create_task(async_client.post(f"/api/accounts/{account_id}/rate-limit-reset-credits/consume"))
+    await asyncio.wait_for(consume_entered.wait(), timeout=10)
+
+    # Hold the critical section past the original 0.5s lease; a second
+    # process's takeover attempt must fail because the heartbeat renewed it.
+    await asyncio.sleep(1.0)
+    assert await try_acquire_redeem_claim(account_id, "intruder") is False
+
+    consume_release.set()
+    response = await request
+    assert response.status_code == 200, response.text
+    assert consume_calls == ["credit-slow"]
 
 
 @pytest.mark.asyncio

@@ -13,7 +13,7 @@ setups use.
 | Failure (before) | Mechanism (after) | Bound |
 | --- | --- | --- |
 | Retry on replica B consumes a second credit | durable `(account_id, redeem_request_id) -> credit_id` ledger committed before the consume call | exact (any replica) |
-| Two SQLite processes redeem concurrently | atomic claim-row upsert with 30s lease | exact while claimant lives; 30s lease on crash |
+| Two SQLite processes redeem concurrently | atomic claim-row upsert with 30s lease renewed every 10s by a holder heartbeat | exact while claimant lives (including slow redemptions); 30s lease on crash |
 | v1 false 409 from a fresh replica | authoritative upstream fetch on snapshot miss | one extra upstream round-trip, miss path only |
 | Peers list a redeemed credit for <=60s | `reset_credits` bus namespace, full-store clear | ~0.5s poll bound; refresh tick is the fallback |
 
@@ -31,8 +31,10 @@ setups use.
   user action generates a new `redeem_request_id`. Pins expire after 24h.
 - **Wall-clock lease on SQLite claims**: multi-host clock skew could allow
   early takeover, but SQLite multi-process deployments are effectively
-  single-host/volume, and the 30s lease vs sub-second redeem duration leaves
-  large margin.
+  single-host/volume, and the holder heartbeat (renew every 10s against a 30s
+  lease) keeps the claim alive even when a redemption legitimately outlives
+  one lease (usage-fetch retries plus the upstream consume can exceed 30s).
+  Expiry-based takeover only happens once renewals stop (crash/hang).
 - **Claim retry latency**: up to 15s under contention before the 409 —
   acceptable for a human-driven dashboard action; PostgreSQL deployments keep
   the blocking advisory lock instead.

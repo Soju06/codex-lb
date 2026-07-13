@@ -221,6 +221,7 @@ from app.modules.proxy.types import (
     RateLimitWindowSnapshotData,
 )
 from app.modules.rate_limit_reset_credits.api import serialize_reset_credit_redeem
+from app.modules.rate_limit_reset_credits.redeem_coordination import RedeemClaimTimeoutError
 from app.modules.rate_limit_reset_credits.store import get_rate_limit_reset_credits_store
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.mappers import usage_history_to_window_row
@@ -1082,6 +1083,25 @@ def _translate_v1_reset_credit_refresh_error(exc: RefreshError) -> HTTPException
 
 
 @asynccontextmanager
+async def _serialize_v1_reset_credit_redeem(account_id: str, *, session: AsyncSession) -> AsyncIterator[None]:
+    """Serialize the v1 redeem section, mapping claim contention to the OpenAI envelope.
+
+    The shared serializer raises ``RedeemClaimTimeoutError`` on SQLite claim
+    contention; on this surface that must surface as an ``HTTPException`` so
+    the ``/v1/*`` handler renders the OpenAI error envelope instead of the
+    dashboard one.
+    """
+    try:
+        async with serialize_reset_credit_redeem(account_id, session=session):
+            yield
+    except RedeemClaimTimeoutError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="Another reset credit redemption is already in progress for this account",
+        ) from exc
+
+
+@asynccontextmanager
 async def _v1_reset_credit_accounts_refresh_scope() -> AsyncIterator[AccountsRepository]:
     async with get_background_session() as session:
         yield AccountsRepository(session)
@@ -1131,7 +1151,7 @@ async def v1_redeem_reset_credit(
             raise HTTPException(status_code=403, detail="Account is outside the API key pool")
         account_id = account.id
 
-        async with serialize_reset_credit_redeem(account_id, session=session):
+        async with _serialize_v1_reset_credit_redeem(account_id, session=session):
             credit = _select_available_reset_credit_by_id(account_id, payload.redeem_id)
             try:
                 route = await _resolve_reset_credit_route(session, account_id)

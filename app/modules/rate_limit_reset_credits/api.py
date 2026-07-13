@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -52,6 +52,7 @@ from app.modules.rate_limit_reset_credits.redeem_coordination import (
     new_redeem_claim_holder_id,
     pin_redeem_request,
     release_redeem_claim,
+    renew_redeem_claim_periodically,
 )
 from app.modules.rate_limit_reset_credits.store import (
     RateLimitResetCreditsStore,
@@ -206,18 +207,24 @@ async def _redeem_soonest_reset_credit(
     effective_fetch_fn = fetch_fn or fetch_reset_credits
     effective_consume_fn = consume_fn or consume_reset_credit
 
-    async with serialize_reset_credit_redeem(account.id, session=lock_session):
-        return await _redeem_soonest_reset_credit_locked(
-            account=account,
-            store=store,
-            encryptor=encryptor,
-            effective_fetch_fn=effective_fetch_fn,
-            effective_consume_fn=effective_consume_fn,
-            auth_manager=auth_manager,
-            refresh_usage=refresh_usage,
-            resolve_route=resolve_route,
-            redeem_request_id=redeem_request_id,
-        )
+    try:
+        async with serialize_reset_credit_redeem(account.id, session=lock_session):
+            return await _redeem_soonest_reset_credit_locked(
+                account=account,
+                store=store,
+                encryptor=encryptor,
+                effective_fetch_fn=effective_fetch_fn,
+                effective_consume_fn=effective_consume_fn,
+                auth_manager=auth_manager,
+                refresh_usage=refresh_usage,
+                resolve_route=resolve_route,
+                redeem_request_id=redeem_request_id,
+            )
+    except RedeemClaimTimeoutError as exc:
+        raise DashboardConflictError(
+            "Another reset credit redemption is already in progress for this account",
+            code="reset_credit_redeem_in_progress",
+        ) from exc
 
 
 @asynccontextmanager
@@ -226,6 +233,12 @@ async def serialize_reset_credit_redeem(
     *,
     session: AsyncSession | None,
 ):
+    """Serialize the per-account redeem section across replicas.
+
+    Raises ``RedeemClaimTimeoutError`` when the SQLite claim stays contended
+    past the acquisition timeout; callers map it to their surface's error
+    envelope (dashboard vs ``/v1/*`` OpenAI).
+    """
     if session is not None:
         dialect = session.get_bind().dialect.name
         if dialect == "postgresql":
@@ -235,18 +248,21 @@ async def serialize_reset_credit_redeem(
         if dialect == "sqlite":
             # A durable claim row is the sole serializer here so processes
             # sharing one SQLite file exclude each other, not just tasks in
-            # this process. Crashed holders are recovered via lease expiry.
+            # this process. Crashed holders are recovered via lease expiry;
+            # live holders keep the lease renewed via a heartbeat task so a
+            # legitimately slow redemption is not taken over mid-section.
             holder_id = new_redeem_claim_holder_id()
-            try:
-                await acquire_redeem_claim(account_id, holder_id)
-            except RedeemClaimTimeoutError as exc:
-                raise DashboardConflictError(
-                    "Another reset credit redemption is already in progress for this account",
-                    code="reset_credit_redeem_in_progress",
-                ) from exc
+            await acquire_redeem_claim(account_id, holder_id)
+            heartbeat = asyncio.create_task(
+                renew_redeem_claim_periodically(account_id, holder_id),
+                name=f"reset-credit-redeem-claim-heartbeat:{account_id}",
+            )
             try:
                 yield
             finally:
+                heartbeat.cancel()
+                with suppress(asyncio.CancelledError):
+                    await heartbeat
                 await release_redeem_claim(account_id, holder_id)
             return
 

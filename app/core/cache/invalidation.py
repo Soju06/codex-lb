@@ -113,8 +113,16 @@ class CacheInvalidationPoller:
         ``False``), so priming never invokes a callback. Unlike ``initialize``
         this also flushes any pending bumps and seeds baselines for every
         namespace observed in the ``cache_invalidation`` table.
+
+        Mirrors ``initialize``'s error contract: if the baseline read fails the
+        poller stays uninitialized (``_poll_initialized`` still ``False``) and
+        this method raises so the caller can retry or explicitly degrade.
+        ``_poll_once`` swallows the read error, so a silent success here would
+        let the first *background* poll absorb a peer bump as the initial
+        baseline, voiding the delivery guarantee priming exists to provide.
         """
-        await self._poll_once()
+        if not await self._poll_once():
+            raise RuntimeError("cache invalidation prime failed: baseline version read did not complete")
 
     async def start(self) -> None:
         if self._task and not self._task.done():
@@ -265,7 +273,14 @@ class CacheInvalidationPoller:
             if not await self.bump(namespace):
                 self._pending_bumps.add(namespace)
 
-    async def _poll_once(self) -> None:
+    async def _poll_once(self) -> bool:
+        """Flush pending bumps and reconcile observed versions once.
+
+        Returns ``True`` when the baseline/version read completed (callbacks may
+        still have failed individually and left their namespace unacknowledged)
+        and ``False`` when the read itself failed, so ``prime`` can surface a
+        failed startup seed instead of silently leaving the poller uninitialized.
+        """
         await self._flush_pending_bumps()
         session: AsyncSession | None = None
         try:
@@ -274,7 +289,7 @@ class CacheInvalidationPoller:
             rows = result.all()
         except Exception:
             self._record_poll_failure()
-            return
+            return False
         finally:
             if session is not None:
                 await close_session(session)
@@ -302,6 +317,7 @@ class CacheInvalidationPoller:
             # advance must survive an older in-flight poll observation.
             self._known_versions[namespace] = max(self._known_versions.get(namespace, 0), version)
         self._poll_initialized = True
+        return True
 
     async def _run_callbacks(self, namespace: str) -> bool:
         succeeded = True

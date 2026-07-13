@@ -240,7 +240,16 @@ async def lifespan(app: FastAPI):
     # initial baseline, leaving this replica on the pre-refresh catalog until the
     # non-leader scheduler backstop (default 300s) instead of the sub-second cache
     # poll bound.
-    await cache_poller.prime()
+    try:
+        await cache_poller.prime()
+    except Exception:
+        # prime() raises when the baseline version read fails; degrade to
+        # first-poll-baselines (matching initialize()'s contract) rather than
+        # continuing as if the seed succeeded. A peer bump landing before the
+        # first background poll may then be absorbed as the initial baseline
+        # and only converge on the fallback TTL / next bump, but the failure is
+        # surfaced here instead of silently voiding the delivery guarantee.
+        logger.warning("cache invalidation baseline prime failed", exc_info=True)
     try:
         await routing_availability_cache.refresh_from_db()
     except Exception:

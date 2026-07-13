@@ -14,6 +14,7 @@ from datetime import timedelta
 
 import pytest
 from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 import app.core.cache.invalidation as invalidation_module
 import app.core.openai.model_refresh_scheduler as scheduler_module
@@ -38,7 +39,7 @@ from app.core.openai.model_registry_store import (
     persist_registry_snapshot,
     reconcile_model_registry_from_store,
 )
-from app.core.utils.time import utcnow
+from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import Account, AccountStatus, CacheInvalidation, ModelRegistrySnapshotRecord
 from app.db.session import SessionLocal
 
@@ -839,3 +840,92 @@ async def test_invalidation_callback_load_failure_leaves_version_unacked_and_ret
     await poller._poll_once()
     assert get_model_registry().applied_content_hash == content_hash
     assert get_model_registry().get_snapshot() is not None
+
+
+async def test_reviving_expired_unchanged_snapshot_returns_changed(db_setup) -> None:
+    """Unit regression: an unchanged-content persist against a store row that
+    has aged past the staleness cap must report ``True`` (bump-worthy). Followers
+    cleared their local registry and reset their applied-hash marker when the row
+    expired, so an unchanged-content revival still needs a bump for them to
+    re-apply within the poll bound rather than the scheduler backstop."""
+    del db_setup
+    export = await _refreshed_leader_export()
+    assert export.snapshot is not None
+
+    first = encode_registry_export(export)
+    async with SessionLocal() as session:
+        assert await persist_registry_snapshot(session, encoded=first, leader_id="replica-a") is True
+
+    # Age the stored row past the staleness cap so followers would have dropped
+    # to the bootstrap floor before the leader revives it.
+    max_age = get_settings().model_registry_snapshot_max_age_seconds
+    async with SessionLocal() as session:
+        await session.execute(
+            text("UPDATE model_registry_snapshot SET refreshed_at = :ts WHERE id = 1"),
+            {"ts": utcnow() - timedelta(seconds=max_age + 3600)},
+        )
+        await session.commit()
+
+    aged = dataclasses.replace(export.snapshot, fetched_at=time.monotonic())
+    second = encode_registry_export(ModelRegistryExport(snapshot=aged, metadata_models=export.metadata_models))
+    assert second.content_hash == first.content_hash
+    async with SessionLocal() as session:
+        # Same content, but the revived expired row is bump-worthy.
+        assert await persist_registry_snapshot(session, encoded=second, leader_id="replica-b") is True
+
+    row = await _snapshot_row()
+    assert row is not None
+    assert row.content_hash == first.content_hash
+    # The revival advanced refreshed_at back inside the staleness cap.
+    revived_age = (utcnow() - to_utc_naive(row.refreshed_at)).total_seconds()
+    assert revived_age < max_age
+
+
+async def test_leader_revives_expired_snapshot_and_bumps_bus(db_setup, monkeypatch) -> None:
+    """Product-path regression: after the stored row ages past the staleness cap,
+    a leader refresh that fetches the SAME catalog bytes must still bump the
+    ``model_registry`` bus so followers re-apply within the poll bound."""
+    del db_setup
+    await _add_active_account("acc-leader")
+    model = _make_upstream_model(REPLICA_SLUG)
+
+    async def _stub_fetch(candidates, encryptor, accounts_repo=None):
+        return scheduler_module._FetchResult(models=[model], account_models={"acc-leader": ("pro", [model])})
+
+    monkeypatch.setattr(scheduler_module, "_get_leader_election", lambda: _StubLeaderElection(leader=True))
+    monkeypatch.setattr(scheduler_module, "_fetch_with_failover", _stub_fetch)
+    monkeypatch.setattr(invalidation_module, "_poller", CacheInvalidationPoller(SessionLocal))
+
+    scheduler = scheduler_module.ModelRefreshScheduler(interval_seconds=300, enabled=True)
+    await scheduler._refresh_once()
+    version_after_first = await _model_registry_bus_version()
+    assert version_after_first is not None and version_after_first >= 1
+
+    # The stored row ages past the staleness cap (followers drop to the floor).
+    max_age = get_settings().model_registry_snapshot_max_age_seconds
+    async with SessionLocal() as session:
+        await session.execute(
+            text("UPDATE model_registry_snapshot SET refreshed_at = :ts WHERE id = 1"),
+            {"ts": utcnow() - timedelta(seconds=max_age + 3600)},
+        )
+        await session.commit()
+
+    # A second leader tick refreshes the identical catalog; the revival must bump.
+    await scheduler._refresh_once()
+    version_after_revival = await _model_registry_bus_version()
+    assert version_after_revival is not None and version_after_revival > version_after_first
+
+
+async def test_prime_surfaces_baseline_read_failure(db_setup) -> None:
+    """A failed baseline-priming read must raise (poller stays uninitialized) so
+    startup degrades explicitly instead of silently continuing as if the baseline
+    was recorded, which would let the first background poll absorb a peer bump."""
+    del db_setup
+
+    def _explode() -> AsyncSession:
+        raise RuntimeError("baseline version read unavailable")
+
+    poller = CacheInvalidationPoller(_explode)
+    with pytest.raises(RuntimeError):
+        await poller.prime()
+    assert poller._poll_initialized is False

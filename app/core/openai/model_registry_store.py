@@ -307,16 +307,29 @@ async def persist_registry_snapshot(
     encoded: EncodedRegistrySnapshot,
     leader_id: str | None,
 ) -> bool:
-    """Atomically upsert the single snapshot row; returns True when the payload changed.
+    """Atomically upsert the single snapshot row; returns True when followers must re-apply.
 
     Unchanged content only touches ``refreshed_at``/``leader_id`` (guarded by
     ``content_hash``) so snapshot age means "time since the leader last
     confirmed this catalog" without rewriting a potentially multi-MB payload.
+
+    Returns True when the payload changed *or* when an existing row had aged past
+    ``model_registry_snapshot_max_age_seconds`` before this refresh revived it:
+    once a row expires, followers clear their local registry and reset their
+    applied-content-hash marker, so an unchanged-content revival still needs a
+    ``model_registry`` bump for them to re-apply within the cache-poll bound
+    instead of waiting for the non-leader scheduler backstop. Returns False only
+    when the row was already fresh and the content is unchanged.
     """
-    existing_hash = await session.scalar(
-        select(ModelRegistrySnapshotRecord.content_hash).where(ModelRegistrySnapshotRecord.id == _SNAPSHOT_ROW_ID)
-    )
-    if existing_hash == encoded.content_hash:
+    existing = (
+        await session.execute(
+            select(
+                ModelRegistrySnapshotRecord.content_hash,
+                ModelRegistrySnapshotRecord.refreshed_at,
+            ).where(ModelRegistrySnapshotRecord.id == _SNAPSHOT_ROW_ID)
+        )
+    ).first()
+    if existing is not None and existing.content_hash == encoded.content_hash:
         result = await session.execute(
             update(ModelRegistrySnapshotRecord)
             .where(
@@ -331,7 +344,11 @@ async def persist_registry_snapshot(
         )
         if isinstance(result, CursorResult) and result.rowcount == 1:
             await session.commit()
-            return False
+            max_age_seconds = get_settings().model_registry_snapshot_max_age_seconds
+            prior_age_seconds = (utcnow() - to_utc_naive(existing.refreshed_at)).total_seconds()
+            # An expired row means followers already dropped to the bootstrap
+            # floor; treat the revival as bump-worthy so they re-apply promptly.
+            return prior_age_seconds > max_age_seconds
 
     values = {
         "id": _SNAPSHOT_ROW_ID,

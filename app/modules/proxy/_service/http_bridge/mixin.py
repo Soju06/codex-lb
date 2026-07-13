@@ -1808,22 +1808,115 @@ class _HTTPBridgeMixin(
             raise
 
     async def _refresh_durable_http_bridge_session(self, session: "_HTTPBridgeSession") -> None:
+        """Renew the durable lease; callers must hold ``self._http_bridge_lock``."""
+
         if session.durable_session_id is None or session.durable_owner_epoch is None:
             return
+        current_instance = _service_get_settings().http_responses_session_bridge_instance_id
         try:
             lookup = await self._durable_bridge.renew_live_session(
                 session_id=session.durable_session_id,
                 api_key_id=session.key.api_key_id,
-                instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                instance_id=current_instance,
                 owner_epoch=session.durable_owner_epoch,
                 lease_ttl_seconds=_http_bridge_durable_lease_ttl_seconds(),
                 latest_turn_state=session.downstream_turn_state,
                 latest_response_id=None,
             )
-            if lookup is not None:
-                session.durable_owner_epoch = lookup.owner_epoch
         except Exception:
             logger.warning("Failed to renew durable HTTP bridge session lease", exc_info=True)
+            return
+        if lookup is None:
+            return
+        if lookup.owner_instance_id == current_instance and lookup.owner_epoch == session.durable_owner_epoch:
+            return
+        # Fenced out: another instance/epoch owns the durable session. Never adopt
+        # the foreign epoch — evict the local session so its upstream websocket and
+        # account lease are released, and fail the request with the retryable
+        # instance-mismatch contract used by rejected claims.
+        detached = self._detach_http_bridge_session_locked(session.key, expected_session=session)
+        session.closed = True
+        self._schedule_http_bridge_session_closes([detached or session], reason="durable_fenced_out")
+        _log_http_bridge_event(
+            "fenced_out_evict",
+            session.key,
+            account_id=session.account.id,
+            model=session.request_model,
+            detail=(
+                f"owner_instance={lookup.owner_instance_id}, owner_epoch={lookup.owner_epoch}, "
+                f"current_instance={current_instance}, local_epoch={session.durable_owner_epoch}, "
+                "outcome=renew_fenced_out"
+            ),
+            cache_key_family=session.key.affinity_kind,
+            model_class=_extract_model_class(session.request_model) if session.request_model else None,
+            owner_check_applied=True,
+        )
+        if PROMETHEUS_AVAILABLE and bridge_instance_mismatch_total is not None:
+            bridge_instance_mismatch_total.labels(outcome="renew_fenced_out").inc()
+        raise ProxyResponseError(
+            409,
+            openai_error(
+                "bridge_instance_mismatch",
+                "HTTP bridge session is owned by a different instance; retry to reach the correct replica",
+                error_type="server_error",
+            ),
+        )
+
+    async def reconcile_durable_http_bridge_ownership(self) -> int:
+        """Close local sessions whose durable row is owned by another instance/epoch.
+
+        Piggybacked on the ring-heartbeat cadence so a replica that lost
+        ownership releases its orphaned upstream websocket and account lease
+        within roughly the durable lease TTL instead of the idle TTL.
+        """
+
+        current_instance = _service_get_settings().http_responses_session_bridge_instance_id
+        lease_ttl_seconds = _http_bridge_durable_lease_ttl_seconds()
+        now = _service_time().monotonic()
+        async with self._http_bridge_lock:
+            candidates = [
+                (key, session)
+                for key, session in self._http_bridge_sessions.items()
+                if not session.closed
+                and session.durable_session_id is not None
+                and session.durable_owner_epoch is not None
+                and now - session.last_used_at >= lease_ttl_seconds
+            ]
+        if not candidates:
+            return 0
+        lookups = await self._durable_bridge.lookup_sessions(
+            session_ids=[session.durable_session_id for _, session in candidates if session.durable_session_id]
+        )
+        lookup_by_id = {lookup.session_id: lookup for lookup in lookups}
+        fenced_sessions: list[_HTTPBridgeSession] = []
+        async with self._http_bridge_lock:
+            for key, session in candidates:
+                lookup = lookup_by_id.get(session.durable_session_id or "")
+                if lookup is None or lookup.owner_instance_id is None:
+                    continue
+                if lookup.owner_instance_id == current_instance and lookup.owner_epoch == session.durable_owner_epoch:
+                    continue
+                detached = self._detach_http_bridge_session_locked(key, expected_session=session)
+                if detached is None:
+                    continue
+                fenced_sessions.append(detached)
+                _log_http_bridge_event(
+                    "fenced_out_evict",
+                    key,
+                    account_id=session.account.id,
+                    model=session.request_model,
+                    detail=(
+                        f"owner_instance={lookup.owner_instance_id}, owner_epoch={lookup.owner_epoch}, "
+                        f"current_instance={current_instance}, local_epoch={session.durable_owner_epoch}, "
+                        "outcome=reconcile_sweep"
+                    ),
+                    cache_key_family=key.affinity_kind,
+                    model_class=_extract_model_class(session.request_model) if session.request_model else None,
+                    owner_check_applied=True,
+                )
+        if fenced_sessions:
+            self._schedule_http_bridge_session_closes(fenced_sessions, reason="durable_fenced_out")
+        return len(fenced_sessions)
 
     async def _create_http_bridge_session(
         self,

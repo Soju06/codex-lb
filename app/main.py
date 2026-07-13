@@ -240,6 +240,12 @@ async def lifespan(app: FastAPI):
                 await svc.heartbeat(iid, endpoint_base_url=bridge_endpoint_base_url)
             except Exception:
                 logger.warning("Ring heartbeat failed", exc_info=True)
+            proxy_service = getattr(app.state, "proxy_service", None)
+            if proxy_service is not None and hasattr(proxy_service, "reconcile_durable_http_bridge_ownership"):
+                try:
+                    await proxy_service.reconcile_durable_http_bridge_ownership()
+                except Exception:
+                    logger.warning("HTTP bridge durable ownership reconciliation failed", exc_info=True)
 
     async def _register_and_heartbeat(svc: RingMembershipService, iid: str) -> None:
         attempt = 0

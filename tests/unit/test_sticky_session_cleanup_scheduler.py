@@ -34,6 +34,9 @@ async def test_cleanup_once_purges_prompt_cache_only(monkeypatch) -> None:
     sticky_repo.purge_before = AsyncMock(return_value=0)
     bridge_repo = AsyncMock()
     bridge_repo.purge_closed_before = AsyncMock(return_value=2)
+    bridge_repo.purge_abandoned_before = AsyncMock(return_value=1)
+    ring_service = AsyncMock()
+    ring_service.purge_stale_before = AsyncMock(return_value=0)
 
     class FakeSession:
         async def __aenter__(self):
@@ -52,6 +55,7 @@ async def test_cleanup_once_purges_prompt_cache_only(monkeypatch) -> None:
         patch.object(cleanup_scheduler, "SettingsRepository", return_value=settings_repo),
         patch.object(cleanup_scheduler, "StickySessionsRepository", return_value=sticky_repo),
         patch.object(cleanup_scheduler, "DurableBridgeRepository", return_value=bridge_repo),
+        patch.object(cleanup_scheduler, "RingMembershipService", return_value=ring_service),
         patch.object(cleanup_scheduler.startup_module, "_bridge_durable_schema_ready", True),
     ):
         await scheduler._cleanup_once()
@@ -59,6 +63,8 @@ async def test_cleanup_once_purges_prompt_cache_only(monkeypatch) -> None:
     sticky_repo.purge_prompt_cache_before.assert_called_once()
     sticky_repo.purge_before.assert_not_called()
     bridge_repo.purge_closed_before.assert_called_once()
+    bridge_repo.purge_abandoned_before.assert_called_once()
+    ring_service.purge_stale_before.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -72,6 +78,9 @@ async def test_cleanup_once_skips_bridge_purge_when_schema_is_not_ready(monkeypa
     sticky_repo.purge_prompt_cache_before = AsyncMock(return_value=0)
     bridge_repo = AsyncMock()
     bridge_repo.purge_closed_before = AsyncMock(return_value=0)
+    bridge_repo.purge_abandoned_before = AsyncMock(return_value=0)
+    ring_service = AsyncMock()
+    ring_service.purge_stale_before = AsyncMock(return_value=0)
 
     class FakeSession:
         async def __aenter__(self):
@@ -90,6 +99,7 @@ async def test_cleanup_once_skips_bridge_purge_when_schema_is_not_ready(monkeypa
         patch.object(cleanup_scheduler, "SettingsRepository", return_value=settings_repo),
         patch.object(cleanup_scheduler, "StickySessionsRepository", return_value=sticky_repo),
         patch.object(cleanup_scheduler, "DurableBridgeRepository", return_value=bridge_repo),
+        patch.object(cleanup_scheduler, "RingMembershipService", return_value=ring_service),
         patch.object(cleanup_scheduler.startup_module, "_bridge_durable_schema_ready", False),
         patch.object(
             cleanup_scheduler,
@@ -101,6 +111,8 @@ async def test_cleanup_once_skips_bridge_purge_when_schema_is_not_ready(monkeypa
 
     sticky_repo.purge_prompt_cache_before.assert_called_once()
     bridge_repo.purge_closed_before.assert_not_called()
+    bridge_repo.purge_abandoned_before.assert_not_called()
+    ring_service.purge_stale_before.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -114,6 +126,9 @@ async def test_cleanup_once_purges_bridge_when_schema_exists_after_startup_flag_
     sticky_repo.purge_prompt_cache_before = AsyncMock(return_value=0)
     bridge_repo = AsyncMock()
     bridge_repo.purge_closed_before = AsyncMock(return_value=1)
+    bridge_repo.purge_abandoned_before = AsyncMock(return_value=0)
+    ring_service = AsyncMock()
+    ring_service.purge_stale_before = AsyncMock(return_value=2)
 
     class FakeSession:
         async def __aenter__(self):
@@ -132,6 +147,7 @@ async def test_cleanup_once_purges_bridge_when_schema_exists_after_startup_flag_
         patch.object(cleanup_scheduler, "SettingsRepository", return_value=settings_repo),
         patch.object(cleanup_scheduler, "StickySessionsRepository", return_value=sticky_repo),
         patch.object(cleanup_scheduler, "DurableBridgeRepository", return_value=bridge_repo),
+        patch.object(cleanup_scheduler, "RingMembershipService", return_value=ring_service),
         patch.object(cleanup_scheduler.startup_module, "_bridge_durable_schema_ready", False),
         patch.object(cleanup_scheduler, "missing_durable_bridge_tables", AsyncMock(return_value=())),
     ):
@@ -139,3 +155,5 @@ async def test_cleanup_once_purges_bridge_when_schema_exists_after_startup_flag_
 
     sticky_repo.purge_prompt_cache_before.assert_called_once()
     bridge_repo.purge_closed_before.assert_called_once()
+    bridge_repo.purge_abandoned_before.assert_called_once()
+    ring_service.purge_stale_before.assert_called_once()

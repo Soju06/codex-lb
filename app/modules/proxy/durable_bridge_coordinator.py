@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -113,6 +113,15 @@ class DurableBridgeSessionCoordinator:
                 api_key_scope=api_key_scope,
             )
             return _to_lookup(snapshot) if snapshot is not None else None
+
+    async def lookup_sessions(self, *, session_ids: Sequence[str]) -> list[DurableBridgeLookup]:
+        """Batch-load durable session snapshots for ownership reconciliation."""
+
+        if not session_ids:
+            return []
+        async with self._session() as session:
+            snapshots = await DurableBridgeRepository(session).get_sessions_by_ids(session_ids)
+        return [_to_lookup(snapshot) for snapshot in snapshots]
 
     async def claim_live_session(
         self,

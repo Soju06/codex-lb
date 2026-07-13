@@ -66,6 +66,7 @@ from app.modules.proxy._service.compact import (
 )
 from app.modules.proxy._service.http_bridge.helpers import (
     _effective_http_bridge_idle_ttl_seconds,
+    _http_bridge_durable_lookup_allows_turn_state_takeover,
     _http_bridge_is_context_overflow_error,
     _http_bridge_is_previous_response_owner_unavailable,
     _http_bridge_models_compatible,
@@ -79,6 +80,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_should_attempt_local_previous_response_recovery,
     _http_bridge_should_attempt_soft_affinity_reroute,
     _http_bridge_should_rollover_after_context_overflow,
+    _http_bridge_turn_state_anchor_for_owner_failure,
     _log_http_bridge_event,
     _make_http_bridge_session_header_fallback_key,
     _make_http_bridge_session_key,
@@ -1078,26 +1080,57 @@ class _HTTPBridgeStreamingMixin:
                     headers=headers,
                     previous_response_id=effective_payload.previous_response_id,
                 )
+                should_attempt_turn_state_takeover = False
                 if not should_attempt_previous_response_recovery and not should_attempt_bootstrap_rebind:
+                    takeover_turn_state = _http_bridge_turn_state_anchor_for_owner_failure(
+                        exc,
+                        headers=headers,
+                        previous_response_id=effective_payload.previous_response_id,
+                    )
+                    if takeover_turn_state is not None:
+                        try:
+                            fresh_turn_state_lookup = await self._durable_bridge.lookup_turn_state_target(
+                                turn_state=takeover_turn_state,
+                                api_key_id=api_key.id if api_key is not None else None,
+                            )
+                        except Exception:
+                            logger.warning(
+                                "Turn-state takeover lookup failed after owner forward failure; failing closed",
+                                exc_info=True,
+                            )
+                        else:
+                            if _http_bridge_durable_lookup_allows_turn_state_takeover(fresh_turn_state_lookup):
+                                should_attempt_turn_state_takeover = True
+                                durable_lookup = fresh_turn_state_lookup
+                if (
+                    not should_attempt_previous_response_recovery
+                    and not should_attempt_bootstrap_rebind
+                    and not should_attempt_turn_state_takeover
+                ):
                     raise
                 if PROMETHEUS_AVAILABLE and bridge_durable_recover_total is not None:
-                    bridge_durable_recover_total.labels(
-                        path="owner_forward_fail"
-                        if should_attempt_previous_response_recovery
-                        else "owner_forward_bootstrap"
-                    ).inc()
+                    if should_attempt_previous_response_recovery:
+                        recover_path = "owner_forward_fail"
+                    elif should_attempt_turn_state_takeover:
+                        recover_path = "owner_forward_turn_state"
+                    else:
+                        recover_path = "owner_forward_bootstrap"
+                    bridge_durable_recover_total.labels(path=recover_path).inc()
+                if should_attempt_previous_response_recovery:
+                    recover_event = "previous_response_recover_local"
+                    recover_detail = "outcome=local_rebind_after_forward_failure"
+                elif should_attempt_turn_state_takeover:
+                    recover_event = "turn_state_takeover_local"
+                    recover_detail = "outcome=local_takeover_after_forward_failure"
+                else:
+                    recover_event = "bootstrap_rebind_local"
+                    recover_detail = "outcome=local_bootstrap_after_forward_failure"
                 _log_http_bridge_event(
-                    "previous_response_recover_local"
-                    if should_attempt_previous_response_recovery
-                    else "bootstrap_rebind_local",
+                    recover_event,
                     bridge_session_key,
                     account_id=None,
                     model=effective_payload.model,
-                    detail=(
-                        "outcome=local_rebind_after_forward_failure"
-                        if should_attempt_previous_response_recovery
-                        else "outcome=local_bootstrap_after_forward_failure"
-                    ),
+                    detail=recover_detail,
                     cache_key_family=bridge_session_key.affinity_kind,
                     model_class=_extract_model_class(effective_payload.model) if effective_payload.model else None,
                     owner_check_applied=True,
@@ -1123,10 +1156,14 @@ class _HTTPBridgeStreamingMixin:
                             allow_forward_to_owner=False,
                             forwarded_request=False,
                             allow_previous_response_recovery_rebind=should_attempt_previous_response_recovery,
-                            allow_bootstrap_owner_rebind=should_attempt_bootstrap_rebind,
+                            allow_bootstrap_owner_rebind=(
+                                should_attempt_bootstrap_rebind or should_attempt_turn_state_takeover
+                            ),
                             durable_lookup=durable_lookup,
                             request_stage=(
-                                "reattach" if should_attempt_previous_response_recovery else "bootstrap_rebind"
+                                "reattach"
+                                if should_attempt_previous_response_recovery or should_attempt_turn_state_takeover
+                                else "bootstrap_rebind"
                             ),
                             preferred_account_id=request_state.preferred_account_id,
                             request_usage_budget=request_state.request_usage_budget,

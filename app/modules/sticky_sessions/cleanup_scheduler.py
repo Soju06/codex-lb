@@ -11,8 +11,9 @@ from typing import Protocol, cast
 from app.core import startup as startup_module
 from app.core.config.settings import get_settings
 from app.core.utils.time import utcnow
-from app.db.session import get_background_session
+from app.db.session import SessionLocal, get_background_session
 from app.modules.proxy.durable_bridge_repository import DurableBridgeRepository, missing_durable_bridge_tables
+from app.modules.proxy.ring_membership import RING_MEMBER_RETENTION_SECONDS, RingMembershipService
 from app.modules.proxy.sticky_repository import StickySessionsRepository
 from app.modules.settings.repository import SettingsRepository
 
@@ -80,6 +81,15 @@ class StickySessionCleanupScheduler:
                         bridge_deleted_count = await bridge_repo.purge_closed_before(cutoff)
                         if bridge_deleted_count > 0:
                             logger.info("Purged closed HTTP bridge sessions deleted_count=%s", bridge_deleted_count)
+                        abandoned_deleted_count = await bridge_repo.purge_abandoned_before(cutoff)
+                        if abandoned_deleted_count > 0:
+                            logger.info(
+                                "Purged abandoned HTTP bridge sessions deleted_count=%s", abandoned_deleted_count
+                            )
+                ring_cutoff = utcnow() - timedelta(seconds=RING_MEMBER_RETENTION_SECONDS)
+                ring_deleted_count = await RingMembershipService(SessionLocal).purge_stale_before(ring_cutoff)
+                if ring_deleted_count > 0:
+                    logger.info("Purged stale bridge ring members deleted_count=%s", ring_deleted_count)
             except Exception:
                 logger.exception("Sticky session cleanup loop failed")
 

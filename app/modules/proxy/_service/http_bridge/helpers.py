@@ -1299,6 +1299,7 @@ async def _persist_http_bridge_turn_state_alias(
     if registered is not False:
         return
 
+    fenced_out_session: _HTTPBridgeSession | None = None
     async with service._http_bridge_lock:
         if session.turn_state_alias_registration_generations.get(turn_state) != registration_generation:
             return
@@ -1315,6 +1316,12 @@ async def _persist_http_bridge_turn_state_alias(
         )
         if not current_generation_owns_alias and service._http_bridge_turn_state_index.get(alias_key) == session.key:
             service._http_bridge_turn_state_index.pop(alias_key, None)
+        fenced_out_session = _evict_fenced_out_http_bridge_session_locked(
+            service,
+            session,
+            owner_epoch_at_write=owner_epoch,
+        )
+    _schedule_fenced_out_http_bridge_session_close(service, fenced_out_session, detail="turn_state_alias_fenced_out")
 
 
 async def _persist_http_bridge_previous_response_alias(
@@ -1346,6 +1353,7 @@ async def _persist_http_bridge_previous_response_alias(
     if registered is not False:
         return
 
+    fenced_out_session: _HTTPBridgeSession | None = None
     async with service._http_bridge_lock:
         if session.previous_response_alias_registration_generations.get(response_id) != registration_generation:
             return
@@ -1363,6 +1371,96 @@ async def _persist_http_bridge_previous_response_alias(
             and service._http_bridge_previous_response_index.get(alias_key) == session.key
         ):
             service._http_bridge_previous_response_index.pop(alias_key, None)
+        fenced_out_session = _evict_fenced_out_http_bridge_session_locked(
+            service,
+            session,
+            owner_epoch_at_write=owner_epoch,
+        )
+    _schedule_fenced_out_http_bridge_session_close(
+        service, fenced_out_session, detail="previous_response_alias_fenced_out"
+    )
+
+
+def _evict_fenced_out_http_bridge_session_locked(
+    service: _HTTPBridgeServiceProtocol,
+    session: _HTTPBridgeSession,
+    *,
+    owner_epoch_at_write: int | None,
+) -> _HTTPBridgeSession | None:
+    """Detach a session whose fenced durable write proved lost ownership.
+
+    Callers must hold ``service._http_bridge_lock``. When the session's local
+    epoch advanced concurrently (same-session re-claim), the fenced rejection
+    is stale rather than a lost-ownership signal and no eviction happens.
+    """
+
+    if session.closed:
+        return None
+    if owner_epoch_at_write is None or session.durable_owner_epoch != owner_epoch_at_write:
+        return None
+    detached = service._detach_http_bridge_session_locked(session.key, expected_session=session)
+    if detached is None:
+        session.closed = True
+    return detached or session
+
+
+def _schedule_fenced_out_http_bridge_session_close(
+    service: _HTTPBridgeServiceProtocol,
+    session: _HTTPBridgeSession | None,
+    *,
+    detail: str,
+) -> None:
+    if session is None:
+        return
+    _log_http_bridge_event(
+        "fenced_out_evict",
+        session.key,
+        account_id=session.account.id,
+        model=session.request_model,
+        detail=f"outcome={detail}",
+        cache_key_family=session.key.affinity_kind,
+        model_class=_extract_model_class(session.request_model) if session.request_model else None,
+        owner_check_applied=True,
+    )
+    service._schedule_http_bridge_session_closes([session], reason="durable_fenced_out")
+
+
+def _http_bridge_turn_state_anchor_for_owner_failure(
+    exc: ProxyResponseError,
+    *,
+    headers: Mapping[str, str],
+    previous_response_id: str | None,
+) -> str | None:
+    """Return the turn-state anchor when an owner forward failed unreachable."""
+
+    if previous_response_id is not None:
+        return None
+    turn_state = _sticky_key_from_turn_state_header(headers)
+    if turn_state is None:
+        return None
+    payload = exc.payload
+    if not isinstance(payload, dict):
+        return None
+    error = payload.get("error")
+    if not isinstance(error, dict):
+        return None
+    if error.get("code") != "bridge_owner_unreachable":
+        return None
+    return turn_state
+
+
+def _http_bridge_durable_lookup_allows_turn_state_takeover(lookup: DurableBridgeLookup | None) -> bool:
+    """Allow local takeover only when the durable lease is not actively held.
+
+    Released (owner ``None``), expired-lease, DRAINING, and missing rows allow
+    takeover; a live lease held by another instance keeps failing closed.
+    """
+
+    if lookup is None:
+        return True
+    if lookup.state == HttpBridgeSessionState.DRAINING:
+        return True
+    return _durable_bridge_lookup_active_owner(lookup) is None
 
 
 def _forwarded_http_bridge_session_key(
@@ -1896,6 +1994,8 @@ for _helper_name in (
     "_http_bridge_is_context_overflow_error",
     "_http_bridge_should_rollover_after_context_overflow",
     "_http_bridge_should_attempt_local_bootstrap_rebind",
+    "_http_bridge_turn_state_anchor_for_owner_failure",
+    "_http_bridge_durable_lookup_allows_turn_state_takeover",
     "_normalized_http_bridge_instance_ring",
     "_active_http_bridge_instance_ring",
     "_http_bridge_owner_instance",

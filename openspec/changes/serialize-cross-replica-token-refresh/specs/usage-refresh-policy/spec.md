@@ -69,6 +69,8 @@ A process that fails to acquire the refresh claim MUST wait by polling within a 
 
 When a proxy stream turn encounters this transient claim failure, the streaming retry loop MUST exclude the affected account and fail over to a different account rather than reselecting the claimed account until attempts are exhausted. This failover MUST apply to both the proactive freshness check on the first stream attempt (before any upstream 401) and the forced refresh on the post-401 recovery attempt. Before failing over, the loop MUST release the stream lease it already acquired for the skipped account so that account does not continue to consume one of its stream-concurrency slots for a stream that will never open.
 
+The WebSocket connect loop MUST apply the same failover for a transient, transport-level claim failure reaching the connect path (on both the proactive freshness check and the post-401 forced refresh): rather than surfacing a bogus 401 `invalid_api_key`, it MUST release the skipped account's already-acquired stream lease, exclude the account, and reselect a healthy account. This failover MUST NOT apply when the request is pinned to a preferred/required account.
+
 #### Scenario: Claim held by another replica past the wait cap
 
 - **GIVEN** an unexpired refresh claim held by another replica
@@ -92,6 +94,15 @@ When a proxy stream turn encounters this transient claim failure, the streaming 
 - **THEN** the streaming retry loop excludes that account and fails over to a healthy account
 - **AND** the excluded account's already-acquired stream lease is released before failover
 - **AND** the request does not exhaust attempts as `no_accounts` while a healthy alternate exists
+
+#### Scenario: WebSocket connect claim timeout fails over instead of 401
+
+- **GIVEN** a WebSocket responses connection whose first-selected account needs a refresh
+- **AND** that account's refresh claim is held by another replica past the wait cap
+- **WHEN** the connect path raises the transient, transport-level claim error
+- **THEN** the connect loop excludes that account and fails over to a healthy account
+- **AND** the excluded account's already-acquired stream lease is released before failover
+- **AND** the client receives the upstream response rather than a 401 `invalid_api_key`
 
 ## MODIFIED Requirements
 

@@ -12,6 +12,7 @@ from starlette.websockets import WebSocketDisconnect
 
 import app.modules.proxy.api as proxy_api_module
 import app.modules.proxy.service as proxy_module
+from app.core.auth.refresh import RefreshError
 from app.core.utils.request_id import get_request_id
 
 pytestmark = pytest.mark.integration
@@ -594,6 +595,154 @@ def test_backend_responses_websocket_generic_auth_refresh_budget_is_per_account(
     ]
     assert forced_refresh_markers == [None, "acct_ws_auth_a", None, "acct_ws_auth_b"]
     assert permanent_failures == [("acct_ws_auth_a", "account_auth_invalidated")]
+
+
+def test_backend_responses_websocket_transient_refresh_claim_fails_over_instead_of_401(
+    app_instance,
+    monkeypatch,
+):
+    """Regression for the WebSocket connect path (cross-replica claim contention).
+
+    A transient ``refresh_claim_timeout`` (``transport_error=True``, non-permanent)
+    from ``_ensure_fresh_with_budget`` must not surface as a bogus 401
+    ``invalid_api_key``. Instead, mirroring the streaming/unary retry loops, the
+    connect loop must release the skipped account's stream lease, exclude it, and
+    fail over to a healthy account. Before the fix,
+    ``_try_open_websocket_connect_attempt`` caught any ``RefreshError`` and emitted
+    a 401 that terminated the request without failover.
+    """
+    recovered_upstream = _SequencedUpstreamWebSocket(
+        [],
+        deferred_message_batches=[
+            [
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.created",
+                            "response": {"id": "resp_ws_claim_recovered", "status": "in_progress"},
+                        },
+                        separators=(",", ":"),
+                    ),
+                ),
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.completed",
+                            "response": {"id": "resp_ws_claim_recovered", "status": "completed"},
+                        },
+                        separators=(",", ":"),
+                    ),
+                ),
+            ]
+        ],
+    )
+
+    selected_accounts: list[str] = []
+    freshened_accounts: list[str] = []
+    opened_accounts: list[str] = []
+    released_lease_account_ids: list[str | None] = []
+    permanent_failures: list[tuple[str, str]] = []
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
+        return None
+
+    async def fake_select_websocket_connect_account(
+        self,
+        deadline,
+        *,
+        request_state,
+        exclude_account_ids,
+        **_rest,
+    ):
+        del self, deadline, _rest
+        for account_id in ("acct_ws_claim_a", "acct_ws_claim_b"):
+            if account_id in exclude_account_ids:
+                continue
+            selected_accounts.append(account_id)
+            request_state.websocket_stream_lease = SimpleNamespace(account_id=account_id)
+            return SimpleNamespace(id=account_id)
+        return None
+
+    async def fake_ensure_fresh(self, account, *, force=False, timeout_seconds=None):
+        del self, force, timeout_seconds
+        freshened_accounts.append(account.id)
+        if account.id == "acct_ws_claim_a":
+            raise RefreshError(
+                "refresh_claim_timeout",
+                "refresh claim held by another replica",
+                False,
+                transport_error=True,
+            )
+        return account
+
+    async def fake_open_upstream_with_budget(self, account, headers, *, timeout_seconds, request_state=None):
+        del self, headers, timeout_seconds, request_state
+        opened_accounts.append(account.id)
+        return recovered_upstream
+
+    async def spy_release_account_lease(self, lease):
+        del self
+        if lease is not None:
+            released_lease_account_ids.append(getattr(lease, "account_id", None))
+        return None
+
+    async def fake_mark_permanent_failure(self, account, error_code):
+        del self
+        permanent_failures.append((account.id, error_code))
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_select_websocket_connect_account",
+        fake_select_websocket_connect_account,
+    )
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh)
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_open_upstream_websocket_with_budget",
+        fake_open_upstream_with_budget,
+    )
+    monkeypatch.setattr(proxy_module.LoadBalancer, "release_account_lease", spy_release_account_lease)
+    monkeypatch.setattr(proxy_module.LoadBalancer, "mark_permanent_failure", fake_mark_permanent_failure)
+
+    with TestClient(app_instance) as client:
+        with client.websocket_connect("/backend-api/codex/responses") as websocket:
+            websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "response.create",
+                        "model": "gpt-5.4",
+                        "input": "hello",
+                        "stream": True,
+                    }
+                )
+            )
+            created = json.loads(websocket.receive_text())
+            completed = json.loads(websocket.receive_text())
+
+    assert created["type"] == "response.created"
+    assert completed["type"] == "response.completed"
+    assert completed["response"]["id"] == "resp_ws_claim_recovered"
+    # The claimed account was selected first, then excluded and failed over to a
+    # healthy account rather than surfacing a 401.
+    assert selected_accounts == ["acct_ws_claim_a", "acct_ws_claim_b"]
+    # The transient-claim account never opened an upstream websocket.
+    assert opened_accounts == ["acct_ws_claim_b"]
+    # The skipped account's stream lease was released before failover.
+    assert "acct_ws_claim_a" in released_lease_account_ids
+    # A transient claim timeout must not be recorded as a permanent failure.
+    assert permanent_failures == []
 
 
 def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_instance, monkeypatch):
@@ -4437,8 +4586,10 @@ def test_backend_responses_websocket_connect_failure_masks_previous_response_not
         client_send_lock,
         websocket,
         force_refresh,
+        can_transient_failover=False,
     ):
         del self, account, headers, deadline, api_key, request_state, client_send_lock, websocket, force_refresh
+        del can_transient_failover
         payload = proxy_module.openai_error(
             "previous_response_not_found",
             "Previous response with id 'resp_ws_prev_anchor' not found.",

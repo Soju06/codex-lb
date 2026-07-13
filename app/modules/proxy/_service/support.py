@@ -274,6 +274,22 @@ class _WebSocketConnectFailureEmitted(Exception):
     pass
 
 
+class _WebSocketTransientRefreshFailover(Exception):
+    """Signals the WebSocket connect loop to fail over after a transient refresh.
+
+    Raised from the connect attempt when a non-permanent, transport-level
+    ``RefreshError`` (for example ``refresh_claim_timeout`` when another replica
+    holds the account's refresh claim) reaches the connect path and the request
+    is not bound to a preferred/required account. The loop releases the skipped
+    account's stream lease, excludes it, and reselects a healthy account instead
+    of surfacing a bogus 401 ``invalid_api_key``.
+    """
+
+    def __init__(self, account_id: str) -> None:
+        super().__init__(account_id)
+        self.account_id = account_id
+
+
 class _TransientStreamError(Exception):
     """Transient upstream error (e.g. 500 server_error) - retry on same account first."""
 

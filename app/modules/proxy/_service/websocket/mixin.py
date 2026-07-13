@@ -319,6 +319,7 @@ from app.modules.proxy._service.support import (
     _WebSocketContinuityState,
     _WebSocketReceiveTimeout,
     _WebSocketRequestState,
+    _WebSocketTransientRefreshFailover,
     _WebSocketUpstreamControl,
 )
 from app.modules.proxy._service.support import (
@@ -1867,7 +1868,19 @@ class _WebSocketMixin:
                     client_send_lock=client_send_lock,
                     websocket=websocket,
                     force_refresh=forced_refresh_account_id == account.id,
+                    can_transient_failover=not require_preferred_account and preferred_account_id is None,
                 )
+            except _WebSocketTransientRefreshFailover as failover:
+                # A transient, transport-level refresh failure (e.g. the
+                # account's refresh claim is held by another replica) reached
+                # the connect path. Release the skipped account's already-
+                # acquired stream lease so it does not keep consuming a
+                # stream-concurrency slot for a connection that never opens,
+                # exclude it, and reselect a healthy account.
+                await proxy._load_balancer.release_account_lease(selected_stream_lease)
+                selected_stream_lease = None
+                excluded_account_ids.add(failover.account_id)
+                continue
             except ProxyResponseError as exc:
                 action = await proxy._decide_websocket_failover_action(
                     account=account,
@@ -2208,6 +2221,7 @@ class _WebSocketMixin:
         client_send_lock: anyio.Lock,
         websocket: WebSocket,
         force_refresh: bool = False,
+        can_transient_failover: bool = False,
     ) -> tuple[Account, UpstreamResponsesWebSocket] | None:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
@@ -2268,10 +2282,18 @@ class _WebSocketMixin:
                 request_state=request_state,
                 client_send_lock=client_send_lock,
                 websocket=websocket,
+                can_transient_failover=can_transient_failover,
             )
         except RefreshError as exc:
             if exc.is_permanent:
                 await proxy._load_balancer.mark_permanent_failure(account, exc.code)
+            elif can_transient_failover and exc.transport_error:
+                # Transient refresh failure on the proactive freshness check
+                # (for example the account's refresh claim is held by another
+                # replica): do not surface a bogus 401 invalid_api_key. Signal
+                # the connect loop to release this account's stream lease,
+                # exclude it, and fail over to a healthy account.
+                raise _WebSocketTransientRefreshFailover(account.id) from exc
             await proxy._emit_websocket_connect_failure(
                 websocket,
                 client_send_lock=client_send_lock,
@@ -2309,6 +2331,7 @@ class _WebSocketMixin:
         request_state: _WebSocketRequestState,
         client_send_lock: anyio.Lock,
         websocket: WebSocket,
+        can_transient_failover: bool = False,
     ) -> tuple[Account, UpstreamResponsesWebSocket] | None:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
@@ -2331,6 +2354,12 @@ class _WebSocketMixin:
         except RefreshError as refresh_exc:
             if refresh_exc.is_permanent:
                 await proxy._load_balancer.mark_permanent_failure(account, refresh_exc.code)
+            elif can_transient_failover and refresh_exc.transport_error:
+                # Transient refresh failure on the post-401 forced refresh (for
+                # example the account's refresh claim is held by another
+                # replica): fail over to a healthy account instead of surfacing
+                # a bogus 401 invalid_api_key.
+                raise _WebSocketTransientRefreshFailover(account.id) from refresh_exc
             await proxy._emit_websocket_connect_failure(
                 websocket,
                 client_send_lock=client_send_lock,

@@ -293,3 +293,42 @@ async def test_request_logs_api_lists_limit_warmup_rows(async_client, db_setup):
     assert options_response.status_code == 200
     option_models = [entry["model"] for entry in options_response.json()["modelOptions"]]
     assert "gpt-5.1-codex-mini" in option_models
+
+
+@pytest.mark.asyncio
+async def test_request_log_total_count_is_cached_per_filter_signature(async_client, db_setup, monkeypatch):
+    """With the TTL enabled, repeated listings reuse the cached COUNT(*) for
+    the same filter signature; distinct signatures count separately."""
+    from sqlalchemy import event
+
+    from app.core.config.settings import get_settings
+    from app.db.session import engine
+    from app.modules.request_logs import repository as logs_repository_module
+
+    monkeypatch.setenv("CODEX_LB_REQUEST_LOG_COUNT_CACHE_TTL_SECONDS", "30")
+    get_settings.cache_clear()
+    logs_repository_module._clear_recent_count_cache()
+
+    count_statements: list[str] = []
+
+    def _capture(conn, cursor, statement, parameters, context, executemany):
+        if statement.lstrip().upper().startswith("SELECT COUNT") and "request_logs" in statement:
+            count_statements.append(statement)
+
+    event.listen(engine.sync_engine, "before_cursor_execute", _capture)
+    try:
+        first = await async_client.get("/api/request-logs?limit=5")
+        second = await async_client.get("/api/request-logs?limit=5&offset=5")
+        filtered = await async_client.get("/api/request-logs?limit=5&status=ok")
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", _capture)
+        logs_repository_module._clear_recent_count_cache()
+        get_settings.cache_clear()
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert filtered.status_code == 200
+    assert first.json()["total"] == second.json()["total"]
+    # One COUNT for the shared default signature (page 2 reuses it), one for
+    # the status-filtered signature.
+    assert len(count_statements) == 2

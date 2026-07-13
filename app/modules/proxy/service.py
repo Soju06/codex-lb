@@ -169,6 +169,10 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _has_http_bridge_response_output_marker as _has_http_bridge_response_output_marker,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
+    _http_bridge_admission_timeout_seconds,
+    _http_bridge_should_attempt_local_previous_response_recovery,  # noqa: F401
+)
+from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_allow_durable_takeover as _http_bridge_allow_durable_takeover,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
@@ -263,9 +267,6 @@ from app.modules.proxy._service.http_bridge.helpers import (
 )
 from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_should_attempt_local_bootstrap_rebind as _http_bridge_should_attempt_local_bootstrap_rebind,
-)
-from app.modules.proxy._service.http_bridge.helpers import (
-    _http_bridge_should_attempt_local_previous_response_recovery,  # noqa: F401
 )
 from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_should_attempt_soft_affinity_reroute as _http_bridge_should_attempt_soft_affinity_reroute,
@@ -1286,16 +1287,7 @@ class ProxyService(
     ) -> None:
         timeout_seconds = _proxy_admission_wait_timeout_seconds()
         if bridge_session is not None:
-            # Bridged requests retry gate acquisition within the bridge
-            # request budget; a final attempt must not run past it, so each
-            # acquisition wait is clamped to the remaining budget. Retry
-            # states carry the original deadline because their started_at
-            # is reset when they are re-prepared.
-            deadline = request_state.bridge_request_deadline
-            if deadline is None:
-                deadline = request_state.started_at + _http_bridge_request_budget_seconds(get_settings())
-            remaining_budget = deadline - time.monotonic()
-            timeout_seconds = max(0.0, min(timeout_seconds, remaining_budget))
+            timeout_seconds = _http_bridge_admission_timeout_seconds(request_state, timeout_seconds, get_settings())
         request_state.response_create_gate = response_create_gate
         request_state.response_create_gate_wait_started_at = time.monotonic()
         if account_id is not None:

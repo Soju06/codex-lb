@@ -565,6 +565,116 @@ async def test_proxy_401_with_foreign_claim_fails_over_without_reauth_write(asyn
 
 
 @pytest.mark.asyncio
+async def test_proxy_preflight_claim_timeout_fails_over_and_releases_lease(async_client, monkeypatch):
+    """Route-level regression for the pre-401 proactive-refresh path.
+
+    A transient refresh-claim timeout on the FIRST stream attempt (the
+    proactive freshness check, before any upstream 401) must exclude the
+    account, release its already-acquired stream lease, and fail over to
+    another account. Before the fix the streaming retry loop only handled a
+    transient claim failure in the post-401 forced-refresh path, so a
+    first-attempt claim timeout propagated out of the generator (P2 #1) and,
+    even where excluded, leaked the skipped account's stream lease (P2 #2).
+    """
+    import json
+
+    import app.modules.proxy.service as proxy_module
+
+    for raw_account_id, email in (
+        ("acc_preflight_claim_a", "preflight-claim-a@example.com"),
+        ("acc_preflight_claim_b", "preflight-claim-b@example.com"),
+    ):
+        auth_json = _make_auth_json(raw_account_id, email)
+        files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+        response = await async_client.post("/api/accounts/import", files=files)
+        assert response.status_code == 200
+
+    async with SessionLocal() as session:
+        account_ids = list((await session.execute(select(Account.id))).scalars().all())
+        assert len(account_ids) == 2
+        for account_id in account_ids:
+            session.add(
+                StickySession(
+                    key=f"sticky-{account_id}",
+                    kind=StickySessionKind.STICKY_THREAD,
+                    account_id=account_id,
+                )
+            )
+        await session.commit()
+
+    # Whichever account the retry loop freshens first fails with a transient
+    # refresh-claim timeout (as if a foreign replica holds the claim on the
+    # proactive, pre-401 freshness check); the other account freshens cleanly.
+    first_seen: dict[str, str | None] = {"account_id": None}
+
+    async def fake_ensure_fresh(self, account, *, force=False, timeout_seconds=None):
+        del self, force, timeout_seconds
+        if first_seen["account_id"] is None:
+            first_seen["account_id"] = account.id
+        if account.id == first_seen["account_id"]:
+            raise RefreshError(
+                "transport_error",
+                "refresh claim held by another replica",
+                False,
+                transport_error=True,
+            )
+        return account
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh)
+
+    released_lease_account_ids: list[str] = []
+    original_release = proxy_module.LoadBalancer.release_account_lease
+
+    async def spy_release(self, lease):
+        if lease is not None:
+            released_lease_account_ids.append(lease.account_id)
+        return await original_release(self, lease)
+
+    monkeypatch.setattr(proxy_module.LoadBalancer, "release_account_lease", spy_release)
+
+    streamed_account_ids: list[str] = []
+    released_before_stream: list[str] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
+        del payload, headers, access_token, base_url, raise_for_status, kwargs
+        if not streamed_account_ids:
+            released_before_stream.extend(released_lease_account_ids)
+        streamed_account_ids.append(account_id)
+        yield (
+            'data: {"type":"response.completed","response":{"id":"resp_preflight_failover",'
+            '"object":"response","status":"completed","usage":{"input_tokens":2,"output_tokens":1}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        json={"model": "gpt-5.4", "instructions": "hi", "input": [], "stream": True},
+    ) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    events = [json.loads(line[6:]) for line in lines if line.startswith("data: ") and line != "data: [DONE]"]
+    assert any(event.get("type") == "response.completed" for event in events)
+
+    failed_account_id = first_seen["account_id"]
+    assert failed_account_id is not None
+    # The pre-401 claim timeout excluded the failed account and failed over: it
+    # never reached the upstream stream, and a different account served it.
+    assert failed_account_id not in streamed_account_ids
+    assert streamed_account_ids
+    assert streamed_account_ids[-1] != failed_account_id
+    # The skipped account's stream lease was released BEFORE failover streaming
+    # (no leaked lease).
+    assert failed_account_id in released_before_stream
+
+    async with SessionLocal() as session:
+        accounts = list((await session.execute(select(Account))).scalars().all())
+        assert {account.status for account in accounts} == {AccountStatus.ACTIVE}
+
+
+@pytest.mark.asyncio
 async def test_claim_coordinator_win_lose_release_semantics(db_setup):
     account_id = "acc_claim_semantics"
     await _create_account(account_id)

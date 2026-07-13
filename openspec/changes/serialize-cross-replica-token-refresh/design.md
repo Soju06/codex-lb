@@ -45,7 +45,7 @@ Keep `enabled = auth_guardian_enabled and (leader_election_enabled or not static
 
 ### 5. Migration
 
-Revision `20260712_020000_add_account_refresh_claims`. **Deviation from the original design note**: the design named `20260712_010000_add_account_usage_rollups` as parent, but that migration is uncommitted work on another branch and does not exist here; per the design's own fallback, this revision is parented on the current committed head `20260711_030000_add_limit_warmup_idle_threshold`. If the usage-rollup migration merges first, one of the two branches needs a re-parent or an Alembic merge revision before release. Single head either way; downgrade drops the table; no backfill (empty coordination table).
+Revision `20260713_040000_add_account_refresh_claims`. **Re-parented after rebase onto main**: the usage-rollup migrations (`20260712_010000_add_account_usage_rollups`, `20260712_020000_add_api_key_usage_rollups`) have since merged to main, so this revision is now parented on the current main head `20260712_020000_add_api_key_usage_rollups` and renamed to a unique timestamp after it (an earlier iteration duplicated the `20260712_020000` id, which the rename resolves). Single head; downgrade drops the table; no backfill (empty coordination table).
 
 ### 6. Performance
 
@@ -53,7 +53,7 @@ Zero new per-request DB round-trips on the hot proxy path — claim machinery ex
 
 ## Deviations from the approved design
 
-1. **Migration parent** — re-parented onto `20260711_030000_add_limit_warmup_idle_threshold` (see Decision 5); the designed parent does not exist on this branch.
+1. **Migration parent** — re-parented onto the current main head `20260712_020000_add_api_key_usage_rollups` (see Decision 5) after the usage-rollup migrations merged to main.
 2. **Coordinator wiring** — the design left wiring open ("claim repository helpers"); implemented as a standalone `RefreshClaimCoordinator` in `app/modules/accounts/refresh_claims.py` that opens its own short-lived background sessions (single-statement autocommit, honoring the "no lock across upstream I/O" invariant) plus a process-default accessor (`get_refresh_claim_coordinator`). `AuthManager` uses the process default unless a coordinator is injected, so every product refresh path (per-request 401 recovery, guardian, usage refresh, warm-up, automations, model refresh) is claimed without per-call-site wiring. The test harness disables the process default (`set_refresh_claim_coordinator(None)`) so DB-less unit tests keep exercising the legacy flow; claim tests inject real coordinators explicitly.
 3. **Adoption returns the caller's object** — when a loser/winner adopts a concurrently committed rotation, the fresh row's state is copied onto the caller's `Account` object (`_adopt_account_row`) instead of returning the repo-session-bound row, which would expire once the owned refresh session closes. The pre-existing stale-guard path had this latent detached-object hazard; the old unit test asserting object identity was updated to assert adopted state.
 4. **Loser re-acquire** — the design called for "one bounded re-acquire attempt"; implemented as the poll loop naturally re-attempting acquisition each iteration (still bounded by the same deadline), which is strictly simpler and no less bounded.

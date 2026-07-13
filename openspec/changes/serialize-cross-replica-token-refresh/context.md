@@ -33,5 +33,5 @@ Two replicas, leader election disabled, Helm chart (empty static ring). An acces
 ## Operational notes
 
 - `claimed_by` is `http_responses_session_bridge_instance_id` plus a per-process suffix; an over-long instance id is truncated on the instance-id portion only (the suffix is always preserved so co-located workers never collapse into one claimant). Stale rows are self-healing via TTL and are deleted on release, so the table stays at most one row per concurrently refreshing account.
-- Landing-order coordination: this change's migration is parented on `20260711_030000_add_limit_warmup_idle_threshold`. If another in-flight change lands a migration on the same parent first, add an Alembic merge revision (or re-parent) before release so CI sees a single head.
+- Landing-order coordination: this change's migration (`20260713_040000_add_account_refresh_claims`) is parented on the current main head `20260712_020000_add_api_key_usage_rollups`. If another in-flight change lands a migration on the same parent first, add an Alembic merge revision (or re-parent) before release so CI sees a single head.
 - This change MODIFIES the `usage-refresh-policy` requirement "Multi-replica leader guard", which the harden-scheduler-leader-election change may also touch — coordinate spec-sync merge order.

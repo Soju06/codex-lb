@@ -1018,6 +1018,24 @@ class _StreamingRetryMixin:
                         )
                         yield format_sse_event(event)
                         return
+                    except RefreshError as refresh_exc:
+                        if refresh_exc.is_permanent:
+                            await proxy._load_balancer.mark_permanent_failure(account, refresh_exc.code)
+                        elif (
+                            refresh_exc.transport_error
+                            and not require_preferred_account
+                            and preferred_account_id is None
+                        ):
+                            # Transient refresh failure before the first
+                            # stream attempt (for example the account's
+                            # refresh claim is held by another replica):
+                            # release the stream lease and fail over to a
+                            # different account instead of reselecting the
+                            # same one until attempts are exhausted.
+                            await _release_tracked_stream_lease(current_account_lease)
+                            current_account_lease = None
+                            excluded_account_ids.add(account.id)
+                        continue
                     except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
                         _facade().logger.warning(
                             "Stream refresh/connect failed request_id=%s attempt=%s account_id=%s",
@@ -1502,8 +1520,11 @@ class _StreamingRetryMixin:
                             ):
                                 # Transient refresh failure (for example the
                                 # account's refresh claim is held by another
-                                # replica): fail over to a different account
-                                # instead of retrying the same one.
+                                # replica): release the skipped account's
+                                # stream lease and fail over to a different
+                                # account instead of retrying the same one.
+                                await _release_tracked_stream_lease(current_account_lease)
+                                current_account_lease = None
                                 excluded_account_ids.add(account.id)
                             continue
                         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:

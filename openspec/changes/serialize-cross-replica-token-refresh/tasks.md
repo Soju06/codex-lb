@@ -2,7 +2,7 @@
 
 - [x] 1. Create OpenSpec change artifacts (proposal, design, tasks, delta specs for usage-refresh-policy, context) and validate
 - [x] 2. Add `AccountRefreshClaim` model to `app/db/models.py` (account_id PK/FK CASCADE, claimed_by, claimed_at, claim_expires_at)
-- [x] 3. Add Alembic revision `20260712_020000_add_account_refresh_claims` parented on `20260711_030000_add_limit_warmup_idle_threshold` (re-parented from the uncommitted usage-rollup revision; see design.md); upgrade creates the table, downgrade drops it; single head
+- [x] 3. Add Alembic revision `20260713_040000_add_account_refresh_claims` parented on the current main head `20260712_020000_add_api_key_usage_rollups` (re-parented after the usage-rollup migrations merged to main; see design.md); upgrade creates the table, downgrade drops it; single head
 - [x] 4. Add `RefreshClaimCoordinator` (`app/modules/accounts/refresh_claims.py`): conditional-upsert `try_acquire` with RETURNING (pg_insert/sqlite_insert, sqlite_writer_section + SQLITE_BUSY retry), `release`, `current_claim`, process-default accessor; add `AccountsRepository.get_by_id_fresh` (populate_existing)
 - [x] 5. Add settings: `token_refresh_claim_ttl_seconds` (default 30, validated >= 2x `token_refresh_timeout_seconds`), `token_refresh_claim_wait_seconds` (default 8.0), `token_refresh_claim_poll_seconds` (default 0.25)
 - [x] 6. AuthManager: claim acquire -> post-claim fresh re-read (skip+adopt on rotated fingerprint, refresh with re-read ciphertext) -> update_tokens -> release; loser bounded poll loop with adopt/re-acquire/transient timeout (`RefreshError` transport_error=True, never cached as permanent)
@@ -12,5 +12,6 @@
 - [x] 10. Unit tests: claim upsert statement compiles for both dialects; settings TTL validation; claimant identity
 - [x] 11. Integration tests (two-replica simulation): concurrent race (one upstream call, no REAUTH, sticky intact), loser adoption, crashed-claimant TTL takeover, foreign-claim bounded wait raises transient error not cached by the singleflight, stale-guard regression, update_tokens CAS, guardian dynamic detection
 - [x] 12. Route-level regression on the proxy responses harness: upstream 401 with claim pre-held by a foreign claimant -> request fails over transiently, no REAUTH_REQUIRED write, sticky sessions intact, zero upstream token exchanges
-- [x] 13. Migration coverage: upgrade/downgrade over `20260712_020000` and single-head assertion
+- [x] 12a. Streaming retry failover: a transient claim timeout on BOTH the pre-401 proactive freshness check and the post-401 forced refresh MUST exclude the account and fail over, releasing the skipped account's stream lease first; route-level regression (`test_proxy_preflight_claim_timeout_fails_over_and_releases_lease`)
+- [x] 13. Migration coverage: upgrade/downgrade over `20260713_040000` (parent `20260712_020000_add_api_key_usage_rollups`) and single-head assertion
 - [x] 14. Run targeted pytest, ruff, and `openspec validate serialize-cross-replica-token-refresh`

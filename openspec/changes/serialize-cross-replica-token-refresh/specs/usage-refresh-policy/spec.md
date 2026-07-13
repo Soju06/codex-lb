@@ -30,7 +30,9 @@ Before any upstream OAuth token exchange for an account, the system MUST acquire
 
 ### Requirement: Refresh claim losers wait bounded and never degrade account status
 
-A process that fails to acquire the refresh claim MUST wait by polling within a bounded deadline (configurable cap, additionally bounded by the caller's refresh timeout budget). When it observes rotated refresh-token material it MUST return the stored tokens without an upstream call. When the deadline elapses it MUST fail with a transient (non-permanent) refresh error that is not recorded in the permanent-failure cooldown, and it MUST NOT write `reauth_required` or `deactivated`, so 401-recovery fails over to another account instead of blocking.
+A process that fails to acquire the refresh claim MUST wait by polling within a bounded deadline (configurable cap, additionally bounded by the caller's refresh timeout budget). When it observes rotated refresh-token material it MUST return the stored tokens without an upstream call. When the deadline elapses it MUST fail with a transient (non-permanent) refresh error that is not recorded in the permanent-failure cooldown, and it MUST NOT write `reauth_required` or `deactivated`, so token-refresh recovery fails over to another account instead of blocking.
+
+When a proxy stream turn encounters this transient claim failure, the streaming retry loop MUST exclude the affected account and fail over to a different account rather than reselecting the claimed account until attempts are exhausted. This failover MUST apply to both the proactive freshness check on the first stream attempt (before any upstream 401) and the forced refresh on the post-401 recovery attempt. Before failing over, the loop MUST release the stream lease it already acquired for the skipped account so that account does not continue to consume one of its stream-concurrency slots for a stream that will never open.
 
 #### Scenario: Claim held by another replica past the wait cap
 
@@ -46,6 +48,15 @@ A process that fails to acquire the refresh claim MUST wait by polling within a 
 - **GIVEN** an unexpired refresh claim held by another replica that completes its token exchange
 - **WHEN** the waiting replica observes the rotated refresh-token material within the wait cap
 - **THEN** it returns the rotated tokens with zero upstream token exchanges
+
+#### Scenario: Proactive pre-stream claim timeout fails over instead of looping
+
+- **GIVEN** a proxy stream turn whose first-selected account is stale and needs a proactive refresh
+- **AND** that account's refresh claim is held by another replica past the wait cap
+- **WHEN** the first-attempt freshness check raises the transient claim error before any upstream 401
+- **THEN** the streaming retry loop excludes that account and fails over to a healthy account
+- **AND** the excluded account's already-acquired stream lease is released before failover
+- **AND** the request does not exhaust attempts as `no_accounts` while a healthy alternate exists
 
 ## MODIFIED Requirements
 

@@ -1403,15 +1403,14 @@ async def test_normalize_public_stream_passes_canonical_unmutated_blocks_verbati
     delta = proxy_api_module.format_sse_event(
         {"type": "response.output_text.delta", "item_id": "msg_1", "output_index": 0, "delta": "hi"}
     )
-    completed = proxy_api_module.format_sse_event(
-        {
-            "type": "response.completed",
-            "response": {
-                "id": "resp_pt",
-                "output": [{"type": "message", "id": "msg_1", "content": [{"type": "output_text", "text": "hi"}]}],
-            },
-        }
-    )
+    completed_payload: dict[str, Any] = {
+        "type": "response.completed",
+        "response": {
+            "id": "resp_pt",
+            "output": [{"type": "message", "id": "msg_1", "content": [{"type": "output_text", "text": "hi"}]}],
+        },
+    }
+    completed = proxy_api_module.format_sse_event(completed_payload)
 
     blocks = [
         block

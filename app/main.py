@@ -218,7 +218,15 @@ async def lifespan(app: FastAPI):
     if settings.model_registry_enabled:
         from app.core.openai.model_registry_store import reconcile_model_registry_from_store
 
-        cache_poller.on_invalidation(NAMESPACE_MODEL_REGISTRY, reconcile_model_registry_from_store)
+        # raise_on_error=True so a transient load failure leaves the
+        # model_registry version unacknowledged and is retried on the next poll
+        # cycle (matching the account_routing refresh callback) instead of being
+        # swallowed, which would strand this replica on the stale catalog until
+        # the non-leader scheduler backstop.
+        cache_poller.on_invalidation(
+            NAMESPACE_MODEL_REGISTRY,
+            lambda: reconcile_model_registry_from_store(raise_on_error=True),
+        )
     set_cache_invalidation_poller(cache_poller)
 
     # Seed the invalidation version baseline BEFORE loading the routing snapshot

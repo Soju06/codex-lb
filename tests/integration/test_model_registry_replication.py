@@ -17,7 +17,11 @@ from sqlalchemy import select, text
 
 import app.core.cache.invalidation as invalidation_module
 import app.core.openai.model_refresh_scheduler as scheduler_module
-from app.core.cache.invalidation import NAMESPACE_MODEL_REGISTRY, CacheInvalidationPoller
+from app.core.cache.invalidation import (
+    NAMESPACE_ACCOUNT_SELECTION,
+    NAMESPACE_MODEL_REGISTRY,
+    CacheInvalidationPoller,
+)
 from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.openai.model_registry import (
@@ -728,3 +732,110 @@ async def test_stale_snapshot_replaced_after_next_leader_refresh(db_setup) -> No
     snapshot = get_model_registry().get_snapshot()
     assert snapshot is not None
     assert REPLICA_SLUG in snapshot.models
+
+
+async def test_apply_does_not_propagate_account_selection_bump(db_setup, monkeypatch) -> None:
+    """Applying the leader's snapshot only needs a local selection-cache clear:
+    the leader's refresh already bumped ``model_registry`` (reaching every
+    replica) and each replica clears its own selection cache on apply. A
+    propagating clear here would make every follower durably re-bump
+    ``account_selection`` on the next poll, amplifying bus traffic for no
+    peer-visible effect."""
+    del db_setup
+    poller = CacheInvalidationPoller(SessionLocal)
+    monkeypatch.setattr(invalidation_module, "_poller", poller)
+
+    await _leader_persist(await _refreshed_leader_export())
+    assert await reconcile_model_registry_from_store() is True
+
+    assert NAMESPACE_ACCOUNT_SELECTION not in poller._pending_bumps
+
+
+async def test_drop_to_floor_does_not_propagate_account_selection_bump(db_setup, monkeypatch) -> None:
+    """Reverting to the bootstrap floor when the store row disappears is a local
+    convergence step every replica performs independently off the same observed
+    store state, so it must not re-bump ``account_selection`` either."""
+    del db_setup
+    poller = CacheInvalidationPoller(SessionLocal)
+    monkeypatch.setattr(invalidation_module, "_poller", poller)
+
+    await _leader_persist(await _refreshed_leader_export())
+    assert await reconcile_model_registry_from_store() is True
+    assert get_model_registry().get_snapshot() is not None
+    poller._pending_bumps.clear()
+
+    async with SessionLocal() as session:
+        await session.execute(text("DELETE FROM model_registry_snapshot WHERE id = 1"))
+        await session.commit()
+
+    assert await reconcile_model_registry_from_store() is False
+    assert get_model_registry().get_snapshot() is None  # reverted to floor
+    assert NAMESPACE_ACCOUNT_SELECTION not in poller._pending_bumps
+
+
+async def test_load_failure_is_swallowed_by_default_but_raises_when_requested(db_setup) -> None:
+    """A transient load failure (malformed payload) must keep the current
+    in-memory state and, by default, be swallowed. The invalidation-callback
+    variant re-raises so the poller can leave the version unacknowledged."""
+    del db_setup
+    await _leader_persist(await _refreshed_leader_export())
+    async with SessionLocal() as session:
+        await session.execute(
+            text("UPDATE model_registry_snapshot SET payload = :p WHERE id = 1"),
+            {"p": "not-json"},
+        )
+        await session.commit()
+
+    # Default: failure is swallowed, no snapshot applied.
+    assert await reconcile_model_registry_from_store() is False
+    assert get_model_registry().get_snapshot() is None
+
+    # Callback variant: the failure surfaces so the poller does not ACK.
+    with pytest.raises(Exception):
+        await reconcile_model_registry_from_store(raise_on_error=True)
+    assert get_model_registry().get_snapshot() is None
+
+
+async def test_invalidation_callback_load_failure_leaves_version_unacked_and_retries(db_setup) -> None:
+    """Product-path regression: as the ``model_registry`` invalidation callback,
+    a transient load failure must NOT acknowledge the observed version so the
+    poller retries on the next cycle instead of stranding the replica on the
+    stale catalog until the scheduler backstop."""
+    del db_setup
+    poller = CacheInvalidationPoller(SessionLocal)
+    poller.on_invalidation(
+        NAMESPACE_MODEL_REGISTRY,
+        lambda: reconcile_model_registry_from_store(raise_on_error=True),
+    )
+    await poller.prime()  # baseline before the leader publishes anything
+
+    content_hash = await _leader_persist(await _refreshed_leader_export())
+    async with SessionLocal() as session:
+        good_payload = await session.scalar(
+            select(ModelRegistrySnapshotRecord.payload).where(ModelRegistrySnapshotRecord.id == 1)
+        )
+        await session.execute(
+            text("UPDATE model_registry_snapshot SET payload = :p WHERE id = 1"),
+            {"p": "not-json"},
+        )
+        await session.commit()
+    leader_poller = CacheInvalidationPoller(SessionLocal)
+    await leader_poller.bump(NAMESPACE_MODEL_REGISTRY)
+
+    # First poll: the callback raises, so the version stays unacknowledged.
+    await poller._poll_once()
+    assert get_model_registry().get_snapshot() is None
+    assert NAMESPACE_MODEL_REGISTRY not in poller._known_versions
+
+    # The transient failure clears (payload readable again). A subsequent poll
+    # retries the SAME (never-acked) version and converges without a new bump.
+    async with SessionLocal() as session:
+        await session.execute(
+            text("UPDATE model_registry_snapshot SET payload = :p WHERE id = 1"),
+            {"p": good_payload},
+        )
+        await session.commit()
+
+    await poller._poll_once()
+    assert get_model_registry().applied_content_hash == content_hash
+    assert get_model_registry().get_snapshot() is not None

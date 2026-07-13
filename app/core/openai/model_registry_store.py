@@ -402,13 +402,31 @@ def _snapshot_age_seconds(header: StoredSnapshotHeader) -> float:
     return (utcnow() - to_utc_naive(header.refreshed_at)).total_seconds()
 
 
-async def reconcile_model_registry_from_store() -> bool:
+async def reconcile_model_registry_from_store(*, raise_on_error: bool = False) -> bool:
     """Apply the persisted snapshot to the local registry when it differs.
 
     Shared by lifespan startup, the ``model_registry`` invalidation callback,
-    and the non-leader refresh-tick backstop. Never raises: any failure keeps
-    the current in-memory state (bootstrap floor at worst) and logs a warning.
-    Returns True when a snapshot was applied.
+    and the non-leader refresh-tick backstop. Returns True when a snapshot was
+    applied.
+
+    A load failure (transient DB read error or malformed payload) keeps the
+    current in-memory state (bootstrap floor at worst) and logs a warning. When
+    ``raise_on_error`` is True the failure is re-raised after logging so the
+    caller can react to it: the ``model_registry`` invalidation callback passes
+    ``raise_on_error=True`` so ``CacheInvalidationPoller._run_callbacks`` leaves
+    the namespace version unacknowledged and retries on the next poll cycle
+    (matching the ``account_routing`` refresh callback), rather than ACKing the
+    bump and leaving this replica on the stale catalog until the non-leader
+    scheduler backstop. The startup one-shot and refresh-tick backstop use the
+    default ``raise_on_error=False`` so a transient failure never fails startup
+    or the scheduler loop; those paths retry on their own cadence.
+
+    The account-selection cache clears here are always local
+    (``propagate=False``): reconcile only applies a change the leader already
+    published (which bumped ``model_registry`` to reach every replica), and
+    every replica clears its own selection cache on apply. Propagating would
+    make each follower durably re-bump ``account_selection``, amplifying bus
+    traffic without changing any peer's state.
     """
     registry = get_model_registry()
     try:
@@ -425,7 +443,7 @@ async def reconcile_model_registry_from_store() -> bool:
                     # so drop the local state to converge with them until a
                     # leader publishes a snapshot.
                     await registry.clear()
-                    get_account_selection_cache().invalidate()
+                    get_account_selection_cache().invalidate(propagate=False)
                     logger.warning(
                         "Dropped local model registry state: no persisted snapshot row exists; "
                         "reverting to bootstrap floor"
@@ -453,7 +471,7 @@ async def reconcile_model_registry_from_store() -> bool:
                     # floor. Drop the local state to converge until a leader
                     # publishes a fresh snapshot.
                     await registry.clear()
-                    get_account_selection_cache().invalidate()
+                    get_account_selection_cache().invalidate(propagate=False)
                     logger.warning(
                         "Dropped local model registry snapshot: persisted entry older than %ds "
                         "(refreshed_at=%s); reverting to bootstrap floor",
@@ -477,10 +495,12 @@ async def reconcile_model_registry_from_store() -> bool:
         state = decode_registry_payload(payload, refreshed_at=header.refreshed_at)
     except Exception:
         logger.warning("Failed to load persisted model registry snapshot", exc_info=True)
+        if raise_on_error:
+            raise
         return False
 
     await registry.import_state(state, content_hash=header.content_hash)
-    get_account_selection_cache().invalidate()
+    get_account_selection_cache().invalidate(propagate=False)
     total_models = len(state.snapshot.models) if state.snapshot is not None else 0
     logger.info(
         "Applied persisted model registry snapshot content_hash=%s total_models=%d cleared=%s",

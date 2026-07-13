@@ -350,12 +350,13 @@ async def _fold_next_slice(session: AsyncSession, target: datetime) -> tuple[_Fo
             return _FoldStatus.DONE, False
 
         start = watermark
-        # Earliest COUNTABLE row (same predicates as the aggregate): an old
-        # prefix of soft-deleted, warmup, or account-less rows would otherwise
-        # anchor the backfill start and make passes walk empty 7-day slices
-        # while holding the fold-state lock, delaying real backfill and any
-        # consolidation waiting on that lock.
-        earliest = (
+        # Earliest COUNTABLE row: an old prefix of rows neither aggregate can
+        # count would otherwise anchor the backfill start and make passes walk
+        # empty 7-day slices while holding the fold-state lock. A row counts
+        # if the ACCOUNT aggregate sees it (non-warmup, live, account
+        # attached) or the API-KEY aggregate sees it (non-warmup, key
+        # attached — soft-deleted rows included), so take the least of both.
+        account_earliest = (
             await session.execute(
                 select(func.min(RequestLog.requested_at)).where(
                     RequestLog.request_kind.not_in(_EXCLUDED_REQUEST_KINDS),
@@ -364,6 +365,16 @@ async def _fold_next_slice(session: AsyncSession, target: datetime) -> tuple[_Fo
                 )
             )
         ).scalar_one_or_none()
+        key_earliest = (
+            await session.execute(
+                select(func.min(RequestLog.requested_at)).where(
+                    RequestLog.request_kind.not_in(_EXCLUDED_REQUEST_KINDS),
+                    RequestLog.api_key_id.is_not(None),
+                )
+            )
+        ).scalar_one_or_none()
+        candidates = [value for value in (account_earliest, key_earliest) if value is not None]
+        earliest = min(candidates) if candidates else None
         if earliest is None:
             # Nothing to fold and nothing to skip past; leave the watermark so
             # backdated inserts (if any ever appear) still fold later.

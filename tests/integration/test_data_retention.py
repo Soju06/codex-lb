@@ -453,3 +453,54 @@ def test_api_key_rollup_migration_resets_prior_fold_state(tmp_path):
     assert rollups == 0
     assert str(watermark).startswith("1970-01-01")
     assert key_rollups == 0
+
+
+@pytest.mark.asyncio
+async def test_fold_start_covers_key_only_soft_deleted_history(db_setup):
+    """A soft-deleted row with an api_key_id is invisible to the account
+    aggregate but still counts for per-key totals; the backfill start must
+    not skip past it."""
+    from datetime import timedelta as _td
+
+    from app.db.models import ApiKey, ApiKeyUsageRollup
+    from app.db.models import RequestLog as RequestLogModel
+
+    now = utcnow()
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        logs_repo = RequestLogsRepository(session)
+        await accounts_repo.upsert(_make_account("acc_keyonly", "keyonly@example.com"))
+        session.add(ApiKey(id="key_only", name="KeyOnly", key_hash="hash_keyonly", key_prefix="sk-ko"))
+        # Oldest row: soft-deleted (account detached) but key-attributed —
+        # only the key aggregate counts it.
+        session.add(
+            RequestLogModel(
+                account_id=None,
+                api_key_id="key_only",
+                request_id="req_keyonly_old",
+                model="gpt-5.1-codex",
+                status="success",
+                input_tokens=100,
+                output_tokens=50,
+                requested_at=now - timedelta(days=40),
+                deleted_at=now - timedelta(days=30),
+            )
+        )
+        await session.commit()
+        await _add_log(
+            logs_repo, account_id="acc_keyonly", request_id="req_keyonly_new", requested_at=now - _td(days=2)
+        )
+
+    await run_fold_pass(now=now)
+
+    async with SessionLocal() as session:
+        key_rollup = (await session.execute(select(ApiKeyUsageRollup))).scalars().all()
+    assert len(key_rollup) == 1
+    assert key_rollup[0].request_count == 1  # the soft-deleted key row folded
+
+    from app.modules.api_keys.repository import ApiKeysRepository
+
+    async with SessionLocal() as session:
+        summary = await ApiKeysRepository(session).get_usage_summary_by_key_id("key_only")
+    assert summary.request_count == 1
+    assert summary.total_tokens == 150

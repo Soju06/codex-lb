@@ -175,14 +175,6 @@ async def lifespan(app: FastAPI):
     bridge_durable_schema_ready = await _ensure_bridge_durable_schema_ready(settings)
     if bridge_durable_schema_ready:
         startup_module.mark_bridge_durable_schema_ready()
-    if settings.model_registry_enabled:
-        from app.core.openai.model_registry_store import reconcile_model_registry_from_store
-
-        # Warm the in-memory registry from the persisted snapshot before any
-        # scheduler starts so a restarted replica serves the refreshed catalog
-        # instead of the bootstrap floor. Never fails startup.
-        await reconcile_model_registry_from_store()
-
     from app.core.auth.api_key_cache import get_api_key_cache
     from app.core.cache.invalidation import (
         NAMESPACE_ACCOUNT_ROUTING,
@@ -228,22 +220,34 @@ async def lifespan(app: FastAPI):
 
         cache_poller.on_invalidation(NAMESPACE_MODEL_REGISTRY, reconcile_model_registry_from_store)
     set_cache_invalidation_poller(cache_poller)
-    try:
-        # Seed baseline namespace versions before loading the routing snapshot
-        # and before serving traffic, so a peer bump committed after this point
-        # is observed as a change on the first poll instead of being silently
-        # acknowledged as pre-existing state.
-        await cache_poller.initialize()
-    except Exception:
-        # Degrades to first-poll-baselines: a peer bump landing before the first
-        # poll may be acknowledged without invalidating until the fallback TTL.
-        logger.warning("cache invalidation baseline seed failed", exc_info=True)
+
+    # Seed the invalidation version baseline BEFORE loading the routing snapshot
+    # and BEFORE the one-shot model-registry reconcile below. prime() records the
+    # current version of every namespace (and flushes any pending bumps) without
+    # firing callbacks, so a peer bump committed after this point is observed as a
+    # change on the first background poll instead of being silently acknowledged
+    # as pre-existing state. In particular a leader that persists-and-bumps the
+    # model_registry namespace in the window between the reconcile's snapshot read
+    # and the poller's first background tick would otherwise be absorbed as the
+    # initial baseline, leaving this replica on the pre-refresh catalog until the
+    # non-leader scheduler backstop (default 300s) instead of the sub-second cache
+    # poll bound.
+    await cache_poller.prime()
     try:
         await routing_availability_cache.refresh_from_db()
     except Exception:
         # Unseeded snapshot degrades to local-mark semantics; the next
         # account_routing bump retries the refresh via the poller callback.
         logger.warning("initial routing availability snapshot refresh failed", exc_info=True)
+
+    if settings.model_registry_enabled:
+        from app.core.openai.model_registry_store import reconcile_model_registry_from_store
+
+        # Warm the in-memory registry from the persisted snapshot before any
+        # scheduler starts so a restarted replica serves the refreshed catalog
+        # instead of the bootstrap floor. Never fails startup.
+        await reconcile_model_registry_from_store()
+
     await cache_poller.start()
 
     usage_scheduler = build_usage_refresh_scheduler()

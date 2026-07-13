@@ -338,6 +338,77 @@ async def test_former_leader_reconverges_from_store_after_persist_failure(db_set
     assert "gpt-leader-local" not in snapshot.models
 
 
+async def test_leader_drops_stale_snapshot_when_all_fetches_fail(db_setup, monkeypatch) -> None:
+    """Under a prolonged upstream outage every leader fetch fails, so the leader
+    never advances the persisted refreshed_at. Once the stored row ages past the
+    staleness cap the leader must reconcile-drop to the bootstrap floor (matching
+    followers) instead of serving its stale in-memory catalog indefinitely."""
+    del db_setup
+    store_hash = await _leader_persist(await _refreshed_leader_export())
+    assert await reconcile_model_registry_from_store() is True
+    registry = get_model_registry()
+    assert registry.get_snapshot() is not None
+    assert registry.applied_content_hash == store_hash
+
+    # The leader stopped confirming the catalog long enough that the only row
+    # has aged past the staleness cap.
+    max_age = get_settings().model_registry_snapshot_max_age_seconds
+    async with SessionLocal() as session:
+        await session.execute(
+            text("UPDATE model_registry_snapshot SET refreshed_at = :ts WHERE id = 1"),
+            {"ts": utcnow() - timedelta(seconds=max_age + 3600)},
+        )
+        await session.commit()
+
+    await _add_active_account("acc-leader")
+    fetch_attempts: list[str] = []
+
+    async def _all_fetches_fail(candidates, encryptor, accounts_repo=None):
+        fetch_attempts.append("attempt")
+        return None  # every plan failed
+
+    monkeypatch.setattr(scheduler_module, "_get_leader_election", lambda: _StubLeaderElection(leader=True))
+    monkeypatch.setattr(scheduler_module, "_fetch_with_failover", _all_fetches_fail)
+
+    scheduler = scheduler_module.ModelRefreshScheduler(interval_seconds=300, enabled=True)
+    await scheduler._refresh_once()
+
+    # It took the leader path (attempted a fetch) then dropped to the floor.
+    assert fetch_attempts == ["attempt"]
+    assert registry.get_snapshot() is None
+    assert registry.applied_content_hash is None
+    # No successful refresh, so the leader did not rewrite/advance the store row.
+    row = await _snapshot_row()
+    assert row is not None
+    assert row.content_hash == store_hash
+
+
+async def test_leader_keeps_fresh_snapshot_when_all_fetches_fail(db_setup, monkeypatch) -> None:
+    """When the stored row is still fresh, an all-fetch-failed leader tick must
+    keep serving the applied catalog (the reconcile is a no-op), not drop it."""
+    del db_setup
+    store_hash = await _leader_persist(await _refreshed_leader_export())
+    assert await reconcile_model_registry_from_store() is True
+    registry = get_model_registry()
+    assert registry.get_snapshot() is not None
+
+    await _add_active_account("acc-leader")
+
+    async def _all_fetches_fail(candidates, encryptor, accounts_repo=None):
+        return None
+
+    monkeypatch.setattr(scheduler_module, "_get_leader_election", lambda: _StubLeaderElection(leader=True))
+    monkeypatch.setattr(scheduler_module, "_fetch_with_failover", _all_fetches_fail)
+
+    scheduler = scheduler_module.ModelRefreshScheduler(interval_seconds=300, enabled=True)
+    await scheduler._refresh_once()
+
+    assert registry.applied_content_hash == store_hash
+    snapshot = registry.get_snapshot()
+    assert snapshot is not None
+    assert REPLICA_SLUG in snapshot.models
+
+
 async def test_former_leader_drops_unpublished_snapshot_when_store_is_empty(db_setup, monkeypatch) -> None:
     """The first-ever leader refresh succeeds locally but its persist fails, so
     no snapshot row exists. Once leadership is lost, the non-leader tick must
@@ -515,6 +586,84 @@ async def test_model_scheduler_starts_after_invalidation_poller_installed(app_in
         pass
 
     assert poller_installed_at_start == [True]
+
+
+async def test_prime_delivers_bump_that_lands_after_baseline(db_setup) -> None:
+    """A bump recorded after prime() must fire the callback on the next poll
+    rather than be absorbed as the poller's initial baseline. This is the
+    startup reconcile-vs-poller race (especially the no-prior-row clear path):
+    a leader persists-and-bumps between the one-shot reconcile and the poller's
+    first tick, and the replica must still converge within the poll bound."""
+    del db_setup
+    calls: list[str] = []
+    poller = CacheInvalidationPoller(SessionLocal)
+    poller.on_invalidation(NAMESPACE_MODEL_REGISTRY, lambda: calls.append("cb"))
+
+    # No model_registry row exists yet when the baseline is recorded.
+    await poller.prime()
+    assert await _model_registry_bus_version() is None
+    # A leader persists-and-bumps in the startup window.
+    await poller.bump(NAMESPACE_MODEL_REGISTRY)
+    # The first background tick after priming must deliver the callback.
+    await poller._poll_once()
+
+    assert calls == ["cb"]
+
+
+async def test_prime_delivers_bump_after_existing_baseline(db_setup) -> None:
+    """The same guarantee holds when a snapshot row already exists at baseline
+    time: a version that advances past the primed baseline fires the callback."""
+    del db_setup
+    calls: list[str] = []
+    poller = CacheInvalidationPoller(SessionLocal)
+    poller.on_invalidation(NAMESPACE_MODEL_REGISTRY, lambda: calls.append("cb"))
+
+    # A row already exists (version 1) before the baseline is recorded.
+    await poller.bump(NAMESPACE_MODEL_REGISTRY)
+    await poller.prime()
+    # A later leader bump advances the version past the recorded baseline.
+    await poller.bump(NAMESPACE_MODEL_REGISTRY)
+    await poller._poll_once()
+
+    assert calls == ["cb"]
+
+
+async def test_startup_primes_poll_baseline_before_reconcile(app_instance, monkeypatch) -> None:
+    """The poll baseline must be seeded before the one-shot startup reconcile
+    (and both before the scheduler starts), so a leader bump landing in that
+    window is delivered as an invalidation instead of the initial baseline."""
+    import app.core.openai.model_registry_store as store_module
+    import app.main as main_module
+
+    order: list[str] = []
+    real_prime = CacheInvalidationPoller.prime
+
+    async def _tracked_prime(self: CacheInvalidationPoller) -> None:
+        order.append("prime")
+        await real_prime(self)
+
+    async def _tracked_reconcile() -> bool:
+        order.append("reconcile")
+        return False
+
+    class _ProbeScheduler:
+        async def start(self) -> None:
+            order.append("scheduler_start")
+
+        async def stop(self) -> None:
+            return None
+
+    monkeypatch.setattr(invalidation_module, "_poller", None)
+    monkeypatch.setattr(get_settings(), "model_registry_enabled", True)
+    monkeypatch.setattr(CacheInvalidationPoller, "prime", _tracked_prime)
+    monkeypatch.setattr(store_module, "reconcile_model_registry_from_store", _tracked_reconcile)
+    monkeypatch.setattr(main_module, "build_model_refresh_scheduler", lambda: _ProbeScheduler())
+
+    async with app_instance.router.lifespan_context(app_instance):
+        pass
+
+    assert "prime" in order and "reconcile" in order and "scheduler_start" in order
+    assert order.index("prime") < order.index("reconcile") < order.index("scheduler_start")
 
 
 async def test_snapshot_older_than_staleness_cap_is_ignored(db_setup) -> None:

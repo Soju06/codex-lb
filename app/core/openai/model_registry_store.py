@@ -445,11 +445,13 @@ async def reconcile_model_registry_from_store() -> bool:
                     # carries registry state: either state imported from (or
                     # persisted to) the store, or an unpublished leader-local
                     # refresh whose persist failed before leadership was lost
-                    # (no applied hash). Reconcile only runs off the leader
-                    # path, so a former leader holding an unpublished catalog
-                    # must not keep serving it while other replicas drop to the
-                    # bootstrap floor. Drop the local state to converge until a
-                    # leader publishes a fresh snapshot.
+                    # (no applied hash). Reconcile runs off the non-leader path
+                    # and, under a prolonged upstream outage, on the leader's
+                    # all-fetch-failed path, so a current or former leader
+                    # holding a stale or unpublished catalog must not keep
+                    # serving it while other replicas drop to the bootstrap
+                    # floor. Drop the local state to converge until a leader
+                    # publishes a fresh snapshot.
                     await registry.clear()
                     get_account_selection_cache().invalidate()
                     logger.warning(

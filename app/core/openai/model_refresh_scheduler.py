@@ -141,6 +141,15 @@ class ModelRefreshScheduler:
                 await _persist_registry_state_and_bump()
             else:
                 logger.warning("Model registry refresh failed for all plans")
+                # Every upstream fetch failed, so the leader made no change and
+                # never advances the persisted ``refreshed_at``. Followers drop
+                # to the bootstrap floor once the store row ages past
+                # ``model_registry_snapshot_max_age_seconds``; reconcile here so
+                # the leader applies the same expiry instead of serving its now
+                # stale in-memory catalog indefinitely under a prolonged
+                # upstream outage. On a still-fresh row this is a no-op because
+                # the leader's applied content hash already matches the store.
+                await reconcile_model_registry_from_store()
         except Exception:
             logger.exception("Model registry refresh loop failed")
 

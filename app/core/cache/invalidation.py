@@ -100,6 +100,22 @@ class CacheInvalidationPoller:
             self._known_versions[namespace] = version
         self._poll_initialized = True
 
+    async def prime(self) -> None:
+        """Record the current version baseline without firing callbacks.
+
+        Runs a single poll so that any bump landing *after* this call is
+        delivered as an invalidation callback rather than absorbed as the
+        poller's initial (callback-less) baseline. Call before a one-shot
+        startup reconcile: a leader that persists-and-bumps in the window
+        between that reconcile's read and the poller's first background tick
+        would otherwise be silently missed until the next full backstop. The
+        first poll only records versions (``_poll_initialized`` is still
+        ``False``), so priming never invokes a callback. Unlike ``initialize``
+        this also flushes any pending bumps and seeds baselines for every
+        namespace observed in the ``cache_invalidation`` table.
+        """
+        await self._poll_once()
+
     async def start(self) -> None:
         if self._task and not self._task.done():
             return

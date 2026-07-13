@@ -1002,7 +1002,7 @@ async def test_model_registry_snapshot_migration_upgrade_and_downgrade(tmp_path)
     from app.db.migrate import _build_alembic_config
 
     db_url = f"sqlite+aiosqlite:///{tmp_path / 'model-registry-snapshot.sqlite'}"
-    parent_revision = "20260711_030000_add_limit_warmup_idle_threshold"
+    parent_revision = "20260712_020000_add_api_key_usage_rollups"
 
     def _table_state(sync_conn):
         inspector = sa_inspect(sync_conn)

@@ -416,6 +416,20 @@ async def reconcile_model_registry_from_store() -> bool:
         async with get_background_session() as session:
             header = await _probe_header(session)
             if header is None:
+                if registry.get_snapshot() is not None or registry.applied_content_hash is not None:
+                    # The store has no snapshot row but this replica still
+                    # carries registry state: either an unpublished leader-local
+                    # refresh whose persist failed before leadership was lost,
+                    # or a previously applied row that was deleted out from
+                    # under us. Other replicas are serving the bootstrap floor,
+                    # so drop the local state to converge with them until a
+                    # leader publishes a snapshot.
+                    await registry.clear()
+                    get_account_selection_cache().invalidate()
+                    logger.warning(
+                        "Dropped local model registry state: no persisted snapshot row exists; "
+                        "reverting to bootstrap floor"
+                    )
                 return False
             if header.schema_version != SCHEMA_VERSION:
                 logger.warning(

@@ -51,7 +51,7 @@ The leader refresh cycle SHALL persist the complete registry state (models, plan
 
 ### Requirement: Persisted model catalog survives restart and version skew
 
-At startup every replica SHALL load the persisted model-registry snapshot into its in-memory registry before background schedulers start, provided the snapshot's age is within `model_registry_snapshot_max_age_seconds` (default 86400); an older snapshot SHALL be ignored so the bootstrap catalog remains the floor. A replica that has already applied a persisted snapshot SHALL drop it — reverting to the bootstrap floor and invalidating its local account-selection cache — when a reconcile observes that the stored snapshot's age now exceeds the cap, so an expired catalog is not served indefinitely. A snapshot whose `schema_version` differs from the running code's codec version SHALL be ignored with a warning and MUST NOT fail startup or the invalidation poller (rolling-deploy safety). A persist failure on the leader SHALL degrade to leader-local refresh behavior with a warning (the in-memory registry is still updated and persistence is retried next cycle) and SHALL reset the replica's applied-snapshot marker, so a later reconcile — for example after losing leadership — reloads the persisted snapshot instead of treating it as already applied. Imported snapshots SHALL preserve refresh-TTL semantics by deriving the monotonic `fetched_at` from the persisted wall-clock `refreshed_at`.
+At startup every replica SHALL load the persisted model-registry snapshot into its in-memory registry before background schedulers start, provided the snapshot's age is within `model_registry_snapshot_max_age_seconds` (default 86400); an older snapshot SHALL be ignored so the bootstrap catalog remains the floor. A replica that has already applied a persisted snapshot SHALL drop it — reverting to the bootstrap floor and invalidating its local account-selection cache — when a reconcile observes that the stored snapshot's age now exceeds the cap, so an expired catalog is not served indefinitely. A snapshot whose `schema_version` differs from the running code's codec version SHALL be ignored with a warning and MUST NOT fail startup or the invalidation poller (rolling-deploy safety). A persist failure on the leader SHALL degrade to leader-local refresh behavior with a warning (the in-memory registry is still updated and persistence is retried next cycle) and SHALL reset the replica's applied-snapshot marker, so a later reconcile — for example after losing leadership — reloads the persisted snapshot instead of treating it as already applied. When a reconcile finds no persisted snapshot row at all while the replica still carries local registry state (an unpublished leader-local refresh whose persist failed, or an applied row deleted from the store), the replica SHALL drop that state — reverting to the bootstrap floor and invalidating its local account-selection cache — so it converges with the other replicas until a leader publishes a snapshot. Imported snapshots SHALL preserve refresh-TTL semantics by deriving the monotonic `fetched_at` from the persisted wall-clock `refreshed_at`.
 
 #### Scenario: Restart loads the persisted catalog before the first refresh
 
@@ -84,6 +84,12 @@ At startup every replica SHALL load the persisted model-registry snapshot into i
 - **GIVEN** a replica applied persisted snapshot hash H, then won leadership, refreshed its in-memory registry, and failed to persist the refreshed state
 - **WHEN** the replica loses leadership and its next reconcile runs (poller callback or refresh-tick backstop)
 - **THEN** it reloads the store's snapshot H and stops serving the unpublished catalog
+
+#### Scenario: Unpublished catalog is dropped when the store is empty after leadership loss
+
+- **GIVEN** the first-ever leader refresh updated a replica's in-memory registry but persisting the snapshot failed, so no `model_registry_snapshot` row exists
+- **WHEN** the replica loses leadership and its next reconcile runs (poller callback or refresh-tick backstop)
+- **THEN** it drops the unpublished catalog, reverts to the bootstrap floor, and invalidates its account-selection cache
 
 #### Scenario: Applied snapshot is dropped once the store entry expires
 

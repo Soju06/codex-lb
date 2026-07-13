@@ -338,6 +338,52 @@ async def test_former_leader_reconverges_from_store_after_persist_failure(db_set
     assert "gpt-leader-local" not in snapshot.models
 
 
+async def test_former_leader_drops_unpublished_snapshot_when_store_is_empty(db_setup, monkeypatch) -> None:
+    """The first-ever leader refresh succeeds locally but its persist fails, so
+    no snapshot row exists. Once leadership is lost, the non-leader tick must
+    drop the unpublished catalog and revert to the bootstrap floor the other
+    replicas are serving, instead of keeping it until a row appears."""
+    del db_setup
+    await _add_active_account("acc-leader")
+    local_model = _make_upstream_model("gpt-leader-local")
+
+    async def _stub_fetch(candidates, encryptor, accounts_repo=None):
+        return scheduler_module._FetchResult(
+            models=[local_model],
+            account_models={"acc-leader": ("pro", [local_model])},
+        )
+
+    async def _failing_persist(*args, **kwargs):
+        raise RuntimeError("database unavailable")
+
+    election = _StubLeaderElection(leader=True)
+    monkeypatch.setattr(scheduler_module, "_get_leader_election", lambda: election)
+    monkeypatch.setattr(scheduler_module, "_fetch_with_failover", _stub_fetch)
+    monkeypatch.setattr(scheduler_module, "persist_registry_snapshot", _failing_persist)
+
+    scheduler = scheduler_module.ModelRefreshScheduler(interval_seconds=300, enabled=True)
+    await scheduler._refresh_once()
+
+    registry = get_model_registry()
+    snapshot = registry.get_snapshot()
+    assert snapshot is not None
+    assert "gpt-leader-local" in snapshot.models
+    assert registry.applied_content_hash is None
+    assert await _snapshot_row() is None
+
+    # Lose leadership with the store still empty: the non-leader tick backstop
+    # must drop the unpublished catalog so this replica converges with peers.
+    election.leader = False
+    await scheduler._refresh_once()
+
+    assert registry.get_snapshot() is None
+    assert registry.applied_content_hash is None
+
+    # Subsequent ticks against the still-empty store are idempotent no-ops.
+    assert await reconcile_model_registry_from_store() is False
+    assert registry.get_snapshot() is None
+
+
 async def test_unchanged_content_touches_refreshed_at_without_rewrite(db_setup) -> None:
     del db_setup
     export = await _refreshed_leader_export()

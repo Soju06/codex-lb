@@ -20,7 +20,7 @@ The query-caching capability is broader than cache TTLs. It also owns the databa
   Mutations bump a namespace's version with a dialect-atomic upsert; every process compares
   versions each poll and runs registered callbacks on change.
 - Registered namespaces and their callbacks (wired in `app/main.py`):
-  - `api_key` -> `ApiKeyCache.clear` (fallback TTL 2s)
+  - `api_key` -> `ApiKeyCache.clear` (fallback TTL 60s)
   - `firewall` -> `FirewallIPCache.invalidate_all` (fallback TTL `firewall_ip_cache_ttl_seconds`, default 30s)
   - `account_routing` -> `RoutingAvailabilityCache.refresh_from_db` (snapshot of `accounts.id -> status`; no TTL — the snapshot is authoritative once seeded, degraded local-set semantics when unseeded)
   - `account_selection` -> `AccountSelectionCache.invalidate(propagate=False)` (fallback TTL 5s)

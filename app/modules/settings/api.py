@@ -458,12 +458,16 @@ async def put_account_proxy_binding(
         account.deactivation_reason = None
         account.reset_at = None
         account.blocked_at = None
-        clear_account_routing_unavailable(account_id)
-        get_account_selection_cache().invalidate()
         reactivated = True
     await context.session.commit()
     if reactivated:
-        # Durable bump after the status commit so peers re-read the committed row.
+        # Invalidate + bump only after the status commit so peers (and this
+        # replica's poller) never rebuild selection/routing inputs from the
+        # pre-commit row. The coalesced ``account_selection`` bump enqueued by
+        # ``invalidate()`` and the durable ``account_routing`` bump both fire
+        # post-commit, matching AccountService.reactivate_account.
+        clear_account_routing_unavailable(account_id)
+        get_account_selection_cache().invalidate()
         await propagate_account_routing_change()
     if close_bridge_sessions:
         await get_proxy_service_for_app(request.app).close_http_bridge_sessions_for_account(account_id)

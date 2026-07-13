@@ -37,6 +37,18 @@ when metadata is missing.
   `runtime.cooldown_until` from persisted `reset_at` for `RATE_LIMITED` rows,
   so the usage-refresh reconcile path honors the persisted cooldown without
   changes, and it already refuses to auto-recover rows with `reset_at` NULL.
+- The usage updater's direct recovery write
+  (`_recover_quota_status_from_usage` in `app/modules/usage/updater.py`) used
+  to flip `RATE_LIMITED` accounts back to `ACTIVE` — clearing the persisted
+  `reset_at` — as soon as fresh usage showed available quota, which would let
+  the default 60s refresh erase a long Retry-After cooldown (e.g. 20 minutes)
+  before peers ever enforced it. It now returns early for rows with
+  `blocked_at` set while `now < reset_at` (or the `blocked_at + 30s` legacy
+  floor when `reset_at` is NULL). Fresh usage showing quota is not evidence
+  the 429 ended: upstream throttles are not always quota-based. Rows without
+  `blocked_at` (window-derived `RATE_LIMITED`) keep the fresh-usage recovery,
+  and the marking replica can still recover early through the
+  runtime-cooldown-gated selection path.
 - The user-facing selector retry hint is clamped independently by
   `SELECTOR_RETRY_HINT_MAX_SECONDS` (300s).
 - Peer selection caches (5s TTL in production) may still route to a freshly

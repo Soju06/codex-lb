@@ -79,6 +79,24 @@ transitions MUST be written through the compare-and-set status update
 (`update_status_if_current`) so a stale snapshot cannot clobber a newer
 marking.
 
+This constraint applies to every recovery path that writes account status,
+including the usage-refresh reconcile path: a usage refresh that observes
+available quota for a `RATE_LIMITED` account with `blocked_at` set MUST NOT
+rewrite the account to `ACTIVE` (or clear `reset_at`/`blocked_at`) while the
+persisted cooldown deadline — `reset_at`, or the
+`blocked_at + RATE_LIMITED_MIN_COOLDOWN_SECONDS` floor when `reset_at` is
+NULL — is still in the future. Only the replica that observed the 429 MAY
+recover the account earlier, through its runtime-cooldown-gated fresh-usage
+path. `RATE_LIMITED` rows without `blocked_at` (stale window-derived
+markings) keep the existing fresh-usage recovery.
+
+#### Scenario: Usage refresh does not clear a running Retry-After cooldown
+
+- **GIVEN** an account marked `RATE_LIMITED` by a 429 whose Retry-After hint persisted `reset_at` 20 minutes in the future and `blocked_at` set
+- **WHEN** a periodic usage refresh fetches fresh usage showing available quota before that deadline
+- **THEN** the persisted row keeps status `RATE_LIMITED` with its `reset_at` and `blocked_at` intact
+- **AND** once the deadline elapses, a later refresh may recover the account to `ACTIVE` through the compare-and-set path
+
 #### Scenario: Peer replica does not flip a cooling account back
 
 - **GIVEN** balancer instance A marked account X `RATE_LIMITED` from a 429 with no reset metadata

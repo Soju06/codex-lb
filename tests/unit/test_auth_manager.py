@@ -1117,11 +1117,18 @@ async def test_refresh_surfaces_transient_error_when_token_cas_never_persists(mo
 
 
 @pytest.mark.asyncio
-async def test_permanent_failure_status_cas_loses_to_rotation_after_fresh_read(monkeypatch):
+async def test_permanent_failure_adopts_peer_rotation_landing_after_fresh_read(monkeypatch):
     """Regression: a concurrent re-auth/import rotates the refresh token AFTER
-    the permanent-failure guard's fresh re-read but BEFORE its status CAS. The
-    stale REAUTH_REQUIRED write must lose (the CAS now also carries the
-    expected refresh-token ciphertext), leaving the repaired account alone."""
+    the permanent-failure guard's fresh re-read but BEFORE its status CAS.
+
+    The status CAS misses because the stored ciphertext now carries a
+    genuinely different rotation. The guard must ADOPT that repaired rotation
+    (returning the refreshed row) rather than returning ``None`` and letting
+    ``_perform_refresh`` re-raise the original permanent ``RefreshError``.
+    Re-raising would send proxy callers into ``LoadBalancer.mark_permanent_failure()``,
+    whose ``update_status`` path is NOT guarded by this refresh-token CAS, so it
+    would clobber the peer's valid rotation with ``REAUTH_REQUIRED`` and tear
+    down sessions for an account a peer just repaired."""
 
     async def _fake_refresh(_: str, **_kwargs: object) -> TokenRefreshResult:
         raise RefreshError("invalid_grant", "refresh failed", True)
@@ -1141,6 +1148,7 @@ async def test_permanent_failure_status_cas_loses_to_rotation_after_fresh_read(m
         status=AccountStatus.ACTIVE,
         deactivation_reason=None,
     )
+    rotated_ciphertext = encryptor.encrypt("refresh-rotated")
 
     class _RotatingAfterFreshReadRepo(_DummyRepo):
         async def get_by_id_fresh(self, account_id: str) -> Account | None:
@@ -1148,9 +1156,10 @@ async def test_permanent_failure_status_cas_loses_to_rotation_after_fresh_read(m
             if latest is None:
                 return None
             snapshot = Account(**{column.name: getattr(latest, column.name) for column in Account.__table__.columns})
-            # Concurrent re-auth commits a rotation in the window between this
-            # fresh read and the status CAS (status/reason/reset untouched).
-            latest.refresh_token_encrypted = encryptor.encrypt("refresh-rotated")
+            # Concurrent re-auth commits a genuinely different rotation in the
+            # window between this fresh read and the status CAS
+            # (status/reason/reset untouched).
+            latest.refresh_token_encrypted = rotated_ciphertext
             return snapshot
 
     repo = _RotatingAfterFreshReadRepo()
@@ -1158,12 +1167,18 @@ async def test_permanent_failure_status_cas_loses_to_rotation_after_fresh_read(m
     repo.accounts_by_id[account.id] = latest_account
     manager = AuthManager(cast(AccountsRepositoryPort, repo))
 
-    with pytest.raises(RefreshError) as exc_info:
-        await manager.refresh_account(account)
+    # No RefreshError: the guard adopts the peer's repaired rotation instead of
+    # re-raising the permanent error.
+    result = await manager.refresh_account(account)
 
-    assert exc_info.value.code == "invalid_grant"
+    assert result is account
+    # The caller's object adopts the peer's freshly rotated refresh token.
+    assert account.refresh_token_encrypted == rotated_ciphertext
+    assert encryptor.decrypt(account.refresh_token_encrypted) == "refresh-rotated"
+    # The account is NEVER downgraded to REAUTH_REQUIRED.
     assert repo.status_payload is None
     assert account.status == AccountStatus.ACTIVE
+    assert account.deactivation_reason is None
 
 
 @pytest.mark.asyncio

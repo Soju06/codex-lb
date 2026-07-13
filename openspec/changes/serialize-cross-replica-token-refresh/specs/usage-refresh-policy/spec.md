@@ -120,7 +120,15 @@ SAME refresh-token plaintext to different bytes between the fresh re-read and
 the write. The system MUST compare the freshly observed refresh-token material
 against the material this attempt exchanged by decrypted-plaintext fingerprint.
 When the fingerprint is genuinely different the system MUST adopt the stored row
-without downgrading. When the fingerprint is unchanged — the account is still
+without downgrading, and MUST return those rotated tokens to the caller (rather
+than returning the success/no-op sentinel that lets the caller re-raise the
+original permanent error) — whether the genuine difference is observed at the
+initial fresh re-read or only after a status compare-and-set miss. Re-raising in
+the compare-and-set-miss window would send proxy callers into the permanent-failure
+path (for example `LoadBalancer.mark_permanent_failure()`), whose status write is
+NOT guarded by this refresh-token compare-and-set, so it would clobber the peer's
+valid rotation with `reauth_required` and tear down sessions for an account a peer
+just repaired. When the fingerprint is unchanged — the account is still
 holding the very material that just failed permanently — the system MUST re-read
 and retry the compare-and-set against the freshly observed ciphertext (bounded)
 so the downgrade lands, rather than skipping the status write and leaving the
@@ -161,6 +169,21 @@ account active with dead credentials.
 - **THEN** it retries the status CAS against the freshly observed ciphertext and
   lands the `reauth_required` downgrade
 - **AND** it does not leave the account active with the dead credentials
+
+#### Scenario: Peer rotation lands in the status-CAS-miss window
+
+- **GIVEN** this replica's exchange failed permanently and the fresh re-read
+  still showed the same failing refresh-token material
+- **AND** a concurrent re-authentication/rotation committed a genuinely
+  different refresh token between that fresh re-read and the status CAS, so the
+  CAS misses
+- **WHEN** the guard re-reads and finds the refresh-token fingerprint now
+  genuinely different from the material this attempt exchanged
+- **THEN** it adopts the stored row and returns the peer's rotated tokens to the
+  caller
+- **AND** no `reauth_required` write occurs and the original permanent error is
+  not re-raised, so the caller does not enter the permanent-failure path for the
+  already-repaired account
 
 ### Requirement: Multi-replica leader guard
 

@@ -563,10 +563,16 @@ class AuthManager:
                 != attempted_fingerprint
             ):
                 # A concurrent re-auth/import committed a genuinely different
-                # refresh token in the CAS window. The account is repaired; do
-                # not downgrade it. Re-raise the permanent error so the caller
-                # fails over without clobbering the freshly rotated material.
-                return None
+                # refresh token in the CAS window. The account is repaired;
+                # adopt the freshly rotated row (mirroring the pre-CAS check
+                # above) instead of re-raising. Returning ``None`` here would
+                # make ``_perform_refresh`` re-raise the original permanent
+                # ``RefreshError``, and proxy callers then commonly invoke
+                # ``LoadBalancer.mark_permanent_failure()`` whose ``update_status``
+                # path is NOT guarded by this refresh-token CAS — so it would
+                # clobber the peer's valid rotation with ``REAUTH_REQUIRED`` and
+                # tear down sessions for an account that was just repaired.
+                return _adopt_account_row(account, latest)
             # Same refresh-token plaintext, merely re-encrypted (non-deterministic
             # Fernet) — or an unrelated status/reason/reset nudge. The account is
             # still holding the material that just failed permanently, so retry

@@ -28,7 +28,9 @@ NAMESPACE_ACCOUNT_SELECTION = "account_selection"
 NAMESPACE_SETTINGS = "settings"
 NAMESPACE_RESET_CREDITS = "reset_credits"
 NAMESPACE_MODEL_REGISTRY = "model_registry"
-type InvalidationCallback = Callable[[], None | Awaitable[None]]
+# Callback return values are ignored; awaitables are awaited for their side
+# effects only, so callbacks may return a status (e.g. bool) for other callers.
+type InvalidationCallback = Callable[[], object | Awaitable[object]]
 
 # Log-safe labels for namespace values. Static analyzers (CodeQL) classify the
 # NAMESPACE_API_KEY constant as credential-like from its name alone, so log

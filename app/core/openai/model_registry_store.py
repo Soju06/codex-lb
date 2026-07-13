@@ -4,10 +4,11 @@ import hashlib
 import json
 import logging
 import time
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from sqlalchemy import select, update
+from sqlalchemy import CursorResult, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -99,7 +100,16 @@ def _encode_reasoning_level(level: ReasoningLevel) -> dict[str, JsonValue]:
     return {"effort": level.effort, "description": level.description}
 
 
-def _decode_reasoning_level(data: dict[str, JsonValue]) -> ReasoningLevel:
+def _encode_string_list(values: Iterable[str]) -> list[JsonValue]:
+    """Re-type a string sequence as ``list[JsonValue]``.
+
+    ``list`` is invariant, so e.g. ``sorted(...)``'s ``list[str]`` is not
+    assignable to the ``list[JsonValue]`` arm of ``JsonValue``.
+    """
+    return [value for value in values]
+
+
+def _decode_reasoning_level(data: Mapping[str, JsonValue]) -> ReasoningLevel:
     return ReasoningLevel(effort=str(data["effort"]), description=str(data["description"]))
 
 
@@ -120,7 +130,7 @@ def _encode_model(model: UpstreamModel) -> dict[str, JsonValue]:
         "supported_in_api": model.supported_in_api,
         "minimal_client_version": model.minimal_client_version,
         "priority": model.priority,
-        "available_in_plans": sorted(model.available_in_plans),
+        "available_in_plans": _encode_string_list(sorted(model.available_in_plans)),
         "base_instructions": model.base_instructions,
         "source_kind": model.source_kind,
         "source_id": model.source_id,
@@ -128,7 +138,7 @@ def _encode_model(model: UpstreamModel) -> dict[str, JsonValue]:
     }
 
 
-def _decode_model(data: dict[str, JsonValue]) -> UpstreamModel:
+def _decode_model(data: Mapping[str, JsonValue]) -> UpstreamModel:
     reasoning_levels = data["supported_reasoning_levels"]
     input_modalities = data["input_modalities"]
     available_in_plans = data["available_in_plans"]
@@ -178,8 +188,8 @@ def _optional_str(value: JsonValue) -> str | None:
     return str(value)
 
 
-def _encode_slug_sets(mapping: dict[str, frozenset[str]]) -> dict[str, list[str]]:
-    return {key: sorted(values) for key, values in mapping.items()}
+def _encode_slug_sets(mapping: dict[str, frozenset[str]]) -> dict[str, JsonValue]:
+    return {key: _encode_string_list(sorted(values)) for key, values in mapping.items()}
 
 
 def _decode_slug_sets(data: JsonValue) -> dict[str, frozenset[str]]:
@@ -190,8 +200,8 @@ def _decode_slug_sets(data: JsonValue) -> dict[str, frozenset[str]]:
     }
 
 
-def _encode_tier_sets(mapping: dict[str, dict[str, frozenset[str]]]) -> dict[str, dict[str, list[str]]]:
-    return {slug: {tier: sorted(values) for tier, values in tiers.items()} for slug, tiers in mapping.items()}
+def _encode_tier_sets(mapping: dict[str, dict[str, frozenset[str]]]) -> dict[str, JsonValue]:
+    return {slug: _encode_slug_sets(tiers) for slug, tiers in mapping.items()}
 
 
 def _decode_tier_sets(data: JsonValue) -> dict[str, dict[str, frozenset[str]]]:
@@ -211,7 +221,7 @@ def _encode_snapshot(snapshot: ModelRegistrySnapshot) -> dict[str, JsonValue]:
         "model_accounts": _encode_slug_sets(snapshot.model_accounts),
         "account_catalogs_authoritative": snapshot.account_catalogs_authoritative,
         "bootstrap_floor_active": snapshot.bootstrap_floor_active,
-        "suppressed_model_slugs": sorted(snapshot.suppressed_model_slugs),
+        "suppressed_model_slugs": _encode_string_list(sorted(snapshot.suppressed_model_slugs)),
     }
 
 
@@ -319,7 +329,7 @@ async def persist_registry_snapshot(
                 leader_id=leader_id,
             )
         )
-        if result.rowcount == 1:
+        if isinstance(result, CursorResult) and result.rowcount == 1:
             await session.commit()
             return False
 

@@ -290,7 +290,51 @@ def test_static_ring_smaller_than_replica_count_fails_at_render_time() -> None:
         "replicaCount=3",
     )
 
-    assert "lists 2 entries but replicaCount is 3" in stderr
+    assert 'missing pod name(s) "codex-lb-workload-2"' in stderr
+
+
+def test_static_ring_with_wrong_pod_names_fails_at_render_time() -> None:
+    """Right entry count, wrong values: the pods would still crashloop at startup."""
+    stderr = _helm_template_error(
+        "--set",
+        "postgresql.auth.password=test-password",
+        "--set-string",
+        "config.sessionBridgeInstanceRing=codex-lb-0\\,codex-lb-1",
+        "--set",
+        "replicaCount=2",
+    )
+
+    assert 'missing pod name(s) "codex-lb-workload-0,codex-lb-workload-1"' in stderr
+    assert 'must list exactly "codex-lb-workload-0,codex-lb-workload-1"' in stderr
+
+
+def test_static_ring_with_fqdn_entries_fails_at_render_time() -> None:
+    fqdn_ring = "\\,".join(
+        f"codex-lb-workload-{ordinal}.codex-lb-bridge.default.svc.cluster.local" for ordinal in range(2)
+    )
+    stderr = _helm_template_error(
+        "--set",
+        "postgresql.auth.password=test-password",
+        "--set-string",
+        f"config.sessionBridgeInstanceRing={fqdn_ring}",
+        "--set",
+        "replicaCount=2",
+    )
+
+    assert "missing pod name(s)" in stderr
+
+
+def test_static_ring_with_extra_unknown_entry_fails_at_render_time() -> None:
+    stderr = _helm_template_error(
+        "--set",
+        "postgresql.auth.password=test-password",
+        "--set-string",
+        "config.sessionBridgeInstanceRing=codex-lb-workload-0\\,codex-lb-workload-1\\,codex-lb-workload-9",
+        "--set",
+        "replicaCount=2",
+    )
+
+    assert 'entry(ies) "codex-lb-workload-9" do not match any StatefulSet pod name' in stderr
 
 
 def test_static_ring_covering_every_replica_renders() -> None:

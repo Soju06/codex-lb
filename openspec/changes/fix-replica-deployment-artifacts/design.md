@@ -32,7 +32,7 @@ The chart injects `config.sessionBridgeAdvertiseBaseUrl` via the container `env:
 
 ### 5. Static-ring render guard is a template `fail`, not a NOTES warning
 
-`sessionBridgeInstanceRing` non-empty with `autoscaling.enabled` (prod overlay: maxReplicas=20) or `replicaCount` > ring length deterministically crashloops pods at Settings load; failing at `helm template`/`upgrade` time is strictly better than a stalled rollout. The guard only fires on the opt-in manual-override path, so default installs are unaffected.
+`sessionBridgeInstanceRing` non-empty with `autoscaling.enabled` (prod overlay: maxReplicas=20), or with entries that do not exactly match the expected StatefulSet pod names (missing pods crashloop at Settings load; count alone is insufficient since a right-count/wrong-values ring crashloops too); failing at `helm template`/`upgrade` time is strictly better than a stalled rollout. The guard only fires on the opt-in manual-override path, so default installs are unaffected.
 
 ### 6. Two-replica smoke goes in external-db mode only
 

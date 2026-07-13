@@ -14,7 +14,7 @@
 - [x] 3.1 templates/NOTES.txt: WARNING block for `networkPolicy.enabled && ingress.enabled && empty ingressNSMatchLabels && empty extraIngress`
 - [x] 3.2 templates/ingress.yaml: move `upstream-hash-by` / responses sticky annotation emission under the `ingress.nginx.enabled` gate (single coherent gate for all nginx annotations)
 - [x] 3.3 values.yaml: default `ingress.responses.nginx.configurationSnippet` to `""` and `ingress.responses.nginx.upstreamHashBy` to `"$http_x_codex_session_id$http_authorization"`; update @param comments documenting the opt-in snippet mode and its required controller flags
-- [x] 3.4 templates/deployment.yaml: render-time `fail` when `config.sessionBridgeInstanceRing` is non-empty and (`autoscaling.enabled` or `replicaCount` > ring entry count), with actionable error message
+- [x] 3.4 templates/deployment.yaml: render-time `fail` when `config.sessionBridgeInstanceRing` is non-empty and (`autoscaling.enabled` or the trimmed ring entries do not exactly match the expected StatefulSet pod names `<workload-name>-0..<replicaCount-1>`), with actionable error messages naming missing/unexpected entries (value validation, not just entry count)
 
 ## 4. Documentation
 

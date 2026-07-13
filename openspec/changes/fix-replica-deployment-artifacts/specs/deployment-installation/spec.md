@@ -48,7 +48,7 @@ The project MUST run automated Helm smoke installs for the easy-setup install mo
 
 ### Requirement: Static bridge ring overrides are guarded at render time
 
-WHEN `config.sessionBridgeInstanceRing` is non-empty AND (`autoscaling.enabled=true` OR `replicaCount` exceeds the number of ring entries), chart rendering MUST fail with an error explaining that a static ring is incompatible with autoscaling / must list every pod.
+WHEN `config.sessionBridgeInstanceRing` is non-empty, chart rendering MUST fail with a helpful error if `autoscaling.enabled=true`, OR if the trimmed ring entries do not exactly match the set of expected StatefulSet pod names (`<workload-name>-0` through `<workload-name>-<replicaCount - 1>`). The guard MUST validate entry values, not merely entry count: a ring with the right number of entries but wrong values (for example FQDN-style entries or a wrong name prefix) MUST be rejected, naming the missing or unexpected entries and the exact expected pod names.
 
 #### Scenario: Static ring with autoscaling fails to render
 
@@ -57,12 +57,22 @@ WHEN `config.sessionBridgeInstanceRing` is non-empty AND (`autoscaling.enabled=t
 
 #### Scenario: Static ring smaller than replicaCount fails to render
 
-- **WHEN** the chart is rendered with `replicaCount=3` and a `config.sessionBridgeInstanceRing` listing 2 entries
-- **THEN** `helm template` fails with an error stating every pod name must be present in the static ring
+- **WHEN** the chart is rendered with `replicaCount=3` and a `config.sessionBridgeInstanceRing` listing 2 of the 3 expected pod names
+- **THEN** `helm template` fails with an error naming the missing pod name
+
+#### Scenario: Static ring with correct count but wrong values fails to render
+
+- **WHEN** the chart is rendered with `replicaCount=2` and a `config.sessionBridgeInstanceRing` listing 2 entries that are not the expected StatefulSet pod names (for example FQDN-style entries or `codex-lb-0,codex-lb-1`)
+- **THEN** `helm template` fails with an error naming the missing expected pod names and the exact ring the chart requires
+
+#### Scenario: Static ring with an unexpected extra entry fails to render
+
+- **WHEN** the chart is rendered with `replicaCount=2` and a `config.sessionBridgeInstanceRing` listing both expected pod names plus an entry that matches no StatefulSet pod
+- **THEN** `helm template` fails with an error naming the unexpected entry
 
 #### Scenario: Static ring covering every replica renders
 
-- **WHEN** the chart is rendered with `replicaCount=2` and a `config.sessionBridgeInstanceRing` listing both pod names
+- **WHEN** the chart is rendered with `replicaCount=2` and a `config.sessionBridgeInstanceRing` listing exactly both expected pod names
 - **THEN** rendering succeeds
 
 ### Requirement: Documented bridge ring and advertise URL examples pass application validation

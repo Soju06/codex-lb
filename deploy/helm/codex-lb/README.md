@@ -318,7 +318,7 @@ config:
   sessionBridgeInstanceRing: "codex-lb-workload-0,codex-lb-workload-1"
 ```
 
-A static ring is incompatible with autoscaling and must list at least `replicaCount` pod names; the chart refuses to render when `autoscaling.enabled=true` or when `replicaCount` exceeds the number of ring entries. This is rarely needed in production; the database-backed discovery is preferred.
+A static ring is incompatible with autoscaling and must list exactly the StatefulSet pod names (`<workload-name>-0` through `<workload-name>-<replicaCount - 1>`); the chart refuses to render when `autoscaling.enabled=true`, when any expected pod name is missing from the ring, or when a ring entry does not match any expected pod name (for example FQDN-style entries). This is rarely needed in production; the database-backed discovery is preferred.
 
 ### Connection Pool Budget
 

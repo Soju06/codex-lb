@@ -95,6 +95,13 @@ class LeaderElection:
     def __init__(self, leader_id: str | None = None) -> None:
         self._leader_id = leader_id or str(uuid.uuid4())
         self._is_leader = False
+        # Monotonic (event-loop clock) estimate of when the lease we hold
+        # expires, set on every successful acquire/renew and cleared on
+        # authoritative loss. ``None`` means no lease is currently held. It is
+        # deliberately conservative: the database clock may grant slightly
+        # more, never less. A transient acquisition failure observed before
+        # this deadline passes must not demote an already-held lease.
+        self._lease_deadline: float | None = None
         # Gated bodies that were detached after the cancellation grace and may
         # still be draining shielded singleton work as the (former) leader.
         self._detached_bodies: set[asyncio.Task[Any]] = set()
@@ -120,6 +127,7 @@ class LeaderElection:
             return True
 
         ttl = settings.leader_election_ttl_seconds
+        loop = asyncio.get_running_loop()
         try:
             async with get_background_session() as session:
                 if _dialect_name(session) == "sqlite":
@@ -135,11 +143,31 @@ class LeaderElection:
                 acquired = _rowcount(result) == 1
                 await session.commit()
         except Exception:
+            # A transient acquisition failure must not demote a lease this
+            # instance already holds and whose locally tracked deadline has
+            # not passed. The leader election is a shared singleton across
+            # every singleton scheduler, so one scheduler tick can call
+            # ``try_acquire`` while another scheduler's gated body is still
+            # the valid leader; clearing ``_is_leader`` here would make that
+            # body's next ``renew`` return ``False`` without touching the
+            # database and cancel otherwise-valid leader work. Demotion is
+            # reserved for an authoritative non-owner result (below) or a
+            # failure observed after the held lease has already expired.
+            if self._is_leader and self._lease_deadline is not None and loop.time() < self._lease_deadline:
+                logger.warning(
+                    "Leader lease acquisition failed but the held lease is still valid; "
+                    "preserving leadership leader_id=%s",
+                    self._leader_id,
+                    exc_info=True,
+                )
+                return True
             logger.warning("Leader election failed, defaulting to non-leader", exc_info=True)
             self._is_leader = False
+            self._lease_deadline = None
             return False
 
         self._is_leader = acquired
+        self._lease_deadline = loop.time() + ttl if acquired else None
         return acquired
 
     async def renew(self) -> bool:
@@ -156,6 +184,7 @@ class LeaderElection:
             return True
 
         ttl = settings.leader_election_ttl_seconds
+        loop = asyncio.get_running_loop()
         async with get_background_session() as session:
             if _dialect_name(session) == "sqlite":
                 result = await session.execute(
@@ -171,8 +200,14 @@ class LeaderElection:
             renewed = _rowcount(result) == 1
             await session.commit()
 
-        if not renewed:
+        if renewed:
+            # Extend the locally tracked deadline so a concurrent acquire that
+            # hits a transient error keeps preserving leadership for the full
+            # renewed lease, not just the original acquisition window.
+            self._lease_deadline = loop.time() + ttl
+        else:
             self._is_leader = False
+            self._lease_deadline = None
         return renewed
 
     async def release(self) -> None:
@@ -190,6 +225,7 @@ class LeaderElection:
         expires after the TTL.
         """
         self._is_leader = False
+        self._lease_deadline = None
         settings = get_settings()
         if not settings.leader_election_enabled:
             return
@@ -289,6 +325,7 @@ class LeaderElection:
                         if consecutive_errors < _MAX_CONSECUTIVE_RENEW_ERRORS and loop.time() < lease_deadline:
                             continue
                         self._is_leader = False
+                        self._lease_deadline = None
                         renewed = False
                     else:
                         consecutive_errors = 0
@@ -321,6 +358,7 @@ class LeaderElection:
                     exc_info=heartbeat_task.exception(),
                 )
                 self._is_leader = False
+                self._lease_deadline = None
                 lease_lost = True
             if lease_lost:
                 logger.warning(

@@ -6,6 +6,8 @@
 
 The usage-refresh, api-key limit reset, model refresh, sticky-session cleanup, quota planner, auth guardian, and automations schedulers MUST execute leader-gated work only after acquiring the `scheduler_leader` lease via the leader election's `run_if_leader` gate.
 
+Because a single shared leader-election object arbitrates every singleton scheduler on a replica, a lease acquisition failure caused by a transient database error MUST NOT demote a lease this instance already holds whose locally tracked deadline has not yet passed. One scheduler tick's failed `try_acquire` MUST NOT clear the shared leadership flag out from under another scheduler's in-progress leader-gated work. Demotion on acquisition MUST be reserved for an authoritative non-owner result (affected rowcount 0) or an acquisition failure observed after the held lease's local deadline has passed.
+
 #### Scenario: Two replicas tick concurrently
 
 - **GIVEN** two replicas share one database
@@ -16,9 +18,17 @@ The usage-refresh, api-key limit reset, model refresh, sticky-session cleanup, q
 #### Scenario: Lease acquisition errors
 
 - **GIVEN** the database is unreachable during lease acquisition
+- **AND** this replica does not already hold a valid lease
 - **WHEN** a scheduler ticks
 - **THEN** the replica treats itself as non-leader and skips the tick
 - **AND** the scheduler retries acquisition on its next tick
+
+#### Scenario: Concurrent acquire error while a valid lease is held
+
+- **GIVEN** this instance already holds an unexpired lease and is running leader-gated work
+- **WHEN** another singleton scheduler's `try_acquire` on the shared leader election hits a transient database error before the held lease's local deadline passes
+- **THEN** leadership is preserved and the in-progress gated work is not cancelled
+- **AND** once the local deadline has passed a transient acquire error demotes the holder
 
 ### Requirement: Lease acquisition is atomic on both database backends
 

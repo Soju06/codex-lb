@@ -160,6 +160,68 @@ async def test_try_acquire_defaults_to_non_leader_on_error(monkeypatch: pytest.M
 
 
 @pytest.mark.asyncio
+async def test_try_acquire_preserves_held_lease_on_transient_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Regression: the leader election is a shared singleton across every
+    # singleton scheduler, so a second scheduler tick can call try_acquire
+    # while a concurrently-running gated body still validly holds the lease.
+    # A transient DB error on that acquire must NOT demote the held, unexpired
+    # lease — otherwise the running body's next renew() returns False without
+    # touching the database and cancels otherwise-valid leader work.
+    class _AcquireThenErrorSession(_FakeSession):
+        def __init__(self) -> None:
+            super().__init__("postgresql", [1])
+            self.calls = 0
+
+        async def execute(self, statement: Any, params: Any = None) -> _FakeResult:
+            self.calls += 1
+            if self.calls == 1:
+                return await super().execute(statement, params)
+            raise RuntimeError("db down")
+
+    session = _AcquireThenErrorSession()
+    _install(monkeypatch, session, ttl=30)
+
+    election = leader_election_module.LeaderElection(leader_id="node-a")
+    assert await election.try_acquire() is True
+    assert election.is_leader is True
+
+    # A second concurrent acquire hits a transient error while the held lease
+    # is still valid: leadership is preserved so the running body's renewals
+    # keep hitting the database instead of demoting on a stale local flag.
+    assert await election.try_acquire() is True
+    assert election.is_leader is True
+
+
+@pytest.mark.asyncio
+async def test_try_acquire_demotes_on_transient_error_after_lease_expiry(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The preservation above is bounded by the locally tracked lease deadline:
+    # once that deadline has passed a transient acquire error must demote,
+    # because the lease can no longer be assumed to be held.
+    class _AcquireThenErrorSession(_FakeSession):
+        def __init__(self) -> None:
+            super().__init__("postgresql", [1])
+            self.calls = 0
+
+        async def execute(self, statement: Any, params: Any = None) -> _FakeResult:
+            self.calls += 1
+            if self.calls == 1:
+                return await super().execute(statement, params)
+            raise RuntimeError("db down")
+
+    session = _AcquireThenErrorSession()
+    _install(monkeypatch, session, ttl=30)
+
+    election = leader_election_module.LeaderElection(leader_id="node-a")
+    assert await election.try_acquire() is True
+    # Force the held lease's local deadline into the past.
+    election._lease_deadline = asyncio.get_running_loop().time() - 1
+
+    assert await election.try_acquire() is False
+    assert election.is_leader is False
+    assert election._lease_deadline is None
+
+
+@pytest.mark.asyncio
 async def test_renew_demotes_on_rowcount_zero(monkeypatch: pytest.MonkeyPatch) -> None:
     session = _FakeSession("postgresql", [1, 0])
     _install(monkeypatch, session)

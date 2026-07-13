@@ -504,6 +504,15 @@ def _process_network_failure_error(
     )
 
 
+def _failed_shared_session_for_process_network_error(
+    error_code: str,
+    session: aiohttp.ClientSession,
+) -> aiohttp.ClientSession | None:
+    # Replay safety answers whether this request may run again; it must not
+    # decide whether later callers inherit a concrete failed generation.
+    return session if error_code == PROCESS_NETWORK_UNAVAILABLE_CODE else None
+
+
 @dataclass(frozen=True)
 class CodexControlResponse:
     status_code: int
@@ -3672,7 +3681,7 @@ class _CompactCommandTransport:
                         failure_detail=failure_detail,
                         failure_exception_type=failure_exception_type,
                         upstream_status_code=resp.status,
-                        failed_session=(self.session if error_code == PROCESS_NETWORK_UNAVAILABLE_CODE else None),
+                        failed_session=_failed_shared_session_for_process_network_error(error_code, self.session),
                     ) from exc
                 except Exception as exc:
                     error_code = "upstream_error"
@@ -3778,7 +3787,7 @@ class _CompactCommandTransport:
                 retryable_same_contract=retryable_same_contract,
                 failure_detail=failure_detail,
                 failure_exception_type=failure_exception_type,
-                failed_session=self.session if retryable_same_contract else None,
+                failed_session=_failed_shared_session_for_process_network_error(error_code, self.session),
             ) from exc
         except OSError as exc:
             message = str(exc) or "Request to upstream failed"
@@ -3799,6 +3808,7 @@ class _CompactCommandTransport:
                 retryable_same_contract=False,
                 failure_detail=failure_detail,
                 failure_exception_type=failure_exception_type,
+                failed_session=_failed_shared_session_for_process_network_error(error_code, self.session),
             ) from exc
         except Exception as exc:
             if self.route is None:

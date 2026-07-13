@@ -24963,7 +24963,11 @@ async def test_compact_responses_budget_exhaustion_returns_request_timeout(monke
 
 
 @pytest.mark.asyncio
-async def test_compact_body_read_network_failure_rotates_generation_for_next_request(monkeypatch):
+@pytest.mark.parametrize(
+    "failure_path",
+    ["body_read", "request_client_error", "request_os_error"],
+)
+async def test_compact_unsafe_network_failure_rotates_generation_for_next_request(monkeypatch, failure_path: str):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     settings.upstream_base_url = "https://chatgpt.com/backend-api"
     settings.upstream_connect_timeout_seconds = 8.0
@@ -24992,7 +24996,27 @@ async def test_compact_body_read_network_failure_rotates_generation_for_next_req
             cause = OSError(errno.ENETUNREACH, "Network is unreachable")
             raise aiohttp.ClientPayloadError("response body read failed") from cause
 
-    failed_session = _CompactSession(_BodyReadFailureResponse())
+    class _RequestFailureSession:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def post(
+            self,
+            url: str,
+            *,
+            json=None,
+            headers: dict[str, str] | None = None,
+            timeout=None,
+        ):
+            self.calls.append({"url": url, "json": json, "headers": headers, "timeout": timeout})
+            cause = OSError(errno.ENETUNREACH, "Network is unreachable")
+            if failure_path == "request_client_error":
+                raise aiohttp.ClientPayloadError("request failed after dispatch") from cause
+            raise cause
+
+    failed_session = (
+        _CompactSession(_BodyReadFailureResponse()) if failure_path == "body_read" else _RequestFailureSession()
+    )
     replacement_session = _CompactSession(
         _JsonCompactResponse(
             {"object": "response.compaction", "compaction_summary": {"encrypted_content": "after_rotation"}}

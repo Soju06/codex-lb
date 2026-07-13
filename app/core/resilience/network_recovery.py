@@ -32,6 +32,11 @@ _ROUTE_ERROR_NUMBERS = frozenset(
     if isinstance((value := getattr(errno, name, None)), int)
 )
 _MAX_RETRY_DELAY_SECONDS = 5.0
+# Retiring a known-bad generation protects later callers rather than retrying
+# the failed request, so it cannot inherit an already-expired request deadline.
+# Keep that lifecycle cleanup independently bounded in case client construction
+# or lock acquisition stalls.
+_CONCRETE_FAILED_GENERATION_ROTATION_TIMEOUT_SECONDS = 5.0
 
 NetworkRecoveryDecision = Literal["not_applicable", "retry", "exhausted"]
 
@@ -150,7 +155,16 @@ class ProcessNetworkRecovery:
         if not is_process_network_error(error_code):
             return "not_applicable"
         remaining_budget_seconds = deadline - time.monotonic()
-        if remaining_budget_seconds <= 0:
+        should_rotate = (
+            rotate_shared_client
+            and not self._shared_rotation_requested
+            and (retryable_same_contract or failed_session is not None)
+        )
+        # The request deadline decides whether work may be replayed, but it
+        # must not leave a concrete failed generation current for later
+        # callers. Generation-less rotation remains request-budget-bound.
+        must_rotate_concrete_generation = should_rotate and failed_session is not None
+        if remaining_budget_seconds <= 0 and not must_rotate_concrete_generation:
             if not retryable_same_contract:
                 return "not_applicable"
             self._log("exhausted", delay_seconds=0.0)
@@ -161,19 +175,22 @@ class ProcessNetworkRecovery:
         # A consumed request body cannot be replayed, but its concrete failed
         # shared generation must still be retired for subsequent callers. The
         # session identity keeps that cleanup compare-and-swap scoped.
-        should_rotate = (
-            rotate_shared_client
-            and not self._shared_rotation_requested
-            and (retryable_same_contract or failed_session is not None)
-        )
         if should_rotate:
             try:
-                async with asyncio.timeout_at(deadline):
-                    await rotate_shared_http_transport(
-                        transport=self.transport,
-                        request_id=self.request_id,
-                        failed_session=failed_session,
-                    )
+                if failed_session is not None:
+                    async with asyncio.timeout(_CONCRETE_FAILED_GENERATION_ROTATION_TIMEOUT_SECONDS):
+                        await rotate_shared_http_transport(
+                            transport=self.transport,
+                            request_id=self.request_id,
+                            failed_session=failed_session,
+                        )
+                else:
+                    async with asyncio.timeout_at(deadline):
+                        await rotate_shared_http_transport(
+                            transport=self.transport,
+                            request_id=self.request_id,
+                            failed_session=None,
+                        )
             except TimeoutError:
                 if not retryable_same_contract:
                     return "not_applicable"

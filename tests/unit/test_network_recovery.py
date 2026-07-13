@@ -126,6 +126,42 @@ async def test_recovery_controller_is_bounded_by_remaining_budget(monkeypatch) -
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("retryable_same_contract", "expected_decision"),
+    [(False, "not_applicable"), (True, "exhausted")],
+    ids=["unsafe", "retryable"],
+)
+async def test_recovery_controller_rotates_concrete_failed_generation_after_deadline(
+    monkeypatch,
+    retryable_same_contract: bool,
+    expected_decision: network_recovery.NetworkRecoveryDecision,
+) -> None:
+    sleep = AsyncMock()
+    rotate = AsyncMock(return_value="rotated")
+    failed_session = cast(aiohttp.ClientSession, object())
+    monkeypatch.setattr(network_recovery.asyncio, "sleep", sleep)
+    monkeypatch.setattr(network_recovery, "rotate_shared_http_transport", rotate)
+    monkeypatch.setattr(network_recovery.time, "monotonic", lambda: 100.0)
+    recovery = network_recovery.ProcessNetworkRecovery(transport="compact", request_id="req_expired_rotation")
+
+    decision = await recovery.wait(
+        error_code=network_recovery.PROCESS_NETWORK_UNAVAILABLE_CODE,
+        retryable_same_contract=retryable_same_contract,
+        deadline=99.0,
+        rotate_shared_client=True,
+        failed_session=failed_session,
+    )
+
+    assert decision == expected_decision
+    rotate.assert_awaited_once_with(
+        transport="compact",
+        request_id="req_expired_rotation",
+        failed_session=failed_session,
+    )
+    sleep.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_recovery_controller_ignores_other_failures(monkeypatch) -> None:
     sleep = AsyncMock()
     monkeypatch.setattr(network_recovery.asyncio, "sleep", sleep)
@@ -196,6 +232,7 @@ async def test_unsafe_recovery_rotation_timeout_preserves_original_failure(monke
     sleep = AsyncMock()
     monkeypatch.setattr(network_recovery.asyncio, "sleep", sleep)
     monkeypatch.setattr(network_recovery, "rotate_shared_http_transport", blocked_rotation)
+    monkeypatch.setattr(network_recovery, "_CONCRETE_FAILED_GENERATION_ROTATION_TIMEOUT_SECONDS", 0.01)
     recovery = network_recovery.ProcessNetworkRecovery(transport="stream", request_id="req_unsafe_timeout")
 
     decision = await recovery.wait(

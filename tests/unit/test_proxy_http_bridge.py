@@ -12327,7 +12327,9 @@ async def test_submit_http_bridge_request_rejects_unregistered_session_after_adm
         service_tier=None,
         reasoning_effort=None,
         api_key_reservation=None,
-        started_at=1.0,
+        # started_at is monotonic in production; the budget clamp on bridge
+        # gate waits treats stale values as an exhausted request budget.
+        started_at=time.monotonic(),
         awaiting_response_created=True,
         event_queue=asyncio.Queue(),
         request_text='{"type":"response.create","model":"gpt-5.5","input":"new"}',

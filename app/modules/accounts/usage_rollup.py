@@ -273,7 +273,20 @@ async def _fold_next_slice(session: AsyncSession, target: datetime) -> tuple[_Fo
             return _FoldStatus.DONE, False
 
         start = watermark
-        earliest = (await session.execute(select(func.min(RequestLog.requested_at)))).scalar_one_or_none()
+        # Earliest COUNTABLE row (same predicates as the aggregate): an old
+        # prefix of soft-deleted, warmup, or account-less rows would otherwise
+        # anchor the backfill start and make passes walk empty 7-day slices
+        # while holding the fold-state lock, delaying real backfill and any
+        # consolidation waiting on that lock.
+        earliest = (
+            await session.execute(
+                select(func.min(RequestLog.requested_at)).where(
+                    RequestLog.request_kind.not_in(_EXCLUDED_REQUEST_KINDS),
+                    RequestLog.deleted_at.is_(None),
+                    RequestLog.account_id.is_not(None),
+                )
+            )
+        ).scalar_one_or_none()
         if earliest is None:
             # Nothing to fold and nothing to skip past; leave the watermark so
             # backdated inserts (if any ever appear) still fold later.

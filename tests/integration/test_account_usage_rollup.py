@@ -403,3 +403,44 @@ async def test_account_delete_removes_rollup_row(db_setup):
     async with SessionLocal() as session:
         assert await AccountsRepository(session).delete("acc_del2", delete_history=True)
     assert await _rollup_rows() == []
+
+
+@pytest.mark.asyncio
+async def test_backfill_start_skips_excluded_prefix(db_setup):
+    """Years of soft-deleted/warmup-only history before the first countable
+    row must not anchor the backfill start: the pass folds in one slice
+    instead of walking empty windows while holding the fold-state lock."""
+    from app.db.models import RequestLog as RequestLogModel
+
+    now = utcnow()
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        logs_repo = RequestLogsRepository(session)
+        await accounts_repo.upsert(_make_account("acc_prefix", "prefix@example.com"))
+        # Excluded prefix: a warmup row and a soft-deleted account-less row,
+        # both years before any countable history.
+        await _add_log(
+            logs_repo,
+            account_id="acc_prefix",
+            request_id="req_warm_old",
+            requested_at=now - timedelta(days=900),
+            request_kind="warmup",
+        )
+        orphan = RequestLogModel(
+            account_id=None,
+            request_id="req_orphan_old",
+            model="gpt-5.1-codex",
+            status="success",
+            requested_at=now - timedelta(days=800),
+            deleted_at=now - timedelta(days=700),
+        )
+        session.add(orphan)
+        await session.commit()
+        # Countable history spans well under one fold slice.
+        await _add_log(logs_repo, account_id="acc_prefix", request_id="req_new", requested_at=now - timedelta(days=2))
+
+    committed = await run_fold_pass(now=now)
+    assert committed == 1  # one slice, not ~115 empty 7-day windows
+
+    summaries = await _summaries()
+    assert summaries["acc_prefix"].request_count == 1

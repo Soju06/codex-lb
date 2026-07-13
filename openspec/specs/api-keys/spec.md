@@ -39,7 +39,7 @@ When `assigned_account_ids` is omitted or empty, the created key SHALL remain un
 - **AND** the response returns `expiresAt` representing the same UTC instant
 
 ### Requirement: API Key update
-The system SHALL allow updating key properties via `PATCH /api/api-keys/{id}`. Updatable fields: `name`, `allowedModels`, `weeklyTokenLimit`, `expiresAt`, `isActive`, `usageSections`. The key hash and prefix MUST NOT be modifiable. The system MUST accept timezone-aware ISO 8601 datetimes for `expiresAt` and normalize them to UTC naive before persistence.
+The system SHALL allow updating key properties via `PATCH /api/api-keys/{id}`. Updatable fields: `name`, `allowedModels`, `weeklyTokenLimit`, `expiresAt`, `isActive`, `usageSections`, `transportPolicyOverride`. The key hash and prefix MUST NOT be modifiable. The system MUST accept timezone-aware ISO 8601 datetimes for `expiresAt` and normalize them to UTC naive before persistence. The `transportPolicyOverride` field MUST accept `null` (follow the global policy) or one of `"smart"`, `"always_http"`, `"always_websocket"`; any other value MUST be rejected with HTTP 400.
 
 When a submitted API key limit rule does not match an existing rule by `limit_type`, `limit_window`, and `model_filter`, the system MUST initialize the new rule's `current_value` from the API key's successful existing request-log usage in that rule's current window. If `resetUsage` is true, the system MUST initialize submitted limits with `current_value: 0`.
 
@@ -71,6 +71,21 @@ When a submitted API key limit rule does not match an existing rule by `limit_ty
 - **WHEN** an API key has request-log usage in the active window
 - **AND** admin submits `PATCH /api/api-keys/{id}` adding a limit with `resetUsage: true`
 - **THEN** the new limit's `current_value` is `0`
+
+#### Scenario: Update key transport policy override
+
+- **WHEN** admin submits `PATCH /api/api-keys/{id}` with `{ "transportPolicyOverride": "always_http" }`
+- **THEN** the system persists the override and returns `transportPolicyOverride = "always_http"`
+
+#### Scenario: Clear key transport policy override
+
+- **WHEN** admin submits `PATCH /api/api-keys/{id}` with `{ "transportPolicyOverride": null }`
+- **THEN** the system clears the override and the key follows the global `http_downstream_transport_policy`
+
+#### Scenario: Reject invalid transport policy override
+
+- **WHEN** admin submits `PATCH /api/api-keys/{id}` with `{ "transportPolicyOverride": "carrier-pigeon" }`
+- **THEN** the system returns 400 and does not modify the key
 
 ### Requirement: API Key deletion
 

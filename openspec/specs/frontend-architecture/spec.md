@@ -7,9 +7,10 @@ Define dashboard surface contracts so settings, account management, and operatio
 ### Requirement: Settings page
 
 The Settings page SHALL include sections for: routing settings (sticky threads,
-reset priority, prompt-cache affinity TTL, weekly pace controls), password
-management (setup/change/remove), TOTP management (setup/disable), API key auth
-toggle, API key management (table, create, edit, delete, regenerate), and
+reset priority, prompt-cache affinity TTL, weekly pace controls, limit warm-up
+controls, and Fast Mode prohibition), password management
+(setup/change/remove), TOTP management (setup/disable), API key auth toggle,
+API key management (table, create, edit, delete, regenerate), and
 sticky-session administration. API key create/edit controls that expose
 reasoning effort choices MUST include upstream-supported extended efforts such
 as `max` and `ultra`.
@@ -24,6 +25,32 @@ as `max` and `ultra`.
 - **WHEN** a user selects a weekly pace gap smoothing window from the routing settings section
 - **THEN** the app calls `PUT /api/settings` with `weeklyPaceSmoothingMinutes`
 - **AND** the saved settings response reflects the selected value
+
+#### Scenario: Save prompt-cache affinity TTL
+
+- **WHEN** a user updates the prompt-cache affinity TTL from the routing settings section
+- **THEN** the app calls `PUT /api/settings` with the updated TTL and reflects the saved value
+
+#### Scenario: Save staggered idle warm-up setting
+
+- **WHEN** a user toggles staggered idle limit warm-up from the routing settings section
+- **THEN** the app calls `PUT /api/settings` with the updated value and reflects the saved value
+
+#### Scenario: Save Fast Mode prohibition
+
+- **WHEN** a user enables or disables the Fast Mode prohibition control in the routing settings section
+- **THEN** the app calls `PUT /api/settings` with `prohibitFastMode`
+- **AND** reflects the saved value
+
+#### Scenario: View sticky-session mappings
+
+- **WHEN** a user opens the sticky-session section on the Settings page
+- **THEN** the app fetches sticky-session entries and displays each mapping's kind, account, timestamps, and stale/expiry state
+
+#### Scenario: Purge stale prompt-cache mappings
+
+- **WHEN** a user requests a stale purge from the sticky-session section
+- **THEN** the app calls the sticky-session purge API and refreshes the list afterward
 
 ### Requirement: Accounts page
 

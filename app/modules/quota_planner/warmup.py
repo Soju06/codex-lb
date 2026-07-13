@@ -447,6 +447,12 @@ class QuotaWarmupService:
         # capacity — lingering rows from a former plan are not applicable.
         if latest is None:
             return False
+        latest_window_minutes = getattr(latest, "window_minutes", None)
+        if latest_window_minutes is None or int(latest_window_minutes) > SHORT_WINDOW_MAX_MINUTES:
+            # Only samples that positively report a short duration are
+            # eligible for supersession rejection; metadata-less samples
+            # keep the legacy bootstrap behavior.
+            return False
         latest_recorded_at = getattr(latest, "recorded_at", None)
         if latest_recorded_at is None:
             return False

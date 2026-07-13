@@ -34,7 +34,7 @@ The system SHALL support an optional limit warm-up mechanism that is disabled by
 #### Scenario: Staggered idle warm-up pre-starts rolling primary windows
 - **GIVEN** limit warm-up and staggered idle warm-up are enabled globally
 - **AND** multiple active accounts are opted into limit warm-up
-- **AND** an opted-in account has a healthy idle short-window primary usage sample
+- **AND** an opted-in account has a healthy idle short-window primary usage sample (any sample reporting a duration over 24 hours is not eligible)
 - **WHEN** background usage refresh evaluates that account inside its deterministic stagger slot
 - **THEN** the system MAY send one minimal upstream warm-up request for that account's current rolling-window cycle, whose length is the account's observed primary window duration (defaulting to 300 minutes when duration metadata is missing)
 - **AND** the system MUST NOT send another staggered idle warm-up for that same account/cycle tuple

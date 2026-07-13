@@ -1099,6 +1099,43 @@ async def test_staggered_idle_warmup_skips_when_reset_at_is_missing(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_staggered_idle_warmup_skips_long_nonstandard_windows(monkeypatch) -> None:
+    monkeypatch.setattr(
+        limit_warmup_service,
+        "utcnow",
+        lambda: datetime.fromtimestamp(6000, tz=timezone.utc).replace(tzinfo=None),
+    )
+    repo = FakeWarmupRepo()
+    sender = FakeSender()
+    service = LimitWarmupService(repo, FakeRequestLogsRepo(), sender=sender)
+    accounts = [_account("acc_1"), _account("acc_2"), _account("acc_3")]
+    account = accounts[1]
+
+    await service.run_after_usage_refresh(
+        accounts=accounts,
+        settings=_settings(limit_warmup_staggered_idle_enabled=True),
+        before_primary={account.id: _usage(account.id, used_percent=0, reset_at=18_000)},
+        before_secondary={},
+        after_primary={
+            account.id: UsageHistory(
+                account_id=account.id,
+                used_percent=0,
+                reset_at=90_000,
+                window="primary",
+                # A 25h window is neither the weekly nor monthly default but
+                # is still too long to phase-plan.
+                window_minutes=1500,
+                recorded_at=utcnow(),
+            )
+        },
+        after_secondary={},
+    )
+
+    assert sender.calls == []
+    assert repo.rows == []
+
+
+@pytest.mark.asyncio
 async def test_staggered_idle_warmup_ignores_selected_reset_windows(monkeypatch) -> None:
     monkeypatch.setattr(
         limit_warmup_service,

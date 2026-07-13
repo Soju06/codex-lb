@@ -35,6 +35,7 @@ _TERMINAL_ERROR_EVENTS = {"response.failed", "response.incomplete", "error"}
 _QUOTA_ERROR_CODES = {"insufficient_quota", "quota_exceeded", "rate_limit_exceeded", "usage_limit_reached"}
 _MAX_CONCURRENT_WARMUP_SENDS = 4
 _ROLLING_WINDOW_SECONDS = 300 * 60
+_SHORT_WINDOW_MAX_MINUTES = 24 * 60
 _STAGGER_SLOT_GRACE_SECONDS = 60
 _IDLE_PRIMARY_WINDOW = "primary_idle"
 # Minimum reset_at forward jump (in seconds) to confirm a real quota window reset.
@@ -710,9 +711,9 @@ def _build_staggered_idle_candidate(
         return None
     if after.reset_at is None:
         return None
-    if usage_core.is_weekly_window_minutes(after.window_minutes):
-        return None
-    if usage_core.is_monthly_window_minutes(after.window_minutes):
+    if after.window_minutes is not None and after.window_minutes > _SHORT_WINDOW_MAX_MINUTES:
+        # Any long window (weekly, monthly, or a nonstandard duration over
+        # 24h) has no short phase to pre-start.
         return None
     if after.used_percent > idle_threshold_percent:
         return None

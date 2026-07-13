@@ -138,6 +138,77 @@ def test_build_routing_costs_treats_live_primary_window_as_active() -> None:
     assert "mid-window" not in costs
 
 
+def test_build_routing_costs_ignores_long_window_primary_samples() -> None:
+    settings = PlannerSettings(
+        mode="shadow",
+        timezone="UTC",
+        working_days=(0,),
+        working_hours_start="09:00",
+        working_hours_end="18:00",
+    )
+    now = datetime(2026, 5, 18, 3, 0, tzinfo=timezone.utc)
+    # A long unremapped primary window (25h) is not phase-plannable: it must
+    # neither earn an expiring-active-window bonus nor a cold-start cost.
+    states = [
+        AccountState(
+            "long-window",
+            AccountStatus.ACTIVE,
+            used_percent=50.0,
+            primary_reset_at=int(now.timestamp() + 1800),
+            primary_window_minutes=1500,
+        ),
+    ]
+
+    costs = build_routing_costs(settings=settings, states=states, now=now)
+
+    assert "long-window" not in costs
+
+
+def test_plan_shadow_actions_excludes_long_window_resets_from_stagger_math() -> None:
+    settings = PlannerSettings(
+        mode="shadow",
+        timezone="UTC",
+        working_days=(0,),
+        working_hours_start="09:00",
+        working_hours_end="18:00",
+        prewarm_enabled=True,
+        prewarm_lead_minutes=300,
+        max_warmups_per_day=2,
+        min_expected_gain=1.0,
+    )
+    now = datetime(2026, 5, 18, 5, 0, tzinfo=timezone.utc)
+    peak_at = datetime(2026, 5, 18, 13, 0, tzinfo=timezone.utc)
+    long_reset = int(now.timestamp() + 1800)
+    states = [
+        AccountState(
+            "long-window",
+            AccountStatus.ACTIVE,
+            used_percent=50.0,
+            primary_reset_at=long_reset,
+            primary_window_minutes=1500,
+        ),
+        AccountState("cold-5h", AccountStatus.ACTIVE, used_percent=0.0, primary_window_minutes=300),
+    ]
+
+    actions = plan_shadow_actions(
+        settings=settings,
+        states=states,
+        demand_forecast=_forecast(now, peak_at=peak_at),
+        now=now,
+    )
+
+    assert actions
+    assert {action.account_id for action in actions} == {"cold-5h"}
+    # The long window's reset must not act as an active-reset stagger
+    # anchor: no candidate is derived from it.
+    for action in actions:
+        assert action.scheduled_at is not None
+        anchored = abs((action.scheduled_at + timedelta(seconds=action.window_seconds)).timestamp() - long_reset) in (
+            1800.0,
+        )
+        assert not anchored
+
+
 def test_plan_shadow_actions_skips_weekly_only_accounts() -> None:
     settings = PlannerSettings(
         mode="shadow",
@@ -341,8 +412,20 @@ def test_simulation_sums_capacity_for_matching_reset_epochs() -> None:
         ),
     )
     states = [
-        AccountState("a", AccountStatus.ACTIVE, used_percent=40.0, primary_reset_at=int(reset_at)),
-        AccountState("b", AccountStatus.ACTIVE, used_percent=40.0, primary_reset_at=int(reset_at)),
+        AccountState(
+            "a",
+            AccountStatus.ACTIVE,
+            used_percent=40.0,
+            primary_reset_at=int(reset_at),
+            primary_window_minutes=300,
+        ),
+        AccountState(
+            "b",
+            AccountStatus.ACTIVE,
+            used_percent=40.0,
+            primary_reset_at=int(reset_at),
+            primary_window_minutes=300,
+        ),
     ]
 
     simulation = simulate_pool(settings=settings, states=states, demand_forecast=forecast, now=now)

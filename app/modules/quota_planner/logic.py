@@ -539,7 +539,12 @@ def _plannable_window_seconds(state: AccountState) -> float | None:
 
 def _is_active_window(state: AccountState, current_ts: float) -> bool:
     # Healthy accounts never carry a blocked-status reset_at; the live phase
-    # state comes from the primary usage sample's reset timestamp.
+    # state comes from the primary usage sample's reset timestamp. Only
+    # phase-plannable (short-window) accounts count: a long unremapped
+    # primary window must not feed expiring bonuses, active-reset stagger
+    # math, or simulated pool capacity.
+    if _plannable_window_seconds(state) is None:
+        return False
     return state.primary_reset_at is not None and float(state.primary_reset_at) > current_ts
 
 

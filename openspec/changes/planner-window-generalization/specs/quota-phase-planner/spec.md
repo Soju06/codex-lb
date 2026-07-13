@@ -2,7 +2,7 @@
 
 ### Requirement: Phase planning is scoped to short rolling windows
 
-An account SHALL be phase-plannable for scheduler warmup candidacy and cold-start routing costs only when its selection state carries a primary window sample with duration metadata of at most 24 hours (weekly and monthly windows are not phase-plannable; samples without duration metadata are not phase-plannable). The warm-up execution gate and warmup-effect observed confidence SHALL treat positive evidence of a long window in the primary slot as disqualifying, while absent samples or samples without duration metadata keep legacy bootstrap behavior. Active/cold window state SHALL derive from the primary window sample's reset timestamp, not from blocked-status reset markers.
+An account SHALL be phase-plannable for scheduler warmup candidacy and cold-start routing costs only when its selection state carries a primary window sample with duration metadata of at most 24 hours (weekly and monthly windows are not phase-plannable; samples without duration metadata are not phase-plannable). The warm-up execution gate and warmup-effect observed confidence SHALL treat positive evidence of a long window in the primary slot as disqualifying, while absent samples or samples without duration metadata keep legacy bootstrap behavior. Active/cold window state SHALL derive from the primary window sample's reset timestamp, not from blocked-status reset markers, and only phase-plannable accounts SHALL count as having active phase windows — a long unremapped primary sample MUST NOT feed expiring-window bonuses, active-reset stagger anchors, or simulated pool capacity.
 
 #### Scenario: Weekly-only account is not planned
 

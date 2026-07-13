@@ -348,9 +348,12 @@ async def _service_circuit_breaker_context(
 
 
 def _is_process_network_transport_error(exc: BaseException) -> bool:
-    return is_process_network_failure(exc) or (
-        isinstance(exc, CodexTransportError) and exc.error_code == PROCESS_NETWORK_UNAVAILABLE_CODE
-    )
+    # A permanent lookup failure for the configured proxy hostname identifies
+    # that endpoint, not a host-wide outage; transient proxy DNS remains neutral.
+    return is_process_network_failure(
+        exc,
+        include_permanent_dns=not is_proxy_endpoint_failure(exc),
+    ) or (isinstance(exc, CodexTransportError) and exc.error_code == PROCESS_NETWORK_UNAVAILABLE_CODE)
 
 
 async def _record_account_circuit_breaker_failure(circuit_breaker: CircuitBreaker, exc: Exception) -> bool:

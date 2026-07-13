@@ -7028,7 +7028,21 @@ async def test_open_upstream_websocket_records_circuit_breaker_failure_on_5xx_ha
 
 
 @pytest.mark.asyncio
-async def test_open_upstream_websocket_process_dns_failure_does_not_poison_account_breaker(monkeypatch):
+@pytest.mark.parametrize(
+    ("error_number", "proxy_endpoint", "records_failure"),
+    [
+        pytest.param(socket.EAI_AGAIN, False, False, id="transient-upstream-dns"),
+        pytest.param(socket.EAI_AGAIN, True, False, id="transient-proxy-dns"),
+        pytest.param(socket.EAI_NONAME, False, False, id="permanent-upstream-dns"),
+        pytest.param(socket.EAI_NONAME, True, True, id="permanent-proxy-dns"),
+    ],
+)
+async def test_open_upstream_websocket_scopes_dns_failure_for_account_breaker(
+    monkeypatch,
+    error_number: int,
+    proxy_endpoint: bool,
+    records_failure: bool,
+):
     class _CircuitBreakerStub:
         def __init__(self) -> None:
             self.failures: list[Exception] = []
@@ -7046,6 +7060,22 @@ async def test_open_upstream_websocket_process_dns_failure_does_not_poison_accou
         async def _record_success(self) -> None:
             pass
 
+    connection_key = ConnectionKey(
+        "missing-proxy.invalid" if proxy_endpoint else "chatgpt.com",
+        8080 if proxy_endpoint else 443,
+        not proxy_endpoint,
+        not proxy_endpoint,
+        None,
+        None,
+        None,
+    )
+    dns_failure = socket.gaierror(error_number, "DNS failure")
+    connector_error = (
+        aiohttp.ClientProxyConnectionError(connection_key, dns_failure)
+        if proxy_endpoint
+        else aiohttp.ClientConnectorError(connection_key, dns_failure)
+    )
+
     class _DnsFailureSession:
         def __init__(self) -> None:
             self._loop = asyncio.get_running_loop()
@@ -7053,11 +7083,7 @@ async def test_open_upstream_websocket_process_dns_failure_does_not_poison_accou
 
         async def request(self, method, url, **kwargs):
             del method, url, kwargs
-            connection_key = ConnectionKey("chatgpt.com", 443, True, True, None, None, None)
-            raise aiohttp.ClientConnectorError(
-                connection_key,
-                socket.gaierror(socket.EAI_AGAIN, "Temporary failure in name resolution"),
-            )
+            raise connector_error
 
     cb = _CircuitBreakerStub()
     monkeypatch.setattr(proxy_module, "get_settings", lambda: SimpleNamespace(circuit_breaker_enabled=True))
@@ -7074,7 +7100,7 @@ async def test_open_upstream_websocket_process_dns_failure_does_not_poison_accou
             hold_half_open_probe=True,
         )
 
-    assert cb.failures == []
+    assert cb.failures == ([connector_error] if records_failure else [])
     assert cb.release_calls == 1
 
 

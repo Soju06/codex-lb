@@ -492,6 +492,23 @@ async def _reject_websocket_owner_switch_blocked(
     await _release_websocket_response_create_gate(request_state, response_create_gate)
 
 
+async def _close_downstream_after_sequenced_replay_refusal(
+    websocket: WebSocket,
+    downstream_activity: _DownstreamWebSocketActivity,
+) -> None:
+    # Once a sequence-numbered frame is visible, a synthetic terminal frame
+    # would violate the upstream sequence. Closing is therefore the only
+    # client-visible terminal signal whenever replay is refused.
+    downstream_activity.mark_disconnected()
+    try:
+        await websocket.close(code=1011, reason="upstream replay requires a fresh request")
+    except Exception:
+        _facade().logger.debug(
+            "Failed to close downstream websocket after sequenced replay refusal",
+            exc_info=True,
+        )
+
+
 @contextmanager
 def _websocket_archive_request_context(request_id: str | None) -> Iterator[None]:
     token = set_request_id(request_id)
@@ -1366,6 +1383,11 @@ class _WebSocketMixin:
                         penalize_account=exc.error_code != "proxy_network_unavailable",
                         suppress_sequenced_downstream_errors=sequenced_downstream_replay_refused,
                     )
+                    if sequenced_downstream_replay_refused:
+                        await _close_downstream_after_sequenced_replay_refusal(
+                            websocket,
+                            downstream_activity,
+                        )
                     if upstream_reader is not None:
                         await _facade()._await_cancelled_task(upstream_reader, label="proxy websocket upstream reader")
                         upstream_reader = None
@@ -1429,14 +1451,10 @@ class _WebSocketMixin:
                         suppress_sequenced_downstream_errors=sequenced_downstream_replay_refused,
                     )
                     if sequenced_downstream_replay_refused:
-                        downstream_activity.mark_disconnected()
-                        try:
-                            await websocket.close(code=1011, reason="upstream replay requires a fresh request")
-                        except Exception:
-                            _facade().logger.debug(
-                                "Failed to close downstream websocket after sequenced send failure",
-                                exc_info=True,
-                            )
+                        await _close_downstream_after_sequenced_replay_refusal(
+                            websocket,
+                            downstream_activity,
+                        )
                     if upstream_reader is not None:
                         await _facade()._await_cancelled_task(upstream_reader, label="proxy websocket upstream reader")
                         upstream_reader = None
@@ -3122,14 +3140,10 @@ class _WebSocketMixin:
                     suppress_sequenced_downstream_errors=sequenced_downstream_replay_refused,
                 )
                 if sequenced_downstream_replay_refused:
-                    downstream_activity.mark_disconnected()
-                    try:
-                        await websocket.close(code=1011, reason="upstream replay requires a fresh request")
-                    except Exception:
-                        _facade().logger.debug(
-                            "Failed to close downstream websocket after sequenced replay refusal",
-                            exc_info=True,
-                        )
+                    await _close_downstream_after_sequenced_replay_refusal(
+                        websocket,
+                        downstream_activity,
+                    )
                 break
         except asyncio.CancelledError:
             raise

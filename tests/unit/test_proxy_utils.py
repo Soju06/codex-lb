@@ -19678,6 +19678,149 @@ async def test_proxy_responses_websocket_downstream_disconnect_does_not_penalize
 
 
 @pytest.mark.asyncio
+async def test_proxy_responses_websocket_closes_sequenced_client_after_typed_send_failure(monkeypatch):
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    handle_stream_error = AsyncMock()
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    settings.stream_idle_timeout_seconds = 300.0
+    settings.proxy_downstream_websocket_idle_timeout_seconds = 120.0
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service.ProxyService, "_handle_stream_error", handle_stream_error)
+
+    first_request = json.dumps(
+        {
+            "type": "response.create",
+            "model": "gpt-5.4",
+            "instructions": "",
+            "input": [{"role": "user", "content": "first"}],
+            "stream": True,
+        },
+        separators=(",", ":"),
+    )
+    second_request = json.dumps(
+        {
+            "type": "response.create",
+            "model": "gpt-5.4",
+            "instructions": "",
+            "input": [{"role": "user", "content": "second"}],
+            "stream": True,
+        },
+        separators=(",", ":"),
+    )
+
+    class _SequencedDownstreamWebSocket:
+        def __init__(self) -> None:
+            self.step = 0
+            self.sequenced_frame_seen = asyncio.Event()
+            self.closed = asyncio.Event()
+            self.sent_text: list[str] = []
+            self.close_calls: list[tuple[int, str | None]] = []
+
+        async def receive(self) -> dict[str, object]:
+            if self.step == 0:
+                self.step = 1
+                return {"type": "websocket.receive", "text": first_request}
+            if self.step == 1:
+                await self.sequenced_frame_seen.wait()
+                self.step = 2
+                return {"type": "websocket.receive", "text": second_request}
+            await self.closed.wait()
+            return {"type": "websocket.disconnect"}
+
+        async def send_text(self, text: str) -> None:
+            self.sent_text.append(text)
+            if json.loads(text).get("sequence_number") == 1:
+                self.sequenced_frame_seen.set()
+
+        async def send_bytes(self, _data: bytes) -> None:
+            return None
+
+        async def close(self, code: int = 1000, reason: str | None = None) -> None:
+            self.close_calls.append((code, reason))
+            self.closed.set()
+
+    class _SecondSendFailsUpstreamWebSocket:
+        def __init__(self) -> None:
+            self.send_count = 0
+            self.closed = asyncio.Event()
+            self.messages: asyncio.Queue[SimpleNamespace] = asyncio.Queue()
+            self.messages.put_nowait(
+                SimpleNamespace(
+                    kind="text",
+                    text=json.dumps(
+                        {
+                            "type": "response.created",
+                            "sequence_number": 1,
+                            "response": {"id": "resp_sequenced_send", "status": "in_progress"},
+                        },
+                        separators=(",", ":"),
+                    ),
+                    data=None,
+                    close_code=None,
+                    error=None,
+                    error_code=None,
+                )
+            )
+
+        async def send_text(self, _text: str) -> None:
+            self.send_count += 1
+            if self.send_count == 2:
+                raise UpstreamWebSocketTransportError(
+                    "Codex upstream websocket send failed: OSError",
+                    error_code="proxy_network_unavailable",
+                )
+
+        async def send_bytes(self, _data: bytes) -> None:
+            return None
+
+        async def receive(self) -> SimpleNamespace:
+            return await self.messages.get()
+
+        async def close(self) -> None:
+            self.closed.set()
+
+    downstream = _SequencedDownstreamWebSocket()
+    upstream = _SecondSendFailsUpstreamWebSocket()
+    account = _make_account("acc_ws_sequenced_send_failure")
+
+    async def connect(*_args: object, **_kwargs: object):
+        return account, upstream
+
+    monkeypatch.setattr(proxy_service.ProxyService, "_connect_proxy_websocket", connect)
+    monkeypatch.setattr(
+        proxy_service.ProxyService,
+        "_revalidate_open_websocket_account",
+        AsyncMock(side_effect=lambda current_account, **_: (current_account, None, None)),
+    )
+
+    try:
+        await asyncio.wait_for(
+            service.proxy_responses_websocket(
+                cast(WebSocket, downstream),
+                {},
+                codex_session_affinity=False,
+                openai_cache_affinity=False,
+                api_key=None,
+            ),
+            timeout=1.0,
+        )
+    except TimeoutError as exc:  # pragma: no cover - diagnostic guard
+        raise AssertionError(
+            f"websocket did not terminate: step={downstream.step} sent={downstream.sent_text!r} "
+            f"closes={downstream.close_calls!r} upstream_sends={upstream.send_count}"
+        ) from exc
+
+    assert upstream.send_count == 2
+    assert [json.loads(text)["type"] for text in downstream.sent_text] == [
+        "response.created",
+        "response.failed",
+    ]
+    assert downstream.close_calls == [(1011, "upstream replay requires a fresh request")]
+    handle_stream_error.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_stream_api_key_settlement_outlives_caller_cancel_and_closes_repo(monkeypatch):
     started = asyncio.Event()
     release = asyncio.Event()

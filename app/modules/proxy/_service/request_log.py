@@ -97,35 +97,43 @@ class _RequestLogMixin:
 
     async def _rewrite_request_log_model_once(self, request_id: str, model: str) -> None:
         proxy = cast(_RequestLogServiceProtocol, self)
+        insert_task_name = f"proxy-request-log-{request_id}"
         with anyio.CancelScope(shield=True):
-            # The insert is detached now: wait for this request's pending log
-            # task first, so a backed-up DB writer cannot exhaust the retry
-            # window below before the row even exists.
-            insert_task_name = f"proxy-request-log-{request_id}"
-            for pending_insert in [
-                task for task in proxy._request_log_tasks if task.get_name() == insert_task_name and not task.done()
-            ]:
-                try:
-                    await asyncio.wait_for(asyncio.shield(pending_insert), timeout=30)
-                except Exception:  # insert failures surface via the retry loop below
-                    pass
             try:
+                loop = asyncio.get_running_loop()
+                deadline = loop.time() + 30
                 rowcount = 0
-                # Total wait: 0 + 50 + 100 + 200 + 400 + 800 ms = 1550 ms.
-                for delay in (0.0, 0.05, 0.1, 0.2, 0.4, 0.8):
-                    if delay > 0:
-                        await asyncio.sleep(delay)
+                delay = 0.0
+                while True:
+                    # Re-check for this request's insert task every iteration:
+                    # the stream generator's finally can schedule the insert
+                    # on a later event-loop turn than this rewrite task, so a
+                    # one-time snapshot could miss it and fall back to blind
+                    # polling against a DB-gated insert.
+                    for pending_insert in [
+                        task
+                        for task in proxy._request_log_tasks
+                        if task.get_name() == insert_task_name and not task.done()
+                    ]:
+                        remaining = max(0.1, deadline - loop.time())
+                        try:
+                            await asyncio.wait_for(asyncio.shield(pending_insert), timeout=remaining)
+                        except Exception:  # insert failures surface via the update probe below
+                            pass
                     async with proxy._repo_factory() as repos:
                         rowcount = await repos.request_logs.update_model_for_request(request_id, model)
                     if rowcount:
                         break
-                if not rowcount:
-                    logger.warning(
-                        "rewrite_request_log_model: request_log row for %s never appeared; "
-                        "public effective model %s not recorded",
-                        request_id,
-                        model,
-                    )
+                    if loop.time() >= deadline:
+                        logger.warning(
+                            "rewrite_request_log_model: request_log row for %s never appeared; "
+                            "public effective model %s not recorded",
+                            request_id,
+                            model,
+                        )
+                        break
+                    delay = min(delay + 0.05, 0.8)
+                    await asyncio.sleep(delay)
             except Exception:
                 logger.warning(
                     "failed to rewrite request_log model request_id=%s model=%s",

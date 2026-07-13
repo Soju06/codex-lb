@@ -191,3 +191,54 @@ async def test_image_model_rewrite_waits_for_detached_insert(raw_client, monkeyp
             .one()
         )
     assert row.model == "gpt-image-1"
+
+
+@pytest.mark.asyncio
+async def test_image_model_rewrite_catches_insert_scheduled_after_rewrite(raw_client, monkeypatch):
+    """The stream generator's finally can schedule the log insert on a LATER
+    event-loop turn than the rewrite task; the rewrite must re-check the
+    task set instead of snapshotting once and falling back to blind polls."""
+    import asyncio
+
+    client, app = raw_client
+
+    from tests.integration.test_proxy_api_extended import _import_account
+
+    await _import_account(client, "acc_img_late", "img-late@example.com")
+
+    gate = asyncio.Event()
+    from app.modules.request_logs.repository import RequestLogsRepository
+
+    original_add_log = RequestLogsRepository.add_log
+
+    async def gated_add_log(self, *args, **kwargs):
+        await gate.wait()
+        return await original_add_log(self, *args, **kwargs)
+
+    monkeypatch.setattr(RequestLogsRepository, "add_log", gated_add_log)
+
+    from app.dependencies import get_proxy_service_for_app
+
+    service = get_proxy_service_for_app(app)
+
+    # Rewrite is scheduled FIRST; the insert only appears afterwards.
+    await service.rewrite_request_log_model("resp_img_late", "gpt-image-1")
+    await asyncio.sleep(0.1)
+    await service._write_request_log(
+        account_id=None,
+        api_key=None,
+        request_id="resp_img_late",
+        model="gpt-5.5",
+        latency_ms=5,
+        status="success",
+    )
+    # Hold the insert past the legacy 1.55s poll window, then release.
+    await asyncio.sleep(2.0)
+    gate.set()
+    assert await service.drain_persistence_tasks(timeout_seconds=15)
+
+    async with SessionLocal() as session:
+        row = (
+            (await session.execute(select(RequestLog).where(RequestLog.request_id == "resp_img_late"))).scalars().one()
+        )
+    assert row.model == "gpt-image-1"

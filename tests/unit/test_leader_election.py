@@ -277,6 +277,66 @@ async def test_renew_demotes_on_rowcount_zero(monkeypatch: pytest.MonkeyPatch) -
 
 
 @pytest.mark.asyncio
+async def test_renew_demotes_on_rowcount_zero_even_when_commit_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Regression (P2): when the renewal UPDATE affects rowcount 0 (another
+    # replica took over the lease) but the following commit() raises on a flaky
+    # connection, renew() must still demote — the rowcount-0 verdict is captured
+    # before the commit and is authoritative. The pre-fix code committed after
+    # the rowcount check, so a commit failure re-raised out of renew() before the
+    # demotion block; the heartbeat then treated a definitive lease loss as a
+    # transient renewal error and kept the gated body running as a believed
+    # leader until another error or the local deadline.
+    class _CommitFailsOnRenewSession(_FakeSession):
+        async def commit(self) -> None:
+            self.commits += 1
+            # First commit is the acquire (must succeed); the renewal commit fails.
+            if self.commits >= 2:
+                raise RuntimeError("commit failed mid-takeover")
+
+    session = _CommitFailsOnRenewSession("postgresql", [1, 0])
+    _install(monkeypatch, session)
+
+    election = leader_election_module.LeaderElection(leader_id="node-a")
+    assert await election.try_acquire() is True
+
+    # renew() must return False (not raise) and demote, despite the commit failure.
+    assert await election.renew() is False
+    assert election.is_leader is False
+    assert election._lease_deadline is None
+
+
+@pytest.mark.asyncio
+async def test_acquire_deadline_derived_before_commit(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Holistic hardening: the locally tracked lease deadline must be derived from
+    # a monotonic instant captured BEFORE the acquire statement, not after
+    # commit(). The database stamps expires_at from clock_timestamp() during
+    # statement execution, so a deadline read after a slow commit round-trip
+    # would outrun the true DB expiry and let the heartbeat believe it still
+    # leads after the row had expired. A slow commit exposes the difference: the
+    # recorded deadline must stay within ~ttl of the pre-call instant, not
+    # ttl + commit_latency.
+    ttl = 30
+
+    class _SlowCommitSession(_FakeSession):
+        async def commit(self) -> None:
+            self.commits += 1
+            await asyncio.sleep(0.5)
+
+    session = _SlowCommitSession("postgresql", [1])
+    _install(monkeypatch, session, ttl=ttl)
+
+    election = leader_election_module.LeaderElection(leader_id="node-a")
+    loop = asyncio.get_running_loop()
+    before = loop.time()
+    assert await election.try_acquire() is True
+
+    assert election._lease_deadline is not None
+    # Pre-fix (deadline read after the 0.5s commit) would be ~before + ttl + 0.5.
+    assert election._lease_deadline - before < ttl + 0.2
+    assert election._lease_deadline - before > ttl - 0.2
+
+
+@pytest.mark.asyncio
 async def test_renew_extends_on_rowcount_one(monkeypatch: pytest.MonkeyPatch) -> None:
     session = _FakeSession("sqlite", [1, 1])
     _install(monkeypatch, session)
@@ -718,6 +778,58 @@ async def test_run_if_leader_bounds_heartbeat_sleep_by_remaining_lease(
     assert loop.time() - start < 3.0
     # One preserved acquire attempt + exactly one renewal attempt before demotion.
     assert session.execute_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_run_if_leader_keeps_renewing_during_shutdown_drain(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Regression (P1): when run_if_leader is cancelled externally by graceful
+    # shutdown (a scheduler's stop()) while the lease is still HELD, the gate
+    # must keep renewing the lease while the gated body drains, and stop the
+    # heartbeat only after the body exits. The pre-fix finally cancelled the
+    # heartbeat FIRST, so a body honouring cancellation slower than the remaining
+    # lease TTL (e.g. draining a shielded refresh) could outlive the DB lease and
+    # let a follower acquire it and run duplicate singleton work. Assert a
+    # renewal fires during the drain window (statements beyond the acquire).
+    ttl = 3  # renew_interval = 1s
+    session = _FakeSession("postgresql", [1, 1, 1, 1, 1, 1])  # acquire + renewals
+    _install(monkeypatch, session, ttl=ttl)
+
+    in_shield = asyncio.Event()
+    body_done = asyncio.Event()
+
+    async def _body() -> str:
+        inner = asyncio.create_task(asyncio.sleep(1.5))
+        in_shield.set()
+        try:
+            await asyncio.shield(inner)
+        except asyncio.CancelledError:
+            # Drain the shielded work before propagating, like the auth-guardian
+            # and usage-refresh singleflight bodies do.
+            await inner
+            body_done.set()
+            raise
+        return "ran"
+
+    election = leader_election_module.LeaderElection(leader_id="node-a")
+    run_task: asyncio.Task[Any] = asyncio.ensure_future(election.run_if_leader(_body))
+
+    await in_shield.wait()
+    # Let the heartbeat settle into its first sleep before shutdown cancels.
+    await asyncio.sleep(0.2)
+    statements_at_cancel = len(session.statements)
+
+    # Simulate graceful shutdown cancelling the gate while the lease is still held.
+    run_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await run_task
+
+    # The body fully drained its shielded work (bounded by the cancel grace).
+    assert body_done.is_set()
+    # A renewal fired during the drain: the heartbeat kept the lease alive rather
+    # than being cancelled before the body exited. Pre-fix only the acquire would
+    # be present because the heartbeat was cancelled first.
+    assert statements_at_cancel == 1
+    assert len(session.statements) >= 2
 
 
 @pytest.mark.asyncio

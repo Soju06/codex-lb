@@ -144,6 +144,12 @@ class LeaderElection:
 
         ttl = settings.leader_election_ttl_seconds
         loop = asyncio.get_running_loop()
+        # Capture the monotonic instant BEFORE the acquire so the locally tracked
+        # deadline is derived from a point no later than the database's own
+        # expiry stamp (computed from ``clock_timestamp()`` during statement
+        # execution). Recording it after ``commit()`` would push the local
+        # deadline past the true DB expiry by the commit round-trip.
+        acquire_started = loop.time()
         try:
             async with get_background_session() as session:
                 if _dialect_name(session) == "sqlite":
@@ -183,7 +189,7 @@ class LeaderElection:
             return False
 
         self._is_leader = acquired
-        self._lease_deadline = loop.time() + ttl if acquired else None
+        self._lease_deadline = acquire_started + ttl if acquired else None
         return acquired
 
     async def renew(self) -> bool:
@@ -201,6 +207,15 @@ class LeaderElection:
 
         ttl = settings.leader_election_ttl_seconds
         loop = asyncio.get_running_loop()
+        # Capture the monotonic instant BEFORE issuing the renewal so the locally
+        # tracked deadline is derived from a point no later than the database's
+        # own ``clock_timestamp()`` expiry stamp (evaluated during statement
+        # execution, i.e. AFTER this instant). Reading the clock only after
+        # ``commit()`` would push the local deadline past the true DB expiry by
+        # the commit round-trip, letting the heartbeat believe it still leads
+        # after the row had already expired — the local deadline must never
+        # outrun the database expiry.
+        renew_started = loop.time()
         async with get_background_session() as session:
             if _dialect_name(session) == "sqlite":
                 result = await session.execute(
@@ -213,18 +228,38 @@ class LeaderElection:
                     _POSTGRES_RENEW_SQL,
                     {"leader_id": self._leader_id, "ttl": ttl},
                 )
+            # Capture the affected rowcount BEFORE the commit. A rowcount of 0
+            # means the UPDATE matched no row because another replica now owns
+            # the lease; that verdict is authoritative and independent of whether
+            # the (functionally no-op) commit then succeeds.
             renewed = _rowcount(result) == 1
+            if not renewed:
+                # Demote on the authoritative lease loss BEFORE committing, so a
+                # ``commit()`` failure on a flaky connection cannot re-raise out
+                # of ``renew()`` and be misread by the heartbeat as a transient
+                # renewal error. A transient error would keep the gated body
+                # running as a believed-leader until another error or the local
+                # deadline; a definitive rowcount-0 loss must demote and cancel
+                # the body immediately.
+                self._is_leader = False
+                self._lease_deadline = None
+                try:
+                    await session.commit()
+                except Exception:
+                    logger.warning(
+                        "Leader lease renewal observed lease loss (rowcount 0) but the commit "
+                        "failed; treating the lease as lost leader_id=%s",
+                        self._leader_id,
+                        exc_info=True,
+                    )
+                return False
             await session.commit()
 
-        if renewed:
-            # Extend the locally tracked deadline so a concurrent acquire that
-            # hits a transient error keeps preserving leadership for the full
-            # renewed lease, not just the original acquisition window.
-            self._lease_deadline = loop.time() + ttl
-        else:
-            self._is_leader = False
-            self._lease_deadline = None
-        return renewed
+        # Extend the locally tracked deadline so a concurrent acquire that hits a
+        # transient error keeps preserving leadership for the full renewed lease,
+        # not just the original acquisition window.
+        self._lease_deadline = renew_started + ttl
+        return True
 
     async def release(self) -> None:
         """Delete the lease row we hold so followers can take over immediately.
@@ -288,6 +323,14 @@ class LeaderElection:
         ``_CANCEL_GRACE_SECONDS``; a body still draining shielded work after
         the grace is detached (its outcome is logged from a done callback),
         so ``run_if_leader`` itself returns within the grace of the loss.
+
+        When ``run_if_leader`` is instead cancelled externally (graceful
+        shutdown) while the lease is still held, the heartbeat keeps renewing
+        the lease until the gated body has drained (bounded by the cancel
+        grace); the heartbeat is stopped only after the body exits, so a body
+        that honours cancellation slower than the remaining lease TTL cannot let
+        the DB lease expire while it still runs as leader.
+
         Returns the body's result, or ``None`` when this replica is not
         leader or the body was cancelled due to lease loss.
         """
@@ -346,6 +389,11 @@ class LeaderElection:
                         lease_lost = True
                         return
                     await asyncio.sleep(min(float(renew_interval), remaining))
+                    # Stamp the working deadline from BEFORE the renewal is
+                    # dispatched (not from after it resolves) so the locally
+                    # tracked deadline never outruns the database ``expires_at``,
+                    # which is computed during the renewal statement's execution.
+                    renew_started = loop.time()
                     inflight = asyncio.ensure_future(self.renew())
                     # ``asyncio.wait`` returns on the timeout without cancelling
                     # or awaiting ``inflight``, so a renewal whose cancellation
@@ -379,7 +427,7 @@ class LeaderElection:
                     else:
                         consecutive_errors = 0
                         if renewed:
-                            lease_deadline = loop.time() + ttl
+                            lease_deadline = renew_started + ttl
                     if not renewed:
                         lease_lost = True
                         return
@@ -419,6 +467,24 @@ class LeaderElection:
                 return None
             return await body_task
         finally:
+            # Shutdown-cancel path: ``run_if_leader`` was cancelled externally
+            # (e.g. a scheduler's ``stop()``) while the lease is still HELD —
+            # unlike the lease-loss branch above, which has already cancelled the
+            # body BECAUSE the lease was lost. Here the gated body may still be
+            # running as the rightful leader, e.g. draining a shielded token/
+            # usage refresh. Cancel and drain it FIRST, while the heartbeat keeps
+            # renewing the lease, and only stop the heartbeat once the body has
+            # exited (bounded by the cancel grace). Stopping renewals first — the
+            # old ordering — could let a body that honours cancellation slower
+            # than the remaining lease TTL (e.g. TTL=5s with the 5s cancel grace)
+            # outlive the DB lease, so a follower could acquire it and run the
+            # same singleton work concurrently. On the lease-loss / heartbeat-
+            # crash paths ``body_cancel_handled`` is already set, so the body is
+            # not re-cancelled here and the (already-returned) heartbeat is simply
+            # cancelled — the lease is genuinely gone there and MUST NOT be
+            # renewed.
+            if not body_cancel_handled and not body_task.done():
+                await self._cancel_within_grace(body_task)
             heartbeat_task.cancel()
             try:
                 await heartbeat_task
@@ -426,8 +492,6 @@ class LeaderElection:
                 pass
             except Exception:
                 logger.exception("Leader heartbeat failed during cleanup")
-            if not body_cancel_handled and not body_task.done():
-                await self._cancel_within_grace(body_task)
 
     async def _cancel_within_grace(self, task: asyncio.Task[Any]) -> None:
         """Cancel ``task`` and await it for at most ``_CANCEL_GRACE_SECONDS``.

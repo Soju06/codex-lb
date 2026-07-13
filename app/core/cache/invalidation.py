@@ -261,17 +261,26 @@ class CacheInvalidationPoller:
         self._consecutive_poll_failures = 0
 
         for namespace, version in rows:
+            # Re-read the acknowledged version for THIS namespace immediately
+            # before comparing: a concurrent bump_local() may have advanced it
+            # (recording a local self-suppression) after this cycle's snapshot
+            # read but before we reach this row. Using the freshly-read value
+            # keeps the local ack authoritative.
             prev = self._known_versions.get(namespace)
-            changed = (prev is not None and version != prev) or (
-                prev is None and self._poll_initialized and version > 0
-            )
+            # Only a STRICTLY newer version is a change. A stale snapshot whose
+            # version is <= the acknowledged version (e.g. read before a
+            # concurrent local bump advanced _known_versions) must neither fire
+            # the callback nor rewind the acknowledged version.
+            changed = (prev is not None and version > prev) or (prev is None and self._poll_initialized and version > 0)
             if changed and not await self._run_callbacks(namespace):
                 # Do not acknowledge the observed version: a failed callback
                 # (e.g. a transient DB error during a snapshot refresh) must be
                 # retried on the next cycle, or a replica would permanently
                 # miss the invalidation.
                 continue
-            self._known_versions[namespace] = version
+            # Never lower an acknowledged version: a concurrent bump_local()
+            # advance must survive an older in-flight poll observation.
+            self._known_versions[namespace] = max(self._known_versions.get(namespace, 0), version)
         self._poll_initialized = True
 
     async def _run_callbacks(self, namespace: str) -> bool:

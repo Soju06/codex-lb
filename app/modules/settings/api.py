@@ -22,7 +22,7 @@ from app.core.auth.dependencies import (
 from app.core.clients.http import _build_ssl_context
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
-from app.core.exceptions import DashboardBadRequestError
+from app.core.exceptions import DashboardBadRequestError, DashboardSettingsConflictError
 from app.core.upstream_proxy import resolve_proxy_endpoint
 from app.db.models import Account, AccountProxyBinding, AccountStatus, ProxyEndpoint, ProxyPool, ProxyPoolMember
 from app.dependencies import SettingsContext, get_proxy_service_for_app, get_settings_context
@@ -165,6 +165,7 @@ def _dashboard_settings_response(settings) -> DashboardSettingsResponse:
         guest_access_enabled=settings.guest_access_enabled,
         guest_password_configured=settings.guest_password_configured,
         limit_warmup_staggered_idle_enabled=settings.limit_warmup_staggered_idle_enabled,
+        version=settings.version,
     )
 
 
@@ -536,6 +537,10 @@ async def update_settings(
     context: SettingsContext = Depends(get_settings_context),
 ) -> DashboardSettingsResponse:
     current = await context.service.get_settings()
+    if payload.expected_version is not None and payload.expected_version != current.version:
+        raise DashboardSettingsConflictError(
+            "Settings were modified since this form was loaded; reload and retry",
+        )
     if (
         "upstream_proxy_default_pool_id" in payload.model_fields_set
         and payload.upstream_proxy_default_pool_id is not None

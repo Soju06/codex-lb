@@ -731,6 +731,12 @@ class DashboardSettings(Base):
         server_default=text("'{}'"),
         nullable=False,
     )
+    version: Mapped[int] = mapped_column(
+        Integer,
+        default=1,
+        server_default=text("1"),
+        nullable=False,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,
@@ -738,6 +744,25 @@ class DashboardSettings(Base):
         onupdate=func.now(),
         nullable=False,
     )
+
+    __mapper_args__ = {"version_id_col": version}
+
+
+class RuntimeSentinel(Base):
+    """Cross-replica consistency sentinels stamped into the shared database.
+
+    Each row records a value every replica must agree on (for example the
+    encryption-key fingerprint). Rows are written with an atomic
+    insert-if-absent so the first replica to boot wins and later replicas
+    verify against the stored value.
+    """
+
+    __tablename__ = "runtime_sentinels"
+
+    name: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[str] = mapped_column(String(128), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class ApiFirewallAllowlist(Base):

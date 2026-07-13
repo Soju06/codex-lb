@@ -135,6 +135,46 @@ def test_build_auth_guardian_scheduler_requires_leader_election_for_multi_replic
     assert scheduler.enabled is False
 
 
+def test_build_auth_guardian_scheduler_warns_when_self_disabling_without_leader_election(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    settings = _settings(
+        auth_guardian_enabled=True,
+        leader_election_enabled=False,
+        instance_ring=["pod-a", "pod-b"],
+    )
+    monkeypatch.setattr(settings_module, "get_settings", lambda: settings)
+
+    with caplog.at_level(logging.WARNING, logger="app.core.auth.guardian"):
+        scheduler = build_auth_guardian_scheduler()
+
+    assert scheduler.enabled is False
+    warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    message = warnings[0].getMessage()
+    assert "Auth guardian disabled" in message
+    assert "CODEX_LB_LEADER_ELECTION_ENABLED" in message
+
+
+def test_build_auth_guardian_scheduler_does_not_warn_when_leader_election_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    settings = _settings(
+        auth_guardian_enabled=True,
+        leader_election_enabled=True,
+        instance_ring=["pod-a", "pod-b"],
+    )
+    monkeypatch.setattr(settings_module, "get_settings", lambda: settings)
+
+    with caplog.at_level(logging.WARNING, logger="app.core.auth.guardian"):
+        scheduler = build_auth_guardian_scheduler()
+
+    assert scheduler.enabled is True
+    assert not [record for record in caplog.records if record.levelno == logging.WARNING]
+
+
 @pytest.mark.asyncio
 async def test_auth_guardian_refresh_once_refreshes_stale_active_and_skips_others() -> None:
     now = datetime(2026, 1, 2, 12, 0, 0)

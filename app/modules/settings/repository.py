@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.exc import StaleDataError
 
 from app.core.auth.dashboard_session_ttl import DEFAULT_DASHBOARD_SESSION_TTL_SECONDS
 from app.core.config.settings import get_settings
+from app.core.exceptions import DashboardSettingsConflictError
 from app.db.models import DashboardSettings
 
 _SETTINGS_ID = 1
@@ -209,5 +211,11 @@ class SettingsRepository:
         return settings
 
     async def commit_refresh(self, settings: DashboardSettings) -> None:
-        await self._session.commit()
+        try:
+            await self._session.commit()
+        except StaleDataError as exc:
+            # The optimistic version check (DashboardSettings.version) matched
+            # zero rows: another writer (replica or request) committed first.
+            await self._session.rollback()
+            raise DashboardSettingsConflictError() from exc
         await self._session.refresh(settings)

@@ -55,6 +55,7 @@ class DashboardSettingsData:
     guest_access_enabled: bool
     guest_password_configured: bool
     limit_warmup_staggered_idle_enabled: bool
+    version: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,6 +159,7 @@ class SettingsService:
             guest_access_enabled=row.guest_access_enabled,
             guest_password_configured=row.guest_password_hash is not None,
             limit_warmup_staggered_idle_enabled=row.limit_warmup_staggered_idle_enabled,
+            version=row.version,
         )
 
     async def update_settings(self, payload: DashboardSettingsUpdateData) -> DashboardSettingsData:
@@ -261,6 +263,7 @@ class SettingsService:
             guest_access_enabled=row.guest_access_enabled,
             guest_password_configured=row.guest_password_hash is not None,
             limit_warmup_staggered_idle_enabled=row.limit_warmup_staggered_idle_enabled,
+            version=row.version,
         )
 
 

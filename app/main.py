@@ -23,6 +23,7 @@ from starlette.staticfiles import StaticFiles
 from app.core.auth.guardian import build_auth_guardian_scheduler
 from app.core.bootstrap import ensure_auto_bootstrap_token, log_bootstrap_token
 from app.core.clients.http import close_http_client, init_http_client
+from app.core.config.key_fingerprint import verify_encryption_key_fingerprint
 from app.core.config.settings import _bridge_advertise_hostname_is_replica_specific, get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.handlers import add_exception_handlers
@@ -116,9 +117,7 @@ def _resolve_static_asset_path(static_root: Path, requested_path: str) -> Path |
     return Path(full_path)
 
 
-def _is_benign_metrics_bind_failure(exc: BaseException) -> bool:
-    if not MULTIPROCESS_MODE:
-        return False
+def _is_metrics_bind_conflict(exc: BaseException) -> bool:
     if isinstance(exc, SystemExit):
         return exc.code == 1
     if isinstance(exc, OSError):
@@ -126,6 +125,20 @@ def _is_benign_metrics_bind_failure(exc: BaseException) -> bool:
 
         return exc.errno in (_errno.EADDRINUSE, _errno.EADDRNOTAVAIL)
     return False
+
+
+def _is_benign_metrics_bind_failure(exc: BaseException) -> bool:
+    return MULTIPROCESS_MODE and _is_metrics_bind_conflict(exc)
+
+
+def _log_non_multiproc_metrics_bind_conflict(port: int) -> None:
+    logger.error(
+        "Metrics port %d is already bound by another worker process but PROMETHEUS_MULTIPROC_DIR is not set: "
+        "/metrics reflects only the winning worker's counters (1/N of traffic). "
+        "Set PROMETHEUS_MULTIPROC_DIR to a writable directory shared by all workers to aggregate metrics "
+        "across worker processes.",
+        port,
+    )
 
 
 @asynccontextmanager
@@ -153,6 +166,7 @@ async def lifespan(app: FastAPI):
         init_tracing(service_name="codex-lb", endpoint=settings.otel_exporter_endpoint, app=app)
     await init_db()
     init_background_db()
+    await verify_encryption_key_fingerprint()
     _auto_bootstrap_token = await ensure_auto_bootstrap_token()
     if _auto_bootstrap_token:
         log_bootstrap_token(logger, _auto_bootstrap_token)
@@ -199,6 +213,8 @@ async def lifespan(app: FastAPI):
                         "Metrics port %d unavailable (another worker likely serves metrics)",
                         settings.metrics_port,
                     )
+                elif _is_metrics_bind_conflict(exc):
+                    _log_non_multiproc_metrics_bind_conflict(settings.metrics_port)
                 else:
                     raise
             except OSError as exc:
@@ -207,6 +223,8 @@ async def lifespan(app: FastAPI):
                         "Metrics port %d already bound (another worker serves metrics)",
                         settings.metrics_port,
                     )
+                elif _is_metrics_bind_conflict(exc):
+                    _log_non_multiproc_metrics_bind_conflict(settings.metrics_port)
                 else:
                     raise
 

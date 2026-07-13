@@ -233,6 +233,10 @@ class Settings(BaseSettings):
     automations_scheduler_enabled: bool = True
     automations_scheduler_interval_seconds: int = Field(default=30, gt=0)
     encryption_key_file: Path = DEFAULT_ENCRYPTION_KEY_FILE
+    # Startup cross-replica encryption-key consistency check against the shared
+    # database sentinel: "enforce" refuses startup on mismatch, "warn" logs an
+    # ERROR and continues, "off" disables the check.
+    encryption_key_fingerprint_mode: Literal["enforce", "warn", "off"] = "enforce"
     database_migrations_fail_fast: bool = True
     log_proxy_request_shape: bool = False
     log_proxy_request_shape_raw_cache_key: bool = False

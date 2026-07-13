@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from sqlalchemy import or_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.exceptions import DashboardSettingsConflictError
 from app.db.models import DashboardSettings
 from app.modules.settings.repository import SettingsRepository
 
@@ -17,34 +20,53 @@ class DashboardAuthRepository:
     async def get_settings(self) -> DashboardSettings:
         return await self._settings_repository.get_or_create()
 
-    async def set_totp_secret(self, secret_encrypted: bytes | None) -> DashboardSettings:
+    async def _mutate_settings_with_retry(self, mutate: Callable[[DashboardSettings], None]) -> DashboardSettings:
+        """Apply a single-purpose settings mutation, retrying once on a version conflict.
+
+        These mutations are idempotent absolute writes (set/clear a credential
+        field), so losing the optimistic version race to a concurrent settings
+        update is benign: re-read the fresh row, re-apply the same mutation,
+        and commit again instead of surfacing a 500.
+        """
         row = await self._settings_repository.get_or_create()
-        row.totp_secret_encrypted = secret_encrypted
-        row.totp_last_verified_step = None
-        if secret_encrypted is None:
-            row.totp_required_on_login = False
-        await self._settings_repository.commit_refresh(row)
+        mutate(row)
+        try:
+            await self._settings_repository.commit_refresh(row)
+        except DashboardSettingsConflictError:
+            row = await self._settings_repository.get_or_create()
+            await self._session.refresh(row)
+            mutate(row)
+            await self._settings_repository.commit_refresh(row)
         return row
+
+    async def set_totp_secret(self, secret_encrypted: bytes | None) -> DashboardSettings:
+        def _mutate(row: DashboardSettings) -> None:
+            row.totp_secret_encrypted = secret_encrypted
+            row.totp_last_verified_step = None
+            if secret_encrypted is None:
+                row.totp_required_on_login = False
+
+        return await self._mutate_settings_with_retry(_mutate)
 
     async def set_password_hash(self, password_hash: str) -> DashboardSettings:
-        row = await self._settings_repository.get_or_create()
-        row.password_hash = password_hash
-        row.bootstrap_token_encrypted = None
-        row.bootstrap_token_hash = None
-        await self._settings_repository.commit_refresh(row)
-        return row
+        def _mutate(row: DashboardSettings) -> None:
+            row.password_hash = password_hash
+            row.bootstrap_token_encrypted = None
+            row.bootstrap_token_hash = None
+
+        return await self._mutate_settings_with_retry(_mutate)
 
     async def set_guest_password_hash(self, password_hash: str) -> DashboardSettings:
-        row = await self._settings_repository.get_or_create()
-        row.guest_password_hash = password_hash
-        await self._settings_repository.commit_refresh(row)
-        return row
+        def _mutate(row: DashboardSettings) -> None:
+            row.guest_password_hash = password_hash
+
+        return await self._mutate_settings_with_retry(_mutate)
 
     async def clear_guest_password_hash(self) -> DashboardSettings:
-        row = await self._settings_repository.get_or_create()
-        row.guest_password_hash = None
-        await self._settings_repository.commit_refresh(row)
-        return row
+        def _mutate(row: DashboardSettings) -> None:
+            row.guest_password_hash = None
+
+        return await self._mutate_settings_with_retry(_mutate)
 
     async def try_set_password_hash(self, password_hash: str) -> bool:
         await self._settings_repository.get_or_create()
@@ -63,15 +85,15 @@ class DashboardAuthRepository:
         return row.password_hash
 
     async def clear_password_and_totp(self) -> DashboardSettings:
-        row = await self._settings_repository.get_or_create()
-        row.password_hash = None
-        row.bootstrap_token_encrypted = None
-        row.bootstrap_token_hash = None
-        row.totp_required_on_login = False
-        row.totp_secret_encrypted = None
-        row.totp_last_verified_step = None
-        await self._settings_repository.commit_refresh(row)
-        return row
+        def _mutate(row: DashboardSettings) -> None:
+            row.password_hash = None
+            row.bootstrap_token_encrypted = None
+            row.bootstrap_token_hash = None
+            row.totp_required_on_login = False
+            row.totp_secret_encrypted = None
+            row.totp_last_verified_step = None
+
+        return await self._mutate_settings_with_retry(_mutate)
 
     async def store_bootstrap_token_if_absent(self, token_encrypted: bytes, token_hash: bytes) -> bool:
         await self._settings_repository.get_or_create()

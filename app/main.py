@@ -297,7 +297,12 @@ async def lifespan(app: FastAPI):
         lambda: get_settings_cache().invalidate(propagate=False),
     )
     set_cache_invalidation_poller(cache_poller)
-    await routing_availability_cache.refresh_from_db()
+    try:
+        await routing_availability_cache.refresh_from_db()
+    except Exception:
+        # Unseeded snapshot degrades to local-mark semantics; the next
+        # account_routing bump retries the refresh via the poller callback.
+        logger.warning("initial routing availability snapshot refresh failed", exc_info=True)
     await cache_poller.start()
 
     ring_service: RingMembershipService | None = None

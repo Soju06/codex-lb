@@ -344,6 +344,70 @@ async def test_pending_coalesced_bump_flushes_after_recovery(db_setup) -> None:
     assert await _namespace_version(namespace) == 1
 
 
+@pytest.mark.asyncio
+async def test_bump_requested_during_flush_survives(db_setup, monkeypatch) -> None:
+    """A request_bump() landing while _flush_pending_bumps is awaiting the bump
+    write must re-queue the namespace and produce a later bump; a mutation
+    committing mid-flush must not be coalesced into the version already written."""
+    namespace = "test_flush_race"
+    poller = CacheInvalidationPoller(SessionLocal)
+    real_bump = poller.bump
+
+    async def bump_then_concurrent_request(ns: str) -> bool:
+        ok = await real_bump(ns)
+        # Another mutation commits and requests a bump while the flush loop is
+        # still awaiting this bump.
+        poller.request_bump(ns)
+        return ok
+
+    monkeypatch.setattr(poller, "bump", bump_then_concurrent_request)
+    poller.request_bump(namespace)
+    await poller._flush_pending_bumps()
+    assert namespace in poller._pending_bumps  # re-queued, not lost
+    assert await _namespace_version(namespace) == 1
+
+    monkeypatch.setattr(poller, "bump", real_bump)
+    await poller._flush_pending_bumps()
+    assert namespace not in poller._pending_bumps
+    assert await _namespace_version(namespace) == 2
+
+
+@pytest.mark.asyncio
+async def test_transient_refresh_failure_does_not_ack_routing_bump(db_setup, caplog) -> None:
+    """A transient DB error during the account_routing refresh callback must not
+    acknowledge the bump; the next poll cycle retries and converges the pause."""
+    account_id = "acct-bus-refresh-retry"
+    await _insert_account(account_id)
+
+    flaky = _FlakySessionFactory(failures=0)
+    b_cache = RoutingAvailabilityCache(flaky)
+    b_poller = CacheInvalidationPoller(SessionLocal)
+    b_poller.on_invalidation(NAMESPACE_ACCOUNT_ROUTING, b_cache.refresh_from_db)
+    await b_cache.refresh_from_db()
+    await b_poller._poll_once()
+    assert b_cache.is_unavailable(account_id) is False
+
+    # Replica A pauses the account: committed status write + durable bump.
+    await _set_account_status(account_id, AccountStatus.PAUSED)
+    remote_poller = CacheInvalidationPoller(SessionLocal)
+    assert await remote_poller.bump(NAMESPACE_ACCOUNT_ROUTING) is True
+
+    # Replica B's refresh hits a transient DB error: the version must stay
+    # unacknowledged (the stale ACTIVE snapshot is the defect window).
+    flaky.remaining = 1
+    with caplog.at_level(logging.WARNING, logger=_INVALIDATION_LOGGER):
+        await b_poller._poll_once()
+    assert b_cache.is_unavailable(account_id) is False
+    assert any(
+        "cache_invalidation callback failed for namespace account_routing" in record.getMessage()
+        for record in caplog.records
+    )
+
+    # The next cycle retries the refresh and converges without another bump.
+    await b_poller._poll_once()
+    assert b_cache.is_unavailable(account_id) is True
+
+
 class _BrokenSession:
     def in_transaction(self) -> bool:
         return False

@@ -88,7 +88,8 @@ class CacheInvalidationPoller:
 
         Multiple requests for the same namespace within one cycle collapse into a
         single version bump. A failed flush keeps the namespace pending so it is
-        retried on subsequent cycles.
+        retried on subsequent cycles. A request arriving while a flush is already
+        awaiting the bump for this namespace re-queues it for the next cycle.
         """
         self._pending_bumps.add(namespace)
 
@@ -169,8 +170,14 @@ class CacheInvalidationPoller:
 
     async def _flush_pending_bumps(self) -> None:
         for namespace in sorted(self._pending_bumps):
-            if await self.bump(namespace):
-                self._pending_bumps.discard(namespace)
+            # Clear the pending marker BEFORE awaiting the bump: a request_bump()
+            # arriving while the bump write is in flight must re-queue the
+            # namespace so a mutation committing mid-flush still produces a
+            # later bump instead of being coalesced into the version already
+            # being written.
+            self._pending_bumps.discard(namespace)
+            if not await self.bump(namespace):
+                self._pending_bumps.add(namespace)
 
     async def _poll_once(self) -> None:
         await self._flush_pending_bumps()
@@ -189,24 +196,33 @@ class CacheInvalidationPoller:
 
         for namespace, version in rows:
             prev = self._known_versions.get(namespace)
-            if prev is not None and version != prev:
-                for cb in self._callbacks.get(namespace, []):
-                    try:
-                        result = cb()
-                        if isawaitable(result):
-                            await result
-                    except Exception:
-                        logger.debug("cache_invalidation callback error", exc_info=True)
-            elif prev is None and self._poll_initialized and version > 0:
-                for cb in self._callbacks.get(namespace, []):
-                    try:
-                        result = cb()
-                        if isawaitable(result):
-                            await result
-                    except Exception:
-                        logger.debug("cache_invalidation callback error", exc_info=True)
+            changed = (prev is not None and version != prev) or (
+                prev is None and self._poll_initialized and version > 0
+            )
+            if changed and not await self._run_callbacks(namespace):
+                # Do not acknowledge the observed version: a failed callback
+                # (e.g. a transient DB error during a snapshot refresh) must be
+                # retried on the next cycle, or a replica would permanently
+                # miss the invalidation.
+                continue
             self._known_versions[namespace] = version
         self._poll_initialized = True
+
+    async def _run_callbacks(self, namespace: str) -> bool:
+        succeeded = True
+        for cb in self._callbacks.get(namespace, []):
+            try:
+                result = cb()
+                if isawaitable(result):
+                    await result
+            except Exception:
+                succeeded = False
+                logger.warning(
+                    "cache_invalidation callback failed for namespace %s; retrying next poll cycle",
+                    _NAMESPACE_LOG_LABELS.get(namespace, "unknown"),
+                    exc_info=True,
+                )
+        return succeeded
 
     def _record_poll_failure(self) -> None:
         self._consecutive_poll_failures += 1

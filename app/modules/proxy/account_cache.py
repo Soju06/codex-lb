@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -21,8 +20,6 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from app.modules.proxy.load_balancer import SelectionInputs
-
-logger = logging.getLogger(__name__)
 
 _AssignedAccountsKey = tuple[str, ...] | None
 _CacheKey = tuple[str | None, str | None, str | None, str, _AssignedAccountsKey]
@@ -149,15 +146,18 @@ class RoutingAvailabilityCache:
         Local overlay marks whose committed status became routable again are dropped —
         this is what lets a reactivation or re-authentication served by another replica
         clear this replica's marker without a restart.
+
+        Database errors propagate to the caller: when invoked as an
+        ``account_routing`` invalidation callback the poller then leaves the
+        namespace version unacknowledged and retries on the next poll cycle, so
+        a transient failure cannot make a replica permanently miss a pause,
+        deletion, or re-authentication.
         """
         factory = self._session_factory or SessionLocal
         session = factory()
         try:
             result = await session.execute(select(Account.id, Account.status))
             snapshot: dict[str, AccountStatus] = {account_id: status for account_id, status in result.all()}
-        except Exception:
-            logger.warning("routing availability snapshot refresh failed", exc_info=True)
-            return
         finally:
             await close_session(session)
         self._snapshot = snapshot

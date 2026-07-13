@@ -442,6 +442,11 @@ class UsageUpdater:
         for window in _MAIN_USAGE_WINDOWS:
             if latest is not None and window == latest.window:
                 continue
+            if window == "monthly" and usage_core.capacity_for_plan(account.plan_type, "monthly") is None:
+                # A lingering monthly row from a former plan (e.g. after a
+                # free-to-paid upgrade) is not applicable usage and must not
+                # suppress refreshes.
+                continue
             sibling = await self._usage_repo.latest_entry_for_account(account.id, window=window)
             if sibling is not None and (newest is None or sibling.recorded_at > newest.recorded_at):
                 newest = sibling

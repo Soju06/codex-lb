@@ -1976,18 +1976,19 @@ def _state_from_account(
     if primary_used is not None and primary_reset is not None and primary_reset <= now_epoch:
         primary_used = 0.0
         primary_reset = None
-        # A strictly newer long-window row proves a later fetch no longer
-        # reported the short window: drop the stale duration so phase
-        # planning does not keep treating the account as a cold
-        # short-window warmup candidate.
-        if (
-            primary_entry is not None
-            and effective_secondary_entry is not None
-            and effective_secondary_entry is not primary_entry
-            and (effective_secondary_entry.recorded_at - primary_entry.recorded_at).total_seconds()
-            > _SIBLING_FETCH_MARGIN_SECONDS
-        ):
-            primary_window_minutes = None
+    # A strictly newer long-window row proves a later fetch no longer
+    # reported the short window: drop the stale duration — whether or not
+    # the stale row's reset has elapsed — so phase planning stops treating
+    # the account as having a short phase window.
+    if (
+        primary_window_minutes is not None
+        and primary_entry is not None
+        and effective_secondary_entry is not None
+        and effective_secondary_entry is not primary_entry
+        and (effective_secondary_entry.recorded_at - primary_entry.recorded_at).total_seconds()
+        > _SIBLING_FETCH_MARGIN_SECONDS
+    ):
+        primary_window_minutes = None
     if secondary_used is not None and secondary_reset is not None and secondary_reset <= now_epoch:
         secondary_used = 0.0
         secondary_reset = None

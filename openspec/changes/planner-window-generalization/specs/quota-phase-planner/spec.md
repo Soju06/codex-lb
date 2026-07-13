@@ -37,10 +37,10 @@ An account SHALL be phase-plannable for scheduler warmup candidacy and cold-star
 
 #### Scenario: Superseded short-window samples lose plannability
 
-- **GIVEN** an account whose expired primary sample is strictly older than its long-window row
+- **GIVEN** an account whose primary sample is strictly older than its long-window row
 - **WHEN** selection state is built
-- **THEN** the derived short-window duration is cleared
-- **AND** the planner does not treat the account as a cold short-window warmup candidate
+- **THEN** the derived short-window duration is cleared whether or not the stale sample's reset has elapsed
+- **AND** the planner does not treat the account as having a short phase window
 
 ### Requirement: Phase math derives from observed window durations
 

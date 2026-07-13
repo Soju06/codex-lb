@@ -1771,6 +1771,35 @@ def test_state_from_account_drops_stale_window_duration_when_superseded(monkeypa
     assert state.primary_window_minutes is None
 
 
+def test_state_from_account_drops_superseded_window_duration_before_expiry(monkeypatch):
+    now = 1_700_000_000.0
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+
+    state = _state_from_account(
+        account=_make_test_account(status=AccountStatus.ACTIVE),
+        # Upstream stopped reporting the short window while the stale row's
+        # reset is still in the future: the newer weekly row proves the
+        # short window is gone, so plannability must drop immediately.
+        primary_entry=_make_test_usage(
+            window="primary",
+            used_percent=40.0,
+            reset_at=int(now + 3600),
+            recorded_at=_epoch_to_naive_utc(now - 3 * 3600),
+            window_minutes=300,
+        ),
+        secondary_entry=_make_test_usage(
+            window="secondary",
+            used_percent=40.0,
+            reset_at=int(now + 5 * 24 * 3600),
+            recorded_at=_epoch_to_naive_utc(now - 30),
+        ),
+        runtime=RuntimeState(),
+    )
+
+    assert state.primary_window_minutes is None
+
+
 def test_state_from_account_keeps_window_duration_for_same_fetch_rows(monkeypatch):
     now = 1_700_000_000.0
     monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)

@@ -928,6 +928,43 @@ def test_staggered_idle_slot_is_stable_and_spread() -> None:
     assert other.slot_offset_seconds == 6000
 
 
+def test_staggered_idle_slot_uses_observed_window_duration() -> None:
+    # A 60-minute observed window spreads slots across 3600 seconds instead
+    # of the 300-minute fallback.
+    reset_at = 10_000
+    window_seconds = 3_600
+    window_start = reset_at - window_seconds
+
+    first = limit_warmup_service._staggered_idle_due(
+        "acc_1",
+        ["acc_1", "acc_2", "acc_3"],
+        now=datetime.fromtimestamp(window_start, tz=timezone.utc).replace(tzinfo=None),
+        reset_at=reset_at,
+        window_seconds=window_seconds,
+    )
+    second = limit_warmup_service._staggered_idle_due(
+        "acc_2",
+        ["acc_1", "acc_2", "acc_3"],
+        now=datetime.fromtimestamp(window_start + 1_200, tz=timezone.utc).replace(tzinfo=None),
+        reset_at=reset_at,
+        window_seconds=window_seconds,
+    )
+    outside = limit_warmup_service._staggered_idle_due(
+        "acc_1",
+        ["acc_1", "acc_2", "acc_3"],
+        now=datetime.fromtimestamp(window_start - 1, tz=timezone.utc).replace(tzinfo=None),
+        reset_at=reset_at,
+        window_seconds=window_seconds,
+    )
+
+    assert first is not None
+    assert first.cycle_end == reset_at
+    assert first.slot_offset_seconds == 0
+    assert second is not None
+    assert second.slot_offset_seconds == 1_200
+    assert outside is None
+
+
 def test_staggered_idle_slot_uses_account_reset_window() -> None:
     reset_at = 20_000
     window_start = reset_at - 18_000

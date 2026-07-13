@@ -1764,6 +1764,52 @@ def test_state_from_account_expires_stale_partial_secondary_usage_after_reset(mo
     assert state.secondary_reset_at is None
 
 
+def test_state_from_account_carries_primary_window_minutes(monkeypatch):
+    now = 1_700_000_000.0
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+
+    state = _state_from_account(
+        account=_make_test_account(status=AccountStatus.ACTIVE),
+        primary_entry=_make_test_usage(
+            window="primary",
+            used_percent=10.0,
+            reset_at=int(now + 3600),
+            recorded_at=_epoch_to_naive_utc(now - 30),
+            window_minutes=300,
+        ),
+        secondary_entry=None,
+        runtime=RuntimeState(),
+    )
+
+    assert state.primary_window_minutes == 300
+    assert state.primary_reset_at == int(now + 3600)
+
+
+def test_state_from_account_clears_primary_window_minutes_for_weekly_only(monkeypatch):
+    now = 1_700_000_000.0
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+
+    state = _state_from_account(
+        account=_make_test_account(status=AccountStatus.ACTIVE, plan_type="free"),
+        primary_entry=_make_test_usage(
+            window="primary",
+            used_percent=20.0,
+            reset_at=int(now + 5 * 24 * 3600),
+            recorded_at=_epoch_to_naive_utc(now - 30),
+            window_minutes=10080,
+        ),
+        secondary_entry=None,
+        runtime=RuntimeState(),
+    )
+
+    # The weekly-primary remap moves the row to the secondary slot; the
+    # account has no short window and must not look phase-plannable.
+    assert state.primary_window_minutes is None
+    assert state.secondary_used_percent == 20.0
+
+
 def test_state_from_account_treats_monthly_usage_as_advisory_long_window_pressure(monkeypatch):
     now = 1_700_000_000.0
     future_reset = int(now + 30 * 24 * 3600)

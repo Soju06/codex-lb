@@ -28,7 +28,7 @@ from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.repository import UsageRepository
 from app.modules.usage.updater import UsageUpdater
 
-from .logic import PlannerSettings
+from .logic import SHORT_WINDOW_MAX_MINUTES, PlannerSettings
 from .repository import QuotaPlannerRepository
 
 WARMUP_REQUEST_KIND = "warmup"
@@ -411,6 +411,8 @@ class QuotaWarmupService:
             return False, f"account_status_{account.status.value}"
 
         latest = (await self._usage.latest_by_account()).get(account.id)
+        if _sample_blocks_short_window_planning(latest):
+            return False, "no_short_window"
         if latest is not None and latest.reset_at is not None and latest.reset_at > int(utcnow().timestamp()):
             return False, "account_window_already_active"
 
@@ -480,7 +482,12 @@ class QuotaWarmupService:
         latest_before_by_account = {account.id: latest_before} if latest_before else {}
         await UsageUpdater(self._usage, self._accounts).refresh_accounts([account], latest_before_by_account)
         latest_after = (await self._usage.latest_by_account()).get(account.id)
-        observed_after = latest_after if _usage_history_is_fresh(latest_before, latest_after) else None
+        observed_after = (
+            latest_after
+            if _usage_history_is_fresh(latest_before, latest_after)
+            and not _sample_blocks_short_window_planning(latest_after)
+            else None
+        )
         effective_confidence = confidence if observed_after is not None else "unknown"
         await self._planner.add_window_observation(
             account_id=account.id,
@@ -494,6 +501,20 @@ class QuotaWarmupService:
 
 def _local_midnight() -> datetime:
     return utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def _sample_blocks_short_window_planning(entry: object | None) -> bool:
+    # Phase planning only applies to short rolling windows. Only positive
+    # evidence of a long (weekly or monthly) window in the primary slot
+    # blocks warm-up execution — weekly-only plans surface the weekly window
+    # there. Absent samples or samples without duration metadata keep the
+    # legacy bootstrap behavior.
+    if entry is None:
+        return False
+    window_minutes = getattr(entry, "window_minutes", None)
+    if window_minutes is None:
+        return False
+    return int(window_minutes) > SHORT_WINDOW_MAX_MINUTES
 
 
 def _usage_history_is_fresh(before: object | None, after: object | None) -> bool:

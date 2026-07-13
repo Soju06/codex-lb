@@ -22,6 +22,11 @@ Dashboard API and static-asset responses MUST be served gzip-compressed when the
 - **WHEN** a request targets a proxy path (`/backend-api/*`, `/v1/*`)
 - **THEN** the dashboard gzip middleware passes it through untouched
 
+#### Scenario: Ranged asset requests bypass compression
+
+- **WHEN** an asset request carries a `Range` header
+- **THEN** the response is served uncompressed with a valid 206 `Content-Range` over unencoded bytes
+
 #### Scenario: Chart vendor code loads lazily
 
 - **WHEN** the built dashboard entry page loads

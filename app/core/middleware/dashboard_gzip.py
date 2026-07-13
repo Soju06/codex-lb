@@ -18,10 +18,21 @@ class DashboardGZipMiddleware:
         self._gzip = GZipMiddleware(app, minimum_size=minimum_size)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] == "http" and scope.get("path", "").startswith(_COMPRESSED_PATH_PREFIXES):
+        if (
+            scope["type"] == "http"
+            and scope.get("path", "").startswith(_COMPRESSED_PATH_PREFIXES)
+            and not _has_range_header(scope)
+        ):
             await self._gzip(scope, receive, send)
             return
         await self._plain(scope, receive, send)
+
+
+def _has_range_header(scope: Scope) -> bool:
+    """Ranged requests bypass gzip: FileResponse builds the 206 and its
+    Content-Range against the uncompressed file, so compressing the body
+    afterwards would describe offsets the encoded bytes no longer match."""
+    return any(name == b"range" for name, _ in scope.get("headers", ()))
 
 
 def add_dashboard_gzip_middleware(app) -> None:

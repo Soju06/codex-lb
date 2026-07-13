@@ -52,7 +52,13 @@ class ApiKeyCache(Generic[_CacheValueT]):
         self._version += 1
 
 
-_api_key_cache: ApiKeyCache[object] = ApiKeyCache(ttl_seconds=2)
+# Key mutations bump the api_key cache-invalidation namespace, and every
+# instance's poller (0.5s interval) clears this cache, so revocation latency
+# is poller-bound, not TTL-bound. The TTL only limits staleness if the poller
+# is broken; keeping it short instead forced interactive Codex turns (which
+# are usually more than a few seconds apart) to re-read the key row from the
+# database before every upstream call.
+_api_key_cache: ApiKeyCache[object] = ApiKeyCache(ttl_seconds=60)
 
 
 def get_api_key_cache() -> ApiKeyCache[object]:

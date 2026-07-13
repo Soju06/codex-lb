@@ -1415,3 +1415,90 @@ async def test_reallocate_sticky_respects_existing_session_then_falls_back(async
     await async_client.post("/backend-api/codex/responses", json=payload)
     assert len(seen) == 3
     assert seen[2] == "acc_realloc_b"
+
+
+@pytest.mark.asyncio
+async def test_sticky_upsert_single_statement_insert_and_update(db_setup):
+    """The upsert must persist and return the row with one data statement
+    (RETURNING), for both the insert and the conflict-update arms."""
+    from sqlalchemy import event
+
+    from app.db.models import StickySessionKind
+    from app.db.session import engine
+    from app.modules.proxy.sticky_repository import StickySessionsRepository
+
+    encryptor = TokenEncryptor()
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(
+            Account(
+                id="acc_sticky_rt",
+                email="sticky-rt@example.com",
+                plan_type="plus",
+                access_token_encrypted=encryptor.encrypt("access"),
+                refresh_token_encrypted=encryptor.encrypt("refresh"),
+                id_token_encrypted=encryptor.encrypt("id"),
+                last_refresh=utcnow(),
+                status=AccountStatus.ACTIVE,
+                deactivation_reason=None,
+            )
+        )
+
+    statements: list[str] = []
+
+    def _capture(conn, cursor, statement, parameters, context, executemany):
+        if "sticky_sessions" in statement:
+            statements.append(statement)
+
+    async with SessionLocal() as session:
+        repo = StickySessionsRepository(session)
+        event.listen(engine.sync_engine, "before_cursor_execute", _capture)
+        try:
+            inserted = await repo.upsert("key_rt", "acc_sticky_rt", kind=StickySessionKind.PROMPT_CACHE)
+            updated = await repo.upsert("key_rt", "acc_sticky_rt", kind=StickySessionKind.PROMPT_CACHE)
+        finally:
+            event.remove(engine.sync_engine, "before_cursor_execute", _capture)
+
+    assert inserted.key == "key_rt"
+    assert inserted.account_id == "acc_sticky_rt"
+    assert updated.key == "key_rt"
+    assert updated.account_id == "acc_sticky_rt"
+    assert updated.updated_at >= inserted.updated_at
+    # One INSERT ... RETURNING per upsert; no follow-up SELECT/refresh.
+    assert len(statements) == 2
+    assert all("INSERT" in stmt.upper() and "RETURNING" in stmt.upper() for stmt in statements)
+
+
+@pytest.mark.asyncio
+async def test_sticky_upsert_returning_refreshes_identity_map_instance(db_setup):
+    """Rebinding a key within one session must return the NEW account even
+    when the session's identity map already holds the row from an earlier
+    upsert (populate_existing on the RETURNING execute)."""
+    from app.db.models import StickySessionKind
+    from app.modules.proxy.sticky_repository import StickySessionsRepository
+
+    encryptor = TokenEncryptor()
+    async with SessionLocal() as session:
+        repo_accounts = AccountsRepository(session)
+        for account_id in ("acc_rebind_a", "acc_rebind_b"):
+            await repo_accounts.upsert(
+                Account(
+                    id=account_id,
+                    email=f"{account_id}@example.com",
+                    plan_type="plus",
+                    access_token_encrypted=encryptor.encrypt("access"),
+                    refresh_token_encrypted=encryptor.encrypt("refresh"),
+                    id_token_encrypted=encryptor.encrypt("id"),
+                    last_refresh=utcnow(),
+                    status=AccountStatus.ACTIVE,
+                    deactivation_reason=None,
+                )
+            )
+
+    async with SessionLocal() as session:
+        repo = StickySessionsRepository(session)
+        first = await repo.upsert("key_rebind", "acc_rebind_a", kind=StickySessionKind.PROMPT_CACHE)
+        assert first.account_id == "acc_rebind_a"
+        # Same session, same identity-map row: rebinding must not return the
+        # stale in-memory account_id.
+        second = await repo.upsert("key_rebind", "acc_rebind_b", kind=StickySessionKind.PROMPT_CACHE)
+        assert second.account_id == "acc_rebind_b"

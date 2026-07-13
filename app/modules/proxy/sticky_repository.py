@@ -65,14 +65,18 @@ class StickySessionsRepository:
         return result.scalar_one_or_none()
 
     async def upsert(self, key: str, account_id: str, *, kind: StickySessionKind) -> StickySession:
-        statement = self._build_upsert_statement(key, account_id, kind)
+        # RETURNING collapses the previous upsert + re-select + refresh
+        # (4 round trips) into one statement; this runs inline before the
+        # first upstream byte on sticky requests, so round trips are TTFT.
+        # populate_existing forces the returned row to overwrite any stale
+        # identity-map instance the session may already hold for this key.
+        statement = self._build_upsert_statement(key, account_id, kind).returning(StickySession)
         async with sqlite_writer_section():
-            await self._session.execute(statement)
+            result = await self._session.execute(statement, execution_options={"populate_existing": True})
+            row = result.scalar_one_or_none()
             await self._session.commit()
-        row = await self.get_entry(key, kind=kind)
         if row is None:
             raise RuntimeError(f"StickySession upsert failed for key={key!r} kind={kind.value!r}")
-        await self._session.refresh(row)
         return row
 
     async def delete(self, key: str, *, kind: StickySessionKind) -> bool:

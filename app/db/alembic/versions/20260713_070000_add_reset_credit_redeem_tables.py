@@ -12,7 +12,7 @@ from alembic import op
 from sqlalchemy.engine import Connection
 
 revision = "20260713_070000_add_reset_credit_redeem_tables"
-down_revision = "20260712_020000_add_api_key_usage_rollups"
+down_revision = "20260713_040000_add_replica_guardrails"
 branch_labels = None
 depends_on = None
 

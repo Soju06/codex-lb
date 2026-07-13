@@ -350,6 +350,81 @@ async def test_run_if_leader_detaches_shielded_body_after_grace(monkeypatch: pyt
     await asyncio.wait_for(body_finished.wait(), timeout=1)
 
 
+async def _detach_shielded_body(
+    monkeypatch: pytest.MonkeyPatch,
+    session: _FakeSession,
+) -> tuple[Any, asyncio.Event, asyncio.Event]:
+    """Drive ``run_if_leader`` through lease loss so its body gets detached.
+
+    Returns the election plus the release/finished events of the still
+    draining shielded body.
+    """
+    monkeypatch.setattr(leader_election_module, "_CANCEL_GRACE_SECONDS", 0.2)
+
+    release = asyncio.Event()
+    body_finished = asyncio.Event()
+
+    async def _body() -> None:
+        inner = asyncio.create_task(release.wait())
+        try:
+            await asyncio.shield(inner)
+        except asyncio.CancelledError:
+            await inner
+            body_finished.set()
+            raise
+
+    election = leader_election_module.LeaderElection(leader_id="node-a")
+    assert await election.run_if_leader(_body) is None
+    assert len(election._detached_bodies) == 1
+    return election, release, body_finished
+
+
+@pytest.mark.asyncio
+async def test_release_waits_for_detached_body_then_deletes_lease(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Shutdown ordering: scheduler stop() can return with a gated body
+    # detached and still draining shielded work as the former leader.
+    # release() must wait for that body before deleting the lease row so a
+    # follower cannot become leader while the old work still runs.
+    session = _FakeSession("postgresql", [1, 0, 1])  # acquire, stolen renewal, release delete
+    _install(monkeypatch, session, ttl=3)
+    election, release, body_finished = await _detach_shielded_body(monkeypatch, session)
+
+    asyncio.get_running_loop().call_later(0.1, release.set)
+    await election.release()
+
+    assert body_finished.is_set()
+    assert election.is_leader is False
+    assert isinstance(session.statements[-1], Delete)
+    assert election._detached_bodies == set()
+
+
+@pytest.mark.asyncio
+async def test_release_skips_delete_while_detached_body_still_draining(monkeypatch: pytest.MonkeyPatch) -> None:
+    # If the detached body is still draining after the release drain grace,
+    # deleting the lease row would hand leadership to a follower while this
+    # process may still act as leader; release() must skip the early release
+    # and let the lease expire after its TTL instead.
+    session = _FakeSession("postgresql", [1, 0])  # acquire, stolen renewal; no delete expected
+    _install(monkeypatch, session, ttl=3)
+    election, release, body_finished = await _detach_shielded_body(monkeypatch, session)
+    monkeypatch.setattr(leader_election_module, "_RELEASE_DRAIN_GRACE_SECONDS", 0.2)
+    statements_before_release = len(session.statements)
+
+    await election.release()
+
+    assert not body_finished.is_set()
+    assert election.is_leader is False
+    assert len(session.statements) == statements_before_release
+    assert not any(isinstance(statement, Delete) for statement in session.statements)
+
+    release.set()
+    [detached] = election._detached_bodies
+    with pytest.raises(asyncio.CancelledError):
+        await detached
+    assert body_finished.is_set()
+    assert election._detached_bodies == set()
+
+
 @pytest.mark.asyncio
 async def test_run_if_leader_runs_body_directly_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
     session = _FakeSession("postgresql", [])

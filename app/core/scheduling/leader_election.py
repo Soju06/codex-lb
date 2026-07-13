@@ -29,6 +29,13 @@ _MAX_CONSECUTIVE_RENEW_ERRORS = 2
 # duration of an upstream call after the lease is already gone.
 _CANCEL_GRACE_SECONDS = 5.0
 
+# How long ``release`` waits for previously detached gated bodies to finish
+# before deleting the lease row. If a detached body is still draining after
+# this grace the early release is skipped entirely: handing the lease to a
+# follower while the old body may still act as leader would recreate the
+# duplicate-singleton overlap, so the lease is left to expire after its TTL.
+_RELEASE_DRAIN_GRACE_SECONDS = 5.0
+
 # PostgreSQL evaluates both the new expiry and the takeover predicate on the
 # database clock so inter-replica wall-clock skew cannot steal a live lease.
 _POSTGRES_ACQUIRE_SQL = text(
@@ -88,6 +95,9 @@ class LeaderElection:
     def __init__(self, leader_id: str | None = None) -> None:
         self._leader_id = leader_id or str(uuid.uuid4())
         self._is_leader = False
+        # Gated bodies that were detached after the cancellation grace and may
+        # still be draining shielded singleton work as the (former) leader.
+        self._detached_bodies: set[asyncio.Task[Any]] = set()
 
     @property
     def leader_id(self) -> str:
@@ -162,12 +172,27 @@ class LeaderElection:
     async def release(self) -> None:
         """Delete the lease row we hold so followers can take over immediately.
 
+        Bodies detached after the cancellation grace may still be draining
+        shielded singleton work as the former leader, so the early release
+        first waits up to ``_RELEASE_DRAIN_GRACE_SECONDS`` for them. If any
+        body is still draining after the grace, the row is left in place —
+        the lease then expires after its TTL — because handing it to a
+        follower while old gated work still runs would recreate the
+        duplicate-singleton overlap the lease exists to prevent.
+
         Failure to release must never block shutdown; the lease then simply
         expires after the TTL.
         """
         self._is_leader = False
         settings = get_settings()
         if not settings.leader_election_enabled:
+            return
+        if not await self._drain_detached_bodies():
+            logger.warning(
+                "Skipping early leader lease release: detached leader-gated work is still "
+                "draining after %.1fs; the lease will expire after its TTL",
+                _RELEASE_DRAIN_GRACE_SECONDS,
+            )
             return
         try:
             async with get_background_session() as session:
@@ -267,7 +292,7 @@ class LeaderElection:
                     self._leader_id,
                 )
                 body_cancel_handled = True
-                await _cancel_within_grace(body_task)
+                await self._cancel_within_grace(body_task)
                 return None
             return await body_task
         finally:
@@ -279,34 +304,53 @@ class LeaderElection:
             except Exception:
                 logger.exception("Leader heartbeat failed during cleanup")
             if not body_cancel_handled and not body_task.done():
-                await _cancel_within_grace(body_task)
+                await self._cancel_within_grace(body_task)
 
+    async def _cancel_within_grace(self, task: asyncio.Task[Any]) -> None:
+        """Cancel ``task`` and await it for at most ``_CANCEL_GRACE_SECONDS``.
 
-async def _cancel_within_grace(task: asyncio.Task[Any]) -> None:
-    """Cancel ``task`` and await it for at most ``_CANCEL_GRACE_SECONDS``.
+        Gated bodies may shield in-flight singleton refreshes (e.g. the token
+        and usage refresh singleflights) and drain them after a cancellation
+        request, so this uses ``asyncio.wait`` (which does not re-cancel on
+        timeout) and detaches the task after the grace instead of blocking on
+        the shielded upstream call. A detached task keeps draining in the
+        background bounded by the underlying operation's own timeout; it is
+        tracked so ``release`` will not hand the lease over while it may still
+        run, and its outcome is logged from a done callback so failures are
+        still observed.
+        """
+        task.cancel()
+        _, pending = await asyncio.wait({task}, timeout=_CANCEL_GRACE_SECONDS)
+        if pending:
+            self._detached_bodies.add(task)
+            task.add_done_callback(self._on_detached_body_done)
+            logger.warning(
+                "Leader-gated task still draining shielded work %.1fs after cancellation; detaching",
+                _CANCEL_GRACE_SECONDS,
+            )
+            return
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.warning("Leader-gated task failed while being cancelled", exc_info=exc)
 
-    Gated bodies may shield in-flight singleton refreshes (e.g. the token and
-    usage refresh singleflights) and drain them after a cancellation request,
-    so this uses ``asyncio.wait`` (which does not re-cancel on timeout) and
-    detaches the task after the grace instead of blocking on the shielded
-    upstream call. A detached task keeps draining in the background bounded by
-    the underlying operation's own timeout, and its outcome is logged from a
-    done callback so failures are still observed.
-    """
-    task.cancel()
-    _, pending = await asyncio.wait({task}, timeout=_CANCEL_GRACE_SECONDS)
-    if pending:
-        task.add_done_callback(_log_detached_body_result)
-        logger.warning(
-            "Leader-gated task still draining shielded work %.1fs after cancellation; detaching",
-            _CANCEL_GRACE_SECONDS,
+    def _on_detached_body_done(self, task: asyncio.Task[Any]) -> None:
+        self._detached_bodies.discard(task)
+        _log_detached_body_result(task)
+
+    async def _drain_detached_bodies(self) -> bool:
+        """Wait for detached gated bodies; true when none remain running."""
+        pending = {task for task in self._detached_bodies if not task.done()}
+        if not pending:
+            return True
+        logger.info(
+            "Waiting up to %.1fs for %d detached leader-gated task(s) before releasing the lease",
+            _RELEASE_DRAIN_GRACE_SECONDS,
+            len(pending),
         )
-        return
-    if task.cancelled():
-        return
-    exc = task.exception()
-    if exc is not None:
-        logger.warning("Leader-gated task failed while being cancelled", exc_info=exc)
+        _, still_pending = await asyncio.wait(pending, timeout=_RELEASE_DRAIN_GRACE_SECONDS)
+        return not still_pending
 
 
 def _log_detached_body_result(task: asyncio.Task[Any]) -> None:

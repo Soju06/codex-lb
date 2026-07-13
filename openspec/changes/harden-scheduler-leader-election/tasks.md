@@ -15,3 +15,4 @@
 - [x] 13. Review follow-up: time-box each renewal attempt (`asyncio.wait_for`, `ttl / 6`) and demote on a passed local lease deadline so a hung DB cannot extend leadership past the TTL
 - [x] 14. Review follow-up: bound the post-cancel await of the gated body to a 5s grace and detach (with logged outcome) bodies draining shielded singleflight refreshes; document the residual overlap and its safety argument in `context.md`
 - [x] 15. Review follow-up: narrow the disabled-election contract for Auth Guardian (multi-replica ring without election disables the guardian) and emit an operator-visible warning from `build_auth_guardian_scheduler`
+- [x] 16. Review follow-up: make shutdown `release()` drain detached gated bodies for a bounded grace and skip the early lease delete while any is still running, so a follower cannot acquire the lease while the old process may still act as leader

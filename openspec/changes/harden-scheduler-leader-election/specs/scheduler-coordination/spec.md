@@ -85,7 +85,7 @@ After demotion the gate MUST await the cancelled body for at most a bounded grac
 
 ### Requirement: Lease is released on graceful shutdown
 
-On lifespan shutdown, after all schedulers are stopped, the process MUST delete the `scheduler_leader` row it holds (matching its own leader id). Release failure MUST NOT block or fail shutdown; the lease then simply expires after the TTL.
+On lifespan shutdown, after all schedulers are stopped, the process MUST delete the `scheduler_leader` row it holds (matching its own leader id). Before deleting the row, release MUST wait a bounded grace for any gated body that was detached still draining shielded singleton work; if such a body is still running after the grace, release MUST skip deleting the row entirely — the lease then expires after its TTL — so a follower cannot acquire the lease while the shutting-down process may still execute leader-gated work. Release failure MUST NOT block or fail shutdown; the lease then simply expires after the TTL.
 
 #### Scenario: Leader shuts down cleanly
 
@@ -93,6 +93,13 @@ On lifespan shutdown, after all schedulers are stopped, the process MUST delete 
 - **WHEN** the leader's lifespan teardown completes
 - **THEN** the lease row is deleted
 - **AND** the surviving replica acquires the lease on its next tick without waiting for TTL expiry
+
+#### Scenario: Shutdown with a detached gated body still draining
+
+- **GIVEN** a leader shutting down while a detached gated body is still draining shielded refresh work
+- **WHEN** the release drain grace elapses with the body still running
+- **THEN** the lease row is not deleted
+- **AND** shutdown proceeds and followers acquire the lease only after the TTL expires
 
 #### Scenario: Release fails during shutdown
 

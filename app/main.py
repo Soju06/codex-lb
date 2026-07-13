@@ -468,8 +468,13 @@ async def lifespan(app: FastAPI):
         # Release the scheduler leader lease only after every leader-gated
         # scheduler has stopped so no local tick re-acquires it; followers can
         # then take over immediately instead of waiting out the lease TTL.
+        # release() itself first drains bodies that were detached still
+        # draining shielded work, and skips the early release (letting the
+        # lease expire by TTL) if any is still running, so a follower cannot
+        # become leader while this process may still act as one. The timeout
+        # covers that bounded drain plus the row delete.
         try:
-            await asyncio.wait_for(get_leader_election().release(), timeout=3)
+            await asyncio.wait_for(get_leader_election().release(), timeout=10)
         except Exception:
             logger.warning("Failed to release scheduler leader lease during shutdown", exc_info=True)
         try:

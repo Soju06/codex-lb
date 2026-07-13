@@ -99,6 +99,13 @@ The dashboard settings row SHALL carry a monotonically increasing `version` incr
 - **THEN** the response is 409 with code `settings_conflict`
 - **AND** no settings field is modified
 
+#### Scenario: Writer committing between the version check and the update still loses
+
+- **GIVEN** a `PUT /api/settings` request whose `expectedVersion` matched the row when the handler read it
+- **WHEN** another writer commits a settings update before the first request's write is applied
+- **THEN** the first request's write is rejected with 409 and code `settings_conflict`
+- **AND** the interleaved writer's committed fields are not reverted
+
 #### Scenario: Internal credential writer retries through a conflict
 
 - **GIVEN** a dashboard-auth credential mutation whose session read the settings row before a concurrent settings update committed

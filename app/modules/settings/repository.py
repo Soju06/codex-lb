@@ -122,8 +122,17 @@ class SettingsRepository:
         weekly_pace_smoothing_minutes: int | None = None,
         guest_access_enabled: bool | None = None,
         limit_warmup_staggered_idle_enabled: bool | None = None,
+        expected_version: int | None = None,
     ) -> DashboardSettings:
         settings = await self.get_or_create()
+        if expected_version is not None and settings.version != expected_version:
+            # Bind the CAS to the row this UPDATE targets: with
+            # DashboardSettings.version as version_id_col, commit_refresh emits
+            # `UPDATE ... WHERE version = :expected`, so a writer committing in
+            # between still surfaces as StaleDataError -> 409.
+            raise DashboardSettingsConflictError(
+                "Settings were modified since this form was loaded; reload and retry",
+            )
         if sticky_threads_enabled is not None:
             settings.sticky_threads_enabled = sticky_threads_enabled
         if upstream_stream_transport is not None:

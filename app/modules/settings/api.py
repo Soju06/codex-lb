@@ -764,7 +764,13 @@ async def update_settings(
                     if payload.limit_warmup_staggered_idle_enabled is not None
                     else current.limit_warmup_staggered_idle_enabled
                 ),
-            )
+            ),
+            # CAS anchor: omitted fields above were merged from `current`
+            # (version checked against expectedVersion when supplied), so the
+            # repository must apply the UPDATE only if the row still carries
+            # that version; a writer committing in between yields 409 instead
+            # of silently reverting its fields.
+            expected_version=current.version,
         )
     except ValueError as exc:
         raise DashboardBadRequestError(str(exc), code="invalid_totp_config") from exc

@@ -162,11 +162,17 @@ class SettingsService:
             version=row.version,
         )
 
-    async def update_settings(self, payload: DashboardSettingsUpdateData) -> DashboardSettingsData:
+    async def update_settings(
+        self,
+        payload: DashboardSettingsUpdateData,
+        *,
+        expected_version: int | None = None,
+    ) -> DashboardSettingsData:
         current = await self._repository.get_or_create()
         if payload.totp_required_on_login and current.totp_secret_encrypted is None:
             raise ValueError("Configure TOTP before enabling login enforcement")
         row = await self._repository.update(
+            expected_version=expected_version,
             sticky_threads_enabled=payload.sticky_threads_enabled,
             upstream_stream_transport=payload.upstream_stream_transport,
             prohibit_fast_mode=payload.prohibit_fast_mode,

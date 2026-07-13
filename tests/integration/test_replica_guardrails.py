@@ -18,6 +18,7 @@ from app.db.models import RuntimeSentinel
 from app.db.session import SessionLocal
 from app.modules.dashboard_auth.repository import DashboardAuthRepository
 from app.modules.settings.repository import SettingsRepository
+from app.modules.settings.service import SettingsService
 
 pytestmark = pytest.mark.integration
 
@@ -212,6 +213,58 @@ async def test_concurrent_settings_put_loser_receives_409(async_client, monkeypa
     response = await async_client.get("/api/settings")
     assert response.json()["prohibitFastMode"] is True
     assert response.json()["stickyThreadsEnabled"] is True
+
+
+@pytest.mark.asyncio
+async def test_settings_put_conflicts_when_writer_commits_between_check_and_update(async_client, monkeypatch):
+    """A writer committing after the expectedVersion check but before the service
+    update must still lose with 409: the handler passes the version it merged
+    omitted fields from as `expected_version`, the repository rejects a row that
+    has moved past it, and the versioned UPDATE (`WHERE version = :expected`)
+    covers the residual read-to-commit window."""
+    original_update = SettingsService.update_settings
+    first_writer_passed_check = asyncio.Event()
+    second_writer_committed = asyncio.Event()
+    call_count = 0
+
+    async def racing_update(self, payload, *, expected_version=None):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            # Writer A has already passed the api-level expectedVersion check
+            # (it runs before service.update_settings); pause before the
+            # service touches the row again so writer B can commit in between.
+            first_writer_passed_check.set()
+            await asyncio.wait_for(second_writer_committed.wait(), timeout=10)
+        return await original_update(self, payload, expected_version=expected_version)
+
+    monkeypatch.setattr(SettingsService, "update_settings", racing_update)
+
+    response = await async_client.get("/api/settings")
+    version = response.json()["version"]
+
+    task_a = asyncio.create_task(
+        async_client.put(
+            "/api/settings",
+            json={"expectedVersion": version, "stickyThreadsEnabled": False},
+        )
+    )
+    await asyncio.wait_for(first_writer_passed_check.wait(), timeout=10)
+    response_b = await async_client.put(
+        "/api/settings",
+        json={"expectedVersion": version, "prohibitFastMode": True},
+    )
+    second_writer_committed.set()
+    response_a = await task_a
+
+    assert response_b.status_code == 200
+    assert response_a.status_code == 409
+    assert response_a.json()["error"]["code"] == "settings_conflict"
+    # Writer B's committed fields survived; writer A wrote nothing.
+    response = await async_client.get("/api/settings")
+    assert response.json()["prohibitFastMode"] is True
+    assert response.json()["stickyThreadsEnabled"] is True
+    assert response.json()["version"] == version + 1
 
 
 @pytest.mark.asyncio

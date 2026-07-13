@@ -188,13 +188,22 @@ async def release_redeem_claim(account_id: str, holder_id: str) -> None:
 
 
 async def get_pinned_redeem_credit_id(account_id: str, redeem_request_id: str) -> str | None:
-    """Read the credit pinned to this redeem_request_id by any replica."""
+    """Read the credit pinned to this redeem_request_id by any replica.
+
+    Rows older than the 24h TTL are ignored (the read TTL matches the purge
+    TTL applied by ``pin_redeem_request``), so an expired pin reads as absent.
+    The caller then re-selects a fresh credit and re-pins it via
+    ``pin_redeem_request`` instead of forwarding the redemption for a stale
+    credit id that the purge path would otherwise drop.
+    """
+    now = datetime.now(UTC)
     session = SessionLocal()
     try:
         return await session.scalar(
             select(ResetCreditRedeemRequest.credit_id).where(
                 ResetCreditRedeemRequest.account_id == account_id,
                 ResetCreditRedeemRequest.redeem_request_id == redeem_request_id,
+                ResetCreditRedeemRequest.created_at >= now - REDEEM_REQUEST_TTL,
             )
         )
     finally:

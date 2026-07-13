@@ -586,6 +586,43 @@ async def test_pin_redeem_request_reused_after_ttl_repins_new_credit(async_clien
     assert [(row.redeem_request_id, row.credit_id) for row in rows] == [("reused-R", "new-credit")]
 
 
+@pytest.mark.asyncio
+async def test_get_pinned_redeem_credit_id_ignores_expired_rows(async_client) -> None:
+    """An expired pin (older than the 24h TTL) must read as absent so the
+    caller re-selects and re-pins a fresh credit instead of retargeting the
+    stale credit id. The read TTL matches ``pin_redeem_request``'s purge TTL,
+    so the row reads as absent even before any purge write runs."""
+    account_id = await _import_account(
+        async_client,
+        email="ledger-expired-read@example.com",
+        account_id="acc_ledger_expired_read",
+    )
+
+    async with SessionLocal() as session:
+        session.add(
+            ResetCreditRedeemRequest(
+                account_id=account_id,
+                redeem_request_id="expired-R",
+                credit_id="stale-credit",
+                created_at=datetime.now(UTC) - timedelta(hours=25),
+            )
+        )
+        session.add(
+            ResetCreditRedeemRequest(
+                account_id=account_id,
+                redeem_request_id="fresh-R",
+                credit_id="fresh-credit",
+                created_at=datetime.now(UTC) - timedelta(hours=1),
+            )
+        )
+        await session.commit()
+
+    # Expired row is filtered on read (no purge write has run), while a
+    # within-TTL row is still returned.
+    assert await get_pinned_redeem_credit_id(account_id, "expired-R") is None
+    assert await get_pinned_redeem_credit_id(account_id, "fresh-R") == "fresh-credit"
+
+
 # --- v1 fresh-replica fallback (false 409 without it) ---
 
 

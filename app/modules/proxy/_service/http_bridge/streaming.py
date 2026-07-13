@@ -84,6 +84,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _log_http_bridge_event,
     _make_http_bridge_session_header_fallback_key,
     _make_http_bridge_session_key,
+    _proxy_admission_wait_timeout_seconds,
     _record_bridge_reattach,
     _record_continuity_fail_closed,
     _release_http_bridge_unanchored_handoff,
@@ -215,6 +216,7 @@ _SECURITY_WORK_NO_AUTHORIZED_ACCOUNTS_MESSAGE = (
 )
 _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS = 5.0
 _HTTP_BRIDGE_BACKGROUND_CLEANUP_WARN_THRESHOLD = 100
+_RESPONSE_CREATE_GATE_RETRY_SLEEP_SECONDS = 10.0
 
 
 def _proxy_error_code_message(exc: ProxyResponseError) -> tuple[str | None, str | None]:
@@ -230,6 +232,14 @@ def _http_bridge_account_capacity_wait_seconds(exc: ProxyResponseError) -> float
     code, message = _proxy_error_code_message(exc)
     if code == "capacity_exhausted_active_sessions":
         return None
+    if code == "response_create_gate_timeout":
+        # Per-session response-create gate contention is recoverable: the
+        # in-flight turn releases the gate when it completes, so queued
+        # same-session work must wait within the bridge request budget
+        # instead of failing at the first admission-timeout expiry. Each
+        # retry re-attempts acquisition for proxy_admission_wait_timeout
+        # seconds, so the sleep only covers the window between attempts.
+        return _RESPONSE_CREATE_GATE_RETRY_SLEEP_SECONDS
     return _account_selection_recovery_sleep_seconds_from_message(
         message,
         error_code=code,
@@ -247,8 +257,18 @@ def _http_bridge_capacity_wait_plan(
     remaining_budget_seconds = max(0.0, request_deadline - _service_time().monotonic())
     if remaining_budget_seconds <= 0:
         return None
-    _code, message = _proxy_error_code_message(exc)
-    return min(account_capacity_wait_seconds, remaining_budget_seconds), account_capacity_wait_seconds, message
+    code, message = _proxy_error_code_message(exc)
+    bounded_wait_seconds = min(account_capacity_wait_seconds, remaining_budget_seconds)
+    if code == "response_create_gate_timeout":
+        # Reserve the tail of the request budget for one final gate
+        # acquisition attempt instead of sleeping it away: a same-session
+        # turn may release the gate during those last seconds.
+        attempt_reserve_seconds = _proxy_admission_wait_timeout_seconds()
+        bounded_wait_seconds = min(
+            bounded_wait_seconds,
+            max(0.0, remaining_budget_seconds - attempt_reserve_seconds),
+        )
+    return bounded_wait_seconds, account_capacity_wait_seconds, message
 
 
 async def _iter_account_capacity_wait_sse(
@@ -1866,6 +1886,7 @@ class _HTTPBridgeStreamingMixin:
     ) -> AsyncGenerator[str, None]:
         if request_deadline is None:
             request_deadline = request_state.started_at + _http_bridge_request_budget_seconds(_service_get_settings())
+        request_state.bridge_request_deadline = request_deadline
         while True:
             try:
                 await self._submit_http_bridge_request(
@@ -1881,6 +1902,29 @@ class _HTTPBridgeStreamingMixin:
                 if wait_plan is None:
                     raise
                 bounded_wait_seconds, account_capacity_wait_seconds, message = wait_plan
+                exc_code, _exc_message = _proxy_error_code_message(exc)
+                gate_contention = exc_code == "response_create_gate_timeout"
+                if gate_contention and session.closed:
+                    # The timed-out attempt retired the session (stuck
+                    # pending work); retrying a closed session would commit
+                    # a stream and then surface upstream_unavailable. Fail
+                    # the startup cleanly instead.
+                    raise
+                if gate_contention:
+                    # A sleeping gate waiter keeps occupying its bridge
+                    # queue slot so per-session pending work stays bounded
+                    # by the queue limit across retries.
+                    async with session.pending_lock:
+                        if session.queued_request_count >= queue_limit:
+                            raise ProxyResponseError(
+                                429,
+                                openai_error(
+                                    "bridge_queue_full",
+                                    "HTTP responses session bridge queue is full",
+                                    error_type="rate_limit_error",
+                                ),
+                            )
+                        session.queued_request_count += 1
                 logger.info(
                     "Waiting for account capacity before retrying HTTP bridge submit request_id=%s model=%s "
                     "account_id=%s sleep_seconds=%.1f recovery_hint_seconds=%.1f error=%s",
@@ -1891,14 +1935,21 @@ class _HTTPBridgeStreamingMixin:
                     account_capacity_wait_seconds,
                     message,
                 )
-                async for line in _iter_account_capacity_wait_sse(
-                    request_id=request_state.request_id,
-                    reason=message,
-                    sleep_seconds=bounded_wait_seconds,
-                    emit_keepalives=not propagate_http_errors,
-                ):
-                    yield line
+                try:
+                    async for line in _iter_account_capacity_wait_sse(
+                        request_id=request_state.request_id,
+                        reason=message,
+                        sleep_seconds=bounded_wait_seconds,
+                        emit_keepalives=not propagate_http_errors,
+                    ):
+                        yield line
+                finally:
+                    if gate_contention:
+                        async with session.pending_lock:
+                            session.queued_request_count = max(0, session.queued_request_count - 1)
                 if _service_time().monotonic() >= request_deadline:
+                    raise
+                if gate_contention and session.closed:
                     raise
                 continue
             break

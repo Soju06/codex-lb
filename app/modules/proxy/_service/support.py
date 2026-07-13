@@ -372,6 +372,10 @@ class _WebSocketRequestState:
     latency_bridge_queue_wait_ms: int | None = None
     response_create_gate_wait_started_at: float | None = None
     bridge_queue_wait_started_at: float | None = None
+    # Monotonic deadline of the original bridge request budget. Retry and
+    # recovery paths re-prepare request states with a fresh started_at, so
+    # budget clamps must use this instead of recomputing from started_at.
+    bridge_request_deadline: float | None = None
     prewarm_status: str | None = None
     prewarm_latency_ms: int | None = None
     prewarm_canary_bucket: str | None = None

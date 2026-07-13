@@ -83,3 +83,96 @@ The system SHALL issue dashboard password-authenticated sessions with an absolut
 - **WHEN** an admin changes the configured dashboard session lifetime after a session cookie has already been issued
 - **THEN** previously issued cookies continue to expire according to the expiry embedded in their encrypted payload
 - **AND** only newly issued dashboard password sessions use the updated lifetime
+
+### Requirement: Dashboard OAuth callback errors hide internal exception details
+
+Dashboard OAuth manual-callback responses MUST NOT include raw unexpected
+exception strings, stack traces, local file paths, or other internal diagnostic
+text in the response body. The server MAY log unexpected exceptions for operator
+troubleshooting. User-actionable OAuth provider errors MAY continue to expose the
+explicit provider-facing error code/message.
+
+#### Scenario: Unexpected manual callback exception is sanitized
+
+- **GIVEN** a dashboard session is authorized
+- **AND** the OAuth manual-callback service raises an unexpected exception whose
+  message contains internal diagnostic text
+- **WHEN** the client calls `POST /api/oauth/manual-callback`
+- **THEN** the response returns HTTP 500 with error code `manual_callback_failed`
+- **AND** the response message is a generic internal-error message
+- **AND** the response body does not contain the raw exception text
+
+#### Scenario: OAuth provider error remains user-actionable
+
+- **GIVEN** a dashboard session is authorized
+- **AND** the OAuth manual-callback service raises `OAuthError` with an explicit
+  error code and message
+- **WHEN** the client calls `POST /api/oauth/manual-callback`
+- **THEN** the response exposes that OAuth error code and message to the client
+
+### Requirement: Dashboard guest access is read-only
+
+The system SHALL support a dashboard `guest` role with read permission and without write permission. The system SHALL continue to treat password-authenticated, trusted-header, disabled-auth, and local bootstrap users as `admin` principals with read and write permissions.
+
+#### Scenario: Guest can read dashboard APIs
+
+- **WHEN** guest access is enabled and a guest principal requests a dashboard GET endpoint
+- **THEN** the request succeeds using read-only dashboard access
+- **AND** the session response identifies the principal as `guest`
+- **AND** the session response includes only the `read` permission
+
+#### Scenario: Guest cannot mutate dashboard state
+
+- **WHEN** guest access is enabled and a guest principal requests a dashboard mutating endpoint
+- **THEN** the system returns HTTP 403 with error code `read_only_access`
+- **AND** no dashboard state is changed
+
+### Requirement: Guest access may be enabled without a guest password
+
+The system SHALL allow operators to enable guest access without configuring a guest password. When guest access is enabled and no guest password is configured, remote dashboard requests that do not have an admin session SHALL be authorized as a `guest` principal for read-only routes.
+
+#### Scenario: Passwordless guest reads remotely
+
+- **WHEN** guest access is enabled
+- **AND** no guest password is configured
+- **AND** a remote request has no admin dashboard session
+- **THEN** dashboard GET endpoints treat the request as a `guest`
+
+#### Scenario: Passwordless guest still cannot write
+
+- **WHEN** guest access is enabled without a guest password
+- **AND** a remote request has no admin dashboard session
+- **THEN** dashboard mutating endpoints return HTTP 403 with error code `read_only_access`
+
+### Requirement: Guest access may require a guest password
+
+The system SHALL allow operators to configure a separate guest password. When guest access is enabled and a guest password is configured, unauthenticated remote dashboard requests SHALL remain blocked until the guest password login endpoint issues a guest session.
+
+#### Scenario: Password-protected guest login succeeds
+
+- **WHEN** guest access is enabled with a guest password
+- **AND** a remote client submits the correct guest password
+- **THEN** the system issues a dashboard session with role `guest`
+- **AND** subsequent dashboard GET endpoints are allowed
+
+#### Scenario: Password-protected guest write is denied
+
+- **WHEN** a password-authenticated guest session requests a dashboard mutating endpoint
+- **THEN** the system returns HTTP 403 with error code `read_only_access`
+
+### Requirement: Legacy default dashboard session TTL migration
+
+The migration for this change MUST update `dashboard_settings.dashboard_session_ttl_seconds` from `43200` to `31536000` only for rows that still carry the legacy default value. Rows with any customized value MUST remain unchanged.
+
+#### Scenario: Legacy default row migrates to 1 year
+
+- **GIVEN** a dashboard settings row has `dashboard_session_ttl_seconds = 43200`
+- **WHEN** the migration runs
+- **THEN** the row has `dashboard_session_ttl_seconds = 31536000`
+
+#### Scenario: Customized row remains unchanged
+
+- **GIVEN** a dashboard settings row has `dashboard_session_ttl_seconds = 7200`
+- **WHEN** the migration runs
+- **THEN** the row still has `dashboard_session_ttl_seconds = 7200`
+

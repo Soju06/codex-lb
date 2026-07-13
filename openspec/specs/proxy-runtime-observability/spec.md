@@ -27,7 +27,7 @@ When the proxy resolves or fails closed a continuity-sensitive follow-up request
 - **AND** Prometheus counters record the low-cardinality source or reason labels for that decision
 
 ### Requirement: Full upstream conversation archive
-The proxy MUST provide an opt-in durable archive of Codex-to-upstream conversation traffic. When enabled, the archive MUST write gzip-compressed newline-delimited JSON records for upstream request payloads, streamed Responses events, compact response payloads, and websocket text or binary frames without performing gzip file I/O in the request event loop during normal operation. The archive writer queue MUST be bounded and MUST apply synchronous write backpressure instead of growing without limit when the background writer is saturated. Archive records MUST include request id, timestamp, direction, traffic kind, transport, account id when known, upstream target metadata, redacted headers, and the full payload or frame body. Credential-bearing headers such as authorization, cookies, proxy authorization, token headers, and API key headers MUST be redacted before persistence. JSON records MUST preserve non-ASCII payload text as UTF-8 rather than Unicode escape sequences. When disabled, no archive file MUST be created by the archive writer.
+The proxy MUST provide an opt-in durable archive of Codex-to-upstream conversation traffic. When enabled, the archive MUST write gzip-compressed newline-delimited JSON records for upstream request payloads, streamed Responses events, compact response payloads, and websocket text or binary frames without performing gzip file I/O in the request event loop during normal operation. The archive writer queue MUST be bounded and MUST apply synchronous write backpressure instead of growing without limit when the background writer is saturated. Archive records MUST include request id, timestamp, direction, traffic kind, transport, account id when known, upstream target metadata, redacted headers, and the full payload or frame body. Credential-bearing headers such as authorization, cookies, proxy authorization, token headers, and API key headers MUST be redacted before persistence. JSON records MUST preserve non-ASCII payload text as UTF-8 rather than Unicode escape sequences. When disabled, no archive file MUST be created by the archive writer. Request-log API rows MUST expose an `archiveRequestId` lookup key when the persisted log id can differ from the archive record request id.
 
 #### Scenario: operator enables archive for audit
 - **WHEN** `CODEX_LB_CONVERSATION_ARCHIVE_ENABLED=true`
@@ -43,6 +43,12 @@ The proxy MUST provide an opt-in durable archive of Codex-to-upstream conversati
 - **GIVEN** conversation archive files exist as `.jsonl.gz` or legacy `.jsonl`
 - **WHEN** an authenticated dashboard operator opens an existing request log detail
 - **THEN** the dashboard can find matching archive records by request id across archive files and display payload plus metadata for that request
+
+#### Scenario: response-id request logs keep archive lookup
+- **WHEN** a successful proxied request stores a downstream response id in the request-log `requestId`
+- **AND** the conversation archive stored records under the original request context id
+- **THEN** the request-log API response includes `archiveRequestId` with the original archive lookup id
+- **AND** the persisted `requestId` remains available for response-id continuity lookup
 
 ### Requirement: Optional upstream payload tracing
 When request-shape tracing for proxy routing is enabled, the system MUST log affinity decision metadata without exposing full prompt text or full cache keys. The trace MUST include request id, request kind, sticky kind, sticky-key source, whether a session header was present, whether a prompt-cache key was set/injected, and a stable tools hash when tools are present.
@@ -67,7 +73,9 @@ The service MUST expose metrics and structured logs for HTTP bridge routing deci
 
 ### Requirement: Responses concurrency pressure is observable
 
-The service MUST expose low-cardinality logs and metrics for account-local in-flight create count, active stream count, leased token/cost pressure, cap rejections, lease stale reclaims, soft-affinity reroutes, and local-vs-upstream 429 classification. Observability MUST avoid raw prompt text, raw affinity keys, API keys, and request payload content.
+The service MUST expose low-cardinality logs and metrics for account-local in-flight create count, active stream count, leased token/cost pressure, cap rejections, lease stale reclaims, soft-affinity reroutes, and local-vs-upstream 429 classification. Observability MUST avoid raw prompt text, raw affinity keys, API keys, emails, request ids, session ids, and request payload content.
+
+The service MUST expose a Prometheus gauge named `codex_lb_account_inflight_leases` labeled by `account_id` and `kind`, where `kind` is either `stream` or `response_create`. The gauge value MUST equal the current in-process account lease count for that account and kind. The gauge MUST update when a lease is acquired, explicitly released, or reclaimed as stale. Gauge labels MUST NOT include raw prompt text, raw affinity keys, API keys, emails, request ids, session ids, or request payload content.
 
 #### Scenario: Local and upstream 429s are separated
 
@@ -75,15 +83,38 @@ The service MUST expose low-cardinality logs and metrics for account-local in-fl
 - **THEN** logs and metrics distinguish local overload reasons from normalized upstream `upstream_rate_limit`
 - **AND** preserved upstream wire payloads may retain upstream codes such as `rate_limit_exceeded`, `usage_limit_reached`, or `insufficient_quota`
 
+#### Scenario: Active account leases update gauge
+
+- **WHEN** the proxy acquires a `stream` lease for account `acc_1`
+- **THEN** `codex_lb_account_inflight_leases{account_id="acc_1",kind="stream"}` increases to the current active stream lease count
+- **AND** `codex_lb_account_inflight_leases{account_id="acc_1",kind="response_create"}` remains the current active response-create lease count
+
+#### Scenario: Released account leases reset gauge
+
+- **WHEN** the proxy explicitly releases or stale-reclaims the last active `stream` lease for account `acc_1`
+- **THEN** `codex_lb_account_inflight_leases{account_id="acc_1",kind="stream"}` is set to `0`
+
 ### Requirement: Streaming timeout diagnostics are emitted
 
-For `/v1/responses` HTTP/SSE streams, the service MUST log low-cardinality diagnostics for early heartbeat emission, keepalive emission, startup wait timeout, downstream disconnect, and stream idle timeout. The diagnostics MUST include request id, route family, account id when known, timeout stage, and elapsed seconds where available, without exposing payload content or raw affinity keys.
+For `/v1/responses` HTTP/SSE streams, the service MUST log low-cardinality diagnostics for early heartbeat emission, keepalive emission, account-capacity recovery waits, startup wait timeout, downstream disconnect, and stream idle timeout. The diagnostics MUST include request id, route family, account id when known, timeout or wait stage, model when known, bounded sleep or elapsed seconds where available, and normalized error code/message where available, without exposing payload content, API keys, raw affinity keys, or raw account emails.
 
 #### Scenario: Keepalive path is diagnosable
 
 - **WHEN** a streaming Responses request waits for upstream events long enough to emit keepalive data
 - **THEN** the service records heartbeat or keepalive diagnostics
 - **AND** the diagnostic does not include raw prompt-cache keys or request payloads
+
+#### Scenario: Account-capacity recovery wait is diagnosable
+
+- **WHEN** a streaming Responses request waits because account selection returned a recoverable capacity or rate-limit retry hint
+- **THEN** the service logs the request id, route family, model when known, bounded wait seconds, recovery hint seconds, and normalized selection error
+- **AND** the diagnostic does not include account emails, API keys, raw affinity keys, prompt text, or request payload content
+
+#### Scenario: Local account cap wait is diagnosable
+
+- **WHEN** a streaming request waits because local per-account stream or response-create capacity is exhausted
+- **THEN** downstream keepalive and logs use the account-capacity wait path with normalized local cap reason fields
+- **AND** the diagnostic does not expose prompt content, API keys, raw affinity keys, or account emails
 
 ### Requirement: HTTP bridge startup wait timeouts are logged
 
@@ -94,7 +125,6 @@ When an HTTP bridge startup wait times out locally, the service MUST log the req
 - **WHEN** a HTTP bridge startup wait exceeds the configured proxy admission wait timeout
 - **THEN** the console log includes the timeout stage and request id
 - **AND** the log includes only low-cardinality affinity metadata, not raw affinity key values
-
 
 ### Requirement: Runtime continuity canary reports raw-error exposure and build parity
 Operators MUST have a local verifier that reports whether the running `codex-lb` runtime is built from the expected code and whether recent Codex client logs contain raw `previous_response_not_found` errors.
@@ -122,3 +152,228 @@ When the service retires an HTTP bridge session because pending precreated repla
 - **WHEN** precreated HTTP bridge replay fails after upstream close or timeout
 - **THEN** the console log includes a HTTP bridge event with `event=retire_stale_pending`
 - **AND** the event includes only hashed bridge identity and low-cardinality metadata
+
+### Requirement: Request-log metadata keeps local routing failures unbound from upstream status
+
+When request routing fails before contacting upstream, `upstream_status_code` MUST be
+`null` even if the internal failure exception carried an HTTP-like status. The
+logged `upstream_error_code` MUST keep the local routing code for triage and
+analytics.
+
+#### Scenario: Additional quota or plan-routing failure is classified as local
+
+- **WHEN** a request fails with one of `no_plan_support_for_model`,
+  `additional_quota_data_unavailable`, or
+  `no_additional_quota_eligible_accounts`
+- **THEN** request-log metadata stores `upstream_error_code` with that exact code
+- **AND** request-log metadata stores `upstream_status_code = null`
+
+### Requirement: Request logs persist prompt-client user-agent metadata
+The proxy MUST persist prompt-client user-agent metadata on `request_logs` for both HTTP and WebSocket Responses traffic. Each persisted row MUST store the full inbound `User-Agent` header value when present and a derived `useragent_group` value extracted from the first product token. When the inbound header is missing or blank after trimming, both persisted values MUST be `null`.
+
+#### Scenario: HTTP request log stores user-agent metadata
+- **WHEN** an HTTP or HTTP/SSE proxy request includes `User-Agent: opencode/1.15.13 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14`
+- **THEN** the persisted `request_logs` row stores `useragent = "opencode/1.15.13 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"`
+- **AND** the persisted row stores `useragent_group = "opencode"`
+
+#### Scenario: WebSocket request log stores user-agent metadata
+- **WHEN** a proxied WebSocket Responses session is opened with `User-Agent: opencode/1.15.13 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14`
+- **THEN** the persisted `request_logs` row for that request stores the full header in `useragent`
+- **AND** the persisted row stores `useragent_group = "opencode"`
+
+#### Scenario: Missing or blank user-agent remains null
+- **WHEN** a proxied HTTP or WebSocket request omits the `User-Agent` header or sends only blank whitespace
+- **THEN** the persisted `request_logs` row stores `useragent = null`
+- **AND** the persisted row stores `useragent_group = null`
+
+### Requirement: Request logs persist client IP for Responses traffic
+
+The proxy MUST persist the resolved edge client IP on `request_logs.client_ip` for HTTP, SSE, and WebSocket Responses request-log rows when a client IP is available. The proxy MUST resolve the value using the existing trusted-proxy policy, including configured trusted proxy CIDRs and supported forwarded-client-IP headers. When no client IP is available, the persisted value MUST be `null`.
+
+#### Scenario: Direct Responses request stores socket client IP
+
+- **WHEN** a Responses request reaches the proxy without trusted forwarded-client-IP headers
+- **THEN** the persisted `request_logs` row stores the socket client IP in `client_ip`
+
+#### Scenario: Trusted proxy request stores forwarded client IP
+
+- **WHEN** a Responses request reaches the proxy from a trusted proxy source with a valid forwarded-client-IP header
+- **THEN** the persisted `request_logs` row stores the resolved forwarded client IP in `client_ip`
+
+#### Scenario: HTTP bridge owner logs original client IP
+
+- **WHEN** an origin instance forwards a Responses request to an HTTP bridge owner instance
+- **THEN** the owner-side request log stores the client IP resolved by the origin instance
+
+#### Scenario: HTTP bridge replay archives under the retried request
+
+- **WHEN** an HTTP bridge request is retried with a new request-log row and archive id
+- **AND** the ambient request id still references the old session request
+- **THEN** the upstream request payload is archived under the retried request's archive id
+
+### Requirement: Request-log search matches client IP
+
+Request-log search MUST match persisted `client_ip` values.
+
+#### Scenario: Search by client IP returns matching rows
+
+- **WHEN** a request log row has `client_ip = "203.0.113.7"`
+- **AND** the operator searches request logs for `203.0.113.7`
+- **THEN** the matching request log row is returned
+
+### Requirement: Drain status exposes HTTP bridge activity
+
+The internal `/internal/drain/status` payload MUST include bounded HTTP bridge
+activity counters when the proxy service exposes bridge activity. The snapshot
+MUST be non-blocking and MUST include whether HTTP bridge work is active, the
+number of visible pending or queued bridge requests, the number of live bridge
+sessions, the number of in-flight bridge session creations, the oldest in-flight
+creation age in seconds, how many in-flight create markers are older than the
+stale threshold, and how many completed in-flight create markers were cleaned
+while building the snapshot. The HTTP bridge background cleanup task count MUST
+include only active HTTP bridge close/cleanup tasks, not unrelated work stored in
+shared background task registries.
+
+#### Scenario: Drain status reports bridge work
+
+- **WHEN** `/internal/drain/status` is requested while the proxy service has
+  HTTP bridge sessions, queued work, or in-flight bridge session creation
+- **THEN** the response includes HTTP bridge activity counters
+- **AND** `http_bridge_active` is true when any pending, queued, session, or
+  in-flight create count is non-zero
+
+#### Scenario: Completed in-flight bridge creates are cleaned from drain status
+
+- **WHEN** an in-flight HTTP bridge session creation marker is completed,
+- **AND** `/internal/drain/status` builds the bridge activity snapshot
+- **THEN** the completed marker is removed from the local in-flight create map
+- **AND** the payload reports the cleaned marker count without
+  blocking the health request
+
+#### Scenario: Live stale-age bridge creates are reported but not expired
+
+- **WHEN** an in-flight HTTP bridge session creation marker is older than the
+  stale in-flight threshold but has not completed
+- **AND** `/internal/drain/status` builds the bridge activity snapshot
+- **THEN** the marker remains in the local in-flight create map
+- **AND** the payload reports the stale marker count without completing the
+  live session creation future
+
+### Requirement: TTFT phase timings are persisted and exported
+The proxy MUST persist nullable low-cardinality request-log fields for TTFT phase analysis and MUST export equivalent Prometheus phase latency observations without labels containing raw API keys, raw session ids, raw affinity keys, request ids, or prompt text.
+
+#### Scenario: HTTP bridge request records phase timing
+- **WHEN** a visible HTTP bridge request waits for session response-create admission and then receives upstream `response.created`
+- **THEN** the request log includes integer millisecond timing for response-create gate wait and upstream response-created latency
+- **AND** Prometheus observes phase latency with only stable labels such as phase, transport, upstream transport, and model class
+
+#### Scenario: First upstream event is distinct from first token
+- **WHEN** the upstream bridge reader receives an upstream event before text delta output
+- **THEN** the request log can record first upstream event latency separately from first downstream token latency
+
+### Requirement: Codex prewarm canary outcomes are observable
+The proxy MUST record visible-request prewarm status, latency, canary bucket, and eligibility cohort using stable strings, and MUST emit a prewarm outcome counter labelled only by outcome, cohort, and bucket.
+
+#### Scenario: Canary miss is visible without raw identifiers
+- **WHEN** Codex prewarm is enabled but deterministic canary sampling excludes an otherwise eligible request
+- **THEN** the visible request log records `prewarm_status=canary_miss`
+- **AND** metrics increment the prewarm counter for the stable cohort and bucket
+- **AND** logs and metrics do not include raw API keys, raw session ids, prompt text, or affinity key values
+
+### Requirement: 24-hour TTFT breakdown queries are available
+Operators MUST have an OpenSpec context runbook or dashboard artifact with 24-hour TTFT breakdown queries by user agent group, upstream transport, model/cache ratio, session gap cohort, prompt size cohort, and prewarm bucket/outcome/cohort.
+
+#### Scenario: Operator investigates TTFT regression
+- **WHEN** an operator needs to inspect the last 24 hours of request-log latency
+- **THEN** the repository provides SQL that reports p50, p90, p95 TTFT and total latency for the requested breakdowns
+
+### Requirement: Dashboard request logs show generation speed
+
+The dashboard request-log table MUST show time to first token and output-token generation speed when the required latency and output-token fields are available. Generation speed MUST use output tokens divided by elapsed generation time after time to first token, not total input plus output tokens and not total request latency including TTFT.
+
+#### Scenario: TPS excludes TTFT and input tokens
+
+- **GIVEN** a successful request log has 1,000 input tokens, 200 output tokens, 1,000 ms total latency, and 200 ms TTFT
+- **WHEN** the dashboard renders request logs
+- **THEN** it shows TTFT as 200ms
+- **AND** it shows TPS as 250.0
+
+#### Scenario: missing speed inputs stay blank
+
+- **GIVEN** a request log is missing TTFT, total latency, or output tokens
+- **WHEN** the dashboard renders request logs
+- **THEN** it does not show a misleading calculated TPS value
+
+### Requirement: Reports show daily median generation speed trends
+
+The Reports dashboard MUST expose daily median TTFT and daily median TPS trends when request-log latency fields are available. Empty days and rows with no valid timing/speed inputs MUST render as zero in those trend charts. Daily TPS MUST median per-request output-token TPS after TTFT rather than use input tokens or include TTFT wait time.
+
+#### Scenario: Daily speed charts use median valid request values
+
+- **GIVEN** one report day has request logs with TTFT and output-token TPS values
+- **WHEN** the dashboard renders Reports
+- **THEN** it shows a Time to First Token chart using median TTFT for the day
+- **AND** it shows a Tokens per Second chart using median per-request TPS for the day
+
+#### Scenario: Missing daily speed data is zero-filled
+
+- **GIVEN** a selected report range includes a day with no request logs or no valid timing data
+- **WHEN** the dashboard renders Reports
+- **THEN** the TTFT and TPS charts include that day with value zero
+
+### Requirement: Websocket responses capture request-log latency timings
+
+The websocket responses proxy path MUST record first-upstream-event, response-created, and first-token latency into the same request-log latency fields the HTTP bridge populates, so websocket request logs expose TTFT and generation speed. Recording MUST NOT change routing, failover, or the bytes returned to the client.
+
+#### Scenario: Websocket request log records latency timings
+
+- **GIVEN** a websocket responses request whose upstream emits a `response.created` event, then a text delta, then completion
+- **WHEN** the proxy persists the request log
+- **THEN** the log has non-null first-upstream-event, response-created, and first-token latency values
+- **AND** first-upstream-event latency is less than or equal to response-created latency, which is less than or equal to first-token latency
+
+### Requirement: Startup probe timeouts do not emit shielded-future diagnostics
+
+The system SHALL, when the streaming proxy's startup probe times out waiting for
+the first upstream event and the probed task later fails with an upstream error,
+deliver that error through the streamed response without emitting an
+`exception in shielded future` or `exception was never retrieved` diagnostic to
+the asyncio loop exception handler.
+
+#### Scenario: Timed-out probe whose upstream later returns 429
+
+- **GIVEN** the startup probe times out before the first upstream event arrives
+- **WHEN** the probed task subsequently fails with a 429 from the admission gate
+- **THEN** the upstream error is surfaced to the caller through the streamed response
+- **AND** no `exception in shielded future` diagnostic is logged
+
+#### Scenario: Probe stream dropped before the first item is consumed
+
+- **GIVEN** the startup probe times out and hands the running task to the response
+- **WHEN** the wrapping stream is dropped before the task is awaited
+- **THEN** the probed task's failure does not log an `exception was never retrieved` warning
+
+### Requirement: Request observability distinguishes accounts from model sources
+
+Request logs and structured diagnostics for proxied requests SHALL distinguish
+subscription account routing from OpenAI-compatible model-source routing. For
+source-routed requests, observability MUST include a stable source id and source
+kind. For subscription-routed requests, existing account id observability MUST be
+preserved. Logs and request-log payloads MUST NOT include upstream source API key
+material.
+
+#### Scenario: Source-routed request records source metadata
+
+- **WHEN** a `/v1/chat/completions` or `/v1/audio/transcriptions` request is
+  routed to OpenAI-compatible source `src_local`
+- **THEN** the request log or equivalent structured diagnostic records source
+  kind `openai_compatible` and source id `src_local`
+- **AND** `account_id` remains null unless a subscription account was actually
+  used
+
+#### Scenario: Source API key is redacted
+
+- **WHEN** a source-routed request is logged or archived
+- **THEN** the configured upstream API key is not emitted in logs, request logs,
+  metrics, diagnostics, or archive metadata
+

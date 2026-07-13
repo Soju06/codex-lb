@@ -358,6 +358,91 @@ async def test_update_tokens_cas_rejects_stale_writer(db_setup):
     assert stored_refresh_token == "refresh-new"
 
 
+@pytest.mark.asyncio
+async def test_update_status_if_current_rejects_stale_refresh_token_material(db_setup):
+    """The status CAS must also be conditioned on the refresh-token ciphertext
+    so a permanent-failure downgrade cannot land over a concurrent rotation."""
+    account_id = "acc_status_cas_material"
+    await _create_account(account_id)
+
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        account = await repo.get_by_id(account_id)
+        assert account is not None
+        current_ciphertext = account.refresh_token_encrypted
+
+        stale = await repo.update_status_if_current(
+            account_id,
+            AccountStatus.REAUTH_REQUIRED,
+            "stale permanent-failure write",
+            expected_status=AccountStatus.ACTIVE,
+            expected_refresh_token_encrypted=b"not-the-current-ciphertext",
+        )
+        assert stale is False
+        status, _, sticky_present = await _account_snapshot(account_id)
+        assert status == AccountStatus.ACTIVE
+        assert sticky_present is True
+
+        applied = await repo.update_status_if_current(
+            account_id,
+            AccountStatus.REAUTH_REQUIRED,
+            "current permanent-failure write",
+            expected_status=AccountStatus.ACTIVE,
+            expected_refresh_token_encrypted=current_ciphertext,
+        )
+        assert applied is True
+
+    status, _, _ = await _account_snapshot(account_id)
+    assert status == AccountStatus.REAUTH_REQUIRED
+
+
+@pytest.mark.asyncio
+async def test_permanent_failure_cas_loses_to_rotation_committed_during_status_write(db_setup, monkeypatch):
+    """CAS race-window regression: a concurrent re-auth/import commits a token
+    rotation AFTER the permanent-failure guard's fresh re-read but BEFORE its
+    status CAS (status/reason/reset untouched, so the pre-hardening CAS
+    matched). The stale REAUTH_REQUIRED write must lose and the freshly
+    repaired account must stay active with the rotated material."""
+    account_id = "acc_cas_race_window"
+    await _create_account(account_id)
+    encryptor = TokenEncryptor()
+
+    async def fake_refresh(refresh_token: str, **_kwargs: object) -> TokenRefreshResult:
+        raise RefreshError("refresh_token_reused", "refresh token reused", True)
+
+    monkeypatch.setattr(auth_manager_module, "refresh_access_token", fake_refresh)
+
+    class _RaceWindowRepo(AccountsRepository):
+        async def get_by_id_fresh(self, account_id: str) -> Account | None:
+            latest = await super().get_by_id_fresh(account_id)
+            # Concurrent re-auth commits a rotation through another session in
+            # the window between this fresh read and the status CAS.
+            async with SessionLocal() as winner_session:
+                await AccountsRepository(winner_session).update_tokens(
+                    account_id,
+                    access_token_encrypted=encryptor.encrypt("access-rotated"),
+                    refresh_token_encrypted=encryptor.encrypt("refresh-rotated"),
+                    id_token_encrypted=encryptor.encrypt("id-rotated"),
+                    last_refresh=utcnow(),
+                )
+            return latest
+
+    async with SessionLocal() as session:
+        repo = _RaceWindowRepo(session)
+        account = await repo.get_by_id(account_id)
+        assert account is not None
+        manager = AuthManager(repo)
+
+        with pytest.raises(RefreshError) as exc_info:
+            await manager.refresh_account(account)
+
+    assert exc_info.value.code == "refresh_token_reused"
+    status, stored_refresh_token, sticky_present = await _account_snapshot(account_id)
+    assert status == AccountStatus.ACTIVE
+    assert stored_refresh_token == "refresh-rotated"
+    assert sticky_present is True
+
+
 def _encode_jwt(payload: dict) -> str:
     import base64
     import json

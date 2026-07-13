@@ -15,7 +15,13 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import DEFAULT_PLAN, OpenAIAuthClaims, extract_id_token_claims
-from app.core.auth.refresh import RefreshError, TokenRefreshResult, refresh_access_token, should_refresh
+from app.core.auth.refresh import (
+    RefreshError,
+    TokenRefreshResult,
+    get_token_refresh_timeout_override,
+    refresh_access_token,
+    should_refresh,
+)
 from app.core.balancer import PERMANENT_FAILURE_CODES, account_status_for_permanent_failure
 from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
@@ -52,6 +58,7 @@ class AccountsRepositoryPort(Protocol):
         expected_status: AccountStatus,
         expected_deactivation_reason: str | None = None,
         expected_reset_at: int | None = None,
+        expected_refresh_token_encrypted: bytes | None = None,
     ) -> bool: ...
 
     async def update_tokens(
@@ -253,7 +260,17 @@ class AuthManager:
             self._encryptor,
             account.refresh_token_encrypted,
         )
-        deadline = time.monotonic() + max(0.0, float(settings.token_refresh_claim_wait_seconds))
+        # The wait for a foreign claim is bounded by the configured cap AND the
+        # caller's remaining refresh budget: the singleflight body is shielded
+        # and outlives a cancelled caller, so without the budget cap a small
+        # request budget with a held foreign claim would leave this task
+        # polling for the full configured wait (holding its repo session and
+        # the inflight singleflight entry that later callers join).
+        wait_seconds = max(0.0, float(settings.token_refresh_claim_wait_seconds))
+        caller_budget = get_token_refresh_timeout_override()
+        if caller_budget is not None:
+            wait_seconds = min(wait_seconds, max(0.0, caller_budget))
+        deadline = time.monotonic() + wait_seconds
         poll_seconds = max(0.01, float(settings.token_refresh_claim_poll_seconds))
         # NOTE: comparisons below use the fingerprint captured at entry, not
         # ``account.refresh_token_encrypted``: when ``account`` is attached to
@@ -289,7 +306,7 @@ class AuthManager:
                 raise RefreshError(
                     "refresh_claim_timeout",
                     f"Token refresh for account {account.id} is claimed by another replica; "
-                    f"timed out waiting {settings.token_refresh_claim_wait_seconds}s for its rotation",
+                    f"timed out waiting {wait_seconds:.3f}s for its rotation",
                     False,
                     transport_error=True,
                 )
@@ -421,6 +438,11 @@ class AuthManager:
         if latest is None:
             # Account row is gone; nothing to downgrade.
             return None
+        # The CAS is additionally conditioned on the freshly observed
+        # refresh-token ciphertext: a concurrent re-auth/import can rotate the
+        # token material between the fresh re-read above and this write while
+        # leaving status/reason/reset untouched, and a stale REAUTH_REQUIRED
+        # write must not clobber that freshly repaired account.
         applied = await self._repo.update_status_if_current(
             account.id,
             status,
@@ -428,6 +450,7 @@ class AuthManager:
             expected_status=latest.status,
             expected_deactivation_reason=latest.deactivation_reason,
             expected_reset_at=latest.reset_at,
+            expected_refresh_token_encrypted=latest.refresh_token_encrypted,
         )
         if not applied:
             logger.warning(

@@ -16,7 +16,7 @@ The claim is a single conditional upsert (`INSERT .. ON CONFLICT (account_id) DO
 - **PostgreSQL**: concurrent claimers serialize on the conflict row lock; exactly one WHERE passes. Autocommit single statement — no transaction spans the upstream exchange.
 - **SQLite**: the statement is atomic under the database-level single-writer lock and safe across processes sharing one file (busy_timeout + a short `database is locked` retry). In-process writers are additionally serialized by `sqlite_writer_section`.
 
-The claim row carries `claim_expires_at` (TTL default 30s, validated >= 2x the refresh HTTP timeout): a crashed claimant delays other replicas by at most the TTL, after which the conditional upsert succeeds for the next claimer.
+The claim row carries `claim_expires_at` (TTL default 30s, validated >= the refresh-admission wait timeout + 2x the refresh HTTP timeout, since the claim is held across the admission wait and the exchange): a crashed claimant delays other replicas by at most the TTL, after which the conditional upsert succeeds for the next claimer.
 
 ## Failure modes
 
@@ -32,6 +32,6 @@ Two replicas, leader election disabled, Helm chart (empty static ring). An acces
 
 ## Operational notes
 
-- `claimed_by` is `http_responses_session_bridge_instance_id` plus a per-process suffix; stale rows are self-healing via TTL and are deleted on release, so the table stays at most one row per concurrently refreshing account.
+- `claimed_by` is `http_responses_session_bridge_instance_id` plus a per-process suffix; an over-long instance id is truncated on the instance-id portion only (the suffix is always preserved so co-located workers never collapse into one claimant). Stale rows are self-healing via TTL and are deleted on release, so the table stays at most one row per concurrently refreshing account.
 - Landing-order coordination: this change's migration is parented on `20260711_030000_add_limit_warmup_idle_threshold`. If another in-flight change lands a migration on the same parent first, add an Alembic merge revision (or re-parent) before release so CI sees a single head.
 - This change MODIFIES the `usage-refresh-policy` requirement "Multi-replica leader guard", which the harden-scheduler-leader-election change may also touch — coordinate spec-sync merge order.

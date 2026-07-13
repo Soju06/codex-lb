@@ -558,6 +558,7 @@ class AccountsRepository:
         expected_deactivation_reason: str | None = None,
         expected_reset_at: int | None = None,
         expected_blocked_at: int | None | object = _UNSET,
+        expected_refresh_token_encrypted: bytes | None = None,
     ) -> bool:
         async with sqlite_writer_section():
             values: dict[str, object | None] = {
@@ -587,6 +588,11 @@ class AccountsRepository:
                     stmt = stmt.where(Account.blocked_at.is_(None))
                 else:
                     stmt = stmt.where(Account.blocked_at == expected_blocked_at)
+            if expected_refresh_token_encrypted is not None:
+                # Guards permanent refresh-failure downgrades: a concurrent
+                # re-auth/import rotates the token ciphertext without touching
+                # status/reason/reset, and this write must lose that race.
+                stmt = stmt.where(Account.refresh_token_encrypted == expected_refresh_token_encrypted)
             result = await self._session.execute(stmt)
             updated_id = result.scalar_one_or_none()
             if updated_id is not None and status in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):

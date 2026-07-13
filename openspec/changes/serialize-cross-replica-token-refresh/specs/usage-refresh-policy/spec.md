@@ -4,7 +4,7 @@
 
 ### Requirement: Cross-replica token refresh serialization
 
-Before any upstream OAuth token exchange for an account, the system MUST acquire that account's row in `account_refresh_claims` via a conditional upsert that succeeds only when no unexpired claim by another claimant exists; the upsert MUST be atomic on both PostgreSQL (ON CONFLICT row lock) and SQLite (single-writer lock). After acquiring, the system MUST re-read the account's refresh-token material fresh from the database (bypassing session identity caches) and MUST skip the upstream exchange when the material has rotated since the refresh was requested, adopting the stored tokens instead. Claims MUST carry an expiry (TTL at least twice the refresh HTTP timeout) so a crashed claimant cannot block refresh indefinitely, MUST be released after the refreshed tokens are persisted, and MUST NOT be held as an open database transaction or lock across upstream network I/O.
+Before any upstream OAuth token exchange for an account, the system MUST acquire that account's row in `account_refresh_claims` via a conditional upsert that succeeds only when no unexpired claim by another claimant exists; the upsert MUST be atomic on both PostgreSQL (ON CONFLICT row lock) and SQLite (single-writer lock). After acquiring, the system MUST re-read the account's refresh-token material fresh from the database (bypassing session identity caches) and MUST skip the upstream exchange when the material has rotated since the refresh was requested, adopting the stored tokens instead. Claims MUST carry an expiry covering all work performed under the claim (TTL at least the refresh-admission wait timeout plus twice the refresh HTTP timeout, because the claim is held across the admission wait and the OAuth exchange) so a crashed claimant cannot block refresh indefinitely while a healthy claimant cannot lose its claim mid-work, MUST be released after the refreshed tokens are persisted, and MUST NOT be held as an open database transaction or lock across upstream network I/O. The claimant identity MUST remain unique per process even when the configured instance id exceeds the stored column width (truncate the instance-id portion, never the per-process suffix).
 
 #### Scenario: Two replicas force-refresh the same account concurrently
 
@@ -63,8 +63,9 @@ account's token material from the database with a real SELECT that bypasses
 session identity caches, MUST NOT downgrade the account when the refresh token
 rotated after the failed attempt began (returning the rotated tokens instead),
 and MUST apply the status downgrade with a compare-and-set conditioned on the
-freshly observed account state so a concurrent re-authentication or rotation is
-never overwritten.
+freshly observed account state including the refresh-token ciphertext, so a
+concurrent re-authentication or rotation — even one that leaves
+status/reason/reset untouched — is never overwritten.
 
 #### Scenario: Refresh-time `app_session_terminated` is classified as permanent
 

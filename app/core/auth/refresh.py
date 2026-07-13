@@ -192,6 +192,17 @@ def pop_token_refresh_timeout_override(token: contextvars.Token[float | None]) -
     _TOKEN_REFRESH_TIMEOUT_OVERRIDE.reset(token)
 
 
+def get_token_refresh_timeout_override() -> float | None:
+    """Caller-scoped refresh budget (seconds); ``None`` when no caller set one.
+
+    Set by the proxy request path around ``AuthManager.ensure_fresh`` so that
+    everything the (shielded, caller-outliving) refresh task does — including
+    waiting on a foreign cross-replica refresh claim — stays bounded by the
+    budget of the request that started it.
+    """
+    return _TOKEN_REFRESH_TIMEOUT_OVERRIDE.get()
+
+
 async def _safe_json(resp: aiohttp.ClientResponse) -> JsonObject:
     try:
         data = await resp.json(content_type=None)

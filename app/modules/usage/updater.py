@@ -128,6 +128,7 @@ class AccountsRepositoryWithStatusComparePort(AccountsRepositoryPort, Protocol):
         expected_deactivation_reason: str | None = None,
         expected_reset_at: int | None = None,
         expected_blocked_at: int | None = None,
+        expected_refresh_token_encrypted: bytes | None = None,
     ) -> bool: ...
 
 

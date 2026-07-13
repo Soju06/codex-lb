@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -9,7 +10,12 @@ from typing import cast
 
 import pytest
 
-from app.core.auth.refresh import RefreshError, TokenRefreshResult
+from app.core.auth.refresh import (
+    RefreshError,
+    TokenRefreshResult,
+    pop_token_refresh_timeout_override,
+    push_token_refresh_timeout_override,
+)
 from app.core.crypto import TokenEncryptor
 from app.core.upstream_proxy import UpstreamProxyRouteError
 from app.core.utils.time import utcnow
@@ -63,18 +69,24 @@ class _DummyRepo:
         expected_status: AccountStatus,
         expected_deactivation_reason: str | None = None,
         expected_reset_at: int | None = None,
+        expected_refresh_token_encrypted: bytes | None = None,
     ) -> bool:
         latest = self.accounts_by_id.get(account_id)
         if latest is not None and (
             latest.status != expected_status
             or latest.deactivation_reason != expected_deactivation_reason
             or latest.reset_at != expected_reset_at
+            or (
+                expected_refresh_token_encrypted is not None
+                and latest.refresh_token_encrypted != expected_refresh_token_encrypted
+            )
         ):
             return False
         self.status_payload = {
             "account_id": account_id,
             "status": status,
             "deactivation_reason": deactivation_reason,
+            "expected_refresh_token_encrypted": expected_refresh_token_encrypted,
         }
         return True
 
@@ -845,6 +857,115 @@ async def test_refresh_account_deactivates_when_repo_only_reencrypted_same_refre
     assert exc_info.value.is_permanent is True
     assert repo.status_payload is not None
     assert repo.status_payload["status"] == AccountStatus.REAUTH_REQUIRED
+    # The downgrade CAS is conditioned on the freshly observed ciphertext, not
+    # the (re-encrypted) material this attempt exchanged.
+    assert repo.status_payload["expected_refresh_token_encrypted"] == latest_account.refresh_token_encrypted
+
+
+@pytest.mark.asyncio
+async def test_permanent_failure_status_cas_loses_to_rotation_after_fresh_read(monkeypatch):
+    """Regression: a concurrent re-auth/import rotates the refresh token AFTER
+    the permanent-failure guard's fresh re-read but BEFORE its status CAS. The
+    stale REAUTH_REQUIRED write must lose (the CAS now also carries the
+    expected refresh-token ciphertext), leaving the repaired account alone."""
+
+    async def _fake_refresh(_: str, **_kwargs: object) -> TokenRefreshResult:
+        raise RefreshError("invalid_grant", "refresh failed", True)
+
+    monkeypatch.setattr(auth_manager_module, "refresh_access_token", _fake_refresh)
+
+    encryptor = TokenEncryptor()
+    stale_refresh = utcnow().replace(year=utcnow().year - 1)
+    account = Account(
+        id="acc_cas_race_window",
+        email="user@example.com",
+        plan_type="plus",
+        access_token_encrypted=encryptor.encrypt("access-old"),
+        refresh_token_encrypted=encryptor.encrypt("refresh-old"),
+        id_token_encrypted=encryptor.encrypt("id-old"),
+        last_refresh=stale_refresh,
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
+    )
+
+    class _RotatingAfterFreshReadRepo(_DummyRepo):
+        async def get_by_id_fresh(self, account_id: str) -> Account | None:
+            latest = self.accounts_by_id.get(account_id)
+            if latest is None:
+                return None
+            snapshot = Account(**{column.name: getattr(latest, column.name) for column in Account.__table__.columns})
+            # Concurrent re-auth commits a rotation in the window between this
+            # fresh read and the status CAS (status/reason/reset untouched).
+            latest.refresh_token_encrypted = encryptor.encrypt("refresh-rotated")
+            return snapshot
+
+    repo = _RotatingAfterFreshReadRepo()
+    latest_account = Account(**{column.name: getattr(account, column.name) for column in Account.__table__.columns})
+    repo.accounts_by_id[account.id] = latest_account
+    manager = AuthManager(cast(AccountsRepositoryPort, repo))
+
+    with pytest.raises(RefreshError) as exc_info:
+        await manager.refresh_account(account)
+
+    assert exc_info.value.code == "invalid_grant"
+    assert repo.status_payload is None
+    assert account.status == AccountStatus.ACTIVE
+
+
+@pytest.mark.asyncio
+async def test_claim_wait_is_capped_by_caller_refresh_budget(monkeypatch):
+    """Regression: the shielded singleflight body outlives a cancelled caller,
+    so a foreign refresh claim must not keep it polling for the full
+    ``token_refresh_claim_wait_seconds`` (8s default) when the caller's
+    remaining request budget is far smaller."""
+
+    class _ForeignClaims:
+        claimant_id = "this-replica"
+
+        async def try_acquire(self, account_id: str, *, ttl_seconds: float) -> bool:
+            del account_id, ttl_seconds
+            return False
+
+        async def release(self, account_id: str) -> None:
+            del account_id
+
+    async def _unexpected_refresh(_: str, **_kwargs: object) -> TokenRefreshResult:
+        raise AssertionError("no upstream exchange may run while a foreign claim is held")
+
+    monkeypatch.setattr(auth_manager_module, "refresh_access_token", _unexpected_refresh)
+
+    encryptor = TokenEncryptor()
+    account = Account(
+        id="acc_claim_budget_cap",
+        email="user@example.com",
+        plan_type="plus",
+        access_token_encrypted=encryptor.encrypt("access-old"),
+        refresh_token_encrypted=encryptor.encrypt("refresh-old"),
+        id_token_encrypted=encryptor.encrypt("id-old"),
+        last_refresh=utcnow(),
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
+    )
+    repo = _DummyRepo()
+    repo.accounts_by_id[account.id] = account
+    manager = AuthManager(cast(AccountsRepositoryPort, repo), refresh_claims=_ForeignClaims())
+
+    # The proxy request path pushes its remaining budget as the refresh
+    # timeout override; the claim wait must be capped by it (0.05s), not run
+    # for the configured claim wait (8s default).
+    override_token = push_token_refresh_timeout_override(0.05)
+    try:
+        started = time.monotonic()
+        with pytest.raises(RefreshError) as exc_info:
+            await manager.ensure_fresh(account, force=True)
+        elapsed = time.monotonic() - started
+    finally:
+        pop_token_refresh_timeout_override(override_token)
+
+    assert exc_info.value.code == "refresh_claim_timeout"
+    assert exc_info.value.is_permanent is False
+    assert exc_info.value.transport_error is True
+    assert elapsed < 2.0
 
 
 @pytest.mark.parametrize(

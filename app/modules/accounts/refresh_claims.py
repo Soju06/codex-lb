@@ -69,8 +69,16 @@ class RefreshClaimCoordinatorPort(Protocol):
 
 
 def default_refresh_claimant_id() -> str:
+    """Claimant id fitting ``account_refresh_claims.claimed_by`` (128 chars).
+
+    Overly long bridge instance ids are truncated on the instance-id portion
+    only; the per-process suffix is always preserved so two workers sharing one
+    instance id can never collapse into the same claimant (which would make the
+    re-entrant claim upsert grant both of them the claim concurrently).
+    """
     instance_id = get_settings().http_responses_session_bridge_instance_id
-    return f"{instance_id}:{_PROCESS_SUFFIX}"[:128]
+    suffix = f":{_PROCESS_SUFFIX}"
+    return f"{instance_id[: 128 - len(suffix)]}{suffix}"
 
 
 class RefreshClaimCoordinator:

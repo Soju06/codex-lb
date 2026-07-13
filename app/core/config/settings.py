@@ -183,8 +183,10 @@ class Settings(BaseSettings):
     token_refresh_timeout_seconds: float = 8.0
     # Cross-replica token-refresh claim (account_refresh_claims table).
     # The TTL bounds how long a crashed claimant can block refresh for one
-    # account; it is validated to stay >= 2x token_refresh_timeout_seconds so
-    # a healthy claimant cannot lose its claim mid-exchange.
+    # account; it is validated to stay >= proxy_admission_wait_timeout_seconds
+    # + 2x token_refresh_timeout_seconds because the claim is held across the
+    # refresh-admission wait AND the OAuth exchange, and a healthy claimant
+    # must not lose its claim mid-work.
     token_refresh_claim_ttl_seconds: float = Field(default=30.0, gt=0)
     token_refresh_claim_wait_seconds: float = Field(default=8.0, gt=0)
     token_refresh_claim_poll_seconds: float = Field(default=0.25, gt=0)
@@ -605,11 +607,18 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _validate_token_refresh_claim_ttl(self) -> "Settings":
-        minimum_ttl = 2.0 * self.token_refresh_timeout_seconds
+        # The claim is acquired BEFORE the refresh-admission wait and held
+        # through the OAuth exchange, so the TTL floor must cover both: the
+        # admission wait ceiling plus the HTTP exchange (2x for margin). A TTL
+        # sized only around the HTTP timeout can expire under a healthy
+        # claimant stuck in admission, letting another replica claim the same
+        # account and reuse the single-use refresh token.
+        minimum_ttl = self.proxy_admission_wait_timeout_seconds + 2.0 * self.token_refresh_timeout_seconds
         if self.token_refresh_claim_ttl_seconds < minimum_ttl:
             raise ValueError(
-                "token_refresh_claim_ttl_seconds must be at least 2x token_refresh_timeout_seconds "
-                f"({minimum_ttl}s) so a healthy claimant cannot lose its claim mid-exchange"
+                "token_refresh_claim_ttl_seconds must be at least proxy_admission_wait_timeout_seconds "
+                f"+ 2x token_refresh_timeout_seconds ({minimum_ttl}s) so a healthy claimant cannot lose "
+                "its claim while waiting for refresh admission or mid-exchange"
             )
         return self
 

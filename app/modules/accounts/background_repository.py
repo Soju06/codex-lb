@@ -54,6 +54,7 @@ class BackgroundAccountsRepository:
         expected_deactivation_reason: str | None = None,
         expected_reset_at: int | None = None,
         expected_blocked_at: int | None | object = _UNSET,
+        expected_refresh_token_encrypted: bytes | None = None,
     ) -> bool:
         async with get_background_session() as session:
             repo = AccountsRepository(session)
@@ -61,6 +62,7 @@ class BackgroundAccountsRepository:
                 "expected_status": expected_status,
                 "expected_deactivation_reason": expected_deactivation_reason,
                 "expected_reset_at": expected_reset_at,
+                "expected_refresh_token_encrypted": expected_refresh_token_encrypted,
             }
             if expected_blocked_at is not _UNSET:
                 kwargs["expected_blocked_at"] = expected_blocked_at

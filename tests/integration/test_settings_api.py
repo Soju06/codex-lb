@@ -806,6 +806,78 @@ async def test_account_proxy_binding_reactivates_proxy_unreachable_account(async
 
 
 @pytest.mark.asyncio
+async def test_account_proxy_binding_reactivation_invalidates_after_commit(async_client, monkeypatch):
+    """Regression: the reactivation path must invalidate the selection cache (and
+    enqueue its coalesced ``account_selection`` bump) only AFTER the status commit.
+
+    If ``invalidate()`` runs before ``session.commit()``, the poller can flush the
+    pending bump while the reactivation is still uncommitted, so a peer rebuilds
+    selection/routing inputs from the pre-commit DEACTIVATED row. We assert the
+    request-scoped ``after_commit`` fires before ``invalidate()`` is called.
+    """
+    from sqlalchemy import event
+    from sqlalchemy.orm import Session as SyncSession
+
+    from app.modules.proxy.account_cache import (
+        get_account_selection_cache,
+        mark_account_routing_unavailable,
+    )
+
+    account_id = await _import_account(async_client, "acc-settings-proxy-order", "settings-proxy-order@example.com")
+    mark_account_routing_unavailable(account_id)
+    async with SessionLocal() as session:
+        account = await session.get(Account, account_id)
+        assert account is not None
+        account.status = AccountStatus.DEACTIVATED
+        account.deactivation_reason = "proxy_unreachable: ProxyConnectionError - connection refused"
+        await session.commit()
+
+    endpoint = await async_client.post(
+        "/api/settings/upstream-proxy/endpoints",
+        json={"name": "order proxy", "scheme": "http", "host": "proxy.test", "port": 8080},
+    )
+    assert endpoint.status_code == 200
+    pool = await async_client.post(
+        "/api/settings/upstream-proxy/pools",
+        json={"name": "order pool", "endpointIds": [endpoint.json()["id"]]},
+    )
+    assert pool.status_code == 200
+
+    cache = get_account_selection_cache()
+    original_invalidate = cache.invalidate
+    sequence: list[str] = []
+    armed = {"on": False}
+
+    def _after_commit(_session: SyncSession) -> None:
+        if armed["on"]:
+            sequence.append("commit")
+
+    def _spy_invalidate(*args, **kwargs):
+        if armed["on"]:
+            sequence.append("invalidate")
+        return original_invalidate(*args, **kwargs)
+
+    monkeypatch.setattr(cache, "invalidate", _spy_invalidate)
+    event.listen(SyncSession, "after_commit", _after_commit)
+    armed["on"] = True
+    try:
+        binding = await async_client.put(
+            f"/api/settings/upstream-proxy/accounts/{account_id}/binding",
+            json={"poolId": pool.json()["id"], "isActive": True},
+        )
+    finally:
+        armed["on"] = False
+        event.remove(SyncSession, "after_commit", _after_commit)
+
+    assert binding.status_code == 200
+    assert "invalidate" in sequence, "reactivation must invalidate the selection cache"
+    assert "commit" in sequence, "reactivation must commit the status change"
+    # The status commit must land before the invalidate/bump so peers re-read the
+    # committed (ACTIVE) row, never the pre-commit DEACTIVATED one.
+    assert sequence.index("commit") < sequence.index("invalidate")
+
+
+@pytest.mark.asyncio
 async def test_account_proxy_binding_closes_existing_bridge_sessions(async_client, monkeypatch):
     close_sessions = AsyncMock()
     monkeypatch.setattr(

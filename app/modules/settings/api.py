@@ -26,7 +26,11 @@ from app.core.exceptions import DashboardBadRequestError
 from app.core.upstream_proxy import resolve_proxy_endpoint
 from app.db.models import Account, AccountProxyBinding, AccountStatus, ProxyEndpoint, ProxyPool, ProxyPoolMember
 from app.dependencies import SettingsContext, get_proxy_service_for_app, get_settings_context
-from app.modules.proxy.account_cache import clear_account_routing_unavailable, get_account_selection_cache
+from app.modules.proxy.account_cache import (
+    clear_account_routing_unavailable,
+    get_account_selection_cache,
+    propagate_account_routing_change,
+)
 from app.modules.settings.schemas import (
     AccountProxyBindingRequest,
     AccountProxyBindingResponse,
@@ -448,14 +452,23 @@ async def put_account_proxy_binding(
         close_bridge_sessions = row.pool_id != payload.pool_id or row.is_active != payload.is_active
         row.pool_id = payload.pool_id
         row.is_active = payload.is_active
+    reactivated = False
     if payload.is_active and _account_proxy_binding_should_reactivate(account):
         account.status = AccountStatus.ACTIVE
         account.deactivation_reason = None
         account.reset_at = None
         account.blocked_at = None
+        reactivated = True
+    await context.session.commit()
+    if reactivated:
+        # Invalidate + bump only after the status commit so peers (and this
+        # replica's poller) never rebuild selection/routing inputs from the
+        # pre-commit row. The coalesced ``account_selection`` bump enqueued by
+        # ``invalidate()`` and the durable ``account_routing`` bump both fire
+        # post-commit, matching AccountService.reactivate_account.
         clear_account_routing_unavailable(account_id)
         get_account_selection_cache().invalidate()
-    await context.session.commit()
+        await propagate_account_routing_change()
     if close_bridge_sessions:
         await get_proxy_service_for_app(request.app).close_http_bridge_sessions_for_account(account_id)
     await context.session.refresh(row)

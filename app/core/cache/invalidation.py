@@ -4,24 +4,47 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from inspect import isawaitable
-from typing import TYPE_CHECKING
 
 from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.metrics.prometheus import (
+    PROMETHEUS_AVAILABLE,
+    cache_invalidation_bump_failures_total,
+    cache_invalidation_poll_failures_total,
+)
 from app.db.models import CacheInvalidation
 from app.db.session import close_session
-
-if TYPE_CHECKING:
-    pass
 
 logger = logging.getLogger(__name__)
 
 NAMESPACE_API_KEY = "api_key"
 NAMESPACE_FIREWALL = "firewall"
+NAMESPACE_ACCOUNT_ROUTING = "account_routing"
+NAMESPACE_ACCOUNT_SELECTION = "account_selection"
+NAMESPACE_SETTINGS = "settings"
 type InvalidationCallback = Callable[[], None | Awaitable[None]]
+
+# Log-safe labels for namespace values. Static analyzers (CodeQL) classify the
+# NAMESPACE_API_KEY constant as credential-like from its name alone, so log
+# statements must not take dataflow from the constants. These literals mirror
+# the namespace values; test_namespace_log_labels_cover_all_namespaces keeps
+# them in sync.
+_NAMESPACE_LOG_LABELS: dict[str, str] = {
+    "api_key": "api_key",
+    "firewall": "firewall",
+    "account_routing": "account_routing",
+    "account_selection": "account_selection",
+    "settings": "settings",
+}
+
+_BUMP_RETRY_ATTEMPTS = 3
+_BUMP_RETRY_BASE_SECONDS = 0.05
+_POLL_FAILURES_WARNING_THRESHOLD = 3
+_POLL_FAILURES_ERROR_THRESHOLD = 10
 
 
 class CacheInvalidationPoller:
@@ -34,12 +57,42 @@ class CacheInvalidationPoller:
         self._poll_interval = poll_interval_seconds
         self._known_versions: dict[str, int] = {}
         self._callbacks: dict[str, list[InvalidationCallback]] = {}
+        self._pending_bumps: set[str] = set()
+        self._consecutive_poll_failures = 0
         self._poll_initialized = False
         self._task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
 
     def on_invalidation(self, namespace: str, callback: InvalidationCallback) -> None:
         self._callbacks.setdefault(namespace, []).append(callback)
+
+    async def initialize(self) -> None:
+        """Seed baseline namespace versions before the process serves traffic.
+
+        MUST run at lifespan startup before local caches / routing snapshots are
+        loaded and before the first poll cycle. It records the current version of
+        every ``cache_invalidation`` row as the baseline and marks the poller
+        initialized, so that any bump a peer commits after this point is observed
+        as a change (fires callbacks) rather than acknowledged as pre-existing
+        state. Without this seed the first poll would treat every existing version
+        row as a baseline and silently drop a peer bump that landed between local
+        cache load and the first poll, leaving security/selection/routing state
+        stale until the fallback TTL or a later bump.
+
+        On success ``_poll_initialized`` is set to ``True``. If the read fails the
+        method raises with state unchanged (baseline empty, ``_poll_initialized``
+        still ``False``), so the caller can degrade to the first-poll-baselines
+        behavior.
+        """
+        session = self._session_factory()
+        try:
+            result = await session.execute(select(CacheInvalidation.namespace, CacheInvalidation.version))
+            rows = result.all()
+        finally:
+            await close_session(session)
+        for namespace, version in rows:
+            self._known_versions[namespace] = version
+        self._poll_initialized = True
 
     async def start(self) -> None:
         if self._task and not self._task.done():
@@ -58,7 +111,32 @@ class CacheInvalidationPoller:
             pass
         self._task = None
 
-    async def bump(self, namespace: str) -> None:
+    def request_bump(self, namespace: str) -> None:
+        """Enqueue a coalesced bump flushed at the start of the next poll cycle.
+
+        Multiple requests for the same namespace within one cycle collapse into a
+        single version bump. A failed flush keeps the namespace pending so it is
+        retried on subsequent cycles. A request arriving while a flush is already
+        awaiting the bump for this namespace re-queues it for the next cycle.
+        """
+        self._pending_bumps.add(namespace)
+
+    async def bump(self, namespace: str) -> bool:
+        for attempt in range(_BUMP_RETRY_ATTEMPTS):
+            try:
+                await self._bump_once(namespace)
+                return True
+            except OperationalError:
+                if attempt == _BUMP_RETRY_ATTEMPTS - 1:
+                    self._record_bump_failure(namespace)
+                    return False
+                await asyncio.sleep(_BUMP_RETRY_BASE_SECONDS * (2**attempt))
+            except Exception:
+                self._record_bump_failure(namespace)
+                return False
+        return False
+
+    async def _bump_once(self, namespace: str) -> None:
         session = self._session_factory()
         try:
             dialect = session.get_bind().dialect.name
@@ -95,10 +173,17 @@ class CacheInvalidationPoller:
                         .values(version=CacheInvalidation.version + 1)
                     )
             await session.commit()
-        except Exception:
-            logger.warning("cache_invalidation bump failed", exc_info=True)
         finally:
             await close_session(session)
+
+    def _record_bump_failure(self, namespace: str) -> None:
+        logger.error(
+            "cache_invalidation bump failed for namespace %s",
+            _NAMESPACE_LOG_LABELS.get(namespace, "unknown"),
+            exc_info=True,
+        )
+        if PROMETHEUS_AVAILABLE and cache_invalidation_bump_failures_total is not None:
+            cache_invalidation_bump_failures_total.labels(namespace=namespace).inc()
 
     async def _run(self) -> None:
         while not self._stop.is_set():
@@ -111,36 +196,80 @@ class CacheInvalidationPoller:
             except asyncio.TimeoutError:
                 continue
 
+    async def _flush_pending_bumps(self) -> None:
+        for namespace in sorted(self._pending_bumps):
+            # Clear the pending marker BEFORE awaiting the bump: a request_bump()
+            # arriving while the bump write is in flight must re-queue the
+            # namespace so a mutation committing mid-flush still produces a
+            # later bump instead of being coalesced into the version already
+            # being written.
+            self._pending_bumps.discard(namespace)
+            if not await self.bump(namespace):
+                self._pending_bumps.add(namespace)
+
     async def _poll_once(self) -> None:
-        session = self._session_factory()
+        await self._flush_pending_bumps()
+        session: AsyncSession | None = None
         try:
+            session = self._session_factory()
             result = await session.execute(select(CacheInvalidation.namespace, CacheInvalidation.version))
             rows = result.all()
         except Exception:
+            self._record_poll_failure()
             return
         finally:
-            await close_session(session)
+            if session is not None:
+                await close_session(session)
+        self._consecutive_poll_failures = 0
 
         for namespace, version in rows:
             prev = self._known_versions.get(namespace)
-            if prev is not None and version != prev:
-                for cb in self._callbacks.get(namespace, []):
-                    try:
-                        result = cb()
-                        if isawaitable(result):
-                            await result
-                    except Exception:
-                        logger.debug("cache_invalidation callback error", exc_info=True)
-            elif prev is None and self._poll_initialized and version > 0:
-                for cb in self._callbacks.get(namespace, []):
-                    try:
-                        result = cb()
-                        if isawaitable(result):
-                            await result
-                    except Exception:
-                        logger.debug("cache_invalidation callback error", exc_info=True)
+            changed = (prev is not None and version != prev) or (
+                prev is None and self._poll_initialized and version > 0
+            )
+            if changed and not await self._run_callbacks(namespace):
+                # Do not acknowledge the observed version: a failed callback
+                # (e.g. a transient DB error during a snapshot refresh) must be
+                # retried on the next cycle, or a replica would permanently
+                # miss the invalidation.
+                continue
             self._known_versions[namespace] = version
         self._poll_initialized = True
+
+    async def _run_callbacks(self, namespace: str) -> bool:
+        succeeded = True
+        for cb in self._callbacks.get(namespace, []):
+            try:
+                result = cb()
+                if isawaitable(result):
+                    await result
+            except Exception:
+                succeeded = False
+                logger.warning(
+                    "cache_invalidation callback failed for namespace %s; retrying next poll cycle",
+                    _NAMESPACE_LOG_LABELS.get(namespace, "unknown"),
+                    exc_info=True,
+                )
+        return succeeded
+
+    def _record_poll_failure(self) -> None:
+        self._consecutive_poll_failures += 1
+        if PROMETHEUS_AVAILABLE and cache_invalidation_poll_failures_total is not None:
+            cache_invalidation_poll_failures_total.inc()
+        if self._consecutive_poll_failures >= _POLL_FAILURES_ERROR_THRESHOLD:
+            logger.error(
+                "cache_invalidation poll failed %d consecutive times",
+                self._consecutive_poll_failures,
+                exc_info=True,
+            )
+        elif self._consecutive_poll_failures >= _POLL_FAILURES_WARNING_THRESHOLD:
+            logger.warning(
+                "cache_invalidation poll failed %d consecutive times",
+                self._consecutive_poll_failures,
+                exc_info=True,
+            )
+        else:
+            logger.debug("cache_invalidation poll failed", exc_info=True)
 
 
 _poller: CacheInvalidationPoller | None = None
@@ -150,6 +279,6 @@ def get_cache_invalidation_poller() -> CacheInvalidationPoller | None:
     return _poller
 
 
-def set_cache_invalidation_poller(poller: CacheInvalidationPoller) -> None:
+def set_cache_invalidation_poller(poller: CacheInvalidationPoller | None) -> None:
     global _poller
     _poller = poller

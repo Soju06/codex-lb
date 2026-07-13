@@ -67,6 +67,7 @@ from app.modules.proxy.account_cache import (
     clear_account_routing_unavailable,
     get_account_selection_cache,
     mark_account_routing_unavailable,
+    propagate_account_routing_change,
 )
 from app.modules.rate_limit_reset_credits.store import get_rate_limit_reset_credits_store
 from app.modules.usage.additional_quota_keys import (
@@ -608,6 +609,7 @@ class AccountsService:
         if result:
             clear_account_routing_unavailable(account_id)
             get_account_selection_cache().invalidate()
+            await propagate_account_routing_change()
         return result
 
     async def pause_account(self, account_id: str) -> bool:
@@ -632,6 +634,7 @@ class AccountsService:
         if result:
             mark_account_routing_unavailable(account_id)
             get_account_selection_cache().invalidate()
+            await propagate_account_routing_change()
         return result
 
     async def update_account(self, account_id: str, *, security_work_authorized: bool | None = None) -> bool:
@@ -660,6 +663,7 @@ class AccountsService:
             mark_account_routing_unavailable(account_id)
             get_account_selection_cache().invalidate()
             get_api_key_cache().clear()
+            await propagate_account_routing_change()
             poller = get_cache_invalidation_poller()
             if poller is not None:
                 await poller.bump(NAMESPACE_API_KEY)

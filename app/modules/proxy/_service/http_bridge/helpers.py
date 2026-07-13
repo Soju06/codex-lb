@@ -887,6 +887,10 @@ def _http_bridge_session_allows_api_key(session: "_HTTPBridgeSession", api_key: 
 
 
 def _http_bridge_session_account_active(session: "_HTTPBridgeSession") -> bool:
+    # Hot-path invariant: this reuse check MUST stay a pure in-memory lookup (no
+    # per-request database reads). Cross-replica freshness comes from the
+    # `account_routing` cache-invalidation namespace refreshing the routing
+    # availability snapshot behind is_account_routing_unavailable().
     return session.account.status == AccountStatus.ACTIVE and not is_account_routing_unavailable(session.account.id)
 
 

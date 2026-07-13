@@ -250,6 +250,17 @@ if PROMETHEUS_AVAILABLE:
         ["reason", "affinity_kind", "model_class"],
         registry=REGISTRY,
     )
+    cache_invalidation_bump_failures_total = Counter(
+        "codex_lb_cache_invalidation_bump_failures_total",
+        "Total cache invalidation version bumps that failed after retries",
+        ["namespace"],
+        registry=REGISTRY,
+    )
+    cache_invalidation_poll_failures_total = Counter(
+        "codex_lb_cache_invalidation_poll_failures_total",
+        "Total cache invalidation poll cycles that failed",
+        registry=REGISTRY,
+    )
 
     def make_scrape_registry() -> CollectorRegistryLike:
         if MULTIPROCESS_MODE:
@@ -303,6 +314,8 @@ else:
     proxy_phase_latency_seconds: HistogramLike | None = None
     http_bridge_prewarm_total: CounterLike | None = None
     http_bridge_stuck_retire_total: CounterLike | None = None
+    cache_invalidation_bump_failures_total: CounterLike | None = None
+    cache_invalidation_poll_failures_total: CounterLike | None = None
 
     def make_scrape_registry() -> None:
         return None
@@ -335,6 +348,8 @@ __all__ = [
     "bridge_reattach_total",
     "bridge_same_account_takeover_total",
     "bridge_soft_local_rebind_total",
+    "cache_invalidation_bump_failures_total",
+    "cache_invalidation_poll_failures_total",
     "circuit_breaker_state",
     "continuity_fail_closed_total",
     "continuity_owner_resolution_total",

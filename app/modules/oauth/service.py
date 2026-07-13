@@ -52,7 +52,11 @@ from app.modules.oauth.schemas import (
     OauthStartResponse,
     OauthStatusResponse,
 )
-from app.modules.proxy.account_cache import clear_account_routing_unavailable, get_account_selection_cache
+from app.modules.proxy.account_cache import (
+    clear_account_routing_unavailable,
+    get_account_selection_cache,
+    propagate_account_routing_change,
+)
 
 _async_sleep = asyncio.sleep
 logger = logging.getLogger(__name__)
@@ -741,6 +745,7 @@ class OauthService:
     async def _invalidate_account_routing_caches(self) -> None:
         get_account_selection_cache().invalidate()
         get_api_key_cache().clear()
+        await propagate_account_routing_change()
         poller = get_cache_invalidation_poller()
         if poller is not None:
             await poller.bump(NAMESPACE_API_KEY)

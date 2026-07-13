@@ -6155,8 +6155,16 @@ async def _normalize_public_responses_stream(
             seen_text_delta_keys.add(_text_delta_stream_key(normalized_payload))
         # Both the backfill branch and _normalize_public_stream_payload copy
         # the dict when they change anything, so identity with the parsed
-        # payload proves the event is unmutated.
-        unmutated_block = event_block if normalized_payload is parsed_payload else None
+        # payload proves the event is unmutated. Pass-through additionally
+        # requires the block to already carry the canonical `event: <type>`
+        # framing that format_sse_event would add: bridge rewrite paths can
+        # enqueue data-only blocks, and named-event (EventSource) clients
+        # would otherwise lose the event name re-serialization used to add.
+        unmutated_block = (
+            event_block
+            if normalized_payload is parsed_payload and _has_canonical_event_framing(event_block, event_type)
+            else None
+        )
         for formatted_payload in formatted_payloads_with_synthetic_deltas(normalized_payload, unmutated_block):
             yield formatted_payload
         if isinstance(event_type, str) and event_type in _PUBLIC_RESPONSE_STREAM_TERMINAL_TYPES:
@@ -6410,6 +6418,15 @@ def _synthetic_pre_created_item_id(response_id: str | None) -> str:
     if response_id:
         return f"msg_{response_id}_precreated"
     return "msg_precreated"
+
+
+def _has_canonical_event_framing(event_block: str, event_type: JsonValue) -> bool:
+    """True when the block already carries the `event: <type>` line that
+    format_sse_event would emit (or the payload has no type, where canonical
+    framing is data-only)."""
+    if not isinstance(event_type, str) or not event_type:
+        return event_block.startswith("data: ")
+    return event_block.startswith(f"event: {event_type}\n")
 
 
 def _normalize_public_stream_payload(

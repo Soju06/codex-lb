@@ -482,20 +482,23 @@ class ProxyResponseError(Exception):
         self.failed_session = failed_session
 
 
-def _replay_safe_process_network_error(
+def _process_network_failure_error(
     message: str,
     exc: Exception,
     *,
+    retryable_same_contract: bool,
     failed_session: aiohttp.ClientSession | None,
 ) -> ProxyResponseError:
-    """Build the internal retry signal used only before request dispatch."""
+    """Preserve replay provenance and failed shared generation independently."""
 
+    # Dispatch may make the request unsafe to replay, but it does not make the
+    # concrete failed generation safe for subsequent requests to keep using.
     return ProxyResponseError(
         502,
         openai_error(PROCESS_NETWORK_UNAVAILABLE_CODE, message),
-        failure_phase="connect",
-        retryable_same_contract=True,
-        failure_detail="process_network_connect_error",
+        failure_phase="connect" if retryable_same_contract else "upstream",
+        retryable_same_contract=retryable_same_contract,
+        failure_detail="process_network_connect_error" if retryable_same_contract else "transport_error",
         failure_exception_type=type(exc).__name__,
         failed_session=failed_session,
     )
@@ -3098,9 +3101,10 @@ async def _stream_responses_with_session(
         if routed_error_code == PROCESS_NETWORK_UNAVAILABLE_CODE and exc.retryable_same_contract:
             # Routed Codex sessions are private to this attempt, so recovery
             # legitimately has no shared HTTP generation for compare-and-swap.
-            raise _replay_safe_process_network_error(
+            raise _process_network_failure_error(
                 response_error_message,
                 exc,
+                retryable_same_contract=True,
                 failed_session=None,
             ) from exc
         yield format_sse_event(
@@ -3124,10 +3128,11 @@ async def _stream_responses_with_session(
         failure_phase = "connect" if retryable_same_contract else "upstream"
         failure_detail = "transport_error"
         failure_exception_type = type(exc).__name__
-        if error_code == PROCESS_NETWORK_UNAVAILABLE_CODE and retryable_same_contract:
-            raise _replay_safe_process_network_error(
+        if error_code == PROCESS_NETWORK_UNAVAILABLE_CODE and transport == "http":
+            raise _process_network_failure_error(
                 response_error_message,
                 exc,
+                retryable_same_contract=retryable_same_contract,
                 failed_session=client_session,
             ) from exc
         yield format_sse_event(
@@ -3246,10 +3251,11 @@ async def _stream_responses_with_session(
         failure_phase = "connect" if retryable_same_contract else "upstream"
         failure_detail = "transport_error"
         failure_exception_type = type(exc).__name__
-        if error_code == PROCESS_NETWORK_UNAVAILABLE_CODE and retryable_same_contract:
-            raise _replay_safe_process_network_error(
+        if error_code == PROCESS_NETWORK_UNAVAILABLE_CODE and transport == "http":
+            raise _process_network_failure_error(
                 response_error_message,
                 exc,
+                retryable_same_contract=retryable_same_contract,
                 failed_session=client_session,
             ) from exc
         yield format_sse_event(
@@ -3666,6 +3672,7 @@ class _CompactCommandTransport:
                         failure_detail=failure_detail,
                         failure_exception_type=failure_exception_type,
                         upstream_status_code=resp.status,
+                        failed_session=(self.session if error_code == PROCESS_NETWORK_UNAVAILABLE_CODE else None),
                     ) from exc
                 except Exception as exc:
                     error_code = "upstream_error"

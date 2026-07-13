@@ -4694,6 +4694,37 @@ class _SseSession:
         return self._response
 
 
+class _SessionGenerationHarness:
+    def __init__(self, failed_session: object, replacement_session: object) -> None:
+        self.current_session = failed_session
+        self.replacement_session = replacement_session
+        self.leased_sessions: list[object] = []
+        self.rotations: list[tuple[str, aiohttp.ClientSession | None]] = []
+
+    @asynccontextmanager
+    async def lease_http_session(
+        self,
+        session: aiohttp.ClientSession | None = None,
+    ) -> AsyncIterator[aiohttp.ClientSession]:
+        assert session is None
+        selected = self.current_session
+        self.leased_sessions.append(selected)
+        yield cast(aiohttp.ClientSession, selected)
+
+    async def rotate(
+        self,
+        *,
+        transport: str,
+        request_id: str | None,
+        failed_session: aiohttp.ClientSession | None,
+    ) -> str:
+        del request_id
+        self.rotations.append((transport, failed_session))
+        assert failed_session is self.current_session
+        self.current_session = self.replacement_session
+        return "rotated"
+
+
 class _TimeoutSseSession:
     def post(
         self,
@@ -5897,6 +5928,7 @@ async def test_stream_responses_raw_route_oserror_is_neutral_but_not_replayed(mo
             del url, kwargs
             raise OSError(errno.ENETUNREACH, "Network is unreachable")
 
+    session = _AmbiguousRouteFailureSession()
     monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
     monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
     monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
@@ -5904,19 +5936,21 @@ async def test_stream_responses_raw_route_oserror_is_neutral_but_not_replayed(mo
         {"model": "gpt-5.1", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
     )
 
-    events = [
-        event
-        async for event in proxy_module.stream_responses(
-            payload,
-            headers={},
-            access_token="token",
-            account_id="acc_1",
-            session=cast(proxy_module.aiohttp.ClientSession, _AmbiguousRouteFailureSession()),
-        )
-    ]
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        _ = [
+            event
+            async for event in proxy_module.stream_responses(
+                payload,
+                headers={},
+                access_token="token",
+                account_id="acc_1",
+                session=cast(proxy_module.aiohttp.ClientSession, session),
+            )
+        ]
 
-    event = json.loads(events[0].split("data: ", 1)[1])
-    assert event["response"]["error"]["code"] == "proxy_network_unavailable"
+    assert _proxy_error_code(exc_info.value) == "proxy_network_unavailable"
+    assert exc_info.value.retryable_same_contract is False
+    assert exc_info.value.failed_session is session
 
 
 @pytest.mark.asyncio
@@ -11415,6 +11449,85 @@ async def test_stream_responses_serialized_dns_failure_is_not_replayed(monkeypat
     record_error.assert_not_awaited()
     record_success.assert_not_awaited()
     assert request_logs.calls[-1]["error_code"] == "proxy_network_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_stream_post_dispatch_network_failure_rotates_generation_for_next_request(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    settings.upstream_base_url = "https://chatgpt.com/backend-api"
+    settings.upstream_connect_timeout_seconds = 8.0
+    settings.stream_idle_timeout_seconds = 45.0
+    settings.image_inline_fetch_enabled = False
+    settings.log_upstream_request_summary = False
+    settings.log_upstream_request_payload = False
+    settings.upstream_stream_transport = "http"
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_stream_generation_rotation")
+    handle_stream_error = AsyncMock()
+    record_error = AsyncMock()
+    record_success = AsyncMock()
+
+    class _PostDispatchFailureContent:
+        def iter_chunked(self, _size: int) -> AsyncIterator[bytes]:
+            async def chunks() -> AsyncIterator[bytes]:
+                cause = OSError(errno.ENETUNREACH, "Network is unreachable")
+                raise aiohttp.ClientPayloadError("response body read failed") from cause
+                yield b""  # pragma: no cover
+
+            return chunks()
+
+    class _PostDispatchFailureResponse:
+        status = 200
+        content = _PostDispatchFailureContent()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            del exc_type, exc, tb
+            return False
+
+    failed_session = _SseSession(_PostDispatchFailureResponse())
+    replacement_session = _SseSession(
+        _SsePostResponse([b'data: {"type":"response.completed","response":{"id":"resp_after_rotation"}}\n\n'])
+    )
+    generations = _SessionGenerationHarness(failed_session, replacement_session)
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_module, "lease_http_session", generations.lease_http_session)
+    monkeypatch.setattr(network_recovery_module, "rotate_shared_http_transport", generations.rotate)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service._load_balancer, "record_error", record_error)
+    monkeypatch.setattr(service._load_balancer, "record_success", record_success)
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
+    monkeypatch.setattr(service, "_resolve_upstream_route_for_account", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+    failed = [chunk async for chunk in service.stream_responses(payload, {})]
+    recovered = [chunk async for chunk in service.stream_responses(payload, {})]
+
+    assert len(failed) == 1
+    failed_event = json.loads(failed[0].split("data: ", 1)[1])
+    assert failed_event["response"]["error"]["code"] == "proxy_network_unavailable"
+    recovered_event = json.loads(recovered[0].split("data: ", 1)[1])
+    assert recovered_event["response"]["id"] == "resp_after_rotation"
+    assert generations.leased_sessions == [failed_session, replacement_session]
+    assert len(failed_session.calls) == len(replacement_session.calls) == 1
+    assert generations.rotations == [("stream", cast(aiohttp.ClientSession, failed_session))]
+    handle_stream_error.assert_not_awaited()
+    record_error.assert_not_awaited()
+    record_success.assert_awaited_once_with(account)
+    assert request_logs.calls[0]["error_code"] == "proxy_network_unavailable"
+    assert request_logs.calls[1]["status"] == "success"
 
 
 @pytest.mark.asyncio
@@ -24847,6 +24960,80 @@ async def test_compact_responses_budget_exhaustion_returns_request_timeout(monke
     assert _proxy_error_code(exc) == "upstream_request_timeout"
     assert request_logs.calls[0]["error_code"] == "upstream_request_timeout"
     assert request_logs.calls[0]["transport"] == "http"
+
+
+@pytest.mark.asyncio
+async def test_compact_body_read_network_failure_rotates_generation_for_next_request(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    settings.upstream_base_url = "https://chatgpt.com/backend-api"
+    settings.upstream_connect_timeout_seconds = 8.0
+    settings.image_inline_fetch_enabled = False
+    settings.log_upstream_request_summary = False
+    settings.log_upstream_request_payload = False
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_compact_generation_rotation")
+    handle_stream_error = AsyncMock()
+    record_error = AsyncMock()
+    record_success = AsyncMock()
+
+    class _BodyReadFailureResponse:
+        status = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            del exc_type, exc, tb
+            return False
+
+        async def json(self, *, content_type=None):
+            del content_type
+            cause = OSError(errno.ENETUNREACH, "Network is unreachable")
+            raise aiohttp.ClientPayloadError("response body read failed") from cause
+
+    failed_session = _CompactSession(_BodyReadFailureResponse())
+    replacement_session = _CompactSession(
+        _JsonCompactResponse(
+            {"object": "response.compaction", "compaction_summary": {"encrypted_content": "after_rotation"}}
+        )
+    )
+    generations = _SessionGenerationHarness(failed_session, replacement_session)
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_module, "lease_http_session", generations.lease_http_session)
+    monkeypatch.setattr(network_recovery_module, "rotate_shared_http_transport", generations.rotate)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service._load_balancer, "record_error", record_error)
+    monkeypatch.setattr(service._load_balancer, "record_success", record_success)
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
+    monkeypatch.setattr(service, "_resolve_upstream_route_for_account", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", AsyncMock())
+
+    payload = ResponsesCompactRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service.compact_responses(payload, {})
+    recovered = await service.compact_responses(payload, {})
+
+    assert _proxy_error_code(exc_info.value) == "proxy_network_unavailable"
+    assert exc_info.value.retryable_same_contract is False
+    assert exc_info.value.failed_session is failed_session
+    assert recovered.model_extra == {"compaction_summary": {"encrypted_content": "after_rotation"}}
+    assert generations.leased_sessions == [failed_session, replacement_session]
+    assert len(failed_session.calls) == len(replacement_session.calls) == 1
+    assert generations.rotations == [("compact", cast(aiohttp.ClientSession, failed_session))]
+    handle_stream_error.assert_not_awaited()
+    record_error.assert_not_awaited()
+    record_success.assert_awaited_once_with(account)
+    assert request_logs.calls[0]["error_code"] == "proxy_network_unavailable"
+    assert request_logs.calls[1]["status"] == "success"
 
 
 @pytest.mark.asyncio

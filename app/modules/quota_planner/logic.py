@@ -186,7 +186,11 @@ def plan_shadow_actions(
     actions: list[PlannerAction] = []
     skipped_candidates = 0
     current_ts = current.timestamp()
-    active_resets = [float(state.primary_reset_at) for state in states if _is_active_window(state, current_ts)]
+    active_resets = [
+        float(state.primary_reset_at)
+        for state in states
+        if state.primary_reset_at is not None and _is_active_window(state, current_ts)
+    ]
     for state in states:
         if not _is_warmup_candidate(state, current_ts):
             continue

@@ -238,8 +238,30 @@ async def test_stream_responses_tap_publishes_rate_limit_events(monkeypatch: pyt
     finally:
         live_hub.register_live_usage_publisher(None)
 
+    live_hub.register_live_usage_publisher(
+        lambda snapshot, *, account_id=None, chatgpt_account_id=None: captured.append(
+            (snapshot, account_id, chatgpt_account_id)
+        )
+    )
+    try:
+        suppressed = [
+            block
+            async for block in proxy_client_module.stream_responses(
+                request,
+                {},
+                "access-token",
+                "workspace-live",
+                codex_lb_account_id="acc-internal",
+                suppress_live_usage=True,
+            )
+        ]
+    finally:
+        live_hub.register_live_usage_publisher(None)
+
     assert seen == blocks
     assert seen_internal == blocks
+    # Suppressed callers (e.g. quota-planner probes) produce no publishes.
+    assert suppressed == blocks
     assert len(captured) == 2
     snapshot, account_id, chatgpt_account_id = captured[0]
     assert (account_id, chatgpt_account_id) == (None, "workspace-live")

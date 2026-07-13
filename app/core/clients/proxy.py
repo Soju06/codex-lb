@@ -2494,6 +2494,7 @@ async def stream_responses(
     codex_installation_id: str | None = None,
     enforce_openai_sdk_contract: bool = True,
     codex_lb_account_id: str | None = None,
+    suppress_live_usage: bool = False,
 ) -> AsyncIterator[str]:
     effective_allow_direct_egress = allow_direct_egress or (route is None and session is not None)
     async with lease_http_session(session) as client_session:
@@ -2513,8 +2514,9 @@ async def stream_responses(
             codex_installation_id=codex_installation_id,
             enforce_openai_sdk_contract=enforce_openai_sdk_contract,
             codex_lb_account_id=codex_lb_account_id,
+            suppress_live_usage=suppress_live_usage,
         ):
-            if (codex_lb_account_id or account_id) and EVENT_MARKER in event_block:
+            if not suppress_live_usage and (codex_lb_account_id or account_id) and EVENT_MARKER in event_block:
                 publish_live_usage(
                     parse_rate_limit_event_text(event_block),
                     account_id=codex_lb_account_id,
@@ -2539,6 +2541,7 @@ async def _stream_responses_with_session(
     codex_installation_id: str | None = None,
     enforce_openai_sdk_contract: bool = True,
     codex_lb_account_id: str | None = None,
+    suppress_live_usage: bool = False,
 ) -> AsyncIterator[str]:
     settings = get_settings()
     headers = apply_codex_installation_headers(headers, codex_installation_id)
@@ -2655,7 +2658,7 @@ async def _stream_responses_with_session(
                 resp = _CodexSSEResponse(raw_resp)
                 status_code = resp.status
                 last_stream_activity_at = time.monotonic()
-                if resp.status < 400:
+                if resp.status < 400 and not suppress_live_usage:
                     publish_live_usage(
                         parse_rate_limit_headers(getattr(raw_resp, "headers", None)),
                         account_id=codex_lb_account_id,
@@ -2749,7 +2752,7 @@ async def _stream_responses_with_session(
         ) as resp:
             status_code = resp.status
             last_stream_activity_at = time.monotonic()
-            if resp.status < 400:
+            if resp.status < 400 and not suppress_live_usage:
                 publish_live_usage(
                     parse_rate_limit_headers(getattr(resp, "headers", None)),
                     account_id=codex_lb_account_id,

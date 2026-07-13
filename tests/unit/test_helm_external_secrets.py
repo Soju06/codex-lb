@@ -366,10 +366,8 @@ def test_ingress_renders_dedicated_responses_ingress_with_session_hash() -> None
 
     assert rendered.count("kind: Ingress") == 2
     assert "name: codex-lb-responses" in rendered
-    assert "nginx.ingress.kubernetes.io/upstream-hash-by: $codex_responses_hash_key" in rendered
-    assert "nginx.ingress.kubernetes.io/configuration-snippet:" in rendered
-    assert 'set $codex_responses_hash_key "$http_authorization:$request_id";' in rendered
-    assert "set $codex_responses_hash_key $http_x_codex_session_id;" in rendered
+    assert "nginx.ingress.kubernetes.io/upstream-hash-by: $http_x_codex_session_id$http_authorization" in rendered
+    assert "nginx.ingress.kubernetes.io/configuration-snippet:" not in rendered
     assert "nginx.ingress.kubernetes.io/upstream-hash-by: $http_authorization" in rendered
     assert "nginx.ingress.kubernetes.io/proxy-next-upstream: error timeout http_502 http_503 http_504" in rendered
     assert "invalid_header" in rendered
@@ -439,8 +437,8 @@ def test_kind_smoke_overrides_helm_test_image_and_external_db_replicas() -> None
     assert '--set test.image.repository="${IMAGE_REPOSITORY}"' in script
     assert '--set test.image.tag="${IMAGE_TAG}"' in script
     assert "--set test.image.pullPolicy=IfNotPresent" in script
-    assert _command_sets_value(external_db_install, "replicaCount=1")
-    assert not _command_sets_value(bundled_install, "replicaCount=1")
+    assert _command_sets_value(external_db_install, "replicaCount=2")
+    assert not _command_sets_value(bundled_install, "replicaCount=2")
 
 
 def test_kind_smoke_logs_timestamped_major_steps() -> None:

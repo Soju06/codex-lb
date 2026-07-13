@@ -1,3 +1,44 @@
+{{- /*
+Static bridge ring guard: a manual config.sessionBridgeInstanceRing must list exactly
+the StatefulSet pod names or Settings validation crashloops pods at startup (each pod
+requires its own $(POD_NAME) to appear literally in the ring). Fail loudly at render
+time instead of shipping a stalled rollout.
+*/}}
+{{- if .Values.config.sessionBridgeInstanceRing }}
+{{- $ringEntries := list }}
+{{- range splitList "," .Values.config.sessionBridgeInstanceRing }}
+{{- $entry := trim . }}
+{{- if $entry }}
+{{- $ringEntries = append $ringEntries $entry }}
+{{- end }}
+{{- end }}
+{{- if .Values.autoscaling.enabled }}
+{{- fail "config.sessionBridgeInstanceRing is a static ring and is incompatible with autoscaling.enabled=true: the HPA can create pods that are missing from the ring and crashloop at startup. Remove the static ring (database-backed ring discovery is automatic) or disable autoscaling." }}
+{{- end }}
+{{- $workloadName := include "codex-lb.workloadName" . }}
+{{- $expectedPodNames := list }}
+{{- range $ordinal := until (int .Values.replicaCount) }}
+{{- $expectedPodNames = append $expectedPodNames (printf "%s-%d" $workloadName $ordinal) }}
+{{- end }}
+{{- $missingPodNames := list }}
+{{- range $expectedPodNames }}
+{{- if not (has . $ringEntries) }}
+{{- $missingPodNames = append $missingPodNames . }}
+{{- end }}
+{{- end }}
+{{- $unexpectedEntries := list }}
+{{- range $ringEntries }}
+{{- if not (has . $expectedPodNames) }}
+{{- $unexpectedEntries = append $unexpectedEntries . }}
+{{- end }}
+{{- end }}
+{{- if $missingPodNames }}
+{{- fail (printf "config.sessionBridgeInstanceRing is missing pod name(s) %q: every pod name must be present in the static ring or the missing pods fail Settings validation at startup. With replicaCount=%d the ring must list exactly %q. List every pod or remove the static ring (database-backed ring discovery is automatic)." (join "," $missingPodNames) (int .Values.replicaCount) (join "," $expectedPodNames)) }}
+{{- end }}
+{{- if $unexpectedEntries }}
+{{- fail (printf "config.sessionBridgeInstanceRing entry(ies) %q do not match any StatefulSet pod name: ring entries must be bare pod names (not FQDNs or other identifiers) or the rendered ring routes to members that do not exist. With replicaCount=%d the ring must list exactly %q. Fix the entries or remove the static ring (database-backed ring discovery is automatic)." (join "," $unexpectedEntries) (int .Values.replicaCount) (join "," $expectedPodNames)) }}
+{{- end }}
+{{- end }}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:

@@ -288,6 +288,70 @@ async def test_refresh_cap_partition_retains_partition_on_failed_read(
     assert get_cap_partition() == CapPartition(replica_count=2, rank=0)
 
 
+def test_holder_failed_read_restarts_pending_scale_down_window() -> None:
+    clock = _Clock()
+    holder = CapPartitionHolder(clock=clock)
+    holder.observe_members(["replica-a", "replica-b"], "replica-a", scale_down_seconds=60.0)
+
+    # Begin scaling down to one replica: share-growing, so pending.
+    assert holder.observe_members(["replica-a"], "replica-a", scale_down_seconds=60.0) is False
+
+    # A read outage spans the whole window; the gap must restart the window.
+    clock.advance(70.0)
+    holder.note_failed_read()
+
+    # The next successful lower-count read must not adopt immediately even
+    # though the pre-outage observation is now older than the window.
+    assert holder.observe_members(["replica-a"], "replica-a", scale_down_seconds=60.0) is False
+    assert holder.current == CapPartition(replica_count=2, rank=0)
+
+    # Only a full fresh window of continuous observation adopts the scale-down.
+    clock.advance(60.0)
+    assert holder.observe_members(["replica-a"], "replica-a", scale_down_seconds=60.0) is True
+    assert holder.current == CapPartition(replica_count=1, rank=0)
+
+
+@pytest.mark.asyncio
+async def test_refresh_cap_partition_failed_read_restarts_pending_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        cap_partitioning_module,
+        "get_settings",
+        lambda: SimpleNamespace(proxy_account_cap_partition_scale_down_seconds=60),
+    )
+    clock = _Clock()
+    monkeypatch.setattr(cap_partitioning_module, "_holder", CapPartitionHolder(clock=clock))
+
+    async def _both_active() -> list[str]:
+        return ["replica-a", "replica-b"]
+
+    async def _one_active() -> list[str]:
+        return ["replica-a"]
+
+    async def _failing_list_active() -> list[str]:
+        raise RuntimeError("db unavailable")
+
+    await refresh_cap_partition(_both_active, "replica-a")
+    assert get_cap_partition() == CapPartition(replica_count=2, rank=0)
+
+    # Start the share-growing scale-down window, then lose reads past the window.
+    await refresh_cap_partition(_one_active, "replica-a")
+    assert get_cap_partition() == CapPartition(replica_count=2, rank=0)
+    clock.advance(70.0)
+    await refresh_cap_partition(_failing_list_active, "replica-a")
+    assert get_cap_partition() == CapPartition(replica_count=2, rank=0)
+
+    # First post-outage read must not adopt: the observation was not continuous.
+    await refresh_cap_partition(_one_active, "replica-a")
+    assert get_cap_partition() == CapPartition(replica_count=2, rank=0)
+
+    # A full fresh continuous window is required before adopting the smaller share.
+    clock.advance(60.0)
+    await refresh_cap_partition(_one_active, "replica-a")
+    assert get_cap_partition() == CapPartition(replica_count=1, rank=0)
+
+
 @pytest.mark.asyncio
 async def test_refresh_cap_partition_reads_active_members(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(

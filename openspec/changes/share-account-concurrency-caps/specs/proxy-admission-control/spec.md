@@ -32,7 +32,7 @@ For `/v1/responses`, `/backend-api/codex/responses`, and compact Responses traff
 
 ### Requirement: Account concurrency caps are partitioned across live replicas
 
-Each replica MUST derive its local share of every configured account concurrency cap deterministically from the sorted active bridge-ring member list: with `R` active members and this replica at rank `k` in instance-id order, the share MUST be `floor(cap / R)` plus one extra slot when `k < cap mod R`, floored at one slot so an account never becomes unroutable on a replica; a nonpositive configured cap MUST remain unlimited on every replica. Partition derivation MUST NOT add database reads to the request or admission path; it MUST refresh from bridge-ring registration and heartbeat ticks, and the observing replica MUST count itself even when its own ring row is missing or stale. Membership changes that cannot grow this replica's share of any cap (the member count does not decrease and this replica's rank does not decrease) MUST be adopted on the next refresh; membership changes that could grow this replica's share (a member-count decrease, or any move to an earlier rank — including mixed churn where the count grows while this replica's rank drops, as during a rolling replacement) MUST NOT be adopted until that exact pending partition (member count and rank) has been observed continuously for the configured stability window (`proxy_account_cap_partition_scale_down_seconds`, default 60 seconds, minimum 30); a change of the pending partition, including a rank change at an unchanged count, MUST restart the window. A failed membership read MUST retain the last adopted partition. Setting `proxy_account_caps_scope` to `replica` MUST restore per-replica cap semantics, and a replica that observes no other active member MUST use the full configured caps.
+Each replica MUST derive its local share of every configured account concurrency cap deterministically from the sorted active bridge-ring member list: with `R` active members and this replica at rank `k` in instance-id order, the share MUST be `floor(cap / R)` plus one extra slot when `k < cap mod R`, floored at one slot so an account never becomes unroutable on a replica; a nonpositive configured cap MUST remain unlimited on every replica. Partition derivation MUST NOT add database reads to the request or admission path; it MUST refresh from bridge-ring registration and heartbeat ticks, and the observing replica MUST count itself even when its own ring row is missing or stale. Membership changes that cannot grow this replica's share of any cap (the member count does not decrease and this replica's rank does not decrease) MUST be adopted on the next refresh; membership changes that could grow this replica's share (a member-count decrease, or any move to an earlier rank — including mixed churn where the count grows while this replica's rank drops, as during a rolling replacement) MUST NOT be adopted until that exact pending partition (member count and rank) has been observed continuously for the configured stability window (`proxy_account_cap_partition_scale_down_seconds`, default 60 seconds, minimum 30); a change of the pending partition, including a rank change at an unchanged count, MUST restart the window. A failed membership read MUST retain the last adopted partition; while a share-growing change is pending, a failed read MUST also restart the stability window so the observation gap does not count toward the continuous-stable requirement. Setting `proxy_account_caps_scope` to `replica` MUST restore per-replica cap semantics, and a replica that observes no other active member MUST use the full configured caps.
 
 #### Scenario: Shares sum to the configured cap
 
@@ -87,6 +87,13 @@ Each replica MUST derive its local share of every configured account concurrency
 - **WHEN** a partition refresh fails to read ring membership
 - **THEN** the replica keeps the two-way partition
 - **AND** it does not fall open to the full configured caps
+
+#### Scenario: Failed membership read restarts a pending share-increase window
+
+- **GIVEN** a replica with a share-growing partition pending part-way through the stability window
+- **WHEN** a partition refresh fails to read ring membership
+- **THEN** the pending stability window is restarted
+- **AND** the share-growing partition is adopted only after being observed continuously for the full window from the next successful read
 
 #### Scenario: Replica scope restores legacy semantics
 

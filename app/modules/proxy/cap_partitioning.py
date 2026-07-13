@@ -14,8 +14,10 @@ lower-ranked ids vanish) can grow it. Changes that cannot grow the share are
 adopted on the next refresh, while any potentially share-growing change is
 adopted only after that exact pending partition (count and rank) has been
 observed continuously for a configured stability window — a different pending
-partition restarts the window — so neither a missed heartbeat nor a rolling
-replacement can transiently inflate a survivor's share.
+partition restarts the window, and a failed membership read also restarts it
+since an observation gap must not count as continuous — so neither a missed
+heartbeat, a rolling replacement, nor a read outage can transiently inflate a
+survivor's share.
 """
 
 from __future__ import annotations
@@ -119,6 +121,19 @@ class CapPartitionHolder:
         """
         return observed.replica_count < self._adopted.replica_count or observed.rank < self._adopted.rank
 
+    def note_failed_read(self) -> None:
+        """Restart the stability window after a failed membership read.
+
+        A share-growing partition is adopted only after being observed
+        *continuously* for the stability window. A failed read is a gap in
+        observations, so any pending share-increase is dropped and its window
+        must restart from the next successful read; otherwise a read outage
+        spanning the window would let the first post-outage observation adopt a
+        larger survivor share without continuous confirmation, weakening the
+        missed-heartbeat guard. The already-adopted partition is left intact.
+        """
+        self._clear_pending()
+
     def _clear_pending(self) -> None:
         self._pending = None
         self._pending_since = None
@@ -161,13 +176,16 @@ async def refresh_cap_partition(
 ) -> None:
     """Refresh the partition from active bridge-ring membership.
 
-    A failed membership read retains the last-known partition instead of
-    falling open to the full configured caps.
+    A failed membership read retains the last-known adopted partition instead
+    of falling open to the full configured caps, but restarts any pending
+    share-increase window so the observation gap does not count toward the
+    continuous stability window.
     """
     try:
         members = await list_active_members()
     except Exception:
         logger.warning("Cap partition refresh failed; retaining last-known partition", exc_info=True)
+        _holder.note_failed_read()
         return
     observe_ring_members(members, self_instance_id)
 

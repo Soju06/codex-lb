@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import flag_modified
 from sqlalchemy.orm.exc import StaleDataError
 
 from app.core.auth.dashboard_session_ttl import DEFAULT_DASHBOARD_SESSION_TTL_SECONDS
@@ -216,6 +217,15 @@ class SettingsRepository:
             settings.guest_access_enabled = guest_access_enabled
         if limit_warmup_staggered_idle_enabled is not None:
             settings.limit_warmup_staggered_idle_enabled = limit_warmup_staggered_idle_enabled
+        # Force the optimistic-version CAS to run even when the payload makes no
+        # net change. `version_id_col` only raises `StaleDataError` when the
+        # flush emits an ORM UPDATE; a full-row save that assigns values all
+        # equal to this (possibly stale) session's row would otherwise flush
+        # nothing, commit silently, and refresh over a concurrent writer's
+        # values without the required 409. Flagging a column dirty guarantees an
+        # `UPDATE ... SET version = version + 1 WHERE version = :expected`, so a
+        # stale no-op save still surfaces the conflict.
+        flag_modified(settings, "sticky_threads_enabled")
         await self.commit_refresh(settings)
         return settings
 

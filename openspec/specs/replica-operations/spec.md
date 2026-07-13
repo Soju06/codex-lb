@@ -84,7 +84,7 @@ At startup, after schema readiness, each replica SHALL compute a fingerprint of 
 
 ### Requirement: Dashboard settings updates are optimistically locked
 
-The dashboard settings row SHALL carry a monotonically increasing `version` incremented on every persisted ORM update, and full-row updates SHALL apply only when the version still matches the value read by the writer. `GET`/`PUT /api/settings` responses SHALL expose `version`; the `PUT` payload MAY include `expectedVersion`, and a stale `expectedVersion` SHALL yield 409 before any write. Internal single-field writers (dashboard auth credential and TOTP mutations) SHALL retry on a version conflict rather than fail.
+The dashboard settings row SHALL carry a monotonically increasing `version` incremented on every persisted ORM update, and full-row updates SHALL apply only when the version still matches the value read by the writer. The version check SHALL run for every accepted `PUT /api/settings`, including a save whose payload changes no field, so a stale writer cannot bypass the conflict guard by submitting an unchanged form. `GET`/`PUT /api/settings` responses SHALL expose `version`; the `PUT` payload MAY include `expectedVersion`, and a stale `expectedVersion` SHALL yield 409 before any write. Internal single-field writers (dashboard auth credential and TOTP mutations) SHALL retry on a version conflict rather than fail.
 
 #### Scenario: Concurrent settings writers race
 
@@ -104,6 +104,13 @@ The dashboard settings row SHALL carry a monotonically increasing `version` incr
 - **GIVEN** a `PUT /api/settings` request whose `expectedVersion` matched the row when the handler read it
 - **WHEN** another writer commits a settings update before the first request's write is applied
 - **THEN** the first request's write is rejected with 409 and code `settings_conflict`
+- **AND** the interleaved writer's committed fields are not reverted
+
+#### Scenario: Stale no-op save still enforces the version check
+
+- **GIVEN** a `PUT /api/settings` whose payload assigns every field to the value the writer's own (stale) row already holds
+- **WHEN** another writer commits a settings update before the no-op save is applied
+- **THEN** the no-op save is rejected with 409 and code `settings_conflict`
 - **AND** the interleaved writer's committed fields are not reverted
 
 #### Scenario: Internal credential writer retries through a conflict

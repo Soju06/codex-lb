@@ -216,6 +216,48 @@ async def test_concurrent_settings_put_loser_receives_409(async_client, monkeypa
 
 
 @pytest.mark.asyncio
+async def test_concurrent_no_op_settings_put_loser_receives_409(async_client, monkeypatch):
+    """A no-op save (payload equals the writer's own stale row) must still lose
+    with 409 when a concurrent writer commits first. Without forcing the CAS,
+    the loser's flush emits no ORM UPDATE, so `version_id_col` never fires and
+    the stale save silently succeeds over the winner's fields."""
+    original_commit = SettingsRepository.commit_refresh
+    first_writer_reached_commit = asyncio.Event()
+    second_writer_committed = asyncio.Event()
+    call_count = 0
+
+    async def racing_commit(self, settings):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            # Writer A read the row and applied a no-op payload, then pauses
+            # before committing so writer B (which read the same version) can
+            # commit a real change first.
+            first_writer_reached_commit.set()
+            await asyncio.wait_for(second_writer_committed.wait(), timeout=10)
+        return await original_commit(self, settings)
+
+    monkeypatch.setattr(SettingsRepository, "commit_refresh", racing_commit)
+
+    response = await async_client.get("/api/settings")
+    assert response.json()["stickyThreadsEnabled"] is True
+
+    # Writer A submits a payload that leaves every field at its current value.
+    task_a = asyncio.create_task(async_client.put("/api/settings", json={"stickyThreadsEnabled": True}))
+    await asyncio.wait_for(first_writer_reached_commit.wait(), timeout=10)
+    response_b = await async_client.put("/api/settings", json={"prohibitFastMode": True})
+    second_writer_committed.set()
+    response_a = await task_a
+
+    assert response_b.status_code == 200
+    assert response_a.status_code == 409
+    assert response_a.json()["error"]["code"] == "settings_conflict"
+    # Writer B's real change survived; the stale no-op did not revert it.
+    response = await async_client.get("/api/settings")
+    assert response.json()["prohibitFastMode"] is True
+
+
+@pytest.mark.asyncio
 async def test_settings_put_conflicts_when_writer_commits_between_check_and_update(async_client, monkeypatch):
     """A writer committing after the expectedVersion check but before the service
     update must still lose with 409: the handler passes the version it merged

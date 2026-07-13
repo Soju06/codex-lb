@@ -915,6 +915,19 @@ class _CompactMixin:
                         request_id,
                         account.id,
                     )
+                except ProxyResponseError:
+                    await proxy._load_balancer.release_account_lease(selected_account_response_create_lease)
+                    selected_account_response_create_lease = None
+                    # ensure_fresh_with_budget translates terminal process-network
+                    # recovery outcomes before the compact upstream settlement
+                    # branches run, so this boundary owns reservation cleanup.
+                    await proxy._settle_compact_api_key_usage(
+                        api_key=api_key,
+                        api_key_reservation=api_key_reservation,
+                        response=None,
+                        request_service_tier=request_service_tier,
+                    )
+                    raise
                 except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
                     await proxy._load_balancer.release_account_lease(selected_account_response_create_lease)
                     selected_account_response_create_lease = None
@@ -1020,6 +1033,17 @@ class _CompactMixin:
                                     force=True,
                                     timeout_seconds=_compact_freshness_budget_seconds(remaining_budget),
                                 )
+                            except ProxyResponseError:
+                                # A translated refresh-recovery error escapes the
+                                # current upstream-error handler, so settle before
+                                # handing it to the request-level error boundary.
+                                await proxy._settle_compact_api_key_usage(
+                                    api_key=api_key,
+                                    api_key_reservation=api_key_reservation,
+                                    response=None,
+                                    request_service_tier=request_service_tier,
+                                )
+                                raise
                             except RefreshError as refresh_exc:
                                 if refresh_exc.is_permanent:
                                     await proxy._load_balancer.mark_permanent_failure(account, refresh_exc.code)

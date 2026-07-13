@@ -25255,6 +25255,110 @@ async def test_compact_unsafe_network_failure_rotates_generation_for_next_reques
 
 
 @pytest.mark.asyncio
+async def test_compact_initial_refresh_network_error_settles_reservation_before_upstream(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_compact_initial_refresh_network_reservation")
+    api_key = _make_api_key_data("key_compact_initial_refresh_network_reservation")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_compact_initial_refresh_network",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+    refresh_error = proxy_service.RefreshError(
+        "transport_error",
+        "Transport error while reading token refresh response",
+        False,
+        transport_error=True,
+        transport_error_code="proxy_network_unavailable",
+        retryable_same_contract=False,
+    )
+    settle = AsyncMock()
+    compact = AsyncMock(side_effect=AssertionError("compact upstream must not run after refresh failure"))
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=refresh_error))
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", settle)
+    monkeypatch.setattr(proxy_service, "core_compact_responses", compact)
+
+    payload = ResponsesCompactRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service.compact_responses(
+            payload,
+            {},
+            api_key=api_key,
+            api_key_reservation=reservation,
+        )
+
+    assert _proxy_error_code(exc_info.value) == "proxy_network_unavailable"
+    compact.assert_not_awaited()
+    settle.assert_awaited_once_with(
+        api_key=api_key,
+        api_key_reservation=reservation,
+        response=None,
+        request_service_tier=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_compact_forced_refresh_network_error_settles_reservation(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_compact_forced_refresh_network_reservation")
+    api_key = _make_api_key_data("key_compact_forced_refresh_network_reservation")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_compact_forced_refresh_network",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+    refresh_error = proxy_service.RefreshError(
+        "transport_error",
+        "Transport error while reading forced token refresh response",
+        False,
+        transport_error=True,
+        transport_error_code="proxy_network_unavailable",
+        retryable_same_contract=False,
+    )
+    settle = AsyncMock()
+    compact = AsyncMock(side_effect=proxy_module.ProxyResponseError(401, openai_error("invalid_api_key", "expired")))
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=[account, refresh_error]))
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", settle)
+    monkeypatch.setattr(proxy_service, "core_compact_responses", compact)
+
+    payload = ResponsesCompactRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service.compact_responses(
+            payload,
+            {},
+            api_key=api_key,
+            api_key_reservation=reservation,
+        )
+
+    assert _proxy_error_code(exc_info.value) == "proxy_network_unavailable"
+    compact.assert_awaited_once()
+    settle.assert_awaited_once_with(
+        api_key=api_key,
+        api_key_reservation=reservation,
+        response=None,
+        request_service_tier=None,
+    )
+
+
+@pytest.mark.asyncio
 async def test_compact_responses_refresh_connection_reset_fails_over(monkeypatch):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     request_logs = _RequestLogsRecorder()

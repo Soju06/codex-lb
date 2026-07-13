@@ -2,17 +2,21 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, insert, literal, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Account, AccountLimitWarmup
+from app.db.models import AccountLimitWarmup
 from app.db.session import sqlite_writer_section
 
 
 class LimitWarmupRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
+
+    def _dialect_name(self) -> str:
+        bind = self._session.get_bind()
+        return bind.dialect.name if bind else "sqlite"
 
     async def latest_by_account(self, account_ids: list[str]) -> dict[str, AccountLimitWarmup]:
         if not account_ids:
@@ -60,35 +64,59 @@ class LimitWarmupRepository:
         reset_at_tolerance_seconds: int = 0,
     ) -> AccountLimitWarmup | None:
         tolerance = max(0, reset_at_tolerance_seconds)
+        table = AccountLimitWarmup.__table__
+        # Single atomic conditional insert: the tolerance-window existence guard
+        # and the insert execute as one statement, so the dedup is effective
+        # across processes and replicas. On SQLite the statement is atomic under
+        # the database-level single-writer lock (the process-local
+        # sqlite_writer_section is kept only as a local write throttle). On
+        # PostgreSQL a single INSERT .. SELECT is not self-sufficient under READ
+        # COMMITTED, so an advisory transaction lock keyed on (account, window)
+        # serializes concurrent attempts first.
+        duplicate_in_tolerance_window = (
+            select(AccountLimitWarmup.id)
+            .where(
+                AccountLimitWarmup.account_id == account_id,
+                AccountLimitWarmup.window == window,
+                AccountLimitWarmup.reset_at.between(reset_at - tolerance, reset_at + tolerance),
+            )
+            .exists()
+        )
+        insert_stmt = (
+            insert(AccountLimitWarmup)
+            .from_select(
+                ["account_id", "window", "reset_at", "status", "model", "attempted_at"],
+                select(
+                    literal(account_id, type_=table.c.account_id.type),
+                    literal(window, type_=table.c.window.type),
+                    literal(reset_at, type_=table.c.reset_at.type),
+                    literal(status, type_=table.c.status.type),
+                    literal(model, type_=table.c.model.type),
+                    literal(attempted_at, type_=table.c.attempted_at.type),
+                ).where(~duplicate_in_tolerance_window),
+            )
+            .returning(AccountLimitWarmup.id)
+        )
         try:
             async with sqlite_writer_section():
-                # Serialize tolerant check-and-insert by account on databases
-                # where the SQLite process-local writer lock does not apply.
-                await self._session.execute(select(Account.id).where(Account.id == account_id).with_for_update())
-                existing = await self._existing_attempt(
-                    account_id=account_id,
-                    window=window,
-                    reset_at=reset_at,
-                    reset_at_tolerance_seconds=tolerance,
-                )
-                if existing is not None:
-                    await self._session.rollback()
-                    return None
-
-                row = AccountLimitWarmup(
-                    account_id=account_id,
-                    window=window,
-                    reset_at=reset_at,
-                    status=status,
-                    model=model,
-                    attempted_at=attempted_at,
-                )
-                self._session.add(row)
+                if self._dialect_name() == "postgresql":
+                    await self._session.execute(
+                        text("SELECT pg_advisory_xact_lock(hashtext(:key))"),
+                        {"key": f"limit_warmup:{account_id}:{window}"},
+                    )
+                inserted_id = await self._session.scalar(insert_stmt)
                 await self._session.commit()
-                await self._session.refresh(row)
         except IntegrityError:
+            # Backstop: the exact-tuple unique constraint
+            # uq_account_limit_warmups_account_window_reset still catches any
+            # duplicate the guard could not see.
             await self._session.rollback()
             return None
+        if inserted_id is None:
+            return None
+        row = await self._session.get(AccountLimitWarmup, inserted_id)
+        if row is not None:
+            await self._session.refresh(row)
         return row
 
     async def complete_attempt(
@@ -121,24 +149,3 @@ class LimitWarmupRepository:
         if row is not None:
             await self._session.refresh(row)
         return row
-
-    async def _existing_attempt(
-        self,
-        *,
-        account_id: str,
-        window: str,
-        reset_at: int,
-        reset_at_tolerance_seconds: int = 0,
-    ) -> AccountLimitWarmup | None:
-        tolerance = max(0, reset_at_tolerance_seconds)
-        stmt = (
-            select(AccountLimitWarmup)
-            .where(
-                AccountLimitWarmup.account_id == account_id,
-                AccountLimitWarmup.window == window,
-                AccountLimitWarmup.reset_at.between(reset_at - tolerance, reset_at + tolerance),
-            )
-            .limit(1)
-        )
-        result = await self._session.execute(stmt)
-        return result.scalar_one_or_none()

@@ -22,6 +22,7 @@ os.environ["CODEX_LB_MODEL_REGISTRY_ENABLED"] = "false"
 os.environ["CODEX_LB_STICKY_SESSION_CLEANUP_ENABLED"] = "false"
 os.environ["CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_ENABLED"] = "false"
 os.environ["CODEX_LB_QUOTA_PLANNER_SCHEDULER_ENABLED"] = "false"
+os.environ["CODEX_LB_REQUEST_LOG_COUNT_CACHE_TTL_SECONDS"] = "0"
 
 from app.db.models import Base  # noqa: E402
 from app.db.session import engine  # noqa: E402

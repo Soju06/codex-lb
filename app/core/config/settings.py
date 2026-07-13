@@ -226,6 +226,8 @@ class Settings(BaseSettings):
     sticky_session_cleanup_interval_seconds: int = Field(default=300, gt=0)
     # Data retention (0 = disabled). Non-zero values have safety floors so
     # every in-product consumer window stays inside retained data.
+    # Display-only pagination total for the request-log listing; 0 disables.
+    request_log_count_cache_ttl_seconds: float = Field(default=30.0, ge=0)
     request_log_retention_days: int = Field(default=0, ge=0, le=3650)
     usage_history_retention_days: int = Field(default=0, ge=0, le=3650)
     quota_planner_scheduler_enabled: bool = True

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 from sqlalchemy import select
 
+from app.core import usage as usage_core
 from app.core.config.settings import get_settings
 from app.core.usage.live_hub import register_live_usage_publisher
 from app.core.usage.live_snapshots import LiveRateLimitSnapshot, LiveUsageWindow
@@ -143,37 +144,62 @@ class LiveUsageIngestor:
             return
 
         snapshot = item.snapshot
+        primary = snapshot.primary
+        secondary = snapshot.secondary
+        monthly: LiveUsageWindow | None = None
+        # Mirror the poller's write-time normalization: a lone primary window
+        # with the monthly duration is the monthly-only free-plan shape and
+        # belongs in the monthly slot, not the primary one.
+        if (
+            primary is not None
+            and secondary is None
+            and primary.window_minutes == usage_core.DEFAULT_WINDOW_MINUTES_MONTHLY
+        ):
+            monthly, primary = primary, None
         async with get_background_session() as session:
             repo = UsageRepository(session)
-            if snapshot.primary is not None:
+            if primary is not None:
                 await repo.add_entry(
                     account_id=account_id,
-                    used_percent=float(snapshot.primary.used_percent),
+                    used_percent=float(primary.used_percent),
                     input_tokens=None,
                     output_tokens=None,
                     window="primary",
-                    reset_at=snapshot.primary.reset_at,
-                    window_minutes=snapshot.primary.window_minutes,
+                    reset_at=primary.reset_at,
+                    window_minutes=primary.window_minutes,
                     credits_has=snapshot.credits_has,
                     credits_unlimited=snapshot.credits_unlimited,
                     credits_balance=snapshot.credits_balance,
                 )
-            if snapshot.secondary is not None:
+            if secondary is not None:
                 # Mirror the poller: credits normally ride the primary row.
                 # A secondary-only snapshot (e.g. the short window is not
                 # being reported) must still carry the fresh credit state.
-                secondary_carries_credits = snapshot.primary is None
+                secondary_carries_credits = primary is None
                 await repo.add_entry(
                     account_id=account_id,
-                    used_percent=float(snapshot.secondary.used_percent),
+                    used_percent=float(secondary.used_percent),
                     input_tokens=None,
                     output_tokens=None,
                     window="secondary",
-                    reset_at=snapshot.secondary.reset_at,
-                    window_minutes=snapshot.secondary.window_minutes,
+                    reset_at=secondary.reset_at,
+                    window_minutes=secondary.window_minutes,
                     credits_has=snapshot.credits_has if secondary_carries_credits else None,
                     credits_unlimited=snapshot.credits_unlimited if secondary_carries_credits else None,
                     credits_balance=snapshot.credits_balance if secondary_carries_credits else None,
+                )
+            if monthly is not None:
+                await repo.add_entry(
+                    account_id=account_id,
+                    used_percent=float(monthly.used_percent),
+                    input_tokens=None,
+                    output_tokens=None,
+                    window="monthly",
+                    reset_at=monthly.reset_at,
+                    window_minutes=monthly.window_minutes,
+                    credits_has=snapshot.credits_has,
+                    credits_unlimited=snapshot.credits_unlimited,
+                    credits_balance=snapshot.credits_balance,
                 )
         self._last_write[account_id] = (_fingerprint(snapshot), time.monotonic())
         await self._invalidate_caches_throttled()

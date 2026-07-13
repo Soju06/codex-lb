@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import cast as typing_cast
@@ -11,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import InstrumentedAttribute
 from sqlalchemy.sql.elements import ColumnElement
 
+from app.core.config.settings import get_settings
 from app.core.usage.logs import RequestLogLike, calculated_cost_from_log
 from app.core.usage.types import BucketModelAggregate, RequestActivityAggregate, UsageSummaryLogsAggregate
 from app.core.utils.request_id import ensure_request_id
@@ -23,6 +25,38 @@ from app.db.session import sqlite_writer_section
 class _RequestLogFilters:
     conditions: list
     needs_related_search_joins: bool
+
+
+# The exact COUNT(*) behind the request-log listing's "X-Y of N" scans the
+# whole filtered set on PostgreSQL; the dashboard re-runs it on every 30s
+# poll and every pagination click even though the displayed total is
+# tolerant of short staleness. Cache it per filter signature for a small
+# TTL (configurable; 0 disables, which the test suite uses so totals stay
+# exact within a test).
+_COUNT_CACHE_MAX_ENTRIES = 256
+_recent_count_cache: dict[tuple, tuple[int, float]] = {}
+
+
+def _clear_recent_count_cache() -> None:
+    _recent_count_cache.clear()
+
+
+def _cached_recent_count(key: tuple) -> int | None:
+    entry = _recent_count_cache.get(key)
+    if entry is None:
+        return None
+    total, expires_at = entry
+    if time.monotonic() >= expires_at:
+        _recent_count_cache.pop(key, None)
+        return None
+    return total
+
+
+def _store_recent_count(key: tuple, total: int, ttl_seconds: float) -> None:
+    if len(_recent_count_cache) >= _COUNT_CACHE_MAX_ENTRIES:
+        oldest = min(_recent_count_cache, key=lambda existing: _recent_count_cache[existing][1])
+        _recent_count_cache.pop(oldest, None)
+    _recent_count_cache[key] = (total, time.monotonic() + ttl_seconds)
 
 
 class RequestLogsRepository:
@@ -511,7 +545,28 @@ class RequestLogsRepository:
             stmt = stmt.limit(limit)
         result = await self._session.execute(stmt)
         logs = list(result.scalars().all())
-        total = await self._count_recent(filters)
+
+        ttl_seconds = get_settings().request_log_count_cache_ttl_seconds
+        if ttl_seconds <= 0:
+            return logs, await self._count_recent(filters)
+        cache_key = (
+            search,
+            since,
+            until,
+            tuple(account_ids or ()),
+            tuple(api_key_ids or ()),
+            tuple(model_options or ()),
+            tuple(models or ()),
+            tuple(reasoning_efforts or ()),
+            include_success,
+            include_error_other,
+            tuple(sorted(error_codes_in)) if error_codes_in else None,
+            tuple(sorted(error_codes_excluding)) if error_codes_excluding else None,
+        )
+        total = _cached_recent_count(cache_key)
+        if total is None:
+            total = await self._count_recent(filters)
+            _store_recent_count(cache_key, total, ttl_seconds)
         return logs, total
 
     async def _count_recent(self, filters: _RequestLogFilters) -> int:

@@ -21,6 +21,7 @@ from sqlalchemy.engine import Connection
 
 from app.core.config.settings import get_settings
 from app.db.alembic.revision_ids import LEGACY_MIGRATION_TO_NEW_REVISION, OLD_TO_NEW_REVISION_MAP, REVISION_ID_PATTERN
+from app.db.migration_lock import migration_lock
 from app.db.migration_url import to_sync_database_url
 from app.db.models import Base
 
@@ -127,6 +128,8 @@ class MigrationState:
     has_alembic_version_table: bool
     has_legacy_migrations_table: bool
     needs_upgrade: bool
+    unknown_revisions: tuple[str, ...]
+    is_ahead: bool
 
 
 class MigrationBootstrapError(RuntimeError):
@@ -335,11 +338,14 @@ def _ensure_alembic_version_table_capacity_for_connection(connection: Connection
 
     inspector = inspect(connection)
     if not inspector.has_table(_ALEMBIC_VERSION_TABLE):
+        # IF NOT EXISTS is defense-in-depth against concurrent out-of-band
+        # `alembic upgrade` invocations that bypass run_upgrade's migration
+        # lock; the product paths are already serialized by migration_lock.
         connection.execute(
             text(
                 " ".join(
                     (
-                        f"CREATE TABLE {_ALEMBIC_VERSION_TABLE} (",
+                        f"CREATE TABLE IF NOT EXISTS {_ALEMBIC_VERSION_TABLE} (",
                         f"{_ALEMBIC_VERSION_COLUMN} VARCHAR({required_length}) NOT NULL,",
                         f"PRIMARY KEY ({_ALEMBIC_VERSION_COLUMN})",
                         ")",
@@ -481,7 +487,23 @@ def inspect_migration_state(database_url: str) -> MigrationState:
         tables = _read_table_names(connection)
         has_alembic = _ALEMBIC_VERSION_TABLE in tables
         has_legacy = _LEGACY_MIGRATIONS_TABLE in tables
-        current = _read_current_revision_from_connection(connection) if has_alembic else None
+        current_revisions = _read_current_revisions_from_connection(connection) if has_alembic else ()
+
+    if not current_revisions:
+        current = None
+    elif len(current_revisions) == 1:
+        current = current_revisions[0]
+    else:
+        current = ",".join(current_revisions)
+
+    known_revisions = _known_revisions(config)
+    unknown_revisions = tuple(
+        sorted(
+            revision
+            for revision in current_revisions
+            if revision not in known_revisions and revision not in OLD_TO_NEW_REVISION_MAP
+        )
+    )
 
     if has_alembic:
         needs_upgrade = current != head_revision
@@ -495,6 +517,8 @@ def inspect_migration_state(database_url: str) -> MigrationState:
         has_alembic_version_table=has_alembic,
         has_legacy_migrations_table=has_legacy,
         needs_upgrade=needs_upgrade,
+        unknown_revisions=unknown_revisions,
+        is_ahead=bool(unknown_revisions),
     )
 
 
@@ -601,27 +625,85 @@ def check_schema_drift(database_url: str) -> tuple[str, ...]:
     return tuple(repr(diff) for diff in diffs) + manual_diffs
 
 
+_NO_LEGACY_BOOTSTRAP = LegacyBootstrapResult(
+    stamped_revision=None,
+    legacy_row_count=0,
+    unknown_migrations=(),
+    had_non_contiguous_entries=False,
+)
+
+
+def _resolved_lock_timeout_seconds(lock_timeout_seconds: float | None) -> float:
+    if lock_timeout_seconds is not None:
+        return lock_timeout_seconds
+    return get_settings().database_migration_lock_timeout_seconds
+
+
+def _schema_ahead_error(state: MigrationState) -> MigrationBootstrapError:
+    return MigrationBootstrapError(
+        f"Database schema revision(s) {','.join(state.unknown_revisions)} are not known to this build "
+        f"(head={state.head_revision}); the schema was likely migrated by a newer version. "
+        "Deploy a matching or newer image, or run an Alembic downgrade to a revision this build knows."
+    )
+
+
 def run_upgrade(
     database_url: str,
     revision: str = "head",
     *,
     bootstrap_legacy: bool,
     auto_remap_legacy_revisions: bool = True,
+    lock_timeout_seconds: float | None = None,
 ) -> MigrationRunResult:
     config = _build_alembic_config(database_url)
+    sync_database_url = _required_sqlalchemy_url(config)
+    with migration_lock(
+        sync_database_url,
+        timeout_seconds=_resolved_lock_timeout_seconds(lock_timeout_seconds),
+    ):
+        return _run_upgrade_locked(
+            config,
+            database_url,
+            revision,
+            bootstrap_legacy=bootstrap_legacy,
+            auto_remap_legacy_revisions=auto_remap_legacy_revisions,
+        )
+
+
+def _run_upgrade_locked(
+    config: Config,
+    database_url: str,
+    revision: str,
+    *,
+    bootstrap_legacy: bool,
+    auto_remap_legacy_revisions: bool,
+) -> MigrationRunResult:
     state_before = inspect_migration_state(database_url)
+    if state_before.is_ahead:
+        raise _schema_ahead_error(state_before)
+
+    # Post-acquire re-check: a peer holding the lock first may already have
+    # migrated to head. When alembic_version exists the legacy bootstrap never
+    # stamps, and current == head means no legacy remap is pending, so skipping
+    # is safe and lets the losing replica complete startup successfully.
+    if revision == "head" and state_before.has_alembic_version_table and not state_before.needs_upgrade:
+        logger.info(
+            "Database schema already at Alembic head revision=%s; skipping upgrade "
+            "(migrations were applied by this or another replica)",
+            state_before.current_revision,
+        )
+        return MigrationRunResult(
+            current_revision=state_before.current_revision,
+            bootstrap=_NO_LEGACY_BOOTSTRAP,
+        )
+
     config.attributes["codex_lb_fresh_install"] = (
         state_before.current_revision is None
         and not state_before.has_alembic_version_table
         and not state_before.has_legacy_migrations_table
     )
 
-    bootstrap_result = LegacyBootstrapResult(
-        stamped_revision=None,
-        legacy_row_count=0,
-        unknown_migrations=(),
-        had_non_contiguous_entries=False,
-    )
+    bootstrap_result = _NO_LEGACY_BOOTSTRAP
 
     if bootstrap_legacy:
         bootstrap_result = _bootstrap_legacy_history(config)
@@ -664,10 +746,15 @@ def current_revision(database_url: str) -> str | None:
     return state.current_revision
 
 
-def stamp_revision(database_url: str, revision: str) -> None:
+def stamp_revision(database_url: str, revision: str, *, lock_timeout_seconds: float | None = None) -> None:
     config = _build_alembic_config(database_url)
-    _ensure_alembic_version_table_capacity(config)
-    command.stamp(config, revision)
+    sync_database_url = _required_sqlalchemy_url(config)
+    with migration_lock(
+        sync_database_url,
+        timeout_seconds=_resolved_lock_timeout_seconds(lock_timeout_seconds),
+    ):
+        _ensure_alembic_version_table_capacity(config)
+        command.stamp(config, revision)
 
 
 def wait_for_connection(

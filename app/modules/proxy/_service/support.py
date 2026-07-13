@@ -703,6 +703,12 @@ class _HTTPBridgeSession:
     previous_response_alias_registration_generations: dict[str, int] = field(default_factory=dict)
     last_completed_input_count: int = 0
     last_completed_response_id: str | None = None
+    # Account that owns ``last_completed_response_id``. A previous_response_id
+    # anchor is account-scoped upstream, so it may only be replayed on the same
+    # account; when the session fails over to a different account this diverges
+    # from ``account.id`` and the anchor must NOT be injected. Kept in sync with
+    # ``last_completed_response_id`` at every setter.
+    last_completed_response_account_id: str | None = None
     last_completed_input_prefix_fingerprint: str | None = None
     last_pending_tool_calls: dict[str, str] = field(default_factory=dict)
     durable_session_id: str | None = None

@@ -75,9 +75,11 @@ def test_long_instance_id_truncates_base_and_preserves_process_and_owner_room(
     from app.core.config.settings import get_settings
     from app.modules.accounts.refresh_claims import (
         _CLAIMANT_ID_MAX_LEN,
-        _PROCESS_SUFFIX,
         _compose_claimed_by,
+        _current_process_suffix,
     )
+
+    process_suffix = _current_process_suffix()
 
     monkeypatch.setenv("CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_INSTANCE_ID", "i" * 200)
     get_settings.cache_clear()
@@ -87,12 +89,12 @@ def test_long_instance_id_truncates_base_and_preserves_process_and_owner_room(
         get_settings.cache_clear()
 
     assert len(claimant_id) == _CLAIMANT_ID_MAX_LEN
-    assert claimant_id.endswith(f":{_PROCESS_SUFFIX}")
+    assert claimant_id.endswith(f":{process_suffix}")
     # Composing with a full-length (64 hex) owner fingerprint still fits 128 and
     # preserves both the process suffix and the owner discriminator.
     composed = _compose_claimed_by(claimant_id, "f" * 64)
     assert len(composed) <= 128
-    assert f":{_PROCESS_SUFFIX}" in composed
+    assert f":{process_suffix}" in composed
 
 
 def test_compose_claimed_by_distinguishes_owners_and_preserves_owner_token() -> None:
@@ -111,6 +113,73 @@ def test_compose_claimed_by_distinguishes_owners_and_preserves_owner_token() -> 
     assert len(composed_a) <= 128
     assert composed_a.endswith("a" * _CLAIM_OWNER_TOKEN_LEN)
     assert composed_b.endswith("b" * _CLAIM_OWNER_TOKEN_LEN)
+
+
+def test_process_suffix_is_stable_within_one_process() -> None:
+    """Genuine same-process re-entrancy relies on a stable claimant id: repeated
+    calls in one process MUST return the same suffix (and thus the same
+    claimant id), otherwise a crashed refresh could not reclaim its own live
+    claim via the same-claimant re-entry predicate."""
+    from app.modules.accounts.refresh_claims import _current_process_suffix
+
+    assert _current_process_suffix() == _current_process_suffix()
+    assert default_refresh_claimant_id() == default_refresh_claimant_id()
+
+
+def test_forked_children_get_distinct_claimant_ids_after_preload() -> None:
+    """Regression: the per-process suffix was frozen at module import, so in a
+    pre-fork deployment (module preloaded in the parent before workers fork)
+    every child inherited the SAME suffix. Two workers sharing one instance id
+    then built the SAME ``claimed_by`` and both satisfied the re-entrant claim
+    upsert (``claimed_by == claimed_by``), refreshing the single-use token
+    concurrently. Two forked children (same instance id, module imported before
+    the fork boundary) MUST therefore yield DISTINCT claimant ids and distinct
+    composed ``claimed_by`` values."""
+    import os
+
+    from app.modules.accounts.refresh_claims import _compose_claimed_by
+
+    # Resolve the claimant id in the parent BEFORE forking to model a preloaded
+    # module: any lazily-cached suffix is populated with the parent's identity.
+    parent_id = default_refresh_claimant_id()
+
+    def _child_claimant_id() -> str:
+        read_fd, write_fd = os.pipe()
+        pid = os.fork()
+        if pid == 0:  # pragma: no cover - runs in the forked child
+            os.close(read_fd)
+            try:
+                os.write(write_fd, default_refresh_claimant_id().encode())
+            finally:
+                os.close(write_fd)
+                os._exit(0)
+        os.close(write_fd)
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(read_fd, 4096)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        os.close(read_fd)
+        _, status = os.waitpid(pid, 0)
+        assert status == 0
+        return b"".join(chunks).decode()
+
+    child_a = _child_claimant_id()
+    child_b = _child_claimant_id()
+
+    # Same instance id (same replica) but the per-process suffix must diverge.
+    assert child_a != parent_id
+    assert child_b != parent_id
+    assert child_a != child_b
+
+    owner = "f" * 64
+    composed = {
+        _compose_claimed_by(parent_id, owner),
+        _compose_claimed_by(child_a, owner),
+        _compose_claimed_by(child_b, owner),
+    }
+    assert len(composed) == 3
 
 
 def test_claim_ttl_must_cover_admission_wait_plus_twice_the_refresh_timeout() -> None:

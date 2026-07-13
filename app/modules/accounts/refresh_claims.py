@@ -25,6 +25,8 @@ claimant can never block refresh for longer than the TTL.
 from __future__ import annotations
 
 import asyncio
+import os
+import threading
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -44,9 +46,45 @@ from app.db.session import get_background_session, sqlite_writer_section
 _SQLITE_BUSY_RETRY_ATTEMPTS = 4
 _SQLITE_BUSY_RETRY_BASE_SECONDS = 0.05
 
-# Distinguishes workers/processes sharing one bridge instance id so a claim is
-# always scoped to exactly one event loop's refresh task.
-_PROCESS_SUFFIX = uuid.uuid4().hex[:12]
+# Per-OS-process claimant suffix. Distinguishes workers/processes that share one
+# bridge instance id so a claim is always scoped to exactly one event loop's
+# refresh task. It MUST be derived per OS process and resolved lazily -- never
+# frozen at module import: in pre-fork deployments (gunicorn/uvicorn --workers
+# with a preloaded/imported-before-fork module) the parent imports this module
+# once, so a suffix captured at import time is inherited *identically* by every
+# forked child. Sibling workers sharing one instance id would then build the
+# same ``claimed_by`` string, and the re-entrant claim upsert
+# (``claimed_by == claimed_by``) would grant BOTH processes the claim, letting
+# them refresh the single-use token concurrently -- exactly the cross-process
+# race this module exists to prevent. We therefore combine the OS pid (unique
+# per process on a host) with a random component captured lazily on first use in
+# the current process, and memoize it keyed on the pid so repeated calls within
+# one process stay stable (preserving genuine same-process re-entrant claims)
+# while a fork -- which changes ``os.getpid()`` -- forces regeneration. The pid
+# handles same-host uniqueness; the instance id plus the post-fork random
+# component keep two hosts that happen to reuse an instance id and a pid apart.
+_PROCESS_SUFFIX_LOCK = threading.Lock()
+_process_suffix: str | None = None
+_process_suffix_pid: int | None = None
+
+
+def _current_process_suffix() -> str:
+    """Return this OS process's stable claimant suffix, regenerated after fork.
+
+    Resolved at call time (not at import) and memoized against the current pid,
+    so a module preloaded in a parent before forking yields distinct suffixes in
+    each child (the child's pid differs from the memoized one, forcing a fresh
+    random component) while repeated calls in one process return an identical
+    value.
+    """
+    global _process_suffix, _process_suffix_pid
+    pid = os.getpid()
+    with _PROCESS_SUFFIX_LOCK:
+        if _process_suffix is None or _process_suffix_pid != pid:
+            _process_suffix = f"{pid}-{uuid.uuid4().hex[:8]}"
+            _process_suffix_pid = pid
+        return _process_suffix
+
 
 # Width of ``account_refresh_claims.claimed_by`` (String(128)). The stored value
 # composes the claimant identity with a per-refresh owner token so that two
@@ -102,12 +140,14 @@ def default_refresh_claimant_id() -> str:
     """Claimant id fitting ``account_refresh_claims.claimed_by`` (128 chars).
 
     Overly long bridge instance ids are truncated on the instance-id portion
-    only; the per-process suffix is always preserved so two workers sharing one
-    instance id can never collapse into the same claimant (which would make the
-    re-entrant claim upsert grant both of them the claim concurrently).
+    only; the per-OS-process suffix (see ``_current_process_suffix``) is always
+    preserved so two workers sharing one instance id -- including forked
+    children of a preloaded process -- can never collapse into the same claimant
+    (which would make the re-entrant claim upsert grant both of them the claim
+    concurrently).
     """
     instance_id = get_settings().http_responses_session_bridge_instance_id
-    suffix = f":{_PROCESS_SUFFIX}"
+    suffix = f":{_current_process_suffix()}"
     # Reserve room for the per-refresh owner suffix appended at claim time
     # (see ``_compose_claimed_by``) so the composed ``claimed_by`` fits the
     # column without ever truncating the process suffix or the owner token.

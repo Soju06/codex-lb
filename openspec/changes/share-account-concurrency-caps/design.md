@@ -37,9 +37,10 @@ When `cap < R`, ranks beyond the remainder would get 0 slots and the account wou
 
 ### D3: Direction-aware hysteresis on membership changes
 
-- Count increase (scale-up) or equal-count churn: adopt immediately. Shares only shrink or shift by one slot — safe toward upstream.
-- Count decrease (scale-down): adopt only after the lower count has been observed continuously for `proxy_account_cap_partition_scale_down_seconds` (default 60s, `ge=30`). A single missed heartbeat (stale threshold 30s) recovers within one 10s heartbeat interval, so it never survives the window; a real scale-down is adopted ~60-70s after the last heartbeat. During the window survivors keep their smaller shares (under-admission, safe).
-- A pending lower count at a *different* lower count restarts the window; observing the adopted count again clears the pending state.
+- Hysteresis is keyed on the direction of *this replica's share*, not just the member count: with the count fixed, an earlier rank can only grow the share (it may cross the `cap mod R` remainder threshold) and a later rank can only shrink it.
+- Count increase (scale-up), or equal-count churn toward a later rank: adopt immediately — shares only shrink or stay put, safe toward upstream.
+- Count decrease (scale-down), or equal-count churn toward an earlier rank (rolling replacement: a draining member is swapped for a new instance id while the count stays constant): adopt only after the share-growing observation has been held continuously for `proxy_account_cap_partition_scale_down_seconds` (default 60s, `ge=30`). A single missed heartbeat (stale threshold 30s) recovers within one 10s heartbeat interval, so it never survives the window; a real scale-down is adopted ~60-70s after the last heartbeat. During the window survivors keep their smaller shares (under-admission, safe).
+- A pending share-growing observation at a *different* member count restarts the window; observing the adopted partition again clears the pending state.
 
 ### D4: Fail-closed refresh, self always counted
 

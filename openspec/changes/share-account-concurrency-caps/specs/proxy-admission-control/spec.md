@@ -32,7 +32,7 @@ For `/v1/responses`, `/backend-api/codex/responses`, and compact Responses traff
 
 ### Requirement: Account concurrency caps are partitioned across live replicas
 
-Each replica MUST derive its local share of every configured account concurrency cap deterministically from the sorted active bridge-ring member list: with `R` active members and this replica at rank `k` in instance-id order, the share MUST be `floor(cap / R)` plus one extra slot when `k < cap mod R`, floored at one slot so an account never becomes unroutable on a replica; a nonpositive configured cap MUST remain unlimited on every replica. Partition derivation MUST NOT add database reads to the request or admission path; it MUST refresh from bridge-ring registration and heartbeat ticks, and the observing replica MUST count itself even when its own ring row is missing or stale. When the active member count increases, the smaller shares MUST be adopted on the next refresh; when it decreases, the larger shares MUST NOT be adopted until the lower count has been observed continuously for the configured stability window (`proxy_account_cap_partition_scale_down_seconds`, default 60 seconds, minimum 30). A failed membership read MUST retain the last adopted partition. Setting `proxy_account_caps_scope` to `replica` MUST restore per-replica cap semantics, and a replica that observes no other active member MUST use the full configured caps.
+Each replica MUST derive its local share of every configured account concurrency cap deterministically from the sorted active bridge-ring member list: with `R` active members and this replica at rank `k` in instance-id order, the share MUST be `floor(cap / R)` plus one extra slot when `k < cap mod R`, floored at one slot so an account never becomes unroutable on a replica; a nonpositive configured cap MUST remain unlimited on every replica. Partition derivation MUST NOT add database reads to the request or admission path; it MUST refresh from bridge-ring registration and heartbeat ticks, and the observing replica MUST count itself even when its own ring row is missing or stale. Membership changes that cannot grow this replica's share (a member-count increase, or same-count churn that moves this replica to a later rank) MUST be adopted on the next refresh; membership changes that would grow this replica's share (a member-count decrease, or same-count churn that moves this replica to an earlier rank, as during a rolling replacement) MUST NOT be adopted until the share-growing observation has been held continuously for the configured stability window (`proxy_account_cap_partition_scale_down_seconds`, default 60 seconds, minimum 30). A failed membership read MUST retain the last adopted partition. Setting `proxy_account_caps_scope` to `replica` MUST restore per-replica cap semantics, and a replica that observes no other active member MUST use the full configured caps.
 
 #### Scenario: Shares sum to the configured cap
 
@@ -60,6 +60,13 @@ Each replica MUST derive its local share of every configured account concurrency
 - **WHEN** one replica's heartbeat goes stale and recovers within the window
 - **THEN** the surviving replica keeps its two-way share throughout
 - **AND** the two-way partition is only replaced after the lower count is observed continuously for the full window
+
+#### Scenario: Same-count churn does not grow a share early
+
+- **GIVEN** two active replicas and a scale-down stability window of 60 seconds
+- **WHEN** the other replica drains while a new instance id appears, keeping the member count at 2 but moving this replica to an earlier rank
+- **THEN** this replica keeps its previous rank's share until the churned membership has been observed continuously for the full window
+- **AND** same-count churn that moves this replica to a later rank is adopted on that refresh
 
 #### Scenario: Failed membership read retains the partition
 

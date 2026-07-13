@@ -136,13 +136,58 @@ def test_holder_restarts_window_when_lower_count_changes() -> None:
     assert holder.current == CapPartition(replica_count=1, rank=0)
 
 
-def test_holder_adopts_same_count_membership_churn_immediately() -> None:
-    holder = CapPartitionHolder(clock=_Clock())
+def test_holder_defers_same_count_churn_that_grows_share_until_window_elapses() -> None:
+    clock = _Clock()
+    holder = CapPartitionHolder(clock=clock)
     holder.observe_members(["replica-a", "replica-b"], "replica-b", scale_down_seconds=60.0)
     assert holder.current == CapPartition(replica_count=2, rank=1)
 
-    changed = holder.observe_members(["replica-b", "replica-c"], "replica-b", scale_down_seconds=60.0)
+    # Rolling replacement: replica-a drains while replica-c appears, so the
+    # count stays 2 but this replica's rank (and thus its remainder share)
+    # would grow — the stability window must apply.
+    assert holder.observe_members(["replica-b", "replica-c"], "replica-b", scale_down_seconds=60.0) is False
+    assert holder.current == CapPartition(replica_count=2, rank=1)
+
+    clock.advance(59.0)
+    assert holder.observe_members(["replica-b", "replica-c"], "replica-b", scale_down_seconds=60.0) is False
+    assert holder.current == CapPartition(replica_count=2, rank=1)
+
+    clock.advance(1.0)
+    assert holder.observe_members(["replica-b", "replica-c"], "replica-b", scale_down_seconds=60.0) is True
+    assert holder.current == CapPartition(replica_count=2, rank=0)
+
+
+def test_holder_adopts_same_count_churn_toward_later_rank_immediately() -> None:
+    holder = CapPartitionHolder(clock=_Clock())
+    holder.observe_members(["replica-b", "replica-c"], "replica-b", scale_down_seconds=60.0)
+    assert holder.current == CapPartition(replica_count=2, rank=0)
+
+    # Same-size churn that moves this replica to a later rank only shrinks
+    # its share — safe toward upstream, adopted on this refresh.
+    changed = holder.observe_members(["replica-a", "replica-b"], "replica-b", scale_down_seconds=60.0)
     assert changed is True
+    assert holder.current == CapPartition(replica_count=2, rank=1)
+
+
+def test_holder_same_count_churn_flap_recovery_clears_pending_increase() -> None:
+    clock = _Clock()
+    holder = CapPartitionHolder(clock=clock)
+    holder.observe_members(["replica-a", "replica-b"], "replica-b", scale_down_seconds=60.0)
+
+    holder.observe_members(["replica-b", "replica-c"], "replica-b", scale_down_seconds=60.0)
+    clock.advance(30.0)
+    # replica-a's heartbeat recovers inside the window: keep the adopted rank.
+    assert holder.observe_members(["replica-a", "replica-b"], "replica-b", scale_down_seconds=60.0) is False
+    assert holder.current == CapPartition(replica_count=2, rank=1)
+
+    # A later share-growing churn must run the full window again.
+    clock.advance(10.0)
+    holder.observe_members(["replica-b", "replica-c"], "replica-b", scale_down_seconds=60.0)
+    clock.advance(59.0)
+    assert holder.observe_members(["replica-b", "replica-c"], "replica-b", scale_down_seconds=60.0) is False
+    assert holder.current == CapPartition(replica_count=2, rank=1)
+    clock.advance(1.0)
+    assert holder.observe_members(["replica-b", "replica-c"], "replica-b", scale_down_seconds=60.0) is True
     assert holder.current == CapPartition(replica_count=2, rank=0)
 
 

@@ -1282,9 +1282,13 @@ class ProxyService(
         if bridge_session is not None:
             # Bridged requests retry gate acquisition within the bridge
             # request budget; a final attempt must not run past it, so each
-            # acquisition wait is clamped to the remaining budget.
-            budget_seconds = _http_bridge_request_budget_seconds(get_settings())
-            remaining_budget = request_state.started_at + budget_seconds - time.monotonic()
+            # acquisition wait is clamped to the remaining budget. Retry
+            # states carry the original deadline because their started_at
+            # is reset when they are re-prepared.
+            deadline = request_state.bridge_request_deadline
+            if deadline is None:
+                deadline = request_state.started_at + _http_bridge_request_budget_seconds(get_settings())
+            remaining_budget = deadline - time.monotonic()
             timeout_seconds = max(0.0, min(timeout_seconds, remaining_budget))
         request_state.response_create_gate = response_create_gate
         request_state.response_create_gate_wait_started_at = time.monotonic()

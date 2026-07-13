@@ -1836,6 +1836,7 @@ class _HTTPBridgeStreamingMixin:
     ) -> AsyncGenerator[str, None]:
         if request_deadline is None:
             request_deadline = request_state.started_at + _http_bridge_request_budget_seconds(_service_get_settings())
+        request_state.bridge_request_deadline = request_deadline
         while True:
             try:
                 await self._submit_http_bridge_request(

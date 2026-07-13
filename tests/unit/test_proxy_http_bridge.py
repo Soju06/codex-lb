@@ -1131,6 +1131,51 @@ async def test_http_bridge_submit_waits_for_response_create_gate_contention(
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_stream_persists_original_deadline_on_request_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="sid-deadline-persist")
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-deadline-persist",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        # Retry/recovery states are re-prepared with a fresh started_at;
+        # the original deadline must still govern budget clamps.
+        started_at=time.monotonic(),
+        transport="http",
+        event_queue=asyncio.Queue(),
+    )
+    assert request_state.event_queue is not None
+    request_state.event_queue.put_nowait(
+        'data: {"type":"response.completed","response":{"id":"resp_deadline_persist"}}\n\n'
+    )
+    request_state.event_queue.put_nowait(None)
+    submit = AsyncMock(return_value=None)
+    detach = AsyncMock()
+    settings = _make_app_settings()
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_submit_http_bridge_request", submit)
+    monkeypatch.setattr(service, "_detach_http_bridge_request", detach)
+
+    explicit_deadline = time.monotonic() + 42.0
+    async for _ in service._stream_http_bridge_session_events(
+        session,
+        request_state=request_state,
+        text_data='{"type":"response.create"}',
+        queue_limit=4,
+        propagate_http_errors=False,
+        downstream_turn_state=None,
+        request_deadline=explicit_deadline,
+    ):
+        pass
+
+    assert request_state.bridge_request_deadline == pytest.approx(explicit_deadline)
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_gate_contention_retry_fails_fast_when_queue_full(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

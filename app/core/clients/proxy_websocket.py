@@ -157,11 +157,15 @@ class WebsocketsResponsesWebSocket:
         except ConnectionClosedError as exc:
             error_code = _websocket_transport_error_code(exc, uses_proxy=self._uses_proxy)
             await _rotate_after_websocket_network_failure(error_code)
+            # ConnectionClosedError describes an incomplete close handshake,
+            # not generic transport provenance. Let relay owners map ordinary
+            # closes to stream_incomplete while preserving classified network failures.
+            relay_error_code = error_code if error_code == PROCESS_NETWORK_UNAVAILABLE_CODE else None
             return UpstreamWebSocketMessage(
                 kind="error",
                 close_code=_close_code_from_exception(exc),
                 error=str(exc),
-                error_code=error_code,
+                error_code=relay_error_code,
             )
         except Exception as exc:
             error_code = _websocket_transport_error_code(exc, uses_proxy=self._uses_proxy)

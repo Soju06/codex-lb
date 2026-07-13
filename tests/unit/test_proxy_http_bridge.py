@@ -16,6 +16,8 @@ import aiohttp
 import anyio
 import pytest
 from fastapi import WebSocket
+from websockets.exceptions import ConnectionClosedError
+from websockets.frames import Close
 
 from app.core.auth.refresh import RefreshError
 from app.core.clients.proxy import CODEX_RESPONSES_LITE_WEBSOCKET_METADATA_KEY, ProxyResponseError
@@ -24,6 +26,7 @@ from app.core.clients.proxy_websocket import (
     UpstreamResponsesWebSocket,
     UpstreamWebSocketMessage,
     UpstreamWebSocketTransportError,
+    WebsocketsResponsesWebSocket,
 )
 from app.core.config.settings import Settings
 from app.core.errors import openai_error
@@ -14033,6 +14036,44 @@ async def test_http_bridge_reader_preserves_routed_aiohttp_close_code(
     assert session.last_upstream_close_code == 1011
     assert session.closed is True
     routed_websocket.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_reader_maps_ordinary_websocket_close_to_stream_incomplete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+
+    class _OrdinaryCloseConnection:
+        async def recv(self) -> str:
+            raise ConnectionClosedError(Close(1011, "boom"), None)
+
+        async def close(self) -> None:
+            return None
+
+    session = _make_bridge_session(key_value="bridge-ordinary-close")
+    session.upstream = WebsocketsResponsesWebSocket(cast(Any, _OrdinaryCloseConnection()))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", AsyncMock(return_value=False))
+    failure_calls: list[dict[str, object]] = []
+
+    async def fail_reader(
+        target_session: proxy_service._HTTPBridgeSession,
+        **kwargs: object,
+    ) -> bool:
+        assert target_session is session
+        failure_calls.append(dict(kwargs))
+        target_session.closed = True
+        return True
+
+    monkeypatch.setattr(service, "_fail_http_bridge_reader_and_maybe_retire", fail_reader)
+
+    await service._relay_http_bridge_upstream_messages(session)
+
+    assert session.last_upstream_close_code == 1011
+    assert len(failure_calls) == 1
+    assert failure_calls[0]["error_code"] == "stream_incomplete"
+    assert failure_calls[0]["penalize_account"] is True
 
 
 @pytest.mark.asyncio

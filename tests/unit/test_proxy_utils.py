@@ -23,12 +23,14 @@ from aiohttp.client_reqrep import ConnectionKey, RequestInfo
 from fastapi import WebSocket
 from starlette.requests import Request
 from starlette.responses import StreamingResponse
+from websockets.exceptions import ConnectionClosedError
+from websockets.frames import Close
 
 import app.core.clients.proxy as proxy_module
 import app.core.resilience.network_recovery as network_recovery_module
 import app.modules.proxy.load_balancer as load_balancer_module
 from app.core.clients.proxy import _build_upstream_headers, filter_inbound_headers
-from app.core.clients.proxy_websocket import UpstreamWebSocketTransportError
+from app.core.clients.proxy_websocket import UpstreamWebSocketTransportError, WebsocketsResponsesWebSocket
 from app.core.config.settings import Settings
 from app.core.crypto import TokenEncryptor
 from app.core.errors import openai_error
@@ -20326,6 +20328,75 @@ async def test_relay_upstream_websocket_network_failure_is_neutral_and_not_repla
     handle_stream_error.assert_not_awaited()
     terminal = json.loads(downstream.sent_text[-1])
     assert terminal["response"]["error"]["code"] == "proxy_network_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_relay_upstream_websocket_ordinary_close_is_stream_incomplete_and_penalized(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    handle_stream_error = AsyncMock()
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    monkeypatch.setattr(service, "_release_websocket_request_state_reservation", AsyncMock())
+
+    class _FakeDownstreamWebSocket:
+        def __init__(self) -> None:
+            self.sent_text: list[str] = []
+
+        async def send_text(self, text: str) -> None:
+            self.sent_text.append(text)
+
+        async def close(self, code: int = 1000, reason: str | None = None) -> None:
+            del code, reason
+
+    class _OrdinaryCloseConnection:
+        async def recv(self) -> str:
+            raise ConnectionClosedError(Close(1011, "boom"), None)
+
+        async def close(self) -> None:
+            return None
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_ordinary_close",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        request_text='{"type":"response.create","model":"gpt-5.1","input":"hi"}',
+        awaiting_response_created=True,
+        downstream_visible=True,
+    )
+    pending_requests = deque([request_state])
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    downstream = _FakeDownstreamWebSocket()
+    account = _make_account("acc_ws_ordinary_close")
+    upstream = WebsocketsResponsesWebSocket(cast(Any, _OrdinaryCloseConnection()))
+
+    await service._relay_upstream_websocket_messages(
+        cast(WebSocket, downstream),
+        upstream,
+        account=account,
+        account_id_value=account.id,
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        client_send_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=upstream_control,
+        response_create_gate=asyncio.Semaphore(1),
+        proxy_request_budget_seconds=5.0,
+        stream_idle_timeout_seconds=5.0,
+        downstream_activity=proxy_service._DownstreamWebSocketActivity(),
+    )
+
+    assert upstream_control.reconnect_requested is False
+    assert list(pending_requests) == []
+    terminal = json.loads(downstream.sent_text[-1])
+    assert terminal["response"]["error"]["code"] == "stream_incomplete"
+    handle_stream_error.assert_awaited_once()
+    handle_stream_error_args = handle_stream_error.await_args
+    assert handle_stream_error_args is not None
+    assert handle_stream_error_args.args[0] is account
+    assert handle_stream_error_args.args[2] == "stream_incomplete"
 
 
 @pytest.mark.asyncio

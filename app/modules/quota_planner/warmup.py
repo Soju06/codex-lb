@@ -126,22 +126,14 @@ class QuotaWarmupService:
             )
         assert account is not None
 
-        claimed = await self._planner.update_decision_status(
+        claimed = await self._planner.claim_warmup_decision(
             decision.id,
-            status="executing",
-            reason="warmup_executing",
-            expected_status="planned",
+            since=_local_midnight(),
+            max_warmups=settings.max_warmups_per_day,
+            max_credits=settings.max_warmup_credits_per_day,
         )
         if claimed is None:
-            current = await self._planner.get_decision(decision.id)
-            if current is None:
-                return WarmupExecutionResult(decision_id=decision.id, status="skipped", reason="decision_missing")
-            return WarmupExecutionResult(
-                decision_id=current.id,
-                status=current.status,
-                reason=current.reason or f"decision_{current.status}",
-                executed_at=current.executed_at,
-            )
+            return await self._resolve_refused_claim(decision_id=decision.id, settings=settings)
 
         reservation_id: str | None = None
         if api_key_id is not None:
@@ -314,6 +306,49 @@ class QuotaWarmupService:
         except Exception:
             logger.exception("Failed to record quota warmup effect", extra={"account_id": account.id, "model": model})
 
+    async def _resolve_refused_claim(
+        self,
+        *,
+        decision_id: str,
+        settings: PlannerSettings,
+    ) -> WarmupExecutionResult:
+        """Map a refused planned -> executing claim to a decision outcome.
+
+        The claim UPDATE returns no row either because a concurrent worker
+        already moved the decision out of ``planned`` or because a daily budget
+        guard failed. Re-read the decision fresh (the identity map may hold a
+        stale snapshot) to distinguish the two, then re-run the budget counts to
+        pick the matching budget-exhausted reason.
+        """
+        current = await self._planner.get_decision_fresh(decision_id)
+        if current is None:
+            return WarmupExecutionResult(decision_id=decision_id, status="skipped", reason="decision_missing")
+        if current.status != "planned":
+            return WarmupExecutionResult(
+                decision_id=current.id,
+                status=current.status,
+                reason=current.reason or f"decision_{current.status}",
+                executed_at=current.executed_at,
+            )
+        today = _local_midnight()
+        active_today = await self._planner.count_active_warmups_since(today)
+        if active_today >= settings.max_warmups_per_day:
+            reason = "daily_warmup_count_budget_exhausted"
+        else:
+            reason = "daily_warmup_credit_budget_exhausted"
+        row = await self._planner.update_decision_status(
+            decision_id,
+            status="skipped",
+            reason=reason,
+            expected_status="planned",
+        )
+        return await self._result_from_update_or_current(
+            decision_id=decision_id,
+            row=row,
+            fallback_status="skipped",
+            fallback_reason=reason,
+        )
+
     async def _result_from_update_or_current(
         self,
         *,
@@ -379,9 +414,11 @@ class QuotaWarmupService:
         if latest is not None and latest.reset_at is not None and latest.reset_at > int(utcnow().timestamp()):
             return False, "account_window_already_active"
 
-        today = utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-        executed_today = await self._planner.count_executed_warmups_since(today)
-        if executed_today >= settings.max_warmups_per_day:
+        # Advisory pre-check only: the authoritative budget enforcement happens
+        # inside the atomic planned -> executing claim (claim_warmup_decision).
+        today = _local_midnight()
+        active_today = await self._planner.count_active_warmups_since(today)
+        if active_today >= settings.max_warmups_per_day:
             return False, "daily_warmup_count_budget_exhausted"
         spent_today = await self._planner.warmup_cost_since(today)
         if settings.max_warmup_credits_per_day <= 0 or spent_today >= settings.max_warmup_credits_per_day:
@@ -453,6 +490,10 @@ class QuotaWarmupService:
             primary_reset_at=observed_after.reset_at if observed_after else None,
             confidence=effective_confidence,
         )
+
+
+def _local_midnight() -> datetime:
+    return utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
 
 
 def _usage_history_is_fresh(before: object | None, after: object | None) -> bool:

@@ -1,3 +1,7 @@
+# NOTE: This Compose file defines a SINGLE-REPLICA topology.
+# Do not use `docker compose up --scale server=N` — the SQLite default supports
+# only one writer and the published host ports collide. Multi-replica deployments
+# require the Helm chart with PostgreSQL and leader election (deploy/helm/codex-lb).
 services:
   server:
     build:
@@ -9,14 +13,17 @@ services:
       - "2455:2455"
       - "1455:1455"
     command:
-      - fastapi
-      - run
-      - app/main.py
+      # uvicorn directly (not `fastapi run`) so --ws-max-size matches the
+      # websocket ingress budget that app.cli applies in production.
+      - uvicorn
+      - app.main:app
       - --host
       - 0.0.0.0
       - --port
       - "2455"
       - --reload
+      - --ws-max-size
+      - "134217728"
     volumes:
       - codex-lb-data:/var/lib/codex-lb
     develop:

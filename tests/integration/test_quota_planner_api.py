@@ -119,14 +119,17 @@ async def test_quota_planner_repository_persists_naive_utc_decision_datetimes(mo
     # raises "can't subtract offset-naive and offset-aware datetimes" if these are aware,
     # so the repository MUST sanitize them before persistence.
     bound_scheduled: list[object] = []
-    original_add = AsyncSession.add
+    original_insert_scalar = AsyncSession.scalar
 
-    def capture_add(self, instance, *args, **kwargs):
-        if isinstance(instance, QuotaPlannerDecision):
-            bound_scheduled.append(instance.scheduled_at)
-        return original_add(self, instance, *args, **kwargs)
+    async def capture_insert_scalar(self, statement, *args, **kwargs):
+        values = getattr(statement, "_values", None)
+        if values:
+            for col, bind in values.items():
+                if getattr(col, "name", None) == "scheduled_at":
+                    bound_scheduled.append(getattr(bind, "value", bind))
+        return await original_insert_scalar(self, statement, *args, **kwargs)
 
-    monkeypatch.setattr(AsyncSession, "add", capture_add)
+    monkeypatch.setattr(AsyncSession, "scalar", capture_insert_scalar)
 
     async with SessionLocal() as session:
         repo = QuotaPlannerRepository(session)
@@ -141,7 +144,7 @@ async def test_quota_planner_repository_persists_naive_utc_decision_datetimes(mo
             status="planned",
         )
 
-    assert bound_scheduled, "log_decision should construct a decision row"
+    assert bound_scheduled, "log_decision should bind scheduled_at on its insert"
     bound_value = bound_scheduled[-1]
     assert isinstance(bound_value, datetime)
     # Guards the Postgres path: timezone-naive columns must not receive aware datetimes.

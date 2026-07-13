@@ -3446,7 +3446,7 @@ def test_websocket_installation_metadata_stamping_rechecks_response_create_size(
     with pytest.raises(proxy_service.ProxyResponseError) as exc_info:
         websocket_mixin._websocket_enforce_response_create_text_size(request_state, stamped_text)
 
-    assert exc_info.value.status_code == 413
+    assert exc_info.value.status_code == 400
     assert exc_info.value.payload["error"]["code"] == "payload_too_large"
 
 
@@ -4965,6 +4965,39 @@ async def test_iter_sse_events_accepts_cr_only_blank_line_separator():
 
 
 @pytest.mark.asyncio
+async def test_iter_sse_events_separator_straddles_chunk_boundary():
+    """The scan cursor backs up by the separator overlap, so a \r\n\r\n
+    split across two reads must still terminate the event."""
+    event = b'data: {"type":"response.completed"}\r\n\r\ndata: {"type":"next"}\n\n'
+    split = event.index(b"\r\n\r\n") + 2  # split in the middle of the separator
+    response = _DummyResponse([event[:split], event[split:]])
+    stream = proxy_module._iter_sse_events(cast(proxy_module.SSEResponse, response), 1.0, 4096)
+
+    chunks = [chunk async for chunk in stream]
+
+    assert chunks == [
+        'data: {"type":"response.completed"}\r\n\r\n',
+        'data: {"type":"next"}\n\n',
+    ]
+
+
+@pytest.mark.asyncio
+async def test_iter_sse_events_multiple_events_in_one_chunk_after_large_partial():
+    """After a large partial event completes, the residual buffer must be
+    rescanned from the start (cursor reset) so following events pop."""
+    big = b"A" * 8192
+    payload = b'data: {"big":"' + big + b'"}\n\ndata: one\n\ndata: two\n\n'
+    response = _DummyResponse([payload[:1000], payload[1000:5000], payload[5000:]])
+    stream = proxy_module._iter_sse_events(cast(proxy_module.SSEResponse, response), 1.0, 64 * 1024)
+
+    chunks = [chunk async for chunk in stream]
+
+    assert len(chunks) == 3
+    assert chunks[1] == "data: one\n\n"
+    assert chunks[2] == "data: two\n\n"
+
+
+@pytest.mark.asyncio
 async def test_iter_sse_events_raises_on_event_size_limit():
     large_data = b"A" * 1024
     response = _DummyResponse([b"data: ", large_data])
@@ -6467,7 +6500,7 @@ async def test_stream_responses_websocket_rejects_oversized_response_create_befo
             )
         ]
 
-    assert exc_info.value.status_code == 413
+    assert exc_info.value.status_code == 400
     assert exc_info.value.payload["error"]["code"] == "payload_too_large"
     assert session.ws_calls == []
 
@@ -14900,7 +14933,7 @@ async def test_prepare_websocket_response_create_request_releases_reservation_on
             api_key=api_key,
         )
 
-    assert exc_info.value.status_code == 413
+    assert exc_info.value.status_code == 400
     release_usage.assert_awaited_once_with(reservation)
 
 
@@ -16011,7 +16044,7 @@ async def test_prepare_websocket_full_replay_rejects_oversized_unslimmable_paylo
             continuity_state=continuity_state,
         )
 
-    assert exc_info.value.status_code == 413
+    assert exc_info.value.status_code == 400
     assert exc_info.value.payload["error"]["code"] == "payload_too_large"
 
 
@@ -30205,7 +30238,7 @@ async def test_inline_http_bridge_image_urls_rechecks_expanded_payload_size(monk
     with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
         await service._inline_http_bridge_image_urls(text_data, request_state)
 
-    assert exc_info.value.status_code == 413
+    assert exc_info.value.status_code == 400
     assert exc_info.value.failure_phase == "validation"
     assert request_state.request_text is not None
     assert "data:image/png;base64," in request_state.request_text

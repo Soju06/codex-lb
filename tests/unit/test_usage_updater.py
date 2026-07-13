@@ -711,6 +711,135 @@ async def test_force_refresh_usage_keeps_rate_limited_account_without_primary_or
 
 
 @pytest.mark.asyncio
+async def test_recover_keeps_rate_limited_account_during_persisted_retry_after_cooldown() -> None:
+    accounts_repo = StubAccountsRepository()
+    updater = UsageUpdater(StubUsageRepository(), accounts_repo)
+    account = _make_account("acc_retry_after_cooldown", "workspace_retry_after_cooldown")
+    account.status = AccountStatus.RATE_LIMITED
+    account.deactivation_reason = None
+    now = int(time.time())
+    # A 429 with a 20-minute Retry-After persisted blocked_at + reset_at.
+    account.blocked_at = now - 60
+    account.reset_at = now + 1140
+    accounts_repo.accounts_by_id[account.id] = account
+
+    await updater._recover_quota_status_from_usage(
+        account,
+        primary=usage_updater_module.UsageWindow(used_percent=0.0),
+        secondary=usage_updater_module.UsageWindow(used_percent=10.0),
+    )
+
+    assert accounts_repo.status_updates == []
+    assert account.status == AccountStatus.RATE_LIMITED
+    assert account.reset_at == now + 1140
+    assert account.blocked_at == now - 60
+
+
+@pytest.mark.asyncio
+async def test_recover_keeps_rate_limited_account_during_legacy_blocked_at_floor() -> None:
+    accounts_repo = StubAccountsRepository()
+    updater = UsageUpdater(StubUsageRepository(), accounts_repo)
+    account = _make_account("acc_legacy_floor", "workspace_legacy_floor")
+    account.status = AccountStatus.RATE_LIMITED
+    account.deactivation_reason = None
+    now = int(time.time())
+    # Legacy 429 row written before cooldown persistence: blocked_at only.
+    account.blocked_at = now - 5
+    account.reset_at = None
+    accounts_repo.accounts_by_id[account.id] = account
+
+    await updater._recover_quota_status_from_usage(
+        account,
+        primary=usage_updater_module.UsageWindow(used_percent=0.0),
+        secondary=usage_updater_module.UsageWindow(used_percent=10.0),
+    )
+
+    assert accounts_repo.status_updates == []
+    assert account.status == AccountStatus.RATE_LIMITED
+    assert account.blocked_at == now - 5
+
+
+@pytest.mark.asyncio
+async def test_recover_restores_rate_limited_account_after_persisted_cooldown_elapses() -> None:
+    accounts_repo = StubAccountsRepository()
+    updater = UsageUpdater(StubUsageRepository(), accounts_repo)
+    account = _make_account("acc_cooldown_elapsed", "workspace_cooldown_elapsed")
+    account.status = AccountStatus.RATE_LIMITED
+    account.deactivation_reason = None
+    now = int(time.time())
+    account.blocked_at = now - 1300
+    account.reset_at = now - 10
+    accounts_repo.accounts_by_id[account.id] = account
+
+    await updater._recover_quota_status_from_usage(
+        account,
+        primary=usage_updater_module.UsageWindow(used_percent=0.0),
+        secondary=usage_updater_module.UsageWindow(used_percent=10.0),
+    )
+
+    assert accounts_repo.status_updates == [
+        {
+            "account_id": account.id,
+            "status": AccountStatus.ACTIVE,
+            "deactivation_reason": None,
+            "reset_at": None,
+            "blocked_at": None,
+        },
+    ]
+    assert account.status == AccountStatus.ACTIVE
+    assert account.reset_at is None
+    assert account.blocked_at is None
+
+
+@pytest.mark.asyncio
+async def test_usage_refresh_keeps_rate_limited_retry_after_cooldown(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+
+    async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: Any) -> UsagePayload:
+        del access_token, account_id
+        return UsagePayload.model_validate(
+            {
+                "rate_limit": {
+                    "primary_window": {
+                        "used_percent": 0.0,
+                        "reset_at": 1735689600,
+                        "limit_window_seconds": 60,
+                    },
+                    "secondary_window": {
+                        "used_percent": 10.0,
+                        "reset_at": 1736208000,
+                        "limit_window_seconds": 7 * 24 * 60 * 60,
+                    },
+                }
+            }
+        )
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+    # 60s after the 429, well before the 20-minute Retry-After deadline.
+    monkeypatch.setattr("app.modules.usage.updater.time.time", lambda: 1735600060.0)
+
+    usage_repo = StubUsageRepository(return_rows=True)
+    accounts_repo = StubAccountsRepository()
+    updater = UsageUpdater(usage_repo, accounts_repo=accounts_repo)
+    account = _make_account("acc_rate_limited_retry_after", "workspace_shared")
+    account.status = AccountStatus.RATE_LIMITED
+    account.reset_at = 1735601200
+    account.blocked_at = 1735600000
+    accounts_repo.accounts_by_id[account.id] = account
+
+    await updater.refresh_accounts([account], latest_usage={})
+
+    assert usage_repo.entries, "expected the refresh to fetch and store fresh usage"
+    assert account.status == AccountStatus.RATE_LIMITED
+    assert account.reset_at == 1735601200
+    assert account.blocked_at == 1735600000
+    assert accounts_repo.status_updates == []
+
+
+@pytest.mark.asyncio
 async def test_force_refresh_bypasses_fresh_usage_cache(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
     from app.core.config.settings import get_settings

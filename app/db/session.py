@@ -335,11 +335,20 @@ async def init_db() -> None:
         )
         if migration_state.needs_upgrade:
             current_revision = migration_state.current_revision or "none"
-            message = (
-                "Startup database migration is disabled but database schema is behind Alembic head "
-                f"(current={current_revision}, head={migration_state.head_revision}). "
-                "Run the dedicated migration job or `python -m app.db.migrate upgrade` before starting the app."
-            )
+            if migration_state.is_ahead:
+                unknown_revisions = ",".join(migration_state.unknown_revisions)
+                message = (
+                    "Startup database migration is disabled and database schema revision(s) "
+                    f"{unknown_revisions} are not known to this build (head={migration_state.head_revision}). "
+                    "The schema was likely migrated by a newer version; deploy a matching or newer image, "
+                    "or run an Alembic downgrade to a revision this build knows."
+                )
+            else:
+                message = (
+                    "Startup database migration is disabled but database schema is behind Alembic head "
+                    f"(current={current_revision}, head={migration_state.head_revision}). "
+                    "Run the dedicated migration job or `python -m app.db.migrate upgrade` before starting the app."
+                )
             logger.error(message)
             raise RuntimeError(message)
 

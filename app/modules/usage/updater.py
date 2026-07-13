@@ -15,6 +15,7 @@ from app.core.auth.refresh import RefreshError
 from app.core.balancer import (
     PERMANENT_FAILURE_CODES,
     QUOTA_EXCEEDED_COOLDOWN_SECONDS,
+    RATE_LIMITED_MIN_COOLDOWN_SECONDS,
     account_status_for_permanent_failure,
 )
 from app.core.clients.usage import UsageFetchError, fetch_usage
@@ -741,6 +742,24 @@ class UsageUpdater:
         if not self._auth_manager:
             return
         if account.status == AccountStatus.RATE_LIMITED:
+            if account.blocked_at is not None:
+                # An account marked RATE_LIMITED by an actual 429 always
+                # carries a blocked_at marker. Honor the persisted cooldown
+                # deadline (Retry-After hint, upstream reset metadata, or the
+                # backoff floor) so the periodic usage refresh cannot flip the
+                # account back to ACTIVE — erasing reset_at that peer replicas
+                # rely on — while the upstream cooldown is still running.
+                # Fresh usage showing quota is not evidence the 429 window
+                # ended: throttles are not always quota-based. Rows without
+                # blocked_at are stale window-derived markings and keep the
+                # fresh-usage recovery below.
+                cooldown_deadline = (
+                    float(account.reset_at)
+                    if account.reset_at
+                    else float(account.blocked_at) + RATE_LIMITED_MIN_COOLDOWN_SECONDS
+                )
+                if time.time() < cooldown_deadline:
+                    return
             long_window = monthly or secondary
             if primary is None and monthly is None:
                 return

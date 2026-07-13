@@ -31,6 +31,19 @@ codex-lb has been installed successfully.
   Metrics: http://{{ include "codex-lb.fullname" . }}-metrics:{{ .Values.metrics.port }}/metrics
 {{- end }}
 
+{{- if and .Values.networkPolicy.enabled .Values.ingress.enabled (not .Values.networkPolicy.ingressNSMatchLabels) (not .Values.networkPolicy.extraIngress) }}
+
+WARNING: networkPolicy.enabled=true and ingress.enabled=true, but neither
+  networkPolicy.ingressNSMatchLabels nor networkPolicy.extraIngress is set.
+  The rendered NetworkPolicy DENIES all ingress-controller traffic to port
+  {{ .Values.service.port }}: external requests will time out while pods stay
+  Ready and probes stay green. Allow your ingress controller namespace, e.g.:
+
+    networkPolicy:
+      ingressNSMatchLabels:
+        kubernetes.io/metadata.name: ingress-nginx
+{{- end }}
+
 IMPORTANT:
   1. Set your encryption key in the Secret (key: encryption-key)
      Generate with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"

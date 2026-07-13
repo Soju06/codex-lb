@@ -17,6 +17,7 @@ from app.core.balancer import (
     HEALTH_TIER_HEALTHY,
     HEALTH_TIER_PROBING,
     QUOTA_EXCEEDED_COOLDOWN_SECONDS,
+    RATE_LIMITED_MIN_COOLDOWN_SECONDS,
     ROUTING_POLICY_BURN_FIRST,
     ROUTING_POLICY_PRESERVE,
     TRAFFIC_CLASS_FOREGROUND,
@@ -950,11 +951,12 @@ class LoadBalancer:
                 )
                 return selection_inputs
 
-            standard_latest_primary, standard_latest_secondary, latest_monthly = await asyncio.gather(
-                repos.usage.latest_by_account(),
-                repos.usage.latest_by_account(window="secondary"),
-                repos.usage.latest_by_account(window="monthly"),
-            )
+            # These share one AsyncSession: concurrent execution on a single
+            # session is unsafe (asyncpg) and gains nothing — the driver
+            # serializes statements per connection anyway.
+            standard_latest_primary = await repos.usage.latest_by_account()
+            standard_latest_secondary = await repos.usage.latest_by_account(window="secondary")
+            latest_monthly = await repos.usage.latest_by_account(window="monthly")
             if effective_limit_name:
                 model_allowed_plans = get_model_registry().plan_types_for_model(model) if model else None
                 latest_primary = additional_filter.latest_primary
@@ -1953,14 +1955,58 @@ def _state_from_account(
         and effective_secondary_entry.used_percent is not None
         and float(effective_secondary_entry.used_percent) < 100.0
     )
+    effective_blocked_at = float(account.blocked_at) if account.blocked_at is not None else runtime.blocked_at
+
+    # An account marked RATE_LIMITED by an actual 429 always carries a
+    # blocked_at marker (stale window-derived RATE_LIMITED rows do not).
+    # Evaluate the persisted cooldown against the ORIGINAL persisted
+    # status/blocked_at/reset_at, before the zero-primary-capacity ACTIVE
+    # rewrite below, so that rewrite cannot erase rate-limit cooldown
+    # semantics: fresh monthly/long-window quota is recovery evidence for
+    # stale window data, not for an upstream 429 whose cooldown is running.
+    rate_limited_cooldown_deadline: float | None = None
+    if account.status == AccountStatus.RATE_LIMITED and effective_blocked_at is not None:
+        persisted_deadline = (
+            float(account.reset_at) if account.reset_at else effective_blocked_at + RATE_LIMITED_MIN_COOLDOWN_SECONDS
+        )
+        if time.time() < persisted_deadline:
+            rate_limited_cooldown_deadline = persisted_deadline
+        if (
+            rate_limited_cooldown_deadline is not None
+            and runtime.cooldown_until is not None
+            and runtime.cooldown_until <= time.time()
+            and runtime.blocked_at is not None
+            and runtime.blocked_at >= effective_blocked_at
+        ):
+            # The marking replica keeps its existing early-recovery gate: fresh
+            # post-block usage evidence lifts the hold locally; peers (with no
+            # runtime knowledge of the 429) wait for the persisted deadline.
+            # The runtime block marker must be at least as recent as the
+            # persisted block: leftover runtime state from an earlier 429 does
+            # not prove this replica observed the current one.
+            early_freshness_entry = _rate_limited_freshness_entry(
+                account=account,
+                primary_entry=primary_entry,
+                long_window_entry=effective_secondary_entry,
+            )
+            if early_freshness_entry is not None and early_freshness_entry.recorded_at is not None:
+                recorded_epoch = early_freshness_entry.recorded_at.replace(tzinfo=timezone.utc).timestamp()
+                if recorded_epoch > effective_blocked_at:
+                    rate_limited_cooldown_deadline = None
+
     if usage_core.capacity_for_plan(account.plan_type, "primary") == 0.0 and (
         account.status != AccountStatus.RATE_LIMITED
         or (
-            primary_window_minutes is not None
-            and not usage_core.is_primary_window_minutes(primary_window_minutes)
-            and long_window_quota_available
+            rate_limited_cooldown_deadline is None
+            and (
+                (
+                    primary_window_minutes is not None
+                    and not usage_core.is_primary_window_minutes(primary_window_minutes)
+                    and long_window_quota_available
+                )
+                or (primary_entry is None and long_window_quota_available)
+            )
         )
-        or (primary_entry is None and long_window_quota_available)
     ):
         primary_used = None
         primary_reset = None
@@ -1978,7 +2024,21 @@ def _state_from_account(
         effective_runtime_reset = db_reset_at or runtime.reset_at
     else:
         effective_runtime_reset = None
-    effective_blocked_at = float(account.blocked_at) if account.blocked_at is not None else runtime.blocked_at
+
+    # Defense-in-depth for RATE_LIMITED rows persisted without a reset_at
+    # deadline (written before cooldown persistence, or by an older replica):
+    # hold the account out of rotation for a minimum floor window after
+    # blocked_at instead of letting a replica with no runtime knowledge of
+    # the 429 flip it straight back to ACTIVE. Once the floor elapses,
+    # recovery proceeds through the normal CAS-guarded persistence path.
+    if (
+        status_seed == AccountStatus.RATE_LIMITED
+        and effective_runtime_reset is None
+        and effective_blocked_at is not None
+    ):
+        floor_deadline = effective_blocked_at + RATE_LIMITED_MIN_COOLDOWN_SECONDS
+        if time.time() < floor_deadline:
+            effective_runtime_reset = floor_deadline
 
     if (
         account.status == AccountStatus.QUOTA_EXCEEDED
@@ -1998,15 +2058,24 @@ def _state_from_account(
     # observed and the debounce period is over.
     #
     # QUOTA_EXCEEDED uses a persisted blocked_at marker so recovery survives
-    # process restarts. RATE_LIMITED keeps the narrower runtime-only behavior,
-    # because its cooldown duration is not persisted today.
+    # process restarts. RATE_LIMITED keeps the narrower runtime-only gate: only
+    # the replica that observed the 429 (and therefore holds the runtime
+    # cooldown) may recover the account early on fresh post-block usage
+    # evidence; peers wait for the persisted reset_at deadline to elapse. The
+    # runtime block marker must be at least as recent as the effective block:
+    # leftover runtime state from an earlier 429 does not prove this replica
+    # observed the current one.
     cooldown_ready = False
     if account.status == AccountStatus.QUOTA_EXCEEDED:
         cooldown_ready = (
             effective_blocked_at is not None and time.time() >= effective_blocked_at + QUOTA_EXCEEDED_COOLDOWN_SECONDS
         )
     elif (
-        runtime.cooldown_until is not None and runtime.cooldown_until <= time.time() and runtime.blocked_at is not None
+        runtime.cooldown_until is not None
+        and runtime.cooldown_until <= time.time()
+        and runtime.blocked_at is not None
+        and effective_blocked_at is not None
+        and runtime.blocked_at >= effective_blocked_at
     ):
         cooldown_ready = True
 

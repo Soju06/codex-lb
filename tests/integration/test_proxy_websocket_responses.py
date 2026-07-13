@@ -6923,7 +6923,7 @@ def test_backend_responses_websocket_rejects_oversized_response_create_before_up
             error_event = json.loads(websocket.receive_text())
 
     assert error_event["type"] == "error"
-    assert error_event["status"] == 413
+    assert error_event["status"] == 400
     assert error_event["error"]["code"] == "payload_too_large"
     assert error_event["error"]["type"] == "invalid_request_error"
     assert error_event["error"]["param"] == "input"

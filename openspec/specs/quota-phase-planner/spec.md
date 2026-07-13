@@ -5,9 +5,7 @@
 Define the quota phase planner contracts for audit-only defaults,
 phase-aware routing costs, scheduler safety, warmup-effect evidence, and
 dashboard/operator controls.
-
 ## Requirements
-
 ### Requirement: Quota phase planner defaults are non-invasive
 
 The quota phase planner SHALL default to audit-only behavior. Fresh installations
@@ -81,3 +79,73 @@ parsed decision details when stored audit JSON is available.
 - **THEN** the server evaluates the same safety gates used by scheduler
   execution
 - **AND** it records a skipped, failed, or executed decision outcome
+
+### Requirement: Quota planner decisions persist naive UTC instants
+
+The quota phase planner SHALL normalize timezone-aware datetimes to naive UTC
+before persisting them to the timezone-naive `QuotaPlannerDecision.scheduled_at`
+and `executed_at` columns. When a planned or executed instant is timezone-aware,
+the persisted column value MUST equal that instant converted to UTC with its
+`tzinfo` removed, preserving the absolute instant. Naive datetimes MUST be
+persisted unchanged. JSON audit snapshots MAY continue to record the same
+instants as ISO-8601 strings that include a timezone offset.
+
+#### Scenario: Aware planned instant is stored as naive UTC
+
+- **GIVEN** the scheduler logs a decision with a timezone-aware UTC
+  `scheduled_at`
+- **WHEN** the repository persists the decision row
+- **THEN** the stored `scheduled_at` is timezone-naive
+- **AND** it equals the original instant expressed in UTC
+
+#### Scenario: Aware executed instant is stored as naive UTC on update
+
+- **GIVEN** a decision is updated with a timezone-aware UTC `executed_at`
+- **WHEN** the repository writes the status update
+- **THEN** the stored `executed_at` is timezone-naive
+- **AND** it equals the original instant expressed in UTC
+
+#### Scenario: Naive instants persist unchanged
+
+- **GIVEN** a decision is logged or updated with a timezone-naive datetime
+- **WHEN** the repository persists the value
+- **THEN** the stored value is unchanged and remains timezone-naive
+
+### Requirement: Planner repository datetime boundaries are UTC-normalized
+
+Quota phase planner repository methods MUST normalize timezone-aware datetime
+inputs to naive UTC before binding those values into database comparisons or
+persisted planner observation timestamps.
+
+#### Scenario: Aware datetimes are accepted at repository boundaries
+
+- **GIVEN** quota planner repository calls receive timezone-aware datetime
+  values for warmup decision queries, demand aggregation, or quota window
+  observations
+- **WHEN** those calls bind the values into database statements
+- **THEN** the bound values use naive UTC timestamps
+- **AND** the queries return rows that match the equivalent UTC instant
+
+### Requirement: Warmup decisions are claimed before synthetic traffic
+
+Warmup execution SHALL atomically transition a planned decision to `executing`
+before reserving API-key budget or sending synthetic probe traffic. Final
+outcomes such as `executed`, `failed`, or API-key skip reasons MUST only update
+decisions that are still `executing`. Cancellation MUST only update decisions
+that are still queued or skipped and MUST NOT cancel an in-flight `executing`
+decision.
+
+#### Scenario: Planned warmup is claimed before probe send
+
+- **GIVEN** a planned warmup decision is eligible to run
+- **WHEN** warm-now starts sending the synthetic probe
+- **THEN** the persisted decision status is already `executing`
+- **AND** a concurrent worker cannot claim the same planned decision
+
+#### Scenario: Executing warmup cannot be canceled
+
+- **GIVEN** a warmup decision is already `executing`
+- **WHEN** an operator requests cancellation
+- **THEN** the decision remains `executing`
+- **AND** the response reports that the decision is not cancelable
+

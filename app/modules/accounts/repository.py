@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import delete, func, or_, select, text, update
+from sqlalchemy import delete, or_, select, text, update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -16,6 +16,7 @@ from app.db.models import (
     Account,
     AccountLimitWarmup,
     AccountStatus,
+    AccountUsageRollup,
     AdditionalUsageHistory,
     ApiKeyAccountAssignment,
     DashboardSettings,
@@ -27,6 +28,12 @@ from app.db.models import (
     UsageHistory,
 )
 from app.db.session import sqlite_writer_section
+from app.modules.accounts.usage_rollup import (
+    AccountUsageRollupRepository,
+    deduped_usage_aggregate_stmt,
+    lock_fold_state,
+    merge_rollups_into,
+)
 from app.modules.usage.additional_quota_keys import normalize_additional_quota_routing_policy_overrides
 from app.modules.usage.repository import _clear_bulk_history_since_sqlite_cache
 
@@ -83,40 +90,21 @@ class AccountsRepository:
         self,
         account_ids: list[str] | None = None,
     ) -> dict[str, AccountRequestUsageSummary]:
-        summaries: dict[str, AccountRequestUsageSummary] = {}
-        output_tokens_expr = func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)
-        conditions: list = [
-            RequestLog.request_kind.not_in(("warmup", "limit_warmup")),
-            RequestLog.deleted_at.is_(None),
-        ]
-        if account_ids:
-            conditions.append(RequestLog.account_id.in_(account_ids))
+        rollup_repo = AccountUsageRollupRepository(self._session)
+        folded, watermark = await rollup_repo.read_state(account_ids)
 
-        latest_request_log_ids = (
-            select(
-                func.max(RequestLog.id).label("request_log_id"),
-            )
-            .where(*conditions)
-            .group_by(
-                RequestLog.account_id,
-                RequestLog.request_id,
-                RequestLog.requested_at,
-            )
-            .subquery("latest_request_log_ids")
-        )
-        stmt = (
-            select(
-                RequestLog.account_id,
-                func.count(RequestLog.id).label("request_count"),
-                func.coalesce(func.sum(RequestLog.input_tokens), 0).label("input_tokens"),
-                func.coalesce(func.sum(output_tokens_expr), 0).label("output_tokens"),
-                func.coalesce(func.sum(RequestLog.cached_input_tokens), 0).label("cached_input_tokens"),
-                func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("total_cost_usd"),
-            )
-            .join(latest_request_log_ids, RequestLog.id == latest_request_log_ids.c.request_log_id)
-            .group_by(RequestLog.account_id)
-        )
-        result = await self._session.execute(stmt)
+        merged: dict[str, list[float]] = {
+            account_id: [
+                sums.request_count,
+                sums.input_tokens,
+                sums.output_tokens,
+                sums.cached_input_tokens,
+                sums.total_cost_usd,
+            ]
+            for account_id, sums in folded.items()
+        }
+        tail_stmt = deduped_usage_aggregate_stmt(account_ids=account_ids, after_exclusive=watermark)
+        result = await self._session.execute(tail_stmt)
         for (
             account_id,
             request_count,
@@ -127,18 +115,24 @@ class AccountsRepository:
         ) in result.all():
             if not account_id:
                 continue
-            input_sum = int(input_tokens or 0)
-            output_sum = int(output_tokens or 0)
-            cached_sum = int(cached_input_tokens or 0)
-            cached_sum = max(0, min(cached_sum, input_sum))
-            return_row = AccountRequestUsageSummary(
-                request_count=int(request_count or 0),
-                total_tokens=input_sum + output_sum,
-                cached_input_tokens=cached_sum,
-                total_cost_usd=round(float(total_cost_usd or 0.0), 6),
-            )
-            summaries[account_id] = return_row
+            totals = merged.setdefault(account_id, [0, 0, 0, 0, 0.0])
+            totals[0] += int(request_count or 0)
+            totals[1] += int(input_tokens or 0)
+            totals[2] += int(output_tokens or 0)
+            totals[3] += int(cached_input_tokens or 0)
+            totals[4] += float(total_cost_usd or 0.0)
 
+        summaries: dict[str, AccountRequestUsageSummary] = {}
+        for account_id, (request_count, input_sum, output_sum, cached_sum, total_cost_usd) in merged.items():
+            input_total = int(input_sum)
+            output_total = int(output_sum)
+            cached_total = max(0, min(int(cached_sum), input_total))
+            summaries[account_id] = AccountRequestUsageSummary(
+                request_count=int(request_count),
+                total_tokens=input_total + output_total,
+                cached_input_tokens=cached_total,
+                total_cost_usd=round(float(total_cost_usd), 6),
+            )
         return summaries
 
     async def exists_active_chatgpt_account_id(self, chatgpt_account_id: str) -> bool:
@@ -415,6 +409,12 @@ class AccountsRepository:
         if not duplicate_ids:
             return False
 
+        # Serialize against fold passes before reassigning any request logs:
+        # a fold overlapping this transaction could otherwise attribute the
+        # duplicates' logs to rollup rows this transaction deletes, leaving
+        # those logs behind the watermark but counted in no rollup.
+        await lock_fold_state(self._session)
+
         duplicate_api_key_ids = (
             (
                 await self._session.execute(
@@ -462,6 +462,10 @@ class AccountsRepository:
             .where(HttpBridgeSessionRecord.account_id.in_(duplicate_ids))
             .values(account_id=canonical.id)
         )
+        # Folded usage must follow the reassigned request logs, or the
+        # canonical account silently loses the duplicates' pre-watermark
+        # history from its lifetime totals.
+        await merge_rollups_into(self._session, canonical.id, duplicate_ids)
         await self._session.execute(delete(Account).where(Account.id.in_(duplicate_ids)))
         return True
 
@@ -641,6 +645,7 @@ class AccountsRepository:
                     .values(account_id=None, deleted_at=utcnow()),
                 )
             await self._session.execute(delete(StickySession).where(StickySession.account_id == account_id))
+            await self._session.execute(delete(AccountUsageRollup).where(AccountUsageRollup.account_id == account_id))
             result = await self._session.execute(delete(Account).where(Account.id == account_id).returning(Account.id))
             deleted_id = result.scalar_one_or_none()
             await self._session.commit()

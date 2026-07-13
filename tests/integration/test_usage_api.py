@@ -227,3 +227,95 @@ async def test_usage_window_invalid_query_returns_validation_error(async_client)
     assert response.status_code == 422
     payload = response.json()
     assert payload["error"]["code"] == "validation_error"
+
+
+@pytest.mark.asyncio
+async def test_usage_summary_sql_aggregate_matches_legacy_python_summation(async_client, db_setup):
+    """The SQL window aggregate must reproduce the legacy per-row Python
+    summation exactly, including the reasoning-token fallback, per-row
+    cached<=input clamp, NULL-cost model exclusion, and top-error pick."""
+    from app.modules.request_logs.repository import RequestLogsRepository
+    from app.modules.usage.builders import _cost_summary_from_logs, _usage_metrics
+
+    now = utcnow()
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        logs_repo = RequestLogsRepository(session)
+        usage_repo = UsageRepository(session)
+        await accounts_repo.upsert(_make_account("acc_usage_eq", "usage-eq@example.com"))
+        # Secondary window row so the summary resolves a 7-day window.
+        await usage_repo.add_entry(
+            "acc_usage_eq",
+            10.0,
+            window="secondary",
+            window_minutes=10080,
+            recorded_at=now - timedelta(minutes=5),
+        )
+
+        cases = [
+            # (input, output, reasoning, cached, cost, status, error_code)
+            (100, 50, None, 30, 0.5, "success", None),  # plain
+            (100, None, 40, None, None, "success", None),  # reasoning fallback, no cost
+            (100, None, None, 250, 0.25, "error", "rate_limit_exceeded"),  # cached > input clamps
+            (None, 20, 5, 70, None, "error", "rate_limit_exceeded"),  # input None: cached unclamped
+            (10, 0, 99, -5, 0.125, "error", "insufficient_quota"),  # output=0 wins over reasoning; negative cached
+        ]
+        for index, (inp, out, reasoning, cached, cost, status, error_code) in enumerate(cases):
+            await logs_repo.add_log(
+                account_id="acc_usage_eq",
+                request_id=f"req_eq_{index}",
+                model=f"gpt-eq-{index % 2}",
+                input_tokens=inp,
+                output_tokens=out,
+                reasoning_tokens=reasoning,
+                cached_input_tokens=cached,
+                latency_ms=100,
+                status=status,
+                error_code=error_code,
+                requested_at=now - timedelta(hours=index + 1),
+                cost_usd=cost,
+            )
+        # Warmup rows are excluded by both paths.
+        await logs_repo.add_log(
+            account_id="acc_usage_eq",
+            request_id="req_eq_warm",
+            model="gpt-eq-0",
+            input_tokens=999,
+            output_tokens=999,
+            latency_ms=100,
+            status="success",
+            error_code=None,
+            requested_at=now - timedelta(hours=1),
+            cost_usd=9.9,
+            request_kind="warmup",
+        )
+
+    async with SessionLocal() as session:
+        logs_repo = RequestLogsRepository(session)
+        legacy_rows = await logs_repo.list_since(now - timedelta(minutes=10080))
+        legacy_metrics = _usage_metrics(legacy_rows)
+        legacy_cost = _cost_summary_from_logs(legacy_rows)
+        aggregate = await logs_repo.aggregate_usage_metrics_since(now - timedelta(minutes=10080))
+
+    response = await async_client.get("/api/usage/summary")
+    assert response.status_code == 200
+    payload = response.json()
+
+    metrics = payload["metrics"]
+    assert metrics["requests7d"] == legacy_metrics.requests_7d == 5
+    assert metrics["tokensSecondaryWindow"] == legacy_metrics.tokens_secondary_window
+    assert metrics["cachedTokensSecondaryWindow"] == legacy_metrics.cached_tokens_secondary_window
+    assert metrics["errorRate7d"] == pytest.approx(legacy_metrics.error_rate_7d)
+    assert metrics["topError"] == legacy_metrics.top_error == "rate_limit_exceeded"
+
+    cost = payload["cost"]
+    assert cost["totalUsd7d"] == pytest.approx(legacy_cost.total_usd_7d)
+
+    # The response schema only exposes the total; compare the per-model
+    # breakdown at the builder level.
+    from app.modules.usage.builders import build_usage_cost_from_aggregate
+
+    aggregate_cost = build_usage_cost_from_aggregate(aggregate)
+    assert [(entry.model, entry.usd) for entry in aggregate_cost.by_model] == [
+        (entry.model, entry.usd) for entry in legacy_cost.by_model
+    ]

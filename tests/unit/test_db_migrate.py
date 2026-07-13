@@ -1662,7 +1662,7 @@ def test_run_upgrade_fails_for_unsupported_alembic_version_id(tmp_path: Path) ->
     with create_engine(sync_url, future=True).begin() as connection:
         connection.execute(text("UPDATE alembic_version SET version_num = 'legacy_custom_999'"))
 
-    with pytest.raises(MigrationBootstrapError, match="Unsupported alembic_version revision ids"):
+    with pytest.raises(MigrationBootstrapError, match="not known to this build"):
         run_upgrade(url, "head", bootstrap_legacy=False)
 
 
@@ -1817,7 +1817,7 @@ def test_ensure_alembic_version_table_capacity_creates_table_when_missing(monkey
     _ensure_alembic_version_table_capacity_for_connection(cast(Connection, connection), required_length=64)
 
     assert connection.executed_sql == [
-        "CREATE TABLE alembic_version ( version_num VARCHAR(64) NOT NULL, PRIMARY KEY (version_num) )"
+        "CREATE TABLE IF NOT EXISTS alembic_version ( version_num VARCHAR(64) NOT NULL, PRIMARY KEY (version_num) )"
     ]
 
 

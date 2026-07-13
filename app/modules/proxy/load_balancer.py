@@ -1976,10 +1976,14 @@ def _state_from_account(
             and runtime.cooldown_until is not None
             and runtime.cooldown_until <= time.time()
             and runtime.blocked_at is not None
+            and runtime.blocked_at >= effective_blocked_at
         ):
             # The marking replica keeps its existing early-recovery gate: fresh
             # post-block usage evidence lifts the hold locally; peers (with no
             # runtime knowledge of the 429) wait for the persisted deadline.
+            # The runtime block marker must be at least as recent as the
+            # persisted block: leftover runtime state from an earlier 429 does
+            # not prove this replica observed the current one.
             early_freshness_entry = _rate_limited_freshness_entry(
                 account=account,
                 primary_entry=primary_entry,
@@ -2057,14 +2061,21 @@ def _state_from_account(
     # process restarts. RATE_LIMITED keeps the narrower runtime-only gate: only
     # the replica that observed the 429 (and therefore holds the runtime
     # cooldown) may recover the account early on fresh post-block usage
-    # evidence; peers wait for the persisted reset_at deadline to elapse.
+    # evidence; peers wait for the persisted reset_at deadline to elapse. The
+    # runtime block marker must be at least as recent as the effective block:
+    # leftover runtime state from an earlier 429 does not prove this replica
+    # observed the current one.
     cooldown_ready = False
     if account.status == AccountStatus.QUOTA_EXCEEDED:
         cooldown_ready = (
             effective_blocked_at is not None and time.time() >= effective_blocked_at + QUOTA_EXCEEDED_COOLDOWN_SECONDS
         )
     elif (
-        runtime.cooldown_until is not None and runtime.cooldown_until <= time.time() and runtime.blocked_at is not None
+        runtime.cooldown_until is not None
+        and runtime.cooldown_until <= time.time()
+        and runtime.blocked_at is not None
+        and effective_blocked_at is not None
+        and runtime.blocked_at >= effective_blocked_at
     ):
         cooldown_ready = True
 

@@ -7,5 +7,6 @@
 - [x] 5. Unit tests: floored deadline persisted for metadata-free 429; Retry-After deadline persisted verbatim; upstream reset metadata still wins; legacy-row floor in `_state_from_account`.
 - [x] 6. Integration regression tests at the two-replica selection path (`tests/integration/test_load_balancer_multi_replica.py`): flip-back regression, Retry-After propagation, legacy-row floor hold and post-floor recovery.
 - [x] 7. Run targeted pytest + ruff; `openspec validate propagate-balancer-health-signals`.
+- [x] 8. Codex review follow-up: in both `_state_from_account` early-recovery gates, require the runtime block marker to be at least as recent as the effective persisted `blocked_at`, so leftover runtime cooldown state from an earlier 429 cannot unlock early recovery of a peer's newer block (unit + two-replica regression tests).
 
 Follow-ups intentionally not in this change (see design.md): round-robin replica decorrelation; staleness-first usage-refresh selection.

@@ -23,7 +23,7 @@ from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
-from app.modules.proxy.load_balancer import LoadBalancer
+from app.modules.proxy.load_balancer import LoadBalancer, RuntimeState
 from app.modules.proxy.repo_bundle import ProxyRepositories
 from app.modules.proxy.sticky_repository import StickySessionsRepository
 from app.modules.request_logs.repository import RequestLogsRepository
@@ -269,6 +269,47 @@ async def test_legacy_rate_limited_row_without_reset_at_is_floored(db_setup):
 
     row = await _fetch_account(limited.id)
     assert row.status == AccountStatus.RATE_LIMITED
+
+
+@pytest.mark.asyncio
+async def test_stale_runtime_cooldown_does_not_unlock_early_recovery_of_peer_marked_block(db_setup):
+    """Regression (codex P2): leftover runtime cooldown state from an earlier
+    429 must not count as having observed the current 429. Replica A holds an
+    expired runtime cooldown from an old block; a peer later re-marked the
+    account RATE_LIMITED with a fresh blocked_at and a 20-minute reset_at, and
+    usage was recorded after that new block. Replica A must keep honoring the
+    persisted deadline instead of recovering the account early."""
+    now_epoch = int(time.time())
+    limited = _make_account(
+        "stale_runtime_limited",
+        status=AccountStatus.RATE_LIMITED,
+        blocked_at=now_epoch - 5,
+        reset_at=now_epoch + 1200,
+    )
+    healthy = _make_account("stale_runtime_healthy")
+    # Usage rows are recorded "now", i.e. after the peer's blocked_at, which is
+    # exactly the evidence the stale-runtime gate previously mistook for a
+    # local post-block recovery signal.
+    await _seed_accounts_with_usage((limited, 50.0, 40.0), (healthy, 20.0, 10.0))
+
+    balancer_a = LoadBalancer(_repo_factory)
+    # Leftover runtime state from an earlier 429 of the same account: the
+    # cooldown elapsed long ago and the runtime block marker predates the
+    # peer's current persisted blocked_at.
+    balancer_a._runtime[limited.id] = RuntimeState(
+        cooldown_until=time.time() - 600.0,
+        blocked_at=time.time() - 900.0,
+    )
+
+    selection = await balancer_a.select_account(routing_strategy="fill_first")
+
+    assert selection.account is not None
+    assert selection.account.id == healthy.id
+
+    row = await _fetch_account(limited.id)
+    assert row.status == AccountStatus.RATE_LIMITED
+    assert row.reset_at == now_epoch + 1200
+    assert row.blocked_at == now_epoch - 5
 
 
 @pytest.mark.asyncio

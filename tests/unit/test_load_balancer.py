@@ -2052,6 +2052,80 @@ def test_state_from_account_marking_replica_recovers_free_plan_on_fresh_post_blo
     assert state.status == AccountStatus.ACTIVE
 
 
+def test_state_from_account_stale_runtime_block_does_not_recover_free_plan_peer_marked_block(monkeypatch):
+    # Regression (codex P2): leftover runtime cooldown state from an EARLIER
+    # 429 must not count as having observed the CURRENT 429. Here the
+    # persisted block (blocked_at now-10) was written by a peer replica after
+    # this replica's stale runtime marker (now-900); the zero-primary recovery
+    # must keep honoring the persisted deadline.
+    now = 1_700_000_000.0
+    stale_runtime_blocked_at = now - 900.0
+    persisted_blocked_at = int(now - 10)
+    persisted_reset = int(now + 1200)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
+
+    account = _make_test_account(
+        status=AccountStatus.RATE_LIMITED,
+        reset_at=persisted_reset,
+        blocked_at=persisted_blocked_at,
+        plan_type="free",
+    )
+    monthly_entry = _make_test_usage(
+        window="monthly",
+        used_percent=10.0,
+        reset_at=int(now + 30 * 24 * 3600),
+        recorded_at=_epoch_to_naive_utc(now - 2),
+        window_minutes=43200,
+    )
+
+    state = _state_from_account(
+        account=account,
+        primary_entry=None,
+        secondary_entry=monthly_entry,
+        runtime=RuntimeState(cooldown_until=now - 600, blocked_at=stale_runtime_blocked_at),
+    )
+
+    assert state.status == AccountStatus.RATE_LIMITED
+    assert state.reset_at == persisted_reset
+
+
+def test_state_from_account_stale_runtime_block_does_not_recover_peer_marked_rate_limit(monkeypatch):
+    # Regression (codex P2): same stale-runtime scenario on a standard plan.
+    # Fresh primary usage recorded after the peer's block must not clear the
+    # persisted cooldown when this replica's runtime block marker predates the
+    # current persisted blocked_at.
+    now = 1_700_000_000.0
+    stale_runtime_blocked_at = now - 900.0
+    persisted_blocked_at = int(now - 60)
+    persisted_reset = int(now + 1200)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+
+    account = _make_test_account(
+        status=AccountStatus.RATE_LIMITED,
+        reset_at=persisted_reset,
+        blocked_at=persisted_blocked_at,
+    )
+    fresh_primary = _make_test_usage(
+        window="primary",
+        used_percent=10.0,
+        reset_at=int(now + 3600),
+        recorded_at=_epoch_to_naive_utc(now - 10),
+    )
+
+    state = _state_from_account(
+        account=account,
+        primary_entry=fresh_primary,
+        secondary_entry=None,
+        runtime=RuntimeState(cooldown_until=now - 600, blocked_at=stale_runtime_blocked_at),
+    )
+
+    assert state.status == AccountStatus.RATE_LIMITED
+    assert state.reset_at == persisted_reset
+
+
 def test_state_from_account_recovers_quota_exceeded_on_restart_without_blocked_at_when_usage_shows_new_reset_window(
     monkeypatch,
 ):

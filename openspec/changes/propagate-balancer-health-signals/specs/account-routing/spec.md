@@ -87,8 +87,12 @@ persisted cooldown deadline — `reset_at`, or the
 `blocked_at + RATE_LIMITED_MIN_COOLDOWN_SECONDS` floor when `reset_at` is
 NULL — is still in the future. Only the replica that observed the 429 MAY
 recover the account earlier, through its runtime-cooldown-gated fresh-usage
-path. `RATE_LIMITED` rows without `blocked_at` (stale window-derived
-markings) keep the existing fresh-usage recovery.
+path; a replica's runtime cooldown state counts as observing the current 429
+only when its runtime block marker is at least as recent as the effective
+persisted `blocked_at` — leftover runtime state from an earlier 429 MUST NOT
+unlock early recovery of a newer block. `RATE_LIMITED` rows without
+`blocked_at` (stale window-derived markings) keep the existing fresh-usage
+recovery.
 
 #### Scenario: Usage refresh does not clear a running Retry-After cooldown
 
@@ -104,6 +108,13 @@ markings) keep the existing fresh-usage recovery.
 - **WHEN** a second balancer instance sharing the same database runs account selection
 - **THEN** account X is not selected
 - **AND** the persisted row remains `RATE_LIMITED` with its `reset_at` deadline intact until the deadline elapses
+
+#### Scenario: Stale runtime cooldown does not unlock early recovery of a newer block
+
+- **GIVEN** a replica holds expired runtime cooldown state left over from an earlier 429 of account X
+- **AND** account X was since re-marked `RATE_LIMITED` by a peer replica with a newer `blocked_at` and a future persisted `reset_at`
+- **WHEN** the replica evaluates account X with usage recorded after the newer `blocked_at`
+- **THEN** account X stays `RATE_LIMITED` and is not selected until the persisted deadline elapses
 
 #### Scenario: Legacy row without reset_at is floored
 

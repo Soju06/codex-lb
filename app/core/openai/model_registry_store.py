@@ -439,17 +439,21 @@ async def reconcile_model_registry_from_store() -> bool:
                 )
                 return False
             if _snapshot_age_seconds(header) > max_age_seconds:
-                if registry.applied_content_hash is not None:
-                    # This replica is serving state imported from (or persisted
-                    # to) the store, and that row is now past the staleness
-                    # cap: drop it so the bootstrap catalog becomes the floor
-                    # again instead of serving the expired catalog forever.
-                    # Leader-local refreshes that failed to persist carry no
-                    # applied hash and are intentionally kept.
+                if registry.get_snapshot() is not None or registry.applied_content_hash is not None:
+                    # The only valid published row has aged past the staleness
+                    # cap, so no replica can converge on it. This replica still
+                    # carries registry state: either state imported from (or
+                    # persisted to) the store, or an unpublished leader-local
+                    # refresh whose persist failed before leadership was lost
+                    # (no applied hash). Reconcile only runs off the leader
+                    # path, so a former leader holding an unpublished catalog
+                    # must not keep serving it while other replicas drop to the
+                    # bootstrap floor. Drop the local state to converge until a
+                    # leader publishes a fresh snapshot.
                     await registry.clear()
                     get_account_selection_cache().invalidate()
                     logger.warning(
-                        "Dropped applied model registry snapshot: persisted entry older than %ds "
+                        "Dropped local model registry snapshot: persisted entry older than %ds "
                         "(refreshed_at=%s); reverting to bootstrap floor",
                         max_age_seconds,
                         header.refreshed_at,

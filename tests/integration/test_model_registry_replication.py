@@ -384,6 +384,64 @@ async def test_former_leader_drops_unpublished_snapshot_when_store_is_empty(db_s
     assert registry.get_snapshot() is None
 
 
+async def test_former_leader_drops_unpublished_snapshot_when_store_is_expired(db_setup, monkeypatch) -> None:
+    """A leader refreshes locally but its persist fails, so the only store row is
+    the previously-published snapshot that has since aged past the staleness cap.
+    Once leadership is lost, the non-leader tick must drop the unpublished
+    catalog and revert to the bootstrap floor the other replicas are serving,
+    not keep serving the leader-local catalog because it carries no applied hash."""
+    del db_setup
+    await _add_active_account("acc-leader")
+
+    # A previously published row exists but is now expired (leader stopped
+    # confirming it); other replicas have already reverted to the floor.
+    await _leader_persist(await _refreshed_leader_export())
+    max_age = get_settings().model_registry_snapshot_max_age_seconds
+    async with SessionLocal() as session:
+        await session.execute(
+            text("UPDATE model_registry_snapshot SET refreshed_at = :ts WHERE id = 1"),
+            {"ts": utcnow() - timedelta(seconds=max_age + 3600)},
+        )
+        await session.commit()
+
+    local_model = _make_upstream_model("gpt-leader-local")
+
+    async def _stub_fetch(candidates, encryptor, accounts_repo=None):
+        return scheduler_module._FetchResult(
+            models=[local_model],
+            account_models={"acc-leader": ("pro", [local_model])},
+        )
+
+    async def _failing_persist(*args, **kwargs):
+        raise RuntimeError("database unavailable")
+
+    election = _StubLeaderElection(leader=True)
+    monkeypatch.setattr(scheduler_module, "_get_leader_election", lambda: election)
+    monkeypatch.setattr(scheduler_module, "_fetch_with_failover", _stub_fetch)
+    monkeypatch.setattr(scheduler_module, "persist_registry_snapshot", _failing_persist)
+
+    scheduler = scheduler_module.ModelRefreshScheduler(interval_seconds=300, enabled=True)
+    await scheduler._refresh_once()
+
+    registry = get_model_registry()
+    snapshot = registry.get_snapshot()
+    assert snapshot is not None
+    assert "gpt-leader-local" in snapshot.models
+    assert registry.applied_content_hash is None
+
+    # Lose leadership with the store row still expired: the non-leader tick
+    # backstop must drop the unpublished catalog so this replica converges.
+    election.leader = False
+    await scheduler._refresh_once()
+
+    assert registry.get_snapshot() is None
+    assert registry.applied_content_hash is None
+
+    # Reconciling the same expired row again is a log-only no-op.
+    assert await reconcile_model_registry_from_store() is False
+    assert registry.get_snapshot() is None
+
+
 async def test_unchanged_content_touches_refreshed_at_without_rewrite(db_setup) -> None:
     del db_setup
     export = await _refreshed_leader_export()

@@ -150,15 +150,20 @@ def _decode_model(data: Mapping[str, JsonValue]) -> UpstreamModel:
         or not isinstance(raw, dict)
     ):
         raise ValueError("Malformed persisted model entry")
+    # Reject a wrong-typed reasoning level rather than dropping it, so a corrupt
+    # entry surfaces as a decode failure instead of a silently-partial level set.
+    decoded_levels: list[ReasoningLevel] = []
+    for level in reasoning_levels:
+        if not isinstance(level, dict):
+            raise ValueError("Malformed persisted reasoning level")
+        decoded_levels.append(_decode_reasoning_level(level))
     return UpstreamModel(
         slug=str(data["slug"]),
         display_name=str(data["display_name"]),
         description=str(data["description"]),
         context_window=int(_cast_int(data["context_window"])),
         input_modalities=tuple(str(item) for item in input_modalities),
-        supported_reasoning_levels=tuple(
-            _decode_reasoning_level(level) for level in reasoning_levels if isinstance(level, dict)
-        ),
+        supported_reasoning_levels=tuple(decoded_levels),
         default_reasoning_level=_optional_str(data["default_reasoning_level"]),
         supports_reasoning_summaries=bool(data["supports_reasoning_summaries"]),
         support_verbosity=bool(data["support_verbosity"]),
@@ -195,9 +200,17 @@ def _encode_slug_sets(mapping: dict[str, frozenset[str]]) -> dict[str, JsonValue
 def _decode_slug_sets(data: JsonValue) -> dict[str, frozenset[str]]:
     if not isinstance(data, dict):
         raise ValueError("Malformed persisted set mapping")
-    return {
-        str(key): frozenset(str(item) for item in values) for key, values in data.items() if isinstance(values, list)
-    }
+    decoded: dict[str, frozenset[str]] = {}
+    for key, values in data.items():
+        # A wrong-typed value (e.g. a bare string where a list of slugs is
+        # expected) MUST reject the whole decode rather than silently dropping
+        # the entry: a dropped set-backed field would apply a partial catalog
+        # (model present, plan gating gone) instead of surfacing corruption to
+        # the poller. An empty list is a legitimately-empty set and is kept.
+        if not isinstance(values, list):
+            raise ValueError("Malformed persisted set mapping: expected a list of slugs")
+        decoded[str(key)] = frozenset(str(item) for item in values)
+    return decoded
 
 
 def _encode_tier_sets(mapping: dict[str, dict[str, frozenset[str]]]) -> dict[str, JsonValue]:
@@ -228,7 +241,14 @@ def _encode_snapshot(snapshot: ModelRegistrySnapshot) -> dict[str, JsonValue]:
 def _decode_models(data: JsonValue) -> dict[str, UpstreamModel]:
     if not isinstance(data, dict):
         raise ValueError("Malformed persisted models mapping")
-    return {str(slug): _decode_model(entry) for slug, entry in data.items() if isinstance(entry, dict)}
+    decoded: dict[str, UpstreamModel] = {}
+    for slug, entry in data.items():
+        # Reject a wrong-typed entry rather than dropping it, so a corrupt model
+        # surfaces as a decode failure instead of a silently-partial catalog.
+        if not isinstance(entry, dict):
+            raise ValueError("Malformed persisted model entry")
+        decoded[str(slug)] = _decode_model(entry)
+    return decoded
 
 
 def _decode_account_plans(data: JsonValue) -> dict[str, str]:

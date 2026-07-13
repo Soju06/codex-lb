@@ -9,6 +9,7 @@ the non-leader refresh-tick backstop.
 from __future__ import annotations
 
 import dataclasses
+import json
 import time
 from datetime import timedelta
 
@@ -839,6 +840,56 @@ async def test_invalidation_callback_load_failure_leaves_version_unacked_and_ret
 
     await poller._poll_once()
     assert get_model_registry().applied_content_hash == content_hash
+    assert get_model_registry().get_snapshot() is not None
+
+
+async def test_malformed_set_backed_field_leaves_version_unacked_and_not_applied(db_setup) -> None:
+    """Product-path regression for the P2 finding: a payload that is valid JSON
+    but has a wrong-typed set-backed field (``model_plans`` value as a dict
+    where a list of slugs is expected) MUST reject on decode rather than
+    silently dropping the entry. As the invalidation callback this leaves the
+    ``model_registry`` version unacknowledged and applies NO partial catalog."""
+    del db_setup
+    poller = CacheInvalidationPoller(SessionLocal)
+    poller.on_invalidation(
+        NAMESPACE_MODEL_REGISTRY,
+        lambda: reconcile_model_registry_from_store(raise_on_error=True),
+    )
+    await poller.prime()
+
+    await _leader_persist(await _refreshed_leader_export())
+    async with SessionLocal() as session:
+        good_payload = await session.scalar(
+            select(ModelRegistrySnapshotRecord.payload).where(ModelRegistrySnapshotRecord.id == 1)
+        )
+        assert good_payload is not None
+        document = json.loads(good_payload)
+        # Corrupt one set-backed field into a dict; previously the decode
+        # comprehension silently dropped it and applied a plan-gating-less model.
+        document["snapshot"]["model_plans"][REPLICA_SLUG] = {"gpt-x": "pro"}
+        await session.execute(
+            text("UPDATE model_registry_snapshot SET payload = :p WHERE id = 1"),
+            {"p": json.dumps(document)},
+        )
+        await session.commit()
+    leader_poller = CacheInvalidationPoller(SessionLocal)
+    await leader_poller.bump(NAMESPACE_MODEL_REGISTRY)
+
+    # The callback raises on the malformed field, so the version stays unacked
+    # and no partial catalog is applied.
+    await poller._poll_once()
+    assert get_model_registry().get_snapshot() is None
+    assert NAMESPACE_MODEL_REGISTRY not in poller._known_versions
+
+    # Once the leader republishes a good payload, the never-acked version
+    # converges on the next poll without a new bump.
+    async with SessionLocal() as session:
+        await session.execute(
+            text("UPDATE model_registry_snapshot SET payload = :p WHERE id = 1"),
+            {"p": good_payload},
+        )
+        await session.commit()
+    await poller._poll_once()
     assert get_model_registry().get_snapshot() is not None
 
 

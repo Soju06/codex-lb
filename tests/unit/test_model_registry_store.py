@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 import time
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -125,6 +126,69 @@ class TestRoundTrip:
             decode_registry_payload("[]", refreshed_at=utcnow())
         with pytest.raises(ValueError):
             decode_registry_payload('{"cleared": false, "snapshot": 42}', refreshed_at=utcnow())
+
+
+def _encoded_document(snapshot: ModelRegistrySnapshot) -> tuple[dict, datetime]:
+    encoded = encode_registry_export(ModelRegistryExport(snapshot=snapshot, metadata_models=None))
+    return json.loads(encoded.payload), encoded.refreshed_at
+
+
+class TestMalformedSetBackedFields:
+    """A set/mapping-backed field persisted with a wrong-typed value MUST reject
+    the whole decode rather than silently dropping the entry, so the poller
+    leaves the ``model_registry`` bump unacknowledged and retries instead of
+    applying a partial catalog (e.g. a model whose plan gating vanished)."""
+
+    @pytest.mark.parametrize(
+        ("path", "bad_value"),
+        [
+            # A dict where a list of slugs is expected -- the finding's example.
+            (("model_plans", "gpt-new"), {"gpt-x": "pro"}),
+            # A bare string where a list of slugs is expected.
+            (("model_plans", "gpt-new"), "pro"),
+            (("plan_models", "pro"), "gpt-new"),
+            (("model_accounts", "gpt-new"), "acc-1"),
+            # Tier maps delegate to the same set decoder.
+            (("model_service_tier_plans", "gpt-new", "priority"), "pro"),
+            (("model_service_tier_accounts", "gpt-new", "priority"), "acc-1"),
+        ],
+    )
+    def test_wrong_typed_set_backed_field_raises(self, path: tuple[str, ...], bad_value: object) -> None:
+        document, refreshed_at = _encoded_document(_rich_snapshot())
+        target = document["snapshot"]
+        for key in path[:-1]:
+            target = target[key]
+        target[path[-1]] = bad_value
+        with pytest.raises(ValueError):
+            decode_registry_payload(json.dumps(document), refreshed_at=refreshed_at)
+
+    def test_wrong_typed_model_entry_raises(self) -> None:
+        document, refreshed_at = _encoded_document(_rich_snapshot())
+        document["snapshot"]["models"]["gpt-new"] = "not-a-model"
+        with pytest.raises(ValueError):
+            decode_registry_payload(json.dumps(document), refreshed_at=refreshed_at)
+
+    def test_wrong_typed_reasoning_level_raises(self) -> None:
+        document, refreshed_at = _encoded_document(_rich_snapshot())
+        document["snapshot"]["models"]["gpt-new"]["supported_reasoning_levels"] = ["medium"]
+        with pytest.raises(ValueError):
+            decode_registry_payload(json.dumps(document), refreshed_at=refreshed_at)
+
+    def test_empty_set_backed_maps_are_allowed(self) -> None:
+        # Genuinely-absent/empty set mappings decode successfully (empty != malformed).
+        snapshot = dataclasses.replace(
+            _rich_snapshot(),
+            model_plans={},
+            plan_models={},
+            model_service_tier_plans={},
+            model_service_tier_accounts={},
+            model_accounts={"gpt-new": frozenset()},
+        )
+        encoded = encode_registry_export(ModelRegistryExport(snapshot=snapshot, metadata_models=None))
+        decoded = decode_registry_payload(encoded.payload, refreshed_at=encoded.refreshed_at)
+        assert decoded.snapshot is not None
+        assert decoded.snapshot.model_plans == {}
+        assert decoded.snapshot.model_accounts == {"gpt-new": frozenset()}
 
 
 class TestContentHash:

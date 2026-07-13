@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from typing import Any, Mapping
 
@@ -37,9 +38,15 @@ def _parse_float(value: object) -> float | None:
     if not isinstance(value, (int, float, str)):
         return None
     try:
-        return float(value)
+        parsed = float(value)
     except ValueError:
         return None
+    # Live signals run synchronously on the serving path; non-finite values
+    # (NaN/Infinity strings) must degrade to "unparseable", not raise later
+    # in int() coercion.
+    if not math.isfinite(parsed):
+        return None
+    return parsed
 
 
 def _parse_int(value: object) -> int | None:

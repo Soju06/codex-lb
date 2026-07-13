@@ -487,6 +487,7 @@ class QuotaWarmupService:
             access_token,
             upstream_account_id,
             raise_for_status=True,
+            codex_lb_account_id=account.id,
         ):
             event = parse_sse_event(event_block)
             if event is None or event.response is None or event.response.usage is None:

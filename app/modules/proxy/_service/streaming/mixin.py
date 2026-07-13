@@ -553,6 +553,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                         "codex_installation_id": account.codex_installation_id,
                         "enforce_openai_sdk_contract": enforce_openai_sdk_contract,
                         "upstream_stream_transport_override": upstream_stream_transport,
+                        "codex_lb_account_id": account.id,
                     },
                     raise_for_status=True,
                 )
@@ -569,6 +570,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                         "route_trace": route_trace,
                         "codex_installation_id": account.codex_installation_id,
                         "enforce_openai_sdk_contract": enforce_openai_sdk_contract,
+                        "codex_lb_account_id": account.id,
                     },
                     raise_for_status=True,
                 )

@@ -53,6 +53,22 @@ def test_parse_rate_limit_headers_reads_both_windows_and_credits() -> None:
     assert snapshot.credits_balance == pytest.approx(12.5)
 
 
+def test_parse_rate_limit_headers_rejects_non_finite_values() -> None:
+    # Non-finite numeric strings must degrade to unparseable fields, never
+    # raise on the serving path.
+    snapshot = parse_rate_limit_headers(
+        {
+            "x-codex-primary-used-percent": "25.0",
+            "x-codex-primary-window-minutes": "NaN",
+            "x-codex-primary-reset-at": "Infinity",
+        }
+    )
+    assert snapshot is not None
+    assert snapshot.primary == LiveUsageWindow(used_percent=25.0, window_minutes=None, reset_at=None)
+
+    assert parse_rate_limit_headers({"x-codex-primary-used-percent": "NaN"}) is None
+
+
 def test_parse_rate_limit_headers_without_windows_returns_none() -> None:
     assert parse_rate_limit_headers({"content-type": "text/event-stream"}) is None
     assert parse_rate_limit_headers({"x-codex-credits-balance": "5"}) is None
@@ -190,9 +206,11 @@ async def test_stream_responses_tap_publishes_rate_limit_events(monkeypatch: pyt
 
     monkeypatch.setattr(proxy_client_module, "lease_http_session", fake_lease)
 
-    captured: list[tuple[Any, str | None]] = []
+    captured: list[tuple[Any, str | None, str | None]] = []
     live_hub.register_live_usage_publisher(
-        lambda snapshot, *, account_id=None, chatgpt_account_id=None: captured.append((snapshot, chatgpt_account_id))
+        lambda snapshot, *, account_id=None, chatgpt_account_id=None: captured.append(
+            (snapshot, account_id, chatgpt_account_id)
+        )
     )
     try:
         request = proxy_client_module.ResponsesRequest.model_validate(
@@ -207,12 +225,27 @@ async def test_stream_responses_tap_publishes_rate_limit_events(monkeypatch: pyt
                 "workspace-live",
             )
         ]
+        seen_internal = [
+            block
+            async for block in proxy_client_module.stream_responses(
+                request,
+                {},
+                "access-token",
+                "workspace-live",
+                codex_lb_account_id="acc-internal",
+            )
+        ]
     finally:
         live_hub.register_live_usage_publisher(None)
 
     assert seen == blocks
-    assert len(captured) == 1
-    snapshot, chatgpt_account_id = captured[0]
-    assert chatgpt_account_id == "workspace-live"
+    assert seen_internal == blocks
+    assert len(captured) == 2
+    snapshot, account_id, chatgpt_account_id = captured[0]
+    assert (account_id, chatgpt_account_id) == (None, "workspace-live")
     assert snapshot.primary is not None
     assert snapshot.primary.used_percent == pytest.approx(55.0)
+    # When the caller knows the selected internal account, attribution
+    # prefers it so multi-seat workspaces are not dropped as ambiguous.
+    _, account_id_internal, chatgpt_internal = captured[1]
+    assert (account_id_internal, chatgpt_internal) == ("acc-internal", None)

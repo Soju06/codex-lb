@@ -1400,6 +1400,23 @@ class CacheInvalidation(Base):
     version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
 
 
+class ModelRegistrySnapshotRecord(Base):
+    """Single-row (id=1) persisted serialization of the refreshed model registry.
+
+    Written by the leader's model refresh cycle and loaded by every replica via
+    the cache-invalidation bus so the catalog stays replica-coherent.
+    """
+
+    __tablename__ = "model_registry_snapshot"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    payload: Mapped[str] = mapped_column(Text, nullable=False)
+    refreshed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    leader_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+
 class BridgeRingMember(Base):
     __tablename__ = "bridge_ring_members"
 

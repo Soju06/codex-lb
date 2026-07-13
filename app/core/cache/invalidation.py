@@ -27,6 +27,7 @@ NAMESPACE_ACCOUNT_ROUTING = "account_routing"
 NAMESPACE_ACCOUNT_SELECTION = "account_selection"
 NAMESPACE_SETTINGS = "settings"
 NAMESPACE_RESET_CREDITS = "reset_credits"
+NAMESPACE_MODEL_REGISTRY = "model_registry"
 type InvalidationCallback = Callable[[], None | Awaitable[None]]
 
 # Log-safe labels for namespace values. Static analyzers (CodeQL) classify the
@@ -41,6 +42,7 @@ _NAMESPACE_LOG_LABELS: dict[str, str] = {
     "account_selection": "account_selection",
     "settings": "settings",
     "reset_credits": "reset_credits",
+    "model_registry": "model_registry",
 }
 
 _BUMP_RETRY_ATTEMPTS = 3

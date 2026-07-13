@@ -1,0 +1,445 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+import time
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+
+from sqlalchemy import select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.config.settings import get_settings
+from app.core.openai.model_registry import (
+    ModelRegistryExport,
+    ModelRegistrySnapshot,
+    ReasoningLevel,
+    UpstreamModel,
+    get_model_registry,
+)
+from app.core.types import JsonValue
+from app.core.utils.time import to_utc_naive, utcnow
+from app.db.models import ModelRegistrySnapshotRecord
+from app.db.session import get_background_session
+from app.modules.proxy.account_cache import get_account_selection_cache
+
+logger = logging.getLogger(__name__)
+
+# Version of the persisted payload shape. MUST be bumped whenever the payload
+# encoding changes (new/renamed fields, different container shapes); replicas
+# ignore snapshots whose schema_version differs from their codec version.
+SCHEMA_VERSION = 1
+
+_SNAPSHOT_ROW_ID = 1
+
+# Field-complete codec contracts: unit tests assert these sets equal the
+# dataclass fields so a new field cannot ship without codec support.
+UPSTREAM_MODEL_CODEC_FIELDS = frozenset(
+    {
+        "slug",
+        "display_name",
+        "description",
+        "context_window",
+        "input_modalities",
+        "supported_reasoning_levels",
+        "default_reasoning_level",
+        "supports_reasoning_summaries",
+        "support_verbosity",
+        "default_verbosity",
+        "prefer_websockets",
+        "supports_parallel_tool_calls",
+        "supported_in_api",
+        "minimal_client_version",
+        "priority",
+        "available_in_plans",
+        "base_instructions",
+        "source_kind",
+        "source_id",
+        "raw",
+    }
+)
+
+# ``fetched_at`` is monotonic-clock based and is persisted as the wall-clock
+# ``refreshed_at`` column instead of appearing in the payload.
+SNAPSHOT_CODEC_FIELDS = frozenset(
+    {
+        "models",
+        "model_plans",
+        "plan_models",
+        "model_service_tier_plans",
+        "model_service_tier_accounts",
+        "account_plans",
+        "fetched_at",
+        "model_accounts",
+        "account_catalogs_authoritative",
+        "bootstrap_floor_active",
+        "suppressed_model_slugs",
+    }
+)
+
+
+@dataclass(slots=True)
+class EncodedRegistrySnapshot:
+    payload: str
+    content_hash: str
+    refreshed_at: datetime
+
+
+@dataclass(slots=True)
+class StoredSnapshotHeader:
+    schema_version: int
+    content_hash: str
+    refreshed_at: datetime
+
+
+def _encode_reasoning_level(level: ReasoningLevel) -> dict[str, JsonValue]:
+    return {"effort": level.effort, "description": level.description}
+
+
+def _decode_reasoning_level(data: dict[str, JsonValue]) -> ReasoningLevel:
+    return ReasoningLevel(effort=str(data["effort"]), description=str(data["description"]))
+
+
+def _encode_model(model: UpstreamModel) -> dict[str, JsonValue]:
+    return {
+        "slug": model.slug,
+        "display_name": model.display_name,
+        "description": model.description,
+        "context_window": model.context_window,
+        "input_modalities": list(model.input_modalities),
+        "supported_reasoning_levels": [_encode_reasoning_level(level) for level in model.supported_reasoning_levels],
+        "default_reasoning_level": model.default_reasoning_level,
+        "supports_reasoning_summaries": model.supports_reasoning_summaries,
+        "support_verbosity": model.support_verbosity,
+        "default_verbosity": model.default_verbosity,
+        "prefer_websockets": model.prefer_websockets,
+        "supports_parallel_tool_calls": model.supports_parallel_tool_calls,
+        "supported_in_api": model.supported_in_api,
+        "minimal_client_version": model.minimal_client_version,
+        "priority": model.priority,
+        "available_in_plans": sorted(model.available_in_plans),
+        "base_instructions": model.base_instructions,
+        "source_kind": model.source_kind,
+        "source_id": model.source_id,
+        "raw": model.raw,
+    }
+
+
+def _decode_model(data: dict[str, JsonValue]) -> UpstreamModel:
+    reasoning_levels = data["supported_reasoning_levels"]
+    input_modalities = data["input_modalities"]
+    available_in_plans = data["available_in_plans"]
+    raw = data["raw"]
+    if (
+        not isinstance(reasoning_levels, list)
+        or not isinstance(input_modalities, list)
+        or not isinstance(available_in_plans, list)
+        or not isinstance(raw, dict)
+    ):
+        raise ValueError("Malformed persisted model entry")
+    return UpstreamModel(
+        slug=str(data["slug"]),
+        display_name=str(data["display_name"]),
+        description=str(data["description"]),
+        context_window=int(_cast_int(data["context_window"])),
+        input_modalities=tuple(str(item) for item in input_modalities),
+        supported_reasoning_levels=tuple(
+            _decode_reasoning_level(level) for level in reasoning_levels if isinstance(level, dict)
+        ),
+        default_reasoning_level=_optional_str(data["default_reasoning_level"]),
+        supports_reasoning_summaries=bool(data["supports_reasoning_summaries"]),
+        support_verbosity=bool(data["support_verbosity"]),
+        default_verbosity=_optional_str(data["default_verbosity"]),
+        prefer_websockets=bool(data["prefer_websockets"]),
+        supports_parallel_tool_calls=bool(data["supports_parallel_tool_calls"]),
+        supported_in_api=bool(data["supported_in_api"]),
+        minimal_client_version=_optional_str(data["minimal_client_version"]),
+        priority=int(_cast_int(data["priority"])),
+        available_in_plans=frozenset(str(item) for item in available_in_plans),
+        base_instructions=str(data["base_instructions"]),
+        source_kind=str(data["source_kind"]),
+        source_id=_optional_str(data["source_id"]),
+        raw=dict(raw),
+    )
+
+
+def _cast_int(value: JsonValue) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"Expected numeric value, got {type(value).__name__}")
+    return int(value)
+
+
+def _optional_str(value: JsonValue) -> str | None:
+    if value is None:
+        return None
+    return str(value)
+
+
+def _encode_slug_sets(mapping: dict[str, frozenset[str]]) -> dict[str, list[str]]:
+    return {key: sorted(values) for key, values in mapping.items()}
+
+
+def _decode_slug_sets(data: JsonValue) -> dict[str, frozenset[str]]:
+    if not isinstance(data, dict):
+        raise ValueError("Malformed persisted set mapping")
+    return {
+        str(key): frozenset(str(item) for item in values) for key, values in data.items() if isinstance(values, list)
+    }
+
+
+def _encode_tier_sets(mapping: dict[str, dict[str, frozenset[str]]]) -> dict[str, dict[str, list[str]]]:
+    return {slug: {tier: sorted(values) for tier, values in tiers.items()} for slug, tiers in mapping.items()}
+
+
+def _decode_tier_sets(data: JsonValue) -> dict[str, dict[str, frozenset[str]]]:
+    if not isinstance(data, dict):
+        raise ValueError("Malformed persisted tier mapping")
+    return {str(slug): _decode_slug_sets(tiers) for slug, tiers in data.items()}
+
+
+def _encode_snapshot(snapshot: ModelRegistrySnapshot) -> dict[str, JsonValue]:
+    return {
+        "models": {slug: _encode_model(model) for slug, model in snapshot.models.items()},
+        "model_plans": _encode_slug_sets(snapshot.model_plans),
+        "plan_models": _encode_slug_sets(snapshot.plan_models),
+        "model_service_tier_plans": _encode_tier_sets(snapshot.model_service_tier_plans),
+        "model_service_tier_accounts": _encode_tier_sets(snapshot.model_service_tier_accounts),
+        "account_plans": dict(snapshot.account_plans),
+        "model_accounts": _encode_slug_sets(snapshot.model_accounts),
+        "account_catalogs_authoritative": snapshot.account_catalogs_authoritative,
+        "bootstrap_floor_active": snapshot.bootstrap_floor_active,
+        "suppressed_model_slugs": sorted(snapshot.suppressed_model_slugs),
+    }
+
+
+def _decode_models(data: JsonValue) -> dict[str, UpstreamModel]:
+    if not isinstance(data, dict):
+        raise ValueError("Malformed persisted models mapping")
+    return {str(slug): _decode_model(entry) for slug, entry in data.items() if isinstance(entry, dict)}
+
+
+def _decode_account_plans(data: JsonValue) -> dict[str, str]:
+    if not isinstance(data, dict):
+        raise ValueError("Malformed persisted account plans")
+    return {str(key): str(value) for key, value in data.items()}
+
+
+def _decode_snapshot(data: dict[str, JsonValue], *, fetched_at: float) -> ModelRegistrySnapshot:
+    suppressed = data["suppressed_model_slugs"]
+    if not isinstance(suppressed, list):
+        raise ValueError("Malformed persisted suppression set")
+    return ModelRegistrySnapshot(
+        models=_decode_models(data["models"]),
+        model_plans=_decode_slug_sets(data["model_plans"]),
+        plan_models=_decode_slug_sets(data["plan_models"]),
+        model_service_tier_plans=_decode_tier_sets(data["model_service_tier_plans"]),
+        model_service_tier_accounts=_decode_tier_sets(data["model_service_tier_accounts"]),
+        account_plans=_decode_account_plans(data["account_plans"]),
+        fetched_at=fetched_at,
+        model_accounts=_decode_slug_sets(data["model_accounts"]),
+        account_catalogs_authoritative=bool(data["account_catalogs_authoritative"]),
+        bootstrap_floor_active=bool(data["bootstrap_floor_active"]),
+        suppressed_model_slugs=frozenset(str(item) for item in suppressed),
+    )
+
+
+def encode_registry_export(export: ModelRegistryExport) -> EncodedRegistrySnapshot:
+    """Serialize registry state to a canonical JSON payload plus content hash.
+
+    The payload deliberately excludes any timestamp so the content hash stays
+    stable across refresh ticks that fetch an identical catalog; the wall-clock
+    ``refreshed_at`` is carried as a separate column.
+    """
+    if export.snapshot is None:
+        document: dict[str, JsonValue] = {"cleared": True, "snapshot": None, "metadata_models": None}
+        refreshed_at = utcnow()
+    else:
+        document = {
+            "cleared": False,
+            "snapshot": _encode_snapshot(export.snapshot),
+            "metadata_models": (
+                {slug: _encode_model(model) for slug, model in export.metadata_models.items()}
+                if export.metadata_models is not None
+                else None
+            ),
+        }
+        elapsed = max(0.0, time.monotonic() - export.snapshot.fetched_at)
+        refreshed_at = utcnow() - timedelta(seconds=elapsed)
+    payload = json.dumps(document, sort_keys=True, separators=(",", ":"))
+    content_hash = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return EncodedRegistrySnapshot(payload=payload, content_hash=content_hash, refreshed_at=refreshed_at)
+
+
+def decode_registry_payload(payload: str, *, refreshed_at: datetime) -> ModelRegistryExport:
+    """Deserialize a persisted payload, deriving the monotonic ``fetched_at``
+    from the wall-clock ``refreshed_at`` so TTL semantics survive import."""
+    document = json.loads(payload)
+    if not isinstance(document, dict):
+        raise ValueError("Malformed persisted model registry payload")
+    if document.get("cleared") is True:
+        return ModelRegistryExport(snapshot=None, metadata_models=None)
+    snapshot_data = document.get("snapshot")
+    if not isinstance(snapshot_data, dict):
+        raise ValueError("Malformed persisted model registry snapshot")
+    age_seconds = max(0.0, (utcnow() - to_utc_naive(refreshed_at)).total_seconds())
+    snapshot = _decode_snapshot(snapshot_data, fetched_at=time.monotonic() - age_seconds)
+    metadata_data = document.get("metadata_models")
+    metadata_models = _decode_models(metadata_data) if isinstance(metadata_data, dict) else None
+    return ModelRegistryExport(snapshot=snapshot, metadata_models=metadata_models)
+
+
+async def persist_registry_snapshot(
+    session: AsyncSession,
+    *,
+    encoded: EncodedRegistrySnapshot,
+    leader_id: str | None,
+) -> bool:
+    """Atomically upsert the single snapshot row; returns True when the payload changed.
+
+    Unchanged content only touches ``refreshed_at``/``leader_id`` (guarded by
+    ``content_hash``) so snapshot age means "time since the leader last
+    confirmed this catalog" without rewriting a potentially multi-MB payload.
+    """
+    existing_hash = await session.scalar(
+        select(ModelRegistrySnapshotRecord.content_hash).where(ModelRegistrySnapshotRecord.id == _SNAPSHOT_ROW_ID)
+    )
+    if existing_hash == encoded.content_hash:
+        result = await session.execute(
+            update(ModelRegistrySnapshotRecord)
+            .where(
+                ModelRegistrySnapshotRecord.id == _SNAPSHOT_ROW_ID,
+                ModelRegistrySnapshotRecord.content_hash == encoded.content_hash,
+            )
+            .values(
+                schema_version=SCHEMA_VERSION,
+                refreshed_at=encoded.refreshed_at,
+                leader_id=leader_id,
+            )
+        )
+        if result.rowcount == 1:
+            await session.commit()
+            return False
+
+    values = {
+        "id": _SNAPSHOT_ROW_ID,
+        "schema_version": SCHEMA_VERSION,
+        "content_hash": encoded.content_hash,
+        "payload": encoded.payload,
+        "refreshed_at": encoded.refreshed_at,
+        "leader_id": leader_id,
+    }
+    update_values = {key: value for key, value in values.items() if key != "id"}
+    dialect = session.get_bind().dialect.name
+    if dialect == "postgresql":
+        stmt = (
+            pg_insert(ModelRegistrySnapshotRecord)
+            .values(**values)
+            .on_conflict_do_update(index_elements=[ModelRegistrySnapshotRecord.id], set_=update_values)
+        )
+        await session.execute(stmt)
+    elif dialect == "sqlite":
+        stmt = (
+            sqlite_insert(ModelRegistrySnapshotRecord)
+            .values(**values)
+            .on_conflict_do_update(index_elements=[ModelRegistrySnapshotRecord.id], set_=update_values)
+        )
+        await session.execute(stmt)
+    else:
+        existing = await session.scalar(
+            select(ModelRegistrySnapshotRecord).where(ModelRegistrySnapshotRecord.id == _SNAPSHOT_ROW_ID)
+        )
+        if existing is None:
+            session.add(ModelRegistrySnapshotRecord(**values))
+        else:
+            await session.execute(
+                update(ModelRegistrySnapshotRecord)
+                .where(ModelRegistrySnapshotRecord.id == _SNAPSHOT_ROW_ID)
+                .values(**update_values)
+            )
+    await session.commit()
+    logger.info(
+        "Persisted model registry snapshot content_hash=%s payload_bytes=%d",
+        encoded.content_hash,
+        len(encoded.payload),
+    )
+    return True
+
+
+async def _probe_header(session: AsyncSession) -> StoredSnapshotHeader | None:
+    row = (
+        await session.execute(
+            select(
+                ModelRegistrySnapshotRecord.schema_version,
+                ModelRegistrySnapshotRecord.content_hash,
+                ModelRegistrySnapshotRecord.refreshed_at,
+            ).where(ModelRegistrySnapshotRecord.id == _SNAPSHOT_ROW_ID)
+        )
+    ).first()
+    if row is None:
+        return None
+    schema_version, content_hash, refreshed_at = row
+    return StoredSnapshotHeader(
+        schema_version=schema_version,
+        content_hash=content_hash,
+        refreshed_at=refreshed_at,
+    )
+
+
+def _snapshot_age_seconds(header: StoredSnapshotHeader) -> float:
+    return (utcnow() - to_utc_naive(header.refreshed_at)).total_seconds()
+
+
+async def reconcile_model_registry_from_store() -> bool:
+    """Apply the persisted snapshot to the local registry when it differs.
+
+    Shared by lifespan startup, the ``model_registry`` invalidation callback,
+    and the non-leader refresh-tick backstop. Never raises: any failure keeps
+    the current in-memory state (bootstrap floor at worst) and logs a warning.
+    Returns True when a snapshot was applied.
+    """
+    registry = get_model_registry()
+    try:
+        max_age_seconds = get_settings().model_registry_snapshot_max_age_seconds
+        async with get_background_session() as session:
+            header = await _probe_header(session)
+            if header is None:
+                return False
+            if header.schema_version != SCHEMA_VERSION:
+                logger.warning(
+                    "Ignoring persisted model registry snapshot with schema_version=%d (codec version %d)",
+                    header.schema_version,
+                    SCHEMA_VERSION,
+                )
+                return False
+            if _snapshot_age_seconds(header) > max_age_seconds:
+                logger.warning(
+                    "Ignoring persisted model registry snapshot older than %ds (refreshed_at=%s)",
+                    max_age_seconds,
+                    header.refreshed_at,
+                )
+                return False
+            if header.content_hash == registry.applied_content_hash:
+                return False
+            payload = await session.scalar(
+                select(ModelRegistrySnapshotRecord.payload).where(ModelRegistrySnapshotRecord.id == _SNAPSHOT_ROW_ID)
+            )
+        if payload is None:
+            return False
+        state = decode_registry_payload(payload, refreshed_at=header.refreshed_at)
+    except Exception:
+        logger.warning("Failed to load persisted model registry snapshot", exc_info=True)
+        return False
+
+    await registry.import_state(state, content_hash=header.content_hash)
+    get_account_selection_cache().invalidate()
+    total_models = len(state.snapshot.models) if state.snapshot is not None else 0
+    logger.info(
+        "Applied persisted model registry snapshot content_hash=%s total_models=%d cleared=%s",
+        header.content_hash,
+        total_models,
+        state.snapshot is None,
+    )
+    return True

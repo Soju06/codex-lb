@@ -175,6 +175,13 @@ async def lifespan(app: FastAPI):
     bridge_durable_schema_ready = await _ensure_bridge_durable_schema_ready(settings)
     if bridge_durable_schema_ready:
         startup_module.mark_bridge_durable_schema_ready()
+    if settings.model_registry_enabled:
+        from app.core.openai.model_registry_store import reconcile_model_registry_from_store
+
+        # Warm the in-memory registry from the persisted snapshot before any
+        # scheduler starts so a restarted replica serves the refreshed catalog
+        # instead of the bootstrap floor. Never fails startup.
+        await reconcile_model_registry_from_store()
     usage_scheduler = build_usage_refresh_scheduler()
     api_key_limit_reset_scheduler = build_api_key_limit_reset_scheduler()
     model_scheduler = build_model_refresh_scheduler()
@@ -294,6 +301,7 @@ async def lifespan(app: FastAPI):
         NAMESPACE_ACCOUNT_SELECTION,
         NAMESPACE_API_KEY,
         NAMESPACE_FIREWALL,
+        NAMESPACE_MODEL_REGISTRY,
         NAMESPACE_RESET_CREDITS,
         NAMESPACE_SETTINGS,
         CacheInvalidationPoller,
@@ -322,6 +330,10 @@ async def lifespan(app: FastAPI):
     # The bus carries no payload, so a peer redeem clears this replica's whole
     # reset-credits store; the refresh scheduler repopulates it on its next tick.
     cache_poller.on_invalidation(NAMESPACE_RESET_CREDITS, get_rate_limit_reset_credits_store().invalidate)
+    if settings.model_registry_enabled:
+        from app.core.openai.model_registry_store import reconcile_model_registry_from_store
+
+        cache_poller.on_invalidation(NAMESPACE_MODEL_REGISTRY, reconcile_model_registry_from_store)
     set_cache_invalidation_poller(cache_poller)
     try:
         # Seed baseline namespace versions before loading the routing snapshot

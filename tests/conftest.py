@@ -133,9 +133,11 @@ def _reset_model_registry():
     registry = get_model_registry()
     registry._snapshot = None
     registry._metadata_models = None
+    registry._applied_content_hash = None
     yield
     registry._snapshot = None
     registry._metadata_models = None
+    registry._applied_content_hash = None
 
 
 @pytest.fixture(autouse=True)

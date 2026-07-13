@@ -1,0 +1,117 @@
+# model-catalog-compat delta: replica-aware-model-registry
+
+## ADDED Requirements
+
+### Requirement: Refreshed model catalog is replica-coherent
+
+The leader refresh cycle SHALL persist the complete registry state (models, plan maps, per-account tier maps, suppression set, authoritative flags, metadata retention state, and the refresh wall-clock timestamp) to the single-row `model_registry_snapshot` table and SHALL bump the `model_registry` cache-invalidation namespace only after the persist commits (write-then-bump). The payload write and the bump SHALL be skipped when the serialized content hash is unchanged from the last persisted state; the stored `refreshed_at` timestamp SHALL still be advanced so snapshot age reflects the leader's latest successful refresh. Every replica MUST apply a newly persisted snapshot within the cache-invalidation poll bound and MUST invalidate its local account-selection cache on apply; after apply, `/v1/models`, plan gating (`plan_types_for_model`), suppression (`is_suppressed_model`), and per-account service-tier routing on a non-leader MUST be identical to the leader. A non-leader refresh tick MUST NOT fetch the upstream catalog and SHALL instead reconcile from the persisted snapshot when the stored snapshot header differs from the last applied one (backstop for a lost invalidation bump). A leader catalog clear SHALL persist an explicit cleared marker and bump, so followers revert to the bootstrap floor rather than serving a withdrawn catalog.
+
+#### Scenario: Follower serves the refreshed catalog on /v1/models
+
+- **GIVEN** replica A (leader) completes a registry refresh whose catalog adds a new slug and withdraws a bootstrap slug
+- **AND** replica A persists the snapshot and bumps the `model_registry` namespace
+- **WHEN** replica B's cache-invalidation poller observes the version change
+- **THEN** replica B applies the snapshot to its in-memory registry
+- **AND** `GET /v1/models` served by replica B lists the new slug and omits the withdrawn slug
+
+#### Scenario: Follower enforces suppression of a withdrawn slug
+
+- **GIVEN** the leader's refreshed snapshot marks a previously served slug as suppressed
+- **WHEN** a follower applies the persisted snapshot
+- **THEN** `is_suppressed_model` returns true for that slug on the follower
+
+#### Scenario: Follower enforces plan gating for a newly gated slug
+
+- **GIVEN** the leader's refreshed snapshot maps a slug to exactly one plan type
+- **WHEN** a follower applies the persisted snapshot
+- **THEN** `plan_types_for_model` on the follower returns exactly that plan set instead of no filtering
+
+#### Scenario: Catalog clear propagates to followers
+
+- **GIVEN** the leader clears the registry because no active accounts remain
+- **WHEN** the leader persists the cleared marker and bumps, and a follower applies it
+- **THEN** the follower reverts to the bootstrap catalog floor
+
+#### Scenario: Lost bump converges via the refresh-tick backstop
+
+- **GIVEN** a snapshot was persisted but the invalidation bump was lost
+- **WHEN** a non-leader replica's next refresh tick runs
+- **THEN** the replica detects the header mismatch, applies the persisted snapshot, and converges within one refresh interval
+
+#### Scenario: Non-leader tick performs no upstream fetch
+
+- **WHEN** a non-leader replica's refresh tick runs
+- **THEN** it performs no upstream model-catalog fetch, regardless of whether it reconciled from the store
+
+### Requirement: Persisted model catalog survives restart and version skew
+
+At startup every replica SHALL load the persisted model-registry snapshot into its in-memory registry before background schedulers start, provided the snapshot's age is within `model_registry_snapshot_max_age_seconds` (default 86400); an older snapshot SHALL be ignored so the bootstrap catalog remains the floor. A snapshot whose `schema_version` differs from the running code's codec version SHALL be ignored with a warning and MUST NOT fail startup or the invalidation poller (rolling-deploy safety). A persist failure on the leader SHALL degrade to leader-local refresh behavior with a warning (the in-memory registry is still updated and persistence is retried next cycle). Imported snapshots SHALL preserve refresh-TTL semantics by deriving the monotonic `fetched_at` from the persisted wall-clock `refreshed_at`.
+
+#### Scenario: Restart loads the persisted catalog before the first refresh
+
+- **GIVEN** a fresh persisted snapshot exists
+- **WHEN** a replica starts
+- **THEN** its registry serves the persisted catalog before the first refresh tick completes
+
+#### Scenario: Snapshot older than the staleness cap is ignored
+
+- **GIVEN** the persisted snapshot's `refreshed_at` is older than `model_registry_snapshot_max_age_seconds`
+- **WHEN** a replica starts
+- **THEN** the snapshot is not applied and the bootstrap catalog is served
+- **AND** the next successful leader refresh repopulates the snapshot
+
+#### Scenario: Mismatched schema version is ignored without error
+
+- **GIVEN** the persisted snapshot's `schema_version` differs from the running code's codec version
+- **WHEN** a replica attempts to load it at startup or via the poller
+- **THEN** the snapshot is ignored with a warning and no error is raised
+
+#### Scenario: Leader persist failure keeps the leader serving its refreshed catalog
+
+- **GIVEN** the leader's registry refresh succeeded but persisting the snapshot fails
+- **WHEN** the refresh cycle completes
+- **THEN** the leader's in-memory registry still serves the refreshed catalog and a warning is logged
+
+## MODIFIED Requirements
+
+### Requirement: Bootstrap model catalog is available before refresh
+
+Before the first successful upstream model-registry refresh, the system MUST
+serve a conservative static catalog of known Codex model slugs from both
+`GET /v1/models` and `GET /backend-api/codex/models`. This static catalog is a
+bundled fallback for startup/offline paths; refreshed upstream model-registry
+data remains the authoritative source once available. A replica that starts
+while a fresh persisted registry snapshot exists SHALL serve the persisted
+catalog (not the bootstrap catalog) before its first scheduler tick; the
+bootstrap catalog remains the floor only when no persisted or refreshed
+snapshot is available. The bootstrap catalog MUST
+include `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.5`,
+`gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex`, `gpt-5.3-codex-spark`,
+`gpt-5.2`, and `codex-auto-review`, and MUST NOT invent unverified variant
+slugs such as `gpt-5.5-pro` or a bare `gpt-5.6`. `gpt-5.3-codex` and
+`gpt-5.3-codex-spark` were dropped from upstream's bundled catalog at
+codex rust-v0.144.x but remain retained for older pinned clients because the
+upstream backend still serves them.
+
+#### Scenario: OpenAI-compatible models endpoint serves bootstrap slugs
+
+- **GIVEN** the model registry has no refreshed upstream snapshot
+- **AND** no persisted registry snapshot is available
+- **WHEN** a client calls `GET /v1/models`
+- **THEN** the response contains exactly the bootstrap model slugs
+- **AND** the response includes `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna`
+- **AND** the response does not include `gpt-5.5-pro` or bare `gpt-5.6`
+
+#### Scenario: Codex-native models endpoint serves GPT-5.6 bootstrap metadata
+
+- **GIVEN** the model registry has no refreshed upstream snapshot
+- **WHEN** a client calls `GET /backend-api/codex/models`
+- **THEN** the `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna` entries include representative upstream metadata including context-window, visibility, speed-tier, and reasoning fields
+- **AND** Sol and Terra advertise `low`, `medium`, `high`, `xhigh`, `max`, and `ultra`
+- **AND** Luna advertises `low`, `medium`, `high`, `xhigh`, and `max`
+
+#### Scenario: Replica startup with a fresh persisted snapshot serves the persisted catalog
+
+- **GIVEN** a fresh persisted registry snapshot exists whose catalog differs from the bootstrap catalog
+- **WHEN** a replica starts and a client calls `GET /v1/models` before the first refresh tick
+- **THEN** the response reflects the persisted catalog, not the bootstrap catalog

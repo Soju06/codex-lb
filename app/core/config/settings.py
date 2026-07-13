@@ -271,6 +271,9 @@ class Settings(BaseSettings):
     # catalog (GPT-5.6 requires 0.144.0) or a degraded-startup refresh would
     # receive an upstream catalog without those models.
     model_registry_client_version: str = "0.144.0"
+    # Persisted registry snapshots older than this are ignored at load time
+    # (bootstrap catalog remains the floor until the next leader refresh).
+    model_registry_snapshot_max_age_seconds: int = Field(default=86400, gt=0)
     codex_fingerprint_os: str = "Mac OS 26.5.0"
     codex_fingerprint_arch: str = "arm64"
     codex_fingerprint_terminal: str = "iTerm.app/3.6.10"

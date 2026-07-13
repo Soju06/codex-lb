@@ -36,12 +36,23 @@ _CANCEL_GRACE_SECONDS = 5.0
 # duplicate-singleton overlap, so the lease is left to expire after its TTL.
 _RELEASE_DRAIN_GRACE_SECONDS = 5.0
 
-# PostgreSQL evaluates both the new expiry and the takeover predicate on the
-# database clock so inter-replica wall-clock skew cannot steal a live lease.
+# PostgreSQL evaluates the lease clock server-side so inter-replica wall-clock
+# skew cannot steal a live lease. The stored expiry uses ``clock_timestamp()``
+# (the actual statement-execution time) rather than ``now()`` /
+# ``transaction_timestamp()`` (fixed at transaction start): a renewal or
+# same-leader re-acquire that blocks on the ``scheduler_leader`` row lock must
+# extend from the CURRENT time, not from a timestamp captured before it waited.
+# Because the row lock serializes writers, ``clock_timestamp()`` is evaluated in
+# commit order, so a slow writer that committed after a newer one can never
+# write an earlier ``expires_at`` — the lease can only move forward. The
+# takeover predicate keeps the transaction snapshot clock (``now()``): the
+# takeover decision is a single point-in-time read and staying on the snapshot
+# is the conservative choice (a waiter never over-eagerly steals a lease that
+# was refreshed while it was blocked on the lock).
 _POSTGRES_ACQUIRE_SQL = text(
     """
     INSERT INTO scheduler_leader (id, leader_id, acquired_at, expires_at)
-    VALUES (1, :leader_id, now(), now() + make_interval(secs => :ttl))
+    VALUES (1, :leader_id, clock_timestamp(), clock_timestamp() + make_interval(secs => :ttl))
     ON CONFLICT (id) DO UPDATE SET
         leader_id = excluded.leader_id,
         acquired_at = excluded.acquired_at,
@@ -53,7 +64,7 @@ _POSTGRES_ACQUIRE_SQL = text(
 _POSTGRES_RENEW_SQL = text(
     """
     UPDATE scheduler_leader
-    SET expires_at = now() + make_interval(secs => :ttl)
+    SET expires_at = clock_timestamp() + make_interval(secs => :ttl)
     WHERE id = 1 AND leader_id = :leader_id
     """
 ).bindparams(bindparam("ttl", type_=Float))

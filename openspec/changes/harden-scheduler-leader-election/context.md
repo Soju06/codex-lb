@@ -8,7 +8,7 @@ The `rate_limit_reset_credits` scheduler is intentionally **per-process** (see `
 
 ## Clock domains
 
-- **PostgreSQL**: both the stored expiry (`now() + make_interval(secs => :ttl)`) and the takeover predicate (`expires_at < now()`) are evaluated on the database clock. Replica wall clocks never participate, so NTP skew between replicas cannot steal a live lease.
+- **PostgreSQL**: both the stored expiry (`clock_timestamp() + make_interval(secs => :ttl)`) and the takeover predicate (`expires_at < now()`) are evaluated on the database clock. Replica wall clocks never participate, so NTP skew between replicas cannot steal a live lease. The stored expiry uses `clock_timestamp()` (actual statement-execution time), not `now()`/`transaction_timestamp()` (fixed at transaction start): overlapping renewals on the shared leader-election singleton queue on the `scheduler_leader` row lock, so a renewal that captured `now()` before it blocked on the lock could commit after a newer renewal and write an earlier `expires_at`, shortening the lease below the leader's locally tracked deadline. `clock_timestamp()` is evaluated after the lock is acquired, in commit order, so `expires_at` only moves forward. The takeover predicate stays on the transaction snapshot clock (`now()`), which is the conservative choice for a point-in-time takeover read.
 - **SQLite**: a shared SQLite file implies a single host, so the host clock is a single clock domain. The writer binds `datetime.now(UTC)` on both sides of the comparison. Only `leader_election.py` writes this row; manual UPDATEs with a different datetime format could confuse the string comparison — do not hand-edit `scheduler_leader`.
 
 ## Residual overlap (accepted risk)

@@ -82,12 +82,41 @@ async def test_try_acquire_uses_database_clock_sql_on_postgres_dialect(monkeypat
     [statement] = session.statements
     assert isinstance(statement, TextClause)
     sql = str(statement)
-    assert "now()" in sql
     assert "make_interval" in sql
+    # The stored expiry uses the actual statement-execution clock so an acquire
+    # (including a same-leader re-acquire) that waited on the row lock extends
+    # from the current time and can never write expires_at backward.
+    assert "clock_timestamp() + make_interval(secs => :ttl)" in sql
+    assert "now() + make_interval" not in sql
+    # The takeover predicate stays on the transaction snapshot clock.
     assert "expires_at < now()" in sql
     [params] = session.params
     assert params["leader_id"] == "node-a"
     assert params["ttl"] == 30
+
+
+@pytest.mark.asyncio
+async def test_renew_uses_current_statement_clock_on_postgres(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Regression: PostgreSQL now()/transaction_timestamp() is fixed at
+    # transaction start, so a renewal that blocks on the scheduler_leader row
+    # lock would compute expires_at from a pre-lock timestamp; two overlapping
+    # renewals could then commit out of order and move expires_at backward,
+    # shortening the effective lease below the locally tracked deadline. The
+    # renewal UPDATE must compute expires_at from clock_timestamp() (actual
+    # statement-execution time) so a renewal that waited on the lock still
+    # extends from the current time and the lease only moves forward.
+    session = _FakeSession("postgresql", [1, 1])
+    _install(monkeypatch, session)
+
+    election = leader_election_module.LeaderElection(leader_id="node-a")
+    assert await election.try_acquire() is True
+    assert await election.renew() is True
+
+    renew_statement = session.statements[1]
+    assert isinstance(renew_statement, TextClause)
+    renew_sql = str(renew_statement)
+    assert "clock_timestamp() + make_interval(secs => :ttl)" in renew_sql
+    assert "now()" not in renew_sql
 
 
 @pytest.mark.asyncio

@@ -49,7 +49,7 @@ Lease acquisition SHALL be a single conditional upsert on the `scheduler_leader`
 
 ### Requirement: Lease expiry is evaluated in a single clock domain
 
-On PostgreSQL both the stored expiry (`now() + TTL`) and the takeover predicate (`expires_at < now()`) MUST be computed on the database clock so that inter-replica wall-clock skew cannot steal an unexpired lease. On SQLite (single host by construction) the host clock MAY be used, bound consistently on both sides of the comparison by the same writer.
+On PostgreSQL both the stored expiry and the takeover predicate (`expires_at < now()`) MUST be computed on the database clock so that inter-replica wall-clock skew cannot steal an unexpired lease. The stored expiry (on both the acquire upsert and the renewal UPDATE) MUST be computed from the actual statement-execution clock (`clock_timestamp() + TTL`), not from the transaction-start clock (`now()` / `transaction_timestamp()`, which is fixed at transaction start). Because the `scheduler_leader` row lock serializes concurrent writers, a renewal or same-leader re-acquire that blocked on the row lock MUST therefore extend the lease from the current time, and `expires_at` MUST NOT move backward relative to a concurrent writer that committed later — so a leader's locally tracked deadline can never outrun the database expiry. On SQLite (single host by construction) the host clock MAY be used, bound consistently on both sides of the comparison by the same writer.
 
 #### Scenario: Acquiring replica's wall clock is ahead
 
@@ -57,6 +57,14 @@ On PostgreSQL both the stored expiry (`now() + TTL`) and the takeover predicate 
 - **AND** the leader holds an unexpired lease
 - **WHEN** the follower calls `try_acquire`
 - **THEN** the lease is not stolen because expiry is evaluated against the database clock
+
+#### Scenario: Overlapping renewals block on the lease row lock
+
+- **GIVEN** two leader-gated schedulers renewing the same lease on one PostgreSQL replica
+- **AND** their renewal UPDATEs queue on the `scheduler_leader` row lock
+- **WHEN** an earlier-started renewal commits after a later-started one
+- **THEN** the stored `expires_at` reflects each renewal's statement-execution time and never moves backward
+- **AND** the effective lease is not shortened below the leader's locally tracked deadline
 
 ### Requirement: Leaders renew the lease while gated work runs and demote on loss
 

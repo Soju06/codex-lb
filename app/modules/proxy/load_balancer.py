@@ -1955,14 +1955,54 @@ def _state_from_account(
         and effective_secondary_entry.used_percent is not None
         and float(effective_secondary_entry.used_percent) < 100.0
     )
+    effective_blocked_at = float(account.blocked_at) if account.blocked_at is not None else runtime.blocked_at
+
+    # An account marked RATE_LIMITED by an actual 429 always carries a
+    # blocked_at marker (stale window-derived RATE_LIMITED rows do not).
+    # Evaluate the persisted cooldown against the ORIGINAL persisted
+    # status/blocked_at/reset_at, before the zero-primary-capacity ACTIVE
+    # rewrite below, so that rewrite cannot erase rate-limit cooldown
+    # semantics: fresh monthly/long-window quota is recovery evidence for
+    # stale window data, not for an upstream 429 whose cooldown is running.
+    rate_limited_cooldown_deadline: float | None = None
+    if account.status == AccountStatus.RATE_LIMITED and effective_blocked_at is not None:
+        persisted_deadline = (
+            float(account.reset_at) if account.reset_at else effective_blocked_at + RATE_LIMITED_MIN_COOLDOWN_SECONDS
+        )
+        if time.time() < persisted_deadline:
+            rate_limited_cooldown_deadline = persisted_deadline
+        if (
+            rate_limited_cooldown_deadline is not None
+            and runtime.cooldown_until is not None
+            and runtime.cooldown_until <= time.time()
+            and runtime.blocked_at is not None
+        ):
+            # The marking replica keeps its existing early-recovery gate: fresh
+            # post-block usage evidence lifts the hold locally; peers (with no
+            # runtime knowledge of the 429) wait for the persisted deadline.
+            early_freshness_entry = _rate_limited_freshness_entry(
+                account=account,
+                primary_entry=primary_entry,
+                long_window_entry=effective_secondary_entry,
+            )
+            if early_freshness_entry is not None and early_freshness_entry.recorded_at is not None:
+                recorded_epoch = early_freshness_entry.recorded_at.replace(tzinfo=timezone.utc).timestamp()
+                if recorded_epoch > effective_blocked_at:
+                    rate_limited_cooldown_deadline = None
+
     if usage_core.capacity_for_plan(account.plan_type, "primary") == 0.0 and (
         account.status != AccountStatus.RATE_LIMITED
         or (
-            primary_window_minutes is not None
-            and not usage_core.is_primary_window_minutes(primary_window_minutes)
-            and long_window_quota_available
+            rate_limited_cooldown_deadline is None
+            and (
+                (
+                    primary_window_minutes is not None
+                    and not usage_core.is_primary_window_minutes(primary_window_minutes)
+                    and long_window_quota_available
+                )
+                or (primary_entry is None and long_window_quota_available)
+            )
         )
-        or (primary_entry is None and long_window_quota_available)
     ):
         primary_used = None
         primary_reset = None
@@ -1980,7 +2020,6 @@ def _state_from_account(
         effective_runtime_reset = db_reset_at or runtime.reset_at
     else:
         effective_runtime_reset = None
-    effective_blocked_at = float(account.blocked_at) if account.blocked_at is not None else runtime.blocked_at
 
     # Defense-in-depth for RATE_LIMITED rows persisted without a reset_at
     # deadline (written before cooldown persistence, or by an older replica):

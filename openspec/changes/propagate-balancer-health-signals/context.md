@@ -42,6 +42,16 @@ when metadata is missing.
 - Peer selection caches (5s TTL in production) may still route to a freshly
   marked account until TTL expiry; that convergence gap is owned by the
   cache-invalidation-bus work and is not widened by this change.
+- Zero-primary-capacity plans (e.g. `free`): the stale-window recovery rewrite
+  in `_state_from_account` (from #909) flips a `RATE_LIMITED` seed to `ACTIVE`
+  when fresh monthly/long-window usage shows quota. That rewrite is gated on
+  the ORIGINAL persisted `status`/`blocked_at`/`reset_at`: a row marked by an
+  actual 429 (`blocked_at` set) stays held until the persisted deadline (or
+  the legacy `blocked_at + 30s` floor) elapses — fresh monthly quota is
+  recovery evidence for stale window data, not for a running 429 cooldown.
+  Rows without `blocked_at` (window-derived `RATE_LIMITED`) keep the existing
+  recovery, and the marking replica's post-block fresh-usage early-recovery
+  gate is unchanged.
 
 ## What stays replica-local (by design)
 

@@ -51,12 +51,13 @@ def _make_account(
     status: AccountStatus = AccountStatus.ACTIVE,
     blocked_at: int | None = None,
     reset_at: int | None = None,
+    plan_type: str = "plus",
 ) -> Account:
     encryptor = TokenEncryptor()
     return Account(
         id=f"acc_mr_{suffix}",
         email=f"mr_{suffix}@example.com",
-        plan_type="plus",
+        plan_type=plan_type,
         access_token_encrypted=encryptor.encrypt(f"access-{suffix}"),
         refresh_token_encrypted=encryptor.encrypt(f"refresh-{suffix}"),
         id_token_encrypted=encryptor.encrypt(f"id-{suffix}"),
@@ -158,6 +159,86 @@ async def test_peer_replica_honors_retry_after_hint_cooldown(db_setup):
 
     balancer_b = LoadBalancer(_repo_factory)
     selection = await balancer_b.select_account(routing_strategy="fill_first")
+
+    assert selection.account is not None
+    assert selection.account.id == healthy.id
+
+    row = await _fetch_account(limited.id)
+    assert row.status == AccountStatus.RATE_LIMITED
+
+
+async def _seed_free_accounts_with_monthly_usage(*accounts_with_usage: tuple[Account, float]) -> None:
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+        for account, monthly_used in accounts_with_usage:
+            await accounts_repo.upsert(account)
+            await usage_repo.add_entry(
+                account_id=account.id,
+                used_percent=monthly_used,
+                window="monthly",
+                reset_at=now_epoch + 30 * 24 * 3600,
+                window_minutes=43200,
+                recorded_at=now,
+            )
+
+
+@pytest.mark.asyncio
+async def test_peer_replica_holds_free_plan_rate_limited_account_despite_fresh_monthly_quota(db_setup):
+    """Regression (codex P1): on a zero-primary-capacity plan (free) the
+    recovery rewrite in ``_state_from_account`` flipped ``status_seed`` to
+    ACTIVE before the peer-recovery guards ran, so a peer replica with fresh
+    monthly usage below 100% flipped a monthly-only rate-limited account
+    straight back to ACTIVE, erasing the persisted cooldown."""
+    limited = _make_account("free_limited", plan_type="free")
+    healthy = _make_account("free_healthy", plan_type="free")
+    # fill_first prefers the higher long-window usage, so replica B would pick
+    # the rate-limited account if it (incorrectly) considered it selectable.
+    await _seed_free_accounts_with_monthly_usage((limited, 50.0), (healthy, 10.0))
+
+    balancer_a = LoadBalancer(_repo_factory)
+    await balancer_a.mark_rate_limit(limited, {"message": "Rate limit exceeded."})
+
+    row = await _fetch_account(limited.id)
+    assert row.status == AccountStatus.RATE_LIMITED
+    assert row.blocked_at is not None
+    assert row.reset_at is not None
+    persisted_reset_at = row.reset_at
+
+    # Replica B: fresh instance, empty runtime state, same database.
+    balancer_b = LoadBalancer(_repo_factory)
+    selection = await balancer_b.select_account(routing_strategy="fill_first")
+
+    assert selection.account is not None
+    assert selection.account.id == healthy.id
+
+    row = await _fetch_account(limited.id)
+    assert row.status == AccountStatus.RATE_LIMITED
+    assert row.reset_at == persisted_reset_at
+    assert row.blocked_at is not None
+
+
+@pytest.mark.asyncio
+async def test_legacy_free_plan_rate_limited_row_is_floored_despite_fresh_monthly_quota(db_setup):
+    """Regression (codex P2): a legacy RATE_LIMITED row (reset_at NULL) with a
+    recent blocked_at must be held by the minimum-cooldown floor even on a
+    zero-primary-capacity plan where the recovery rewrite previously bypassed
+    the floor."""
+    now_epoch = int(time.time())
+    limited = _make_account(
+        "free_legacy_limited",
+        status=AccountStatus.RATE_LIMITED,
+        blocked_at=now_epoch - 5,
+        reset_at=None,
+        plan_type="free",
+    )
+    healthy = _make_account("free_legacy_healthy", plan_type="free")
+    await _seed_free_accounts_with_monthly_usage((limited, 50.0), (healthy, 10.0))
+
+    balancer = LoadBalancer(_repo_factory)
+    selection = await balancer.select_account(routing_strategy="fill_first")
 
     assert selection.account is not None
     assert selection.account.id == healthy.id

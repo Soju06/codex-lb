@@ -25,6 +25,7 @@ from app.core.cache.invalidation import (
     NAMESPACE_ACCOUNT_SELECTION,
     NAMESPACE_API_KEY,
     NAMESPACE_FIREWALL,
+    NAMESPACE_RESET_CREDITS,
     NAMESPACE_SETTINGS,
     CacheInvalidationPoller,
     get_cache_invalidation_poller,
@@ -321,6 +322,7 @@ def test_namespace_log_labels_cover_all_namespaces() -> None:
             NAMESPACE_ACCOUNT_ROUTING,
             NAMESPACE_ACCOUNT_SELECTION,
             NAMESPACE_SETTINGS,
+            NAMESPACE_RESET_CREDITS,
         )
     }
 
@@ -600,3 +602,41 @@ async def test_initialize_failure_leaves_poller_uninitialized(db_setup) -> None:
         await poller.initialize()
     assert poller._poll_initialized is False
     assert poller._known_versions == {}
+
+
+@pytest.mark.asyncio
+async def test_bump_local_suppresses_source_callback_but_peer_still_fires(db_setup) -> None:
+    """A replica that has already invalidated locally uses ``bump_local`` so its
+    OWN poller does not re-fire the (whole-store) callback for the bump it just
+    issued, while a peer replica still observes it and fires. This is the
+    reset-credit self-clear regression: without ``bump_local`` the source poller
+    would clear its entire reset-credit store on its own bump."""
+    source_calls: list[str] = []
+    peer_calls: list[str] = []
+
+    source = CacheInvalidationPoller(SessionLocal)
+    source.on_invalidation(NAMESPACE_RESET_CREDITS, lambda: source_calls.append("cleared"))
+    peer = CacheInvalidationPoller(SessionLocal)
+    peer.on_invalidation(NAMESPACE_RESET_CREDITS, lambda: peer_calls.append("cleared"))
+
+    # Both replicas seed their baselines before anything is bumped.
+    await source._poll_once()
+    await peer._poll_once()
+
+    # The source has already invalidated the affected account locally; it only
+    # needs peers to react.
+    assert await source.bump_local(NAMESPACE_RESET_CREDITS) is True
+
+    # The source poll does NOT re-run its whole-store callback for its own bump.
+    await source._poll_once()
+    assert source_calls == []
+
+    # The peer observes the bump and clears its store exactly once.
+    await peer._poll_once()
+    assert peer_calls == ["cleared"]
+
+    # A genuine peer bump still fires on the source (self-suppression only
+    # cancels the source's own contribution, never a peer's).
+    assert await peer.bump(NAMESPACE_RESET_CREDITS) is True
+    await source._poll_once()
+    assert source_calls == ["cleared"]

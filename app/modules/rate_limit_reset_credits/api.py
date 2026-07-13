@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
@@ -19,7 +20,7 @@ from app.core.auth.dependencies import (
     validate_dashboard_session,
 )
 from app.core.auth.refresh import RefreshError
-from app.core.cache.invalidation import NAMESPACE_RESET_CREDITS, bump_cache_invalidation
+from app.core.cache.invalidation import NAMESPACE_RESET_CREDITS, bump_cache_invalidation_local
 from app.core.clients.rate_limit_reset_credits import (
     ConsumeResetCreditError,
     ConsumeResetCreditResponse,
@@ -296,11 +297,20 @@ async def _redeem_soonest_reset_credit_locked(
     if auth_manager is not None:
         redeem_account = await auth_manager.ensure_fresh(account, force=False)
 
+    # Every accepted consume MUST participate in the durable ledger. When the
+    # caller supplies no redeem_request_id (the still-supported no-body dashboard
+    # path), synthesize a UUID v4 so the selected credit is pinned before the
+    # upstream consume instead of forwarding an unrecorded id. Only a
+    # CLIENT-supplied id can be an idempotent retry with a pre-existing pin; a
+    # freshly synthesized id is never already pinned, so the pin lookup is
+    # skipped for it (and would be a guaranteed miss anyway).
+    client_supplied_id = redeem_request_id is not None
+    if redeem_request_id is None:
+        redeem_request_id = uuid.uuid4().hex
+
     cached_snapshot = store.get(account.id)
     cached_credit = _select_soonest_available_credit(cached_snapshot)
-    pending_credit_id = (
-        await get_pinned_redeem_credit_id(account.id, redeem_request_id) if redeem_request_id is not None else None
-    )
+    pending_credit_id = await get_pinned_redeem_credit_id(account.id, redeem_request_id) if client_supplied_id else None
     if cached_credit is None and pending_credit_id is None:
         raise DashboardConflictError("No available reset credit", code="no_available_reset_credit")
 
@@ -333,9 +343,10 @@ async def _redeem_soonest_reset_credit_locked(
         await store.set(account.id, build_snapshot(credits_response))
         raise DashboardConflictError("No available reset credit", code="no_available_reset_credit")
     else:
-        credit_id = credit.id
-        if redeem_request_id is not None:
-            credit_id = await pin_redeem_request(account.id, redeem_request_id, credit_id)
+        # Pin the selected credit before the consume: a synthesized or
+        # client-supplied id is now always recorded, so a lost consume response
+        # leaves a durable pin any replica can reuse.
+        credit_id = await pin_redeem_request(account.id, redeem_request_id, credit.id)
 
     try:
         result = await effective_consume_fn(
@@ -352,7 +363,7 @@ async def _redeem_soonest_reset_credit_locked(
     redeemed_at = result.credit.redeemed_at if result.credit else None
     available_count_after = max(0, credits_response.available_count - 1)
     await store.invalidate(account.id)
-    await bump_cache_invalidation(NAMESPACE_RESET_CREDITS)
+    await bump_cache_invalidation_local(NAMESPACE_RESET_CREDITS)
 
     if refresh_usage is not None:
         try:

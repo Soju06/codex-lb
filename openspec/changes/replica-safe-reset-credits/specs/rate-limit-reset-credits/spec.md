@@ -48,7 +48,7 @@ Per-account redemption serialization MUST hold across all replicas and processes
 
 ### Requirement: Reset credit snapshot invalidation propagates across replicas
 
-After a successful consume (dashboard or `POST /v1/reset-credit`) and after a consume-conflict snapshot invalidation, the system SHALL bump a `reset_credits` namespace on the shared cache-invalidation version counter (best-effort); every replica's invalidation poller SHALL clear its in-memory reset-credits store within the poll bound, with the per-replica refresh tick as the fallback when a bump is lost.
+After a successful consume (dashboard or `POST /v1/reset-credit`) and after a consume-conflict snapshot invalidation, the system SHALL bump a `reset_credits` namespace on the shared cache-invalidation version counter (best-effort); every PEER replica's invalidation poller SHALL clear its in-memory reset-credits store within the poll bound, with the per-replica refresh tick as the fallback when a bump is lost. The ORIGINATING replica SHALL NOT re-clear its whole reset-credits store in response to its own bump: it has already evicted the affected account's snapshot precisely, so a whole-store clear on the source would needlessly discard still-valid snapshots for unrelated accounts and force redundant upstream refetches. The source replica MAY acknowledge its own bump locally to suppress the self-triggered whole-store clear; if a peer bump coalesces into the same acknowledged version and is thereby not observed on the source, that degrades to the per-replica refresh fallback (identical to a lost bump) and never suppresses invalidation on any peer.
 
 #### Scenario: Peer replica stops listing a redeemed credit within the poll bound
 - **GIVEN** replicas A and B both cache a snapshot listing credit C as available
@@ -60,6 +60,12 @@ After a successful consume (dashboard or `POST /v1/reset-credit`) and after a co
 - **GIVEN** the version-counter bump write fails after a successful consume
 - **WHEN** replica B's next scheduled refresh tick runs
 - **THEN** replica B's snapshot for that account reflects the post-redeem upstream state no later than that tick
+
+#### Scenario: Redeeming one account does not clear unrelated snapshots on the source replica
+- **GIVEN** replica A caches valid snapshots for account X and account Y
+- **WHEN** a consume for account X succeeds on replica A and bumps the `reset_credits` namespace
+- **THEN** replica A evicts only account X's snapshot
+- **AND** account Y's cached snapshot on replica A survives (replica A does not clear its whole store in response to its own bump)
 
 ## MODIFIED Requirements
 
@@ -88,6 +94,12 @@ The system SHALL expose a dashboard endpoint `POST /api/accounts/{account_id}/ra
 - **GIVEN** a consume with `redeem_request_id` R recorded `credit_id` C durably and forwarded the consume, but the client response was lost
 - **WHEN** the retry with the same R is served by a different replica
 - **THEN** that replica forwards C to upstream instead of selecting a new credit
+
+#### Scenario: No-body consume synthesizes a redeem_request_id and pins the ledger
+- **GIVEN** a dashboard consume request that carries no `redeem_request_id` (the still-supported no-body path)
+- **WHEN** the endpoint selects an available credit to redeem
+- **THEN** the endpoint synthesizes a UUID v4 `redeem_request_id`, durably pins the selected `credit_id` to it before the upstream consume, and forwards that recorded id to upstream
+- **AND** the consume never forwards an unrecorded `redeem_request_id`
 
 #### Scenario: Upstream consume failures surface as dashboard errors
 - **GIVEN** an operator invokes `POST /api/accounts/{id}/rate-limit-reset-credits/consume`

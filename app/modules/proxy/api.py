@@ -41,7 +41,7 @@ from app.core.auth.dependencies import (
     validate_usage_api_key,
 )
 from app.core.auth.refresh import RefreshError
-from app.core.cache.invalidation import NAMESPACE_RESET_CREDITS, bump_cache_invalidation
+from app.core.cache.invalidation import NAMESPACE_RESET_CREDITS, bump_cache_invalidation_local
 from app.core.clients.files import FileProxyError
 from app.core.clients.proxy import ProxyResponseError
 from app.core.clients.rate_limit_reset_credits import (
@@ -1177,10 +1177,10 @@ async def v1_redeem_reset_credit(
             except ConsumeResetCreditError as exc:
                 if _should_invalidate_v1_reset_credit_snapshot_on_consume_error(exc):
                     await get_rate_limit_reset_credits_store().invalidate(account_id)
-                    await bump_cache_invalidation(NAMESPACE_RESET_CREDITS)
+                    await bump_cache_invalidation_local(NAMESPACE_RESET_CREDITS)
                 raise _translate_v1_reset_credit_consume_error(exc) from exc
             await get_rate_limit_reset_credits_store().invalidate(account_id)
-            await bump_cache_invalidation(NAMESPACE_RESET_CREDITS)
+            await bump_cache_invalidation_local(NAMESPACE_RESET_CREDITS)
             try:
                 await _refresh_usage_after_v1_reset_credit_redeem(account_id)
             except Exception:

@@ -138,6 +138,42 @@ class CacheInvalidationPoller:
                 return False
         return False
 
+    async def bump_local(self, namespace: str) -> bool:
+        """Bump a namespace this replica has ALREADY invalidated locally.
+
+        For callers that both mutate their own in-memory state AND want peers
+        to react (e.g. the reset-credit redeem path evicts the affected
+        account's snapshot locally, then bumps so peers clear their stores).
+        After the shared bump succeeds this records the resulting version as
+        already-observed on THIS poller, so the originating replica does NOT
+        re-run its (possibly whole-store) callback for a bump it already
+        accounted for locally. Peer replicas still observe the bump and fire.
+
+        A peer bump that lands between our commit and the acknowledging read is
+        acknowledged here without firing on this replica; that degrades to the
+        per-replica refresh fallback the reset-credits design already documents
+        for a lost bump, and never affects peers. ``_known_versions`` is only
+        advanced (``max``), never rewound, so a concurrent poll cannot be forced
+        to re-fire by this method.
+        """
+        if not await self.bump(namespace):
+            return False
+        session = self._session_factory()
+        try:
+            version = await session.scalar(
+                select(CacheInvalidation.version).where(CacheInvalidation.namespace == namespace)
+            )
+        except Exception:
+            # Failing to acknowledge only risks one redundant self-invalidation
+            # on the next poll; the bump itself already succeeded for peers.
+            logger.debug("cache_invalidation bump_local acknowledge read failed", exc_info=True)
+            return True
+        finally:
+            await close_session(session)
+        if version is not None:
+            self._known_versions[namespace] = max(self._known_versions.get(namespace, 0), version)
+        return True
+
     async def _bump_once(self, namespace: str) -> None:
         session = self._session_factory()
         try:
@@ -292,3 +328,15 @@ async def bump_cache_invalidation(namespace: str) -> None:
     if poller is None:
         return
     await poller.bump(namespace)
+
+
+async def bump_cache_invalidation_local(namespace: str) -> None:
+    """Best-effort bump for a namespace already invalidated locally by the caller.
+
+    Notifies peers while suppressing this replica's own re-invalidation for the
+    bump it just issued. A no-op outside the lifespan poller's lifetime.
+    """
+    poller = _poller
+    if poller is None:
+        return
+    await poller.bump_local(namespace)

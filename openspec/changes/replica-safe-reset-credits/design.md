@@ -63,13 +63,27 @@ is the sole serializer when a DB session is present).
 
 `NAMESPACE_RESET_CREDITS = "reset_credits"` added next to
 `NAMESPACE_API_KEY`/`NAMESPACE_FIREWALL`; `main.py` registers
-`cache_poller.on_invalidation(NAMESPACE_RESET_CREDITS, store.invalidate)`.
-Bumped best-effort after `store.invalidate(account_id)` in the dashboard
-consume path and at both invalidate sites in `v1_redeem_reset_credit`. The bus
+`cache_poller.on_invalidation(NAMESPACE_RESET_CREDITS, store.invalidate)`
+(whole-store clear for PEERS). Bumped best-effort after
+`store.invalidate(account_id)` in the dashboard consume path and at both
+invalidate sites in `v1_redeem_reset_credit`, via
+`bump_cache_invalidation_local` / `CacheInvalidationPoller.bump_local`. The bus
 carries no payload, so peers do a FULL store clear; accepted because redeems
 are rare and the <=60s refresh tick repopulates. The v1 upstream-fetch
 fallback (decision 4) makes the false-409 fix independent of bus delivery; the
 bus only shortens listing staleness from <=60s to ~0.5s.
+
+`bump_local` bumps the shared counter and then records the resulting version as
+already-observed on the ORIGINATING poller, so the source replica does NOT
+re-run the whole-store clear for its own bump — it already evicted the affected
+account precisely, and re-clearing would discard still-valid snapshots for
+unrelated accounts and force redundant upstream refetches. `_known_versions` is
+only advanced (`max`), never rewound, so a concurrent poll cannot be forced to
+re-fire. A peer bump that coalesces into the acknowledged version on the source
+degrades to the per-replica refresh fallback (identical to a lost bump); peers
+are never affected. Rejected: a payload-carrying bus or per-account namespaces
+(same reasons below) — self-suppression keeps the payload-free counter while
+removing the source-side amplification.
 
 Rejected: per-account dynamic namespaces (would leak unbounded rows into
 `cache_invalidation`, scanned every 0.5s by every replica); moving snapshots

@@ -86,11 +86,15 @@ def _fake_request(host: str = "127.0.0.1") -> Request:
     return cast(Request, SimpleNamespace(client=SimpleNamespace(host=host)))
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def fake_redeem_ledger(monkeypatch: pytest.MonkeyPatch) -> dict[tuple[str, str], str]:
     """In-memory stand-in for the shared-DB redeem idempotency ledger.
 
-    Keeps these unit tests hermetic; the real DB-backed ledger is covered by
+    Autouse so every helper test is hermetic: the no-body dashboard path now
+    synthesizes a redeem_request_id and pins it, so a success reaches
+    ``pin_redeem_request`` even without an explicit fixture request. Tests that
+    request it by name receive the same dict instance to assert ledger state.
+    The real DB-backed ledger is covered by
     tests/integration/test_reset_credits_replica_safety.py.
     """
     ledger: dict[tuple[str, str], str] = {}
@@ -545,6 +549,51 @@ async def test_redeem_retries_same_request_id_preserves_original_credit_when_ano
     }
     assert result.response.code == "already_redeemed"
     assert fake_redeem_ledger[("acc_1", "retry-id")] == "original"
+
+
+@pytest.mark.asyncio
+async def test_redeem_without_request_id_synthesizes_one_and_pins_ledger(
+    fake_redeem_ledger: dict[tuple[str, str], str],
+) -> None:
+    """The no-body dashboard path (no client redeem_request_id) MUST still
+    participate in the durable ledger: the endpoint synthesizes a UUID, pins the
+    selected credit, and forwards that recorded id to upstream instead of an
+    unrecorded one."""
+    store = RateLimitResetCreditsStore()
+    await store.set("acc_1", _snapshot([_credit("c1")], available_count=1))
+
+    captured: dict[str, Any] = {}
+
+    async def consume_fn(
+        access_token: str,
+        account_id: str | None,
+        credit_id: str,
+        **kwargs: Any,
+    ) -> ConsumeResetCreditResponse:
+        captured.update({"credit_id": credit_id, "redeem_request_id": kwargs.get("redeem_request_id")})
+        return ConsumeResetCreditResponse.model_validate(
+            {
+                "code": "reset",
+                "credit": {"id": credit_id, "status": "redeemed", "redeemed_at": "2026-06-13T13:12:31Z"},
+                "windows_reset": 1,
+            }
+        )
+
+    await _redeem_soonest_reset_credit(
+        account=_account(),
+        store=store,
+        encryptor=StubEncryptor(),
+        fetch_fn=_static_fetch_fn(_response([_credit("c1")], available_count=1)),
+        consume_fn=consume_fn,
+        # No redeem_request_id: the still-supported no-body consume path.
+    )
+
+    # A synthesized id was recorded and forwarded to upstream (not None).
+    synthesized_id = captured["redeem_request_id"]
+    assert isinstance(synthesized_id, str) and synthesized_id
+    assert captured["credit_id"] == "c1"
+    # Exactly one ledger row was pinned for the synthesized id -> selected credit.
+    assert fake_redeem_ledger == {("acc_1", synthesized_id): "c1"}
 
 
 @pytest.mark.asyncio

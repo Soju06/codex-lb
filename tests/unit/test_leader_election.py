@@ -88,6 +88,20 @@ async def test_try_acquire_uses_database_clock_sql_on_postgres_dialect(monkeypat
     # from the current time and can never write expires_at backward.
     assert "clock_timestamp() + make_interval(secs => :ttl)" in sql
     assert "now() + make_interval" not in sql
+    # Regression: the ON CONFLICT DO UPDATE SET clause must recompute the expiry
+    # from clock_timestamp() in the current statement rather than copy
+    # excluded.expires_at. ``excluded`` is the VALUES tuple, evaluated before the
+    # statement blocked on the scheduler_leader row lock, so a re-acquire that
+    # waited near or past the TTL would otherwise commit a pre-wait (stale)
+    # expiry while try_acquire records a fresh local deadline after commit.
+    conflict_clause = sql.split("DO UPDATE SET", 1)[1]
+    assert "excluded.expires_at" not in conflict_clause
+    assert "excluded.acquired_at" not in conflict_clause
+    assert "expires_at = clock_timestamp() + make_interval(secs => :ttl)" in conflict_clause
+    assert "acquired_at = clock_timestamp()" in conflict_clause
+    # The upsert extends from the current clock on both the insert and the
+    # conflict-update path, so clock_timestamp()+make_interval appears twice.
+    assert sql.count("clock_timestamp() + make_interval(secs => :ttl)") == 2
     # The takeover predicate stays on the transaction snapshot clock.
     assert "expires_at < now()" in sql
     [params] = session.params

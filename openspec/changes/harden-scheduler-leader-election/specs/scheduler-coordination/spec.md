@@ -66,6 +66,14 @@ On PostgreSQL both the stored expiry and the takeover predicate (`expires_at < n
 - **THEN** the stored `expires_at` reflects each renewal's statement-execution time and never moves backward
 - **AND** the effective lease is not shortened below the leader's locally tracked deadline
 
+#### Scenario: Re-acquire upsert blocks on the lease row lock
+
+- **GIVEN** a PostgreSQL replica whose acquire upsert takes the `ON CONFLICT DO UPDATE` path
+- **AND** the upsert blocks on the `scheduler_leader` row lock for a duration approaching the TTL
+- **WHEN** the conflict update commits
+- **THEN** the stored `expires_at` is recomputed from `clock_timestamp()` in the current statement rather than the `VALUES`/`excluded` tuple captured before the wait
+- **AND** the committed lease is not already stale relative to the fresh local deadline `try_acquire` records after commit
+
 ### Requirement: Leaders renew the lease while gated work runs and demote on loss
 
 While leader-gated work executes, the lease holder MUST renew the lease at an interval no greater than one third of the TTL. Each renewal attempt MUST be time-boxed to no more than one sixth of the TTL so that a hung database call cannot silently extend leadership; a timed-out attempt counts as a renewal error. The time-box MUST be enforced against the elapsed timeout alone: once the timeout elapses the attempt MUST be counted as an error immediately and the heartbeat MUST NOT block on the renewal coroutine's cancellation or cleanup unwinding (e.g. a blocked rollback during session teardown), which could otherwise defer demotion past the lease deadline. Renewal MUST verify that the renewal UPDATE affected a row; an affected rowcount of 0 MUST demote the holder and request cancellation of the in-flight gated work. Two consecutive renewal errors MUST demote the holder likewise, and any renewal error observed after the holder's locally tracked lease deadline (last successful renewal or acquisition plus TTL) has passed MUST demote immediately, so a leader with a hung or unreachable database demotes itself no later than the lease TTL.

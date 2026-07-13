@@ -45,6 +45,11 @@ _RELEASE_DRAIN_GRACE_SECONDS = 5.0
 # Because the row lock serializes writers, ``clock_timestamp()`` is evaluated in
 # commit order, so a slow writer that committed after a newer one can never
 # write an earlier ``expires_at`` — the lease can only move forward. The
+# conflict-update path recomputes ``clock_timestamp()`` in the ``DO UPDATE SET``
+# clause rather than copying ``excluded.*``: the ``excluded`` row is the
+# ``VALUES`` tuple, evaluated before the statement blocked on the row lock, so
+# reusing it would stamp a pre-wait expiry and reintroduce the stale-clock race.
+# The
 # takeover predicate keeps the transaction snapshot clock (``now()``): the
 # takeover decision is a single point-in-time read and staying on the snapshot
 # is the conservative choice (a waiter never over-eagerly steals a lease that
@@ -55,8 +60,8 @@ _POSTGRES_ACQUIRE_SQL = text(
     VALUES (1, :leader_id, clock_timestamp(), clock_timestamp() + make_interval(secs => :ttl))
     ON CONFLICT (id) DO UPDATE SET
         leader_id = excluded.leader_id,
-        acquired_at = excluded.acquired_at,
-        expires_at = excluded.expires_at
+        acquired_at = clock_timestamp(),
+        expires_at = clock_timestamp() + make_interval(secs => :ttl)
     WHERE scheduler_leader.expires_at < now() OR scheduler_leader.leader_id = :leader_id
     """
 ).bindparams(bindparam("ttl", type_=Float))

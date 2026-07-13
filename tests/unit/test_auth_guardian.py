@@ -175,7 +175,7 @@ def test_build_auth_guardian_scheduler_warns_when_self_disabling_without_leader_
     warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
     assert len(warnings) == 1
     message = warnings[0].getMessage()
-    assert "Auth guardian disabled" in message
+    assert "Auth Guardian disabled" in message
     assert "CODEX_LB_LEADER_ELECTION_ENABLED" in message
 
 

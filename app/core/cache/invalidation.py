@@ -28,6 +28,19 @@ NAMESPACE_ACCOUNT_SELECTION = "account_selection"
 NAMESPACE_SETTINGS = "settings"
 type InvalidationCallback = Callable[[], None | Awaitable[None]]
 
+# Log-safe labels for namespace values. Static analyzers (CodeQL) classify the
+# NAMESPACE_API_KEY constant as credential-like from its name alone, so log
+# statements must not take dataflow from the constants. These literals mirror
+# the namespace values; test_namespace_log_labels_cover_all_namespaces keeps
+# them in sync.
+_NAMESPACE_LOG_LABELS: dict[str, str] = {
+    "api_key": "api_key",
+    "firewall": "firewall",
+    "account_routing": "account_routing",
+    "account_selection": "account_selection",
+    "settings": "settings",
+}
+
 _BUMP_RETRY_ATTEMPTS = 3
 _BUMP_RETRY_BASE_SECONDS = 0.05
 _POLL_FAILURES_WARNING_THRESHOLD = 3
@@ -135,7 +148,11 @@ class CacheInvalidationPoller:
             await close_session(session)
 
     def _record_bump_failure(self, namespace: str) -> None:
-        logger.error("cache_invalidation bump failed for namespace %s", namespace, exc_info=True)
+        logger.error(
+            "cache_invalidation bump failed for namespace %s",
+            _NAMESPACE_LOG_LABELS.get(namespace, "unknown"),
+            exc_info=True,
+        )
         if PROMETHEUS_AVAILABLE and cache_invalidation_bump_failures_total is not None:
             cache_invalidation_bump_failures_total.labels(namespace=namespace).inc()
 

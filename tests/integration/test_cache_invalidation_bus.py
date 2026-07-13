@@ -20,8 +20,11 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.cache.invalidation import (
+    _NAMESPACE_LOG_LABELS,
     NAMESPACE_ACCOUNT_ROUTING,
     NAMESPACE_ACCOUNT_SELECTION,
+    NAMESPACE_API_KEY,
+    NAMESPACE_FIREWALL,
     NAMESPACE_SETTINGS,
     CacheInvalidationPoller,
     get_cache_invalidation_poller,
@@ -297,10 +300,29 @@ async def test_bump_failure_is_observable_and_does_not_raise(db_setup, caplog) -
     with caplog.at_level(logging.ERROR, logger=_INVALIDATION_LOGGER):
         assert await poller.bump(namespace) is False
 
-    assert any(record.levelno == logging.ERROR and namespace in record.getMessage() for record in caplog.records)
+    # Unregistered namespaces are logged with a log-safe fallback label.
+    assert any(
+        record.levelno == logging.ERROR
+        and "cache_invalidation bump failed for namespace unknown" in record.getMessage()
+        for record in caplog.records
+    )
     if before is not None:
         assert _counter_value(cache_invalidation_bump_failures_total, namespace) == before + 1
     assert await _namespace_version(namespace) is None
+
+
+def test_namespace_log_labels_cover_all_namespaces() -> None:
+    """_NAMESPACE_LOG_LABELS uses literal keys/values (analyzer-safe); keep in sync."""
+    assert _NAMESPACE_LOG_LABELS == {
+        namespace: namespace
+        for namespace in (
+            NAMESPACE_API_KEY,
+            NAMESPACE_FIREWALL,
+            NAMESPACE_ACCOUNT_ROUTING,
+            NAMESPACE_ACCOUNT_SELECTION,
+            NAMESPACE_SETTINGS,
+        )
+    }
 
 
 @pytest.mark.asyncio

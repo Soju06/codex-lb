@@ -7,7 +7,7 @@ Regenerate with `uv run python scripts/generate_settings_reference.py`;
 `tests/unit/test_settings_reference.py` fails when this page drifts from
 `app/core/config/settings.py`.
 
-codex-lb currently exposes 114 settings. Every setting is an environment
+codex-lb currently exposes 115 settings. Every setting is an environment
 variable with the `CODEX_LB_` prefix (process environment or `.env` /
 `.env.local` next to the process). All defaults work with zero configuration —
 start from [Configuration](../configuration.md) for the handful that matter,
@@ -57,6 +57,7 @@ the host side of the compose `ports` mapping instead.
 | `CODEX_LB_UPSTREAM_COMPACT_TIMEOUT_SECONDS` | `float \| None` | `None` |
 | `CODEX_LB_UPSTREAM_CONNECT_TIMEOUT_SECONDS` | `float` | `8.0` |
 | `CODEX_LB_UPSTREAM_RESPONSE_CREATE_MAX_BYTES` | `int` | `15728640` |
+| `CODEX_LB_UPSTREAM_ROUTE_CACHE_TTL_SECONDS` | `float` | `60.0` |
 | `CODEX_LB_UPSTREAM_STREAM_TRANSPORT` | `'http' \| 'websocket' \| 'auto'` | `'auto'` |
 | `CODEX_LB_UPSTREAM_WEBSOCKET_TRUST_ENV` | `bool` | auto-detected from outbound proxy env vars |
 

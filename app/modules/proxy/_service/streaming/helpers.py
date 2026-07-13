@@ -51,7 +51,8 @@ from app.core.resilience.network_recovery import (
     PROCESS_NETWORK_UNAVAILABLE_CODE,
 )
 from app.core.types import JsonValue
-from app.core.upstream_proxy import ResolvedUpstreamRoute
+from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError
+from app.core.upstream_proxy.cache import get_upstream_route_cache
 from app.core.utils.request_id import get_request_id
 from app.core.utils.sse import CODEX_KEEPALIVE_FRAME as CODEX_KEEPALIVE_FRAME  # noqa: F401
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
@@ -727,14 +728,28 @@ async def _resolve_upstream_route_for_account(
     *,
     operation: str,
 ) -> ResolvedUpstreamRoute | None:
+    # Outcomes (route / direct-egress None / fail-closed error) are cached
+    # verbatim, so a hit can never change the degradation path the resolver
+    # chose; errors re-raise with their original reason.
+    cache = get_upstream_route_cache()
+    cached = cache.get(account.id)
+    if cached is not None:
+        return cached.unwrap(account.id)
+    generation = cache.generation
     async with _facade().SessionLocal() as session:
-        return await _facade().resolve_upstream_route(
-            session,
-            account_id=account.id,
-            operation=operation,
-            scope="account",
-            encryptor=proxy._encryptor,
-        )
+        try:
+            route = await _facade().resolve_upstream_route(
+                session,
+                account_id=account.id,
+                operation=operation,
+                scope="account",
+                encryptor=proxy._encryptor,
+            )
+        except UpstreamProxyRouteError as exc:
+            cache.store_error(account.id, exc, generation=generation)
+            raise
+    cache.store_route(account.id, route, generation=generation)
+    return route
 
 
 async def _select_account_with_budget_for_stream(proxy: Any, deadline: float, **kwargs: Any) -> AccountSelection:

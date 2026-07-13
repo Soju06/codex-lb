@@ -33,6 +33,7 @@ from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError, resolve_upstream_route
+from app.core.upstream_proxy.cache import get_upstream_route_cache
 from app.core.upstream_proxy.resolver import _is_missing_upstream_proxy_schema
 from app.core.usage.models import UsagePayload
 from app.core.utils.time import naive_utc_to_epoch, to_utc_naive, utcnow
@@ -663,6 +664,10 @@ class AccountsService:
             mark_account_routing_unavailable(account_id)
             get_account_selection_cache().invalidate()
             get_api_key_cache().clear()
+            # Deletion cascades the account_proxy_bindings row away, and account
+            # ids are deterministic (delete-then-re-import regenerates the same
+            # id), so the cached route outcome must not survive the deletion.
+            await get_upstream_route_cache().invalidate()
             await propagate_account_routing_change()
             poller = get_cache_invalidation_poller()
             if poller is not None:

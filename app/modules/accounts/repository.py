@@ -11,6 +11,7 @@ from sqlalchemy import delete, or_, select, text, update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.upstream_proxy.cache import get_upstream_route_cache
 from app.core.utils.time import utcnow
 from app.db.models import (
     Account,
@@ -247,6 +248,11 @@ class AccountsRepository:
                 await self._session.commit()
                 if usage_cache_dirty:
                     _clear_bulk_history_since_sqlite_cache()
+                    # Duplicate reconciliation deletes Account rows, cascading
+                    # any account_proxy_bindings they owned. The route cache is
+                    # keyed by deterministic account id, so stale duplicate-id
+                    # outcomes must not survive the commit.
+                    await get_upstream_route_cache().invalidate()
                 await self._session.refresh(canonical)
                 return canonical
 

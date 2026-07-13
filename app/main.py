@@ -230,11 +230,13 @@ async def lifespan(app: FastAPI):
         NAMESPACE_MODEL_REGISTRY,
         NAMESPACE_RESET_CREDITS,
         NAMESPACE_SETTINGS,
+        NAMESPACE_UPSTREAM_ROUTE,
         CacheInvalidationPoller,
         get_cache_invalidation_poller,
         set_cache_invalidation_poller,
     )
     from app.core.middleware.firewall_cache import get_firewall_ip_cache
+    from app.core.upstream_proxy.cache import get_upstream_route_cache
     from app.modules.proxy.account_cache import get_account_selection_cache, get_routing_availability_cache
     from app.modules.rate_limit_reset_credits.store import get_rate_limit_reset_credits_store
 
@@ -258,6 +260,10 @@ async def lifespan(app: FastAPI):
         NAMESPACE_SETTINGS,
         lambda: get_settings_cache().invalidate(propagate=False),
     )
+    cache_poller.on_invalidation(NAMESPACE_UPSTREAM_ROUTE, get_upstream_route_cache().clear)
+    # The route resolver also reads the dashboard settings row (routing enabled
+    # + default pool id), so settings bumps clear resolved routes as well.
+    cache_poller.on_invalidation(NAMESPACE_SETTINGS, get_upstream_route_cache().clear)
     # The bus carries no payload, so a peer redeem clears this replica's whole
     # reset-credits store; the refresh scheduler repopulates it on its next tick.
     cache_poller.on_invalidation(NAMESPACE_RESET_CREDITS, get_rate_limit_reset_credits_store().invalidate)

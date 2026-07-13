@@ -24,6 +24,7 @@ from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
 from app.core.exceptions import DashboardBadRequestError, DashboardSettingsConflictError
 from app.core.upstream_proxy import resolve_proxy_endpoint
+from app.core.upstream_proxy.cache import get_upstream_route_cache
 from app.db.models import Account, AccountProxyBinding, AccountStatus, ProxyEndpoint, ProxyPool, ProxyPoolMember
 from app.dependencies import SettingsContext, get_proxy_service_for_app, get_settings_context
 from app.modules.proxy.account_cache import (
@@ -346,6 +347,9 @@ async def add_upstream_proxy_pool_member(
         if _is_duplicate_proxy_pool_member_error(exc):
             raise _duplicate_proxy_pool_member_error()
         raise
+    # Pool membership is a route-resolver input: clear + durably bump before
+    # responding (same contract as the account-binding upsert).
+    await get_upstream_route_cache().invalidate()
     endpoint_ids = (
         (
             await context.session.execute(
@@ -468,6 +472,10 @@ async def put_account_proxy_binding(
         account.blocked_at = None
         reactivated = True
     await context.session.commit()
+    # Binding rows are a route-resolver input: clear this replica's route
+    # cache and durably bump ``upstream_route`` before responding so no
+    # request on the mutating replica resolves the pre-mutation binding.
+    await get_upstream_route_cache().invalidate()
     if reactivated:
         # Invalidate + bump only after the status commit so peers (and this
         # replica's poller) never rebuild selection/routing inputs from the
@@ -815,6 +823,14 @@ async def update_settings(
     except ValueError as exc:
         raise DashboardBadRequestError(str(exc), code="invalid_totp_config") from exc
 
+    upstream_route_inputs_changed = (
+        current.upstream_proxy_routing_enabled != updated.upstream_proxy_routing_enabled
+        or current.upstream_proxy_default_pool_id != updated.upstream_proxy_default_pool_id
+    )
+    # ``SettingsRepository.commit_refresh`` already cleared the route cache
+    # synchronously between the commit and its refresh await (no concurrent
+    # request can see the committed row alongside the stale cache); only the
+    # durable cross-replica signals remain here.
     await get_settings_cache().invalidate()
     changed_fields = [
         field_name
@@ -867,6 +883,14 @@ async def update_settings(
         )
         if getattr(current, field_name) != getattr(updated, field_name)
     ]
+    if upstream_route_inputs_changed:
+        # Durably bump ``upstream_route`` (with the coalesced retry fallback)
+        # rather than relying solely on the ``settings`` bump issued above:
+        # that bump is non-raising and enqueues no retry, so a transient write
+        # failure would leave peers on the stale route outcome until the TTL
+        # instead of the first recovered poll cycle. The re-clear inside
+        # ``invalidate`` is harmless; the guarding clear already ran pre-await.
+        await get_upstream_route_cache().invalidate()
     AuditService.log_async(
         "settings_changed",
         actor_ip=request.client.host if request.client else None,

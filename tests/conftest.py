@@ -22,6 +22,9 @@ os.environ["CODEX_LB_MODEL_REGISTRY_ENABLED"] = "false"
 os.environ["CODEX_LB_STICKY_SESSION_CLEANUP_ENABLED"] = "false"
 os.environ["CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_ENABLED"] = "false"
 os.environ["CODEX_LB_QUOTA_PLANNER_SCHEDULER_ENABLED"] = "false"
+# Route-resolution caching is opt-in per test (cache-specific tests set a TTL
+# explicitly); keeping it off preserves fresh-read semantics everywhere else.
+os.environ["CODEX_LB_UPSTREAM_ROUTE_CACHE_TTL_SECONDS"] = "0"
 # The app-level automations scheduler ticks on the real clock; with leader
 # election enabled its startup tick runs as a background task and can land
 # inside a test that stages its own due-now jobs, racing the test's
@@ -304,6 +307,12 @@ def _reset_global_state() -> None:
         settings_cache = get_settings_cache()
         settings_cache._cached_settings = None
         settings_cache._cached_at = 0.0
+    except Exception:
+        pass
+    try:
+        from app.core.upstream_proxy.cache import get_upstream_route_cache
+
+        get_upstream_route_cache().clear()
     except Exception:
         pass
     try:

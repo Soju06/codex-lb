@@ -7,7 +7,14 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.cache.invalidation import (
+    NAMESPACE_UPSTREAM_ROUTE,
+    CacheInvalidationPoller,
+    set_cache_invalidation_poller,
+)
+from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
+from app.core.upstream_proxy.cache import get_upstream_route_cache
 from app.core.utils.time import utcnow
 from app.db.models import (
     Account,
@@ -16,6 +23,7 @@ from app.db.models import (
     AdditionalUsageHistory,
     ApiKey,
     ApiKeyAccountAssignment,
+    CacheInvalidation,
     HttpBridgeSessionAlias,
     HttpBridgeSessionRecord,
     HttpBridgeSessionState,
@@ -916,7 +924,10 @@ async def test_accounts_upsert_merge_by_chatgpt_identity_prefers_matching_worksp
 
 
 @pytest.mark.asyncio
-async def test_accounts_upsert_merge_by_chatgpt_identity_reconciles_duplicate_rows(db_setup):
+async def test_accounts_upsert_merge_by_chatgpt_identity_reconciles_duplicate_rows(db_setup, monkeypatch):
+    monkeypatch.setenv("CODEX_LB_UPSTREAM_ROUTE_CACHE_TTL_SECONDS", "60")
+    get_settings.cache_clear()
+    set_cache_invalidation_poller(CacheInvalidationPoller(SessionLocal))
     async with SessionLocal() as session:
         repo = AccountsRepository(session)
 
@@ -1014,12 +1025,30 @@ async def test_accounts_upsert_merge_by_chatgpt_identity_reconciles_duplicate_ro
         )
         await session.commit()
 
+        route_cache = get_upstream_route_cache()
+        route_cache.store_route(duplicate_row.id, None, generation=route_cache.generation)
+        assert route_cache.get(duplicate_row.id) is not None
+        version_before = (
+            await session.scalar(
+                select(CacheInvalidation.version).where(CacheInvalidation.namespace == NAMESPACE_UPSTREAM_ROUTE)
+            )
+            or 0
+        )
+
         reauth = _make_account_with_chatgpt_id("acc_merge_main", "merge@example.com", "chatgpt_merge")
         reauth.plan_type = "team"
         saved = await repo.upsert(reauth, merge_by_email=False, merge_by_chatgpt_identity=True)
 
         assert saved.id == "acc_merge_main"
         assert saved.plan_type == "team"
+        assert route_cache.get(duplicate_row.id) is None
+        version_after = (
+            await session.scalar(
+                select(CacheInvalidation.version).where(CacheInvalidation.namespace == NAMESPACE_UPSTREAM_ROUTE)
+            )
+            or 0
+        )
+        assert version_after > version_before
 
         rows = list(
             (await session.execute(select(Account).where(Account.chatgpt_account_id == "chatgpt_merge")))

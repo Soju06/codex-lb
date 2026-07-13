@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
 from sqlalchemy import select
 
+from app.core.auth.guardian import _count_live_bridge_ring_members
 from app.core.config.key_fingerprint import (
     ENCRYPTION_KEY_FINGERPRINT_SENTINEL,
     EncryptionKeyFingerprintMismatchError,
@@ -14,9 +16,11 @@ from app.core.config.key_fingerprint import (
     verify_encryption_key_fingerprint,
 )
 from app.core.exceptions import DashboardSettingsConflictError
-from app.db.models import RuntimeSentinel
+from app.core.utils.time import utcnow
+from app.db.models import BridgeRingMember, RuntimeSentinel
 from app.db.session import SessionLocal
 from app.modules.dashboard_auth.repository import DashboardAuthRepository
+from app.modules.proxy.ring_membership import RING_STALE_THRESHOLD_SECONDS
 from app.modules.settings.repository import SettingsRepository
 from app.modules.settings.service import SettingsService
 
@@ -35,6 +39,28 @@ async def _stamp_sentinel(value: str) -> None:
     async with SessionLocal() as session:
         session.add(RuntimeSentinel(name=ENCRYPTION_KEY_FINGERPRINT_SENTINEL, value=value))
         await session.commit()
+
+
+# --- Auth Guardian dynamic bridge-ring detection ---
+
+
+@pytest.mark.asyncio
+async def test_count_live_bridge_ring_members_counts_only_fresh_heartbeats(db_setup):
+    now = utcnow()
+    stale = now - timedelta(seconds=RING_STALE_THRESHOLD_SECONDS + 60)
+    async with SessionLocal() as session:
+        session.add_all(
+            [
+                BridgeRingMember(instance_id="pod-a", registered_at=now, last_heartbeat_at=now),
+                BridgeRingMember(instance_id="pod-b", registered_at=now, last_heartbeat_at=now),
+                BridgeRingMember(instance_id="pod-dead", registered_at=stale, last_heartbeat_at=stale),
+            ]
+        )
+        await session.commit()
+
+    # Two replicas are live in the DB-backed ring even though the static
+    # instance-ring env var is empty; the stale row is excluded.
+    assert await _count_live_bridge_ring_members() == 2
 
 
 # --- Encryption-key fingerprint sentinel ---

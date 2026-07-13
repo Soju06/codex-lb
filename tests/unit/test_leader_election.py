@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import importlib
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -255,6 +256,98 @@ async def test_run_if_leader_returns_body_result(monkeypatch: pytest.MonkeyPatch
         return 12.5
 
     assert await election.run_if_leader(_body) == 12.5
+
+
+@pytest.mark.asyncio
+async def test_run_if_leader_demotes_when_renewal_hangs(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Renewal attempts are time-boxed to ttl / 6: a database that accepts the
+    # acquire but then hangs on every renewal must demote the leader no later
+    # than the lease TTL instead of extending leadership by the pool timeout.
+    class _HangingRenewSession(_FakeSession):
+        def __init__(self) -> None:
+            super().__init__("postgresql", [1])
+            self.calls = 0
+
+        async def execute(self, statement: Any, params: Any = None) -> _FakeResult:
+            self.calls += 1
+            if self.calls == 1:
+                return await super().execute(statement, params)
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+    session = _HangingRenewSession()
+    _install(monkeypatch, session, ttl=3)
+
+    election = leader_election_module.LeaderElection(leader_id="node-a")
+    body_cancelled = asyncio.Event()
+
+    async def _body() -> str:
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            body_cancelled.set()
+            raise
+        return "ran"
+
+    loop = asyncio.get_running_loop()
+    start = loop.time()
+    result = await election.run_if_leader(_body)
+
+    assert result is None
+    assert election.is_leader is False
+    assert body_cancelled.is_set()
+    # Two time-boxed attempts (interval 1s + timeout 1s each) demote by ~4s,
+    # i.e. within the 3s TTL plus scheduling slack — never the pool timeout.
+    assert loop.time() - start < 6.0
+    assert session.calls >= 3
+
+
+@pytest.mark.asyncio
+async def test_run_if_leader_detaches_shielded_body_after_grace(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Bodies that shield in-flight singleton refreshes (usage/token
+    # singleflights) drain them after a cancellation request. The gate must
+    # stop awaiting after the bounded grace and let the shielded work finish
+    # detached instead of pinning run_if_leader on the upstream call.
+    session = _FakeSession("postgresql", [1, 0])  # acquire wins, renewal observes a stolen lease
+    _install(monkeypatch, session, ttl=3)
+    monkeypatch.setattr(leader_election_module, "_CANCEL_GRACE_SECONDS", 0.2)
+
+    release = asyncio.Event()
+    body_finished = asyncio.Event()
+    inner_task: asyncio.Task[None] | None = None
+
+    async def _inner() -> None:
+        await release.wait()
+
+    async def _body() -> None:
+        nonlocal inner_task
+        inner_task = asyncio.create_task(_inner())
+        try:
+            await asyncio.shield(inner_task)
+        except asyncio.CancelledError:
+            # Drain the shielded work before propagating, like the
+            # auth-guardian and usage-refresh singleflight bodies do.
+            await inner_task
+            body_finished.set()
+            raise
+
+    election = leader_election_module.LeaderElection(leader_id="node-a")
+    loop = asyncio.get_running_loop()
+    start = loop.time()
+    result = await election.run_if_leader(_body)
+
+    assert result is None
+    assert election.is_leader is False
+    # The gate returned within the grace of the lease loss (~1s renew +
+    # 0.2s grace), not after the shielded inner work completed.
+    assert loop.time() - start < 3.0
+    assert inner_task is not None
+    assert not inner_task.done()
+    assert not body_finished.is_set()
+
+    release.set()
+    await inner_task
+    await asyncio.wait_for(body_finished.wait(), timeout=1)
 
 
 @pytest.mark.asyncio

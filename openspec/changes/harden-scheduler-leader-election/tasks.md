@@ -12,3 +12,6 @@
 - [x] 10. Add `run_if_leader` lifecycle tests: heartbeat keeps a follower out during a long body; stealing the lease cancels the body within one renew interval; release lets a second instance acquire immediately
 - [x] 11. Rewrite `tests/unit/test_leader_election.py` for the new API (rowcount-based, dialect-driven); update scheduler unit-test leader fakes and settings default assertions
 - [x] 12. Run targeted pytest, ruff check + format, and `openspec validate` until green
+- [x] 13. Review follow-up: time-box each renewal attempt (`asyncio.wait_for`, `ttl / 6`) and demote on a passed local lease deadline so a hung DB cannot extend leadership past the TTL
+- [x] 14. Review follow-up: bound the post-cancel await of the gated body to a 5s grace and detach (with logged outcome) bodies draining shielded singleflight refreshes; document the residual overlap and its safety argument in `context.md`
+- [x] 15. Review follow-up: narrow the disabled-election contract for Auth Guardian (multi-replica ring without election disables the guardian) and emit an operator-visible warning from `build_auth_guardian_scheduler`

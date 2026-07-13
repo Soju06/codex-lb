@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
@@ -22,6 +21,13 @@ logger = logging.getLogger(__name__)
 _T = TypeVar("_T")
 
 _MAX_CONSECUTIVE_RENEW_ERRORS = 2
+
+# How long a lease-loss (or shutdown) cancellation waits for the gated body to
+# actually finish before detaching it. Bodies may legitimately shield in-flight
+# singleton work (token/usage refresh singleflights) and drain it after
+# cancellation; awaiting that unboundedly would pin ``run_if_leader`` for the
+# duration of an upstream call after the lease is already gone.
+_CANCEL_GRACE_SECONDS = 5.0
 
 # PostgreSQL evaluates both the new expiry and the takeover predicate on the
 # database clock so inter-replica wall-clock skew cannot steal a live lease.
@@ -179,11 +185,17 @@ class LeaderElection:
         """Run ``fn`` only while holding the leader lease.
 
         Heartbeats the lease every ``max(1, ttl // 3)`` seconds while the body
-        runs and cancels the body when the lease is lost (or after
-        ``_MAX_CONSECUTIVE_RENEW_ERRORS`` consecutive renewal errors), bounding
-        leader overlap to roughly one renew interval. Returns the body's
-        result, or ``None`` when this replica is not leader or the body was
-        cancelled due to lease loss.
+        runs. Each renewal attempt is time-boxed to ``ttl / 6`` so a hung
+        database call cannot silently extend leadership: two consecutive
+        failed attempts (each costing at most interval + timeout = ttl / 2),
+        or any failed attempt after the locally tracked lease deadline has
+        passed, demote the holder no later than the lease TTL. On lease loss
+        the body is cancelled and awaited for at most
+        ``_CANCEL_GRACE_SECONDS``; a body still draining shielded work after
+        the grace is detached (its outcome is logged from a done callback),
+        so ``run_if_leader`` itself returns within the grace of the loss.
+        Returns the body's result, or ``None`` when this replica is not
+        leader or the body was cancelled due to lease loss.
         """
         if not await self.try_acquire():
             return None
@@ -192,55 +204,120 @@ class LeaderElection:
         if not settings.leader_election_enabled:
             return await fn()
 
-        renew_interval = max(1, settings.leader_election_ttl_seconds // 3)
+        ttl = settings.leader_election_ttl_seconds
+        renew_interval = max(1, ttl // 3)
+        renew_timeout = max(1.0, ttl / 6)
+        loop = asyncio.get_running_loop()
+        # Local monotonic estimate of when the lease we hold expires; extended
+        # on every successful renewal. This is deliberately conservative: the
+        # database clock may grant slightly more, never less.
+        lease_deadline = loop.time() + ttl
         # ``ensure_future`` accepts any awaitable (``create_task`` requires a
         # coroutine), wrapping it in a task so it can be cancelled on lease loss.
         body_task: asyncio.Task[_T] = asyncio.ensure_future(fn())
         lease_lost = False
 
         async def _heartbeat() -> None:
-            nonlocal lease_lost
+            nonlocal lease_deadline, lease_lost
             consecutive_errors = 0
             while True:
                 await asyncio.sleep(renew_interval)
                 try:
-                    renewed = await self.renew()
+                    renewed = await asyncio.wait_for(self.renew(), timeout=renew_timeout)
                     consecutive_errors = 0
+                    if renewed:
+                        lease_deadline = loop.time() + ttl
                 except Exception:
                     consecutive_errors += 1
                     logger.warning(
-                        "Leader lease renewal errored consecutive_errors=%s",
+                        "Leader lease renewal errored or timed out consecutive_errors=%s",
                         consecutive_errors,
                         exc_info=True,
                     )
-                    if consecutive_errors < _MAX_CONSECUTIVE_RENEW_ERRORS:
+                    if consecutive_errors < _MAX_CONSECUTIVE_RENEW_ERRORS and loop.time() < lease_deadline:
                         continue
                     self._is_leader = False
                     renewed = False
                 if not renewed:
                     lease_lost = True
-                    body_task.cancel()
                     return
 
         heartbeat_task = asyncio.create_task(_heartbeat())
+        # Whether the lease-loss branch already cancelled (and possibly
+        # detached) the body. The finally block must not cancel a second time:
+        # a body draining shielded work sits at a plain ``await inner`` in its
+        # CancelledError handler, and a second ``Task.cancel()`` would cancel
+        # that shielded inner task through the await.
+        body_cancel_handled = False
         try:
-            return await body_task
-        except asyncio.CancelledError:
+            done, _ = await asyncio.wait({body_task, heartbeat_task}, return_when=asyncio.FIRST_COMPLETED)
+            if heartbeat_task in done and not lease_lost and not body_task.done():
+                # The heartbeat can only exit without flagging lease loss by
+                # crashing; without renewals leadership cannot be trusted.
+                logger.error(
+                    "Leader heartbeat failed unexpectedly; demoting leader_id=%s",
+                    self._leader_id,
+                    exc_info=heartbeat_task.exception(),
+                )
+                self._is_leader = False
+                lease_lost = True
             if lease_lost:
                 logger.warning(
                     "Leader-gated task cancelled after lease loss leader_id=%s",
                     self._leader_id,
                 )
+                body_cancel_handled = True
+                await _cancel_within_grace(body_task)
                 return None
-            raise
+            return await body_task
         finally:
             heartbeat_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
+            try:
                 await heartbeat_task
-            if not body_task.done():
-                body_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await body_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception("Leader heartbeat failed during cleanup")
+            if not body_cancel_handled and not body_task.done():
+                await _cancel_within_grace(body_task)
+
+
+async def _cancel_within_grace(task: asyncio.Task[Any]) -> None:
+    """Cancel ``task`` and await it for at most ``_CANCEL_GRACE_SECONDS``.
+
+    Gated bodies may shield in-flight singleton refreshes (e.g. the token and
+    usage refresh singleflights) and drain them after a cancellation request,
+    so this uses ``asyncio.wait`` (which does not re-cancel on timeout) and
+    detaches the task after the grace instead of blocking on the shielded
+    upstream call. A detached task keeps draining in the background bounded by
+    the underlying operation's own timeout, and its outcome is logged from a
+    done callback so failures are still observed.
+    """
+    task.cancel()
+    _, pending = await asyncio.wait({task}, timeout=_CANCEL_GRACE_SECONDS)
+    if pending:
+        task.add_done_callback(_log_detached_body_result)
+        logger.warning(
+            "Leader-gated task still draining shielded work %.1fs after cancellation; detaching",
+            _CANCEL_GRACE_SECONDS,
+        )
+        return
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.warning("Leader-gated task failed while being cancelled", exc_info=exc)
+
+
+def _log_detached_body_result(task: asyncio.Task[Any]) -> None:
+    if task.cancelled():
+        logger.info("Detached leader-gated task finished cancelling after lease loss")
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.warning("Detached leader-gated task failed after lease loss", exc_info=exc)
+    else:
+        logger.info("Detached leader-gated task completed after lease loss")
 
 
 _leader_election: LeaderElection | None = None

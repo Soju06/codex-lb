@@ -112,6 +112,7 @@ def test_build_auth_guardian_scheduler_allows_single_replica_without_leader_elec
 
 def test_build_auth_guardian_scheduler_requires_leader_election_for_multi_replica(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     settings = _settings(
         auth_guardian_enabled=True,
@@ -120,9 +121,16 @@ def test_build_auth_guardian_scheduler_requires_leader_election_for_multi_replic
     )
     monkeypatch.setattr(settings_module, "get_settings", lambda: settings)
 
-    scheduler = build_auth_guardian_scheduler()
+    with caplog.at_level(logging.WARNING, logger=guardian_module.logger.name):
+        scheduler = build_auth_guardian_scheduler()
 
     assert scheduler.enabled is False
+    # Operators must be told the guardian was disabled instead of silently
+    # losing proactive refresh work.
+    assert any(
+        "Auth Guardian disabled" in record.getMessage() and "without leader election" in record.getMessage()
+        for record in caplog.records
+    )
 
     settings.leader_election_enabled = True
     scheduler = build_auth_guardian_scheduler()

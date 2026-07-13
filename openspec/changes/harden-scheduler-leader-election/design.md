@@ -24,7 +24,7 @@ Rejected: monotonic lease-version counters — needs a schema migration and stil
 
 ### 4. Holding the lease during work: `run_if_leader`
 
-`run_if_leader(fn)` acquires, spawns a heartbeat renewing every `max(1, ttl // 3)` seconds while the body runs, and cancels the body when renewal reports the lease lost (or after 2 consecutive renewal errors). This bounds leader overlap to <= renew interval + cancellation latency instead of unbounded.
+`run_if_leader(fn)` acquires, spawns a heartbeat renewing every `max(1, ttl // 3)` seconds while the body runs, and cancels the body when renewal reports the lease lost (or after 2 consecutive renewal errors). Each renewal attempt is time-boxed with `asyncio.wait_for` to `ttl / 6` and the heartbeat tracks a local monotonic lease deadline, so a hung database connection demotes the holder no later than the TTL instead of extending leadership by the pool timeout. After cancellation the gate awaits the body for a bounded grace (5s) and then detaches it with a logging done-callback: bodies that shield singleflight refreshes (usage refresh, Auth Guardian's `ensure_fresh`) share those tasks with request-path callers, so cancelling through the shield is not safe; the residual drain is bounded by the upstream operation's own timeout and documented in `context.md`.
 
 Rejected alternatives:
 - Fencing tokens re-verified before every side effect across seven schedulers: requires a migration (new fence column chaining onto an uncommitted head) plus deep surgery in every scheduler, while DB-level idempotency guards (quota-planner unique `idempotency_key`, automations unique `slot_key`, warmup `SELECT ... FOR UPDATE`) already backstop the critical writes. Residual bounded overlap is documented in `context.md`.

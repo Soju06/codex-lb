@@ -50,7 +50,9 @@ On PostgreSQL both the stored expiry (`now() + TTL`) and the takeover predicate 
 
 ### Requirement: Leaders renew the lease while gated work runs and demote on loss
 
-While leader-gated work executes, the lease holder MUST renew the lease at an interval no greater than one third of the TTL. Renewal MUST verify that the renewal UPDATE affected a row; an affected rowcount of 0 MUST demote the holder and cancel the in-flight gated work, bounding leader overlap to at most one renew interval plus cancellation latency. Two consecutive renewal errors MUST demote the holder likewise.
+While leader-gated work executes, the lease holder MUST renew the lease at an interval no greater than one third of the TTL. Each renewal attempt MUST be time-boxed to no more than one sixth of the TTL so that a hung database call cannot silently extend leadership; a timed-out attempt counts as a renewal error. Renewal MUST verify that the renewal UPDATE affected a row; an affected rowcount of 0 MUST demote the holder and request cancellation of the in-flight gated work. Two consecutive renewal errors MUST demote the holder likewise, and any renewal error observed after the holder's locally tracked lease deadline (last successful renewal or acquisition plus TTL) has passed MUST demote immediately, so a leader with a hung or unreachable database demotes itself no later than the lease TTL.
+
+After demotion the gate MUST await the cancelled body for at most a bounded grace period and then detach it, so the gate itself stops within one renew interval plus the grace. A body that shields in-flight singleton refresh work (token or usage refresh singleflights) MAY drain that work concurrently with a new leader; this residual overlap is bounded by the underlying operation's own timeout and is documented with its safety argument in the capability context.
 
 #### Scenario: Gated work outlives the TTL
 
@@ -66,6 +68,20 @@ While leader-gated work executes, the lease holder MUST renew the lease at an in
 - **THEN** the old leader's renewal observes rowcount 0
 - **AND** the old leader cancels the in-flight task within one renew interval
 - **AND** the old leader marks itself non-leader
+
+#### Scenario: Renewal hangs against a dead database
+
+- **GIVEN** a leader whose renewal database calls hang indefinitely
+- **WHEN** two consecutive time-boxed renewal attempts fail
+- **THEN** the leader demotes itself no later than the lease TTL
+- **AND** the in-flight gated task is cancelled
+
+#### Scenario: Body shields in-flight refresh work past cancellation
+
+- **GIVEN** a leader whose gated body is inside a shielded singleton refresh when the lease is lost
+- **WHEN** the gate cancels the body and the body keeps draining the shielded work
+- **THEN** the gate stops awaiting after the bounded grace period and returns as non-leader
+- **AND** the detached body is bounded by the refresh operation's own timeout and its outcome is logged
 
 ### Requirement: Lease is released on graceful shutdown
 
@@ -87,7 +103,9 @@ On lifespan shutdown, after all schedulers are stopped, the process MUST delete 
 
 ### Requirement: Leader election defaults and configuration
 
-`leader_election_enabled` SHALL default to true. `leader_election_ttl_seconds` SHALL default to 60 and MUST reject values below 5. Disabling leader election MUST cause every replica to treat itself as leader (single-instance escape hatch), and this consequence is documented in the capability context.
+`leader_election_enabled` SHALL default to true. `leader_election_ttl_seconds` SHALL default to 60 and MUST reject values below 5. Disabling leader election MUST cause the leader gate to treat every replica as leader (single-instance escape hatch), and this consequence is documented in the capability context.
+
+The Auth Guardian scheduler is the one exception to the escape hatch: because it force-refreshes OAuth tokens and concurrent force refreshes across replicas can invalidate rotated refresh tokens, in a multi-replica deployment (instance ring larger than one) with leader election disabled the Auth Guardian scheduler MUST NOT start, and its builder MUST emit an operator-visible warning log stating that the guardian is disabled for this reason.
 
 #### Scenario: Fresh two-replica deployment with default configuration
 
@@ -100,3 +118,11 @@ On lifespan shutdown, after all schedulers are stopped, the process MUST delete 
 - **GIVEN** `CODEX_LB_LEADER_ELECTION_TTL_SECONDS=2`
 - **WHEN** settings are loaded
 - **THEN** validation fails
+
+#### Scenario: Multi-replica ring with leader election disabled
+
+- **GIVEN** an instance ring with two replicas and `CODEX_LB_LEADER_ELECTION_ENABLED=false`
+- **AND** `CODEX_LB_AUTH_GUARDIAN_ENABLED=true`
+- **WHEN** the Auth Guardian scheduler is built
+- **THEN** the scheduler is disabled
+- **AND** a warning log states that the guardian is disabled because the ring runs without leader election

@@ -245,15 +245,19 @@ def build_auth_guardian_scheduler() -> AuthGuardianScheduler:
 
     settings = get_settings()
     multi_replica = len(settings.http_responses_session_bridge_instance_ring) > 1
-    if settings.auth_guardian_enabled and multi_replica and not settings.leader_election_enabled:
+    # Deliberate exception to the "disabled election means every replica is
+    # leader" escape hatch: concurrent force token refreshes across replicas
+    # can invalidate rotated refresh tokens, so without election the guardian
+    # must not run in a multi-replica ring at all.
+    enabled = settings.auth_guardian_enabled and (settings.leader_election_enabled or not multi_replica)
+    if settings.auth_guardian_enabled and not enabled:
         logger.warning(
-            "Auth guardian disabled: the bridge instance ring has %d members but leader election is off. "
-            "Set CODEX_LB_LEADER_ELECTION_ENABLED=true so the elected replica runs proactive token refresh.",
-            len(settings.http_responses_session_bridge_instance_ring),
+            "Auth Guardian disabled: multi-replica deployment without leader election; "
+            "set CODEX_LB_LEADER_ELECTION_ENABLED=true to run it leader-gated"
         )
     return AuthGuardianScheduler(
         interval_seconds=settings.auth_guardian_interval_seconds,
-        enabled=settings.auth_guardian_enabled and (settings.leader_election_enabled or not multi_replica),
+        enabled=enabled,
         max_age_seconds=settings.auth_guardian_max_refresh_age_seconds,
         batch_size=settings.auth_guardian_batch_size,
         concurrency=settings.auth_guardian_concurrency,

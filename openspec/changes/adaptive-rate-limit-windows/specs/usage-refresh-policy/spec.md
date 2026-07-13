@@ -40,6 +40,13 @@ Background usage refresh SHALL reconcile persisted `rate_limited` and `quota_exc
 - **THEN** the scheduler marks the account `active`
 - **AND** it clears persisted `reset_at` and `blocked_at`
 
+#### Scenario: Scheduler recovers a rate-limited account that never had a primary row
+- **WHEN** an account is persisted as `rate_limited` with no stored primary-slot row at all
+- **AND** the persisted rate-limit reset deadline has already elapsed
+- **AND** a later background usage refresh records a fresh long-window row below `100%` after the persisted block marker
+- **THEN** the scheduler marks the account `active`
+- **AND** it clears persisted `reset_at` and `blocked_at`
+
 #### Scenario: Scheduler recovers a rate-limited account when upstream stops reporting the primary window
 - **WHEN** an account is persisted as `rate_limited`
 - **AND** the persisted rate-limit reset deadline has already elapsed

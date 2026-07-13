@@ -2495,6 +2495,67 @@ def test_background_recovery_state_recovers_when_upstream_stops_reporting_primar
     assert state.status == AccountStatus.ACTIVE
 
 
+def test_background_recovery_state_recovers_without_any_primary_row(monkeypatch):
+    now = 1_700_000_000.0
+    blocked = now - 7200.0
+    past_reset = int(now - 300)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
+
+    account = _make_test_account(
+        status=AccountStatus.RATE_LIMITED,
+        reset_at=past_reset,
+        blocked_at=int(blocked),
+        plan_type="plus",
+    )
+    # Upstream never wrote a primary row for this account; the post-block
+    # refresh recorded only the weekly window with fresh capacity.
+    fresh_secondary = _make_test_usage(
+        window="secondary",
+        used_percent=40.0,
+        reset_at=int(now + 5 * 24 * 3600),
+        recorded_at=_epoch_to_naive_utc(now - 30),
+    )
+
+    state = background_recovery_state_from_account(
+        account=account,
+        primary_entry=None,
+        secondary_entry=fresh_secondary,
+    )
+
+    assert state.status == AccountStatus.ACTIVE
+
+
+def test_background_recovery_state_keeps_rate_limited_without_primary_row_and_stale_secondary(monkeypatch):
+    now = 1_700_000_000.0
+    blocked = now - 7200.0
+    past_reset = int(now - 300)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+
+    account = _make_test_account(
+        status=AccountStatus.RATE_LIMITED,
+        reset_at=past_reset,
+        blocked_at=int(blocked),
+        plan_type="plus",
+    )
+    stale_secondary = _make_test_usage(
+        window="secondary",
+        used_percent=40.0,
+        reset_at=int(now + 5 * 24 * 3600),
+        recorded_at=_epoch_to_naive_utc(blocked - 30),
+    )
+
+    state = background_recovery_state_from_account(
+        account=account,
+        primary_entry=None,
+        secondary_entry=stale_secondary,
+    )
+
+    assert state.status == AccountStatus.RATE_LIMITED
+
+
 def test_background_recovery_state_keeps_rate_limited_when_long_window_exhausted(monkeypatch):
     now = 1_700_000_000.0
     blocked = now - 7200.0

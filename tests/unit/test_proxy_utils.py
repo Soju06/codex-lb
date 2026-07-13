@@ -10662,6 +10662,7 @@ async def test_ensure_fresh_with_budget_preserves_timeout_contract_when_recovery
 async def test_ensure_fresh_with_budget_does_not_replay_refresh_body_network_failure(monkeypatch):
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     account = _make_account("acc_refresh_body_network_failure")
+    failed_session = cast(aiohttp.ClientSession, object())
     network_error = proxy_service.RefreshError(
         "transport_error",
         "Transport error while reading token refresh response",
@@ -10669,11 +10670,12 @@ async def test_ensure_fresh_with_budget_does_not_replay_refresh_body_network_fai
         transport_error=True,
         transport_error_code="proxy_network_unavailable",
         retryable_same_contract=False,
+        failed_session=failed_session,
     )
     ensure_fresh = AsyncMock(side_effect=network_error)
-    wait = AsyncMock(return_value="not_applicable")
+    rotate = AsyncMock(return_value="rotated")
     monkeypatch.setattr(service, "_ensure_fresh", ensure_fresh)
-    monkeypatch.setattr(proxy_service.ProcessNetworkRecovery, "wait", wait)
+    monkeypatch.setattr(network_recovery_module, "rotate_shared_http_transport", rotate)
 
     with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
         await service._ensure_fresh_with_budget(account, timeout_seconds=10.0)
@@ -10681,10 +10683,11 @@ async def test_ensure_fresh_with_budget_does_not_replay_refresh_body_network_fai
     assert _proxy_error_code(exc_info.value) == "proxy_network_unavailable"
     assert exc_info.value.retryable_same_contract is False
     ensure_fresh.assert_awaited_once()
-    wait.assert_awaited_once()
-    wait_call = wait.await_args
-    assert wait_call is not None
-    assert wait_call.kwargs["retryable_same_contract"] is False
+    rotate.assert_awaited_once_with(
+        transport="refresh",
+        request_id=get_request_id(),
+        failed_session=failed_session,
+    )
 
 
 @pytest.mark.asyncio

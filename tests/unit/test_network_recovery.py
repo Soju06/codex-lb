@@ -142,15 +142,68 @@ async def test_recovery_controller_ignores_other_failures(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_recovery_controller_rejects_unsafe_network_replay(monkeypatch) -> None:
+async def test_recovery_controller_rejects_unsafe_network_replay_without_failed_generation(monkeypatch) -> None:
     sleep = AsyncMock()
+    rotate = AsyncMock(return_value="rotated")
     monkeypatch.setattr(network_recovery.asyncio, "sleep", sleep)
+    monkeypatch.setattr(network_recovery, "rotate_shared_http_transport", rotate)
     recovery = network_recovery.ProcessNetworkRecovery(transport="stream", request_id="req_unsafe")
 
     decision = await recovery.wait(
         error_code=network_recovery.PROCESS_NETWORK_UNAVAILABLE_CODE,
         retryable_same_contract=False,
         deadline=network_recovery.time.monotonic() + 10.0,
+        rotate_shared_client=True,
+    )
+
+    assert decision == "not_applicable"
+    rotate.assert_not_awaited()
+    sleep.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_recovery_controller_rotates_concrete_failed_generation_without_replaying(monkeypatch) -> None:
+    sleep = AsyncMock()
+    rotate = AsyncMock(return_value="rotated")
+    failed_session = cast(aiohttp.ClientSession, object())
+    monkeypatch.setattr(network_recovery.asyncio, "sleep", sleep)
+    monkeypatch.setattr(network_recovery, "rotate_shared_http_transport", rotate)
+    recovery = network_recovery.ProcessNetworkRecovery(transport="stream", request_id="req_unsafe_rotation")
+
+    decision = await recovery.wait(
+        error_code=network_recovery.PROCESS_NETWORK_UNAVAILABLE_CODE,
+        retryable_same_contract=False,
+        deadline=network_recovery.time.monotonic() + 10.0,
+        rotate_shared_client=True,
+        failed_session=failed_session,
+    )
+
+    assert decision == "not_applicable"
+    rotate.assert_awaited_once_with(
+        transport="stream",
+        request_id="req_unsafe_rotation",
+        failed_session=failed_session,
+    )
+    sleep.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_unsafe_recovery_rotation_timeout_preserves_original_failure(monkeypatch) -> None:
+    async def blocked_rotation(**_kwargs: object) -> str:
+        await asyncio.Event().wait()
+        return "unreachable"  # pragma: no cover
+
+    sleep = AsyncMock()
+    monkeypatch.setattr(network_recovery.asyncio, "sleep", sleep)
+    monkeypatch.setattr(network_recovery, "rotate_shared_http_transport", blocked_rotation)
+    recovery = network_recovery.ProcessNetworkRecovery(transport="stream", request_id="req_unsafe_timeout")
+
+    decision = await recovery.wait(
+        error_code=network_recovery.PROCESS_NETWORK_UNAVAILABLE_CODE,
+        retryable_same_contract=False,
+        deadline=network_recovery.time.monotonic() + 0.01,
+        rotate_shared_client=True,
+        failed_session=cast(aiohttp.ClientSession, object()),
     )
 
     assert decision == "not_applicable"

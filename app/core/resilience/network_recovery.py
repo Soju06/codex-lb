@@ -147,15 +147,26 @@ class ProcessNetworkRecovery:
         rotate_shared_client: bool = False,
         failed_session: aiohttp.ClientSession | None = None,
     ) -> NetworkRecoveryDecision:
-        if not retryable_same_contract or not is_process_network_error(error_code):
+        if not is_process_network_error(error_code):
             return "not_applicable"
         remaining_budget_seconds = deadline - time.monotonic()
         if remaining_budget_seconds <= 0:
+            if not retryable_same_contract:
+                return "not_applicable"
             self._log("exhausted", delay_seconds=0.0)
             return "exhausted"
         self._recovered_logged = False
-        self.attempts += 1
-        if rotate_shared_client and not self._shared_rotation_requested:
+        if retryable_same_contract:
+            self.attempts += 1
+        # A consumed request body cannot be replayed, but its concrete failed
+        # shared generation must still be retired for subsequent callers. The
+        # session identity keeps that cleanup compare-and-swap scoped.
+        should_rotate = (
+            rotate_shared_client
+            and not self._shared_rotation_requested
+            and (retryable_same_contract or failed_session is not None)
+        )
+        if should_rotate:
             try:
                 async with asyncio.timeout_at(deadline):
                     await rotate_shared_http_transport(
@@ -164,9 +175,24 @@ class ProcessNetworkRecovery:
                         failed_session=failed_session,
                     )
             except TimeoutError:
+                if not retryable_same_contract:
+                    return "not_applicable"
                 self._log("exhausted", delay_seconds=0.0)
                 return "exhausted"
+            except Exception:
+                if retryable_same_contract:
+                    raise
+                logger.warning(
+                    "process_network_recovery stage=rotation_failed transport=%s request_id=%s account_id=%s",
+                    self.transport,
+                    self.request_id,
+                    self.account_id,
+                    exc_info=True,
+                )
+                return "not_applicable"
             self._shared_rotation_requested = True
+        if not retryable_same_contract:
+            return "not_applicable"
         # Rotation can block on client teardown/creation. Never calculate the
         # recovery sleep from the pre-rotation budget snapshot.
         remaining_budget_seconds = deadline - time.monotonic()

@@ -303,6 +303,71 @@ async def test_run_if_leader_demotes_when_renewal_hangs(monkeypatch: pytest.Monk
 
 
 @pytest.mark.asyncio
+async def test_run_if_leader_demotes_when_renewal_cancellation_hangs(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Regression: asyncio.wait_for awaits the cancelled renewal's unwinding
+    # before returning, so a renewal whose cancellation/cleanup itself hangs
+    # (e.g. a blocked rollback during session teardown) would pin the heartbeat
+    # and never reach demotion, letting the gated body outlive an expired lease.
+    # The heartbeat must count the attempt as an error on the timeout deadline
+    # regardless of whether the renewal coroutine has finished unwinding.
+    unblock = asyncio.Event()
+
+    class _CancellationHangingRenewSession(_FakeSession):
+        def __init__(self) -> None:
+            super().__init__("postgresql", [1])
+            self.calls = 0
+
+        async def execute(self, statement: Any, params: Any = None) -> _FakeResult:
+            self.calls += 1
+            if self.calls == 1:
+                return await super().execute(statement, params)
+            # Model a renewal whose cancellation does not unwind promptly: it
+            # swallows CancelledError and keeps hanging until explicitly
+            # unblocked, as a stuck driver / blocked rollback would.
+            while True:
+                try:
+                    await unblock.wait()
+                    return _FakeResult(1)
+                except asyncio.CancelledError:
+                    if unblock.is_set():
+                        raise
+                    continue
+
+    session = _CancellationHangingRenewSession()
+    _install(monkeypatch, session, ttl=3)
+
+    election = leader_election_module.LeaderElection(leader_id="node-a")
+    body_cancelled = asyncio.Event()
+
+    async def _body() -> str:
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            body_cancelled.set()
+            raise
+        return "ran"
+
+    loop = asyncio.get_running_loop()
+    start = loop.time()
+    result = await election.run_if_leader(_body)
+
+    assert result is None
+    assert election.is_leader is False
+    assert body_cancelled.is_set()
+    # Demotion happened on the time-box deadlines (~4s for ttl=3), not after
+    # the still-hung renewal finished unwinding (which never happens here).
+    assert loop.time() - start < 6.0
+    assert session.calls >= 3
+    # The stalled renewal was abandoned, not awaited.
+    assert election._abandoned_renewals
+
+    # Release the abandoned renewal task(s) so the loop can finalize cleanly.
+    unblock.set()
+    if election._abandoned_renewals:
+        await asyncio.wait(set(election._abandoned_renewals), timeout=1)
+
+
+@pytest.mark.asyncio
 async def test_run_if_leader_detaches_shielded_body_after_grace(monkeypatch: pytest.MonkeyPatch) -> None:
     # Bodies that shield in-flight singleton refreshes (usage/token
     # singleflights) drain them after a cancellation request. The gate must

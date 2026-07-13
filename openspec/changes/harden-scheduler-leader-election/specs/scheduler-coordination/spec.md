@@ -50,7 +50,7 @@ On PostgreSQL both the stored expiry (`now() + TTL`) and the takeover predicate 
 
 ### Requirement: Leaders renew the lease while gated work runs and demote on loss
 
-While leader-gated work executes, the lease holder MUST renew the lease at an interval no greater than one third of the TTL. Each renewal attempt MUST be time-boxed to no more than one sixth of the TTL so that a hung database call cannot silently extend leadership; a timed-out attempt counts as a renewal error. Renewal MUST verify that the renewal UPDATE affected a row; an affected rowcount of 0 MUST demote the holder and request cancellation of the in-flight gated work. Two consecutive renewal errors MUST demote the holder likewise, and any renewal error observed after the holder's locally tracked lease deadline (last successful renewal or acquisition plus TTL) has passed MUST demote immediately, so a leader with a hung or unreachable database demotes itself no later than the lease TTL.
+While leader-gated work executes, the lease holder MUST renew the lease at an interval no greater than one third of the TTL. Each renewal attempt MUST be time-boxed to no more than one sixth of the TTL so that a hung database call cannot silently extend leadership; a timed-out attempt counts as a renewal error. The time-box MUST be enforced against the elapsed timeout alone: once the timeout elapses the attempt MUST be counted as an error immediately and the heartbeat MUST NOT block on the renewal coroutine's cancellation or cleanup unwinding (e.g. a blocked rollback during session teardown), which could otherwise defer demotion past the lease deadline. Renewal MUST verify that the renewal UPDATE affected a row; an affected rowcount of 0 MUST demote the holder and request cancellation of the in-flight gated work. Two consecutive renewal errors MUST demote the holder likewise, and any renewal error observed after the holder's locally tracked lease deadline (last successful renewal or acquisition plus TTL) has passed MUST demote immediately, so a leader with a hung or unreachable database demotes itself no later than the lease TTL.
 
 After demotion the gate MUST await the cancelled body for at most a bounded grace period and then detach it, so the gate itself stops within one renew interval plus the grace. A body that shields in-flight singleton refresh work (token or usage refresh singleflights) MAY drain that work concurrently with a new leader; this residual overlap is bounded by the underlying operation's own timeout and is documented with its safety argument in the capability context.
 
@@ -75,6 +75,13 @@ After demotion the gate MUST await the cancelled body for at most a bounded grac
 - **WHEN** two consecutive time-boxed renewal attempts fail
 - **THEN** the leader demotes itself no later than the lease TTL
 - **AND** the in-flight gated task is cancelled
+
+#### Scenario: Renewal cancellation cleanup hangs
+
+- **GIVEN** a leader whose renewal database calls stall and whose cancellation cleanup does not unwind promptly
+- **WHEN** each time-boxed renewal attempt's timeout elapses while the renewal coroutine is still unwinding
+- **THEN** the attempt is counted as an error on the timeout without awaiting the renewal's cancellation
+- **AND** the leader demotes itself and cancels the in-flight gated task no later than the lease TTL
 
 #### Scenario: Body shields in-flight refresh work past cancellation
 

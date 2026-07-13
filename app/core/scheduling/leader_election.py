@@ -98,6 +98,12 @@ class LeaderElection:
         # Gated bodies that were detached after the cancellation grace and may
         # still be draining shielded singleton work as the (former) leader.
         self._detached_bodies: set[asyncio.Task[Any]] = set()
+        # Renewal tasks abandoned after their time-box elapsed. The heartbeat
+        # must not await a stalled renewal's (possibly hung) cancellation
+        # unwinding, so it drops the task here with a done callback that
+        # consumes the result. Keeping a strong reference prevents the loop
+        # from garbage-collecting a still-pending task mid-flight.
+        self._abandoned_renewals: set[asyncio.Task[bool]] = set()
 
     @property
     def leader_id(self) -> str:
@@ -214,7 +220,13 @@ class LeaderElection:
         database call cannot silently extend leadership: two consecutive
         failed attempts (each costing at most interval + timeout = ttl / 2),
         or any failed attempt after the locally tracked lease deadline has
-        passed, demote the holder no later than the lease TTL. On lease loss
+        passed, demote the holder no later than the lease TTL. The time-box is
+        enforced with ``asyncio.wait`` (not ``asyncio.wait_for``) so a renewal
+        whose cancellation cleanup itself stalls — e.g. a blocked rollback in
+        session teardown — cannot pin the heartbeat past the timeout: once the
+        timeout elapses the attempt is abandoned and counted as an error
+        immediately, without awaiting the renewal coroutine's unwinding. On
+        lease loss
         the body is cancelled and awaited for at most
         ``_CANCEL_GRACE_SECONDS``; a body still draining shielded work after
         the grace is detached (its outcome is logged from a done callback),
@@ -245,27 +257,51 @@ class LeaderElection:
         async def _heartbeat() -> None:
             nonlocal lease_deadline, lease_lost
             consecutive_errors = 0
-            while True:
-                await asyncio.sleep(renew_interval)
-                try:
-                    renewed = await asyncio.wait_for(self.renew(), timeout=renew_timeout)
-                    consecutive_errors = 0
-                    if renewed:
-                        lease_deadline = loop.time() + ttl
-                except Exception:
-                    consecutive_errors += 1
-                    logger.warning(
-                        "Leader lease renewal errored or timed out consecutive_errors=%s",
-                        consecutive_errors,
-                        exc_info=True,
-                    )
-                    if consecutive_errors < _MAX_CONSECUTIVE_RENEW_ERRORS and loop.time() < lease_deadline:
-                        continue
-                    self._is_leader = False
-                    renewed = False
-                if not renewed:
-                    lease_lost = True
-                    return
+            inflight: asyncio.Task[bool] | None = None
+            try:
+                while True:
+                    await asyncio.sleep(renew_interval)
+                    inflight = asyncio.ensure_future(self.renew())
+                    # ``asyncio.wait`` returns on the timeout without cancelling
+                    # or awaiting ``inflight``, so a renewal whose cancellation
+                    # cleanup itself hangs cannot pin the heartbeat past the
+                    # time-box the way ``asyncio.wait_for`` (which awaits the
+                    # cancelled coroutine's unwinding) would.
+                    done, _ = await asyncio.wait({inflight}, timeout=renew_timeout)
+                    renew_task = inflight
+                    inflight = None
+                    try:
+                        if renew_task not in done:
+                            # Renewal stalled past its time-box. Abandon it
+                            # without awaiting the unwind and treat the lease as
+                            # at risk on the timeout deadline, not whenever the
+                            # renewal finally returns.
+                            self._abandon_renewal(renew_task)
+                            raise TimeoutError("leader lease renewal timed out")
+                        renewed = renew_task.result()
+                    except Exception:
+                        consecutive_errors += 1
+                        logger.warning(
+                            "Leader lease renewal errored or timed out consecutive_errors=%s",
+                            consecutive_errors,
+                            exc_info=True,
+                        )
+                        if consecutive_errors < _MAX_CONSECUTIVE_RENEW_ERRORS and loop.time() < lease_deadline:
+                            continue
+                        self._is_leader = False
+                        renewed = False
+                    else:
+                        consecutive_errors = 0
+                        if renewed:
+                            lease_deadline = loop.time() + ttl
+                    if not renewed:
+                        lease_lost = True
+                        return
+            finally:
+                # If the heartbeat is itself cancelled (e.g. shutdown) while a
+                # renewal is in flight, abandon it so it does not leak.
+                if inflight is not None and not inflight.done():
+                    self._abandon_renewal(inflight)
 
         heartbeat_task = asyncio.create_task(_heartbeat())
         # Whether the lease-loss branch already cancelled (and possibly
@@ -334,6 +370,28 @@ class LeaderElection:
         exc = task.exception()
         if exc is not None:
             logger.warning("Leader-gated task failed while being cancelled", exc_info=exc)
+
+    def _abandon_renewal(self, task: asyncio.Task[bool]) -> None:
+        """Request cancellation of a stalled renewal without awaiting its unwind.
+
+        The heartbeat already observed the time-box elapse, so leadership can
+        be treated as at risk immediately. Cancellation cleanup of a hung
+        database call (a blocked rollback or driver call during session
+        teardown) may itself block, so the task is dropped here — tracked with
+        a strong reference and a done callback that consumes its result — and
+        left to unwind in the background rather than blocking the loop.
+        """
+        self._abandoned_renewals.add(task)
+        task.add_done_callback(self._on_renewal_done)
+        task.cancel()
+
+    def _on_renewal_done(self, task: asyncio.Task[bool]) -> None:
+        self._abandoned_renewals.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.debug("Abandoned leader lease renewal finished with error", exc_info=exc)
 
     def _on_detached_body_done(self, task: asyncio.Task[Any]) -> None:
         self._detached_bodies.discard(task)

@@ -79,13 +79,23 @@ class _RequestLogMixin:
         is known so dashboards and usage views surface the user-visible
         ``gpt-image-*`` model instead of the host (e.g. ``gpt-5.5``).
 
-        The upstream ``stream_responses`` generator writes its request_log
-        row from a ``finally`` block that runs after the last chunk is
-        yielded, which can race with the call site here. We therefore retry
-        a few times with short backoff while the row is still missing.
+        The rewrite is persistence, not response work: it runs as a tracked
+        background task (drained at shutdown alongside the log inserts), so
+        image responses never wait on log durability. Inside the task we
+        first await this request's pending detached insert, then retry with
+        short backoff while the row is still missing (the upstream
+        ``stream_responses`` generator writes its row from a ``finally``
+        block that can race with the call site here).
         """
         if not request_id or not model:
             return
+        task = asyncio.create_task(
+            self._rewrite_request_log_model_once(request_id, model),
+            name=f"proxy-request-log-rewrite-{request_id}",
+        )
+        self._track_request_log_task(task, account_id=None, request_id=request_id)
+
+    async def _rewrite_request_log_model_once(self, request_id: str, model: str) -> None:
         proxy = cast(_RequestLogServiceProtocol, self)
         with anyio.CancelScope(shield=True):
             # The insert is detached now: wait for this request's pending log

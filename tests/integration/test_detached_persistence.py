@@ -170,15 +170,19 @@ async def test_image_model_rewrite_waits_for_detached_insert(raw_client, monkeyp
         status="success",
     )
 
-    rewrite = asyncio.create_task(service.rewrite_request_log_model("resp_img_rewrite", "gpt-image-1"))
-    # Let the rewrite start and block on the pending insert, then release it
-    # AFTER the legacy 1.55s retry window would have expired if it were not
-    # chained to the insert task.
+    # The rewrite is itself detached persistence: calling it returns
+    # immediately (image responses never wait on log durability) even while
+    # the insert is still gated...
+    await asyncio.wait_for(
+        service.rewrite_request_log_model("resp_img_rewrite", "gpt-image-1"),
+        timeout=1,
+    )
+    # ...and the background rewrite chains to the pending insert, so once the
+    # gate opens (after the legacy 1.55s retry window would have expired),
+    # draining lands the public model exactly once.
     await asyncio.sleep(0.05)
-    assert not rewrite.done()
     gate.set()
-    await asyncio.wait_for(rewrite, timeout=10)
-    assert await service.drain_persistence_tasks(timeout_seconds=5)
+    assert await service.drain_persistence_tasks(timeout_seconds=10)
 
     async with SessionLocal() as session:
         row = (

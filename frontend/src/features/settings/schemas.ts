@@ -129,6 +129,7 @@ export const DashboardSettingsSchema = z
     guestAccessEnabled: z.boolean().optional().default(false),
     guestPasswordConfigured: z.boolean().optional().default(false),
     limitWarmupStaggeredIdleEnabled: z.boolean().optional().default(false),
+    version: z.number().int().min(1).optional(),
   })
   .transform((settings) => {
     const legacyProvided = settings.stickyReallocationBudgetThresholdPct !== undefined;
@@ -155,6 +156,7 @@ export const DashboardSettingsSchema = z
 
 export const SettingsUpdateRequestSchema = z
   .object({
+    expectedVersion: z.number().int().min(1).optional(),
     stickyThreadsEnabled: z.boolean().optional(),
     upstreamStreamTransport: UpstreamStreamTransportSchema.optional(),
     prohibitFastMode: z.boolean().optional(),

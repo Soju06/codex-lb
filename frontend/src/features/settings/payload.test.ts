@@ -4,6 +4,46 @@ import { buildSettingsUpdateRequest } from "@/features/settings/payload";
 import { DashboardSettingsSchema } from "@/features/settings/schemas";
 
 describe("buildSettingsUpdateRequest", () => {
+  it("carries the loaded settings version as expectedVersion for CAS", () => {
+    const settings = DashboardSettingsSchema.parse({
+      stickyThreadsEnabled: true,
+      upstreamStreamTransport: "default",
+      preferEarlierResetAccounts: false,
+      routingStrategy: "round_robin",
+      openaiCacheAffinityMaxAgeSeconds: 300,
+      dashboardSessionTtlSeconds: 43200,
+      importWithoutOverwrite: true,
+      totpRequiredOnLogin: true,
+      totpConfigured: false,
+      apiKeyAuthEnabled: true,
+      version: 7,
+    });
+
+    const payload = buildSettingsUpdateRequest(settings, { apiKeyAuthEnabled: false });
+
+    expect(payload.expectedVersion).toBe(7);
+    expect(payload.apiKeyAuthEnabled).toBe(false);
+  });
+
+  it("omits expectedVersion when the loaded settings carry no version", () => {
+    const settings = DashboardSettingsSchema.parse({
+      stickyThreadsEnabled: true,
+      upstreamStreamTransport: "default",
+      preferEarlierResetAccounts: false,
+      routingStrategy: "round_robin",
+      openaiCacheAffinityMaxAgeSeconds: 300,
+      dashboardSessionTtlSeconds: 43200,
+      importWithoutOverwrite: true,
+      totpRequiredOnLogin: true,
+      totpConfigured: false,
+      apiKeyAuthEnabled: true,
+    });
+
+    const payload = buildSettingsUpdateRequest(settings, { apiKeyAuthEnabled: false });
+
+    expect("expectedVersion" in payload).toBe(false);
+  });
+
   it("does not persist split sticky thresholds synthesized from legacy settings", () => {
     const settings = DashboardSettingsSchema.parse({
       stickyThreadsEnabled: true,

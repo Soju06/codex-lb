@@ -7,6 +7,7 @@ import json
 import time
 from collections import deque
 from collections.abc import AsyncGenerator
+from dataclasses import replace
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any, cast
@@ -20,6 +21,7 @@ from sqlalchemy import select
 
 import app.modules.proxy.service as proxy_module
 from app.core.config.settings import Settings
+from app.core.openai.model_registry import ModelRegistry
 from app.core.utils.request_id import (
     reset_request_id,
     reset_request_scope_id,
@@ -4248,6 +4250,7 @@ async def test_v1_responses_http_bridge_reuses_upstream_websocket_and_preserves_
 @pytest.mark.asyncio
 async def test_v1_responses_http_bridge_reuses_quota_admitted_spark_account_omitted_from_catalog(
     async_client,
+    app_instance,
     monkeypatch,
 ):
     _install_bridge_settings(monkeypatch, enabled=True)
@@ -4272,10 +4275,19 @@ async def test_v1_responses_http_bridge_reuses_quota_admitted_spark_account_omit
             recorded_at=utcnow(),
         )
 
-    registry = SimpleNamespace(
-        get_snapshot=lambda: SimpleNamespace(account_plans={account_id: "pro"}),
-        account_ids_for_model=lambda _model: frozenset(),
-        plan_types_for_model=lambda _model: frozenset({"pro"}),
+    registry = ModelRegistry(ttl_seconds=60.0)
+    spark_model = replace(
+        registry.get_models_with_fallback()["gpt-5.3-codex-spark"],
+        raw={
+            "service_tiers": [{"slug": "priority"}],
+            "additional_speed_tiers": ["fast"],
+            "default_service_tier": "priority",
+        },
+    )
+    await registry.update(
+        {"pro": [spark_model]},
+        per_account_results={account_id: ("pro", [])},
+        active_account_plans={account_id: "pro"},
     )
     fake_upstream = _FakeBridgeUpstreamWebSocket()
     connect_calls: list[tuple[str | None, str | None]] = []
@@ -4307,6 +4319,7 @@ async def test_v1_responses_http_bridge_reuses_quota_admitted_spark_account_omit
 
     payload = {
         "model": "gpt-5.3-codex-spark",
+        "service_tier": " Priority ",
         "instructions": "Return exactly OK.",
         "input": "hello",
         "prompt_cache_key": "http-bridge-spark-catalog-omission",
@@ -4323,6 +4336,18 @@ async def test_v1_responses_http_bridge_reuses_quota_admitted_spark_account_omit
 
     assert connect_calls == [(account_id, account.chatgpt_account_id)]
     assert len(fake_upstream.sent_text) == 2
+    service = get_proxy_service_for_app(app_instance)
+    bridge_key = proxy_module._HTTPBridgeSessionKey(
+        "prompt_cache",
+        "http-bridge-spark-catalog-omission",
+        None,
+    )
+    bridge_session = service._http_bridge_sessions[bridge_key]
+    assert bridge_session.catalog_omission_quota_admission == CatalogOmissionQuotaAdmission(
+        normalized_model="gpt-5.3-codex-spark",
+        canonical_quota_key="codex_spark",
+        normalized_effective_service_tier="priority",
+    )
 
 
 @pytest.mark.asyncio

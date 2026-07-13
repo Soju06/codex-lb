@@ -580,11 +580,9 @@ class ModelRegistry:
         if service_tier is None:
             return self.plan_types_for_model(slug)
         normalized_slug = slug.strip().lower()
-        normalized_service_tier = service_tier.strip()
+        normalized_service_tier = _canonical_service_tier_value(service_tier)
         if not normalized_slug or not normalized_service_tier:
             return self.plan_types_for_model(slug)
-        if normalized_service_tier == "fast":
-            normalized_service_tier = "priority"
 
         if self._snapshot is None:
             return self.plan_types_for_model(slug)

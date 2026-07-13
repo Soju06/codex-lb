@@ -4,6 +4,7 @@ import asyncio
 import time
 from collections.abc import AsyncIterator, Collection
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, cast
@@ -2624,18 +2625,21 @@ async def test_select_account_preserves_service_tier_plan_filter_when_quota_over
         }
     )
 
-    monkeypatch.setattr(
-        "app.modules.proxy.load_balancer.get_model_registry",
-        lambda: SimpleNamespace(
-            get_snapshot=lambda: SimpleNamespace(account_plans={plus.id: "plus", pro.id: "pro"}),
-            account_ids_for_model=lambda _model: frozenset(),
-            plan_types_for_model=lambda _model: frozenset({"plus", "pro"}),
-            account_ids_for_model_service_tier=lambda _model, _tier: frozenset(),
-            plan_types_for_model_service_tier=lambda _model, tier: (
-                frozenset({"pro"}) if tier == "priority" else frozenset({"plus", "pro"})
-            ),
-        ),
+    registry = ModelRegistry(ttl_seconds=60.0)
+    spark_model = replace(
+        registry.get_models_with_fallback()["gpt-5.3-codex-spark"],
+        raw={
+            "service_tiers": [{"slug": "priority"}],
+            "additional_speed_tiers": ["fast"],
+            "default_service_tier": "priority",
+        },
     )
+    await registry.update(
+        {"pro": [spark_model]},
+        per_account_results={plus.id: ("plus", []), pro.id: ("pro", [])},
+        active_account_plans={plus.id: "plus", pro.id: "pro"},
+    )
+    monkeypatch.setattr("app.modules.proxy.load_balancer.get_model_registry", lambda: registry)
 
     balancer = LoadBalancer(
         lambda: _repo_factory(
@@ -2645,10 +2649,24 @@ async def test_select_account_preserves_service_tier_plan_filter_when_quota_over
             additional_usage_repo,
         )
     )
-    selection = await balancer.select_account(model="gpt-5.3-codex-spark", service_tier="priority")
+    selection = await balancer.select_account(
+        model="gpt-5.3-codex-spark",
+        service_tier=" Priority ",
+    )
+    selection_inputs = await balancer._load_selection_inputs(
+        model="gpt-5.3-codex-spark",
+        service_tier=" Priority ",
+    )
 
     assert selection.account is not None
     assert selection.account.id == pro.id
+    assert [account.id for account in selection_inputs.accounts] == [pro.id]
+    for service_tier in (None, "auto", " Default ", "   "):
+        omit_equivalent_inputs = await balancer._load_selection_inputs(
+            model="gpt-5.3-codex-spark",
+            service_tier=service_tier,
+        )
+        assert [account.id for account in omit_equivalent_inputs.accounts] == [pro.id]
     assert selection.error_code is None
     assert selection.catalog_omission_quota_admission == CatalogOmissionQuotaAdmission(
         normalized_model="gpt-5.3-codex-spark",

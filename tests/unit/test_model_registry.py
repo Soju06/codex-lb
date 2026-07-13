@@ -433,9 +433,12 @@ async def test_plan_types_for_model_service_tier_tracks_tier_plans():
     model_plans = registry.plan_types_for_model("gpt-5.5")
     assert model_plans is not None
     assert {"pro", "plus"}.issubset(model_plans)
-    assert registry.plan_types_for_model_service_tier("gpt-5.5", "priority") == frozenset({"pro"})
-    assert registry.plan_types_for_model_service_tier("gpt-5.5", "fast") == frozenset({"pro"})
+    for service_tier in ("priority", " Priority ", "PRIORITY", "fast", " FAST "):
+        assert registry.plan_types_for_model_service_tier("gpt-5.5", service_tier) == frozenset({"pro"})
     assert registry.plan_types_for_model_service_tier("gpt-5.5", "default") == frozenset({"plus"})
+    assert registry.plan_types_for_model_service_tier("gpt-5.5", None) == model_plans
+    assert registry.plan_types_for_model_service_tier("gpt-5.5", "   ") == model_plans
+    assert registry.plan_types_for_model_service_tier("gpt-5.5", "auto") == frozenset()
 
 
 @pytest.mark.asyncio

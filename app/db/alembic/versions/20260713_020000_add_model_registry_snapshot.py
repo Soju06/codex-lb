@@ -1,7 +1,7 @@
 """add model registry snapshot table
 
 Revision ID: 20260713_020000_add_model_registry_snapshot
-Revises: 20260712_020000_add_api_key_usage_rollups
+Revises: 20260713_040000_add_replica_guardrails
 Create Date: 2026-07-13
 """
 
@@ -11,7 +11,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "20260713_020000_add_model_registry_snapshot"
-down_revision = "20260712_020000_add_api_key_usage_rollups"
+down_revision = "20260713_040000_add_replica_guardrails"
 branch_labels = None
 depends_on = None
 

@@ -1017,16 +1017,6 @@ def _is_reset_credit_account_in_api_key_pool(account: Account | None, api_key: A
     return account.id in assigned_ids
 
 
-def _select_available_reset_credit_by_id(account_id: str, redeem_id: str) -> ResetCreditItem | None:
-    snapshot = get_rate_limit_reset_credits_store().get(account_id)
-    if snapshot is None or snapshot.available_count <= 0:
-        return None
-    for credit in snapshot.credits:
-        if credit.id == redeem_id and credit.status == "available":
-            return credit
-    return None
-
-
 def _translate_v1_reset_credit_consume_error(exc: ConsumeResetCreditError) -> HTTPException:
     status_code = exc.status_code if exc.status_code > 0 else 503
     return HTTPException(status_code=status_code, detail=exc.message)
@@ -1152,7 +1142,6 @@ async def v1_redeem_reset_credit(
         account_id = account.id
 
         async with _serialize_v1_reset_credit_redeem(account_id, session=session):
-            credit = _select_available_reset_credit_by_id(account_id, payload.redeem_id)
             try:
                 route = await _resolve_reset_credit_route(session, account_id)
             except UpstreamProxyRouteError as exc:
@@ -1162,18 +1151,21 @@ async def v1_redeem_reset_credit(
             except RefreshError as exc:
                 raise _translate_v1_reset_credit_refresh_error(exc) from exc
             access_token = TokenEncryptor().decrypt(redeem_credentials.access_token_encrypted)
+            # Re-validate against upstream AFTER winning the cross-replica claim
+            # rather than trusting the replica-local snapshot. A peer replica may
+            # have redeemed this redeem_id while we waited for the claim, and our
+            # cached snapshot can still show it as available until the
+            # invalidation poll clears it; consuming from the stale cache would
+            # send a second upstream consume for an already-redeemed credit.
+            credit = await _fetch_authoritative_reset_credit(
+                account_id=account_id,
+                redeem_id=payload.redeem_id,
+                access_token=access_token,
+                chatgpt_account_id=redeem_credentials.chatgpt_account_id,
+                route=route,
+            )
             if credit is None:
-                # The replica-local snapshot can be empty (fresh replica) or
-                # stale (a peer redeemed); upstream is authoritative before 409.
-                credit = await _fetch_authoritative_reset_credit(
-                    account_id=account_id,
-                    redeem_id=payload.redeem_id,
-                    access_token=access_token,
-                    chatgpt_account_id=redeem_credentials.chatgpt_account_id,
-                    route=route,
-                )
-                if credit is None:
-                    raise HTTPException(status_code=409, detail="Requested reset credit is unavailable")
+                raise HTTPException(status_code=409, detail="Requested reset credit is unavailable")
             try:
                 result = await consume_reset_credit(
                     access_token,

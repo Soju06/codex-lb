@@ -206,7 +206,10 @@ async def pin_redeem_request(account_id: str, redeem_request_id: str, credit_id:
 
     Returns the authoritative credit id (the previously pinned one on
     conflict). Rows older than the 24h TTL for this account are purged in the
-    same transaction.
+    same transaction BEFORE the insert, so a ``redeem_request_id`` reused after
+    its prior row has aged past the TTL is re-pinned to the new credit instead
+    of colliding with the stale row via ``ON CONFLICT DO NOTHING`` and losing
+    the new pin.
     """
     now = datetime.now(UTC)
     session = SessionLocal()
@@ -217,6 +220,16 @@ async def pin_redeem_request(account_id: str, redeem_request_id: str, credit_id:
             "credit_id": credit_id,
             "created_at": now,
         }
+        # Purge expired rows first: an expired row for the SAME
+        # (account_id, redeem_request_id) would otherwise absorb the insert
+        # below via ON CONFLICT DO NOTHING and then be deleted, leaving the new
+        # attempt with no durable pin.
+        await session.execute(
+            delete(ResetCreditRedeemRequest).where(
+                ResetCreditRedeemRequest.account_id == account_id,
+                ResetCreditRedeemRequest.created_at < now - REDEEM_REQUEST_TTL,
+            )
+        )
         dialect = session.get_bind().dialect.name
         if dialect == "postgresql":
             await session.execute(
@@ -240,12 +253,6 @@ async def pin_redeem_request(account_id: str, redeem_request_id: str, credit_id:
                     ]
                 )
             )
-        await session.execute(
-            delete(ResetCreditRedeemRequest).where(
-                ResetCreditRedeemRequest.account_id == account_id,
-                ResetCreditRedeemRequest.created_at < now - REDEEM_REQUEST_TTL,
-            )
-        )
         await session.commit()
         stored = await session.scalar(
             select(ResetCreditRedeemRequest.credit_id).where(

@@ -202,6 +202,59 @@ async def test_dashboard_redeem_retry_on_second_replica_reuses_pinned_credit(asy
     assert [(row.redeem_request_id, row.credit_id) for row in rows] == [("retry-R", "credit-1")]
 
 
+@pytest.mark.asyncio
+async def test_dashboard_redeem_with_request_id_but_no_pin_returns_409_on_empty_fetch(
+    async_client, monkeypatch
+) -> None:
+    """A retry-shaped request (redeem_request_id supplied) with a stale cached
+    credit but NO durable pin must treat the fresh empty fetch as authoritative
+    and 409 instead of pinning the stale credit and consuming upstream."""
+    account_id = await _import_account(
+        async_client,
+        email="stale-cache-no-pin@example.com",
+        account_id="acc_stale_no_pin",
+    )
+
+    stale = _credit("credit-stale", expires_at="2026-07-20T00:00:00Z")
+    consume_calls: list[str] = []
+
+    async def fake_fetch(*args: Any, **kwargs: Any) -> ResetCreditsResponse:
+        # Upstream is authoritative and reports nothing available.
+        return _upstream_response([_credit("credit-stale", status="redeemed")], available_count=0)
+
+    async def fake_consume(
+        access_token: str,
+        chatgpt_account_id: str | None,
+        credit_id: str,
+        **kwargs: Any,
+    ) -> ConsumeResetCreditResponse:
+        consume_calls.append(credit_id)
+        return _success_consume(credit_id)
+
+    monkeypatch.setattr(reset_credits_api, "fetch_reset_credits", fake_fetch)
+    monkeypatch.setattr(reset_credits_api, "consume_reset_credit", fake_consume)
+    monkeypatch.setattr(reset_credits_api, "_build_refresh_usage_callback", lambda _context: _noop_refresh)
+
+    # Stale local snapshot still lists the credit as available.
+    await get_rate_limit_reset_credits_store().set(account_id, _snapshot([stale]))
+
+    response = await async_client.post(
+        f"/api/accounts/{account_id}/rate-limit-reset-credits/consume",
+        json={"redeemRequestId": "never-pinned-R"},
+    )
+
+    assert response.status_code == 409, response.text
+    assert response.json()["error"]["code"] == "no_available_reset_credit"
+    # No upstream consume for the stale credit.
+    assert consume_calls == []
+    # The stale snapshot was replaced with the fresh empty one.
+    snapshot = get_rate_limit_reset_credits_store().get(account_id)
+    assert snapshot is not None
+    assert snapshot.available_count == 0
+    # Nothing was pinned for the unproven retry.
+    assert await get_pinned_redeem_credit_id(account_id, "never-pinned-R") is None
+
+
 # --- SQLite cross-process serialization via the durable claim row ---
 
 
@@ -492,6 +545,47 @@ async def test_pin_redeem_request_first_writer_wins_and_purges_expired_rows(asyn
     assert await get_pinned_redeem_credit_id(account_id, "ancient-R") is None
 
 
+@pytest.mark.asyncio
+async def test_pin_redeem_request_reused_after_ttl_repins_new_credit(async_client) -> None:
+    """Reusing a redeem_request_id after its prior row aged past the TTL must
+    persist the NEW pin, not silently drop it via ON CONFLICT DO NOTHING on the
+    stale (soon-purged) row."""
+    account_id = await _import_account(
+        async_client,
+        email="ledger-ttl-reuse@example.com",
+        account_id="acc_ledger_ttl_reuse",
+    )
+
+    async with SessionLocal() as session:
+        session.add(
+            ResetCreditRedeemRequest(
+                account_id=account_id,
+                redeem_request_id="reused-R",
+                credit_id="old-credit",
+                created_at=datetime.now(UTC) - timedelta(hours=25),
+            )
+        )
+        await session.commit()
+
+    # The same redeem_request_id is reused after its old row is past the 24h
+    # TTL; the new attempt selected a different credit.
+    assert await pin_redeem_request(account_id, "reused-R", "new-credit") == "new-credit"
+    # The new pin is durable, so a cross-replica retry retargets it.
+    assert await get_pinned_redeem_credit_id(account_id, "reused-R") == "new-credit"
+
+    async with SessionLocal() as session:
+        rows = (
+            (
+                await session.execute(
+                    select(ResetCreditRedeemRequest).where(ResetCreditRedeemRequest.account_id == account_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert [(row.redeem_request_id, row.credit_id) for row in rows] == [("reused-R", "new-credit")]
+
+
 # --- v1 fresh-replica fallback (false 409 without it) ---
 
 
@@ -557,6 +651,51 @@ async def test_v1_redeem_on_fresh_replica_returns_409_and_caches_fresh_snapshot(
 
     assert response.status_code == 409
     consume_mock.assert_not_awaited()
+    snapshot = get_rate_limit_reset_credits_store().get(account_id)
+    assert snapshot is not None
+    assert snapshot.available_count == 0
+
+
+@pytest.mark.asyncio
+async def test_v1_redeem_revalidates_stale_cached_credit_after_claim(async_client, monkeypatch) -> None:
+    """A cached snapshot listing the credit as available must NOT short-circuit
+    the upstream re-validation: after winning the cross-replica claim a peer may
+    already have redeemed it, so the endpoint must 409 without a second consume."""
+    account_id = await _import_account(
+        async_client,
+        email="v1-stale-cache@example.com",
+        account_id="acc_v1_stale_cache",
+    )
+    key = await _create_api_key(async_client, name="reset-credit-stale-cache")
+
+    # Replica-local snapshot still lists credit-x as available (a peer redeemed
+    # it while this replica's invalidation poll had not yet fired).
+    await get_rate_limit_reset_credits_store().set(
+        account_id, _snapshot([_credit("credit-x", expires_at="2026-08-01T00:00:00Z")])
+    )
+
+    # Authoritative upstream fetch reports the credit already redeemed.
+    fetch_mock = AsyncMock(
+        return_value=_upstream_response(
+            [_credit("credit-x", status="redeemed", expires_at="2026-08-01T00:00:00Z")],
+            available_count=0,
+        )
+    )
+    consume_mock = AsyncMock()
+    monkeypatch.setattr("app.modules.proxy.api.fetch_reset_credits", fetch_mock)
+    monkeypatch.setattr("app.modules.proxy.api.consume_reset_credit", consume_mock)
+
+    response = await async_client.post(
+        "/v1/reset-credit",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"account_id": account_id, "redeem_id": "credit-x"},
+    )
+
+    assert response.status_code == 409, response.text
+    # Re-validation happened and no second upstream consume was sent.
+    fetch_mock.assert_awaited_once()
+    consume_mock.assert_not_awaited()
+    # The stale snapshot was replaced with the fresh (empty) upstream state.
     snapshot = get_rate_limit_reset_credits_store().get(account_id)
     assert snapshot is not None
     assert snapshot.available_count == 0

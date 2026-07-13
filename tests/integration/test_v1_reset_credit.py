@@ -115,6 +115,19 @@ async def _seed_snapshot(
     )
 
 
+def _upstream_available(credits: list[ResetCreditItem]) -> ResetCreditsResponse:
+    """Upstream fetch response confirming the given credits' availability.
+
+    The v1 redeem path re-validates the requested credit against a fresh
+    upstream fetch after winning the cross-replica claim, so a seeded local
+    snapshot alone is not enough — the fetch must confirm availability.
+    """
+    return ResetCreditsResponse(
+        credits=credits,
+        available_count=sum(1 for credit in credits if credit.status == "available"),
+    )
+
+
 @pytest.mark.asyncio
 async def test_v1_reset_credit_requires_valid_bearer_key(async_client):
     await _enable_api_key_auth(async_client)
@@ -639,6 +652,20 @@ async def test_v1_reset_credit_post_upstream_conflict_invalidates_stale_snapshot
         del args, kwargs
         raise ConsumeResetCreditError(409, "credit already redeemed upstream", code="credit_unavailable")
 
+    monkeypatch.setattr(
+        "app.modules.proxy.api.fetch_reset_credits",
+        AsyncMock(
+            return_value=_upstream_available(
+                [
+                    ResetCreditItem(
+                        id="credit-conflict",
+                        status="available",
+                        expires_at=datetime(2031, 4, 2, tzinfo=timezone.utc),
+                    )
+                ]
+            )
+        ),
+    )
     monkeypatch.setattr("app.modules.proxy.api.consume_reset_credit", fake_consume)
 
     response = await async_client.post(
@@ -685,6 +712,17 @@ async def test_v1_reset_credit_post_consumes_exact_credit_and_invalidates_snapsh
                 "windows_reset": 1,
             }
         )
+    )
+    monkeypatch.setattr(
+        "app.modules.proxy.api.fetch_reset_credits",
+        AsyncMock(
+            return_value=_upstream_available(
+                [
+                    ResetCreditItem(id="credit-soonest", status="available", expires_at=soonest),
+                    ResetCreditItem(id="credit-later", status="available", expires_at=later),
+                ]
+            )
+        ),
     )
     monkeypatch.setattr("app.modules.proxy.api.consume_reset_credit", consume_mock)
 
@@ -756,6 +794,20 @@ async def test_v1_reset_credit_post_force_refreshes_usage_and_invalidates_select
 
     selection_cache = SelectionCache()
 
+    monkeypatch.setattr(
+        "app.modules.proxy.api.fetch_reset_credits",
+        AsyncMock(
+            return_value=_upstream_available(
+                [
+                    ResetCreditItem(
+                        id="credit-refresh",
+                        status="available",
+                        expires_at=datetime(2031, 5, 2, 1, 0, 0, tzinfo=timezone.utc),
+                    )
+                ]
+            )
+        ),
+    )
     monkeypatch.setattr("app.modules.proxy.api.consume_reset_credit", consume_mock)
     monkeypatch.setattr("app.modules.proxy.api.UsageUpdater", StubUsageUpdater)
     monkeypatch.setattr("app.modules.proxy.api.get_account_selection_cache", lambda: selection_cache)
@@ -841,6 +893,20 @@ async def test_v1_reset_credit_post_refreshes_account_before_consuming_credit(
             }
         )
 
+    monkeypatch.setattr(
+        "app.modules.proxy.api.fetch_reset_credits",
+        AsyncMock(
+            return_value=_upstream_available(
+                [
+                    ResetCreditItem(
+                        id="credit-refresh-token",
+                        status="available",
+                        expires_at=datetime(2031, 5, 2, tzinfo=timezone.utc),
+                    )
+                ]
+            )
+        ),
+    )
     monkeypatch.setattr("app.modules.proxy.api._ensure_v1_reset_credit_account_fresh", fake_ensure_fresh)
     monkeypatch.setattr("app.modules.proxy.api.consume_reset_credit", fake_consume)
 
@@ -1031,6 +1097,20 @@ async def test_v1_reset_credit_post_holds_session_open_through_lock_and_upstream
     )
     monkeypatch.setattr("app.modules.proxy.api.consume_reset_credit", fake_consume)
     monkeypatch.setattr(
+        "app.modules.proxy.api.fetch_reset_credits",
+        AsyncMock(
+            return_value=_upstream_available(
+                [
+                    ResetCreditItem(
+                        id="credit-session-lifecycle",
+                        status="available",
+                        expires_at=datetime(2031, 6, 1, tzinfo=timezone.utc),
+                    )
+                ]
+            )
+        ),
+    )
+    monkeypatch.setattr(
         "app.modules.proxy.api._refresh_usage_after_v1_reset_credit_redeem",
         fake_refresh_usage_after_redeem,
     )
@@ -1127,6 +1207,20 @@ async def test_v1_reset_credit_post_preserves_success_when_post_redeem_usage_ref
     monkeypatch.setattr(
         "app.modules.proxy.api._ensure_v1_reset_credit_account_fresh",
         AsyncMock(return_value=account),
+    )
+    monkeypatch.setattr(
+        "app.modules.proxy.api.fetch_reset_credits",
+        AsyncMock(
+            return_value=_upstream_available(
+                [
+                    ResetCreditItem(
+                        id="credit-refresh-raise",
+                        status="available",
+                        expires_at=datetime(2031, 6, 2, tzinfo=timezone.utc),
+                    )
+                ]
+            )
+        ),
     )
     monkeypatch.setattr("app.modules.proxy.api.consume_reset_credit", fake_consume)
     monkeypatch.setattr(

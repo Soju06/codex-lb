@@ -14,7 +14,7 @@ Before `POST /v1/reset-credit` decrypts and forwards the bearer token for the up
 
 If that self-service credential refresh fails, `POST /v1/reset-credit` SHALL stop before the upstream consume call, return a client-actionable conflict response, and keep using the existing `/v1/*` OpenAI error envelope.
 
-When the replica-local snapshot is missing or does not list the requested `redeem_id` as available, `POST /v1/reset-credit` SHALL perform a live upstream reset-credits fetch inside the serialized redeem section using the refreshed account credentials and treat that response as authoritative: if the credit is available upstream the redemption proceeds; otherwise the endpoint returns 409 and replaces the cached snapshot for that account with the fresh upstream snapshot.
+After acquiring the cross-replica redeem claim, `POST /v1/reset-credit` SHALL re-validate the requested `redeem_id` against a live upstream reset-credits fetch performed inside the serialized redeem section using the refreshed account credentials, regardless of whether the replica-local snapshot lists the credit as available. It MUST NOT consume a credit solely on the basis of the replica-local snapshot, because a peer replica may have redeemed that credit while this request waited for the claim and the local snapshot can remain stale until its invalidation poll fires. The upstream fetch response is authoritative: if the credit is available upstream the redemption proceeds; otherwise the endpoint returns 409 and replaces the cached snapshot for that account with the fresh upstream snapshot.
 
 On a successful `POST /v1/reset-credit` redemption, the system SHALL invalidate the redeemed account's cached reset-credit snapshot, force a usage refresh for that account, and invalidate account-selection cache state when that usage refresh writes updated usage. A failed or empty post-redeem usage refresh SHALL NOT roll back the successful credit redemption response.
 
@@ -81,6 +81,16 @@ On a successful `POST /v1/reset-credit` redemption, the system SHALL invalidate 
 - **WHEN** a client calls `POST /v1/reset-credit` for that account and `redeem_id`
 - **THEN** the endpoint returns 409 without calling upstream consume
 - **AND** the fresh upstream snapshot replaces the replica's cached snapshot for that account
+
+#### Scenario: Stale cached credit is re-validated after winning the claim
+
+- **GIVEN** two replicas both cached the same reset credit as available
+- **AND** replica A redeemed it while replica B waited on the cross-replica redeem claim
+- **AND** replica B's cached snapshot still lists that `redeem_id` as available
+- **WHEN** replica B wins the claim and processes `POST /v1/reset-credit` for that `redeem_id`
+- **THEN** replica B performs the authoritative upstream fetch instead of consuming from its stale cache
+- **AND** because upstream reports the credit unavailable, replica B returns 409 without sending a second upstream consume
+- **AND** replica B replaces its cached snapshot with the fresh upstream snapshot
 
 #### Scenario: Successful self-service redemption refreshes usage for immediate follow-up traffic
 

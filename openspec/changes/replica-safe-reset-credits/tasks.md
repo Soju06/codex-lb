@@ -58,3 +58,14 @@
     `reset_credit_redeem_in_progress` conflict and `POST /v1/reset-credit`
     maps it to an `HTTPException(409)` rendered in the `/v1/*` OpenAI
     envelope; regression tests at both surfaces.
+15. [x] (review follow-up) Close scarce-credit accounting gaps on the redeem
+    idempotency ledger and v1 path: (a) dashboard consume returns
+    `no_available_reset_credit` (409) when a `redeem_request_id` has no durable
+    pin and the fresh fetch shows nothing available, instead of pinning and
+    consuming a stale cached credit; (b) `pin_redeem_request` purges expired
+    rows BEFORE inserting so a `redeem_request_id` reused after its prior row
+    aged past the 24h TTL re-pins to the new credit; (c) `POST /v1/reset-credit`
+    always re-validates the requested credit against a fresh upstream fetch
+    after winning the cross-replica claim rather than trusting the replica-local
+    cache. Regression tests at the dashboard route, v1 route, and ledger
+    primitive.

@@ -358,10 +358,44 @@ async def test_redeem_replaces_stale_cached_snapshot_when_fresh_fetch_has_no_ava
 
 
 @pytest.mark.asyncio
-async def test_redeem_retries_same_request_id_when_fresh_fetch_has_no_available_credit(
+async def test_redeem_with_request_id_but_no_pin_returns_conflict_on_empty_fresh_fetch(
     fake_redeem_ledger: dict[tuple[str, str], str],
 ) -> None:
+    """A redeem_request_id with NO durable pin is not proof of an idempotent
+    retry: when the fresh pre-consume fetch reports nothing available, the
+    stale cached credit MUST NOT be pinned and consumed. The endpoint returns a
+    conflict, replaces the stale snapshot with the fresh empty one, and pins
+    nothing."""
     store = RateLimitResetCreditsStore()
+    await store.set("acc_1", _snapshot([_credit("cached")], available_count=1))
+
+    with pytest.raises(DashboardConflictError) as excinfo:
+        await _redeem_soonest_reset_credit(
+            account=_account(),
+            store=store,
+            encryptor=StubEncryptor(),
+            fetch_fn=_static_fetch_fn(_response([], available_count=0)),
+            consume_fn=_raise_not_called,  # type: ignore[arg-type]
+            redeem_request_id="retry-id",
+        )
+
+    assert excinfo.value.code == "no_available_reset_credit"
+    cached = store.get("acc_1")
+    assert cached is not None
+    assert cached.available_count == 0
+    assert cached.credits == []
+    # Nothing pinned for the unproven retry.
+    assert fake_redeem_ledger == {}
+
+
+@pytest.mark.asyncio
+async def test_redeem_retries_same_request_id_after_local_credit_vanishes_with_durable_pin(
+    fake_redeem_ledger: dict[tuple[str, str], str],
+) -> None:
+    """When a durable pin already exists, a same-request retry consumes the
+    pinned credit even though the fresh fetch shows nothing available."""
+    store = RateLimitResetCreditsStore()
+    fake_redeem_ledger[("acc_1", "retry-id")] = "cached"
     await store.set("acc_1", _snapshot([_credit("cached")], available_count=1))
 
     captured: dict[str, Any] = {}
@@ -407,7 +441,7 @@ async def test_redeem_retries_same_request_id_when_fresh_fetch_has_no_available_
     assert result.available_count_before == 0
     assert result.available_count_after == 0
     assert store.get("acc_1") is None
-    # The credit was pinned durably before the consume call.
+    # The pre-existing durable pin is preserved.
     assert fake_redeem_ledger == {("acc_1", "retry-id"): "cached"}
 
 

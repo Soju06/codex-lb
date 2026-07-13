@@ -323,12 +323,15 @@ async def _redeem_soonest_reset_credit_locked(
     if pending_credit_id is not None:
         credit_id = pending_credit_id
     elif credit is None:
+        # The fresh pre-consume fetch is authoritative: no available credit
+        # means none is redeemable now. With no durable pin
+        # (``pending_credit_id is None`` here), there is no proof this is an
+        # idempotent retry of a prior attempt, so a stale local snapshot MUST
+        # NOT be pinned and consumed — that would burn an upstream consume for
+        # an unavailable/already-redeemed credit. Replace the stale snapshot
+        # with the fresh (empty) one and return a conflict.
         await store.set(account.id, build_snapshot(credits_response))
-        if cached_credit is None or redeem_request_id is None:
-            raise DashboardConflictError("No available reset credit", code="no_available_reset_credit")
-        # Pin (durably, before the consume call) so a lost response still
-        # resolves a same-redeem_request_id retry to this credit on any replica.
-        credit_id = await pin_redeem_request(account.id, redeem_request_id, cached_credit.id)
+        raise DashboardConflictError("No available reset credit", code="no_available_reset_credit")
     else:
         credit_id = credit.id
         if redeem_request_id is not None:

@@ -8,7 +8,7 @@
 
 ## 2. Migration and models
 
-- [x] 2.1 Migration `20260712_090000_add_replica_guardrails` on committed head `20260711_030000_add_limit_warmup_idle_threshold`: add `dashboard_settings.version` (server_default '1', batch_alter_table for SQLite) + create `runtime_sentinels`; full downgrade.
+- [x] 2.1 Migration `20260713_040000_add_replica_guardrails` on committed head `20260712_020000_add_api_key_usage_rollups`: add `dashboard_settings.version` (server_default '1', batch_alter_table for SQLite) + create `runtime_sentinels`; full downgrade.
 - [x] 2.2 Models: `DashboardSettings.version` with `version_id_col`; new `RuntimeSentinel`.
 
 ## 3. Guardrails

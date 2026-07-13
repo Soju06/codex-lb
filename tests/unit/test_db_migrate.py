@@ -1870,8 +1870,8 @@ def test_replica_guardrails_migration_round_trips_with_version_backfill(tmp_path
 
     db_path = tmp_path / "replica-guardrails.db"
     url = _db_url(db_path)
-    parent_revision = "20260711_030000_add_limit_warmup_idle_threshold"
-    target_revision = "20260712_090000_add_replica_guardrails"
+    parent_revision = "20260712_020000_add_api_key_usage_rollups"
+    target_revision = "20260713_040000_add_replica_guardrails"
 
     run_upgrade(url, parent_revision, bootstrap_legacy=False)
     config = _build_alembic_config(url)

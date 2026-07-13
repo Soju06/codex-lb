@@ -82,13 +82,11 @@ test environment, making the lifespan metrics-server branch unreachable in tests
 
 ## 5. Migration
 
-Revision `20260712_090000_add_replica_guardrails`. **Deviation from the original design note:**
-the design suggested chaining after the uncommitted `20260712_010000_add_account_usage_rollups`
-revision, but that revision does not exist on this branch, so the migration parents on the
-current committed head `20260711_030000_add_limit_warmup_idle_threshold`. Sibling branches in
-this effort add migrations with `20260712_020000+` prefixes on the same head; that cross-branch
-head fork is resolved at merge time (re-parent whichever lands later; this revision keeps a
-distinct `090000` prefix to avoid collisions). Upgrade: add `dashboard_settings.version`
+Revision `20260713_040000_add_replica_guardrails`, parented on the committed main head
+`20260712_020000_add_api_key_usage_rollups` (re-parented after the usage-rollup revisions
+merged to `main`). Sibling branches in this effort add migrations off the same head; that
+cross-branch head fork is resolved at merge time (re-parent whichever lands later; this
+revision keeps a distinct `20260713_040000` prefix to avoid collisions). Upgrade: add `dashboard_settings.version`
 (`server_default '1'` backfills the existing id=1 row on both backends; batch_alter_table for
 SQLite) + create `runtime_sentinels`. Full downgrade drops both.
 

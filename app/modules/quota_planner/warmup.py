@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import usage as usage_core
 from app.core.clients.proxy import stream_responses
 from app.core.crypto import TokenEncryptor
 from app.core.openai.parsing import parse_sse_event
@@ -417,7 +418,7 @@ class QuotaWarmupService:
         latest = (await self._usage.latest_by_account()).get(account.id)
         if _sample_blocks_short_window_planning(latest):
             return False, "no_short_window"
-        if await self._short_window_superseded(account.id, latest):
+        if await self._short_window_superseded(account, latest):
             return False, "no_short_window"
         if latest is not None and latest.reset_at is not None and latest.reset_at > int(utcnow().timestamp()):
             return False, "account_window_already_active"
@@ -437,19 +438,22 @@ class QuotaWarmupService:
             return False, "warmup_effect_unknown"
         return True, "ready"
 
-    async def _short_window_superseded(self, account_id: str, latest: object | None) -> bool:
+    async def _short_window_superseded(self, account: Account, latest: object | None) -> bool:
         # A strictly newer long-window row proves a later refresh no longer
         # reported the short window: the stale short primary sample is not
         # evidence of a current short window, so warm-up traffic would open
         # nothing. Same-fetch rows land within milliseconds and stay inside
-        # the margin.
+        # the margin. Monthly rows only count for plans with monthly
+        # capacity — lingering rows from a former plan are not applicable.
         if latest is None:
             return False
         latest_recorded_at = getattr(latest, "recorded_at", None)
         if latest_recorded_at is None:
             return False
         for window in ("secondary", "monthly"):
-            sibling = (await self._usage.latest_by_account(window=window)).get(account_id)
+            if window == "monthly" and usage_core.capacity_for_plan(account.plan_type, "monthly") is None:
+                continue
+            sibling = (await self._usage.latest_by_account(window=window)).get(account.id)
             if sibling is None:
                 continue
             if (sibling.recorded_at - latest_recorded_at).total_seconds() > _SIBLING_FETCH_MARGIN_SECONDS:

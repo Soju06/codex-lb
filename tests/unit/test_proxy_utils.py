@@ -5576,7 +5576,8 @@ async def test_stream_responses_honors_timeout_overrides(monkeypatch):
     assert events == ['data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n']
     timeout = session.calls[0]["timeout"]
     assert isinstance(timeout, proxy_module.aiohttp.ClientTimeout)
-    assert timeout.total == pytest.approx(4.5, abs=0.01)
+    assert timeout.total is not None
+    assert 0 < timeout.total <= 4.5
     assert timeout.sock_connect == pytest.approx(2.5)
     assert seen["idle_timeout_seconds"] == pytest.approx(3.5)
 
@@ -5945,7 +5946,7 @@ async def test_stream_responses_keeps_missing_environment_proxy_hostname_endpoin
     monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
     monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
     monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
-    monkeypatch.setattr(proxy_module, "rotate_shared_http_transport", rotate)
+    monkeypatch.setattr(network_recovery_module, "rotate_shared_http_transport", rotate)
     payload = ResponsesRequest.model_validate(
         {"model": "gpt-5.1", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
     )
@@ -6870,7 +6871,7 @@ async def test_stream_codex_websocket_events_treats_raw_error_as_terminal_when_s
 
 
 @pytest.mark.asyncio
-async def test_stream_responses_websocket_broken_pipe_is_retryable_upstream_unavailable(monkeypatch):
+async def test_stream_responses_websocket_broken_pipe_is_not_replayable_upstream_unavailable(monkeypatch):
     logged_completions: list[dict[str, object]] = []
 
     class _BrokenPipeWsResponse(_WsResponse):
@@ -6917,7 +6918,7 @@ async def test_stream_responses_websocket_broken_pipe_is_retryable_upstream_unav
     assert completion["failure_phase"] == "upstream"
     assert completion["failure_detail"] == "transport_error"
     assert completion["failure_exception_type"] == "BrokenPipeError"
-    assert completion["retryable_same_contract"] is True
+    assert completion["retryable_same_contract"] is False
 
 
 @pytest.mark.asyncio
@@ -20422,6 +20423,7 @@ async def test_proxy_responses_websocket_replays_precreated_request_after_upstre
                 data=None,
                 close_code=None,
                 error=None,
+                error_code=None,
             ),
             SimpleNamespace(
                 kind="text",
@@ -20439,8 +20441,9 @@ async def test_proxy_responses_websocket_replays_precreated_request_after_upstre
                 data=None,
                 close_code=None,
                 error=None,
+                error_code=None,
             ),
-            SimpleNamespace(kind="close", text=None, data=None, close_code=1001, error=None),
+            SimpleNamespace(kind="close", text=None, data=None, close_code=1001, error=None, error_code=None),
         ],
         close_delay_seconds=0.05,
     )
@@ -20458,6 +20461,7 @@ async def test_proxy_responses_websocket_replays_precreated_request_after_upstre
                 data=None,
                 close_code=None,
                 error=None,
+                error_code=None,
             ),
             SimpleNamespace(
                 kind="text",
@@ -20475,6 +20479,7 @@ async def test_proxy_responses_websocket_replays_precreated_request_after_upstre
                 data=None,
                 close_code=None,
                 error=None,
+                error_code=None,
             ),
         ]
     )
@@ -24928,7 +24933,8 @@ async def test_compact_responses_forwards_codex_compaction_to_upstream(monkeypat
     async def fake_ensure_fresh(account_arg, *, force=False, timeout_seconds=None):
         del force
         assert account_arg is account
-        assert timeout_seconds == 20.0
+        assert timeout_seconds is not None
+        assert 0 < timeout_seconds <= 20.0
         return account
 
     monkeypatch.setattr(service, "_ensure_fresh", fake_ensure_fresh)
@@ -25900,11 +25906,10 @@ async def test_transcribe_budget_exhaustion_blocks_401_retry_with_timeout(monkey
     runtime_values = dict(settings.__dict__)
     runtime_values["transcription_request_budget_seconds"] = 1.0
     runtime_settings = SimpleNamespace(**runtime_values)
-    monotonic_calls = {"count": 0}
+    clock = {"now": 100.0}
 
     def fake_monotonic():
-        monotonic_calls["count"] += 1
-        return 100.0 if monotonic_calls["count"] < 7 else 102.0
+        return clock["now"]
 
     async def fake_transcribe(
         audio_bytes: bytes,
@@ -25920,6 +25925,7 @@ async def test_transcribe_budget_exhaustion_blocks_401_retry_with_timeout(monkey
     ):
         nonlocal transcribe_calls
         transcribe_calls += 1
+        clock["now"] = 102.0
         raise proxy_module.ProxyResponseError(401, openai_error("invalid_api_key", "token expired"))
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))

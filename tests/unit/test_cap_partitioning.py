@@ -191,6 +191,72 @@ def test_holder_same_count_churn_flap_recovery_clears_pending_increase() -> None
     assert holder.current == CapPartition(replica_count=2, rank=0)
 
 
+def test_holder_defers_mixed_churn_where_count_grows_but_rank_moves_earlier() -> None:
+    clock = _Clock()
+    holder = CapPartitionHolder(clock=clock)
+    holder.observe_members(
+        ["replica-a", "replica-b", "replica-c", "replica-d", "replica-m"], "replica-m", scale_down_seconds=60.0
+    )
+    assert holder.current == CapPartition(replica_count=5, rank=4)
+
+    # Rolling replacement: four lower-ranked members drain while five new
+    # later-sorting ids appear. The count grows (5 -> 6) but the rank drops
+    # (4 -> 0), which grows the share for e.g. cap 8 (1 slot -> 2 slots), so
+    # the stability window must apply despite the larger count.
+    churned = ["replica-m", "replica-n", "replica-o", "replica-p", "replica-q", "replica-r"]
+    assert holder.observe_members(churned, "replica-m", scale_down_seconds=60.0) is False
+    assert holder.current == CapPartition(replica_count=5, rank=4)
+
+    clock.advance(59.0)
+    assert holder.observe_members(churned, "replica-m", scale_down_seconds=60.0) is False
+    assert holder.current == CapPartition(replica_count=5, rank=4)
+
+    clock.advance(1.0)
+    assert holder.observe_members(churned, "replica-m", scale_down_seconds=60.0) is True
+    assert holder.current == CapPartition(replica_count=6, rank=0)
+
+
+def test_holder_adopts_count_increase_toward_later_rank_immediately() -> None:
+    holder = CapPartitionHolder(clock=_Clock())
+    holder.observe_members(["replica-b", "replica-c"], "replica-b", scale_down_seconds=60.0)
+    assert holder.current == CapPartition(replica_count=2, rank=0)
+
+    # More replicas at a same-or-later rank can only shrink the share.
+    changed = holder.observe_members(["replica-a", "replica-b", "replica-c"], "replica-b", scale_down_seconds=60.0)
+    assert changed is True
+    assert holder.current == CapPartition(replica_count=3, rank=1)
+
+
+def test_holder_restarts_window_when_pending_rank_changes_at_same_count() -> None:
+    clock = _Clock()
+    holder = CapPartitionHolder(clock=clock)
+    holder.observe_members(
+        ["replica-a", "replica-b", "replica-c", "replica-d", "replica-m"], "replica-m", scale_down_seconds=60.0
+    )
+    assert holder.current == CapPartition(replica_count=5, rank=4)
+
+    # First share-growing observation: same count, rank 4 -> 3.
+    rank_three = ["replica-b", "replica-c", "replica-d", "replica-m", "replica-z"]
+    assert holder.observe_members(rank_three, "replica-m", scale_down_seconds=60.0) is False
+    clock.advance(50.0)
+    assert holder.observe_members(rank_three, "replica-m", scale_down_seconds=60.0) is False
+
+    # A different pending target (same count, rank 0) must not inherit the
+    # 50 seconds already accrued by the rank-3 observation.
+    rank_zero = ["replica-m", "replica-v", "replica-w", "replica-x", "replica-y"]
+    clock.advance(10.0)
+    assert holder.observe_members(rank_zero, "replica-m", scale_down_seconds=60.0) is False
+    assert holder.current == CapPartition(replica_count=5, rank=4)
+
+    clock.advance(59.0)
+    assert holder.observe_members(rank_zero, "replica-m", scale_down_seconds=60.0) is False
+    assert holder.current == CapPartition(replica_count=5, rank=4)
+
+    clock.advance(1.0)
+    assert holder.observe_members(rank_zero, "replica-m", scale_down_seconds=60.0) is True
+    assert holder.current == CapPartition(replica_count=5, rank=0)
+
+
 def test_observe_ring_members_updates_process_partition(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         cap_partitioning_module,

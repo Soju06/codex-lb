@@ -35,12 +35,12 @@ Each replica computes its own share locally: with `R` active members sorted by i
 
 When `cap < R`, ranks beyond the remainder would get 0 slots and the account would be unroutable on those replicas, breaking sticky/affinity routing. Shares are floored at 1, so the aggregate may reach `R` for very small caps. This bounded overshoot (at most `R - cap` extra slots, only when `cap < R`) was judged safer than unroutable accounts. `cap <= 0` remains "unlimited" on every replica.
 
-### D3: Direction-aware hysteresis on membership changes
+### D3: Share-growth-aware hysteresis on membership changes
 
-- Hysteresis is keyed on the direction of *this replica's share*, not just the member count: with the count fixed, an earlier rank can only grow the share (it may cross the `cap mod R` remainder threshold) and a later rank can only shrink it.
-- Count increase (scale-up), or equal-count churn toward a later rank: adopt immediately — shares only shrink or stay put, safe toward upstream.
-- Count decrease (scale-down), or equal-count churn toward an earlier rank (rolling replacement: a draining member is swapped for a new instance id while the count stays constant): adopt only after the share-growing observation has been held continuously for `proxy_account_cap_partition_scale_down_seconds` (default 60s, `ge=30`). A single missed heartbeat (stale threshold 30s) recovers within one 10s heartbeat interval, so it never survives the window; a real scale-down is adopted ~60-70s after the last heartbeat. During the window survivors keep their smaller shares (under-admission, safe).
-- A pending share-growing observation at a *different* member count restarts the window; observing the adopted partition again clears the pending state.
+- Hysteresis is keyed on whether *this replica's share* could actually grow, not on the member count or a direction heuristic: a rank's share is the round-robin count `ceil((cap - rank) / R)` (floored at 1), which is monotone non-increasing in both `R` and `rank`. Growth is therefore possible exactly when the count shrinks or the rank moves earlier — including mixed churn where the count grows while lower-ranked ids vanish (cap 8: `R=5, rank=4` holds 1 slot but `R=6, rank=0` holds 2).
+- Count does not decrease and rank does not decrease: adopt immediately — every cap share shrinks or stays put, safe toward upstream.
+- Count decrease (scale-down), or any move to an earlier rank (rolling replacement, or stale low-rank members plus new high-rank members): adopt only after that exact pending partition (count + rank) has been held continuously for `proxy_account_cap_partition_scale_down_seconds` (default 60s, `ge=30`). A single missed heartbeat (stale threshold 30s) recovers within one 10s heartbeat interval, so it never survives the window; a real scale-down is adopted ~60-70s after the last heartbeat. During the window survivors keep their smaller shares (under-admission, safe).
+- Any change of the pending partition — including a different rank at the same count — restarts the window, so only one continuously-held target can be adopted; observing the adopted partition again clears the pending state.
 
 ### D4: Fail-closed refresh, self always counted
 
@@ -71,6 +71,6 @@ The first (interrupted) attempt left `cap_partitioning.py`, settings, metrics, `
 
 ## Test plan
 
-- Unit (`tests/unit/test_cap_partitioning.py`): partition math (even split, remainder by rank, floor-at-1, unlimited, single replica); holder hysteresis with an injected clock (scale-up immediate, scale-down deferred/expired, flap recovery, window restart on a different lower count, self-counting); `refresh_cap_partition` retaining the partition on a failed read.
+- Unit (`tests/unit/test_cap_partitioning.py`): partition math (even split, remainder by rank, floor-at-1, unlimited, single replica); holder hysteresis with an injected clock (scale-up immediate, scale-down deferred/expired, flap recovery, window restart on any pending-partition change including a rank change at the same count, mixed count-up/rank-down churn deferred, self-counting); `refresh_cap_partition` retaining the partition on a failed read.
 - Unit (`tests/unit/test_load_balancer_concurrency.py`): `effective_account_concurrency_caps` returns partitioned shares with configured limits and replica count attached; `replica` scope opt-out; partitioned cap error message contract; regression — two `LoadBalancer` instances simulating two replicas admit at most the configured cluster-wide stream cap in aggregate (before this change each replica admitted the full cap).
 - Integration (`tests/integration/test_multi_replica.py`): two `RingMembershipService` instances over one shared SQLite database register two replicas; each replica derives its partition from `list_active` through the product refresh path and the aggregate lease admission across two `LoadBalancer` instances equals the configured cap; scale-down after `unregister` is adopted only after the stability window.

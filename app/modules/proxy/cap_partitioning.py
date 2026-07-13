@@ -6,14 +6,15 @@ bridge-ring member list, so there is no cross-replica mutable shared state and
 no per-request database I/O: every replica computes `floor(cap / R)` plus one
 extra slot when its rank falls below `cap mod R`.
 
-Membership changes are adopted with direction-aware hysteresis keyed on the
-share direction, not just the member count: changes that shrink or keep this
-replica's share (count increases, or same-count churn that moves this replica
-to a later rank) are adopted on the next refresh, while changes that would
-grow the share (count decreases, or same-count churn that moves this replica
-to an earlier rank, e.g. a draining replica being replaced by a new instance
-id) are adopted only after the growing observation has been held continuously
-for a configured stability window, so neither a missed heartbeat nor a rolling
+Membership changes are adopted with hysteresis keyed on whether this
+replica's share could actually grow: a rank's share is monotone non-increasing
+in both the replica count and the rank, so only a count decrease or a move to
+an earlier rank (including mixed churn where new members appear while
+lower-ranked ids vanish) can grow it. Changes that cannot grow the share are
+adopted on the next refresh, while any potentially share-growing change is
+adopted only after that exact pending partition (count and rank) has been
+observed continuously for a configured stability window — a different pending
+partition restarts the window — so neither a missed heartbeat nor a rolling
 replacement can transiently inflate a survivor's share.
 """
 
@@ -57,13 +58,13 @@ class CapPartition:
 
 
 class CapPartitionHolder:
-    """Tracks the adopted partition with direction-aware hysteresis."""
+    """Tracks the adopted partition with share-growth-aware hysteresis."""
 
     def __init__(self, *, clock: Callable[[], float] = time.monotonic) -> None:
         self._clock = clock
         self._adopted = CapPartition()
-        self._pending_increase: CapPartition | None = None
-        self._pending_increase_since: float | None = None
+        self._pending: CapPartition | None = None
+        self._pending_since: float | None = None
 
     @property
     def current(self) -> CapPartition:
@@ -85,41 +86,42 @@ class CapPartitionHolder:
         members = sorted(set(active_instance_ids) | {self_instance_id})
         observed = CapPartition(replica_count=len(members), rank=members.index(self_instance_id))
         if observed == self._adopted:
-            self._clear_pending_increase()
+            self._clear_pending()
             return False
-        if not self._would_increase_share(observed):
-            # Scale-up or same-size churn toward a later rank: every share
-            # shrinks or stays put, which is safe toward upstream — adopt now.
+        if not self._could_grow_share(observed):
+            # Every cap share shrinks or stays put, which is safe toward
+            # upstream — adopt now.
             self._adopted = observed
-            self._clear_pending_increase()
+            self._clear_pending()
             return True
         now = self._clock()
-        if self._pending_increase is None or self._pending_increase.replica_count != observed.replica_count:
-            self._pending_increase = observed
-            self._pending_increase_since = now
+        if observed != self._pending:
+            # A new or changed share-growing target restarts the stability
+            # window: only a partition held continuously may be adopted.
+            self._pending = observed
+            self._pending_since = now
             return False
-        self._pending_increase = observed
-        if self._pending_increase_since is not None and now - self._pending_increase_since >= scale_down_seconds:
+        if self._pending_since is not None and now - self._pending_since >= scale_down_seconds:
             self._adopted = observed
-            self._clear_pending_increase()
+            self._clear_pending()
             return True
         return False
 
-    def _would_increase_share(self, observed: CapPartition) -> bool:
+    def _could_grow_share(self, observed: CapPartition) -> bool:
         """Whether adopting ``observed`` could grow this replica's share of any cap.
 
-        Fewer replicas always grow shares, and at an unchanged count an earlier
-        rank can move this replica under the ``cap mod R`` remainder threshold
-        and grant it an extra slot (same-size churn during rolling replacement).
-        Larger counts and later ranks never grow a share.
+        A rank's share is the round-robin count ``ceil((cap - rank) / R)``
+        (floored at one slot), which is monotone non-increasing in both the
+        replica count and the rank. Growth is therefore possible exactly when
+        the count shrinks or this replica moves to an earlier rank — including
+        mixed churn where the count grows while lower-ranked ids vanish (for
+        cap 8, ``R=5, rank=4`` holds 1 slot but ``R=6, rank=0`` holds 2).
         """
-        if observed.replica_count < self._adopted.replica_count:
-            return True
-        return observed.replica_count == self._adopted.replica_count and observed.rank < self._adopted.rank
+        return observed.replica_count < self._adopted.replica_count or observed.rank < self._adopted.rank
 
-    def _clear_pending_increase(self) -> None:
-        self._pending_increase = None
-        self._pending_increase_since = None
+    def _clear_pending(self) -> None:
+        self._pending = None
+        self._pending_since = None
 
 
 _holder = CapPartitionHolder()

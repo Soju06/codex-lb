@@ -247,6 +247,12 @@ The system SHALL support an optional limit warm-up mechanism that is disabled by
 - **WHEN** background usage refresh records a newer sample for that window with `used_percent < 100` and a later `reset_at`
 - **THEN** the system sends at most one warm-up request for that account/window/reset tuple
 
+#### Scenario: Warm-up is not triggered by upstream reset_at timestamp jitter
+- **GIVEN** limit warm-up is enabled globally and for an account
+- **AND** the account's previous usage sample was exhausted
+- **WHEN** background usage refresh records a newer sample whose `reset_at` advanced by less than 60 seconds (upstream timestamp jitter)
+- **THEN** the system MUST NOT send a warm-up request for that account/window/reset tuple
+
 #### Scenario: Warm-up is opt-in and safe by default
 - **GIVEN** background usage refresh is preparing to evaluate limit warm-up candidates
 - **WHEN** global limit warm-up is disabled
@@ -271,11 +277,19 @@ The system SHALL support an optional limit warm-up mechanism that is disabled by
 #### Scenario: Staggered idle warm-up pre-starts rolling primary windows
 - **GIVEN** limit warm-up and staggered idle warm-up are enabled globally
 - **AND** multiple active accounts are opted into limit warm-up
-- **AND** an opted-in account has a healthy idle short-window primary usage sample (any sample reporting a duration over 24 hours is not eligible)
+- **AND** an opted-in account has a healthy idle short-window primary usage sample (any sample reporting a duration over 24 hours is not eligible) with `used_percent` at or below the configured `limit_warmup_idle_threshold_percent`
+- **AND** no prior warm-up attempt places the account inside the configured cooldown
+- **AND** the usage sample was refreshed for the current cycle
 - **WHEN** background usage refresh evaluates that account inside its deterministic stagger slot
-- **THEN** the system MAY send one minimal upstream warm-up request for that account's current rolling-window cycle, whose length is the account's observed primary window duration (defaulting to 300 minutes when duration metadata is missing)
+- **THEN** the system MUST attempt to send one minimal upstream warm-up request for that account's current rolling-window cycle, whose length is the account's observed primary window duration (defaulting to 300 minutes when duration metadata is missing)
 - **AND** the system MUST NOT send another staggered idle warm-up for that same account/cycle tuple
 - **AND** account slots MUST be spread deterministically across the account's rolling window so restarts do not align all opted-in accounts into the same phase
+
+#### Scenario: Staggered idle warm-up is skipped for accounts with real usage
+- **GIVEN** staggered idle warm-up is enabled globally
+- **AND** an active opted-in account has a short-window primary usage sample with `used_percent` above the configured `limit_warmup_idle_threshold_percent`
+- **WHEN** background usage refresh evaluates that account
+- **THEN** the system MUST NOT send staggered idle warm-up traffic for that account
 
 #### Scenario: Staggered idle warm-up remains opt-in
 - **GIVEN** limit warm-up is enabled globally and for an account

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import timedelta, timezone
 
 import pytest
 
@@ -85,6 +85,9 @@ def stub_codex_usage_caller_validation(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_codex_usage_aggregates_windows(async_client, db_setup):
+    now_epoch = int(utcnow().replace(tzinfo=timezone.utc).timestamp())
+    primary_reset = now_epoch + 300
+    secondary_reset = now_epoch + 5 * 24 * 3600
     async with SessionLocal() as session:
         accounts_repo = AccountsRepository(session)
         usage_repo = UsageRepository(session)
@@ -96,7 +99,7 @@ async def test_codex_usage_aggregates_windows(async_client, db_setup):
             "acc_a",
             10.0,
             window="primary",
-            reset_at=0,
+            reset_at=primary_reset,
             window_minutes=300,
             credits_has=True,
             credits_unlimited=False,
@@ -106,7 +109,7 @@ async def test_codex_usage_aggregates_windows(async_client, db_setup):
             "acc_b",
             30.0,
             window="primary",
-            reset_at=0,
+            reset_at=primary_reset,
             window_minutes=300,
             credits_has=False,
             credits_unlimited=False,
@@ -116,14 +119,14 @@ async def test_codex_usage_aggregates_windows(async_client, db_setup):
             "acc_a",
             40.0,
             window="secondary",
-            reset_at=0,
+            reset_at=secondary_reset,
             window_minutes=10080,
         )
         await usage_repo.add_entry(
             "acc_b",
             60.0,
             window="secondary",
-            reset_at=0,
+            reset_at=secondary_reset,
             window_minutes=10080,
         )
 
@@ -145,14 +148,14 @@ async def test_codex_usage_aggregates_windows(async_client, db_setup):
     primary = rate_limit["primary_window"]
     assert primary["used_percent"] == 20
     assert primary["limit_window_seconds"] == 18000
-    assert primary["reset_after_seconds"] == 0
-    assert primary["reset_at"] == 0
+    assert 0 < primary["reset_after_seconds"] <= 300
+    assert primary["reset_at"] == primary_reset
 
     secondary = rate_limit["secondary_window"]
     assert secondary["used_percent"] == 50
     assert secondary["limit_window_seconds"] == 604800
-    assert secondary["reset_after_seconds"] == 0
-    assert secondary["reset_at"] == 0
+    assert 0 < secondary["reset_after_seconds"] <= 5 * 24 * 3600
+    assert secondary["reset_at"] == secondary_reset
 
     credits = payload["credits"]
     assert credits["has_credits"] is True
@@ -170,11 +173,12 @@ async def test_codex_usage_uses_monthly_only_rows_for_credits(async_client, db_s
             _make_account("acc_monthly", "monthly@example.com", chatgpt_account_id="workspace_acc_monthly")
         )
 
+        monthly_reset = int(utcnow().replace(tzinfo=timezone.utc).timestamp()) + 30 * 24 * 3600
         await usage_repo.add_entry(
             "acc_monthly",
             42.0,
             window="monthly",
-            reset_at=1735862400,
+            reset_at=monthly_reset,
             window_minutes=43200,
             credits_has=True,
             credits_unlimited=False,
@@ -194,7 +198,7 @@ async def test_codex_usage_uses_monthly_only_rows_for_credits(async_client, db_s
     monthly = payload["rate_limit"]["monthly_window"]
     assert monthly["used_percent"] == 42
     assert monthly["limit_window_seconds"] == 2592000
-    assert monthly["reset_at"] == 1735862400
+    assert monthly["reset_at"] == monthly_reset
     assert payload["credits"] == {
         "has_credits": True,
         "unlimited": False,
@@ -227,25 +231,26 @@ async def test_codex_usage_monthly_free_exhaustion_does_not_block_paid_capacity(
             )
         )
 
+        now_epoch = int(utcnow().replace(tzinfo=timezone.utc).timestamp())
         await usage_repo.add_entry(
             "acc_free_monthly_full",
             100.0,
             window="monthly",
-            reset_at=1735862400,
+            reset_at=now_epoch + 30 * 24 * 3600,
             window_minutes=43200,
         )
         await usage_repo.add_entry(
             "acc_paid_available",
             10.0,
             window="primary",
-            reset_at=1735689600,
+            reset_at=now_epoch + 300,
             window_minutes=300,
         )
         await usage_repo.add_entry(
             "acc_paid_available",
             20.0,
             window="secondary",
-            reset_at=1735862400,
+            reset_at=now_epoch + 5 * 24 * 3600,
             window_minutes=10080,
         )
 
@@ -274,18 +279,19 @@ async def test_codex_usage_header_ignored(async_client, db_setup):
         await accounts_repo.upsert(_make_account("acc_a", "a@example.com", chatgpt_account_id="workspace_acc_a"))
         await accounts_repo.upsert(_make_account("acc_b", "b@example.com", chatgpt_account_id="workspace_acc_b"))
 
+        primary_reset = int(utcnow().replace(tzinfo=timezone.utc).timestamp()) + 300
         await usage_repo.add_entry(
             "acc_a",
             10.0,
             window="primary",
-            reset_at=0,
+            reset_at=primary_reset,
             window_minutes=300,
         )
         await usage_repo.add_entry(
             "acc_b",
             90.0,
             window="primary",
-            reset_at=0,
+            reset_at=primary_reset,
             window_minutes=300,
         )
 
@@ -313,11 +319,13 @@ async def test_codex_usage_prefers_newer_weekly_primary_over_stale_secondary(asy
             _make_account("acc_weekly", "weekly@example.com", chatgpt_account_id="workspace_weekly")
         )
 
+        now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+        weekly_reset = now_epoch + 6 * 24 * 3600
         await usage_repo.add_entry(
             "acc_weekly",
             15.0,
             window="secondary",
-            reset_at=1735689600,
+            reset_at=now_epoch + 5 * 24 * 3600,
             window_minutes=10080,
             recorded_at=now - timedelta(days=2),
         )
@@ -325,7 +333,7 @@ async def test_codex_usage_prefers_newer_weekly_primary_over_stale_secondary(asy
             "acc_weekly",
             80.0,
             window="primary",
-            reset_at=1735862400,
+            reset_at=weekly_reset,
             window_minutes=10080,
             recorded_at=now,
         )
@@ -342,7 +350,55 @@ async def test_codex_usage_prefers_newer_weekly_primary_over_stale_secondary(asy
     rate_limit = payload["rate_limit"]
     assert rate_limit["primary_window"] is None
     assert rate_limit["secondary_window"]["used_percent"] == 80
-    assert rate_limit["secondary_window"]["reset_at"] == 1735862400
+    assert rate_limit["secondary_window"]["reset_at"] == weekly_reset
+
+
+@pytest.mark.asyncio
+async def test_codex_usage_expires_elapsed_primary_rows(async_client, db_setup):
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+
+        await accounts_repo.upsert(
+            _make_account("acc_expired", "expired@example.com", chatgpt_account_id="workspace_expired")
+        )
+
+        # Upstream stopped reporting the primary window: the last primary row
+        # keeps a fully-used sample with an elapsed reset while the weekly
+        # window stays fresh.
+        await usage_repo.add_entry(
+            "acc_expired",
+            100.0,
+            window="primary",
+            reset_at=now_epoch - 7200,
+            window_minutes=300,
+            recorded_at=now - timedelta(hours=3),
+        )
+        await usage_repo.add_entry(
+            "acc_expired",
+            40.0,
+            window="secondary",
+            reset_at=now_epoch + 5 * 24 * 3600,
+            window_minutes=10080,
+            recorded_at=now,
+        )
+
+    response = await async_client.get(
+        "/api/codex/usage",
+        headers={
+            "Authorization": "Bearer chatgpt-token",
+            "chatgpt-account-id": "workspace_expired",
+        },
+    )
+    assert response.status_code == 200
+    rate_limit = response.json()["rate_limit"]
+    assert rate_limit["limit_reached"] is False
+    # The expired primary window is omitted instead of advertising a frozen
+    # 100% sample with a reset time in the past.
+    assert rate_limit["primary_window"] is None
+    assert rate_limit["secondary_window"]["used_percent"] == 40
 
 
 @pytest.mark.asyncio

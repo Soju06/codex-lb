@@ -1932,19 +1932,23 @@ def _state_from_account(
         secondary_entry,
     )
 
-    # If the usage window has reset (reset_at is in the past) but the last
-    # recorded sample still shows 100 % usage, the data is stale.  Zero it
-    # out so the account is not incorrectly blocked or deprioritised while
-    # waiting for the next usage refresh to fetch fresh numbers.
+    # If the usage window has reset (reset_at is in the past), the last
+    # recorded sample describes an expired window at ANY used percentage:
+    # upstream may have stopped reporting the window entirely (e.g. the
+    # temporary 5h-limit removal), in which case the row is never rewritten
+    # and a frozen sub-100% sample would otherwise hold drain tiers and
+    # budget pressure forever. Zero the derived locals — not the stored
+    # rows — so the account is not incorrectly blocked or deprioritised
+    # while waiting for the next usage refresh. Expired samples map to 0.0
+    # rather than None because usage-derived status recovery only evaluates
+    # non-None percentages.
     now_epoch = int(time.time())
-    if primary_used is not None and primary_used >= 100.0:
-        if primary_reset is not None and primary_reset <= now_epoch:
-            primary_used = 0.0
-            primary_reset = None
-    if secondary_used is not None and secondary_used >= 100.0:
-        if secondary_reset is not None and secondary_reset <= now_epoch:
-            secondary_used = 0.0
-            secondary_reset = None
+    if primary_used is not None and primary_reset is not None and primary_reset <= now_epoch:
+        primary_used = 0.0
+        primary_reset = None
+    if secondary_used is not None and secondary_reset is not None and secondary_reset <= now_epoch:
+        secondary_used = 0.0
+        secondary_reset = None
 
     ignore_zero_capacity_primary_runtime_reset = False
     status_seed = account.status
@@ -2211,9 +2215,19 @@ def _rate_limited_freshness_entry(
         and usage_core.capacity_for_plan(account.plan_type, "monthly") is not None
     ):
         return long_window_entry
-    if primary_entry is not None:
+    if primary_entry is None:
+        return long_window_entry
+    if long_window_entry is None:
         return primary_entry
-    return None
+    # A post-block refresh that no longer reports the short primary window
+    # writes only long-window rows, so a strictly newer long-window row is
+    # the recovery evidence — but only once the last primary sample's own
+    # reset deadline has elapsed. While the primary sample still claims an
+    # active window, its freshness keeps gating recovery.
+    primary_window_expired = primary_entry.reset_at is None or float(primary_entry.reset_at) <= time.time()
+    if primary_window_expired and long_window_entry.recorded_at > primary_entry.recorded_at:
+        return long_window_entry
+    return primary_entry
 
 
 def _usage_entry_is_recent_available(entry: _UsageWindowEntry | None) -> bool:

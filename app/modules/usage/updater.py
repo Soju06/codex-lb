@@ -275,7 +275,12 @@ class UsageUpdater:
                 continue
             latest = await self._freshness_usage_entry(account, latest_usage.get(account.id))
             bypass_freshness = _quota_recovery_should_bypass_freshness(account, latest=latest)
-            if not bypass_freshness and _latest_usage_is_fresh(latest, now=now, interval_seconds=interval):
+            if not bypass_freshness and await self._usage_is_fresh_with_siblings(
+                account,
+                latest,
+                now=now,
+                interval_seconds=interval,
+            ):
                 continue
             # Additional-only accounts have no main UsageHistory entry.
             # Check DB-backed freshness (works across workers/restarts)
@@ -396,12 +401,14 @@ class UsageUpdater:
     ) -> AccountRefreshResult:
         primary_latest = await self._usage_repo.latest_entry_for_account(account.id, window="primary")
         latest = await self._freshness_usage_entry(account, primary_latest)
-        if not _quota_recovery_should_bypass_freshness(account, latest=latest) and _latest_usage_is_fresh(
-            latest,
-            now=utcnow(),
-            interval_seconds=interval_seconds,
-        ):
-            return AccountRefreshResult(usage_written=False)
+        if not _quota_recovery_should_bypass_freshness(account, latest=latest):
+            if await self._usage_is_fresh_with_siblings(
+                account,
+                latest,
+                now=utcnow(),
+                interval_seconds=interval_seconds,
+            ):
+                return AccountRefreshResult(usage_written=False)
         return await self._refresh_account(
             account,
             usage_account_id=usage_account_id,
@@ -413,6 +420,34 @@ class UsageUpdater:
         if usage_core.capacity_for_plan(account.plan_type, "monthly") is None:
             return None
         return await self._usage_repo.latest_entry_for_account(account.id, window="monthly")
+
+    async def _usage_is_fresh_with_siblings(
+        self,
+        account: Account,
+        latest: UsageHistory | None,
+        *,
+        now: datetime,
+        interval_seconds: int,
+    ) -> bool:
+        if _latest_usage_is_fresh(latest, now=now, interval_seconds=interval_seconds):
+            return True
+        if latest is None:
+            return False
+        # A stale (or elapsed-reset) newest row of one window must not
+        # permanently defeat freshness once upstream stops reporting that
+        # window: a strictly newer sibling-window row proves a later fetch
+        # happened without rewriting the stale window, so the newest row's
+        # own freshness governs the account instead.
+        newest = latest
+        for window in _MAIN_USAGE_WINDOWS:
+            if window == latest.window:
+                continue
+            sibling = await self._usage_repo.latest_entry_for_account(account.id, window=window)
+            if sibling is not None and sibling.recorded_at > newest.recorded_at:
+                newest = sibling
+        if (newest.recorded_at - latest.recorded_at).total_seconds() <= _SIBLING_FETCH_MARGIN_SECONDS:
+            return False
+        return _latest_usage_is_fresh(newest, now=now, interval_seconds=interval_seconds)
 
     async def _refresh_account_if_stale_with_owned_session(
         self,
@@ -1055,6 +1090,14 @@ def _latest_usage_is_fresh(
         if now_epoch >= latest.reset_at:
             return False
     return True
+
+
+# Rows written by the same upstream fetch land within milliseconds of each
+# other; a sibling row only proves a *later* fetch (one that no longer
+# reported the stale window) when it is newer by more than this margin.
+_SIBLING_FETCH_MARGIN_SECONDS = 5.0
+
+_MAIN_USAGE_WINDOWS = ("primary", "secondary", "monthly")
 
 
 def _quota_recovery_should_bypass_freshness(account: Account, *, latest: UsageHistory | None) -> bool:

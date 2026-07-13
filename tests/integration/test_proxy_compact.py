@@ -255,13 +255,14 @@ async def test_proxy_compact_success(async_client, monkeypatch):
 
     monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
 
+    primary_reset = int(utcnow().replace(tzinfo=timezone.utc).timestamp()) + 300
     async with SessionLocal() as session:
         usage_repo = UsageRepository(session)
         await usage_repo.add_entry(
             account_id=expected_account_id,
             used_percent=25.0,
             window="primary",
-            reset_at=1735689600,
+            reset_at=primary_reset,
             recorded_at=utcnow(),
             credits_has=True,
             credits_unlimited=False,
@@ -276,7 +277,7 @@ async def test_proxy_compact_success(async_client, monkeypatch):
     assert seen["account_id"] == raw_account_id
     assert response.headers.get("x-codex-primary-used-percent") == "25.0"
     assert response.headers.get("x-codex-primary-window-minutes") == "300"
-    assert response.headers.get("x-codex-primary-reset-at") == "1735689600"
+    assert response.headers.get("x-codex-primary-reset-at") == str(primary_reset)
     assert response.headers.get("x-codex-credits-has-credits") == "true"
     assert response.headers.get("x-codex-credits-unlimited") == "false"
     assert response.headers.get("x-codex-credits-balance") == "12.50"
@@ -343,13 +344,14 @@ async def test_proxy_compact_headers_include_monthly_only_credits(async_client, 
 
     monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
 
+    monthly_reset = int(utcnow().replace(tzinfo=timezone.utc).timestamp()) + 30 * 24 * 3600
     async with SessionLocal() as session:
         usage_repo = UsageRepository(session)
         await usage_repo.add_entry(
             account_id=expected_account_id,
             used_percent=40.0,
             window="monthly",
-            reset_at=1735862400,
+            reset_at=monthly_reset,
             window_minutes=43200,
             recorded_at=utcnow(),
             credits_has=True,
@@ -364,7 +366,7 @@ async def test_proxy_compact_headers_include_monthly_only_credits(async_client, 
     assert response.status_code == 200
     assert response.headers.get("x-codex-monthly-used-percent") == "40.0"
     assert response.headers.get("x-codex-monthly-window-minutes") == "43200"
-    assert response.headers.get("x-codex-monthly-reset-at") == "1735862400"
+    assert response.headers.get("x-codex-monthly-reset-at") == str(monthly_reset)
     assert response.headers.get("x-codex-credits-has-credits") == "true"
     assert response.headers.get("x-codex-credits-unlimited") == "false"
     assert response.headers.get("x-codex-credits-balance") == "8.75"
@@ -521,13 +523,15 @@ async def test_proxy_compact_headers_normalize_weekly_only_with_stale_secondary(
 
     monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
 
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    weekly_reset = now_epoch + 6 * 24 * 3600
     async with SessionLocal() as session:
         usage_repo = UsageRepository(session)
         await usage_repo.add_entry(
             account_id=expected_account_id,
             used_percent=15.0,
             window="secondary",
-            reset_at=1735689600,
+            reset_at=now_epoch + 5 * 24 * 3600,
             window_minutes=10080,
             recorded_at=now - timedelta(days=2),
         )
@@ -535,7 +539,7 @@ async def test_proxy_compact_headers_normalize_weekly_only_with_stale_secondary(
             account_id=expected_account_id,
             used_percent=80.0,
             window="primary",
-            reset_at=1735862400,
+            reset_at=weekly_reset,
             window_minutes=10080,
             recorded_at=now,
         )
@@ -548,7 +552,58 @@ async def test_proxy_compact_headers_normalize_weekly_only_with_stale_secondary(
     assert response.headers.get("x-codex-primary-used-percent") is None
     assert response.headers.get("x-codex-secondary-used-percent") == "80.0"
     assert response.headers.get("x-codex-secondary-window-minutes") == "10080"
-    assert response.headers.get("x-codex-secondary-reset-at") == "1735862400"
+    assert response.headers.get("x-codex-secondary-reset-at") == str(weekly_reset)
+
+
+@pytest.mark.asyncio
+async def test_proxy_compact_headers_expire_elapsed_primary_rows(async_client, monkeypatch):
+    email = "compact-expired@example.com"
+    raw_account_id = "acc_compact_expired"
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    expected_account_id = generate_unique_account_id(raw_account_id, email)
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    weekly_reset = now_epoch + 5 * 24 * 3600
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        return OpenAIResponsePayload.model_validate({"output": []})
+
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+
+    async with SessionLocal() as session:
+        usage_repo = UsageRepository(session)
+        # Upstream stopped reporting the primary window: the frozen 87%
+        # sample with an elapsed reset must not be served downstream.
+        await usage_repo.add_entry(
+            account_id=expected_account_id,
+            used_percent=87.0,
+            window="primary",
+            reset_at=now_epoch - 7200,
+            window_minutes=300,
+            recorded_at=now - timedelta(hours=3),
+        )
+        await usage_repo.add_entry(
+            account_id=expected_account_id,
+            used_percent=40.0,
+            window="secondary",
+            reset_at=weekly_reset,
+            window_minutes=10080,
+            recorded_at=now,
+        )
+
+    await get_rate_limit_headers_cache().invalidate()
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": []}
+    response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
+    assert response.status_code == 200
+    assert response.headers.get("x-codex-primary-used-percent") == "0.0"
+    assert response.headers.get("x-codex-primary-reset-at") is None
+    assert response.headers.get("x-codex-secondary-used-percent") == "40.0"
+    assert response.headers.get("x-codex-secondary-reset-at") == str(weekly_reset)
 
 
 @pytest.mark.asyncio

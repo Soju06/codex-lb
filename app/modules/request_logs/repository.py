@@ -205,37 +205,64 @@ class RequestLogsRepository:
             (RequestLog.input_tokens.is_(None), greatest(0, RequestLog.cached_input_tokens)),
             else_=greatest(0, least(RequestLog.cached_input_tokens, RequestLog.input_tokens)),
         )
-        totals_row = (
+        # ONE statement = one snapshot: totals, top error, and per-model cost
+        # must describe the same committed row set (the legacy path read one
+        # SELECT and reduced it in Python, which was internally consistent;
+        # separate statements under READ COMMITTED are not). The grouped
+        # result stays tiny (models x error codes) and everything derives
+        # from it in Python.
+        is_error_expr = (RequestLog.status != literal_column("'success'")).label("is_error")
+        rows = (
             await self._session.execute(
                 select(
+                    RequestLog.model,
+                    is_error_expr,
+                    RequestLog.error_code,
                     func.count().label("request_count"),
-                    func.coalesce(func.sum(cast(RequestLog.status != literal_column("'success'"), Integer)), 0).label(
-                        "error_count"
-                    ),
                     func.coalesce(func.sum(tokens_expr), 0).label("total_tokens"),
                     func.coalesce(func.sum(cached_expr), 0).label("cached_input_tokens"),
-                ).where(*window)
-            )
-        ).one()
-
-        top_error = await self.top_error_since(since)
-
-        cost_rows = (
-            await self._session.execute(
-                select(RequestLog.model, func.sum(RequestLog.cost_usd).label("cost_usd"))
-                .where(*window, RequestLog.cost_usd.is_not(None))
-                .group_by(RequestLog.model)
-                .order_by(RequestLog.model.asc())
+                    func.sum(RequestLog.cost_usd).label("cost_usd"),
+                    func.count(RequestLog.cost_usd).label("cost_count"),
+                )
+                .where(*window)
+                .group_by(RequestLog.model, is_error_expr, RequestLog.error_code)
             )
         ).all()
 
+        request_count = 0
+        error_count = 0
+        total_tokens = 0
+        cached_input_tokens = 0
+        error_code_counts: dict[str, int] = {}
+        cost_sums: dict[str, float] = {}
+        cost_counts: dict[str, int] = {}
+        for model, is_error, error_code, group_count, group_tokens, group_cached, group_cost, cost_count in rows:
+            group_count = int(group_count or 0)
+            request_count += group_count
+            total_tokens += int(group_tokens or 0)
+            cached_input_tokens += int(group_cached or 0)
+            if is_error:
+                error_count += group_count
+                if error_code:
+                    error_code_counts[error_code] = error_code_counts.get(error_code, 0) + group_count
+            cost_sums[model] = cost_sums.get(model, 0.0) + float(group_cost or 0.0)
+            cost_counts[model] = cost_counts.get(model, 0) + int(cost_count or 0)
+
+        top_error = None
+        if error_code_counts:
+            # Deterministic tie-break: highest count, then code ascending
+            # (the same rule _top_error_stmt uses for the dashboard).
+            top_error = min(error_code_counts, key=lambda code: (-error_code_counts[code], code))
+
         return UsageSummaryLogsAggregate(
-            request_count=int(totals_row.request_count or 0),
-            error_count=int(totals_row.error_count or 0),
-            total_tokens=int(totals_row.total_tokens or 0),
-            cached_input_tokens=int(totals_row.cached_input_tokens or 0),
+            request_count=request_count,
+            error_count=error_count,
+            total_tokens=total_tokens,
+            cached_input_tokens=cached_input_tokens,
             top_error=top_error,
-            cost_by_model=[(model, float(cost or 0.0)) for model, cost in cost_rows],
+            # Models whose costs are all NULL stay out, matching the legacy
+            # per-row skip of None costs.
+            cost_by_model=sorted((model, cost_sums[model]) for model, count in cost_counts.items() if count > 0),
         )
 
     async def top_error_between(self, since: datetime, until: datetime) -> str | None:

@@ -10,7 +10,7 @@
 
 ## Decisions
 
-- **Three small statements** (totals / top-error / cost-by-model) rather than one mega-query: each maps 1:1 to a legacy helper, keeping the equivalence argument auditable. All hit `idx_logs_requested_at`.
+- **One grouped statement** (`GROUP BY model, is_error, error_code` — models x error codes stays tiny) with all metrics derived from it in Python. Originally three statements, but under READ COMMITTED each SELECT sees its own snapshot, so counts, top error, and cost could describe different committed row sets while the legacy single `list_since` SELECT was internally consistent (Codex review finding). One statement restores one snapshot and still hits `idx_logs_requested_at`. Bonus parity: empty-string error codes are now skipped for top-error exactly like the legacy Python helper.
 - **Per-row cached clamp in SQL** via CASE with dialect least/greatest (SQLite's two-argument `min()`/`max()` are its least/greatest).
 - **Top-error tie-break becomes deterministic** (count desc, code asc — the dashboard-overview rule) instead of Python dict insertion order; disclosed intentional nuance.
 - **Dead refresh removal**: every RequestLog column is assigned before insert and sessions run `expire_on_commit=False`, so the post-commit `refresh` was one guaranteed extra round trip per proxied request.

@@ -1691,6 +1691,7 @@ class _HTTPBridgeStreamingMixin:
                     if durable_lookup.latest_response_id != session.last_completed_response_id:
                         session.last_pending_tool_calls = {}
                     session.last_completed_response_id = durable_lookup.latest_response_id
+                    session.last_completed_response_account_id = durable_lookup.account_id
                     session.last_completed_input_count = durable_full_resend_anchor_count
                     session.last_completed_input_prefix_fingerprint = durable_full_resend_anchor_fingerprint
                     _log_http_bridge_event(
@@ -1789,6 +1790,12 @@ class _HTTPBridgeStreamingMixin:
                 # must not trigger interrupted-output injection.
                 session.last_pending_tool_calls = {}
             session.last_completed_response_id = durable_lookup.latest_response_id
+            # The durable anchor is owned by the durable session's account, which
+            # may differ from this session's account after a failover. Record the
+            # owner so the session-anchor injection below can refuse to replay a
+            # cross-account previous_response_id (upstream cannot resolve it and
+            # would stall with no response.created — a wedged response-create gate).
+            session.last_completed_response_account_id = durable_lookup.account_id
             session.last_completed_input_count = durable_full_resend_anchor_count
             session.last_completed_input_prefix_fingerprint = durable_full_resend_anchor_fingerprint
         # --- Session-level previous_response_id injection ---
@@ -1817,6 +1824,17 @@ class _HTTPBridgeStreamingMixin:
             stored_count=stored_count_preview,
             stored_fingerprint=stored_fingerprint_preview,
         )
+        # A previous_response_id is account-scoped upstream: only the account that
+        # created the response can resume it. If this session's serving account is
+        # not the anchor's owner (e.g. the session failed over after the durable
+        # owner became unavailable), injecting the anchor sends an unresolvable
+        # previous_response_id upstream with the history trimmed away — upstream
+        # then never emits response.created and the response-create gate wedges
+        # ("idle timeout waiting for SSE"). Fall through to a full-history resend.
+        session_anchor_account_owned = (
+            session.last_completed_response_account_id is not None
+            and session.last_completed_response_account_id == session.account.id
+        )
         recovery_session_can_anchor = is_http_bridge_account_neutral_replay(
             kind=session.key.affinity_kind,
             key=session.key.affinity_key,
@@ -1826,6 +1844,7 @@ class _HTTPBridgeStreamingMixin:
             and not proxy_injected_previous_response_id
             and effective_payload.previous_response_id is None
             and session.last_completed_response_id is not None
+            and session_anchor_account_owned
             and (session_anchor_trimmable or recovery_session_can_anchor)
         ):
             fresh_upstream_request_text = text_data

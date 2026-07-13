@@ -3419,6 +3419,45 @@ async def test_refresh_accounts_skips_fetch_when_newer_sibling_row_supersedes_el
 
 
 @pytest.mark.asyncio
+async def test_refresh_accounts_skips_fetch_when_only_fresh_secondary_row_exists(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+    from app.core.utils.time import utcnow
+
+    get_settings.cache_clear()
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+
+    fetch_calls = 0
+
+    async def stub_fetch_usage(**_: Any) -> UsagePayload:
+        nonlocal fetch_calls
+        fetch_calls += 1
+        return UsagePayload.model_validate({"rate_limit": {}})
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+
+    usage_repo = StubUsageRepository()
+    # Upstream omitted the short window from the very first fetch: the
+    # account has only a fresh secondary row and no primary row at all.
+    await usage_repo.add_entry(
+        "acc_secondary_only",
+        40.0,
+        recorded_at=now - timedelta(seconds=10),
+        window="secondary",
+        reset_at=now_epoch + 5 * 24 * 3600,
+        window_minutes=10080,
+    )
+
+    acc = _make_account("acc_secondary_only", "workspace_secondary_only", email="secondary-only@example.com")
+
+    updater = UsageUpdater(usage_repo, accounts_repo=None)
+    await updater.refresh_accounts([acc], latest_usage={})
+
+    assert fetch_calls == 0
+
+
+@pytest.mark.asyncio
 async def test_refresh_accounts_still_fetches_when_elapsed_primary_has_no_newer_sibling(monkeypatch) -> None:
     monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
     from app.core.config.settings import get_settings

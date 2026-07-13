@@ -21,6 +21,13 @@ Background usage refresh MUST treat a latest usage row as stale when that row's 
 - **THEN** the account is treated as fresh
 - **AND** codex-lb does not fetch upstream usage again until the newest row ages out or its own reset elapses
 
+#### Scenario: Secondary-only accounts are fresh by their newest row
+
+- **GIVEN** an account with no primary-slot row at all because upstream omitted the short window
+- **AND** a fresh secondary-window row within the normal refresh interval
+- **WHEN** background usage refresh evaluates the account
+- **THEN** the account is treated as fresh instead of fetching on every sweep visit
+
 ### Requirement: Background usage refresh reconciles recoverable blocked statuses
 
 Background usage refresh SHALL reconcile persisted `rate_limited` and `quota_exceeded` accounts back to `active` after it writes fresh usage snapshots that prove the blocked window has recovered. This reconciliation SHALL be recovery-only and SHALL NOT promote `active` accounts into blocked statuses. For `rate_limited` accounts, recovery evidence SHALL come from the most recently recorded main-window row: when a post-block refresh no longer reports a short primary window and the last primary sample's own reset deadline has elapsed (or no primary sample exists), a fresh long-window row recorded after the block proves recovery. While the last primary sample still claims an unexpired window, primary freshness SHALL keep gating recovery.

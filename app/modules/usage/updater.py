@@ -431,21 +431,26 @@ class UsageUpdater:
     ) -> bool:
         if _latest_usage_is_fresh(latest, now=now, interval_seconds=interval_seconds):
             return True
-        if latest is None:
-            return False
         # A stale (or elapsed-reset) newest row of one window must not
         # permanently defeat freshness once upstream stops reporting that
         # window: a strictly newer sibling-window row proves a later fetch
         # happened without rewriting the stale window, so the newest row's
-        # own freshness governs the account instead.
+        # own freshness governs the account instead. When no primary-slot
+        # row exists at all (upstream omitted the short window from the
+        # first fetch), any sibling row is that proof.
         newest = latest
         for window in _MAIN_USAGE_WINDOWS:
-            if window == latest.window:
+            if latest is not None and window == latest.window:
                 continue
             sibling = await self._usage_repo.latest_entry_for_account(account.id, window=window)
-            if sibling is not None and sibling.recorded_at > newest.recorded_at:
+            if sibling is not None and (newest is None or sibling.recorded_at > newest.recorded_at):
                 newest = sibling
-        if (newest.recorded_at - latest.recorded_at).total_seconds() <= _SIBLING_FETCH_MARGIN_SECONDS:
+        if newest is None or newest is latest:
+            return False
+        if (
+            latest is not None
+            and (newest.recorded_at - latest.recorded_at).total_seconds() <= _SIBLING_FETCH_MARGIN_SECONDS
+        ):
             return False
         return _latest_usage_is_fresh(newest, now=now, interval_seconds=interval_seconds)
 

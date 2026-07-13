@@ -2222,9 +2222,10 @@ def _rate_limited_freshness_entry(
     # A post-block refresh that no longer reports the short primary window
     # writes only long-window rows, so a strictly newer long-window row is
     # the recovery evidence — but only once the last primary sample's own
-    # reset deadline has elapsed. While the primary sample still claims an
-    # active window, its freshness keeps gating recovery.
-    primary_window_expired = primary_entry.reset_at is None or float(primary_entry.reset_at) <= time.time()
+    # reset deadline has provably elapsed. While the primary sample still
+    # claims an active window, or omits reset metadata entirely, its
+    # freshness keeps gating recovery.
+    primary_window_expired = primary_entry.reset_at is not None and float(primary_entry.reset_at) <= time.time()
     if primary_window_expired and long_window_entry.recorded_at > primary_entry.recorded_at:
         return long_window_entry
     return primary_entry

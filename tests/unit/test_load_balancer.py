@@ -2495,6 +2495,43 @@ def test_background_recovery_state_recovers_when_upstream_stops_reporting_primar
     assert state.status == AccountStatus.ACTIVE
 
 
+def test_background_recovery_state_keeps_rate_limited_when_primary_reset_metadata_missing(monkeypatch):
+    now = 1_700_000_000.0
+    blocked = now - 7200.0
+    past_reset = int(now - 300)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+
+    account = _make_test_account(
+        status=AccountStatus.RATE_LIMITED,
+        reset_at=past_reset,
+        blocked_at=int(blocked),
+        plan_type="plus",
+    )
+    # The primary sample omits reset metadata entirely: it has not provably
+    # expired, so a newer weekly row must not supersede it as evidence.
+    stale_primary = _make_test_usage(
+        window="primary",
+        used_percent=100.0,
+        reset_at=None,
+        recorded_at=_epoch_to_naive_utc(blocked - 30),
+    )
+    fresh_secondary = _make_test_usage(
+        window="secondary",
+        used_percent=40.0,
+        reset_at=int(now + 5 * 24 * 3600),
+        recorded_at=_epoch_to_naive_utc(now - 30),
+    )
+
+    state = background_recovery_state_from_account(
+        account=account,
+        primary_entry=stale_primary,
+        secondary_entry=fresh_secondary,
+    )
+
+    assert state.status == AccountStatus.RATE_LIMITED
+
+
 def test_background_recovery_state_keeps_rate_limited_when_all_rows_predate_block(monkeypatch):
     now = 1_700_000_000.0
     blocked = now - 7200.0

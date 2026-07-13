@@ -213,6 +213,7 @@ _SECURITY_WORK_NO_AUTHORIZED_ACCOUNTS_MESSAGE = (
 )
 _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS = 5.0
 _HTTP_BRIDGE_BACKGROUND_CLEANUP_WARN_THRESHOLD = 100
+_RESPONSE_CREATE_GATE_RETRY_SLEEP_SECONDS = 10.0
 
 
 def _proxy_error_code_message(exc: ProxyResponseError) -> tuple[str | None, str | None]:
@@ -228,6 +229,14 @@ def _http_bridge_account_capacity_wait_seconds(exc: ProxyResponseError) -> float
     code, message = _proxy_error_code_message(exc)
     if code == "capacity_exhausted_active_sessions":
         return None
+    if code == "response_create_gate_timeout":
+        # Per-session response-create gate contention is recoverable: the
+        # in-flight turn releases the gate when it completes, so queued
+        # same-session work must wait within the bridge request budget
+        # instead of failing at the first admission-timeout expiry. Each
+        # retry re-attempts acquisition for proxy_admission_wait_timeout
+        # seconds, so the sleep only covers the window between attempts.
+        return _RESPONSE_CREATE_GATE_RETRY_SLEEP_SECONDS
     return _account_selection_recovery_sleep_seconds_from_message(
         message,
         error_code=code,

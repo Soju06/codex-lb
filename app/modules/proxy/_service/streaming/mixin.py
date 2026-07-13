@@ -41,7 +41,7 @@ from app.core.errors import (
 from app.core.errors import (
     response_failed_event,
 )
-from app.core.openai.parsing import parse_sse_event
+from app.core.openai.parsing import parse_sse_event_payload
 from app.core.openai.requests import (
     ResponsesRequest,
 )
@@ -410,12 +410,12 @@ from app.modules.proxy.http_bridge_forwarding import (
     OwnerForwardRelayFailure as OwnerForwardRelayFailure,
 )
 from app.modules.proxy.load_balancer import AccountConcurrencyCaps, AccountLease
-from app.modules.proxy.tool_call_dedupe import (
-    mark_duplicate_tool_call_downstream_event,
-    rewrite_parallel_tool_call_sse_line,
-)
+from app.modules.proxy.tool_call_dedupe import mark_duplicate_tool_call_downstream_event
 from app.modules.proxy.tool_call_dedupe import (
     response_id_from_payload as tool_call_response_id_from_payload,
+)
+from app.modules.proxy.tool_call_dedupe import (
+    rewrite_parallel_tool_call_sse_line as _rewrite_tool_call_line,
 )
 from app.modules.proxy.work_admission import AdmissionLease
 
@@ -617,7 +617,7 @@ class _StreamingMixin(_StreamingRetryMixin):
             await proxy._load_balancer.release_account_lease(account_response_create_lease)
             account_response_create_lease = None
             first_payload = parse_sse_data_json(first)
-            event = parse_sse_event(first)
+            event = parse_sse_event_payload(first_payload)
             event_type = _event_type_from_payload(event, first_payload)
             terminal_event_seen = event_type in {
                 "response.completed",
@@ -757,7 +757,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                 suppress_text_done_events=suppress_text_done_events,
                 saw_text_delta=saw_text_delta,
             ):
-                first, first_payload, event, event_type = rewrite_parallel_tool_call_sse_line(first, first_payload)
+                first, first_payload, event, event_type = _rewrite_tool_call_line(first, first_payload, event=event)
                 if mark_duplicate_tool_call_downstream_event(
                     first_payload,
                     seen_tool_call_keys=tool_call_dedupe.seen_tool_call_keys,
@@ -778,7 +778,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                 raise terminal_stream_error
             async for line in iterator:
                 event_payload = parse_sse_data_json(line)
-                event = parse_sse_event(line)
+                event = parse_sse_event_payload(event_payload)
                 event_type = _event_type_from_payload(event, event_payload)
                 if event_type in {"response.completed", "response.failed", "response.incomplete", "error"}:
                     terminal_event_seen = True
@@ -812,7 +812,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                 if event_service_tier is not None:
                     actual_service_tier = event_service_tier
                     service_tier = event_service_tier
-                line, event_payload, event, event_type = rewrite_parallel_tool_call_sse_line(line, event_payload)
+                line, event_payload, event, event_type = _rewrite_tool_call_line(line, event_payload, event=event)
                 if event_type in _facade()._TEXT_DELTA_EVENT_TYPES:
                     saw_text_delta = True
                 if _facade()._should_suppress_text_done_event(

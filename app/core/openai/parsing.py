@@ -19,7 +19,15 @@ _COMPACT_RESPONSE_ADAPTER = TypeAdapter(CompactResponsePayload)
 
 
 def parse_sse_event(line: str) -> OpenAIEvent | None:
-    payload = parse_sse_data_json(line)
+    return parse_sse_event_payload(parse_sse_data_json(line))
+
+
+def parse_sse_event_payload(payload: JsonValue | None) -> OpenAIEvent | None:
+    """Validate an already-parsed SSE data payload.
+
+    Hot streaming paths parse each event's JSON exactly once and reuse the
+    payload here instead of re-parsing the raw line per consumer.
+    """
     if payload is None:
         return None
     try:

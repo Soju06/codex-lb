@@ -303,6 +303,8 @@ class _ApiKeyUsageMixin:
         api_key_reservation: ApiKeyUsageReservationData | None,
         settlement: _StreamSettlement,
         request_id: str,
+        *,
+        wait_for_settlement: bool = False,
     ) -> bool:
         """Settle stream reservation. Returns True if settled."""
         if api_key is None or api_key_reservation is None:
@@ -341,24 +343,32 @@ class _ApiKeyUsageMixin:
                 )
                 return False
 
+        # Detach unconditionally instead of shield-awaiting: the tracking
+        # callback already schedules a release when settlement fails or is
+        # cancelled, the caller's finally-net skips via
+        # usage_settlement_transferred, and reservations keep counting toward
+        # limits until finalized/released, so a briefly-lagging settlement can
+        # only over-restrict, never over-admit. Awaiting the ~5+2N-statement
+        # settlement transaction here made every keyed stream's close wait on
+        # it. Shutdown drains the task set (drain_persistence_tasks).
         task = asyncio.create_task(_settle_once(), name=f"proxy-stream-api-key-settle-{request_id}")
-        try:
+        settlement.usage_settlement_transferred = True
+        self._track_stream_usage_settlement_task(
+            task,
+            api_key=api_key,
+            api_key_reservation=api_key_reservation,
+            request_id=request_id,
+        )
+        if wait_for_settlement:
+            # Ordering-sensitive callers (the websocket error path) must
+            # commit the settlement before load-balancer health writes; they
+            # opt into waiting while everything else stays detached.
             with anyio.CancelScope(shield=True):
-                return await asyncio.shield(task)
-        except asyncio.CancelledError:
-            if task.done():
-                return task.result()
-            if not task.done():
-                settlement.usage_settlement_transferred = True
-                self._track_stream_usage_settlement_task(
-                    task,
-                    api_key=api_key,
-                    api_key_reservation=api_key_reservation,
-                    request_id=request_id,
-                )
-            raise
-
-        return False
+                try:
+                    await asyncio.shield(task)
+                except Exception:  # failures release via the tracking callback
+                    pass
+        return True
 
     def _track_stream_usage_settlement_task(
         self,

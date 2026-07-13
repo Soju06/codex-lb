@@ -3137,7 +3137,10 @@ async def _stream_responses_with_session(
         failure_phase = "connect" if retryable_same_contract else "upstream"
         failure_detail = "transport_error"
         failure_exception_type = type(exc).__name__
-        if error_code == PROCESS_NETWORK_UNAVAILABLE_CODE and transport == "http":
+        # Direct HTTP streams and direct upstream WebSockets both use this
+        # leased session. Transport decides replay safety above, not whether
+        # the concrete failed shared generation must be retired.
+        if error_code == PROCESS_NETWORK_UNAVAILABLE_CODE:
             raise _process_network_failure_error(
                 response_error_message,
                 exc,
@@ -3260,7 +3263,7 @@ async def _stream_responses_with_session(
         failure_phase = "connect" if retryable_same_contract else "upstream"
         failure_detail = "transport_error"
         failure_exception_type = type(exc).__name__
-        if error_code == PROCESS_NETWORK_UNAVAILABLE_CODE and transport == "http":
+        if error_code == PROCESS_NETWORK_UNAVAILABLE_CODE:
             raise _process_network_failure_error(
                 response_error_message,
                 exc,

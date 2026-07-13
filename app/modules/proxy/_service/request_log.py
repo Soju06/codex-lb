@@ -14,6 +14,21 @@ from app.modules.proxy.repo_bundle import ProxyRepoFactory
 
 logger = logging.getLogger("app.modules.proxy.service")
 
+# _background_cleanup_tasks also tracks non-persistence work (bridge session
+# close cleanups, security-work error forwards); the shutdown drain must not
+# spend its budget on those - they have their own teardown - so it only waits
+# on tasks whose names mark them as request-log or settlement persistence.
+_PERSISTENCE_TASK_NAME_PREFIXES = (
+    "proxy-request-log-",
+    "proxy-stream-api-key-settle-",
+    "proxy-release_stream_api_key_reservation",
+)
+
+
+def _is_persistence_task(task: asyncio.Task[None]) -> bool:
+    return task.get_name().startswith(_PERSISTENCE_TASK_NAME_PREFIXES)
+
+
 _REQUEST_TRANSPORT_HTTP = "http"
 
 
@@ -42,6 +57,7 @@ def _record_proxy_phase_latency(
 class _RequestLogServiceProtocol(Protocol):
     _repo_factory: ProxyRepoFactory
     _request_log_tasks: set[asyncio.Task[None]]
+    _background_cleanup_tasks: set[asyncio.Task[None]]
 
 
 def _normalize_session_id(session_id: str | None) -> str | None:
@@ -63,32 +79,61 @@ class _RequestLogMixin:
         is known so dashboards and usage views surface the user-visible
         ``gpt-image-*`` model instead of the host (e.g. ``gpt-5.5``).
 
-        The upstream ``stream_responses`` generator writes its request_log
-        row from a ``finally`` block that runs after the last chunk is
-        yielded, which can race with the call site here. We therefore retry
-        a few times with short backoff while the row is still missing.
+        The rewrite is persistence, not response work: it runs as a tracked
+        background task (drained at shutdown alongside the log inserts), so
+        image responses never wait on log durability. Inside the task we
+        first await this request's pending detached insert, then retry with
+        short backoff while the row is still missing (the upstream
+        ``stream_responses`` generator writes its row from a ``finally``
+        block that can race with the call site here).
         """
         if not request_id or not model:
             return
+        task = asyncio.create_task(
+            self._rewrite_request_log_model_once(request_id, model),
+            name=f"proxy-request-log-rewrite-{request_id}",
+        )
+        self._track_request_log_task(task, account_id=None, request_id=request_id)
+
+    async def _rewrite_request_log_model_once(self, request_id: str, model: str) -> None:
         proxy = cast(_RequestLogServiceProtocol, self)
+        insert_task_name = f"proxy-request-log-{request_id}"
         with anyio.CancelScope(shield=True):
             try:
+                loop = asyncio.get_running_loop()
+                deadline = loop.time() + 30
                 rowcount = 0
-                # Total wait: 0 + 50 + 100 + 200 + 400 + 800 ms = 1550 ms.
-                for delay in (0.0, 0.05, 0.1, 0.2, 0.4, 0.8):
-                    if delay > 0:
-                        await asyncio.sleep(delay)
+                delay = 0.0
+                while True:
+                    # Re-check for this request's insert task every iteration:
+                    # the stream generator's finally can schedule the insert
+                    # on a later event-loop turn than this rewrite task, so a
+                    # one-time snapshot could miss it and fall back to blind
+                    # polling against a DB-gated insert.
+                    for pending_insert in [
+                        task
+                        for task in proxy._request_log_tasks
+                        if task.get_name() == insert_task_name and not task.done()
+                    ]:
+                        remaining = max(0.1, deadline - loop.time())
+                        try:
+                            await asyncio.wait_for(asyncio.shield(pending_insert), timeout=remaining)
+                        except Exception:  # insert failures surface via the update probe below
+                            pass
                     async with proxy._repo_factory() as repos:
                         rowcount = await repos.request_logs.update_model_for_request(request_id, model)
                     if rowcount:
                         break
-                if not rowcount:
-                    logger.warning(
-                        "rewrite_request_log_model: request_log row for %s never appeared; "
-                        "public effective model %s not recorded",
-                        request_id,
-                        model,
-                    )
+                    if loop.time() >= deadline:
+                        logger.warning(
+                            "rewrite_request_log_model: request_log row for %s never appeared; "
+                            "public effective model %s not recorded",
+                            request_id,
+                            model,
+                        )
+                        break
+                    delay = min(delay + 0.05, 0.8)
+                    await asyncio.sleep(delay)
             except Exception:
                 logger.warning(
                     "failed to rewrite request_log model request_id=%s model=%s",
@@ -196,11 +241,15 @@ class _RequestLogMixin:
             ),
             name=f"proxy-request-log-{request_id}",
         )
-        try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError:
-            self._track_request_log_task(task, account_id=account_id, request_id=request_id)
-            raise
+        # Detach unconditionally: the row is observational (dashboards, usage
+        # aggregation) and nothing on the response path reads it back
+        # synchronously — the one post-hoc consumer, the images model
+        # rewrite, already retries while the row is missing. Awaiting the
+        # INSERT+COMMIT here made every stream's close wait on a DB write,
+        # and Codex CLI does not continue until the stream closes. Failures
+        # are logged by the tracking callback, and shutdown drains the task
+        # set (ProxyService.drain_persistence_tasks).
+        self._track_request_log_task(task, account_id=account_id, request_id=request_id)
         _record_proxy_phase_latency(
             phase="ttft",
             latency_ms=latency_first_token_ms,
@@ -241,6 +290,49 @@ class _RequestLogMixin:
             useragent_group=useragent_group,
             model=model,
         )
+
+    async def drain_persistence_tasks(self, timeout_seconds: float) -> bool:
+        """Await detached request-log and settlement tasks, e.g. at shutdown.
+
+        Persistence runs detached from the response path, so a graceful
+        shutdown must flush whatever is still in flight or the final
+        requests' logs and reservation settlements would be lost. Task done
+        callbacks can schedule follow-up work (a failed settlement enqueues
+        its reservation release), so draining loops until the tracked sets
+        are stable rather than snapshotting once. Returns True when
+        everything drained within the timeout.
+        """
+        proxy = cast(_RequestLogServiceProtocol, self)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_seconds
+        while True:
+            pending = {
+                task
+                for task in (proxy._request_log_tasks | proxy._background_cleanup_tasks)
+                if not task.done() and _is_persistence_task(task)
+            }
+            if not pending:
+                # One scheduling tick so just-finished tasks' done callbacks
+                # (which may enqueue follow-up tasks) run before we re-check.
+                await asyncio.sleep(0)
+                if not any(
+                    _is_persistence_task(task)
+                    for task in (proxy._request_log_tasks | proxy._background_cleanup_tasks)
+                    if not task.done()
+                ):
+                    return True
+                continue
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                for task in pending:
+                    logger.warning("Persistence task did not drain before shutdown: %s", task.get_name())
+                return False
+            done, still_pending = await asyncio.wait(pending, timeout=remaining)
+            del done
+            if still_pending:
+                for task in still_pending:
+                    logger.warning("Persistence task did not drain before shutdown: %s", task.get_name())
+                return False
 
     def _track_request_log_task(
         self,

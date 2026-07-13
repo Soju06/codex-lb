@@ -1269,6 +1269,17 @@ class _StreamingRetryMixin:
                                         error_message,
                                         response_id=failed_response_id,
                                     )
+                                if isinstance(tex, ProxyResponseError):
+                                    # Downstream visibility forbids replay, but a
+                                    # concrete shared HTTP/WebSocket generation
+                                    # carrying a process-network failure must still
+                                    # be retired before later callers lease it.
+                                    await _wait_for_process_network_recovery(
+                                        account,
+                                        error_code=error_code,
+                                        retryable_same_contract=False,
+                                        failed_session=tex.failed_session,
+                                    )
                                 _facade().logger.warning(
                                     "Surfacing mid-stream upstream failure without replay "
                                     "request_id=%s account_id=%s code=%s",

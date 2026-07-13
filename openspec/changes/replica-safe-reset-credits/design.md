@@ -103,17 +103,15 @@ an unrelated subsystem).
 
 ### 6. Migration
 
-Single revision `20260712_020000_add_reset_credit_redeem_tables` creating both
+Single revision `20260713_070000_add_reset_credit_redeem_tables` creating both
 tables plus the `created_at` index; downgrade drops them; no backfill needed
 (both tables start empty by design).
 
 ## Deviations from the original design
 
-- `down_revision` is `20260711_030000_add_limit_warmup_idle_threshold` (the
-  current committed head), not the uncommitted
-  `20260712_010000_add_account_usage_rollups` revision the design named as the
-  probable parent — that revision does not exist on this branch. This is the
-  rebase path the design itself prescribed.
+- `down_revision` is `20260712_020000_add_api_key_usage_rollups` (the current
+  main head after rebasing onto the merged usage-rollup revisions), following
+  the rebase path the design itself prescribed.
 - The scheduler's jitter test seam is an injectable `random.Random` instance
   (`rng` field), matching the design's "injectable rng" option.
 

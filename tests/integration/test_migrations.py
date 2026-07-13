@@ -965,8 +965,8 @@ async def test_reset_credit_redeem_tables_migration_upgrade_and_downgrade(tmp_pa
     from app.db.migrate import _build_alembic_config
 
     db_url = f"sqlite+aiosqlite:///{tmp_path / 'reset-credit-redeem-tables.sqlite'}"
-    revision = "20260712_020000_add_reset_credit_redeem_tables"
-    parent_revision = "20260711_030000_add_limit_warmup_idle_threshold"
+    revision = "20260713_070000_add_reset_credit_redeem_tables"
+    parent_revision = "20260712_020000_add_api_key_usage_rollups"
 
     await to_thread.run_sync(lambda: run_upgrade(db_url, revision, bootstrap_legacy=True))
 

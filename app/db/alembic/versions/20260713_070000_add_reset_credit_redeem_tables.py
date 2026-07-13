@@ -1,8 +1,8 @@
 """add reset credit redeem coordination tables
 
-Revision ID: 20260712_020000_add_reset_credit_redeem_tables
-Revises: 20260711_030000_add_limit_warmup_idle_threshold
-Create Date: 2026-07-12
+Revision ID: 20260713_070000_add_reset_credit_redeem_tables
+Revises: 20260712_020000_add_api_key_usage_rollups
+Create Date: 2026-07-13
 """
 
 from __future__ import annotations
@@ -11,8 +11,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.engine import Connection
 
-revision = "20260712_020000_add_reset_credit_redeem_tables"
-down_revision = "20260711_030000_add_limit_warmup_idle_threshold"
+revision = "20260713_070000_add_reset_credit_redeem_tables"
+down_revision = "20260712_020000_add_api_key_usage_rollups"
 branch_labels = None
 depends_on = None
 

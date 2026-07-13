@@ -5,8 +5,8 @@
    `api-keys`; run strict openspec validation.
 2. [x] Add `ResetCreditRedeemRequest` and `ResetCreditRedeemClaim` models to
    `app/db/models.py` (FK `accounts.id` ON DELETE CASCADE).
-3. [x] Add Alembic revision `20260712_020000_add_reset_credit_redeem_tables`
-   on parent `20260711_030000_add_limit_warmup_idle_threshold`; upgrade
+3. [x] Add Alembic revision `20260713_070000_add_reset_credit_redeem_tables`
+   on parent `20260712_020000_add_api_key_usage_rollups`; upgrade
    creates both tables + `created_at` index, downgrade drops them; extend
    `tests/integration/test_migrations.py` coverage.
 4. [x] Add `app/modules/rate_limit_reset_credits/redeem_coordination.py`:

@@ -81,6 +81,34 @@ async def test_live_ingestor_writes_usage_rows_for_internal_account(db_setup) ->
 
 
 @pytest.mark.asyncio
+async def test_live_ingestor_invalidates_rate_limit_header_cache(monkeypatch, db_setup) -> None:
+    del db_setup
+    from app.modules.usage import live_ingest as live_ingest_module
+
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(_make_account("acc_live_headers", "live-headers@example.com"))
+
+    invalidations: list[int] = []
+
+    class _SpyHeadersCache:
+        async def invalidate(self) -> None:
+            invalidations.append(1)
+
+    monkeypatch.setattr(live_ingest_module, "get_rate_limit_headers_cache", lambda: _SpyHeadersCache())
+
+    ingestor = live_ingest.LiveUsageIngestor(queue_size=8, write_min_interval_seconds=0.0)
+    ingestor.start()
+    try:
+        ingestor.publish(_snapshot(), account_id="acc_live_headers")
+        primary, secondary = await _wait_for_rows("acc_live_headers")
+    finally:
+        await ingestor.stop()
+
+    assert primary is not None and secondary is not None
+    assert invalidations == [1]
+
+
+@pytest.mark.asyncio
 async def test_live_ingestor_carries_credits_on_secondary_only_snapshots(db_setup) -> None:
     del db_setup
     async with SessionLocal() as session:

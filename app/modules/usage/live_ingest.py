@@ -13,6 +13,7 @@ from app.core.usage.live_snapshots import LiveRateLimitSnapshot, LiveUsageWindow
 from app.db.models import Account
 from app.db.session import get_background_session
 from app.modules.proxy.account_cache import get_account_selection_cache
+from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
 from app.modules.usage.repository import UsageRepository
 
 logger = logging.getLogger(__name__)
@@ -175,6 +176,10 @@ class LiveUsageIngestor:
         if now - self._last_cache_invalidation >= _CACHE_INVALIDATION_MIN_INTERVAL_SECONDS:
             self._last_cache_invalidation = now
             get_account_selection_cache().invalidate()
+            # Downstream x-codex-* headers are served from a TTL cache that
+            # only the poller invalidates otherwise; drop it so clients see
+            # the live values before the TTL expires.
+            await get_rate_limit_headers_cache().invalidate()
 
     async def _resolve_account_id(self, chatgpt_account_id: str | None) -> str | None:
         if not chatgpt_account_id:

@@ -367,3 +367,29 @@ When an account has an active proxy binding but route resolution returns `None` 
 - **THEN** the refresh MUST raise an upstream proxy unavailable error
 - **AND** it MUST NOT silently use direct egress
 
+### Requirement: Upstream SSE framing scans each byte a bounded number of times
+
+The upstream SSE event reader MUST NOT rescan previously scanned buffer bytes on each network read; framing cost MUST be linear in event size so a single large event (up to the configured event-size cap) cannot stall the shared event loop. Framing semantics MUST be unchanged: all separator forms (`\r\n\r\n`, `\n\n`, `\r\r`) are honored, including separators straddling read boundaries, and event-size limits and idle timeouts apply as before.
+
+#### Scenario: Large event frames in linear time
+
+- **GIVEN** a single SSE event several megabytes long arriving across many reads
+- **WHEN** the reader frames the stream
+- **THEN** each received byte is scanned at most a bounded number of times (no full-buffer rescans per read)
+- **AND** the event is delivered intact
+
+#### Scenario: Separator straddling a read boundary still terminates the event
+
+- **GIVEN** an event whose `\r\n\r\n` separator is split across two reads
+- **WHEN** the reader frames the stream
+- **THEN** the event terminates exactly at the separator and the following event is framed normally
+
+### Requirement: Upstream connectors persist across interactive turn gaps
+
+The shared upstream TCP connectors MUST configure connection keepalive of at least 90 seconds and a DNS cache TTL of at least 300 seconds, so consecutive interactive requests reuse pooled connections and resolved names instead of re-handshaking per turn.
+
+#### Scenario: Connector construction pins reuse settings
+
+- **WHEN** the shared HTTP client initializes its direct TCP connectors
+- **THEN** they are constructed with `keepalive_timeout >= 90` and `ttl_dns_cache >= 300`
+

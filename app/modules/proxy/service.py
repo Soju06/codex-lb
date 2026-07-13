@@ -87,7 +87,9 @@ from app.core.openai.requests import (
 )
 from app.core.resilience.network_recovery import (
     PROCESS_NETWORK_UNAVAILABLE_CODE,
-    ProcessNetworkRecovery,
+)
+from app.core.resilience.network_recovery import (
+    ProcessNetworkRecovery as ProcessNetworkRecovery,
 )
 from app.core.resilience.overload import is_local_overload_error_code
 from app.core.types import JsonValue
@@ -358,6 +360,9 @@ from app.modules.proxy._service.observability import (
 from app.modules.proxy._service.rate_limit import (
     _RateLimitMixin,
 )
+from app.modules.proxy._service.refresh import (
+    ensure_fresh_with_budget as _recover_fresh_account,
+)
 from app.modules.proxy._service.request_log import (
     _RequestLogMixin,
 )
@@ -510,9 +515,6 @@ from app.modules.proxy._service.streaming.helpers import (
 )
 from app.modules.proxy._service.streaming.helpers import (
     _push_stream_attempt_timeout_overrides as _push_stream_attempt_timeout_overrides,
-)
-from app.modules.proxy._service.streaming.helpers import (
-    _refresh_upstream_proxy_fail_closed_reason as _refresh_upstream_proxy_fail_closed_reason,
 )
 from app.modules.proxy._service.streaming.helpers import (
     _resolve_upstream_stream_transport as _resolve_upstream_stream_transport,
@@ -1480,58 +1482,14 @@ class ProxyService(
         timeout_seconds: float | None = None,
     ) -> Account:
         deadline = None if timeout_seconds is None else time.monotonic() + timeout_seconds
-        recovery = ProcessNetworkRecovery(
-            transport="refresh",
+        return await _recover_fresh_account(
+            self,
+            account,
+            force=force,
+            deadline=deadline,
+            remaining_budget_seconds=_remaining_budget_seconds,
             request_id=get_request_id(),
-            account_id=account.id,
         )
-        while True:
-            remaining_seconds = None if deadline is None else _remaining_budget_seconds(deadline)
-            if remaining_seconds is not None and remaining_seconds <= 0:
-                raise ProxyResponseError(
-                    502,
-                    openai_error("upstream_request_timeout", "Proxy request budget exhausted"),
-                    failure_phase="refresh",
-                )
-            try:
-                refreshed = await self._ensure_fresh(
-                    account,
-                    force=force,
-                    timeout_seconds=remaining_seconds,
-                )
-                recovery.log_recovered()
-                return refreshed
-            except RefreshError as exc:
-                if exc.transport_error_code == PROCESS_NETWORK_UNAVAILABLE_CODE and deadline is not None:
-                    decision = await recovery.wait(
-                        error_code=exc.transport_error_code,
-                        retryable_same_contract=exc.retryable_same_contract,
-                        deadline=deadline,
-                        rotate_shared_client=True,
-                        failed_session=exc.failed_session,
-                    )
-                    if decision == "retry":
-                        continue
-                    if decision == "exhausted":
-                        raise ProxyResponseError(
-                            502,
-                            openai_error("upstream_request_timeout", "Proxy request budget exhausted"),
-                            failure_phase="refresh",
-                        ) from exc
-                if exc.transport_error_code == PROCESS_NETWORK_UNAVAILABLE_CODE:
-                    # A refresh response/body failure can follow consumption of
-                    # a rotating token. Surface it neutrally, but never let an
-                    # outer account loop retry that refresh contract.
-                    raise ProxyResponseError(
-                        502,
-                        openai_error(PROCESS_NETWORK_UNAVAILABLE_CODE, exc.message),
-                        failure_phase="refresh",
-                        retryable_same_contract=False,
-                    ) from exc
-                reason = _refresh_upstream_proxy_fail_closed_reason(exc)
-                if reason is not None:
-                    raise UpstreamProxyRouteError(reason, account_id=account.id) from exc
-                raise
 
     async def _ensure_previsible_unary_fresh_with_failover(
         self,

@@ -7,9 +7,6 @@ from collections.abc import Callable
 from copy import deepcopy
 from typing import Any, AsyncIterator, Literal, Mapping, cast
 
-from app.core.auth.refresh import (
-    RefreshError,
-)
 from app.core.balancer import PERMANENT_FAILURE_CODES
 from app.core.balancer.types import ClassifiedFailure, UpstreamError
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
@@ -441,19 +438,6 @@ def _should_retry_transient_stream_error(code: str | None, message: str | None) 
     if any(marker in normalized_message for marker in _facade()._UPSTREAM_UNAVAILABLE_NON_TRANSIENT_MESSAGE_MARKERS):
         return False
     return any(marker in normalized_message for marker in _facade()._UPSTREAM_UNAVAILABLE_TRANSIENT_MESSAGE_MARKERS)
-
-
-def _refresh_upstream_proxy_fail_closed_reason(exc: RefreshError) -> str | None:
-    if exc.code != "upstream_proxy_unavailable":
-        return None
-    reason = exc.upstream_proxy_fail_closed_reason
-    if reason:
-        return reason
-    marker = "Upstream proxy route unavailable:"
-    if exc.message.startswith(marker):
-        parsed = exc.message.removeprefix(marker).strip()
-        return parsed or "unavailable"
-    return "unavailable"
 
 
 def _classify_upstream_close(

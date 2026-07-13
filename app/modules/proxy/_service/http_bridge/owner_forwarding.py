@@ -276,6 +276,7 @@ class _HTTPBridgeOwnerForwardingMixin:
         headers: Mapping[str, str],
         api_key_reservation: ApiKeyUsageReservationData | None,
         codex_session_affinity: bool,
+        openai_sdk_request: bool = False,
         downstream_turn_state: str | None,
         request_started_at: float,
         proxy_api_authorization: str | None,
@@ -290,6 +291,7 @@ class _HTTPBridgeOwnerForwardingMixin:
             reservation=api_key_reservation,
             codex_session_affinity=codex_session_affinity,
             downstream_turn_state=forwarded_turn_state,
+            openai_sdk_request=openai_sdk_request,
             original_request_unanchored=(
                 owner_forward.key.affinity_kind in {"session_header", "internal_unanchored_parallel"}
                 and incoming_turn_state is None

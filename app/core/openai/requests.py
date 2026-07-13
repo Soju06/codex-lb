@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable, Mapping
+from copy import deepcopy
 from dataclasses import dataclass
+from hashlib import sha256
 from typing import cast
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
 from app.core.openai.exceptions import ClientPayloadError
 from app.core.types import JsonObject, JsonValue
@@ -46,6 +48,8 @@ _COMPACT_TOOL_CALL_OUTPUT_ITEM_TYPES = frozenset(
 )
 _GOAL_CONTINUATION_CONTEXT_PREFIX = '<codex_internal_context source="goal">'
 _PLAN_MODE_CONTEXT_PREFIX = "<collaboration_mode># Plan Mode"
+_EXPLICIT_PROMPT_CACHE_BREAKPOINT: MutableJsonObject = {"mode": "explicit"}
+_SHARED_PROMPT_CACHE_KEY_PREFIX = "clb-"
 
 
 def _json_mapping_or_none(value: JsonValue) -> Mapping[str, JsonValue] | None:
@@ -373,6 +377,74 @@ def responses_input_uses_lite_tools(input_value: JsonValue) -> bool:
     return is_json_list(input_value) and _is_responses_lite_input(input_value)
 
 
+def _shared_instruction_cache_boundary(input_value: JsonValue) -> tuple[int, int] | None:
+    if not is_json_list(input_value):
+        return None
+    user_messages: list[tuple[int, int]] = []
+    for item_index, item in enumerate(input_value):
+        item_mapping = _json_mapping_or_none(item)
+        if item_mapping is None or item_mapping.get("role") != "user":
+            continue
+        content = item_mapping.get("content")
+        if not is_json_list(content):
+            continue
+        input_text_indexes = [
+            content_index
+            for content_index, part in enumerate(content)
+            if (part_mapping := _json_mapping_or_none(part)) is not None
+            and part_mapping.get("type") == "input_text"
+            and isinstance(part_mapping.get("text"), str)
+        ]
+        if input_text_indexes:
+            user_messages.append((item_index, input_text_indexes[-1]))
+    if len(user_messages) < 2:
+        return None
+    return user_messages[0]
+
+
+def _has_explicit_prompt_cache_breakpoint(input_value: JsonValue) -> bool:
+    if not is_json_list(input_value):
+        return False
+    for item in input_value:
+        item_mapping = _json_mapping_or_none(item)
+        if item_mapping is None:
+            continue
+        content = item_mapping.get("content")
+        for part in _json_parts(content):
+            part_mapping = _json_mapping_or_none(part)
+            if part_mapping is not None and "prompt_cache_breakpoint" in part_mapping:
+                return True
+    return False
+
+
+def _shared_instruction_cache_key(payload: MutableJsonObject, boundary: tuple[int, int]) -> str:
+    item_index, content_index = boundary
+    input_items = cast(list[JsonValue], deepcopy(payload["input"]))
+    prefix_items = input_items[: item_index + 1]
+    boundary_item = cast(MutableJsonObject, prefix_items[-1])
+    boundary_content = cast(list[JsonValue], boundary_item["content"])
+    boundary_item["content"] = boundary_content[: content_index + 1]
+    prefix: MutableJsonObject = {"input": prefix_items}
+    for key in ("instructions", "tools", "tool_choice", "parallel_tool_calls", "text"):
+        if key in payload:
+            prefix[key] = payload[key]
+    serialized = json.dumps(prefix, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    digest = sha256(f"{payload['model']}\0{serialized}".encode()).hexdigest()
+    return f"{_SHARED_PROMPT_CACHE_KEY_PREFIX}{digest[:40]}"
+
+
+def _add_shared_instruction_cache_breakpoint(
+    payload: MutableJsonObject,
+    boundary: tuple[int, int],
+) -> None:
+    item_index, content_index = boundary
+    input_items = cast(list[JsonValue], payload["input"])
+    boundary_item = cast(MutableJsonObject, input_items[item_index])
+    boundary_content = cast(list[JsonValue], boundary_item["content"])
+    content_part = cast(MutableJsonObject, boundary_content[content_index])
+    content_part["prompt_cache_breakpoint"] = _EXPLICIT_PROMPT_CACHE_BREAKPOINT.copy()
+
+
 def _merge_responses_instructions(existing: str, extra_parts: list[str]) -> str:
     extra = "\n".join(part for part in extra_parts if part)
     if not extra:
@@ -606,6 +678,8 @@ class ResponsesTextControls(BaseModel):
 
 class ResponsesRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
+    _shared_instruction_cache_key: str | None = PrivateAttr(default=None)
+    _shared_instruction_cache_disabled: bool = PrivateAttr(default=False)
 
     @model_validator(mode="before")
     @classmethod
@@ -711,21 +785,36 @@ class ResponsesRequest(BaseModel):
         """
         payload: MutableJsonObject = self.model_dump(mode="json", exclude_none=True)
         if "tools" not in self.model_fields_set:
-            # ``tools`` is declared with ``default_factory=list``, so
-            # ``model_dump(exclude_none=True)`` synthesizes an explicit
-            # ``"tools": []`` even when the client omitted the field. Codex
-            # Responses-Lite clients omit top-level ``tools`` entirely (the
-            # bundle rides in the ``additional_tools`` input item), and models
-            # with reserved model tools (e.g. ``collaboration.spawn_agent`` on
-            # gpt-5.6 ``multi_agent_version: v2``) reject any explicit
-            # ``tools`` param that cannot match the reserved schema. Only
-            # forward the field when the client actually sent it — including
-            # an explicit client-sent ``[]``. See issue #1184.
+            # ``tools`` has a default factory, but omission must survive owner
+            # forwarding and model-source egress.
             payload.pop("tools", None)
         return payload
 
+    def enable_shared_instruction_cache(self) -> bool:
+        if self._shared_instruction_cache_disabled or _has_explicit_prompt_cache_breakpoint(self.input):
+            return False
+        boundary = _shared_instruction_cache_boundary(self.input)
+        if boundary is None:
+            return False
+        payload = self.model_dump_for_forwarding()
+        self._shared_instruction_cache_key = _shared_instruction_cache_key(payload, boundary)
+        return True
+
+    def disable_shared_instruction_cache(self) -> None:
+        self._shared_instruction_cache_disabled = True
+        self._shared_instruction_cache_key = None
+
     def to_payload(self) -> JsonObject:
-        return _strip_unsupported_fields(self.model_dump_for_forwarding())
+        payload = self.model_dump_for_forwarding()
+        if self._shared_instruction_cache_key is not None:
+            boundary = _shared_instruction_cache_boundary(payload["input"])
+            if boundary is None:
+                payload["prompt_cache_key"] = self._shared_instruction_cache_key
+            else:
+                payload["prompt_cache_key"] = _shared_instruction_cache_key(payload, boundary)
+                if self.model == "gpt-5.6" or self.model.startswith("gpt-5.6-"):
+                    _add_shared_instruction_cache_breakpoint(payload, boundary)
+        return _strip_unsupported_fields(payload)
 
 
 class ResponsesCompactRequest(BaseModel):

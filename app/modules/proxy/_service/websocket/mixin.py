@@ -1560,6 +1560,17 @@ class _WebSocketMixin:
                     responses_payload.previous_response_id,
                     len(missing_call_ids),
                 )
+        had_prompt_cache_key = _prompt_cache_key_from_request_model(responses_payload) is not None
+        affinity_policy = _sticky_key_for_responses_request(
+            responses_payload,
+            headers,
+            codex_session_affinity=codex_session_affinity,
+            openai_cache_affinity=openai_cache_affinity,
+            openai_cache_affinity_max_age_seconds=openai_cache_affinity_max_age_seconds,
+            sticky_threads_enabled=sticky_threads_enabled,
+            api_key=api_key,
+            synthesized_turn_state=synthesized_turn_state,
+        )
         reservation = await proxy._reserve_websocket_api_key_usage(
             refreshed_api_key,
             request_model=responses_payload.model,
@@ -1628,7 +1639,6 @@ class _WebSocketMixin:
                 if isinstance(responses_payload.input, list)
                 else None,
             )
-        had_prompt_cache_key = _prompt_cache_key_from_request_model(responses_payload) is not None
         if previous_response_trimmed_input_count is not None:
             request_state.input_item_count = previous_response_trimmed_input_count
             request_state.input_full_fingerprint = previous_response_trimmed_input_fingerprint
@@ -1667,16 +1677,6 @@ class _WebSocketMixin:
                     responses_payload.previous_response_id,
                     request_state.input_item_count,
                 )
-        affinity_policy = _sticky_key_for_responses_request(
-            responses_payload,
-            headers,
-            codex_session_affinity=codex_session_affinity,
-            openai_cache_affinity=openai_cache_affinity,
-            openai_cache_affinity_max_age_seconds=openai_cache_affinity_max_age_seconds,
-            sticky_threads_enabled=sticky_threads_enabled,
-            api_key=api_key,
-            synthesized_turn_state=synthesized_turn_state,
-        )
         sticky_key_source = "none"
         if affinity_policy.kind == StickySessionKind.CODEX_SESSION:
             turn_state_key = _sticky_key_from_turn_state_header(headers)

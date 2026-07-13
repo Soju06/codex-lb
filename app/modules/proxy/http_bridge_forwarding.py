@@ -50,6 +50,7 @@ HTTP_BRIDGE_FORWARDED_HEADER = "x-codex-bridge-forwarded"
 HTTP_BRIDGE_ORIGIN_INSTANCE_HEADER = "x-codex-bridge-origin-instance"
 HTTP_BRIDGE_TARGET_INSTANCE_HEADER = "x-codex-bridge-target-instance"
 HTTP_BRIDGE_CODEX_AFFINITY_HEADER = "x-codex-bridge-codex-session-affinity"
+HTTP_BRIDGE_OPENAI_SDK_HEADER = "x-codex-bridge-openai-sdk-request"
 HTTP_BRIDGE_RESERVATION_ID_HEADER = "x-codex-bridge-reservation-id"
 HTTP_BRIDGE_RESERVATION_KEY_ID_HEADER = "x-codex-bridge-reservation-key-id"
 HTTP_BRIDGE_RESERVATION_MODEL_HEADER = "x-codex-bridge-reservation-model"
@@ -80,6 +81,7 @@ class HTTPBridgeForwardContext:
     target_instance: str
     codex_session_affinity: bool
     downstream_turn_state: str | None
+    openai_sdk_request: bool = False
     original_request_unanchored: bool = False
     original_affinity_kind: str | None = None
     original_affinity_key: str | None = None
@@ -217,6 +219,8 @@ def build_owner_forward_headers(
     forwarded[HTTP_BRIDGE_ORIGIN_INSTANCE_HEADER] = context.origin_instance
     forwarded[HTTP_BRIDGE_TARGET_INSTANCE_HEADER] = context.target_instance
     forwarded[HTTP_BRIDGE_CODEX_AFFINITY_HEADER] = "1" if context.codex_session_affinity else "0"
+    if context.openai_sdk_request:
+        forwarded[HTTP_BRIDGE_OPENAI_SDK_HEADER] = "1"
     signature_version = _HTTP_BRIDGE_SIGNATURE_VERSION_V2 if context.original_request_unanchored else None
     if signature_version is not None:
         forwarded[HTTP_BRIDGE_SIGNATURE_VERSION_HEADER] = signature_version
@@ -291,6 +295,9 @@ def parse_forwarded_request(
     client_ip = _optional_header(headers.get(HTTP_BRIDGE_CLIENT_IP_HEADER))
     signature_version = _optional_header(headers.get(HTTP_BRIDGE_SIGNATURE_VERSION_HEADER))
     original_unanchored_value = _optional_header(headers.get(HTTP_BRIDGE_ORIGINAL_UNANCHORED_HEADER))
+    openai_sdk_value = _optional_header(headers.get(HTTP_BRIDGE_OPENAI_SDK_HEADER))
+    if openai_sdk_value not in {None, "0", "1"}:
+        return None, _invalid_bridge_forward_signature_error()
     if signature_version == _HTTP_BRIDGE_SIGNATURE_VERSION_V2:
         if original_unanchored_value not in {"0", "1"}:
             return None, _invalid_bridge_forward_signature_error()
@@ -304,6 +311,7 @@ def parse_forwarded_request(
         target_instance=target_instance,
         codex_session_affinity=_bool_header(headers.get(HTTP_BRIDGE_CODEX_AFFINITY_HEADER)),
         downstream_turn_state=_optional_header(headers.get("x-codex-turn-state")),
+        openai_sdk_request=openai_sdk_value == "1",
         original_request_unanchored=original_request_unanchored,
         original_affinity_kind=_optional_header(headers.get(HTTP_BRIDGE_AFFINITY_KIND_HEADER)),
         original_affinity_key=_optional_header(headers.get(HTTP_BRIDGE_AFFINITY_KEY_HEADER)),
@@ -332,6 +340,8 @@ def parse_forwarded_request(
     )
     if tools_bound_valid:
         return HTTPBridgeForwardedRequest(context=context), None
+    if openai_sdk_value is not None:
+        return None, _invalid_bridge_forward_signature_error()
     # ROLLOUT SHIM (#1203, remove with HTTP_BRIDGE_SIGNATURE_V2_HEADER
     # follow-up): fall back to the primary signature (#1169's versioned /
     # legacy scheme) so owners predating the tamper-proofing header — and
@@ -551,6 +561,11 @@ def _structured_bridge_signing_payload(
             "codex_session_affinity": context.codex_session_affinity,
             "downstream_turn_state": context.downstream_turn_state,
             "include_client_ip": include_client_ip,
+            **(
+                {"openai_sdk_request": context.openai_sdk_request}
+                if protocol == "codex-lb-http-bridge-forward-tools-bound"
+                else {}
+            ),
             "origin_instance": context.origin_instance,
             "original_affinity_key": context.original_affinity_key,
             "original_affinity_kind": context.original_affinity_kind,

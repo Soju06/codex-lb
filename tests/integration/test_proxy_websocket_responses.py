@@ -28,6 +28,11 @@ def _without_installation_metadata(value: Any) -> Any:
     if not isinstance(value, dict):
         return value
     normalized = {key: _without_installation_metadata(item) for key, item in value.items()}
+    cache_key = normalized.get("prompt_cache_key")
+    if isinstance(cache_key, str) and cache_key.startswith(("clb-", "std-")):
+        normalized.pop("prompt_cache_key")
+    if normalized.get("prompt_cache_breakpoint") == {"mode": "explicit"}:
+        normalized.pop("prompt_cache_breakpoint")
     client_metadata = normalized.get("client_metadata")
     if isinstance(client_metadata, dict):
         metadata = dict(client_metadata)
@@ -2207,12 +2212,11 @@ def test_backend_responses_websocket_reconnect_keeps_session_affinity_with_fresh
             ),
         ]
 
-    upstreams = deque(
-        [
-            _FakeUpstreamWebSocket(upstream_messages("resp_reconnect_one")),
-            _FakeUpstreamWebSocket(upstream_messages("resp_reconnect_two")),
-        ]
-    )
+    upstream_connections = [
+        _FakeUpstreamWebSocket(upstream_messages("resp_reconnect_one")),
+        _FakeUpstreamWebSocket(upstream_messages("resp_reconnect_two")),
+    ]
+    upstreams = deque(upstream_connections)
     selections: list[dict[str, object]] = []
 
     class _FakeSettingsCache:
@@ -2266,9 +2270,12 @@ def test_backend_responses_websocket_reconnect_keeps_session_affinity_with_fresh
 
     request_payload = {
         "type": "response.create",
-        "model": "gpt-5.4",
+        "model": "gpt-5.6-sol",
         "instructions": "",
-        "input": [{"role": "user", "content": [{"type": "input_text", "text": "reconnect"}]}],
+        "input": [
+            {"role": "user", "content": [{"type": "input_text", "text": "stable context"}]},
+            {"role": "user", "content": [{"type": "input_text", "text": "reconnect"}]},
+        ],
         "stream": True,
     }
     turn_states: list[str] = []
@@ -2293,6 +2300,10 @@ def test_backend_responses_websocket_reconnect_keeps_session_affinity_with_fresh
         proxy_module.StickySessionKind.CODEX_SESSION,
     ]
     assert [cast(dict[str, str], selection["headers"])["x-codex-turn-state"] for selection in selections] == turn_states
+    upstream_payloads = [json.loads(upstream.sent_text[0]) for upstream in upstream_connections]
+    assert upstream_payloads[0]["prompt_cache_key"] == upstream_payloads[1]["prompt_cache_key"]
+    assert upstream_payloads[0]["prompt_cache_key"].startswith("clb-")
+    assert upstream_payloads[0]["input"][0]["content"][0]["prompt_cache_breakpoint"] == {"mode": "explicit"}
 
 
 def test_backend_responses_websocket_echoes_existing_turn_state_header(app_instance, monkeypatch):
@@ -7020,7 +7031,7 @@ def test_backend_responses_websocket_slims_historical_inline_artifacts_and_succe
     monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
     monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
     monkeypatch.setattr(proxy_module, "_UPSTREAM_RESPONSE_CREATE_WARN_BYTES", 64)
-    monkeypatch.setattr(proxy_module, "_UPSTREAM_RESPONSE_CREATE_MAX_BYTES", 512)
+    monkeypatch.setattr(proxy_module, "_UPSTREAM_RESPONSE_CREATE_MAX_BYTES", 600)
     monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
 
     request_payload = {

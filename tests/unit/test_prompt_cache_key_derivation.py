@@ -7,11 +7,13 @@ import pytest
 
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
 from app.core.types import JsonValue
+from app.db.models import StickySessionKind
 from app.modules.api_keys.service import ApiKeyData
 from app.modules.proxy.affinity import (
     _derive_prompt_cache_key,
     _extract_first_user_input,
     _extract_instruction_input,
+    _sticky_key_for_responses_request,
 )
 
 pytestmark = pytest.mark.unit
@@ -334,3 +336,48 @@ class TestDerivePromptCacheKey:
         key_a = _derive_prompt_cache_key(payload_a, api_key)
         key_b = _derive_prompt_cache_key(payload_b, api_key)
         assert key_a == key_b
+
+
+@pytest.mark.parametrize("openai_sdk_request", [False, True])
+def test_shared_instruction_cache_is_codex_native_only(
+    monkeypatch: pytest.MonkeyPatch,
+    openai_sdk_request: bool,
+):
+    class Settings:
+        shared_prompt_cache = True
+
+    monkeypatch.setattr("app.modules.proxy.affinity.get_settings", lambda: Settings())
+    payload = ResponsesRequest(
+        model="gpt-5.6-sol",
+        instructions="base instructions",
+        input=_json_value(
+            [
+                {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "stable project context"}],
+                },
+                {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "current task"}],
+                },
+            ]
+        ),
+        prompt_cache_key="client-thread-key",
+    )
+
+    affinity = _sticky_key_for_responses_request(
+        payload,
+        {"session_id": "process-session"},
+        codex_session_affinity=True,
+        openai_cache_affinity=True,
+        openai_cache_affinity_max_age_seconds=1800,
+        sticky_threads_enabled=True,
+        openai_sdk_request=openai_sdk_request,
+    )
+
+    assert affinity.kind == StickySessionKind.CODEX_SESSION
+    assert affinity.key == "process-session"
+    assert payload.prompt_cache_key == "client-thread-key"
+    wire_payload = payload.to_payload()
+    assert (wire_payload["prompt_cache_key"] == "client-thread-key") is openai_sdk_request
+    assert ("prompt_cache_breakpoint" not in str(wire_payload)) is openai_sdk_request

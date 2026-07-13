@@ -693,6 +693,7 @@ class _HTTPBridgeStreamingMixin:
             openai_cache_affinity_max_age_seconds=dashboard_settings.openai_cache_affinity_max_age_seconds,
             sticky_threads_enabled=dashboard_settings.sticky_threads_enabled,
             api_key=api_key,
+            openai_sdk_request=enforce_openai_sdk_contract,
         )
         sticky_key_source = "none"
         if affinity.kind == StickySessionKind.CODEX_SESSION:
@@ -1071,6 +1072,7 @@ class _HTTPBridgeStreamingMixin:
                     headers=headers,
                     api_key_reservation=api_key_reservation,
                     codex_session_affinity=codex_session_affinity,
+                    openai_sdk_request=enforce_openai_sdk_contract,
                     downstream_turn_state=downstream_turn_state,
                     request_started_at=request_state.started_at,
                     proxy_api_authorization=proxy_api_authorization,

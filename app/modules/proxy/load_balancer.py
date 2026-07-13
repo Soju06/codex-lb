@@ -46,7 +46,7 @@ from app.core.metrics.prometheus import (
     account_lease_released_total,
     account_lease_stale_reclaimed_total,
 )
-from app.core.openai.model_registry import get_model_registry
+from app.core.openai.model_registry import canonical_service_tier_value, get_model_registry
 from app.core.plan_types import account_plan_matches_allowed, normalize_account_plan_type
 from app.core.resilience.circuit_breaker import are_all_account_circuit_breakers_open
 from app.core.resilience.degradation import get_status as get_degradation_status
@@ -2606,8 +2606,10 @@ def _normalize_model_id(model: str) -> str:
 
 
 def _effective_model_service_tier(service_tier: str | None) -> str | None:
-    normalized_service_tier = service_tier.strip().lower() if service_tier is not None else None
-    return None if normalized_service_tier in {None, "auto", "default"} else normalized_service_tier
+    if service_tier is None:
+        return None
+    normalized_service_tier = canonical_service_tier_value(service_tier)
+    return None if normalized_service_tier in {"", "auto", "default"} else normalized_service_tier
 
 
 def _catalog_omission_quota_admission(

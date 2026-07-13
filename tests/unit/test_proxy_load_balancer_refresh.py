@@ -26,6 +26,7 @@ from app.db.models import (
 )
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
+from app.modules.proxy._service.support import _http_bridge_session_supports_service_tier
 from app.modules.proxy.account_cache import is_account_routing_unavailable
 from app.modules.proxy.load_balancer import (
     ADDITIONAL_QUOTA_DATA_UNAVAILABLE,
@@ -2574,8 +2575,21 @@ async def test_authoritative_catalog_controls_quota_exempt_plan_evidence_require
     assert selection.error_code == expected_error_code
 
 
+@pytest.mark.parametrize(
+    ("selected_service_tier", "equivalent_request_service_tier", "expected_effective_service_tier"),
+    [
+        pytest.param("fast", " Priority ", "priority", id="fast-alias"),
+        pytest.param(" Priority ", " FAST ", "priority", id="priority-normalized"),
+        pytest.param("   ", None, None, id="blank-omit-equivalent"),
+    ],
+)
 @pytest.mark.asyncio
-async def test_select_account_preserves_service_tier_plan_filter_when_quota_overrides_catalog(monkeypatch) -> None:
+async def test_select_account_canonicalizes_quota_omission_provenance_for_equivalent_service_tiers(
+    monkeypatch: pytest.MonkeyPatch,
+    selected_service_tier: str,
+    equivalent_request_service_tier: str | None,
+    expected_effective_service_tier: str | None,
+) -> None:
     plus = _make_account("acc-gated-tier-plus", "gated-tier-plus@example.com")
     plus.plan_type = "plus"
     pro = _make_account("acc-gated-tier-pro", "gated-tier-pro@example.com")
@@ -2640,6 +2654,7 @@ async def test_select_account_preserves_service_tier_plan_filter_when_quota_over
         active_account_plans={plus.id: "plus", pro.id: "pro"},
     )
     monkeypatch.setattr("app.modules.proxy.load_balancer.get_model_registry", lambda: registry)
+    monkeypatch.setattr("app.modules.proxy._service.support.get_model_registry", lambda: registry)
 
     balancer = LoadBalancer(
         lambda: _repo_factory(
@@ -2651,11 +2666,11 @@ async def test_select_account_preserves_service_tier_plan_filter_when_quota_over
     )
     selection = await balancer.select_account(
         model="gpt-5.3-codex-spark",
-        service_tier=" Priority ",
+        service_tier=selected_service_tier,
     )
     selection_inputs = await balancer._load_selection_inputs(
         model="gpt-5.3-codex-spark",
-        service_tier=" Priority ",
+        service_tier=selected_service_tier,
     )
 
     assert selection.account is not None
@@ -2668,10 +2683,29 @@ async def test_select_account_preserves_service_tier_plan_filter_when_quota_over
         )
         assert [account.id for account in omit_equivalent_inputs.accounts] == [pro.id]
     assert selection.error_code is None
-    assert selection.catalog_omission_quota_admission == CatalogOmissionQuotaAdmission(
+    admission = selection.catalog_omission_quota_admission
+    assert admission == CatalogOmissionQuotaAdmission(
         normalized_model="gpt-5.3-codex-spark",
         canonical_quota_key="codex_spark",
-        normalized_effective_service_tier="priority",
+        normalized_effective_service_tier=expected_effective_service_tier,
+    )
+    assert admission is not None
+    assert admission.matches(
+        requested_model="gpt-5.3-codex-spark",
+        service_tier=equivalent_request_service_tier,
+    )
+    assert not admission.matches(
+        requested_model="gpt-5.3-codex-spark",
+        service_tier="flex",
+    )
+    bridge_session = SimpleNamespace(
+        account=selection.account,
+        catalog_omission_quota_admission=admission,
+    )
+    assert _http_bridge_session_supports_service_tier(
+        cast(Any, bridge_session),
+        request_model="gpt-5.3-codex-spark",
+        request_service_tier=equivalent_request_service_tier,
     )
 
 

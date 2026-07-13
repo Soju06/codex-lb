@@ -3794,6 +3794,9 @@ class _WebSocketMixin:
             request_state.api_key_reservation,
             settlement,
             response_id,
+            # The reservation must be settled before the load-balancer
+            # health write below (settlement-ordering invariant).
+            wait_for_settlement=settlement.account_health_error,
         )
         if settlement.account_health_error:
             await proxy._handle_stream_error(

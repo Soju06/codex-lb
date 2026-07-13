@@ -303,6 +303,8 @@ class _ApiKeyUsageMixin:
         api_key_reservation: ApiKeyUsageReservationData | None,
         settlement: _StreamSettlement,
         request_id: str,
+        *,
+        wait_for_settlement: bool = False,
     ) -> bool:
         """Settle stream reservation. Returns True if settled."""
         if api_key is None or api_key_reservation is None:
@@ -357,6 +359,15 @@ class _ApiKeyUsageMixin:
             api_key_reservation=api_key_reservation,
             request_id=request_id,
         )
+        if wait_for_settlement:
+            # Ordering-sensitive callers (the websocket error path) must
+            # commit the settlement before load-balancer health writes; they
+            # opt into waiting while everything else stays detached.
+            with anyio.CancelScope(shield=True):
+                try:
+                    await asyncio.shield(task)
+                except Exception:  # failures release via the tracking callback
+                    pass
         return True
 
     def _track_stream_usage_settlement_task(

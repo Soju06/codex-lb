@@ -19277,6 +19277,78 @@ async def test_stream_api_key_settlement_detaches_and_closes_repo(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_stream_api_key_settlement_wait_option_blocks_until_finalized(monkeypatch):
+    """Ordering-sensitive callers (websocket error path) opt into waiting so
+    the settlement commits before load-balancer health writes."""
+    started = asyncio.Event()
+    release = asyncio.Event()
+    finalized: list[str] = []
+    repo = SimpleNamespace(api_keys=object())
+
+    @asynccontextmanager
+    async def repo_factory() -> AsyncIterator[SimpleNamespace]:
+        yield repo
+
+    class FakeApiKeysService:
+        def __init__(self, api_keys_repository: object) -> None:
+            assert api_keys_repository is repo.api_keys
+
+        async def finalize_usage_reservation(self, reservation_id: str, **kwargs: object) -> None:
+            del kwargs
+            started.set()
+            await release.wait()
+            finalized.append(reservation_id)
+
+        async def release_usage_reservation(self, reservation_id: str) -> None:
+            raise AssertionError(f"unexpected release for {reservation_id}")
+
+    monkeypatch.setattr(proxy_service, "ApiKeysService", FakeApiKeysService)
+
+    service = proxy_service.ProxyService(cast(proxy_service.ProxyRepoFactory, repo_factory))
+    api_key = ApiKeyData(
+        id="key_stream_wait",
+        name="stream wait",
+        key_prefix="sk-wait",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_stream_wait",
+        key_id=api_key.id,
+        model="gpt-5.5",
+    )
+    settlement = proxy_service._StreamSettlement(
+        status="success",
+        model="gpt-5.5",
+        input_tokens=1,
+        output_tokens=2,
+    )
+
+    caller = asyncio.create_task(
+        service._settle_stream_api_key_usage(
+            api_key,
+            reservation,
+            settlement,
+            request_id="req_stream_wait",
+            wait_for_settlement=True,
+        )
+    )
+    await asyncio.wait_for(started.wait(), timeout=1)
+    await asyncio.sleep(0)
+    # Still blocked on the in-flight settlement.
+    assert not caller.done()
+    release.set()
+    assert await asyncio.wait_for(caller, timeout=1) is True
+    assert finalized == ["resv_stream_wait"]
+
+
+@pytest.mark.asyncio
 async def test_stream_api_key_settlement_detached_finalizes_without_release(monkeypatch):
     finalized: list[str] = []
     repo = SimpleNamespace(api_keys=object())

@@ -7,17 +7,20 @@ no per-request database I/O: every replica computes `floor(cap / R)` plus one
 extra slot when its rank falls below `cap mod R`.
 
 Membership changes are adopted with hysteresis keyed on whether this
-replica's share could actually grow: a rank's share is monotone non-increasing
-in both the replica count and the rank, so only a count decrease or a move to
-an earlier rank (including mixed churn where new members appear while
-lower-ranked ids vanish) can grow it. Changes that cannot grow the share are
-adopted on the next refresh, while any potentially share-growing change is
-adopted only after that exact pending partition (count and rank) has been
-observed continuously for a configured stability window — a different pending
-partition restarts the window, and a failed membership read also restarts it
-since an observation gap must not count as continuous — so neither a missed
-heartbeat, a rolling replacement, nor a read outage can transiently inflate a
-survivor's share.
+replica's share could actually grow for some cap. A rank's share is monotone
+non-increasing in both the replica count and the rank, so a count decrease or a
+rank decrease *can* grow it — but a rank decrease paired with a large enough
+count increase shrinks it instead (more members sort ahead and consume the
+remainder), so the decision compares the prospective share against the current
+one rather than trusting the rank direction: some cap's share grows exactly
+when the count shrinks or, at an equal-or-larger count, ``replica_count + rank``
+decreases. Changes that cannot grow any cap's share are adopted on the next
+refresh, while any potentially share-growing change is adopted only after that
+exact pending partition (count and rank) has been observed continuously for a
+configured stability window — a different pending partition restarts the
+window, and a failed membership read also restarts it since an observation gap
+must not count as continuous — so neither a missed heartbeat, a rolling
+replacement, nor a read outage can transiently inflate a survivor's share.
 """
 
 from __future__ import annotations
@@ -110,16 +113,30 @@ class CapPartitionHolder:
         return False
 
     def _could_grow_share(self, observed: CapPartition) -> bool:
-        """Whether adopting ``observed`` could grow this replica's share of any cap.
+        """Whether adopting ``observed`` could grow this replica's share of *some* cap.
 
         A rank's share is the round-robin count ``ceil((cap - rank) / R)``
-        (floored at one slot), which is monotone non-increasing in both the
-        replica count and the rank. Growth is therefore possible exactly when
-        the count shrinks or this replica moves to an earlier rank — including
-        mixed churn where the count grows while lower-ranked ids vanish (for
-        cap 8, ``R=5, rank=4`` holds 1 slot but ``R=6, rank=0`` holds 2).
+        (floored at one slot), monotone non-increasing in both the replica
+        count and the rank. A rank *decrease* alone can grow the share, but a
+        rank decrease paired with a large enough count *increase* shrinks it
+        instead — more members now sort ahead and consume the remainder — so a
+        plain rank-direction heuristic wrongly defers genuine shrinks and keeps
+        a too-high share.
+
+        The exact condition (verified by exhaustive comparison against the
+        share formula over all caps) is: some cap's share grows iff the count
+        shrinks, or — at an equal-or-larger count — the rank moves early enough
+        that ``R + rank`` decreases. When the count shrinks the largest caps
+        always grow regardless of rank; otherwise the first cap at which this
+        replica's share would tick up is ``R' + rank' + 1``, and it can exceed
+        the old share only while the old share is still one slot there, i.e.
+        exactly when ``R' + rank' < R + rank``. Any change that cannot grow any
+        cap's share (a later rank, or a count increase that outweighs the rank
+        move) is safe toward upstream and adopted immediately.
         """
-        return observed.replica_count < self._adopted.replica_count or observed.rank < self._adopted.rank
+        if observed.replica_count < self._adopted.replica_count:
+            return True
+        return observed.replica_count + observed.rank < self._adopted.replica_count + self._adopted.rank
 
     def note_failed_read(self) -> None:
         """Restart the stability window after a failed membership read.

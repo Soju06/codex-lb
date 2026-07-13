@@ -216,6 +216,21 @@ def test_holder_defers_mixed_churn_where_count_grows_but_rank_moves_earlier() ->
     assert holder.current == CapPartition(replica_count=6, rank=0)
 
 
+def test_holder_adopts_count_increase_that_shrinks_share_despite_earlier_rank() -> None:
+    holder = CapPartitionHolder(clock=_Clock())
+    holder.observe_members(["replica-a", "replica-b"], "replica-b", scale_down_seconds=60.0)
+    assert holder.current == CapPartition(replica_count=2, rank=1)
+
+    # Mixed churn: replica-a drains while two later-sorting ids appear, so the
+    # count grows (2 -> 3) and this replica's rank drops (1 -> 0). The rank move
+    # is outweighed by the count growth: every cap share shrinks or holds (cap
+    # 8: 4 -> 3; cap 2: 1 -> 1), never grows, so the rank-direction heuristic
+    # would wrongly defer. Adopt immediately.
+    changed = holder.observe_members(["replica-b", "replica-c", "replica-d"], "replica-b", scale_down_seconds=60.0)
+    assert changed is True
+    assert holder.current == CapPartition(replica_count=3, rank=0)
+
+
 def test_holder_adopts_count_increase_toward_later_rank_immediately() -> None:
     holder = CapPartitionHolder(clock=_Clock())
     holder.observe_members(["replica-b", "replica-c"], "replica-b", scale_down_seconds=60.0)

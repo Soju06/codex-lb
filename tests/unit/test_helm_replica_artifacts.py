@@ -384,6 +384,11 @@ def test_kind_smoke_external_db_mode_exercises_two_replica_bridge_ring() -> None
     assert 'ring.get("ring_size") == expected' in script
     assert 'ring.get("is_member") is True' in script
     assert "--for=condition=Ready" in script
+    # kubectl exec only forwards the heredoc probe program when -i/--stdin is set;
+    # without it `python -` sees EOF and exits 0 without running any assertion.
+    assert 'exec -i "${workload}-0"' in script
+    # The probe result must be checked so a silent no-op cannot pass smoke again.
+    assert 'if [[ "${probe_output}" != "bridge ring ok:"* ]]; then' in script
 
 
 def test_compose_files_declare_single_replica_topology() -> None:

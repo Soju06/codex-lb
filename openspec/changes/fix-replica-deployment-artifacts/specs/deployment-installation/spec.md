@@ -25,6 +25,7 @@ The project MUST run automated Helm smoke installs for the easy-setup install mo
 - **THEN** the application release is installed with two replicas
 - **AND** both application pods become Ready
 - **AND** `/health/ready` served by an application pod reports a bridge ring of size 2 with the probed pod an active member
+- **AND** the smoke fails when the bridge ring probe emits no confirmation output, so a probe that silently no-ops cannot pass
 - **AND** the smoke still validates external database mode by using an external PostgreSQL release
 
 #### Scenario: Bundled smoke remains single-replica

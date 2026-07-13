@@ -42,7 +42,8 @@ assert_bridge_ring() {
   done
 
   log_step "asserting bridge ring size ${expected_replicas} via /health/ready on ${workload}-0"
-  kubectl --context "${KUBE_CONTEXT}" -n "${namespace}" exec "${workload}-0" -c codex-lb -- \
+  local probe_output
+  probe_output=$(kubectl --context "${KUBE_CONTEXT}" -n "${namespace}" exec -i "${workload}-0" -c codex-lb -- \
     python - "${expected_replicas}" <<'PY'
 import json
 import sys
@@ -55,6 +56,12 @@ assert ring.get("ring_size") == expected, f"bridge ring size {ring.get('ring_siz
 assert ring.get("is_member") is True, f"probed pod is not an active ring member: {ring}"
 print(f"bridge ring ok: {ring}")
 PY
+)
+  if [[ "${probe_output}" != "bridge ring ok:"* ]]; then
+    echo "[helm-kind-smoke] bridge ring probe emitted no confirmation (stdin not forwarded to python?): '${probe_output}'" >&2
+    return 1
+  fi
+  log_step "${probe_output}"
 }
 
 dump_namespace_debug() {

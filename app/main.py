@@ -482,6 +482,18 @@ async def lifespan(app: FastAPI):
         if metrics_server is not None:
             metrics_server.should_exit = True
 
+        # Start the single process-level lease-renewal keeper BEFORE stopping any
+        # scheduler. Schedulers are stopped one at a time and only the final
+        # release() renews the lease while draining detached bodies; an earlier
+        # scheduler's stop() can detach a shielded leader-gated body (which stops
+        # that scheduler's own heartbeat) while the remaining schedulers are still
+        # stopping. If that stop sequence takes >= the (minimum 5s) TTL, the DB
+        # lease would otherwise expire while the detached body still runs as
+        # leader, letting a follower acquire it and run duplicate singleton work.
+        # The keeper renews the lease continuously across the whole stop sequence
+        # and is stopped by release(), which then owns renewal for its bounded
+        # drain. It is a no-op when leader election is disabled.
+        get_leader_election().start_release_keeper()
         await quota_planner_scheduler.stop()
         await auth_guardian_scheduler.stop()
         await automations_scheduler.stop()

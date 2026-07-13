@@ -127,6 +127,18 @@ class LeaderElection:
         # consumes the result. Keeping a strong reference prevents the loop
         # from garbage-collecting a still-pending task mid-flight.
         self._abandoned_renewals: set[asyncio.Task[bool]] = set()
+        # The single process-level lease-renewal keeper for the graceful-
+        # shutdown window. Started once at shutdown-begin (before ANY scheduler
+        # is stopped) and stopped by ``release``. Because schedulers are stopped
+        # one at a time and only the LAST one triggers ``release``, an earlier
+        # scheduler's ``stop()`` can detach a shielded gated body — which cancels
+        # that scheduler's own heartbeat — while later schedulers are still
+        # stopping and ``release`` has not begun its drain-renewal yet. This
+        # keeper owns lease renewal continuously across that whole gap so the DB
+        # lease can never expire while any detached/draining leader-gated body
+        # could still be acting as leader.
+        self._release_keeper: asyncio.Task[None] | None = None
+        self._release_keeper_stop: asyncio.Event | None = None
 
     @property
     def leader_id(self) -> str:
@@ -280,6 +292,16 @@ class LeaderElection:
         runs would recreate the duplicate-singleton overlap the lease exists to
         prevent.
 
+        Renewal ownership is handed off from the shutdown keeper (see
+        :meth:`start_release_keeper`, started at shutdown-begin so the lease is
+        renewed continuously through the whole scheduler stop sequence). The
+        keeper is stopped FIRST so exactly one owner renews at a time: the keeper
+        renewed within the last interval, so the lease is still valid across the
+        synchronous handoff, and :meth:`_drain_detached_bodies` then renews on
+        the same cadence while it waits. Stopping the keeper before the drain
+        (rather than after) keeps a single renewal owner rather than two writers
+        racing on the row.
+
         Failure to release must never block shutdown; the lease then simply
         expires after the TTL.
         """
@@ -287,7 +309,9 @@ class LeaderElection:
         self._lease_deadline = None
         settings = get_settings()
         if not settings.leader_election_enabled:
+            await self._stop_release_keeper()
             return
+        await self._stop_release_keeper()
         if not await self._drain_detached_bodies():
             logger.warning(
                 "Skipping early leader lease release: detached leader-gated work is still "
@@ -306,6 +330,83 @@ class LeaderElection:
                 await session.commit()
         except Exception:
             logger.warning("Failed to release scheduler leader lease", exc_info=True)
+
+    def start_release_keeper(self) -> None:
+        """Start the single lease-renewal keeper for the graceful-shutdown window.
+
+        Call this once at shutdown-begin, BEFORE stopping any scheduler. From
+        that moment until :meth:`release` stops it, one owner renews the
+        ``scheduler_leader`` row on the ``max(1, ttl // 3)`` cadence, closing the
+        cross-scheduler stop-sequence gap: schedulers are stopped one at a time
+        and only the last one triggers ``release``, so an earlier scheduler's
+        ``stop()`` can detach a shielded leader-gated body — which cancels that
+        scheduler's own heartbeat — while later schedulers are still stopping and
+        ``release`` has not begun its own drain-renewal. Without this keeper the
+        DB lease could expire in that window (with the minimum 5s TTL, a later
+        scheduler that takes >= the TTL to drain is enough) while the detached
+        body still runs as leader, letting a follower acquire the lease and run
+        the same singleton work concurrently.
+
+        Idempotent; a no-op when leader election is disabled. The keeper renews
+        keyed on our ``leader_id`` (a harmless rowcount-0 no-op if this process
+        never held the lease or a follower already took it over), so it is safe
+        to start unconditionally at shutdown-begin regardless of current
+        leadership.
+        """
+        if not get_settings().leader_election_enabled:
+            return
+        if self._release_keeper is not None and not self._release_keeper.done():
+            return
+        stop = asyncio.Event()
+        self._release_keeper_stop = stop
+        self._release_keeper = asyncio.create_task(self._run_release_keeper(stop))
+
+    async def _run_release_keeper(self, stop: asyncio.Event) -> None:
+        """Renew the held lease row on the ttl/3 cadence until asked to stop.
+
+        This is the SINGLE renewal owner for the shutdown window that precedes
+        ``release``. It renews BEFORE each wait so the lease is extended as soon
+        as the keeper starts, and it consults neither ``_is_leader`` nor the
+        locally tracked deadline: ``release`` clears both up-front, yet the row
+        is still ours while detached bodies drain. Renewal errors are swallowed
+        by :meth:`_renew_lease_row`; shutdown must always be able to proceed.
+        """
+        renew_interval = max(1, get_settings().leader_election_ttl_seconds // 3)
+        try:
+            while not stop.is_set():
+                await self._renew_lease_row()
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=renew_interval)
+                except TimeoutError:
+                    pass
+        except asyncio.CancelledError:
+            pass
+
+    async def _stop_release_keeper(self) -> None:
+        """Stop the shutdown lease-renewal keeper if it is running.
+
+        Signals the keeper to exit and awaits it so renewal ownership passes
+        cleanly to ``release``'s own bounded drain-renewal with no overlapping
+        renewer. Cancels as a fallback so a keeper wedged inside a database call
+        cannot pin shutdown; the outer release deadline (``app/main.py``'s
+        ``_release_leader_lease_within``) abandons the whole release if even that
+        stalls, so shutdown always proceeds.
+        """
+        keeper = self._release_keeper
+        stop = self._release_keeper_stop
+        self._release_keeper = None
+        self._release_keeper_stop = None
+        if keeper is None:
+            return
+        if stop is not None:
+            stop.set()
+        keeper.cancel()
+        try:
+            await keeper
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.warning("Scheduler leader lease keeper failed during shutdown", exc_info=True)
 
     async def run_if_leader(self, fn: Callable[[], Awaitable[_T]]) -> _T | None:
         """Run ``fn`` only while holding the leader lease.

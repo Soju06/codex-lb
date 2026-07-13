@@ -916,6 +916,86 @@ async def test_release_renews_lease_while_detached_body_drains(monkeypatch: pyte
 
 
 @pytest.mark.asyncio
+async def test_release_keeper_renews_across_cross_scheduler_stop_gap(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Regression (P1): graceful shutdown stops the singleton schedulers one at a
+    # time and only releases the lease AFTER the last one stops. When an earlier
+    # scheduler's stop() detaches a shielded gated body, run_if_leader cancels
+    # that scheduler's heartbeat on detach — and release() (the only other
+    # renewer) has not begun yet because later schedulers are still stopping. If
+    # that stop sequence takes >= the minimum 5s TTL, on the pre-fix code nothing
+    # renews the lease in the gap (heartbeat gone, release not started), so the DB
+    # lease expires while the detached body still runs as leader and a follower
+    # can acquire it and run duplicate singleton work. The single process-level
+    # keeper, started at shutdown-begin BEFORE any scheduler stops, must renew the
+    # lease continuously across that whole window.
+    ttl = 5  # the minimum allowed TTL; renew_interval = 1s
+    # acquire + keeper renewals across the > TTL gap + drain renewal(s) + delete.
+    # Padded so scheduling jitter cannot exhaust the rowcounts.
+    session = _FakeSession("postgresql", [1] + [1] * 40)
+    _install(monkeypatch, session, ttl=ttl)
+    monkeypatch.setattr(leader_election_module, "_CANCEL_GRACE_SECONDS", 0.2)
+
+    in_shield = asyncio.Event()
+    release_body = asyncio.Event()
+    body_done = asyncio.Event()
+
+    async def _body() -> str:
+        inner = asyncio.create_task(release_body.wait())
+        in_shield.set()
+        try:
+            await asyncio.shield(inner)
+        except asyncio.CancelledError:
+            # Drain the shielded work before propagating, like the auth-guardian
+            # and usage-refresh singleflight bodies do. This outlives the cancel
+            # grace, so run_if_leader detaches it.
+            await inner
+            body_done.set()
+            raise
+        return "ran"
+
+    election = leader_election_module.LeaderElection(leader_id="node-a")
+    # Scheduler A runs its leader-gated body.
+    run_task: asyncio.Task[Any] = asyncio.ensure_future(election.run_if_leader(_body))
+    await in_shield.wait()
+    await asyncio.sleep(0.1)
+
+    # Shutdown begins: main.py starts the single process-level keeper BEFORE
+    # stopping any scheduler.
+    election.start_release_keeper()
+
+    # Scheduler A stops: the shutdown-cancel detaches the still-draining body and
+    # stops scheduler A's own heartbeat.
+    run_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await run_task
+    assert len(election._detached_bodies) == 1
+    assert not body_done.is_set()
+
+    # Scheduler B (and the rest) take longer than the TTL to stop while A's body
+    # keeps draining. The keeper must renew the lease throughout this gap.
+    statements_before_gap = len(session.statements)
+    await asyncio.sleep(ttl + 0.5)  # exceed the TTL to prove the lease never lapses
+    renewals_in_gap = len(session.statements) - statements_before_gap
+    assert not body_done.is_set()
+    # ~1 renewal/sec across a > TTL window; pre-fix this window has zero renewals.
+    assert renewals_in_gap >= 3
+
+    # The final release runs: it stops the keeper (handing renewal to its own
+    # drain), drains the body — here we let it finish — then deletes the row it
+    # still owns.
+    release_task: asyncio.Task[None] = asyncio.ensure_future(election.release())
+    release_body.set()
+    await release_task
+
+    assert body_done.is_set()
+    assert election.is_leader is False
+    assert any(isinstance(statement, Delete) for statement in session.statements)
+    assert election._detached_bodies == set()
+    # The keeper is fully stopped after release.
+    assert election._release_keeper is None
+
+
+@pytest.mark.asyncio
 async def test_run_if_leader_runs_body_directly_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
     session = _FakeSession("postgresql", [])
     _install(monkeypatch, session, enabled=False)

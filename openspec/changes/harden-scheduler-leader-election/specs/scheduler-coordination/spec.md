@@ -155,6 +155,8 @@ When the gate is instead cancelled externally (graceful shutdown) while the leas
 
 On lifespan shutdown, after all schedulers are stopped, the process MUST delete the `scheduler_leader` row it holds (matching its own leader id). Before deleting the row, release MUST wait a bounded grace for any gated body that was detached still draining shielded singleton work. A body detached on the graceful-shutdown path is still the rightful leader, so while release waits for it the lease MUST NOT be left to expire under it: release MUST keep renewing the lease at an interval no greater than one third of the TTL for as long as it waits, so that with the minimum TTL (5s) the database lease cannot expire during the drain wait and a follower cannot acquire it and run the same singleton work concurrently with the still-draining body. If such a body is still running after the grace, release MUST skip deleting the row entirely — the lease then expires after its TTL (roughly one further TTL past the last renewal, after which the detached body is treated as abandoned) — so a follower cannot acquire the lease while the shutting-down process may still execute leader-gated work. Release failure MUST NOT block or fail shutdown; the lease then simply expires after the TTL.
 
+Because the schedulers are stopped one at a time and only the final scheduler's teardown triggers release, an earlier scheduler's `stop()` can detach a shielded leader-gated body — which cancels that scheduler's own lease heartbeat — while later schedulers are still stopping and release has not begun its drain-renewal. To close that cross-scheduler stop-sequence gap, from the moment shutdown begins (BEFORE the first scheduler is stopped) until release takes over renewal, a SINGLE process-level renewal owner MUST renew the lease continuously at an interval no greater than one third of the TTL. This guarantees that the database lease is renewed by exactly one owner from shutdown-begin through the end of the drain, so with the minimum TTL (5s) the lease can never expire while any detached or draining leader-gated body across ALL schedulers could still be acting as leader, even when a later scheduler takes at least the TTL to drain or detach. Renewal ownership MUST pass from this shutdown renewer to release's own bounded drain-renewal without an overlapping-writer race and without a gap. This continuous-renewal obligation is itself bounded: it renews only while release has not yet abandoned the row, so if a body outlives the release drain grace the renewer is stopped and the lease is left to expire after its TTL once the body is treated as abandoned — the whole shutdown release path MUST still complete within its overall deadline even if a body wedges.
+
 The shutdown release step MUST be bounded by a deadline that holds even when the database is wedged. Because the release path opens a background session whose rollback/close shield and await their own teardown, cancelling an awaited release (e.g. via `asyncio.wait_for`) would not unwind a stuck database call and could still pin shutdown past the deadline. The release therefore MUST be run as a separate task and abandoned — not awaited — once the deadline elapses, so shutdown always proceeds within the deadline; the abandoned release's eventual outcome MAY be logged and the lease then expires after its TTL.
 
 #### Scenario: Leader shuts down cleanly
@@ -171,6 +173,15 @@ The shutdown release step MUST be bounded by a deadline that holds even when the
 - **THEN** release keeps renewing the lease on the heartbeat cadence so the database lease does not expire under the still-draining body
 - **AND** no follower can acquire the lease while the body may still act as leader
 - **AND** once the body drains the lease row is deleted
+
+#### Scenario: Renewal is continuous across the cross-scheduler stop sequence
+
+- **GIVEN** a leader shutting down with the minimum TTL whose schedulers are stopped one at a time
+- **AND** an earlier scheduler's `stop()` detaches a shielded gated body, cancelling that scheduler's own lease heartbeat
+- **WHEN** the remaining schedulers take at least the TTL to stop before release begins
+- **THEN** a single process-level renewal owner started at shutdown-begin keeps renewing the lease on the heartbeat cadence throughout that whole window
+- **AND** the database lease never expires while the detached body may still act as leader, so no follower can acquire it and run the same singleton work concurrently
+- **AND** renewal ownership passes to release's own drain-renewal with no overlapping writer and no gap
 
 #### Scenario: Shutdown with a detached gated body still draining
 

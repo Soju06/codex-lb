@@ -6096,14 +6096,18 @@ async def _normalize_public_responses_stream(
     # not attached to the later response.
     pre_created_buffer: list[dict[str, JsonValue]] = []
 
-    def formatted_payloads_with_synthetic_deltas(payload: dict[str, JsonValue]) -> list[str]:
-        return [
-            *[
-                format_sse_event(synthetic_payload)
-                for synthetic_payload in _synthetic_text_delta_events(payload, seen_text_delta_keys)
-            ],
-            format_sse_event(payload),
+    def formatted_payloads_with_synthetic_deltas(
+        payload: dict[str, JsonValue], raw_block: str | None = None
+    ) -> list[str]:
+        synthetic_blocks = [
+            format_sse_event(synthetic_payload)
+            for synthetic_payload in _synthetic_text_delta_events(payload, seen_text_delta_keys)
         ]
+        if raw_block is not None and not synthetic_blocks:
+            # Nothing rewrote the payload and nothing synthetic precedes it:
+            # pass the upstream block through instead of re-serializing.
+            return [raw_block]
+        return [*synthetic_blocks, format_sse_event(payload)]
 
     def buffered_pre_created_payloads_to_replay(response_id: str | None) -> list[str]:
         try:
@@ -6131,6 +6135,7 @@ async def _normalize_public_responses_stream(
             if _looks_like_sse_data_block(event_block):
                 contract_violation_kind = contract_violation_kind or "invalid_json"
             continue
+        parsed_payload = payload
         raw_event_type = payload.get("type")
         if (
             enforce_openai_sdk_contract
@@ -6213,7 +6218,19 @@ async def _normalize_public_responses_stream(
         _collect_output_item_event(normalized_payload, output_items)
         if event_type == "response.output_text.delta":
             seen_text_delta_keys.add(_text_delta_stream_key(normalized_payload))
-        for formatted_payload in formatted_payloads_with_synthetic_deltas(normalized_payload):
+        # Both the backfill branch and _normalize_public_stream_payload copy
+        # the dict when they change anything, so identity with the parsed
+        # payload proves the event is unmutated. Pass-through additionally
+        # requires the block to already carry the canonical `event: <type>`
+        # framing that format_sse_event would add: bridge rewrite paths can
+        # enqueue data-only blocks, and named-event (EventSource) clients
+        # would otherwise lose the event name re-serialization used to add.
+        unmutated_block = (
+            event_block
+            if normalized_payload is parsed_payload and _has_canonical_event_framing(event_block, event_type)
+            else None
+        )
+        for formatted_payload in formatted_payloads_with_synthetic_deltas(normalized_payload, unmutated_block):
             yield formatted_payload
         if isinstance(event_type, str) and event_type in _PUBLIC_RESPONSE_STREAM_TERMINAL_TYPES:
             terminal_seen = True
@@ -6466,6 +6483,15 @@ def _synthetic_pre_created_item_id(response_id: str | None) -> str:
     if response_id:
         return f"msg_{response_id}_precreated"
     return "msg_precreated"
+
+
+def _has_canonical_event_framing(event_block: str, event_type: JsonValue) -> bool:
+    """True when the block already carries the `event: <type>` line that
+    format_sse_event would emit (or the payload has no type, where canonical
+    framing is data-only)."""
+    if not isinstance(event_type, str) or not event_type:
+        return event_block.startswith("data: ")
+    return event_block.startswith(f"event: {event_type}\n")
 
 
 def _normalize_public_stream_payload(
@@ -6811,17 +6837,19 @@ def _is_reasoning_summary_interleavable_event(event_type: JsonValue | None) -> b
 
 
 async def _normalize_reasoning_summary_stream(stream: AsyncIterator[str]) -> AsyncIterator[str]:
-    pending: dict[tuple[str | None, int | None, int | None], list[dict[str, JsonValue]]] = {}
+    pending: dict[tuple[str | None, int | None, int | None], list[tuple[dict[str, JsonValue], str]]] = {}
 
     def flush(key: tuple[str | None, int | None, int | None]) -> list[str]:
-        payloads = pending.pop(key, [])
-        text = "".join(cast(str, payload.get("delta")) for payload in payloads)
+        entries = pending.pop(key, [])
+        text = "".join(cast(str, payload.get("delta")) for payload, _ in entries)
         cleaned = _strip_blank_html_comment_lines(text)
         if cleaned == text:
-            return [format_sse_event(payload) for payload in payloads]
-        if not cleaned or not payloads:
+            # Nothing changed: replay the original upstream blocks instead of
+            # re-serializing every buffered payload.
+            return [raw_block for _, raw_block in entries]
+        if not cleaned or not entries:
             return []
-        normalized = dict(payloads[0])
+        normalized = dict(entries[0][0])
         normalized["delta"] = cleaned
         return [format_sse_event(normalized)]
 
@@ -6849,8 +6877,8 @@ async def _normalize_reasoning_summary_stream(stream: AsyncIterator[str]) -> Asy
                 continue
             key = event_key
             if key in pending:
-                pending[key].append(payload)
-                buffered_text = "".join(cast(str, item.get("delta")) for item in pending[key])
+                pending[key].append((payload, event_block))
+                buffered_text = "".join(cast(str, item.get("delta")) for item, _ in pending[key])
                 if _strip_blank_html_comment_lines(buffered_text) != buffered_text:
                     for buffered in flush(key):
                         yield buffered
@@ -6867,7 +6895,7 @@ async def _normalize_reasoning_summary_stream(stream: AsyncIterator[str]) -> Asy
                 yield format_sse_event(normalized_payload)
                 continue
             if _could_be_blank_html_comment_line(delta):
-                pending[key] = [payload]
+                pending[key] = [(payload, event_block)]
                 continue
             yield event_block
             continue

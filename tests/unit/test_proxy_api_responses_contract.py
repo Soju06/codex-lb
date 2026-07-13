@@ -1391,3 +1391,57 @@ async def test_internal_bridge_rejects_unknown_legacy_anchor_before_terminal_com
         previous_response_id=None,
         api_key=None,
     )
+
+
+@pytest.mark.asyncio
+async def test_normalize_public_stream_passes_canonical_unmutated_blocks_verbatim() -> None:
+    """Unmutated events that already carry canonical `event:` framing pass
+    through byte-identically instead of being re-serialized."""
+    created = proxy_api_module.format_sse_event(
+        {"type": "response.created", "response": {"id": "resp_pt", "output": []}}
+    )
+    delta = proxy_api_module.format_sse_event(
+        {"type": "response.output_text.delta", "item_id": "msg_1", "output_index": 0, "delta": "hi"}
+    )
+    completed_payload: dict[str, Any] = {
+        "type": "response.completed",
+        "response": {
+            "id": "resp_pt",
+            "output": [{"type": "message", "id": "msg_1", "content": [{"type": "output_text", "text": "hi"}]}],
+        },
+    }
+    completed = proxy_api_module.format_sse_event(completed_payload)
+
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_public_responses_stream(_iter_blocks(created, delta, completed))
+    ]
+
+    assert blocks[0] == created
+    assert delta in blocks
+
+
+@pytest.mark.asyncio
+async def test_normalize_public_stream_reframes_data_only_blocks_with_event_name() -> None:
+    """A data-only block (e.g. bridge-rewritten terminal event) must regain
+    the canonical `event: <type>` line so named-event clients see it."""
+    payload = {
+        "type": "response.output_text.delta",
+        "item_id": "msg_d",
+        "output_index": 0,
+        "delta": "x",
+    }
+    import json as _json
+
+    data_only = "data: " + _json.dumps(payload, separators=(",", ":")) + "\n\n"
+
+    created = proxy_api_module.format_sse_event(
+        {"type": "response.created", "response": {"id": "resp_df", "output": []}}
+    )
+    blocks = [
+        block async for block in proxy_api_module._normalize_public_responses_stream(_iter_blocks(created, data_only))
+    ]
+
+    reframed = [block for block in blocks if '"delta":"x"' in block]
+    assert reframed
+    assert reframed[0].startswith("event: response.output_text.delta\n")

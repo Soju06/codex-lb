@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from typing import cast
 
 from app.core.openai.models import OpenAIEvent
-from app.core.openai.parsing import parse_sse_event
+from app.core.openai.parsing import parse_sse_event_payload
 from app.core.types import JsonValue
 from app.core.utils.sse import format_sse_event
 
@@ -765,15 +765,19 @@ def rewrite_parallel_tool_call_text(
     payload: dict[str, JsonValue] | None,
     *,
     event_block: str,
+    event: OpenAIEvent | None = None,
 ) -> tuple[str, dict[str, JsonValue] | None, OpenAIEvent | None, str | None, str]:
     rewritten_payload, changed, _removed_count = rewrite_parallel_tool_call_payload(payload)
     if not changed:
-        event = parse_sse_event(event_block)
+        # Reuse the caller's parsed event; validating the payload directly
+        # avoids re-parsing the raw block when a caller has neither.
+        if event is None:
+            event = parse_sse_event_payload(payload)
         return text, payload, event, event_type_from_payload(event, payload), event_block
     assert rewritten_payload is not None
     rewritten_text = json.dumps(rewritten_payload, ensure_ascii=True, separators=(",", ":"))
     rewritten_event_block = format_sse_event(rewritten_payload)
-    rewritten_event = parse_sse_event(rewritten_event_block)
+    rewritten_event = parse_sse_event_payload(rewritten_payload)
     return (
         rewritten_text,
         rewritten_payload,
@@ -786,14 +790,17 @@ def rewrite_parallel_tool_call_text(
 def rewrite_parallel_tool_call_sse_line(
     line: str,
     payload: dict[str, JsonValue] | None,
+    *,
+    event: OpenAIEvent | None = None,
 ) -> tuple[str, dict[str, JsonValue] | None, OpenAIEvent | None, str | None]:
     rewritten_payload, changed, _removed_count = rewrite_parallel_tool_call_payload(payload)
     if not changed:
-        event = parse_sse_event(line)
+        if event is None:
+            event = parse_sse_event_payload(payload)
         return line, payload, event, event_type_from_payload(event, payload)
     assert rewritten_payload is not None
     rewritten_line = format_sse_event(rewritten_payload)
-    rewritten_event = parse_sse_event(rewritten_line)
+    rewritten_event = parse_sse_event_payload(rewritten_payload)
     return (
         rewritten_line,
         rewritten_payload,

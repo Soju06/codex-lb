@@ -425,6 +425,22 @@ async def reconcile_model_registry_from_store() -> bool:
                 )
                 return False
             if _snapshot_age_seconds(header) > max_age_seconds:
+                if registry.applied_content_hash is not None:
+                    # This replica is serving state imported from (or persisted
+                    # to) the store, and that row is now past the staleness
+                    # cap: drop it so the bootstrap catalog becomes the floor
+                    # again instead of serving the expired catalog forever.
+                    # Leader-local refreshes that failed to persist carry no
+                    # applied hash and are intentionally kept.
+                    await registry.clear()
+                    get_account_selection_cache().invalidate()
+                    logger.warning(
+                        "Dropped applied model registry snapshot: persisted entry older than %ds "
+                        "(refreshed_at=%s); reverting to bootstrap floor",
+                        max_age_seconds,
+                        header.refreshed_at,
+                    )
+                    return False
                 logger.warning(
                     "Ignoring persisted model registry snapshot older than %ds (refreshed_at=%s)",
                     max_age_seconds,

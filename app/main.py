@@ -182,6 +182,70 @@ async def lifespan(app: FastAPI):
         # scheduler starts so a restarted replica serves the refreshed catalog
         # instead of the bootstrap floor. Never fails startup.
         await reconcile_model_registry_from_store()
+
+    from app.core.auth.api_key_cache import get_api_key_cache
+    from app.core.cache.invalidation import (
+        NAMESPACE_ACCOUNT_ROUTING,
+        NAMESPACE_ACCOUNT_SELECTION,
+        NAMESPACE_API_KEY,
+        NAMESPACE_FIREWALL,
+        NAMESPACE_MODEL_REGISTRY,
+        NAMESPACE_RESET_CREDITS,
+        NAMESPACE_SETTINGS,
+        CacheInvalidationPoller,
+        get_cache_invalidation_poller,
+        set_cache_invalidation_poller,
+    )
+    from app.core.middleware.firewall_cache import get_firewall_ip_cache
+    from app.modules.proxy.account_cache import get_account_selection_cache, get_routing_availability_cache
+    from app.modules.rate_limit_reset_credits.store import get_rate_limit_reset_credits_store
+
+    # The poller MUST be installed before the model scheduler starts: a first
+    # leader tick that persists a changed snapshot bumps the model_registry
+    # namespace through the global poller, and a not-yet-installed poller would
+    # silently drop that bump (followers would then wait for the refresh-tick
+    # backstop instead of the cache poll bound).
+    cache_poller = CacheInvalidationPoller(SessionLocal)
+    cache_poller.on_invalidation(NAMESPACE_API_KEY, get_api_key_cache().clear)
+    cache_poller.on_invalidation(NAMESPACE_FIREWALL, get_firewall_ip_cache().invalidate_all)
+    routing_availability_cache = get_routing_availability_cache()
+    # Remote-bump callbacks must be non-propagating variants: a propagating callback
+    # would re-bump on every observed bump and feedback-loop across replicas.
+    cache_poller.on_invalidation(NAMESPACE_ACCOUNT_ROUTING, routing_availability_cache.refresh_from_db)
+    cache_poller.on_invalidation(
+        NAMESPACE_ACCOUNT_SELECTION,
+        lambda: get_account_selection_cache().invalidate(propagate=False),
+    )
+    cache_poller.on_invalidation(
+        NAMESPACE_SETTINGS,
+        lambda: get_settings_cache().invalidate(propagate=False),
+    )
+    # The bus carries no payload, so a peer redeem clears this replica's whole
+    # reset-credits store; the refresh scheduler repopulates it on its next tick.
+    cache_poller.on_invalidation(NAMESPACE_RESET_CREDITS, get_rate_limit_reset_credits_store().invalidate)
+    if settings.model_registry_enabled:
+        from app.core.openai.model_registry_store import reconcile_model_registry_from_store
+
+        cache_poller.on_invalidation(NAMESPACE_MODEL_REGISTRY, reconcile_model_registry_from_store)
+    set_cache_invalidation_poller(cache_poller)
+    try:
+        # Seed baseline namespace versions before loading the routing snapshot
+        # and before serving traffic, so a peer bump committed after this point
+        # is observed as a change on the first poll instead of being silently
+        # acknowledged as pre-existing state.
+        await cache_poller.initialize()
+    except Exception:
+        # Degrades to first-poll-baselines: a peer bump landing before the first
+        # poll may be acknowledged without invalidating until the fallback TTL.
+        logger.warning("cache invalidation baseline seed failed", exc_info=True)
+    try:
+        await routing_availability_cache.refresh_from_db()
+    except Exception:
+        # Unseeded snapshot degrades to local-mark semantics; the next
+        # account_routing bump retries the refresh via the poller callback.
+        logger.warning("initial routing availability snapshot refresh failed", exc_info=True)
+    await cache_poller.start()
+
     usage_scheduler = build_usage_refresh_scheduler()
     api_key_limit_reset_scheduler = build_api_key_limit_reset_scheduler()
     model_scheduler = build_model_refresh_scheduler()
@@ -295,64 +359,6 @@ async def lifespan(app: FastAPI):
             return
         await svc.register(iid, endpoint_base_url=bridge_endpoint_base_url)
 
-    from app.core.auth.api_key_cache import get_api_key_cache
-    from app.core.cache.invalidation import (
-        NAMESPACE_ACCOUNT_ROUTING,
-        NAMESPACE_ACCOUNT_SELECTION,
-        NAMESPACE_API_KEY,
-        NAMESPACE_FIREWALL,
-        NAMESPACE_MODEL_REGISTRY,
-        NAMESPACE_RESET_CREDITS,
-        NAMESPACE_SETTINGS,
-        CacheInvalidationPoller,
-        get_cache_invalidation_poller,
-        set_cache_invalidation_poller,
-    )
-    from app.core.middleware.firewall_cache import get_firewall_ip_cache
-    from app.modules.proxy.account_cache import get_account_selection_cache, get_routing_availability_cache
-    from app.modules.rate_limit_reset_credits.store import get_rate_limit_reset_credits_store
-
-    cache_poller = CacheInvalidationPoller(SessionLocal)
-    cache_poller.on_invalidation(NAMESPACE_API_KEY, get_api_key_cache().clear)
-    cache_poller.on_invalidation(NAMESPACE_FIREWALL, get_firewall_ip_cache().invalidate_all)
-    routing_availability_cache = get_routing_availability_cache()
-    # Remote-bump callbacks must be non-propagating variants: a propagating callback
-    # would re-bump on every observed bump and feedback-loop across replicas.
-    cache_poller.on_invalidation(NAMESPACE_ACCOUNT_ROUTING, routing_availability_cache.refresh_from_db)
-    cache_poller.on_invalidation(
-        NAMESPACE_ACCOUNT_SELECTION,
-        lambda: get_account_selection_cache().invalidate(propagate=False),
-    )
-    cache_poller.on_invalidation(
-        NAMESPACE_SETTINGS,
-        lambda: get_settings_cache().invalidate(propagate=False),
-    )
-    # The bus carries no payload, so a peer redeem clears this replica's whole
-    # reset-credits store; the refresh scheduler repopulates it on its next tick.
-    cache_poller.on_invalidation(NAMESPACE_RESET_CREDITS, get_rate_limit_reset_credits_store().invalidate)
-    if settings.model_registry_enabled:
-        from app.core.openai.model_registry_store import reconcile_model_registry_from_store
-
-        cache_poller.on_invalidation(NAMESPACE_MODEL_REGISTRY, reconcile_model_registry_from_store)
-    set_cache_invalidation_poller(cache_poller)
-    try:
-        # Seed baseline namespace versions before loading the routing snapshot
-        # and before serving traffic, so a peer bump committed after this point
-        # is observed as a change on the first poll instead of being silently
-        # acknowledged as pre-existing state.
-        await cache_poller.initialize()
-    except Exception:
-        # Degrades to first-poll-baselines: a peer bump landing before the first
-        # poll may be acknowledged without invalidating until the fallback TTL.
-        logger.warning("cache invalidation baseline seed failed", exc_info=True)
-    try:
-        await routing_availability_cache.refresh_from_db()
-    except Exception:
-        # Unseeded snapshot degrades to local-mark semantics; the next
-        # account_routing bump retries the refresh via the poller callback.
-        logger.warning("initial routing availability snapshot refresh failed", exc_info=True)
-    await cache_poller.start()
-
     ring_service: RingMembershipService | None = None
     instance_id: str | None = None
     heartbeat_task: asyncio.Task[None] | None = None
@@ -410,15 +416,17 @@ async def lifespan(app: FastAPI):
         if metrics_server is not None:
             metrics_server.should_exit = True
 
-        await cache_poller.stop()
-        if get_cache_invalidation_poller() is cache_poller:
-            # A stopped poller must not keep receiving propagation requests.
-            set_cache_invalidation_poller(None)
         await quota_planner_scheduler.stop()
         await auth_guardian_scheduler.stop()
         await automations_scheduler.stop()
         await sticky_session_cleanup_scheduler.stop()
         await model_scheduler.stop()
+        # Stop the invalidation poller only after the model scheduler: a final
+        # leader tick may still bump through the installed poller.
+        await cache_poller.stop()
+        if get_cache_invalidation_poller() is cache_poller:
+            # A stopped poller must not keep receiving propagation requests.
+            set_cache_invalidation_poller(None)
         await api_key_limit_reset_scheduler.stop()
         await usage_scheduler.stop()
         await rate_limit_reset_credits_scheduler.stop()

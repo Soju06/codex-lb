@@ -4,7 +4,7 @@
 
 ### Requirement: Refreshed model catalog is replica-coherent
 
-The leader refresh cycle SHALL persist the complete registry state (models, plan maps, per-account tier maps, suppression set, authoritative flags, metadata retention state, and the refresh wall-clock timestamp) to the single-row `model_registry_snapshot` table and SHALL bump the `model_registry` cache-invalidation namespace only after the persist commits (write-then-bump). The payload write and the bump SHALL be skipped when the serialized content hash is unchanged from the last persisted state; the stored `refreshed_at` timestamp SHALL still be advanced so snapshot age reflects the leader's latest successful refresh. Every replica MUST apply a newly persisted snapshot within the cache-invalidation poll bound and MUST invalidate its local account-selection cache on apply; after apply, `/v1/models`, plan gating (`plan_types_for_model`), suppression (`is_suppressed_model`), and per-account service-tier routing on a non-leader MUST be identical to the leader. A non-leader refresh tick MUST NOT fetch the upstream catalog and SHALL instead reconcile from the persisted snapshot when the stored snapshot header differs from the last applied one (backstop for a lost invalidation bump). A leader catalog clear SHALL persist an explicit cleared marker and bump, so followers revert to the bootstrap floor rather than serving a withdrawn catalog.
+The leader refresh cycle SHALL persist the complete registry state (models, plan maps, per-account tier maps, suppression set, authoritative flags, metadata retention state, and the refresh wall-clock timestamp) to the single-row `model_registry_snapshot` table and SHALL bump the `model_registry` cache-invalidation namespace only after the persist commits (write-then-bump). The payload write and the bump SHALL be skipped when the serialized content hash is unchanged from the last persisted state; the stored `refreshed_at` timestamp SHALL still be advanced so snapshot age reflects the leader's latest successful refresh. Every replica MUST apply a newly persisted snapshot within the cache-invalidation poll bound and MUST invalidate its local account-selection cache on apply; after apply, `/v1/models`, plan gating (`plan_types_for_model`), suppression (`is_suppressed_model`), and per-account service-tier routing on a non-leader MUST be identical to the leader. A non-leader refresh tick MUST NOT fetch the upstream catalog and SHALL instead reconcile from the persisted snapshot when the stored snapshot header differs from the last applied one (backstop for a lost invalidation bump). A leader catalog clear SHALL persist an explicit cleared marker and bump, so followers revert to the bootstrap floor rather than serving a withdrawn catalog. Every replica SHALL install its `model_registry` cache-invalidation callback (the global invalidation poller) before starting the model refresh scheduler, so a first leader tick that persists a changed snapshot cannot silently drop its bump.
 
 #### Scenario: Follower serves the refreshed catalog on /v1/models
 
@@ -43,9 +43,15 @@ The leader refresh cycle SHALL persist the complete registry state (models, plan
 - **WHEN** a non-leader replica's refresh tick runs
 - **THEN** it performs no upstream model-catalog fetch, regardless of whether it reconciled from the store
 
+#### Scenario: First leader bump is not dropped at startup
+
+- **GIVEN** a replica is starting up
+- **WHEN** the model refresh scheduler starts
+- **THEN** the global cache-invalidation poller with the `model_registry` callback is already installed, so an immediate leader persist-and-bump reaches followers within the poll bound
+
 ### Requirement: Persisted model catalog survives restart and version skew
 
-At startup every replica SHALL load the persisted model-registry snapshot into its in-memory registry before background schedulers start, provided the snapshot's age is within `model_registry_snapshot_max_age_seconds` (default 86400); an older snapshot SHALL be ignored so the bootstrap catalog remains the floor. A snapshot whose `schema_version` differs from the running code's codec version SHALL be ignored with a warning and MUST NOT fail startup or the invalidation poller (rolling-deploy safety). A persist failure on the leader SHALL degrade to leader-local refresh behavior with a warning (the in-memory registry is still updated and persistence is retried next cycle). Imported snapshots SHALL preserve refresh-TTL semantics by deriving the monotonic `fetched_at` from the persisted wall-clock `refreshed_at`.
+At startup every replica SHALL load the persisted model-registry snapshot into its in-memory registry before background schedulers start, provided the snapshot's age is within `model_registry_snapshot_max_age_seconds` (default 86400); an older snapshot SHALL be ignored so the bootstrap catalog remains the floor. A replica that has already applied a persisted snapshot SHALL drop it — reverting to the bootstrap floor and invalidating its local account-selection cache — when a reconcile observes that the stored snapshot's age now exceeds the cap, so an expired catalog is not served indefinitely. A snapshot whose `schema_version` differs from the running code's codec version SHALL be ignored with a warning and MUST NOT fail startup or the invalidation poller (rolling-deploy safety). A persist failure on the leader SHALL degrade to leader-local refresh behavior with a warning (the in-memory registry is still updated and persistence is retried next cycle) and SHALL reset the replica's applied-snapshot marker, so a later reconcile — for example after losing leadership — reloads the persisted snapshot instead of treating it as already applied. Imported snapshots SHALL preserve refresh-TTL semantics by deriving the monotonic `fetched_at` from the persisted wall-clock `refreshed_at`.
 
 #### Scenario: Restart loads the persisted catalog before the first refresh
 
@@ -71,6 +77,20 @@ At startup every replica SHALL load the persisted model-registry snapshot into i
 - **GIVEN** the leader's registry refresh succeeded but persisting the snapshot fails
 - **WHEN** the refresh cycle completes
 - **THEN** the leader's in-memory registry still serves the refreshed catalog and a warning is logged
+- **AND** the replica's applied-snapshot marker is reset so reconciliation no longer treats the store's row as already applied
+
+#### Scenario: Former leader converges back to the persisted snapshot after a failed persist
+
+- **GIVEN** a replica applied persisted snapshot hash H, then won leadership, refreshed its in-memory registry, and failed to persist the refreshed state
+- **WHEN** the replica loses leadership and its next reconcile runs (poller callback or refresh-tick backstop)
+- **THEN** it reloads the store's snapshot H and stops serving the unpublished catalog
+
+#### Scenario: Applied snapshot is dropped once the store entry expires
+
+- **GIVEN** a follower applied a persisted snapshot while it was fresh
+- **AND** the leader stops advancing `refreshed_at` until the stored snapshot's age exceeds `model_registry_snapshot_max_age_seconds`
+- **WHEN** the follower's next reconcile runs
+- **THEN** the follower drops the applied snapshot, reverts to the bootstrap catalog floor, and invalidates its account-selection cache
 
 ## MODIFIED Requirements
 

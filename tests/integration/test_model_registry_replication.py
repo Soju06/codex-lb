@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import dataclasses
 import time
+from datetime import timedelta
 
 import pytest
 from sqlalchemy import select, text
@@ -117,12 +118,30 @@ async def _stale_leader_export() -> ModelRegistryExport:
     return ModelRegistryExport(snapshot=stale_snapshot, metadata_models=None)
 
 
+async def _add_active_account(account_id: str, *, plan_type: str = "pro") -> None:
+    encryptor = TokenEncryptor()
+    async with SessionLocal() as session:
+        session.add(
+            Account(
+                id=account_id,
+                email=f"{account_id}@example.com",
+                plan_type=plan_type,
+                access_token_encrypted=encryptor.encrypt("access"),
+                refresh_token_encrypted=encryptor.encrypt("refresh"),
+                id_token_encrypted=encryptor.encrypt("id"),
+                last_refresh=utcnow(),
+                status=AccountStatus.ACTIVE,
+            )
+        )
+        await session.commit()
+
+
 class _StubLeaderElection:
     def __init__(self, *, leader: bool) -> None:
-        self._leader = leader
+        self.leader = leader
 
     async def try_acquire(self) -> bool:
-        return self._leader
+        return self.leader
 
 
 async def test_bus_propagated_refresh_is_visible_on_follower_v1_models(async_client) -> None:
@@ -219,21 +238,7 @@ async def test_non_leader_tick_skips_already_applied_snapshot(db_setup, monkeypa
 
 async def test_leader_refresh_persists_then_bumps(db_setup, monkeypatch) -> None:
     del db_setup
-    encryptor = TokenEncryptor()
-    async with SessionLocal() as session:
-        session.add(
-            Account(
-                id="acc-leader",
-                email="leader@example.com",
-                plan_type="pro",
-                access_token_encrypted=encryptor.encrypt("access"),
-                refresh_token_encrypted=encryptor.encrypt("refresh"),
-                id_token_encrypted=encryptor.encrypt("id"),
-                last_refresh=utcnow(),
-                status=AccountStatus.ACTIVE,
-            )
-        )
-        await session.commit()
+    await _add_active_account("acc-leader")
 
     model = _make_upstream_model(REPLICA_SLUG)
 
@@ -257,21 +262,7 @@ async def test_leader_refresh_persists_then_bumps(db_setup, monkeypatch) -> None
 
 async def test_leader_persist_failure_keeps_refreshed_catalog(db_setup, monkeypatch) -> None:
     del db_setup
-    encryptor = TokenEncryptor()
-    async with SessionLocal() as session:
-        session.add(
-            Account(
-                id="acc-leader",
-                email="leader@example.com",
-                plan_type="pro",
-                access_token_encrypted=encryptor.encrypt("access"),
-                refresh_token_encrypted=encryptor.encrypt("refresh"),
-                id_token_encrypted=encryptor.encrypt("id"),
-                last_refresh=utcnow(),
-                status=AccountStatus.ACTIVE,
-            )
-        )
-        await session.commit()
+    await _add_active_account("acc-leader")
 
     model = _make_upstream_model(REPLICA_SLUG)
 
@@ -293,8 +284,58 @@ async def test_leader_persist_failure_keeps_refreshed_catalog(db_setup, monkeypa
     snapshot = registry.get_snapshot()
     assert snapshot is not None
     assert REPLICA_SLUG in snapshot.models
+    # The in-memory state diverges from the store, so the applied-hash marker
+    # must be reset for later reconciles to converge back to the store.
+    assert registry.applied_content_hash is None
     assert await _model_registry_bus_version() is None
     assert await _snapshot_row() is None
+
+
+async def test_former_leader_reconverges_from_store_after_persist_failure(db_setup, monkeypatch) -> None:
+    """A replica that applied persisted hash H, then won leadership, refreshed
+    locally, and failed to persist must reconcile back to the store's snapshot
+    once it loses leadership (instead of serving the unpublished catalog)."""
+    del db_setup
+    store_hash = await _leader_persist(await _refreshed_leader_export())
+    assert await reconcile_model_registry_from_store() is True
+    registry = get_model_registry()
+    assert registry.applied_content_hash == store_hash
+
+    await _add_active_account("acc-leader")
+    local_model = _make_upstream_model("gpt-leader-local")
+
+    async def _stub_fetch(candidates, encryptor, accounts_repo=None):
+        return scheduler_module._FetchResult(
+            models=[local_model],
+            account_models={"acc-leader": ("pro", [local_model])},
+        )
+
+    async def _failing_persist(*args, **kwargs):
+        raise RuntimeError("database unavailable")
+
+    election = _StubLeaderElection(leader=True)
+    monkeypatch.setattr(scheduler_module, "_get_leader_election", lambda: election)
+    monkeypatch.setattr(scheduler_module, "_fetch_with_failover", _stub_fetch)
+    monkeypatch.setattr(scheduler_module, "persist_registry_snapshot", _failing_persist)
+
+    scheduler = scheduler_module.ModelRefreshScheduler(interval_seconds=300, enabled=True)
+    await scheduler._refresh_once()
+
+    snapshot = registry.get_snapshot()
+    assert snapshot is not None
+    assert "gpt-leader-local" in snapshot.models
+    assert registry.applied_content_hash is None
+
+    # Lose leadership: the non-leader tick backstop must converge back to the
+    # persisted snapshot the other replicas are serving.
+    election.leader = False
+    await scheduler._refresh_once()
+
+    assert registry.applied_content_hash == store_hash
+    snapshot = registry.get_snapshot()
+    assert snapshot is not None
+    assert REPLICA_SLUG in snapshot.models
+    assert "gpt-leader-local" not in snapshot.models
 
 
 async def test_unchanged_content_touches_refreshed_at_without_rewrite(db_setup) -> None:
@@ -346,6 +387,32 @@ async def test_startup_loads_persisted_snapshot_before_first_refresh(app_instanc
     assert REPLICA_SLUG in {model["id"] for model in response.json()["data"]}
 
 
+async def test_model_scheduler_starts_after_invalidation_poller_installed(app_instance, monkeypatch) -> None:
+    """The first leader tick can persist-and-bump immediately; the global
+    cache-invalidation poller must already be installed when the model
+    scheduler starts or that bump is silently dropped."""
+    import app.main as main_module
+    from app.core.cache.invalidation import get_cache_invalidation_poller
+
+    poller_installed_at_start: list[bool] = []
+
+    class _ProbeScheduler:
+        async def start(self) -> None:
+            poller_installed_at_start.append(get_cache_invalidation_poller() is not None)
+
+        async def stop(self) -> None:
+            return None
+
+    monkeypatch.setattr(invalidation_module, "_poller", None)
+    monkeypatch.setattr(get_settings(), "model_registry_enabled", True)
+    monkeypatch.setattr(main_module, "build_model_refresh_scheduler", lambda: _ProbeScheduler())
+
+    async with app_instance.router.lifespan_context(app_instance):
+        pass
+
+    assert poller_installed_at_start == [True]
+
+
 async def test_snapshot_older_than_staleness_cap_is_ignored(db_setup) -> None:
     del db_setup
     await _leader_persist(await _stale_leader_export())
@@ -354,6 +421,32 @@ async def test_snapshot_older_than_staleness_cap_is_ignored(db_setup) -> None:
 
     assert applied is False
     assert get_model_registry().get_snapshot() is None
+
+
+async def test_expired_store_entry_drops_already_applied_snapshot(db_setup) -> None:
+    """A follower that applied a snapshot while fresh must revert to the
+    bootstrap floor once the store entry exceeds the staleness cap (leader
+    stopped confirming the catalog), not keep serving it indefinitely."""
+    del db_setup
+    await _leader_persist(await _refreshed_leader_export())
+    assert await reconcile_model_registry_from_store() is True
+    registry = get_model_registry()
+    assert registry.get_snapshot() is not None
+
+    max_age = get_settings().model_registry_snapshot_max_age_seconds
+    async with SessionLocal() as session:
+        await session.execute(
+            text("UPDATE model_registry_snapshot SET refreshed_at = :ts WHERE id = 1"),
+            {"ts": utcnow() - timedelta(seconds=max_age + 3600)},
+        )
+        await session.commit()
+
+    assert await reconcile_model_registry_from_store() is False
+    assert registry.get_snapshot() is None  # bootstrap floor restored
+    assert registry.applied_content_hash is None
+    # Idempotent: reconciling the same expired row again is a log-only no-op.
+    assert await reconcile_model_registry_from_store() is False
+    assert registry.get_snapshot() is None
 
 
 async def test_schema_version_skew_is_ignored_without_error(db_setup) -> None:

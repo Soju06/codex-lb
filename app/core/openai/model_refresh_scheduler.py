@@ -150,7 +150,10 @@ async def _persist_registry_state_and_bump() -> None:
 
     A persist failure degrades to leader-local refresh behavior: the in-memory
     registry already holds the refreshed catalog and persistence is retried on
-    the next cycle.
+    the next cycle. The applied-hash marker is reset on failure because the
+    in-memory state now diverges from the persisted row; leaving the old hash
+    in place would make a later reconcile (e.g. after losing leadership) treat
+    the store's row as already applied and never converge back to it.
     """
     registry = get_model_registry()
     try:
@@ -164,6 +167,7 @@ async def _persist_registry_state_and_bump() -> None:
             )
         registry.note_applied_content_hash(encoded.content_hash)
     except Exception:
+        registry.note_applied_content_hash(None)
         logger.warning(
             "Model registry snapshot persist failed; serving leader-local refresh until next cycle",
             exc_info=True,

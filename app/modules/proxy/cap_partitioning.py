@@ -7,20 +7,22 @@ no per-request database I/O: every replica computes `floor(cap / R)` plus one
 extra slot when its rank falls below `cap mod R`.
 
 Membership changes are adopted with hysteresis keyed on whether this
-replica's share could actually grow for some cap. A rank's share is monotone
-non-increasing in both the replica count and the rank, so a count decrease or a
-rank decrease *can* grow it — but a rank decrease paired with a large enough
-count increase shrinks it instead (more members sort ahead and consume the
-remainder), so the decision compares the prospective share against the current
-one rather than trusting the rank direction: some cap's share grows exactly
-when the count shrinks or, at an equal-or-larger count, ``replica_count + rank``
-decreases. Changes that cannot grow any cap's share are adopted on the next
-refresh, while any potentially share-growing change is adopted only after that
-exact pending partition (count and rank) has been observed continuously for a
-configured stability window — a different pending partition restarts the
-window, and a failed membership read also restarts it since an observation gap
-must not count as continuous — so neither a missed heartbeat, a rolling
-replacement, nor a read outage can transiently inflate a survivor's share.
+replica's share could actually grow. A rank's share is monotone non-increasing
+in both the replica count and the rank, but neither direction alone decides
+growth: a count decrease can be outweighed by a rank increase (more members
+sort ahead and consume the remainder), and a rank decrease can be outweighed by
+a large enough count increase. Rather than reason about count/rank directions,
+the decision compares the *prospective* share against the *current* share for
+each configured cap directly — using the same ``partition_cap`` share formula
+the admission path enforces — and defers only when some configured cap's share
+would strictly grow. Any change whose every configured-cap share holds or
+shrinks is safe toward upstream and adopted on the next refresh; a
+share-growing change is adopted only after that exact pending partition (count
+and rank) has been observed continuously for a configured stability window — a
+different pending partition restarts the window, and a failed membership read
+also restarts it since an observation gap must not count as continuous — so
+neither a missed heartbeat, a rolling replacement, nor a read outage can
+transiently inflate a survivor's share.
 """
 
 from __future__ import annotations
@@ -80,9 +82,14 @@ class CapPartitionHolder:
         active_instance_ids: Sequence[str],
         self_instance_id: str,
         *,
+        configured_caps: Sequence[int],
         scale_down_seconds: float,
     ) -> bool:
         """Feed a fresh active-member list; return True when the adopted partition changed.
+
+        ``configured_caps`` are the cluster-wide per-account caps currently in
+        effect (response-create and stream limits); the share-growth decision is
+        made against those caps only, never against an arbitrary cap.
 
         The observing replica is always counted even when its own ring row is
         missing or stale, so startup and self-heartbeat gaps degrade to fewer
@@ -93,7 +100,7 @@ class CapPartitionHolder:
         if observed == self._adopted:
             self._clear_pending()
             return False
-        if not self._could_grow_share(observed):
+        if not self._could_grow_share(observed, configured_caps):
             # Every cap share shrinks or stays put, which is safe toward
             # upstream — adopt now.
             self._adopted = observed
@@ -112,31 +119,28 @@ class CapPartitionHolder:
             return True
         return False
 
-    def _could_grow_share(self, observed: CapPartition) -> bool:
-        """Whether adopting ``observed`` could grow this replica's share of *some* cap.
+    def _could_grow_share(self, observed: CapPartition, configured_caps: Sequence[int]) -> bool:
+        """Whether adopting ``observed`` grows this replica's share of any configured cap.
 
-        A rank's share is the round-robin count ``ceil((cap - rank) / R)``
-        (floored at one slot), monotone non-increasing in both the replica
-        count and the rank. A rank *decrease* alone can grow the share, but a
-        rank decrease paired with a large enough count *increase* shrinks it
-        instead — more members now sort ahead and consume the remainder — so a
-        plain rank-direction heuristic wrongly defers genuine shrinks and keeps
-        a too-high share.
-
-        The exact condition (verified by exhaustive comparison against the
-        share formula over all caps) is: some cap's share grows iff the count
-        shrinks, or — at an equal-or-larger count — the rank moves early enough
-        that ``R + rank`` decreases. When the count shrinks the largest caps
-        always grow regardless of rank; otherwise the first cap at which this
-        replica's share would tick up is ``R' + rank' + 1``, and it can exceed
-        the old share only while the old share is still one slot there, i.e.
-        exactly when ``R' + rank' < R + rank``. Any change that cannot grow any
-        cap's share (a later rank, or a count increase that outweighs the rank
-        move) is safe toward upstream and adopted immediately.
+        The share is monotone non-increasing in both the replica count and the
+        rank, but neither direction alone decides growth: a count decrease can
+        be outweighed by a rank increase, and a rank decrease by a large enough
+        count increase. Reasoning about count/rank directions therefore either
+        over-defers genuine shrinks (a count decrease that a rank increase turns
+        into a smaller configured share) or under-defers genuine growth, so the
+        decision compares the prospective share against the current share for
+        each configured cap using the same ``partition_cap`` formula the
+        admission path enforces. Adopting can only be unsafe toward the
+        cluster-wide cap when some configured cap's share strictly grows; every
+        other change (each configured cap's share holds or shrinks) is safe and
+        adopted immediately.
         """
-        if observed.replica_count < self._adopted.replica_count:
-            return True
-        return observed.replica_count + observed.rank < self._adopted.replica_count + self._adopted.rank
+        adopted = self._adopted
+        return any(
+            partition_cap(cap, observed.replica_count, observed.rank)
+            > partition_cap(cap, adopted.replica_count, adopted.rank)
+            for cap in configured_caps
+        )
 
     def note_failed_read(self) -> None:
         """Restart the stability window after a failed membership read.
@@ -164,6 +168,18 @@ def get_cap_partition() -> CapPartition:
     return _holder.current
 
 
+def _configured_caps(settings: object) -> tuple[int, ...]:
+    """Return the cluster-wide per-account caps that gate share-growth hysteresis.
+
+    These mirror the response-create and stream limits enforced on the
+    admission path so the hysteresis reasons about the shares actually in force
+    rather than an arbitrary cap.
+    """
+    response_cap = max(0, int(getattr(settings, "proxy_account_response_create_limit", 4)))
+    stream_cap = max(0, int(getattr(settings, "proxy_account_stream_limit", 8)))
+    return (response_cap, stream_cap)
+
+
 def observe_ring_members(active_instance_ids: Sequence[str], self_instance_id: str) -> None:
     """Refresh the process-wide partition from an active bridge-ring member list."""
     settings = get_settings()
@@ -174,6 +190,7 @@ def observe_ring_members(active_instance_ids: Sequence[str], self_instance_id: s
     changed = _holder.observe_members(
         active_instance_ids,
         self_instance_id,
+        configured_caps=_configured_caps(settings),
         scale_down_seconds=scale_down_seconds,
     )
     current = _holder.current

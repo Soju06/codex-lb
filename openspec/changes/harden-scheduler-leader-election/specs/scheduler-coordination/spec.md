@@ -4,7 +4,7 @@
 
 ### Requirement: Singleton schedulers gate on the shared leader lease
 
-The usage-refresh, api-key limit reset, model refresh, sticky-session cleanup, quota planner, auth guardian, and automations schedulers MUST execute leader-gated work only after acquiring the `scheduler_leader` lease via the leader election's `run_if_leader` gate.
+The usage-refresh, api-key limit reset, model refresh, sticky-session cleanup, quota planner, auth guardian, automations, data-retention, and account usage-rollup schedulers MUST execute leader-gated work only after acquiring the `scheduler_leader` lease via the leader election's `run_if_leader` gate. Because a data-retention prune or a usage-rollup fold backfill can iterate over many batches and outlive the lease TTL, they MUST NOT gate on a one-time `try_acquire`: the heartbeat-renewed `run_if_leader` gate cancels the in-flight pass on lease loss so a replica that stops being leader mid-pass stops acting on the shared tables.
 
 Because a single shared leader-election object arbitrates every singleton scheduler on a replica, a lease acquisition failure caused by a transient database error MUST NOT demote a lease this instance already holds whose locally tracked deadline has not yet passed. One scheduler tick's failed `try_acquire` MUST NOT clear the shared leadership flag out from under another scheduler's in-progress leader-gated work. Demotion on acquisition MUST be reserved for an authoritative non-owner result (affected rowcount 0) or an acquisition failure observed after the held lease's local deadline has passed.
 

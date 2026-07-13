@@ -294,11 +294,6 @@ async def lifespan(app: FastAPI):
             logger.warning("Drain timeout reached, proceeding with shutdown")
 
         proxy_service = getattr(app.state, "proxy_service", None)
-        if proxy_service is not None and hasattr(proxy_service, "drain_persistence_tasks"):
-            try:
-                await proxy_service.drain_persistence_tasks(timeout_seconds=settings.shutdown_drain_timeout_seconds)
-            except Exception:
-                logger.warning("Failed to drain proxy persistence tasks during shutdown", exc_info=True)
         if proxy_service is not None and hasattr(proxy_service, "mark_http_bridge_draining"):
             try:
                 await proxy_service.mark_http_bridge_draining()
@@ -309,6 +304,14 @@ async def lifespan(app: FastAPI):
                 await proxy_service.close_all_http_bridge_sessions()
             except Exception:
                 logger.warning("Failed to close HTTP bridge sessions during shutdown", exc_info=True)
+        # Drain AFTER the bridge teardown: failing a bridge's pending
+        # requests writes their request logs, which enqueues more
+        # persistence tasks that this drain must cover.
+        if proxy_service is not None and hasattr(proxy_service, "drain_persistence_tasks"):
+            try:
+                await proxy_service.drain_persistence_tasks(timeout_seconds=settings.shutdown_drain_timeout_seconds)
+            except Exception:
+                logger.warning("Failed to drain proxy persistence tasks during shutdown", exc_info=True)
 
         # Cancel heartbeat and age the shared ring row near expiry.
         if heartbeat_task is not None:

@@ -19400,10 +19400,10 @@ async def test_stream_api_key_background_settlement_failure_falls_back_to_releas
     assert settled is True
     await started.wait()
     release_finalize.set()
-    for _ in range(50):
-        if not service._background_cleanup_tasks:
-            break
-        await asyncio.sleep(0)
+    # The failed settlement's done callback schedules the release as a
+    # SECOND-generation task; a single-snapshot drain would miss it, so the
+    # drain must loop until the tracked sets are stable.
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
 
     assert service._background_cleanup_tasks == set()
     assert released == ["resv_stream_failed_background"]

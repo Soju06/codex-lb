@@ -82,6 +82,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _log_http_bridge_event,
     _make_http_bridge_session_header_fallback_key,
     _make_http_bridge_session_key,
+    _proxy_admission_wait_timeout_seconds,
     _record_bridge_reattach,
     _record_continuity_fail_closed,
     _release_http_bridge_unanchored_handoff,
@@ -254,8 +255,18 @@ def _http_bridge_capacity_wait_plan(
     remaining_budget_seconds = max(0.0, request_deadline - _service_time().monotonic())
     if remaining_budget_seconds <= 0:
         return None
-    _code, message = _proxy_error_code_message(exc)
-    return min(account_capacity_wait_seconds, remaining_budget_seconds), account_capacity_wait_seconds, message
+    code, message = _proxy_error_code_message(exc)
+    bounded_wait_seconds = min(account_capacity_wait_seconds, remaining_budget_seconds)
+    if code == "response_create_gate_timeout":
+        # Reserve the tail of the request budget for one final gate
+        # acquisition attempt instead of sleeping it away: a same-session
+        # turn may release the gate during those last seconds.
+        attempt_reserve_seconds = _proxy_admission_wait_timeout_seconds()
+        bounded_wait_seconds = min(
+            bounded_wait_seconds,
+            max(0.0, remaining_budget_seconds - attempt_reserve_seconds),
+        )
+    return bounded_wait_seconds, account_capacity_wait_seconds, message
 
 
 async def _iter_account_capacity_wait_sse(

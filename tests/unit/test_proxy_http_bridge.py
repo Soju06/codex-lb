@@ -970,6 +970,32 @@ def test_http_bridge_account_capacity_wait_treats_gate_timeout_as_recoverable() 
     )
 
 
+def test_http_bridge_capacity_wait_plan_reserves_final_gate_attempt(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        http_bridge_streaming_module,
+        "_proxy_admission_wait_timeout_seconds",
+        lambda settings=None: 10.0,
+    )
+    exc = http_bridge_helpers_module._http_bridge_startup_wait_timeout_error(
+        "http_bridge_response_create_gate",
+        code="response_create_gate_timeout",
+    )
+    now = time.monotonic()
+
+    plenty = http_bridge_streaming_module._http_bridge_capacity_wait_plan(exc, request_deadline=now + 120.0)
+    assert plenty is not None
+    assert plenty[0] == pytest.approx(
+        http_bridge_streaming_module._RESPONSE_CREATE_GATE_RETRY_SLEEP_SECONDS,
+        abs=0.5,
+    )
+
+    # With less budget left than the retry sleep, the plan reserves the tail
+    # for one final gate acquisition attempt instead of sleeping it away.
+    tail = http_bridge_streaming_module._http_bridge_capacity_wait_plan(exc, request_deadline=now + 8.0)
+    assert tail is not None
+    assert tail[0] == pytest.approx(0.0, abs=0.5)
+
+
 def test_http_bridge_account_capacity_wait_keeps_active_session_capacity_fail_fast() -> None:
     exc = ProxyResponseError(
         429,

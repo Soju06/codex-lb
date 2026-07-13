@@ -408,6 +408,82 @@ async def test_transient_refresh_failure_does_not_ack_routing_bump(db_setup, cap
     assert b_cache.is_unavailable(account_id) is True
 
 
+class _MarkMidRefreshSessionFactory:
+    """Session factory whose sessions add a local routing mark right after the
+    status SELECT returns, while refresh_from_db is still in flight.
+
+    This reproduces the lost-update race: the SELECT read a pre-pause ACTIVE
+    row, then the pause commits and mark_unavailable() runs before the refresh
+    finishes rebuilding the snapshot.
+    """
+
+    def __init__(self) -> None:
+        self.cache: RoutingAvailabilityCache | None = None
+        self.account_id = ""
+        self.armed = False
+
+    def __call__(self) -> AsyncSession:
+        return cast(AsyncSession, _MarkMidRefreshSession(SessionLocal(), self))
+
+
+class _MarkMidRefreshSession:
+    def __init__(self, inner: AsyncSession, factory: _MarkMidRefreshSessionFactory) -> None:
+        self._inner = inner
+        self._factory = factory
+
+    async def execute(self, *args, **kwargs):
+        result = await self._inner.execute(*args, **kwargs)
+        if self._factory.armed:
+            self._factory.armed = False
+            assert self._factory.cache is not None
+            self._factory.cache.mark_unavailable(self._factory.account_id)
+        return result
+
+    def __getattr__(self, name: str):
+        return getattr(self._inner, name)
+
+
+@pytest.mark.asyncio
+async def test_local_mark_during_inflight_refresh_survives(db_setup, poller_slot, monkeypatch) -> None:
+    """A local routing-unavailable mark added while a snapshot refresh is in
+    flight must not be dropped by that refresh's stale ACTIVE snapshot; the
+    bridge reuse gate must refuse the account immediately after the refresh."""
+    account_id = "acct-bus-mark-race"
+    await _insert_account(account_id)
+
+    factory = _MarkMidRefreshSessionFactory()
+    cache = RoutingAvailabilityCache(factory)
+    factory.cache = cache
+    factory.account_id = account_id
+    monkeypatch.setattr("app.modules.proxy.account_cache._routing_availability_cache", cache)
+    set_cache_invalidation_poller(CacheInvalidationPoller(SessionLocal))
+
+    await cache.refresh_from_db()  # seed (unarmed)
+    assert cache.is_unavailable(account_id) is False
+
+    # A refresh whose SELECT read the pre-pause ACTIVE row is still in flight
+    # when the permanent-failure mark lands; the stale snapshot must not
+    # filter the fresh mark away.
+    factory.armed = True
+    await cache.refresh_from_db()
+    assert cache.is_unavailable(account_id) is True
+
+    stale_session = _fake_bridge_session(_make_account(account_id, AccountStatus.ACTIVE))
+    assert _http_bridge_session_account_active(stale_session) is False
+
+    # Once the paused status is committed, later refreshes keep the account
+    # unavailable via the snapshot itself.
+    await _set_account_status(account_id, AccountStatus.PAUSED)
+    await cache.refresh_from_db()
+    assert cache.is_unavailable(account_id) is True
+
+    # Pre-existing marks are still cleared by a refresh that observes a
+    # committed routable status (reactivation on a peer).
+    await _set_account_status(account_id, AccountStatus.ACTIVE)
+    await cache.refresh_from_db()
+    assert cache.is_unavailable(account_id) is False
+
+
 class _BrokenSession:
     def in_transaction(self) -> bool:
         return False

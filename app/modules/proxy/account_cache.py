@@ -145,7 +145,12 @@ class RoutingAvailabilityCache:
 
         Local overlay marks whose committed status became routable again are dropped —
         this is what lets a reactivation or re-authentication served by another replica
-        clear this replica's marker without a restart.
+        clear this replica's marker without a restart. Only marks that already existed
+        when this refresh started are eligible to be dropped: a mark added while the
+        SELECT is in flight may not be reflected in the rows it read (the status commit
+        can land after the read), so filtering it against that snapshot would silently
+        lose the mark. Such marks are preserved and re-evaluated by the next refresh,
+        which the mark's own queued ``account_routing`` bump guarantees.
 
         Database errors propagate to the caller: when invoked as an
         ``account_routing`` invalidation callback the poller then leaves the
@@ -153,6 +158,7 @@ class RoutingAvailabilityCache:
         a transient failure cannot make a replica permanently miss a pause,
         deletion, or re-authentication.
         """
+        marks_before_refresh = frozenset(self._local_marks)
         factory = self._session_factory or SessionLocal
         session = factory()
         try:
@@ -164,7 +170,9 @@ class RoutingAvailabilityCache:
         self._local_marks = {
             account_id
             for account_id in self._local_marks
-            if (status := snapshot.get(account_id)) is None or status in _ROUTING_UNAVAILABLE_STATUSES
+            if account_id not in marks_before_refresh
+            or (status := snapshot.get(account_id)) is None
+            or status in _ROUTING_UNAVAILABLE_STATUSES
         }
 
     def reset(self) -> None:

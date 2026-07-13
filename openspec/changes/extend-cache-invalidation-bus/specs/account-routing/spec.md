@@ -13,7 +13,10 @@ clear the in-memory unavailable marker. The routing-unavailable state MUST be
 derived from persisted account status and MUST converge on every replica
 within the cache-invalidation bus bound (marks and clears both propagate);
 bridge-session reuse checks MUST NOT add per-request database reads; sessions
-pinned to a deleted account MUST NOT be reused on any replica.
+pinned to a deleted account MUST NOT be reused on any replica. A local
+unavailable mark set while a snapshot refresh is in flight MUST survive that
+refresh: a refresh MUST NOT clear marks it could not have observed as committed
+status when its database read started.
 
 #### Scenario: Stale bridge session is not reused after account becomes unavailable
 
@@ -36,6 +39,16 @@ pinned to a deleted account MUST NOT be reused on any replica.
 - **GIVEN** replica B holds a warm HTTP bridge session pinned to account A whose in-memory snapshot reads `ACTIVE`
 - **WHEN** account A is paused via a request served by replica A
 - **THEN** after the invalidation bus converges, replica B refuses to reuse the warm bridge session for account A
+
+#### Scenario: Local mark set during an in-flight snapshot refresh is preserved
+
+- **GIVEN** a routing snapshot refresh is in flight and its database read observed
+  account A as `ACTIVE` before a permanent failure was committed
+- **WHEN** account A is marked routing-unavailable locally before that refresh
+  finishes
+- **THEN** the completed refresh MUST NOT drop the local mark based on its stale
+  snapshot, and account A remains routing-unavailable on that replica until a
+  later refresh observes a committed routable status
 
 #### Scenario: Deletion on one replica stops bridge-session reuse on peers
 

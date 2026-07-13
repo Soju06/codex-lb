@@ -1868,7 +1868,17 @@ class _WebSocketMixin:
                     client_send_lock=client_send_lock,
                     websocket=websocket,
                     force_refresh=forced_refresh_account_id == account.id,
-                    can_transient_failover=not require_preferred_account and preferred_account_id is None,
+                    # Gate transient transport-level refresh failover on whether
+                    # the request is *genuinely pinned* (hard-required account:
+                    # session continuity or file pin), NOT merely on a preferred
+                    # account being set. A forced-refresh reconnect auth replay
+                    # sets both force_refresh_account_id and preferred_account_id
+                    # to the stale account even for movable requests, so keying
+                    # off preferred_account_id would wrongly strand a movable
+                    # request on the stale account when its refresh claim is held
+                    # by another replica. Hard-pinned requests
+                    # (require_preferred_account) still stay on their account.
+                    can_transient_failover=not require_preferred_account,
                 )
             except _WebSocketTransientRefreshFailover as failover:
                 # A transient, transport-level refresh failure (e.g. the

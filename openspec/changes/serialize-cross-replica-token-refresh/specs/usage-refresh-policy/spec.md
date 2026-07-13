@@ -77,7 +77,7 @@ A process that fails to acquire the refresh claim MUST wait by polling within a 
 
 When a proxy stream turn encounters this transient claim failure, the streaming retry loop MUST exclude the affected account and fail over to a different account rather than reselecting the claimed account until attempts are exhausted. This failover MUST apply to both the proactive freshness check on the first stream attempt (before any upstream 401) and the forced refresh on the post-401 recovery attempt. Before failing over, the loop MUST release the stream lease it already acquired for the skipped account so that account does not continue to consume one of its stream-concurrency slots for a stream that will never open.
 
-The WebSocket connect loop MUST apply the same failover for a transient, transport-level claim failure reaching the connect path (on both the proactive freshness check and the post-401 forced refresh): rather than surfacing a bogus 401 `invalid_api_key`, it MUST release the skipped account's already-acquired stream lease, exclude the account, and reselect a healthy account. This failover MUST NOT apply when the request is pinned to a preferred/required account. When every account attempt is exhausted by such transient claim failovers, the connect loop MUST emit a proper terminal error to the client (a 503/capacity-style upstream error, not a 401 `invalid_api_key` and not a silent no-op that leaves the client waiting).
+The WebSocket connect loop MUST apply the same failover for a transient, transport-level claim failure reaching the connect path (on both the proactive freshness check and the post-401 forced refresh): rather than surfacing a bogus 401 `invalid_api_key`, it MUST release the skipped account's already-acquired stream lease, exclude the account, and reselect a healthy account. This failover MUST be gated only on whether the request is *hard-pinned to a required account* — that is, session-continuity (a `previous_response_id` bound to a preferred account) or a file-required preferred account; it MUST NOT be suppressed merely because a *soft* preferred account is set. In particular, a forced-refresh reconnect auth replay sets the stale account as both the forced-refresh target and the preferred account, but a movable request (no session continuity, no file pin) MUST still exclude the stale account and fail over on a transient transport claim failure. Only a hard-pinned request MUST stay on its required account and surface the error there, preserving the account-ownership invariant for session-continuity and file-pinned requests. When every account attempt is exhausted by such transient claim failovers, the connect loop MUST emit a proper terminal error to the client (a 503/capacity-style upstream error, not a 401 `invalid_api_key` and not a silent no-op that leaves the client waiting).
 
 #### Scenario: Claim held by another replica past the wait cap
 
@@ -111,6 +111,24 @@ The WebSocket connect loop MUST apply the same failover for a transient, transpo
 - **THEN** the connect loop excludes that account and fails over to a healthy account
 - **AND** the excluded account's already-acquired stream lease is released before failover
 - **AND** the client receives the upstream response rather than a 401 `invalid_api_key`
+
+#### Scenario: Movable forced-refresh reconnect fails over on transient claim timeout
+
+- **GIVEN** a movable WebSocket responses request (no session-continuity `previous_response_id`, no file-required preferred account)
+- **AND** a reconnect auth replay has set the stale account as both the forced-refresh target and the (soft) preferred account
+- **WHEN** the forced refresh on that account raises the transient, transport-level claim error
+- **THEN** the connect loop excludes the stale account and fails over to a healthy account
+- **AND** the stale account's already-acquired stream lease is released before failover
+- **AND** the transient claim contention is never recorded as a permanent failure
+
+#### Scenario: Hard-pinned reconnect stays on its required account on transient claim timeout
+
+- **GIVEN** a hard-pinned WebSocket responses request (session-continuity `previous_response_id` bound to a preferred account, or a file-required preferred account)
+- **AND** a reconnect auth replay has set that required account as the forced-refresh target
+- **WHEN** the forced refresh on that account raises the transient, transport-level claim error
+- **THEN** the connect loop does NOT cross to another account
+- **AND** the error is surfaced on the pinned account rather than silently failing over
+- **AND** the transient claim contention is never recorded as a permanent failure
 
 #### Scenario: WebSocket connect exhausts every account on transient claim failovers
 

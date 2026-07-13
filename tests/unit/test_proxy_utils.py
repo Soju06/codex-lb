@@ -14072,6 +14072,206 @@ async def test_connect_proxy_websocket_fails_over_after_forced_refresh_transport
 
 
 @pytest.mark.asyncio
+async def test_connect_proxy_websocket_movable_forced_refresh_transient_error_fails_over(monkeypatch):
+    """Regression: a *movable* forced-refresh reconnect must fail over on a
+    transient transport RefreshError even though a (soft) preferred account is set.
+
+    On a WebSocket reconnect auth replay, ``_handle_precreated_websocket_auth_failure``
+    sets both ``force_refresh_account_id`` and ``preferred_account_id`` to the stale
+    account. For a movable request (no ``previous_response_id`` session continuity
+    and no file pin) ``require_preferred_account`` is False, so a transient,
+    transport-level RefreshError (e.g. ``refresh_claim_timeout``, another replica
+    holds the refresh claim) MUST exclude the stale account and fail over to a
+    healthy one. The transient-failover guard must key off genuine pinning
+    (``require_preferred_account``), NOT merely ``preferred_account_id`` being set.
+    """
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    first_account = _make_account("acc_ws_movable_stale")
+    second_account = _make_account("acc_ws_movable_healthy")
+    upstream = SimpleNamespace()
+    selected_accounts: list[str] = []
+    freshened: list[tuple[str, bool]] = []
+    opened_accounts: list[str] = []
+    released_lease_account_ids: list[str | None] = []
+    permanent_failures: list[tuple[str, str]] = []
+
+    async def fake_select_connect_account(self, deadline, *, request_state, exclude_account_ids, **_rest):
+        del self, deadline, _rest
+        for candidate in (first_account, second_account):
+            if candidate.id in exclude_account_ids:
+                continue
+            selected_accounts.append(candidate.id)
+            request_state.websocket_stream_lease = SimpleNamespace(account_id=candidate.id)
+            return candidate
+        return None
+
+    async def fake_ensure_fresh(account, *, force=False, timeout_seconds=None):
+        del timeout_seconds
+        freshened.append((account.id, force))
+        if account.id == first_account.id:
+            raise proxy_service.RefreshError(
+                "refresh_claim_timeout",
+                "refresh claim held by another replica",
+                False,
+                transport_error=True,
+            )
+        return account
+
+    async def fake_open_upstream(account, headers, *, timeout_seconds, request_state=None):
+        del headers, timeout_seconds, request_state
+        opened_accounts.append(account.id)
+        return upstream
+
+    async def spy_release_account_lease(lease):
+        released_lease_account_ids.append(getattr(lease, "account_id", None) if lease is not None else None)
+
+    async def fake_mark_permanent_failure(account, error_code):
+        permanent_failures.append((account.id, error_code))
+
+    monkeypatch.setattr(proxy_service.ProxyService, "_select_websocket_connect_account", fake_select_connect_account)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", fake_ensure_fresh)
+    monkeypatch.setattr(service, "_open_upstream_websocket_with_budget", fake_open_upstream)
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", spy_release_account_lease)
+    monkeypatch.setattr(service._load_balancer, "mark_permanent_failure", fake_mark_permanent_failure)
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_movable_stale",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        force_refresh_account_id=first_account.id,
+        preferred_account_id=first_account.id,
+    )
+    # Movable: no session continuity, no file pin.
+    assert request_state.previous_response_id is None
+    assert request_state.file_required_preferred_account is False
+
+    websocket_send = AsyncMock()
+    websocket = cast(WebSocket, SimpleNamespace(send_text=websocket_send))
+    selected_account, selected_upstream = await service._connect_proxy_websocket(
+        {},
+        sticky_key=None,
+        sticky_kind=None,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        model="gpt-5.1",
+        request_state=request_state,
+        api_key=None,
+        client_send_lock=anyio.Lock(),
+        websocket=websocket,
+    )
+
+    assert selected_account == second_account
+    assert selected_upstream is upstream
+    # The stale account was tried and excluded; the healthy one was reached.
+    assert selected_accounts == [first_account.id, second_account.id]
+    # No upstream opened for the transient-claim account.
+    assert opened_accounts == [second_account.id]
+    # The stale account's stream lease was released before failover.
+    assert first_account.id in released_lease_account_ids
+    # A transient claim timeout must never be recorded as a permanent failure.
+    assert permanent_failures == []
+    # A successful failover surfaces no client-facing error frame.
+    websocket_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_connect_proxy_websocket_pinned_forced_refresh_transient_error_stays_on_account(monkeypatch):
+    """Regression: a *hard-pinned* forced-refresh reconnect must NOT fail over.
+
+    When the request has session continuity (``previous_response_id`` set with a
+    preferred account) ``require_preferred_account`` is True, so a transient
+    transport RefreshError must stay on the pinned account and surface an error
+    rather than crossing to another account. This preserves the account-ownership
+    invariant for session-continuity/file-pinned requests.
+    """
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    pinned_account = _make_account("acc_ws_pinned_stale")
+    other_account = _make_account("acc_ws_pinned_other")
+    selected_accounts: list[str] = []
+    opened_accounts: list[str] = []
+    permanent_failures: list[tuple[str, str]] = []
+
+    async def fake_select_connect_account(self, deadline, *, request_state, exclude_account_ids, **_rest):
+        del self, deadline, _rest
+        for candidate in (pinned_account, other_account):
+            if candidate.id in exclude_account_ids:
+                continue
+            selected_accounts.append(candidate.id)
+            request_state.websocket_stream_lease = SimpleNamespace(account_id=candidate.id)
+            return candidate
+        return None
+
+    async def fake_ensure_fresh(account, *, force=False, timeout_seconds=None):
+        del force, timeout_seconds
+        # The pinned account's refresh claim is held transiently by a peer.
+        raise proxy_service.RefreshError(
+            "refresh_claim_timeout",
+            "refresh claim held by another replica",
+            False,
+            transport_error=True,
+        )
+
+    async def fake_open_upstream(account, headers, *, timeout_seconds, request_state=None):
+        del headers, timeout_seconds, request_state
+        opened_accounts.append(account.id)
+        raise AssertionError("pinned request must not open an upstream after a transient refresh error")
+
+    async def noop_release_account_lease(lease):
+        del lease
+
+    async def fake_mark_permanent_failure(account, error_code):
+        permanent_failures.append((account.id, error_code))
+
+    monkeypatch.setattr(proxy_service.ProxyService, "_select_websocket_connect_account", fake_select_connect_account)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", fake_ensure_fresh)
+    monkeypatch.setattr(service, "_open_upstream_websocket_with_budget", fake_open_upstream)
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", noop_release_account_lease)
+    monkeypatch.setattr(service._load_balancer, "mark_permanent_failure", fake_mark_permanent_failure)
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_pinned_stale",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        force_refresh_account_id=pinned_account.id,
+        preferred_account_id=pinned_account.id,
+        previous_response_id="resp_pinned_session",
+    )
+
+    websocket_send = AsyncMock()
+    websocket = cast(WebSocket, SimpleNamespace(send_text=websocket_send))
+    selected_account, selected_upstream = await service._connect_proxy_websocket(
+        {},
+        sticky_key=None,
+        sticky_kind=None,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        model="gpt-5.1",
+        request_state=request_state,
+        api_key=None,
+        client_send_lock=anyio.Lock(),
+        websocket=websocket,
+    )
+
+    # Hard-pinned request did NOT cross accounts: only the pinned account tried,
+    # no upstream opened, and the error surfaced on its own account.
+    assert selected_account is None
+    assert selected_upstream is None
+    assert selected_accounts == [pinned_account.id]
+    assert opened_accounts == []
+    assert other_account.id not in selected_accounts
+    # The transient error surfaced to the client (no silent cross-account failover).
+    websocket_send.assert_awaited()
+    # Transient claim contention must never be recorded as a permanent failure.
+    assert permanent_failures == []
+
+
+@pytest.mark.asyncio
 async def test_connect_proxy_websocket_cancellation_before_handoff_releases_stream_lease(monkeypatch):
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     account = _make_account("acc_ws_cancel_handoff")

@@ -399,7 +399,7 @@ async def test_fenced_out_renewal_evicts_local_session_and_raises_mismatch(
     # The local epoch must never adopt the foreign owner's epoch.
     assert session.durable_owner_epoch == 1
     await service._drain_http_bridge_background_cleanup_tasks(reason="test")
-    session.upstream.close.assert_awaited()
+    cast(Any, session.upstream).close.assert_awaited()
     service._load_balancer.release_account_lease.assert_awaited()
 
 
@@ -453,7 +453,7 @@ async def test_fenced_out_alias_write_evicts_local_session(monkeypatch: pytest.M
     assert session.closed is True
     assert session.key not in service._http_bridge_sessions
     await service._drain_http_bridge_background_cleanup_tasks(reason="test")
-    session.upstream.close.assert_awaited()
+    cast(Any, session.upstream).close.assert_awaited()
     service._load_balancer.release_account_lease.assert_awaited()
 
 
@@ -527,8 +527,8 @@ async def test_reconcile_closes_fenced_out_sessions_and_keeps_owned(
     assert service._http_bridge_sessions[owned.key] is owned
     assert owned.closed is False
     await service._drain_http_bridge_background_cleanup_tasks(reason="test")
-    fenced.upstream.close.assert_awaited()
-    owned.upstream.close.assert_not_awaited()
+    cast(Any, fenced.upstream).close.assert_awaited()
+    cast(Any, owned.upstream).close.assert_not_awaited()
 
 
 @pytest.mark.asyncio

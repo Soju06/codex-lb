@@ -6,9 +6,9 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime
 from hashlib import sha256
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import CursorResult, delete, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -169,7 +169,10 @@ class RingMembershipService:
         """Delete ring rows whose heartbeat predates the cutoff (dead replicas)."""
 
         async with self._session() as session:
-            result = await session.execute(delete(BridgeRingMember).where(BridgeRingMember.last_heartbeat_at < cutoff))
+            result = cast(
+                CursorResult[Any],
+                await session.execute(delete(BridgeRingMember).where(BridgeRingMember.last_heartbeat_at < cutoff)),
+            )
             await session.commit()
         return int(result.rowcount or 0)
 

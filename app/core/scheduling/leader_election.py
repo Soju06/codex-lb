@@ -6,9 +6,9 @@ import logging
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
-from typing import TypeVar
+from typing import Any, TypeVar, cast
 
-from sqlalchemy import Float, bindparam, delete, text, update
+from sqlalchemy import CursorResult, Float, Result, bindparam, delete, text, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.dml import Insert
@@ -71,6 +71,13 @@ def _dialect_name(session: AsyncSession) -> str:
     return session.get_bind().dialect.name
 
 
+def _rowcount(result: Result[Any]) -> int:
+    # ``AsyncSession.execute`` is typed as returning ``Result``, but DML
+    # statements always produce a ``CursorResult`` at runtime, which is the
+    # only Result subtype that carries ``rowcount``.
+    return cast(CursorResult[Any], result).rowcount
+
+
 class LeaderElection:
     def __init__(self, leader_id: str | None = None) -> None:
         self._leader_id = leader_id or str(uuid.uuid4())
@@ -103,7 +110,7 @@ class LeaderElection:
                         _POSTGRES_ACQUIRE_SQL,
                         {"leader_id": self._leader_id, "ttl": ttl},
                     )
-                acquired = result.rowcount == 1
+                acquired = _rowcount(result) == 1
                 await session.commit()
         except Exception:
             logger.warning("Leader election failed, defaulting to non-leader", exc_info=True)
@@ -139,7 +146,7 @@ class LeaderElection:
                     _POSTGRES_RENEW_SQL,
                     {"leader_id": self._leader_id, "ttl": ttl},
                 )
-            renewed = result.rowcount == 1
+            renewed = _rowcount(result) == 1
             await session.commit()
 
         if not renewed:
@@ -186,7 +193,9 @@ class LeaderElection:
             return await fn()
 
         renew_interval = max(1, settings.leader_election_ttl_seconds // 3)
-        body_task: asyncio.Task[_T] = asyncio.create_task(fn())
+        # ``ensure_future`` accepts any awaitable (``create_task`` requires a
+        # coroutine), wrapping it in a task so it can be cancelled on lease loss.
+        body_task: asyncio.Task[_T] = asyncio.ensure_future(fn())
         lease_lost = False
 
         async def _heartbeat() -> None:

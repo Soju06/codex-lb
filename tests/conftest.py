@@ -23,6 +23,12 @@ os.environ["CODEX_LB_STICKY_SESSION_CLEANUP_ENABLED"] = "false"
 os.environ["CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_ENABLED"] = "false"
 os.environ["CODEX_LB_QUOTA_PLANNER_SCHEDULER_ENABLED"] = "false"
 os.environ["CODEX_LB_REQUEST_LOG_COUNT_CACHE_TTL_SECONDS"] = "0"
+# The app-level automations scheduler ticks on the real clock; with leader
+# election enabled its startup tick runs as a background task and can land
+# inside a test that stages its own due-now jobs, racing the test's
+# claim_run. Tests drive automations via AutomationsService.run_due_jobs
+# with explicit clocks or construct AutomationsScheduler directly.
+os.environ["CODEX_LB_AUTOMATIONS_SCHEDULER_ENABLED"] = "false"
 
 from app.db.models import Base  # noqa: E402
 from app.db.session import engine  # noqa: E402

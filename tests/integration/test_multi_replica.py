@@ -186,30 +186,35 @@ async def test_run_if_leader_heartbeat_keeps_follower_out_during_long_body(db_se
     body outliving the TTL let a second replica become a concurrent leader."""
     from app.core.scheduling.leader_election import LeaderElection
 
-    _enable_leader_election(monkeypatch, ttl_seconds=2)
+    _enable_leader_election(monkeypatch, ttl_seconds=3)
 
     election1 = LeaderElection(leader_id="instance-1")
     election2 = LeaderElection(leader_id="instance-2")
+    body_started = asyncio.Event()
     body_done = asyncio.Event()
 
     async def _long_body() -> str:
-        # Outlives the 2s TTL; the heartbeat (interval 1s) must keep the
+        body_started.set()
+        # Outlives the 3s TTL; the heartbeat (interval 1s) must keep the
         # lease alive the whole time.
-        await asyncio.sleep(2.6)
+        await asyncio.sleep(3.6)
         body_done.set()
         return "finished"
 
-    async def _poll_follower() -> list[bool]:
-        attempts: list[bool] = []
-        while not body_done.is_set():
-            attempts.append(await election2.try_acquire())
-            await asyncio.sleep(0.3)
-        return attempts
+    leader_task = asyncio.create_task(election1.run_if_leader(_long_body))
+    # Poll only once the leader holds the lease: polling concurrently with
+    # the initial acquire lets the follower win that race, after which the
+    # body never runs and the old poll loop spun forever.
+    await asyncio.wait_for(body_started.wait(), timeout=5)
 
-    result, attempts = await asyncio.gather(
-        election1.run_if_leader(_long_body),
-        _poll_follower(),
-    )
+    attempts: list[bool] = []
+    # Also stop when the leader task settles so a cancelled or failed body
+    # surfaces as an assertion failure instead of an endless poll loop.
+    while not body_done.is_set() and not leader_task.done():
+        attempts.append(await election2.try_acquire())
+        await asyncio.sleep(0.3)
+
+    result = await asyncio.wait_for(leader_task, timeout=15)
 
     assert result == "finished"
     assert attempts

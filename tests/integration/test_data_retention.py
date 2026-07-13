@@ -197,9 +197,10 @@ async def test_pruning_drains_backlog_across_batches(db_setup, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_request_log_pruning_never_deletes_above_lagging_watermark(async_client, db_setup, monkeypatch):
-    """The min(cutoff, watermark) guard must bind when the fold is stalled:
-    rows older than the cutoff but above the watermark survive."""
+async def test_request_log_pruning_skipped_while_fold_is_not_current(async_client, db_setup, monkeypatch):
+    """A stalled fold (watermark older than two fold lags) must skip pruning
+    entirely: unfolded rows above the watermark would otherwise be lost, and
+    concurrent readers hold watermarks near the stale one."""
     now = utcnow()
     async with SessionLocal() as session:
         accounts_repo = AccountsRepository(session)
@@ -223,15 +224,46 @@ async def test_request_log_pruning_never_deletes_above_lagging_watermark(async_c
 
     _set_retention(monkeypatch, request_logs=30)
     deleted = await run_retention_pass(now=now)
-    # Only the 60d row is both older than the 30d cutoff AND below the
-    # stalled watermark; the 40d row is unfolded and must survive.
-    assert deleted["request_logs"] == 1
+    assert deleted["request_logs"] == 0
 
     async with SessionLocal() as session:
         remaining = (await session.execute(select(RequestLog.request_id))).scalars().all()
-    assert sorted(remaining) == ["req_1d", "req_40d"]
+    assert sorted(remaining) == ["req_1d", "req_40d", "req_60d"]
 
     assert await _request_usage() == before
+
+
+@pytest.mark.asyncio
+async def test_usage_history_protects_latest_by_recorded_at_not_insert_order(db_setup, monkeypatch):
+    """Out-of-chronology inserts: the row the product treats as latest (max
+    recorded_at) must survive even when a later-inserted row carries an older
+    recorded_at (and a higher id)."""
+    now = utcnow()
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        await accounts_repo.upsert(_make_account("acc_ooo", "ooo@example.com"))
+        # Inserted first: the chronologically-latest sample (lower id).
+        session.add(
+            UsageHistory(
+                account_id="acc_ooo", window="primary", used_percent=55.0, recorded_at=now - timedelta(days=100)
+            )
+        )
+        # Inserted later: an OLDER sample backfilled afterwards (higher id).
+        session.add(
+            UsageHistory(
+                account_id="acc_ooo", window="primary", used_percent=11.0, recorded_at=now - timedelta(days=180)
+            )
+        )
+        await session.commit()
+
+    _set_retention(monkeypatch, usage_history=45)
+    deleted = await run_retention_pass(now=now)
+    assert deleted["usage_history"] == 1
+
+    async with SessionLocal() as session:
+        rows = (await session.execute(select(UsageHistory))).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].used_percent == 55.0
 
 
 @pytest.mark.asyncio

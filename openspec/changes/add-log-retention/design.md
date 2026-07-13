@@ -40,7 +40,12 @@ Adversarial review caught a consumer the original inventory missed: `ApiKeysRepo
 
 Installs that ran the account-rollup change first have an advanced shared watermark; creating `api_key_usage_rollups` empty under that watermark would collapse every key's totals to the live tail. The migration therefore resets the fold state — account rollup rows AND the watermark together, exactly the documented escape hatch — so the next fold pass re-backfills both rollups from raw `request_logs`, with reads falling back to the full live aggregate meanwhile. Pinned by a migration regression test that seeds an advanced watermark before upgrading.
 
-### D7. Review-driven hardening
+### D7. Snapshot-safe deletes and reader-ordered latest protection (Codex P2s)
+
+- Request-log pruning runs only while the fold is current (watermark ≥ now − 2·lag) and deletes only rows a full fold lag below the watermark. Summary reads load sums+watermark and the live tail in separate statements; a fold committing between them advances the watermark, and deleting from that just-folded window would starve the reader's tail. A reader's loaded watermark trails the current one by at most one steady-state fold advance (≤ the pass interval), so a full-lag margin under a current watermark is unreachable by any live reader; during backfill/stall, pruning suspends entirely.
+- Protected usage-history rows are chosen by the readers' ordering (max `recorded_at` per identity, all ties retained) instead of `max(id)`, so backfilled out-of-chronology rows cannot displace the last-known sample.
+
+### D7b. Review-driven hardening
 
 - Protected latest-row id sets are materialized once per pass and passed as literals into the batch deletes; embedding the GROUP BY subquery in every batch statement rescanned the whole table per 10k batch (under the SQLite writer lock). New identities appearing mid-pass are safe: their rows are newer than the cutoff.
 - Retention settings gained a ceiling (`le=3650`); absurd values previously validated at startup then overflowed `timedelta` every pass, silently disabling retention.

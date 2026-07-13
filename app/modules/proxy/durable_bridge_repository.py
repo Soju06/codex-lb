@@ -21,6 +21,7 @@ REQUIRED_DURABLE_BRIDGE_TABLES = (
     "http_bridge_session_aliases",
 )
 _PURGE_CLOSED_BATCH_SIZE = 500
+_SESSION_ID_LOOKUP_CHUNK_SIZE = 500
 
 
 def durable_bridge_api_key_scope(api_key_id: str | None) -> str:
@@ -359,13 +360,23 @@ class DurableBridgeRepository:
         current = await self._session.get(HttpBridgeSessionRecord, session_id, populate_existing=True)
         return _to_snapshot(current)
 
-    async def get_sessions_by_ids(self, session_ids: Sequence[str]) -> list[DurableBridgeSessionSnapshot]:
-        if not session_ids:
+    async def get_sessions_by_ids(
+        self,
+        session_ids: Sequence[str],
+        *,
+        chunk_size: int = _SESSION_ID_LOOKUP_CHUNK_SIZE,
+    ) -> list[DurableBridgeSessionSnapshot]:
+        unique_ids = list(dict.fromkeys(session_ids))
+        if not unique_ids:
             return []
-        result = await self._session.execute(
-            select(HttpBridgeSessionRecord).where(HttpBridgeSessionRecord.id.in_(list(session_ids)))
-        )
-        return [_to_snapshot_required(row) for row in result.scalars().all()]
+        snapshots: list[DurableBridgeSessionSnapshot] = []
+        for start in range(0, len(unique_ids), chunk_size):
+            chunk = unique_ids[start : start + chunk_size]
+            result = await self._session.execute(
+                select(HttpBridgeSessionRecord).where(HttpBridgeSessionRecord.id.in_(chunk))
+            )
+            snapshots.extend(_to_snapshot_required(row) for row in result.scalars().all())
+        return snapshots
 
     async def mark_owner_draining(self, *, instance_id: str) -> int:
         result = await self._session.execute(

@@ -31,6 +31,12 @@
 - [x] 3.2 Add `RingMembershipService.purge_stale_before(cutoff)` and the 24h
       `RING_MEMBER_RETENTION_SECONDS` constant.
 - [x] 3.3 Invoke both purges from `StickySessionCleanupScheduler._cleanup_once`.
+- [x] 3.4 Gate the abandoned-row purge cutoff on the longest bridge reuse
+      window (max of prompt-cache affinity max age, prompt-cache idle TTL,
+      codex idle TTL, base idle TTL) so in-reuse-window sessions keep their
+      durable rows.
+- [x] 3.5 Chunk `get_sessions_by_ids` so reconciliation candidate sets larger
+      than the database bind-parameter limit still resolve.
 
 ## 4. Post-shutdown grace turn-state takeover
 

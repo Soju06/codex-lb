@@ -279,6 +279,30 @@ async def test_purge_abandoned_before_removes_expired_rows_and_aliases_keeps_liv
 
 
 @pytest.mark.asyncio
+async def test_get_sessions_by_ids_chunks_large_id_sets(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    """Reconciliation lookups must chunk the IN(...) clause so candidate sets
+    larger than the database bind-parameter limit still resolve every row."""
+
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        claims = [
+            await _claim(repository, instance_id=f"inst-{index}", session_key_value=f"sid-chunk-{index}")
+            for index in range(5)
+        ]
+        candidate_ids = [claim.id for claim in claims] + [claims[0].id, "missing-session-id"]
+
+        snapshots = await repository.get_sessions_by_ids(candidate_ids, chunk_size=2)
+
+        assert len(snapshots) == len(claims)
+        assert {snapshot.id for snapshot in snapshots} == {claim.id for claim in claims}
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
 async def test_ring_purge_removes_dead_members_and_keeps_recent(
     async_session_factory: Callable[[], AsyncSession],
 ) -> None:

@@ -67,9 +67,14 @@ members.
   (`RING_MEMBER_RETENTION_SECONDS`), far beyond the 30s stale threshold and
   the shutdown stale-aging grace.
 - Both purges run from the existing leader-gated
-  `StickySessionCleanupScheduler._cleanup_once`, reusing the
-  `openai_cache_affinity_max_age_seconds` cutoff already used for closed-row
-  purge.
+  `StickySessionCleanupScheduler._cleanup_once`. The closed-row purge keeps the
+  `openai_cache_affinity_max_age_seconds` cutoff; the abandoned-row purge uses
+  a retention of `max(openai_cache_affinity_max_age_seconds,
+  prompt-cache idle TTL, codex idle TTL, base idle TTL)` because an idle local
+  session stays reusable until its effective idle TTL (default prompt-cache
+  TTL is 3600s vs the 1800s affinity max age) and purging its ACTIVE durable
+  row earlier would strip a still-reusable session of durable ownership and
+  continuity aliases.
 
 ### 4. Post-shutdown grace turn-state takeover
 

@@ -691,7 +691,17 @@ async def test_sticky_sessions_cleanup_scheduler_removes_stale_prompt_cache_and_
     await _insert_http_bridge_session(
         session_id="active-stale-session",
         state="active",
-        last_seen_offset_seconds=600,
+        # Beyond the full reuse window (max of affinity, prompt-cache/codex/base
+        # idle TTLs; prompt-cache idle TTL default is 3600s) so the row is truly
+        # unreusable and the abandoned-row purge removes it.
+        last_seen_offset_seconds=7200,
+    )
+    await _insert_http_bridge_session(
+        session_id="active-reuse-window-session",
+        state="active",
+        # Past the 60s affinity cutoff but within the 3600s prompt-cache reuse
+        # window, so the still-reusable session must keep its ACTIVE durable row.
+        last_seen_offset_seconds=1800,
     )
     await _insert_http_bridge_session(
         session_id="active-leased-session",
@@ -724,10 +734,20 @@ async def test_sticky_sessions_cleanup_scheduler_removes_stale_prompt_cache_and_
         }
 
     assert remaining == {"cleanup-durable"}
-    # active-stale-session has no lease and stale activity, so the abandoned-row
-    # purge removes it; the leased active row and fresh closed row survive.
-    assert bridge_remaining == {"active-leased-session", "closed-fresh-session"}
-    assert alias_remaining == {"active-leased-session", "closed-fresh-session"}
+    # active-stale-session has no lease and is stale beyond the full reuse
+    # window, so the abandoned-row purge removes it. active-reuse-window-session
+    # is still within the prompt-cache reuse window and must be kept, alongside
+    # the leased active row and the fresh closed row.
+    assert bridge_remaining == {
+        "active-reuse-window-session",
+        "active-leased-session",
+        "closed-fresh-session",
+    }
+    assert alias_remaining == {
+        "active-reuse-window-session",
+        "active-leased-session",
+        "closed-fresh-session",
+    }
 
 
 @pytest.mark.asyncio

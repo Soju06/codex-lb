@@ -33,8 +33,13 @@ When a replica discovers through a fenced renewal or fenced alias write that ano
 - **THEN** replica A closes the fenced-out local session
 - **AND** local sessions still owned by replica A are left untouched
 
+#### Scenario: Reconciliation lookups survive large candidate sets
+- **GIVEN** more local sessions are past the lease TTL than fit in one database `IN (...)` parameter list
+- **WHEN** the reconciliation sweep batch-loads the durable rows
+- **THEN** the lookup is chunked so every candidate resolves and fenced-out sessions are still evicted
+
 ### Requirement: Abandoned durable bridge rows are purged
-The background cleanup loop MUST delete ACTIVE and DRAINING `http_bridge_sessions` rows whose lease is expired and whose `last_seen_at` predates the retention cutoff, deleting their aliases in the same pass, so crashed-owner and abandoned-drain rows do not accumulate. Rows with an unexpired lease or recent activity MUST NOT be deleted so crash takeover and drain recovery keep their continuity anchors.
+The background cleanup loop MUST delete ACTIVE and DRAINING `http_bridge_sessions` rows whose lease is expired and whose `last_seen_at` predates the retention cutoff, deleting their aliases in the same pass, so crashed-owner and abandoned-drain rows do not accumulate. Rows with an unexpired lease or recent activity MUST NOT be deleted so crash takeover and drain recovery keep their continuity anchors. The retention cutoff MUST be at least the longest effective bridge session reuse window — the maximum of the prompt-cache affinity max age, the prompt-cache bridge idle TTL, the codex bridge idle TTL, and the base bridge idle TTL — so an idle-but-still-reusable local session never loses its ACTIVE durable row and aliases while it can still be reused.
 
 #### Scenario: Expired abandoned rows are purged with their aliases
 - **WHEN** the cleanup loop runs
@@ -45,3 +50,8 @@ The background cleanup loop MUST delete ACTIVE and DRAINING `http_bridge_session
 - **WHEN** the cleanup loop runs
 - **AND** a row holds an unexpired lease or has `last_seen_at` within the retention cutoff
 - **THEN** the row and its aliases are preserved
+
+#### Scenario: In-reuse-window prompt-cache sessions keep their durable row
+- **GIVEN** the prompt-cache bridge idle TTL exceeds the prompt-cache affinity max age
+- **WHEN** the cleanup loop runs against an ACTIVE row whose lease expired but whose `last_seen_at` is within the prompt-cache bridge idle TTL
+- **THEN** the row and its aliases are preserved so a local reuse keeps its durable ownership and continuity anchors

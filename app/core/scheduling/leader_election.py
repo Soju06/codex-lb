@@ -300,7 +300,19 @@ class LeaderElection:
         # Local monotonic estimate of when the lease we hold expires; extended
         # on every successful renewal. This is deliberately conservative: the
         # database clock may grant slightly more, never less.
-        lease_deadline = loop.time() + ttl
+        #
+        # Seed it from the instance's DB-confirmed deadline rather than a fresh
+        # ``loop.time() + ttl``. ``try_acquire`` may have returned ``True``
+        # WITHOUT extending the database ``expires_at`` — the "preserve active
+        # leadership on a transient acquire error" path keeps an already-held
+        # lease alive but performs no DB write, so it leaves ``_lease_deadline``
+        # at the last value a real acquire/renew confirmed. Resetting to a full
+        # TTL here would let the local deadline drift PAST the true DB lease
+        # expiry, so the heartbeat could keep believing it leads after a
+        # follower has legitimately taken over the row. ``_lease_deadline`` is
+        # only ``None`` in the disabled escape hatch (handled above), so the
+        # fallback is defensive only.
+        lease_deadline = self._lease_deadline if self._lease_deadline is not None else loop.time() + ttl
         # ``ensure_future`` accepts any awaitable (``create_task`` requires a
         # coroutine), wrapping it in a task so it can be cancelled on lease loss.
         body_task: asyncio.Task[_T] = asyncio.ensure_future(fn())

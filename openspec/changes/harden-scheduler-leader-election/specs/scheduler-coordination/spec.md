@@ -8,6 +8,8 @@ The usage-refresh, api-key limit reset, model refresh, sticky-session cleanup, q
 
 Because a single shared leader-election object arbitrates every singleton scheduler on a replica, a lease acquisition failure caused by a transient database error MUST NOT demote a lease this instance already holds whose locally tracked deadline has not yet passed. One scheduler tick's failed `try_acquire` MUST NOT clear the shared leadership flag out from under another scheduler's in-progress leader-gated work. Demotion on acquisition MUST be reserved for an authoritative non-owner result (affected rowcount 0) or an acquisition failure observed after the held lease's local deadline has passed.
 
+A preserved-leadership outcome (a transient acquire error that keeps an already-held lease) MUST NOT be presented to callers as a fresh acquisition: because the failed attempt did not extend the database `expires_at`, it MUST NOT extend or reset the locally tracked lease deadline. The locally tracked deadline MUST be advanced only by an acquire or renewal that actually wrote the database row (affected rowcount 1); `run_if_leader` and its heartbeat MUST seed and extend their working deadline from that DB-confirmed value, never from a full TTL granted on a preserved acquire. Consequently the local deadline can never exceed the last DB-confirmed expiry, so a leader whose renewals keep failing after a preserved acquire demotes itself no later than that expiry and a follower can take over the row once the true lease expires.
+
 #### Scenario: Two replicas tick concurrently
 
 - **GIVEN** two replicas share one database
@@ -29,6 +31,14 @@ Because a single shared leader-election object arbitrates every singleton schedu
 - **WHEN** another singleton scheduler's `try_acquire` on the shared leader election hits a transient database error before the held lease's local deadline passes
 - **THEN** leadership is preserved and the in-progress gated work is not cancelled
 - **AND** once the local deadline has passed a transient acquire error demotes the holder
+
+#### Scenario: Preserved acquire does not extend the local heartbeat deadline
+
+- **GIVEN** a leader running `run_if_leader` whose held lease has a DB-confirmed deadline that is still valid but close to expiry
+- **AND** the database becomes unreachable so `run_if_leader`'s entry `try_acquire` preserves leadership without writing the lease row
+- **WHEN** the gate's heartbeat seeds its working deadline
+- **THEN** it uses the last DB-confirmed expiry rather than a fresh full TTL
+- **AND** with renewals continuing to fail the holder demotes no later than that DB-confirmed expiry, so a follower can acquire the row once the true lease expires
 
 ### Requirement: Lease acquisition is atomic on both database backends
 

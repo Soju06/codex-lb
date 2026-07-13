@@ -473,6 +473,74 @@ async def test_run_if_leader_demotes_when_renewal_cancellation_hangs(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_run_if_leader_preserved_acquire_does_not_extend_local_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Regression: try_acquire() may return True WITHOUT extending the database
+    # expires_at — the "preserve active leadership on a transient acquire
+    # error" path keeps an already-held lease alive but performs no DB write.
+    # run_if_leader must NOT treat that preserved acquire as a fresh
+    # acquisition: seeding its local heartbeat deadline with a full TTL would
+    # push the local deadline PAST the true DB lease expiry, so the heartbeat
+    # could keep believing it leads after a follower legitimately took over the
+    # row. The local deadline must stay at the last DB-confirmed expiry, so a
+    # leader whose renewals keep failing demotes no later than that expiry and a
+    # follower can take over once the true DB lease expires.
+    ttl = 6
+
+    class _AllErrorSession(_FakeSession):
+        # Every DB call fails: models a database that goes unreachable right as
+        # the gate re-acquires, so try_acquire preserves the held lease and
+        # every subsequent renewal errors. The failed acquire never extends the
+        # stored expires_at.
+        def __init__(self) -> None:
+            super().__init__("postgresql", [])
+            self.execute_calls = 0
+
+        async def execute(self, statement: Any, params: Any = None) -> _FakeResult:
+            self.execute_calls += 1
+            raise RuntimeError("db down")
+
+    session = _AllErrorSession()
+    _install(monkeypatch, session, ttl=ttl)
+
+    election = leader_election_module.LeaderElection(leader_id="node-a")
+    loop = asyncio.get_running_loop()
+    # This instance already holds a lease (e.g. a prior acquire/renew by another
+    # singleton scheduler sharing this election) whose DB-confirmed deadline is
+    # still valid at entry but expires well before the first renewal fires
+    # (renew_interval = ttl // 3 = 2s).
+    election._is_leader = True
+    election._lease_deadline = loop.time() + 0.5
+
+    body_cancelled = asyncio.Event()
+
+    async def _body() -> str:
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            body_cancelled.set()
+            raise
+        return "ran"
+
+    start = loop.time()
+    result = await election.run_if_leader(_body)
+
+    assert result is None
+    assert election.is_leader is False
+    assert body_cancelled.is_set()
+    # With the fix the local deadline stays at the ~0.5s DB-confirmed expiry, so
+    # the first failed renewal (~renew_interval = 2s) already sits past the
+    # deadline and demotes immediately. The buggy full-TTL reset would instead
+    # keep leadership until a second failed renewal (~4s), outrunning the true
+    # DB lease.
+    assert loop.time() - start < 3.0
+    # One preserved acquire attempt + exactly one renewal attempt before
+    # demotion; leadership was not extended to allow a second renewal window.
+    assert session.execute_calls == 2
+
+
+@pytest.mark.asyncio
 async def test_run_if_leader_detaches_shielded_body_after_grace(monkeypatch: pytest.MonkeyPatch) -> None:
     # Bodies that shield in-flight singleton refreshes (usage/token
     # singleflights) drain them after a cancellation request. The gate must

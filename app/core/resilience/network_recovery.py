@@ -4,11 +4,14 @@ import asyncio
 import errno
 import logging
 import socket
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Literal
 
 import aiohttp
+from aiohttp_socks import ProxyConnectionError as SocksProxyConnectionError
+from python_socks import ProxyConnectionError as PythonSocksProxyConnectionError
 
 from app.core.clients.http import refresh_http_client_after_network_failure
 from app.core.utils.retry import backoff_seconds
@@ -17,22 +20,16 @@ logger = logging.getLogger(__name__)
 
 PROCESS_NETWORK_UNAVAILABLE_CODE = "proxy_network_unavailable"
 
-_DNS_ERROR_NUMBERS = frozenset(
-    value for name in ("EAI_AGAIN", "EAI_FAIL", "EAI_NONAME") if isinstance((value := getattr(socket, name, None)), int)
+_TRANSIENT_DNS_ERROR_NUMBERS = frozenset(
+    value for name in ("EAI_AGAIN", "EAI_FAIL") if isinstance((value := getattr(socket, name, None)), int)
+)
+_PERMANENT_DNS_ERROR_NUMBERS = frozenset(
+    value for name in ("EAI_NONAME",) if isinstance((value := getattr(socket, name, None)), int)
 )
 _ROUTE_ERROR_NUMBERS = frozenset(
     value
     for name in ("ENETDOWN", "ENETUNREACH", "EHOSTDOWN", "EHOSTUNREACH", "ENONET")
     if isinstance((value := getattr(errno, name, None)), int)
-)
-_SERIALIZED_NETWORK_FAILURE_MARKERS = (
-    "temporary failure in name resolution",
-    "name or service not known",
-    "nodename nor servname provided",
-    "non-recoverable failure in name resolution",
-    "network is down",
-    "network is unreachable",
-    "no route to host",
 )
 _MAX_RETRY_DELAY_SECONDS = 5.0
 
@@ -56,34 +53,64 @@ def _exception_chain(exc: BaseException) -> Iterator[BaseException]:
             pending.append(current.os_error)
 
 
-def is_process_network_failure(exc: BaseException) -> bool:
+def is_process_network_failure(exc: BaseException, *, include_permanent_dns: bool = True) -> bool:
     """Return whether an exception represents host-wide DNS or route loss."""
 
     for current in _exception_chain(exc):
-        if isinstance(current, socket.gaierror) and current.errno in _DNS_ERROR_NUMBERS:
-            return True
+        if isinstance(current, socket.gaierror):
+            if current.errno in _TRANSIENT_DNS_ERROR_NUMBERS:
+                return True
+            if include_permanent_dns and current.errno in _PERMANENT_DNS_ERROR_NUMBERS:
+                return True
         if isinstance(current, OSError) and current.errno in _ROUTE_ERROR_NUMBERS:
             return True
     return False
 
 
-def is_serialized_process_network_failure(message: str | None) -> bool:
-    """Recognize network-loss errors after an exception crossed an SSE boundary."""
+def is_pre_dispatch_connection_failure(exc: BaseException) -> bool:
+    """Return whether a typed connector failure proves dispatch never began."""
 
-    if not message:
-        return False
-    normalized = message.casefold()
-    return any(marker in normalized for marker in _SERIALIZED_NETWORK_FAILURE_MARKERS)
-
-
-def process_network_error_code(exc: BaseException, *, fallback: str) -> str:
-    return PROCESS_NETWORK_UNAVAILABLE_CODE if is_process_network_failure(exc) else fallback
-
-
-def is_process_network_error(code: str | None, message: str | None) -> bool:
-    return code == PROCESS_NETWORK_UNAVAILABLE_CODE or (
-        code == "upstream_unavailable" and is_serialized_process_network_failure(message)
+    return any(
+        isinstance(
+            current,
+            (
+                aiohttp.ClientConnectorError,
+                aiohttp.ConnectionTimeoutError,
+                SocksProxyConnectionError,
+                PythonSocksProxyConnectionError,
+            ),
+        )
+        for current in _exception_chain(exc)
     )
+
+
+def is_proxy_endpoint_failure(exc: BaseException) -> bool:
+    """Return whether the failed connection target is a configured proxy."""
+
+    return any(
+        isinstance(
+            current,
+            (aiohttp.ClientProxyConnectionError, SocksProxyConnectionError, PythonSocksProxyConnectionError),
+        )
+        for current in _exception_chain(exc)
+    )
+
+
+def process_network_error_code(
+    exc: BaseException,
+    *,
+    fallback: str,
+    include_permanent_dns: bool = True,
+) -> str:
+    return (
+        PROCESS_NETWORK_UNAVAILABLE_CODE
+        if is_process_network_failure(exc, include_permanent_dns=include_permanent_dns)
+        else fallback
+    )
+
+
+def is_process_network_error(code: str | None) -> bool:
+    return code == PROCESS_NETWORK_UNAVAILABLE_CODE
 
 
 async def rotate_shared_http_transport(
@@ -109,39 +136,68 @@ class ProcessNetworkRecovery:
     account_id: str | None = None
     attempts: int = 0
     _shared_rotation_requested: bool = False
+    _recovered_logged: bool = False
 
     async def wait(
         self,
         *,
         error_code: str | None,
-        error_message: str | None,
-        remaining_budget_seconds: float,
+        retryable_same_contract: bool,
+        deadline: float,
         rotate_shared_client: bool = False,
+        failed_session: aiohttp.ClientSession | None = None,
     ) -> NetworkRecoveryDecision:
-        if not is_process_network_error(error_code, error_message):
+        if not retryable_same_contract or not is_process_network_error(error_code):
             return "not_applicable"
+        remaining_budget_seconds = deadline - time.monotonic()
         if remaining_budget_seconds <= 0:
             self._log("exhausted", delay_seconds=0.0)
             return "exhausted"
+        self._recovered_logged = False
         self.attempts += 1
         if rotate_shared_client and not self._shared_rotation_requested:
-            await rotate_shared_http_transport(
-                transport=self.transport,
-                request_id=self.request_id,
-            )
+            try:
+                async with asyncio.timeout_at(deadline):
+                    await rotate_shared_http_transport(
+                        transport=self.transport,
+                        request_id=self.request_id,
+                        failed_session=failed_session,
+                    )
+            except TimeoutError:
+                self._log("exhausted", delay_seconds=0.0)
+                return "exhausted"
             self._shared_rotation_requested = True
+        # Rotation can block on client teardown/creation. Never calculate the
+        # recovery sleep from the pre-rotation budget snapshot.
+        remaining_budget_seconds = deadline - time.monotonic()
+        if remaining_budget_seconds <= 0:
+            self._log("exhausted", delay_seconds=0.0)
+            return "exhausted"
         delay = min(
             _MAX_RETRY_DELAY_SECONDS,
             backoff_seconds(self.attempts),
             remaining_budget_seconds,
         )
         self._log("retrying", delay_seconds=delay)
-        await asyncio.sleep(delay)
+        # The caller's absolute request deadline owns both rotation and
+        # backoff; cancellation after the budget boundary must not leak into a
+        # later replay attempt.
+        try:
+            async with asyncio.timeout(remaining_budget_seconds):
+                await asyncio.sleep(delay)
+        except TimeoutError:
+            self._log("exhausted", delay_seconds=0.0)
+            return "exhausted"
+        if deadline - time.monotonic() <= 0:
+            self._log("exhausted", delay_seconds=0.0)
+            return "exhausted"
         return "retry"
 
     def log_recovered(self) -> None:
-        if self.attempts:
+        if self.attempts and not self._recovered_logged:
             self._log("recovered", delay_seconds=0.0)
+            self._recovered_logged = True
+            self._shared_rotation_requested = False
 
     def _log(self, stage: str, *, delay_seconds: float) -> None:
         logger.log(

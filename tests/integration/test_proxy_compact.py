@@ -872,6 +872,48 @@ async def test_proxy_compact_retryable_transport_failure_retries_same_contract_o
 
 
 @pytest.mark.asyncio
+async def test_proxy_compact_ambiguous_process_network_failure_is_neutral_and_not_replayed(
+    async_client,
+    monkeypatch,
+):
+    email = "compact-network-neutral@example.com"
+    raw_account_id = "acc_compact_network_neutral"
+    auth_json = _make_auth_json(raw_account_id, email)
+    response = await async_client.post(
+        "/api/accounts/import",
+        files={"auth_json": ("auth.json", json.dumps(auth_json), "application/json")},
+    )
+    assert response.status_code == 200
+    compact_calls = 0
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        nonlocal compact_calls
+        del payload, headers, access_token, account_id
+        compact_calls += 1
+        raise ProxyResponseError(
+            502,
+            openai_error("proxy_network_unavailable", "Temporary local network failure"),
+            failure_phase="request",
+            retryable_same_contract=False,
+        )
+
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+
+    response = await async_client.post(
+        "/backend-api/codex/responses/compact",
+        json={"model": "gpt-5.1", "instructions": "hi", "input": []},
+    )
+
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "proxy_network_unavailable"
+    assert compact_calls == 1
+    async with SessionLocal() as session:
+        account = await session.get(Account, generate_unique_account_id(raw_account_id, email))
+        assert account is not None
+        assert account.status == AccountStatus.ACTIVE
+
+
+@pytest.mark.asyncio
 async def test_proxy_compact_output_round_trips_into_followup_responses_without_pruning(async_client, monkeypatch):
     email = "compact-round-trip@example.com"
     raw_account_id = "acc_compact_round_trip"

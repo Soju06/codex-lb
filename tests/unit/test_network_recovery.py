@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import errno
 import logging
 import socket
+from typing import cast
 from unittest.mock import AsyncMock
 
+import aiohttp
 import pytest
 from aiohttp.client_exceptions import ClientConnectorError
 from aiohttp.client_reqrep import ConnectionKey
@@ -34,6 +37,13 @@ def test_process_network_failure_inspects_aiohttp_embedded_os_error() -> None:
     )
 
 
+def test_routed_classifier_does_not_treat_missing_proxy_hostname_as_process_outage() -> None:
+    error = socket.gaierror(socket.EAI_NONAME, "Name or service not known")
+
+    assert network_recovery.is_process_network_failure(error)
+    assert not network_recovery.is_process_network_failure(error, include_permanent_dns=False)
+
+
 @pytest.mark.parametrize("error_number", [errno.ENETDOWN, errno.ENETUNREACH, errno.EHOSTUNREACH])
 def test_process_network_failure_classifies_host_route_errors(error_number: int) -> None:
     assert network_recovery.is_process_network_failure(OSError(error_number, "route failure"))
@@ -51,22 +61,9 @@ def test_process_network_failure_does_not_classify_endpoint_failures(error: OSEr
     assert not network_recovery.is_process_network_failure(error)
 
 
-@pytest.mark.parametrize(
-    "message",
-    [
-        "Temporary failure in name resolution",
-        "Name or service not known",
-        "nodename nor servname provided, or not known",
-        "Network is unreachable",
-        "No route to host",
-    ],
-)
-def test_serialized_process_network_failure_markers(message: str) -> None:
-    assert network_recovery.is_process_network_error("upstream_unavailable", message)
-
-
-def test_serialized_process_network_failure_requires_network_error_code() -> None:
-    assert not network_recovery.is_process_network_error("invalid_api_key", "Network is unreachable")
+def test_process_network_error_requires_stable_code_not_message_text() -> None:
+    assert network_recovery.is_process_network_error(network_recovery.PROCESS_NETWORK_UNAVAILABLE_CODE)
+    assert not network_recovery.is_process_network_error("upstream_unavailable")
 
 
 @pytest.mark.asyncio
@@ -75,30 +72,37 @@ async def test_recovery_controller_retries_and_logs_recovery(monkeypatch, caplog
     rotate = AsyncMock(return_value="rotated")
     monkeypatch.setattr(network_recovery.asyncio, "sleep", sleep)
     monkeypatch.setattr(network_recovery, "rotate_shared_http_transport", rotate)
+    monkeypatch.setattr(network_recovery.time, "monotonic", lambda: 100.0)
     recovery = network_recovery.ProcessNetworkRecovery(
         transport="websocket",
         request_id="req_network_recovery",
         account_id="acc_1",
     )
+    failed_session = cast(aiohttp.ClientSession, object())
 
     with caplog.at_level(logging.INFO, logger=network_recovery.__name__):
         first = await recovery.wait(
             error_code=network_recovery.PROCESS_NETWORK_UNAVAILABLE_CODE,
-            error_message="DNS failure",
-            remaining_budget_seconds=10.0,
+            retryable_same_contract=True,
+            deadline=110.0,
             rotate_shared_client=True,
+            failed_session=failed_session,
         )
         second = await recovery.wait(
             error_code=network_recovery.PROCESS_NETWORK_UNAVAILABLE_CODE,
-            error_message="DNS failure",
-            remaining_budget_seconds=10.0,
+            retryable_same_contract=True,
+            deadline=110.0,
             rotate_shared_client=True,
         )
         recovery.log_recovered()
 
     assert first == second == "retry"
     assert sleep.await_count == 2
-    rotate.assert_awaited_once_with(transport="websocket", request_id="req_network_recovery")
+    rotate.assert_awaited_once_with(
+        transport="websocket",
+        request_id="req_network_recovery",
+        failed_session=failed_session,
+    )
     assert "stage=retrying" in caplog.text
     assert "stage=recovered" in caplog.text
     assert "account_id=acc_1" in caplog.text
@@ -108,12 +112,13 @@ async def test_recovery_controller_retries_and_logs_recovery(monkeypatch, caplog
 async def test_recovery_controller_is_bounded_by_remaining_budget(monkeypatch) -> None:
     sleep = AsyncMock()
     monkeypatch.setattr(network_recovery.asyncio, "sleep", sleep)
+    monkeypatch.setattr(network_recovery.time, "monotonic", lambda: 100.0)
     recovery = network_recovery.ProcessNetworkRecovery(transport="stream", request_id="req_bounded")
 
     decision = await recovery.wait(
         error_code=network_recovery.PROCESS_NETWORK_UNAVAILABLE_CODE,
-        error_message=None,
-        remaining_budget_seconds=0.0,
+        retryable_same_contract=True,
+        deadline=100.0,
     )
 
     assert decision == "exhausted"
@@ -128,11 +133,71 @@ async def test_recovery_controller_ignores_other_failures(monkeypatch) -> None:
 
     decision = await recovery.wait(
         error_code="upstream_unavailable",
-        error_message="Connection refused",
-        remaining_budget_seconds=10.0,
+        retryable_same_contract=True,
+        deadline=110.0,
     )
 
     assert decision == "not_applicable"
+    sleep.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_recovery_controller_rejects_unsafe_network_replay(monkeypatch) -> None:
+    sleep = AsyncMock()
+    monkeypatch.setattr(network_recovery.asyncio, "sleep", sleep)
+    recovery = network_recovery.ProcessNetworkRecovery(transport="stream", request_id="req_unsafe")
+
+    decision = await recovery.wait(
+        error_code=network_recovery.PROCESS_NETWORK_UNAVAILABLE_CODE,
+        retryable_same_contract=False,
+        deadline=network_recovery.time.monotonic() + 10.0,
+    )
+
+    assert decision == "not_applicable"
+    sleep.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_recovery_controller_bounds_rotation_by_deadline(monkeypatch) -> None:
+    async def blocked_rotation(**_kwargs: object) -> str:
+        await asyncio.Event().wait()
+        return "unreachable"  # pragma: no cover
+
+    monkeypatch.setattr(network_recovery, "rotate_shared_http_transport", blocked_rotation)
+    recovery = network_recovery.ProcessNetworkRecovery(transport="stream", request_id="req_rotation_timeout")
+
+    decision = await recovery.wait(
+        error_code=network_recovery.PROCESS_NETWORK_UNAVAILABLE_CODE,
+        retryable_same_contract=True,
+        deadline=network_recovery.time.monotonic() + 0.01,
+        rotate_shared_client=True,
+    )
+
+    assert decision == "exhausted"
+
+
+@pytest.mark.asyncio
+async def test_recovery_controller_recomputes_deadline_after_rotation(monkeypatch) -> None:
+    now = [100.0]
+
+    async def rotate(**_kwargs: object) -> str:
+        now[0] = 110.0
+        return "rotated"
+
+    sleep = AsyncMock()
+    monkeypatch.setattr(network_recovery.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(network_recovery.asyncio, "sleep", sleep)
+    monkeypatch.setattr(network_recovery, "rotate_shared_http_transport", rotate)
+    recovery = network_recovery.ProcessNetworkRecovery(transport="websocket", request_id="req_rotation_deadline")
+
+    decision = await recovery.wait(
+        error_code=network_recovery.PROCESS_NETWORK_UNAVAILABLE_CODE,
+        retryable_same_contract=True,
+        deadline=110.0,
+        rotate_shared_client=True,
+    )
+
+    assert decision == "exhausted"
     sleep.assert_not_awaited()
 
 

@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import AsyncMock
 
 import aiohttp
 import pytest
@@ -15,7 +17,11 @@ from websockets.http11 import Response
 import app.core.clients.proxy_websocket as proxy_websocket_module
 from app.core.clients.codex import CodexTransportError, CodexWebSocketResult
 from app.core.clients.proxy import ProxyResponseError
-from app.core.clients.proxy_websocket import connect_responses_websocket
+from app.core.clients.proxy_websocket import (
+    CodexResponsesWebSocket,
+    UpstreamWebSocketTransportError,
+    connect_responses_websocket,
+)
 from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
 
 
@@ -181,6 +187,26 @@ class _FailingCodexClient:
 
 
 @pytest.mark.asyncio
+async def test_codex_responses_websocket_closes_owned_client_when_context_exit_fails():
+    class _FailingContext:
+        async def __aexit__(self, *_args: object) -> None:
+            raise RuntimeError("websocket context exit failed")
+
+    codex_client = _FailingCodexClient()
+    websocket = CodexResponsesWebSocket(
+        _FakeCodexWebSocket(),
+        context=_FailingContext(),
+        codex_client=cast(Any, codex_client),
+        owns_codex_client=True,
+    )
+
+    with pytest.raises(RuntimeError, match="websocket context exit failed"):
+        await websocket.close()
+
+    assert codex_client.closed is True
+
+
+@pytest.mark.asyncio
 async def test_connect_responses_websocket_uses_websockets_transport(monkeypatch):
     fake_connection = _FakeConnection()
     seen: dict[str, object] = {}
@@ -236,6 +262,51 @@ async def test_connect_responses_websocket_uses_websockets_transport(monkeypatch
     assert "Cookie" not in additional_headers
     assert "User-Agent" not in additional_headers
     assert "Origin" not in additional_headers
+
+
+@pytest.mark.asyncio
+async def test_direct_websocket_network_send_and_receive_are_typed_and_rotate_without_reconnect(monkeypatch):
+    class _NetworkFailureConnection(_FakeConnection):
+        async def send(self, data: str | bytes) -> None:
+            del data
+            raise OSError(errno.ENETUNREACH, "Network is unreachable")
+
+        async def recv(self) -> str:
+            raise OSError(errno.ENETUNREACH, "Network is unreachable")
+
+    connection = _NetworkFailureConnection()
+    websocket_connect = AsyncMock(return_value=connection)
+    rotate = AsyncMock(return_value="rotated")
+    monkeypatch.setattr(proxy_websocket_module, "websocket_connect", websocket_connect)
+    monkeypatch.setattr(proxy_websocket_module, "rotate_shared_http_transport", rotate)
+    monkeypatch.setattr(
+        proxy_websocket_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            upstream_base_url="https://chatgpt.com/backend-api",
+            upstream_connect_timeout_seconds=7.0,
+            max_sse_event_bytes=4321,
+            upstream_websocket_trust_env=False,
+        ),
+    )
+
+    websocket = await connect_responses_websocket(
+        {"openai-beta": "responses_websockets=2026-02-06"},
+        "access-token",
+        "account-123",
+        allow_direct_egress=True,
+    )
+
+    with pytest.raises(UpstreamWebSocketTransportError) as exc_info:
+        await websocket.send_text('{"type":"response.create"}')
+    message = await websocket.receive()
+
+    assert exc_info.value.error_code == "proxy_network_unavailable"
+    assert message.kind == "error"
+    assert message.error_code == "proxy_network_unavailable"
+    websocket_connect.assert_awaited_once()
+    assert rotate.await_count == 2
+    assert all(call.kwargs["transport"] == "websocket" for call in rotate.await_args_list)
 
 
 @pytest.mark.asyncio

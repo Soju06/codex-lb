@@ -429,7 +429,10 @@ def _should_retry_transient_stream_error(code: str | None, message: str | None) 
     if code is None or code == "stream_idle_timeout":
         return False
     if code == PROCESS_NETWORK_UNAVAILABLE_CODE:
-        return True
+        # Serialized terminal events arrive only after upstream dispatch. The
+        # stable code keeps settlement account-neutral, but cannot prove that
+        # replaying the POST is safe.
+        return False
     if code in _facade()._TRANSIENT_RETRY_CODES:
         return True
     if code != "upstream_unavailable" or not message:

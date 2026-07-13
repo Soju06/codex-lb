@@ -25,6 +25,7 @@ from app.core.config.settings_cache import get_settings_cache
 from app.core.errors import openai_error
 from app.core.openai.models import CompactResponsePayload
 from app.core.openai.requests import ResponsesCompactRequest
+from app.core.resilience.network_recovery import ProcessNetworkRecovery
 from app.core.types import JsonValue
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError
 from app.core.utils.request_id import ensure_request_id, get_request_id
@@ -802,6 +803,7 @@ class _CompactMixin:
                         _service_pop_compact_timeout_overrides(timeout_tokens)
 
             last_exc: ProxyResponseError | None = None
+            network_recovery = ProcessNetworkRecovery(transport="compact", request_id=request_id)
             excluded_account_ids: set[str] = set()
             require_security_work_authorized = False
             estimated_lease_tokens = _estimated_lease_tokens_from_request_usage_budget(
@@ -959,6 +961,7 @@ class _CompactMixin:
                         account_response_create_lease = selected_account_response_create_lease
                         selected_account_response_create_lease = None
                         response = await _call_compact(account, account_response_create_lease)
+                        network_recovery.log_recovered()
                         actual_service_tier = _service_tier_from_response(response)
                         await proxy._load_balancer.record_success(account)
                         await proxy._settle_compact_api_key_usage(
@@ -1096,15 +1099,33 @@ class _CompactMixin:
                             excluded_account_ids.add(account.id)
                             transient_exhausted = True
                             break  # break inner loop → outer loop tries different account
-                        if exc.retryable_same_contract and safe_retry_budget > 0:
-                            safe_retry_budget -= 1
-                            continue
                         error = _parse_openai_error(exc.payload)
                         code = _normalize_error_code(
                             error.code if error else None,
                             error.type if error else None,
                         )
                         error_message = error.message if error else None
+                        network_recovery.account_id = account.id
+                        recovery_decision = await network_recovery.wait(
+                            error_code=code,
+                            retryable_same_contract=exc.retryable_same_contract,
+                            deadline=deadline,
+                            rotate_shared_client=True,
+                            failed_session=exc.failed_session,
+                        )
+                        if recovery_decision == "retry":
+                            continue
+                        if recovery_decision == "exhausted":
+                            await proxy._settle_compact_api_key_usage(
+                                api_key=api_key,
+                                api_key_reservation=api_key_reservation,
+                                response=None,
+                                request_service_tier=request_service_tier,
+                            )
+                            _raise_proxy_budget_exhausted()
+                        if exc.retryable_same_contract and safe_retry_budget > 0:
+                            safe_retry_budget -= 1
+                            continue
                         if _is_security_work_authorization_required_error(code, error_message):
                             if (
                                 not account.security_work_authorized

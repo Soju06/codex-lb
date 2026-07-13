@@ -364,14 +364,50 @@ class _StreamingRetryMixin:
             account: Account,
             *,
             error_code: str | None,
-            error_message: str | None,
+            retryable_same_contract: bool,
+            failed_session: aiohttp.ClientSession | None = None,
         ) -> NetworkRecoveryDecision:
             network_recovery.account_id = account.id
             return await network_recovery.wait(
                 error_code=error_code,
-                error_message=error_message,
-                remaining_budget_seconds=_facade()._remaining_budget_seconds(deadline),
+                retryable_same_contract=retryable_same_contract,
+                deadline=deadline,
                 rotate_shared_client=True,
+                failed_session=failed_session,
+            )
+
+        async def _settle_process_network_budget_exhaustion(
+            account: Account,
+            settlement: _StreamSettlement,
+        ) -> None:
+            nonlocal settled
+            settlement.status = "error"
+            settlement.record_success = False
+            settlement.account_health_error = False
+            settlement.error_code = "upstream_request_timeout"
+            settlement.error_message = "Proxy request budget exhausted"
+            settlement.error = {"message": "Proxy request budget exhausted"}
+            await proxy._write_stream_preflight_error(
+                account_id=account.id,
+                api_key=api_key,
+                request_id=request_id,
+                model=payload.model,
+                start=start,
+                error_code="upstream_request_timeout",
+                error_message="Proxy request budget exhausted",
+                reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
+                service_tier=payload.service_tier,
+                transport=request_transport,
+                upstream_transport=upstream_stream_transport,
+                useragent=useragent,
+                useragent_group=useragent_group,
+                client_ip=client_ip,
+            )
+            settled = await proxy._settle_stream_api_key_usage(
+                api_key,
+                api_key_reservation,
+                settlement,
+                request_id,
             )
 
         def _move_verified_fresh_replay_from_owner(*, account_id: str, outcome: str) -> bool:
@@ -434,6 +470,12 @@ class _StreamingRetryMixin:
                         enforce_openai_sdk_contract=enforce_openai_sdk_contract,
                     ):
                         yield line
+                    network_recovery.log_recovered()
+                    return
+                except _TerminalStreamError:
+                    # `_stream_once()` has already yielded the terminal event.
+                    # Returning preserves fail-closed delivery: replaying here
+                    # could duplicate a request that reached the upstream.
                     return
                 except ProxyResponseError as exc:
                     error = _parse_openai_error(exc.payload)
@@ -441,16 +483,19 @@ class _StreamingRetryMixin:
                         error.code if error else None,
                         error.type if error else None,
                     )
-                    error_message = error.message if error else None
                     recovery_decision = await _wait_for_process_network_recovery(
                         account,
                         error_code=error_code,
-                        error_message=error_message,
+                        retryable_same_contract=exc.retryable_same_contract,
+                        failed_session=exc.failed_session,
                     )
                     if recovery_decision == "retry":
                         continue
                     if recovery_decision == "exhausted":
-                        raise
+                        raise ProxyResponseError(
+                            502,
+                            openai_error("upstream_request_timeout", "Proxy request budget exhausted"),
+                        ) from exc
                     if error_code != "account_response_create_cap":
                         raise
                     last_transient_exc = exc
@@ -1338,12 +1383,13 @@ class _StreamingRetryMixin:
                                 recovery_decision = await _wait_for_process_network_recovery(
                                     account,
                                     error_code=code,
-                                    error_message=error_message,
+                                    retryable_same_contract=tex.retryable_same_contract,
+                                    failed_session=tex.failed_session,
                                 )
                                 if recovery_decision == "retry":
                                     continue
                                 if recovery_decision == "exhausted":
-                                    raise
+                                    _facade()._raise_proxy_budget_exhausted()
                                 if _facade()._is_account_neutral_error_code(code):
                                     raise
                                 classified = await proxy._handle_stream_error(
@@ -1390,27 +1436,15 @@ class _StreamingRetryMixin:
                             recovery_decision = await _wait_for_process_network_recovery(
                                 account,
                                 error_code=error_code,
-                                error_message=error_message,
+                                retryable_same_contract=(
+                                    isinstance(tex, ProxyResponseError) and tex.retryable_same_contract
+                                ),
+                                failed_session=tex.failed_session if isinstance(tex, ProxyResponseError) else None,
                             )
                             if recovery_decision == "retry":
                                 continue
                             if recovery_decision == "exhausted":
-                                await proxy._write_stream_preflight_error(
-                                    account_id=account.id,
-                                    api_key=api_key,
-                                    request_id=request_id,
-                                    model=payload.model,
-                                    start=start,
-                                    error_code="upstream_request_timeout",
-                                    error_message="Proxy request budget exhausted",
-                                    reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
-                                    service_tier=payload.service_tier,
-                                    transport=request_transport,
-                                    upstream_transport=upstream_stream_transport,
-                                    useragent=useragent,
-                                    useragent_group=useragent_group,
-                                    client_ip=client_ip,
-                                )
+                                await _settle_process_network_budget_exhaustion(account, settlement)
                                 yield format_sse_event(_facade()._proxy_request_timeout_event(request_id))
                                 return
                             transient_retries += 1
@@ -1524,6 +1558,10 @@ class _StreamingRetryMixin:
                         await proxy._handle_stream_error(account, exc.error, exc.code)
                     return
                 except ProxyResponseError as exc:
+                    if _facade()._is_proxy_budget_exhausted_error(exc):
+                        await _settle_process_network_budget_exhaustion(account, settlement)
+                        yield format_sse_event(_facade()._proxy_request_timeout_event(request_id))
+                        return
                     if exc.status_code == 401:
                         remaining_budget = _facade()._remaining_budget_seconds(deadline)
                         if remaining_budget <= 0:
@@ -1654,6 +1692,10 @@ class _StreamingRetryMixin:
                             ):
                                 yield line
                         except ProxyResponseError as retry_exc:
+                            if _facade()._is_proxy_budget_exhausted_error(retry_exc):
+                                await _settle_process_network_budget_exhaustion(account, settlement)
+                                yield format_sse_event(_facade()._proxy_request_timeout_event(request_id))
+                                return
                             if settlement.downstream_visible:
                                 failed_response_id = settlement.response_id or request_id
                                 error = _parse_openai_error(retry_exc.payload)

@@ -1,14 +1,17 @@
 ## 1. Network Failure Classification and Client Recovery
 
-- [x] 1.1 Add typed DNS/host-route failure classification with serialized-message fallback coverage.
+- [x] 1.1 Add typed DNS/host-route failure classification with credential-safe routed-code preservation.
 - [x] 1.2 Add compare-and-swap/coalesced shared HTTP client rotation for process-wide network failures.
 - [x] 1.3 Mark classified process-wide failures account-neutral and add unit coverage proving health state is unchanged.
+- [x] 1.4 Keep failed or cancelled shared-client replacement cleanup safe without replacing the current generation.
 
 ## 2. Responses and WebSocket Recovery
 
-- [x] 2.1 Retry pre-visible HTTP/SSE Responses attempts on the same account within the existing deadline.
+- [x] 2.1 Retry only proven pre-dispatch HTTP/SSE Responses attempts on the same account within the existing deadline.
 - [x] 2.2 Retry upstream WebSocket opens centrally on the same account within the existing deadline.
 - [x] 2.3 Add regression tests for recovery, timeout bounding, continuity-owner preservation, and coalesced diagnostics.
+- [x] 2.4 Recover token-refresh network failures on the same account without health penalties or failover.
+- [x] 2.5 Surface post-dispatch send, receive, and serialized terminal failures account-neutrally without replay.
 
 ## 3. Docker Deployment and Operations
 

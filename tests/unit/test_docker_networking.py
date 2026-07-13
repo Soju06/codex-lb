@@ -47,7 +47,9 @@ def test_network_switching_guidance_is_cross_platform_and_approachable() -> None
     assert "Docker Desktop 4.34 and later" in switching_section
     assert "not been verified as a reliable fix" in switching_section
     assert "--network host" in switching_section
-    assert "127.0.0.53" not in switching_section
+    assert "stable resolver address" in switching_section
+    assert "127.0.0.53" in switching_section
+    assert "supplied by Wi-Fi or other DHCP" in switching_section
     assert " -p " not in switching_section
     assert "DNS server from the previous network" in switching_section
 

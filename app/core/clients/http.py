@@ -162,11 +162,11 @@ async def _build_http_client() -> HttpClient:
                 timeout=aiohttp.ClientTimeout(total=None),
                 trust_env=ws_trust_env,
             )
-        except Exception:
-            await ws_connector.close()
+        except BaseException:
+            await asyncio.shield(ws_connector.close())
             raise
-    except Exception:
-        await session.close()
+    except BaseException:
+        await asyncio.shield(session.close())
         raise
     retry_client = RetryClient(client_session=session, raise_for_status=False)
     return HttpClient(

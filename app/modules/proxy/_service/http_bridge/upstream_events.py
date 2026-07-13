@@ -27,7 +27,7 @@ from app.core.clients.proxy import (  # noqa: F401  # noqa: F401
 from app.core.clients.proxy import codex_control_request as core_codex_control_request  # noqa: F401
 from app.core.clients.proxy import compact_responses as core_compact_responses  # noqa: F401
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
-from app.core.clients.proxy_websocket import UpstreamWebSocketMessage
+from app.core.clients.proxy_websocket import UpstreamWebSocketMessage, UpstreamWebSocketTransportError
 from app.core.openai.parsing import parse_sse_event
 from app.core.utils.request_id import reset_request_id, set_request_id
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
@@ -212,6 +212,7 @@ class _HTTPBridgeUpstreamEventsMixin:
         *,
         error_code: str,
         error_message: str,
+        penalize_account: bool = True,
     ) -> bool:
         session.closed = True
         async with session.pending_lock:
@@ -231,6 +232,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                 error_message=error_message,
                 api_key=None,
                 response_create_gate=session.response_create_gate,
+                penalize_account=penalize_account,
             )
         finally:
             if session.admission_waiter_count > 0:
@@ -297,30 +299,42 @@ class _HTTPBridgeUpstreamEventsMixin:
                     archive_request_state = session.pending_requests[0] if len(session.pending_requests) == 1 else None
                 _archive_http_bridge_upstream_message(session, message, archive_request_state)
                 session.last_upstream_close_code = message.close_code
-                retried = await self._retry_http_bridge_precreated_request(session)
+                retried = False
+                # A process-network receive failure follows a successful send;
+                # replay is not safe merely because output is not visible.
+                if message.error_code != "proxy_network_unavailable":
+                    retried = await self._retry_http_bridge_precreated_request(session)
                 if retried:
                     continue
                 async with session.lifecycle_lock:
                     await self._fail_http_bridge_reader_and_maybe_retire(
                         session,
-                        error_code="stream_incomplete",
+                        error_code=message.error_code or "stream_incomplete",
                         error_message=_upstream_websocket_disconnect_message(message),
+                        penalize_account=message.error_code != "proxy_network_unavailable",
                     )
                 break
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as exc:
             logger.warning(
                 "HTTP bridge upstream reader crashed account_id=%s bridge_kind=%s",
                 session.account.id,
                 session.key.affinity_kind,
                 exc_info=True,
             )
+            error_code = exc.error_code if isinstance(exc, UpstreamWebSocketTransportError) else "stream_incomplete"
+            account_neutral = error_code == "proxy_network_unavailable"
             async with session.lifecycle_lock:
                 await self._fail_http_bridge_reader_and_maybe_retire(
                     session,
-                    error_code="stream_incomplete",
-                    error_message="HTTP bridge upstream reader crashed before response.completed",
+                    error_code=error_code,
+                    error_message=(
+                        str(exc)
+                        if isinstance(exc, UpstreamWebSocketTransportError)
+                        else "HTTP bridge upstream reader crashed before response.completed"
+                    ),
+                    penalize_account=not account_neutral,
                 )
         finally:
             if session.upstream is relay_upstream:

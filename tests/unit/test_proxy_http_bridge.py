@@ -23,6 +23,7 @@ from app.core.clients.proxy_websocket import (
     CodexResponsesWebSocket,
     UpstreamResponsesWebSocket,
     UpstreamWebSocketMessage,
+    UpstreamWebSocketTransportError,
 )
 from app.core.config.settings import Settings
 from app.core.errors import openai_error
@@ -13939,6 +13940,72 @@ async def test_http_bridge_stale_reader_does_not_close_reconnected_upstream(
 
     assert session.upstream is new_upstream
     assert session.closed is False
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_retry_send_network_failure_is_neutral_and_not_replayed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-bridge-retry-send-network",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        awaiting_response_created=True,
+        request_text='{"type":"response.create","model":"gpt-5.4","input":"hello"}',
+        transport="http",
+    )
+    session = _make_bridge_session(
+        key_value="bridge-retry-send-network",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+    retry_send_error = UpstreamWebSocketTransportError(
+        "Codex upstream websocket send failed: OSError",
+        error_code="proxy_network_unavailable",
+    )
+    retry_send = AsyncMock(side_effect=retry_send_error)
+    session.upstream = cast(
+        UpstreamResponsesWebSocket,
+        SimpleNamespace(
+            receive=AsyncMock(return_value=UpstreamWebSocketMessage(kind="close", close_code=1006)),
+            send_text=retry_send,
+            close=AsyncMock(),
+        ),
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(
+        service,
+        "_reconnect_http_bridge_session",
+        AsyncMock(),
+    )
+    failure_calls: list[dict[str, object]] = []
+
+    async def fail_reader(
+        target_session: proxy_service._HTTPBridgeSession,
+        **kwargs: object,
+    ) -> bool:
+        failure_calls.append(dict(kwargs))
+        target_session.closed = True
+        return True
+
+    monkeypatch.setattr(service, "_fail_http_bridge_reader_and_maybe_retire", fail_reader)
+
+    await service._relay_http_bridge_upstream_messages(session)
+
+    assert failure_calls == [
+        {
+            "error_code": "proxy_network_unavailable",
+            "error_message": "Codex upstream websocket send failed: OSError",
+            "penalize_account": False,
+        }
+    ]
+    assert request_state.replay_count == 1
+    retry_send.assert_awaited_once()
+    assert session.closed is True
 
 
 @pytest.mark.asyncio

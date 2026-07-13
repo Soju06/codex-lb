@@ -5,9 +5,9 @@ Docker containers started on the default bridge can retain a Wi-Fi-provided DNS 
 ## What Changes
 
 - Make the portable Docker quick start use a user-defined bridge instead of the legacy default bridge, while documenting that Docker's embedded resolver can retain stale external forwarders on some Linux hosts.
-- Add a Linux network-switching launch option that uses host networking and the host's live resolver without hard-coding a public DNS server.
+- Add a Linux network-switching launch option that uses host networking with a stable host resolver, documents the direct-DHCP limitation, and does not hard-code a public DNS server.
 - Classify DNS and local route failures as process-wide outbound-network failures, rotate stale shared HTTP client state, and keep those failures neutral to account health.
-- Transparently retry pre-visible Responses and upstream WebSocket connection attempts on the continuity owner within the existing request budget, allowing brief host network transitions to recover without a container restart.
+- Transparently retry proven pre-dispatch Responses work, token refresh, and upstream WebSocket connection attempts on the continuity owner within the existing request budget, allowing brief host network transitions to recover without a container restart.
 - Add low-cardinality recovery diagnostics and an operator runbook for distinguishing host DNS failures from upstream/account failures.
 
 ## Capabilities
@@ -18,7 +18,7 @@ None.
 
 ### Modified Capabilities
 
-- `deployment-networking`: Stock Docker guidance distinguishes portable bridge networking from a Linux host-network option that follows the live host resolver.
+- `deployment-networking`: Stock Docker guidance distinguishes portable bridge networking from a Linux host-network option that uses a stable host resolver path.
 - `outbound-http-clients`: Process-wide DNS/route failures rotate shared client state without penalizing individual accounts.
 - `responses-api-compat`: Pre-visible stream and WebSocket connection attempts remain retryable on the continuity owner during a bounded local-network outage.
 - `proxy-runtime-observability`: Network recovery attempts emit low-cardinality diagnostics without host resolver addresses or request payloads.

@@ -53,6 +53,7 @@ from app.core.clients.proxy import compact_responses as core_compact_responses  
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
 from app.core.clients.proxy_websocket import (
     UpstreamResponsesWebSocket,
+    UpstreamWebSocketTransportError,
     filter_inbound_websocket_headers,
 )
 from app.core.errors import (
@@ -606,7 +607,7 @@ async def _wait_for_process_network_recovery(
     recovery: ProcessNetworkRecovery,
     exc: ProxyResponseError,
     *,
-    remaining_budget_seconds: float,
+    deadline: float,
 ) -> NetworkRecoveryDecision:
     error = _parse_openai_error(exc.payload)
     return await recovery.wait(
@@ -614,9 +615,10 @@ async def _wait_for_process_network_recovery(
             error.code if error else None,
             error.type if error else None,
         ),
-        error_message=error.message if error else None,
-        remaining_budget_seconds=remaining_budget_seconds,
+        retryable_same_contract=exc.retryable_same_contract,
+        deadline=deadline,
         rotate_shared_client=True,
+        failed_session=exc.failed_session,
     )
 
 
@@ -1340,6 +1342,45 @@ class _WebSocketMixin:
                             error_param=error.param if error else None,
                             downstream_activity=downstream_activity,
                         )
+                    continue
+                except UpstreamWebSocketTransportError as exc:
+                    # send_str/send_bytes may fail after handing bytes to the
+                    # kernel. Delivery is uncertain, so replay could duplicate
+                    # a response.create even when no output is visible yet.
+                    async with pending_lock:
+                        sequenced_downstream_replay_refused = any(
+                            state.last_downstream_sequence_number is not None for state in pending_requests
+                        )
+                    await proxy._fail_pending_websocket_requests(
+                        account=account,
+                        account_id_value=account.id if account else None,
+                        pending_requests=pending_requests,
+                        pending_lock=pending_lock,
+                        error_code=exc.error_code,
+                        error_message=str(exc),
+                        api_key=api_key,
+                        websocket=websocket,
+                        client_send_lock=client_send_lock,
+                        response_create_gate=response_create_gate,
+                        downstream_activity=downstream_activity,
+                        penalize_account=exc.error_code != "proxy_network_unavailable",
+                        suppress_sequenced_downstream_errors=sequenced_downstream_replay_refused,
+                    )
+                    if upstream_reader is not None:
+                        await _facade()._await_cancelled_task(upstream_reader, label="proxy websocket upstream reader")
+                        upstream_reader = None
+                    upstream_control = None
+                    if upstream is not None:
+                        try:
+                            await upstream.close()
+                        except Exception:
+                            _facade().logger.debug(
+                                "Failed to close upstream websocket after transport send failure",
+                                exc_info=True,
+                            )
+                    upstream = None
+                    await release_current_account_lease()
+                    account = None
                     continue
                 except Exception:
                     replay_refusal_reasons: list[str] = []
@@ -2255,7 +2296,7 @@ class _WebSocketMixin:
                 decision = await _wait_for_process_network_recovery(
                     recovery,
                     exc,
-                    remaining_budget_seconds=_facade()._remaining_budget_seconds(deadline),
+                    deadline=deadline,
                 )
                 if decision == "retry":
                     continue
@@ -2519,13 +2560,14 @@ class _WebSocketMixin:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
         started_at = time.monotonic()
+        deadline = started_at + timeout_seconds
         recovery = ProcessNetworkRecovery(
             transport="websocket",
             request_id=None if request_state is None else request_state.request_log_id or request_state.request_id,
             account_id=account.id,
         )
         while True:
-            remaining_seconds = timeout_seconds - (time.monotonic() - started_at)
+            remaining_seconds = deadline - time.monotonic()
             if remaining_seconds <= 0:
                 _raise_proxy_budget_exhausted()
             try:
@@ -2534,11 +2576,10 @@ class _WebSocketMixin:
                 recovery.log_recovered()
                 return upstream
             except ProxyResponseError as exc:
-                remaining_seconds = timeout_seconds - (time.monotonic() - started_at)
                 decision = await _wait_for_process_network_recovery(
                     recovery,
                     exc,
-                    remaining_budget_seconds=remaining_seconds,
+                    deadline=deadline,
                 )
                 if decision == "retry":
                     continue
@@ -3041,11 +3082,16 @@ class _WebSocketMixin:
                         break
                     continue
                 replay_refusal_reasons: list[str] = []
-                replay_request_state = await _pop_replayable_precreated_websocket_request_state(
-                    pending_requests,
-                    pending_lock=pending_lock,
-                    replay_refusal_reasons=replay_refusal_reasons,
-                )
+                replay_request_state = None
+                # A classified route/DNS receive failure happens after a
+                # completed send. Surface it account-neutrally rather than
+                # guessing that the upstream did not accept the request.
+                if message.error_code != "proxy_network_unavailable":
+                    replay_request_state = await _pop_replayable_precreated_websocket_request_state(
+                        pending_requests,
+                        pending_lock=pending_lock,
+                        replay_refusal_reasons=replay_refusal_reasons,
+                    )
                 if replay_request_state is not None:
                     upstream_control.reconnect_requested = True
                     upstream_control.replay_request_state = replay_request_state
@@ -3065,13 +3111,14 @@ class _WebSocketMixin:
                     account_id_value=account_id_value,
                     pending_requests=pending_requests,
                     pending_lock=pending_lock,
-                    error_code="stream_incomplete",
+                    error_code=message.error_code or "stream_incomplete",
                     error_message=_upstream_websocket_disconnect_message(message),
                     api_key=api_key,
                     websocket=websocket,
                     client_send_lock=client_send_lock,
                     response_create_gate=response_create_gate,
                     downstream_activity=downstream_activity,
+                    penalize_account=message.error_code != "proxy_network_unavailable",
                     suppress_sequenced_downstream_errors=sequenced_downstream_replay_refused,
                 )
                 if sequenced_downstream_replay_refused:

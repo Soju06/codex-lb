@@ -2,7 +2,7 @@
 
 ### Requirement: Stock Docker networking explains network switching
 
-The documented portable standalone Docker deployment MUST attach codex-lb to a user-defined bridge network, and stock Compose deployments MUST declare a user-defined default bridge. The documentation MUST state that Docker's embedded resolver can retain stale external forwarding servers across a host network change. It MUST provide a Linux host-network launch option for operators who require the container to use the host's live resolver. Stock configuration MUST NOT hard-code a public recursive DNS server.
+The documented portable standalone Docker deployment MUST attach codex-lb to a user-defined bridge network, and stock Compose deployments MUST declare a user-defined default bridge. The documentation MUST state that Docker's embedded resolver can retain stale external forwarding servers across a host network change. It MUST provide a Linux host-network launch option for operators whose host exposes a stable resolver address, and MUST state that a direct DHCP-provided resolver can still become stale in host-network mode. Stock configuration MUST NOT hard-code a public recursive DNS server.
 
 #### Scenario: Standalone quick start uses a user-defined bridge
 
@@ -21,6 +21,8 @@ The documented portable standalone Docker deployment MUST attach codex-lb to a u
 - **WHEN** a Linux operator selects the documented launch for switching Wi-Fi or other networks
 - **THEN** the container uses `--network host`
 - **AND** the command does not publish ports with `-p`
+- **AND** the documentation requires a stable host resolver address and identifies `systemd-resolved` as the verified setup
+- **AND** the documentation warns that a direct DHCP-provided resolver may still become stale
 - **AND** the documentation explains the loss of Docker network-namespace isolation
 
 #### Scenario: Portable bridge limitations are explicit

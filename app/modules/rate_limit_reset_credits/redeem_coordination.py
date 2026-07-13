@@ -72,9 +72,9 @@ async def try_acquire_redeem_claim(
             },
             where=ResetCreditRedeemClaim.expires_at < now,
         )
-        result = await session.execute(stmt)
+        result = await session.execute(stmt.returning(ResetCreditRedeemClaim.account_id))
         await session.commit()
-        return bool(result.rowcount)
+        return result.scalar_one_or_none() is not None
     finally:
         await close_session(session)
 

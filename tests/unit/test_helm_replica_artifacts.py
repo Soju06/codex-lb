@@ -14,6 +14,7 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -74,16 +75,49 @@ def _helm_template_error(*args: str) -> str:
     return completed.stderr
 
 
+_NOTES_WRAPPER_TEMPLATE = """\
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rendered-notes
+data:
+  notes: {{ include "codex-lb/templates/NOTES.txt" . | toJson }}
+"""
+
+
 def _helm_notes(*args: str) -> str:
+    """Render the chart NOTES.txt without a Kubernetes cluster.
+
+    ``helm install --dry-run=client`` still requires a reachable cluster
+    (the install action checks API-server reachability before rendering),
+    so it fails on CI runners that have no kubeconfig. Instead, render the
+    NOTES.txt template through ``helm template`` by including it from a
+    wrapper ConfigMap manifest in a throwaway copy of the chart.
+    """
     _ensure_chart_dependencies()
-    completed = subprocess.run(
-        ["helm", "install", "codex-lb", str(_CHART_DIR), "--dry-run=client", *args],
-        cwd=_REPO_ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    return completed.stdout
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        chart_copy = Path(tmp_dir) / "codex-lb"
+        shutil.copytree(_CHART_DIR, chart_copy)
+        (chart_copy / "templates" / "zz-rendered-notes.yaml").write_text(_NOTES_WRAPPER_TEMPLATE)
+        completed = subprocess.run(
+            [
+                "helm",
+                "template",
+                "codex-lb",
+                str(chart_copy),
+                "--show-only",
+                "templates/zz-rendered-notes.yaml",
+                *args,
+            ],
+            cwd=_REPO_ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    (document,) = _helm_documents(completed.stdout)
+    notes = document["data"]["notes"]
+    assert isinstance(notes, str)
+    return notes
 
 
 def _helm_documents(rendered: str) -> list[dict]:

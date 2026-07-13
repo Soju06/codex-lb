@@ -294,6 +294,7 @@ async def test_lifespan_runs_normally_when_otel_is_disabled(monkeypatch: pytest.
     monkeypatch.setattr(main, "init_background_db", init_background_db)
     monkeypatch.setattr(main, "init_http_client", init_http_client)
     monkeypatch.setattr(main, "_ensure_bridge_durable_schema_ready", AsyncMock())
+    monkeypatch.setattr(main, "verify_encryption_key_fingerprint", AsyncMock(return_value=None))
     monkeypatch.setattr(main, "close_http_client", close_http_client)
     monkeypatch.setattr(main, "close_db", close_db)
     monkeypatch.setattr(main, "build_usage_refresh_scheduler", lambda: usage_scheduler)
@@ -374,6 +375,7 @@ async def test_lifespan_marks_bridge_membership_stale_on_shutdown(monkeypatch: p
     monkeypatch.setattr(main, "init_background_db", Mock())
     monkeypatch.setattr(main, "init_http_client", AsyncMock())
     monkeypatch.setattr(main, "_ensure_bridge_durable_schema_ready", AsyncMock())
+    monkeypatch.setattr(main, "verify_encryption_key_fingerprint", AsyncMock(return_value=None))
     monkeypatch.setattr(main, "close_http_client", close_http_client)
     monkeypatch.setattr(main, "close_db", close_db)
     monkeypatch.setattr(main, "build_usage_refresh_scheduler", lambda: usage_scheduler)
@@ -459,6 +461,7 @@ async def test_lifespan_shutdown_fails_bridge_capacity_waiter_and_cancels_usage_
     monkeypatch.setattr(main, "init_background_db", Mock())
     monkeypatch.setattr(main, "init_http_client", AsyncMock())
     monkeypatch.setattr(main, "_ensure_bridge_durable_schema_ready", AsyncMock())
+    monkeypatch.setattr(main, "verify_encryption_key_fingerprint", AsyncMock(return_value=None))
     monkeypatch.setattr(main, "close_http_client", close_http_client)
     monkeypatch.setattr(main, "close_db", close_db)
     monkeypatch.setattr(main, "build_usage_refresh_scheduler", lambda: usage_scheduler)
@@ -630,6 +633,7 @@ async def test_lifespan_marks_bridge_membership_stale_for_hostname_shared_ids(
     monkeypatch.setattr(main, "init_background_db", Mock())
     monkeypatch.setattr(main, "init_http_client", AsyncMock())
     monkeypatch.setattr(main, "_ensure_bridge_durable_schema_ready", AsyncMock())
+    monkeypatch.setattr(main, "verify_encryption_key_fingerprint", AsyncMock(return_value=None))
     monkeypatch.setattr(main, "close_http_client", close_http_client)
     monkeypatch.setattr(main, "close_db", close_db)
     monkeypatch.setattr(main, "build_usage_refresh_scheduler", lambda: usage_scheduler)
@@ -702,6 +706,7 @@ async def test_lifespan_registers_bridge_without_waiting_for_advertise_self_prob
     monkeypatch.setattr(main, "init_background_db", Mock())
     monkeypatch.setattr(main, "init_http_client", AsyncMock())
     monkeypatch.setattr(main, "_ensure_bridge_durable_schema_ready", AsyncMock())
+    monkeypatch.setattr(main, "verify_encryption_key_fingerprint", AsyncMock(return_value=None))
     monkeypatch.setattr(main, "close_http_client", close_http_client)
     monkeypatch.setattr(main, "close_db", close_db)
     monkeypatch.setattr(main, "build_usage_refresh_scheduler", lambda: usage_scheduler)
@@ -782,6 +787,7 @@ async def test_lifespan_fails_fast_when_bridge_durable_schema_is_missing(monkeyp
     monkeypatch.setattr(
         main, "_ensure_bridge_durable_schema_ready", AsyncMock(side_effect=RuntimeError("missing schema"))
     )
+    monkeypatch.setattr(main, "verify_encryption_key_fingerprint", AsyncMock(return_value=None))
 
     with pytest.raises(RuntimeError, match="missing schema"):
         async with main.lifespan(main.app):
@@ -829,6 +835,7 @@ async def test_lifespan_allows_missing_bridge_schema_when_fail_fast_disabled(mon
     monkeypatch.setattr(main, "build_sticky_session_cleanup_scheduler", lambda: sticky_scheduler)
     monkeypatch.setattr(main, "RingMembershipService", lambda session_factory: ring_service)
     monkeypatch.setattr(main, "_ensure_bridge_durable_schema_ready", AsyncMock(return_value=False))
+    monkeypatch.setattr(main, "verify_encryption_key_fingerprint", AsyncMock(return_value=None))
     monkeypatch.setattr(main, "mark_process_dead", Mock())
     monkeypatch.setattr(
         "app.core.cache.invalidation.CacheInvalidationPoller",

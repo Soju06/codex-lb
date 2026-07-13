@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
 import random
 import time
 from dataclasses import dataclass
@@ -978,8 +979,11 @@ def _select_fill_first(available: list[AccountState]) -> AccountState:
 # starts near 0.2s, which is meaningless as a cross-replica cooldown: a peer
 # replica reading the row would flip it back to ACTIVE almost immediately. The
 # floor applies only to the persisted ``reset_at`` deadline written on the
-# backoff fallback path — Retry-After hints and upstream reset metadata are
-# persisted verbatim, and the local ``cooldown_until`` keeps the raw backoff.
+# backoff fallback path — Retry-After hints are persisted rounded up to the
+# next whole second (persistence truncates ``reset_at`` via ``int()``, so a
+# short or fractional hint must not round down to an already-elapsed
+# deadline), upstream reset metadata is persisted verbatim, and the local
+# ``cooldown_until`` keeps the raw backoff.
 RATE_LIMITED_MIN_COOLDOWN_SECONDS = 30.0
 
 
@@ -1007,8 +1011,13 @@ def handle_rate_limit(state: AccountState, error: UpstreamError) -> None:
         # Persist the resolved cooldown deadline so replicas sharing the
         # database honor it instead of flipping the account back to ACTIVE
         # from their own (empty) runtime state. The write rides the existing
-        # ``mark_rate_limit -> _persist_state`` status update.
-        state.reset_at = now + persisted_delay
+        # ``mark_rate_limit -> _persist_state`` status update. Round the
+        # deadline UP to a whole second: ``_persist_state`` truncates via
+        # ``int()``, so a short or fractional Retry-After hint (for example
+        # "500ms", or "1s" near a second boundary) would otherwise persist a
+        # deadline that is already elapsed for peer replicas, dropping the
+        # cooldown entirely.
+        state.reset_at = float(math.ceil(now + persisted_delay))
 
 
 QUOTA_EXCEEDED_COOLDOWN_SECONDS = 120.0

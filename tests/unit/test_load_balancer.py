@@ -871,6 +871,24 @@ def test_handle_rate_limit_persists_retry_after_deadline_verbatim(monkeypatch):
     assert state.cooldown_until == pytest.approx(now + 1200.0)
 
 
+def test_handle_rate_limit_short_retry_after_deadline_rounds_up_for_persistence(monkeypatch):
+    # Regression: the persistence path writes ``int(state.reset_at)``, so a
+    # short or fractional Retry-After hint near a second boundary used to
+    # truncate to a timestamp already elapsed for peer replicas, dropping the
+    # hinted cooldown entirely. The persisted deadline must round UP.
+    now = 1_700_000_000.9
+    monkeypatch.setattr("app.core.balancer.logic.time.time", lambda: now)
+    state = AccountState("a", AccountStatus.ACTIVE, used_percent=5.0)
+    handle_rate_limit(state, {"message": "Try again in 500ms"})
+    assert state.reset_at is not None
+    assert state.reset_at == 1_700_000_002.0  # ceil(now + 0.5), not int(now + 0.5) == 1_700_000_001
+    # The peer-visible integer deadline stays in the future.
+    assert int(state.reset_at) > now
+    # Local cooldown keeps the raw hint so the marking replica's own recovery
+    # gates are unchanged.
+    assert state.cooldown_until == pytest.approx(now + 0.5)
+
+
 def test_handle_rate_limit_upstream_reset_metadata_still_wins(monkeypatch):
     now = 1_700_000_000.0
     monkeypatch.setattr("app.core.balancer.logic.time.time", lambda: now)

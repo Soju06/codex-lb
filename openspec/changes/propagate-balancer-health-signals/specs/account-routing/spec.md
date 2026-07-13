@@ -19,10 +19,13 @@ When the upstream rate-limit error carries no explicit reset metadata
 (`resets_at`/`resets_in_seconds`), the resolved cooldown deadline SHALL be
 persisted on the account row (`reset_at`) so the cooldown survives process
 restarts and is visible to all replicas sharing the database: a parsed
-Retry-After hint duration SHALL be persisted verbatim, and when the cooldown
-comes from the error-count backoff fallback the persisted deadline SHALL be at
-least `RATE_LIMITED_MIN_COOLDOWN_SECONDS` (30 seconds) in the future. Explicit
-upstream reset metadata, when present, SHALL continue to be persisted as-is.
+Retry-After hint deadline SHALL be persisted rounded up to the next whole
+second (persistence stores `reset_at` as an integer, so a short or fractional
+hint MUST NOT truncate down to an already-elapsed deadline), and when the
+cooldown comes from the error-count backoff fallback the persisted deadline
+SHALL be at least `RATE_LIMITED_MIN_COOLDOWN_SECONDS` (30 seconds) in the
+future. Explicit upstream reset metadata, when present, SHALL continue to be
+persisted as-is.
 The marking replica's in-process cooldown MAY remain shorter than the
 persisted deadline so its existing fresh-usage recovery gate is unchanged.
 
@@ -64,6 +67,13 @@ persisted deadline so its existing fresh-usage recovery gate is unchanged.
 - **GIVEN** an upstream 429 whose message says "try again in 20m" and that carries no reset metadata
 - **WHEN** the balancer records the rate limit for the account
 - **THEN** the persisted `reset_at` is approximately 1200 seconds in the future
+
+#### Scenario: Short fractional Retry-After hint is not truncated away
+
+- **GIVEN** an upstream 429 whose message says "try again in 500ms" and that carries no reset metadata
+- **WHEN** the balancer records the rate limit for the account
+- **THEN** the persisted integer `reset_at` deadline is strictly in the future
+- **AND** peer replicas honor the hinted cooldown instead of reselecting the account immediately
 
 ## ADDED Requirements
 

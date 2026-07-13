@@ -287,7 +287,7 @@ def set_cache_invalidation_poller(poller: CacheInvalidationPoller | None) -> Non
 
 
 async def bump_cache_invalidation(namespace: str) -> None:
-    """Best-effort version bump; a no-op before the lifespan poller exists."""
+    """Best-effort version bump; a no-op outside the lifespan poller's lifetime."""
     poller = _poller
     if poller is None:
         return

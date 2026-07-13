@@ -329,6 +329,7 @@ async def test_lifespan_runs_normally_when_otel_is_disabled(monkeypatch: pytest.
 async def test_lifespan_marks_bridge_membership_stale_on_shutdown(monkeypatch: pytest.MonkeyPatch):
     import app.core.startup as startup_module
     import app.main as main
+    from app.core.cache.invalidation import get_cache_invalidation_poller
 
     settings = Settings(
         otel_enabled=False,
@@ -407,6 +408,10 @@ async def test_lifespan_marks_bridge_membership_stale_on_shutdown(monkeypatch: p
         grace_seconds=main.RING_STALE_GRACE_SECONDS,
     )
     ring_service.unregister.assert_not_called()
+    cache_poller.stop.assert_awaited_once()
+    # Shutdown must clear the process-global poller so bump_cache_invalidation
+    # is a no-op (not a call through this test's fake) after lifespan exit.
+    assert get_cache_invalidation_poller() is None
 
 
 @pytest.mark.asyncio

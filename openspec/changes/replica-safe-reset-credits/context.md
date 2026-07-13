@@ -41,6 +41,14 @@ setups use.
   redemption during that window; dashboards show zero credits until the first
   tick, as they already did on restart.
 
+## Implementation notes
+
+- **Poller lifecycle is symmetric**: lifespan shutdown clears the
+  process-global cache-invalidation poller, so `bump_cache_invalidation` is a
+  no-op outside the poller's lifetime (before startup and after shutdown)
+  rather than writing through a stopped poller. This is what keeps the bump
+  best-effort at the edges of the process lifecycle.
+
 ## Example: cross-replica retry
 
 1. Operator clicks redeem; the dashboard sends `redeem_request_id=R`.

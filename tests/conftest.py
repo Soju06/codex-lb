@@ -172,6 +172,12 @@ def _reset_global_state() -> None:
     except Exception:
         pass
     try:
+        from app.core.cache.invalidation import set_cache_invalidation_poller
+
+        set_cache_invalidation_poller(None)
+    except Exception:
+        pass
+    try:
         from app.core.resilience.degradation import set_normal
 
         set_normal()

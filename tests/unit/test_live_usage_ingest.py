@@ -94,6 +94,20 @@ def test_parse_rate_limit_event_text_reads_sse_block() -> None:
     assert snapshot.credits_has is False
 
 
+def test_parse_rate_limit_event_rejects_non_default_limit_families() -> None:
+    base = {
+        "type": "codex.rate_limits",
+        "rate_limits": {"primary": {"used_percent": 55, "window_minutes": 300, "reset_at": 1_700_000_300}},
+    }
+    from app.core.usage.live_snapshots import parse_rate_limit_event
+
+    assert parse_rate_limit_event({**base, "metered_limit_name": "gpt-5.2-codex-sonic"}) is None
+    assert parse_rate_limit_event({**base, "limit_id": "codex_other"}) is None
+    assert parse_rate_limit_event({**base, "limit_name": "gpt-gated"}) is None
+    assert parse_rate_limit_event({**base, "limit_id": "codex"}) is not None
+    assert parse_rate_limit_event(base) is not None
+
+
 def test_parse_rate_limit_event_text_ignores_other_events_and_garbage() -> None:
     assert parse_rate_limit_event_text('data: {"type":"response.completed"}\n\n') is None
     assert parse_rate_limit_event_text('data: {"type":"codex.rate_limits","rate_limits":{}}\n\n') is None

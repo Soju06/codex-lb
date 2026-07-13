@@ -120,6 +120,14 @@ def parse_rate_limit_event(payload: Mapping[str, Any]) -> LiveRateLimitSnapshot 
     """Parse a ``codex.rate_limits`` stream event payload."""
     if payload.get("type") != _EVENT_TYPE:
         return None
+    # Only the default ``codex`` limit family maps onto the account's main
+    # usage rows; events for model-specific or individual limit buckets
+    # (discriminated by limit_id / metered_limit_name / limit_name) must not
+    # corrupt global selection state.
+    for discriminator in ("limit_id", "metered_limit_name", "limit_name"):
+        value = payload.get(discriminator)
+        if value is not None and value != "codex":
+            return None
     rate_limits = payload.get("rate_limits")
     if not isinstance(rate_limits, dict):
         return None

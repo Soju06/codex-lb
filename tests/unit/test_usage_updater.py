@@ -3557,6 +3557,49 @@ async def test_refresh_accounts_fetches_when_additional_usage_ages_despite_fresh
 
 
 @pytest.mark.asyncio
+async def test_refresh_accounts_fetches_when_no_additional_rows_were_ever_synced(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.config.settings import get_settings
+    from app.core.utils.time import utcnow
+
+    get_settings.cache_clear()
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+
+    fetch_calls = 0
+
+    async def stub_fetch_usage(**_: Any) -> UsagePayload:
+        nonlocal fetch_calls
+        fetch_calls += 1
+        return UsagePayload.model_validate({"rate_limit": {}})
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+
+    usage_repo = StubUsageRepository()
+    await usage_repo.add_entry(
+        "acc_undiscovered",
+        30.0,
+        recorded_at=now - timedelta(seconds=5),
+        window="primary",
+        reset_at=now_epoch + 300,
+        window_minutes=300,
+    )
+    latest = await usage_repo.latest_entry_for_account("acc_undiscovered", window="primary")
+    assert latest is not None
+
+    # An additional-usage repo is configured but no rows were ever synced:
+    # live rows alone must not suppress the discovery fetch.
+    additional_repo = StubAdditionalUsageRepository()
+
+    acc = _make_account("acc_undiscovered", "workspace_undiscovered", email="undiscovered@example.com")
+
+    updater = UsageUpdater(usage_repo, accounts_repo=None, additional_usage_repo=additional_repo)
+    await updater.refresh_accounts([acc], latest_usage={"acc_undiscovered": latest})
+
+    assert fetch_calls == 1
+
+
+@pytest.mark.asyncio
 async def test_refresh_accounts_skips_fetch_when_additional_usage_is_fresh(monkeypatch) -> None:
     monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
     from app.core.config.settings import get_settings

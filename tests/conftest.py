@@ -110,9 +110,24 @@ async def db_setup(_reset_db_state):
 
 @pytest_asyncio.fixture
 async def async_client(app_instance):
+    async def _drain_proxy_persistence(response) -> None:
+        # Request-log writes and API-key settlements are detached from the
+        # response path in production; tests assert on their effects right
+        # after a response, so flush them per request to keep the historical
+        # synchronous semantics inside the suite. The detach contract itself
+        # is pinned by dedicated tests that bypass this hook.
+        del response
+        service = getattr(app_instance.state, "proxy_service", None)
+        if service is not None and hasattr(service, "drain_persistence_tasks"):
+            await service.drain_persistence_tasks(timeout_seconds=5)
+
     async with app_instance.router.lifespan_context(app_instance):
         transport = ASGITransport(app=app_instance)
-        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        async with AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+            event_hooks={"response": [_drain_proxy_persistence]},
+        ) as client:
             yield client
 
 

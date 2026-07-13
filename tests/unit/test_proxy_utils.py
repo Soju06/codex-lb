@@ -3253,6 +3253,7 @@ async def test_compact_synthesized_turn_state_allows_file_pin_routing(monkeypatc
         api_key=None,
         fail_on_missing=False,
     )
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["status"] == "success"
     assert request_logs.calls[0]["account_id"] == account.id
 
@@ -3727,7 +3728,10 @@ def _repo_factory(request_logs: _RequestLogsRecorder) -> proxy_service.ProxyRepo
 
 
 @pytest.mark.asyncio
-async def test_write_request_log_continues_after_caller_cancellation() -> None:
+async def test_write_request_log_detaches_and_persists_in_background() -> None:
+    """The response path must not wait on the log INSERT: _write_request_log
+    returns before persistence runs, the task is tracked, and draining
+    flushes it."""
     request_logs = _RequestLogsRecorder()
     started = asyncio.Event()
     release = asyncio.Event()
@@ -3740,29 +3744,24 @@ async def test_write_request_log_continues_after_caller_cancellation() -> None:
     request_logs.add_log = cast(Any, blocking_add_log)
     service = proxy_service.ProxyService(_repo_factory(request_logs))
 
-    task = asyncio.create_task(
-        service._write_request_log(
-            account_id="acc_request_log_cancel",
-            api_key=None,
-            request_id="resp_request_log_cancel",
-            model="gpt-5.4",
-            latency_ms=1,
-            status="error",
-        )
+    await service._write_request_log(
+        account_id="acc_request_log_cancel",
+        api_key=None,
+        request_id="resp_request_log_cancel",
+        model="gpt-5.4",
+        latency_ms=1,
+        status="error",
     )
+    # Returned before persistence completed: the write is detached.
+    assert not request_logs.calls
+    assert service._request_log_tasks
+
     await asyncio.wait_for(started.wait(), timeout=1)
-
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await asyncio.wait_for(task, timeout=1)
     release.set()
-
-    for _ in range(20):
-        if request_logs.calls:
-            break
-        await asyncio.sleep(0.01)
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
 
     assert request_logs.calls[0]["request_id"] == "resp_request_log_cancel"
+    assert service._request_log_tasks == set()
 
 
 @pytest.mark.asyncio
@@ -3786,6 +3785,7 @@ async def test_write_request_log_persists_failure_metadata() -> None:
         upstream_error_code="bridge_owner_unreachable",
         bridge_stage="owner_forward",
     )
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
 
     call = request_logs.calls[0]
     assert call["failure_phase"] == "owner_forward"
@@ -3811,6 +3811,7 @@ async def test_write_request_log_persists_useragent_fields() -> None:
         useragent="opencode/1.15.13 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14",
         useragent_group="opencode",
     )
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
 
     call = request_logs.calls[0]
     assert call["useragent"] == "opencode/1.15.13 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
@@ -8681,6 +8682,7 @@ async def test_service_compact_budget_bounds_unconfigured_upstream_read_timeout(
     assert captured["connect_timeout"] == pytest.approx(2.0)
     assert captured["total_timeout"] == pytest.approx(2.0)
     assert result.model_extra == {"output": []}
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[-1]["request_kind"] == "normal"
 
 
@@ -8797,6 +8799,7 @@ async def test_stream_responses_logs_actual_service_tier_and_requested_tier_trac
 
     assert chunks
     assert request_id
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["service_tier"] == "default"
     assert request_logs.calls[0]["requested_service_tier"] == "priority"
     assert request_logs.calls[0]["actual_service_tier"] == "default"
@@ -9042,6 +9045,7 @@ async def test_service_stream_responses_records_typeless_raw_codex_error_first(m
     ]
 
     assert chunks == [raw_error_line]
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["status"] == "error"
     assert request_logs.calls[0]["error_code"] == "invalid_request_error"
     assert request_logs.calls[0]["error_message"] == "OpenCode stream failed"
@@ -9267,6 +9271,7 @@ async def test_service_stream_responses_records_typeless_raw_codex_error_after_c
         'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_typeless_raw_error"}}\n\n',
         raw_error_line,
     ]
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["status"] == "error"
     assert request_logs.calls[0]["error_code"] == "rate_limit_exceeded"
     assert request_logs.calls[0]["error_message"] == "OpenCode stream failed"
@@ -9407,6 +9412,7 @@ async def test_compact_responses_logs_service_tier_trace_and_generates_request_i
         reset_request_id(token)
 
     assert proxy_service._service_tier_from_response(response) == "default"
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["service_tier"] == "default"
     assert request_logs.calls[0]["requested_service_tier"] == "priority"
     assert request_logs.calls[0]["actual_service_tier"] == "default"
@@ -9453,6 +9459,7 @@ async def test_compact_responses_persists_useragent_fields_in_request_log(monkey
         {"session_id": "sid-compact", "User-Agent": "opencode/1.15.13 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"},
         client_ip="203.0.113.7",
     )
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
 
     assert request_logs.calls[0]["useragent"] == "opencode/1.15.13 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
     assert request_logs.calls[0]["useragent_group"] == "opencode"
@@ -9596,6 +9603,7 @@ async def test_stream_responses_propagates_selection_error_code(monkeypatch):
 
     event = json.loads(chunks[0].split("data: ", 1)[1])
     assert event["response"]["error"]["code"] == "additional_quota_data_unavailable"
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["error_code"] == "additional_quota_data_unavailable"
 
 
@@ -9719,6 +9727,7 @@ async def test_stream_with_retry_preserves_stream_cap_error_type_when_wait_exhau
     assert failed["type"] == "response.failed"
     assert failed["response"]["error"]["code"] == "account_stream_cap"
     assert failed["response"]["error"]["type"] == "rate_limit_error"
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["error_code"] == "account_stream_cap"
 
 
@@ -10683,6 +10692,7 @@ async def test_stream_responses_first_idle_timeout_fails_over_to_next_account(mo
     assert seen_excluded_account_ids == [set(), {account_a.id}]
     record_error.assert_awaited_once_with(account_a)
     record_success.assert_awaited_once_with(account_b)
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert [call["status"] for call in request_logs.calls] == ["error", "success"]
     assert request_logs.calls[0]["error_code"] == "stream_idle_timeout"
 
@@ -10731,6 +10741,7 @@ async def test_stream_responses_first_idle_timeout_surfaces_timeout_when_no_fail
     assert seen_excluded_account_ids == [set(), {account.id}]
     record_error.assert_awaited_once_with(account)
     record_success.assert_not_awaited()
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[-1]["error_code"] == "stream_idle_timeout"
 
 
@@ -10767,6 +10778,7 @@ async def test_stream_responses_empty_upstream_emits_terminal_failure(monkeypatc
 
     event = json.loads(chunks[0].split("data: ", 1)[1])
     assert event["response"]["error"]["code"] == "stream_incomplete"
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["error_code"] == "stream_incomplete"
     record_error.assert_awaited_once_with(account)
     record_success.assert_not_awaited()
@@ -10808,6 +10820,7 @@ async def test_stream_responses_post_yield_upstream_error_emits_terminal_failure
     terminal = json.loads(chunks[1].split("data: ", 1)[1])
     assert terminal["type"] == "response.failed"
     assert terminal["response"]["error"]["code"] == "stream_incomplete"
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["error_code"] == "stream_incomplete"
     record_error.assert_awaited_once_with(account)
     record_success.assert_not_awaited()
@@ -10973,6 +10986,7 @@ async def test_stream_responses_first_event_raw_eof_fails_over_before_downstream
     assert event["type"] == "response.completed"
     assert event["response"]["id"] == "resp_raw_eof_ok"
     assert seen_excluded_account_ids == [set(), {account_a.id}]
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["error_code"] == "stream_incomplete"
     assert request_logs.calls[0]["failure_detail"] == "upstream_eof_before_terminal_event"
     assert request_logs.calls[-1]["status"] == "success"
@@ -11041,6 +11055,7 @@ async def test_stream_responses_suppresses_contiguous_side_effect_replay_across_
     terminal_response = cast(dict[str, JsonValue], terminal_event["response"])
     terminal_error = cast(dict[str, JsonValue], terminal_response["error"])
     assert terminal_error["code"] == "stream_incomplete"
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["status"] == "error"
     assert request_logs.calls[0]["error_code"] == "stream_incomplete"
 
@@ -11101,6 +11116,7 @@ async def test_stream_responses_keeps_same_response_http_tool_calls_with_distinc
     terminal_payload = parse_sse_data_json(chunks[-1])
     assert isinstance(terminal_payload, dict)
     assert terminal_payload["type"] == "response.completed"
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["status"] == "success"
 
 
@@ -11281,6 +11297,7 @@ async def test_stream_responses_retries_security_work_warning_on_authorized_acco
     assert first_call.kwargs["require_security_work_authorized"] is False
     assert second_call.kwargs["require_security_work_authorized"] is True
     assert second_call.kwargs["exclude_account_ids"] == {regular_account.id}
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert [call["account_id"] for call in request_logs.calls] == [
         regular_account.id,
         authorized_account.id,
@@ -11373,6 +11390,7 @@ async def test_stream_responses_treats_missing_security_work_pool_as_optional(mo
     ]
     assert select_account.await_args_list[1].kwargs["exclude_account_ids"] == {regular_account.id}
     assert select_account.await_args_list[2].kwargs["exclude_account_ids"] == {regular_account.id}
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert [call["account_id"] for call in request_logs.calls] == [
         regular_account.id,
         fallback_account.id,
@@ -11446,6 +11464,7 @@ async def test_stream_responses_security_work_retry_exhaustion_logs_useragent(mo
     event = json.loads(chunks[-1].split("data: ", 1)[1])
     assert event["type"] == "response.failed"
     assert event["response"]["error"]["code"] == "security_work_authorization_required"
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[-1]["account_id"] is None
     assert request_logs.calls[-1]["error_code"] == "security_work_authorization_required"
     assert request_logs.calls[-1]["useragent"] == "CodexCLI/1.2.3 linux"
@@ -11537,6 +11556,7 @@ async def test_stream_responses_missing_security_work_pool_preserves_failover_bu
         regular_account.id,
         transient_account.id,
     }
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["account_id"] == regular_account.id
     assert request_logs.calls[-1]["account_id"] == success_account.id
     assert request_logs.calls[-1]["status"] == "success"
@@ -12464,6 +12484,7 @@ async def test_compact_responses_retries_security_work_warning_on_authorized_acc
     assert first_call.kwargs["require_security_work_authorized"] is False
     assert second_call.kwargs["require_security_work_authorized"] is True
     assert second_call.kwargs["exclude_account_ids"] == {regular_account.id}
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert [call["account_id"] for call in request_logs.calls] == [authorized_account.id]
     assert request_logs.calls[0]["status"] == "success"
     record_error.assert_not_awaited()
@@ -12528,6 +12549,7 @@ async def test_compact_responses_treats_missing_security_work_pool_as_optional(m
     ]
     assert select_account.await_args_list[1].kwargs["exclude_account_ids"] == {regular_account.id}
     assert select_account.await_args_list[2].kwargs["exclude_account_ids"] == {regular_account.id}
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert [call["account_id"] for call in request_logs.calls] == [fallback_account.id]
     assert request_logs.calls[0]["status"] == "success"
 
@@ -16322,6 +16344,7 @@ async def test_fail_expired_pending_websocket_requests_keeps_newer_requests(monk
     assert list(pending_requests) == [newer_request]
     emit_terminal_error.assert_awaited_once()
     release_reservation.assert_awaited_once_with(None)
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert len(request_logs.calls) == 1
     assert request_logs.calls[0]["request_id"] == "resp_expired"
     assert request_logs.calls[0]["error_code"] == "upstream_request_timeout"
@@ -16364,6 +16387,7 @@ async def test_fail_pending_websocket_requests_penalizes_upstream_stream_drop(mo
         "stream_incomplete",
     )
     assert list(pending_requests) == []
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert len(request_logs.calls) == 1
     assert request_logs.calls[0]["request_id"] == "resp_ws_drop"
     assert request_logs.calls[0]["error_code"] == "stream_incomplete"
@@ -16450,6 +16474,7 @@ async def test_fail_pending_websocket_requests_does_not_penalize_rejected_input_
 
     handle_stream_error.assert_not_awaited()
     assert list(pending_requests) == []
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert len(request_logs.calls) == 1
     assert request_logs.calls[0]["request_id"] == "resp_ws_rejected"
     assert request_logs.calls[0]["error_code"] == "upstream_rejected_input"
@@ -16490,6 +16515,7 @@ async def test_fail_pending_websocket_requests_logs_even_when_penalty_fails(monk
     )
 
     assert list(pending_requests) == []
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert len(request_logs.calls) == 1
     assert request_logs.calls[0]["request_id"] == "resp_ws_penalty_fail"
     assert request_logs.calls[0]["error_code"] == "stream_incomplete"
@@ -16531,6 +16557,7 @@ async def test_fail_pending_websocket_requests_marks_client_disconnect_without_p
 
     handle_stream_error.assert_not_awaited()
     assert list(pending_requests) == []
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert len(request_logs.calls) == 1
     assert request_logs.calls[0]["request_id"] == "resp_ws_client_disconnect"
     assert request_logs.calls[0]["status"] == "cancelled"
@@ -16584,6 +16611,7 @@ async def test_finalize_websocket_request_state_updates_balancer_state(monkeypat
     record_success.assert_awaited_once_with(account)
     handle_stream_error.assert_not_awaited()
     assert completed_upstream_control.reconnect_requested is False
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[-1]["request_kind"] == "normal"
 
     record_success.reset_mock()
@@ -16623,6 +16651,7 @@ async def test_finalize_websocket_request_state_updates_balancer_state(monkeypat
     record_success.assert_not_awaited()
     handle_stream_error.assert_not_awaited()
     assert prewarm_upstream_control.reconnect_requested is False
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[-1]["status"] == "success"
     assert request_logs.calls[-1]["request_kind"] == "prewarm"
     assert request_logs.calls[-1]["output_tokens"] == 0
@@ -16743,6 +16772,7 @@ async def test_finalize_websocket_request_state_updates_balancer_state(monkeypat
     record_success.assert_not_awaited()
     handle_stream_error.assert_not_awaited()
     assert incomplete_upstream_control.reconnect_requested is False
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[-1]["status"] == "error"
     assert request_logs.calls[-1]["error_code"] == "max_output_tokens"
     assert request_logs.calls[-1]["error_message"] == "max_output_tokens"
@@ -19150,6 +19180,7 @@ async def test_proxy_responses_websocket_downstream_disconnect_does_not_penalize
     assert upstream.closed is True
     assert len(upstream.sent_text) == 1
     assert downstream.sent_text == []
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert len(request_logs.calls) == 1
     assert request_logs.calls[0]["status"] == "cancelled"
     assert request_logs.calls[0]["error_code"] == "client_disconnected"
@@ -19157,7 +19188,7 @@ async def test_proxy_responses_websocket_downstream_disconnect_does_not_penalize
 
 
 @pytest.mark.asyncio
-async def test_stream_api_key_settlement_outlives_caller_cancel_and_closes_repo(monkeypatch):
+async def test_stream_api_key_settlement_detaches_and_closes_repo(monkeypatch):
     started = asyncio.Event()
     release = asyncio.Event()
     closed = asyncio.Event()
@@ -19213,20 +19244,17 @@ async def test_stream_api_key_settlement_outlives_caller_cancel_and_closes_repo(
         cached_input_tokens=5,
     )
 
-    caller = asyncio.create_task(
-        service._settle_stream_api_key_usage(
-            api_key,
-            reservation,
-            settlement,
-            request_id="req_stream_cancel",
-        )
+    settled = await service._settle_stream_api_key_usage(
+        api_key,
+        reservation,
+        settlement,
+        request_id="req_stream_cancel",
     )
-    await started.wait()
-    caller.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await caller
-
+    # Returns immediately with the settlement detached and tracked.
+    assert settled is True
     assert service._background_cleanup_tasks
+
+    await started.wait()
     release.set()
     await asyncio.wait_for(closed.wait(), timeout=1.0)
     for _ in range(20):
@@ -19249,7 +19277,7 @@ async def test_stream_api_key_settlement_outlives_caller_cancel_and_closes_repo(
 
 
 @pytest.mark.asyncio
-async def test_stream_api_key_settlement_returns_completed_result_when_cancel_races(monkeypatch):
+async def test_stream_api_key_settlement_detached_finalizes_without_release(monkeypatch):
     finalized: list[str] = []
     repo = SimpleNamespace(api_keys=object())
 
@@ -19268,14 +19296,7 @@ async def test_stream_api_key_settlement_returns_completed_result_when_cancel_ra
         async def release_usage_reservation(self, reservation_id: str) -> None:
             raise AssertionError(f"unexpected release for {reservation_id}")
 
-    real_shield = asyncio.shield
-
-    async def cancel_after_task_completes(task: asyncio.Task[bool]) -> bool:
-        await real_shield(task)
-        raise asyncio.CancelledError
-
     monkeypatch.setattr(proxy_service, "ApiKeysService", FakeApiKeysService)
-    monkeypatch.setattr(proxy_service.asyncio, "shield", cancel_after_task_completes)
 
     service = proxy_service.ProxyService(cast(proxy_service.ProxyRepoFactory, repo_factory))
     api_key = ApiKeyData(
@@ -19311,7 +19332,10 @@ async def test_stream_api_key_settlement_returns_completed_result_when_cancel_ra
     )
 
     assert settled is True
-    assert settlement.usage_settlement_transferred is False
+    assert settlement.usage_settlement_transferred is True
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+    # Successful detached settlement finalizes exactly once; the
+    # FakeApiKeysService raises on any release attempt.
     assert finalized == ["resv_stream_cancel_done"]
 
 
@@ -19367,19 +19391,14 @@ async def test_stream_api_key_background_settlement_failure_falls_back_to_releas
         output_tokens=34,
     )
 
-    caller = asyncio.create_task(
-        service._settle_stream_api_key_usage(
-            api_key,
-            reservation,
-            settlement,
-            request_id="req_stream_failed_background",
-        )
+    settled = await service._settle_stream_api_key_usage(
+        api_key,
+        reservation,
+        settlement,
+        request_id="req_stream_failed_background",
     )
+    assert settled is True
     await started.wait()
-    caller.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await caller
-
     release_finalize.set()
     for _ in range(50):
         if not service._background_cleanup_tasks:
@@ -20990,6 +21009,7 @@ async def test_stream_with_retry_preserves_useragent_on_preflight_timeout(monkey
     event = json.loads(chunks[0].split("data: ", 1)[1])
     assert event["type"] == "response.failed"
     assert event["response"]["error"]["code"] == "upstream_request_timeout"
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["useragent"] == "opencode/1.15.13 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
     assert request_logs.calls[0]["useragent_group"] == "opencode"
 
@@ -22538,6 +22558,7 @@ async def test_stream_responses_budget_exhaustion_emits_timeout_event(monkeypatc
 
     event = json.loads(chunks[0].split("data: ", 1)[1])
     assert event["response"]["error"]["code"] == "upstream_request_timeout"
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["status"] == "error"
     assert request_logs.calls[0]["error_code"] == "upstream_request_timeout"
     assert request_logs.calls[0]["error_message"] == "Proxy request budget exhausted"
@@ -22570,6 +22591,7 @@ async def test_stream_selection_budget_exhaustion_emits_timeout_event(monkeypatc
 
     event = json.loads(chunks[0].split("data: ", 1)[1])
     assert event["response"]["error"]["code"] == "upstream_request_timeout"
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["status"] == "error"
     assert request_logs.calls[0]["error_code"] == "upstream_request_timeout"
     assert request_logs.calls[0]["error_message"] == "Proxy request budget exhausted"
@@ -22621,6 +22643,7 @@ async def test_stream_refresh_timeout_before_visible_output_fails_over(monkeypat
     assert event["response"]["id"] == "resp_refresh_connect_failover"
     assert seen_excluded_account_ids == [set(), {account_a.id}]
     assert stream_account_ids == [account_b.chatgpt_account_id]
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[-1]["account_id"] == account_b.id
     assert request_logs.calls[-1]["status"] == "success"
 
@@ -22658,6 +22681,7 @@ async def test_stream_route_fail_closed_does_not_mark_account_unhealthy(monkeypa
 
     event = json.loads(chunks[0].split("data: ", 1)[1])
     assert event["response"]["error"]["code"] == "upstream_proxy_unavailable"
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[-1]["account_id"] == account.id
     assert request_logs.calls[-1]["status"] == "error"
     assert request_logs.calls[-1]["error_code"] == "upstream_proxy_unavailable"
@@ -22707,6 +22731,7 @@ async def test_stream_early_route_failure_logs_resolved_route_metadata(monkeypat
     chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-stream"})]
 
     assert chunks
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     log = request_logs.calls[-1]
     assert log["upstream_proxy_route_mode"] == "account_bound"
     assert log["upstream_proxy_pool_id"] == "pool_1"
@@ -22756,6 +22781,7 @@ async def test_transcribe_early_route_failure_logs_resolved_route_metadata(monke
             headers={},
         )
 
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     log = request_logs.calls[-1]
     assert log["upstream_proxy_route_mode"] == "account_bound"
     assert log["upstream_proxy_pool_id"] == "pool_1"
@@ -22796,6 +22822,7 @@ async def test_stream_refresh_route_fail_closed_surfaces_proxy_error(monkeypatch
 
     event = json.loads(chunks[0].split("data: ", 1)[1])
     assert event["response"]["error"]["code"] == "upstream_proxy_unavailable"
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[-1]["account_id"] == account.id
     assert request_logs.calls[-1]["error_code"] == "upstream_proxy_unavailable"
     assert request_logs.calls[-1]["upstream_proxy_fail_closed_reason"] == "pool_unavailable"
@@ -22849,6 +22876,7 @@ async def test_stream_forced_refresh_timeout_before_visible_output_fails_over(mo
     assert event["response"]["id"] == "resp_forced_refresh_connect_failover"
     assert seen_excluded_account_ids == [set(), {account_a.id}]
     assert stream_account_ids == [account_a.chatgpt_account_id, account_b.chatgpt_account_id]
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[-1]["account_id"] == account_b.id
     assert request_logs.calls[-1]["status"] == "success"
 
@@ -23114,6 +23142,7 @@ async def test_stream_midstream_generic_failure_is_neutral_to_account_health(mon
     assert last_event["response"]["error"]["code"] == "upstream_request_timeout"
     record_error.assert_not_awaited()
     record_success.assert_not_awaited()
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["account_id"] == account.id
     assert request_logs.calls[0]["status"] == "error"
     assert request_logs.calls[0]["error_code"] == "upstream_request_timeout"
@@ -23239,6 +23268,7 @@ async def test_stream_incomplete_records_success_without_account_error(monkeypat
     assert event["type"] == "response.incomplete"
     record_success.assert_awaited_once_with(account)
     record_error.assert_not_awaited()
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["status"] == "error"
     assert request_logs.calls[0]["error_code"] is None
 
@@ -23301,6 +23331,7 @@ async def test_stream_previous_response_not_found_proxy_error_is_masked_to_strea
     assert event["response"]["error"]["message"] == "Upstream websocket closed before response.completed"
     assert "previous_response_not_found" not in chunks[0]
     assert request_logs.lookup_calls == [("resp_prev_anchor", None, "sid-stream")]
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["error_code"] == "stream_incomplete"
     assert "continuity_fail_closed surface=http_stream reason=previous_response_not_found" in caplog.text
     assert "resp_prev_anchor" not in caplog.text
@@ -23365,6 +23396,7 @@ async def test_stream_midstream_core_eof_with_previous_response_id_fails_closed(
     assert failed["response"]["error"]["code"] == "stream_incomplete"
     assert failed["response"]["error"]["message"] == "Upstream closed stream without completion"
     assert request_logs.lookup_calls == [("resp_parent", None, "sid-stream")]
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["error_code"] == "stream_incomplete"
     assert request_logs.calls[0]["failure_phase"] == "upstream"
     assert request_logs.calls[0]["failure_detail"] == "upstream_eof_before_terminal_event"
@@ -23435,6 +23467,7 @@ async def test_stream_missing_tool_output_proxy_error_is_masked_to_stream_incomp
     assert "No tool output found" not in chunks[0]
     assert "call_W3U0TC60cgB5OD7gVCyS0qIq" not in chunks[0]
     assert request_logs.lookup_calls == [("resp_prev_anchor", None, "sid-stream")]
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["error_code"] == "stream_incomplete"
     assert "continuity_fail_closed surface=http_stream reason=missing_tool_output" in caplog.text
     assert counter.samples == [
@@ -23504,6 +23537,7 @@ async def test_stream_previous_response_owner_usage_limit_fails_closed(monkeypat
     assert event["response"]["error"]["code"] == "previous_response_owner_unavailable"
     assert event["response"]["error"]["message"] == "Previous response owner account is unavailable; retry later."
     assert request_logs.lookup_calls == [("resp_prev_anchor", None, "sid-stream")]
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["error_code"] == "previous_response_owner_unavailable"
     assert request_logs.calls[0]["account_id"] == account_owner.id
     assert len(select_account_calls) == 1
@@ -23799,6 +23833,7 @@ async def test_stream_prompt_cache_key_does_not_soften_previous_response_owner(m
     assert event["response"]["error"]["code"] == "previous_response_owner_unavailable"
     assert event["response"]["error"]["message"] == "Previous response owner account is unavailable; retry later."
     assert request_logs.lookup_calls == [("resp_prev_anchor", None, "sid-stream")]
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["error_code"] == "previous_response_owner_unavailable"
     assert request_logs.calls[0]["account_id"] == account_owner.id
     select_account.assert_awaited_once()
@@ -23840,6 +23875,7 @@ async def test_stream_selection_fail_closed_records_owner_unavailable_metric(mon
     assert event["type"] == "response.failed"
     assert event["response"]["error"]["code"] == "previous_response_owner_unavailable"
     assert event["response"]["error"]["message"] == "Previous response owner account is unavailable; retry later."
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["account_id"] == "acc_prev_owner_stream"
     assert "continuity_fail_closed surface=http_stream reason=owner_account_unavailable" in caplog.text
     assert "resp_prev_anchor" not in caplog.text
@@ -23897,6 +23933,7 @@ async def test_stream_previous_response_owner_miss_fails_closed_before_unpinned_
     assert event["response"]["error"]["code"] == "previous_response_owner_unavailable"
     assert event["response"]["error"]["message"] == "Previous response owner account is unavailable; retry later."
     assert request_logs.lookup_calls == [("resp_missing_owner", None, "sid-stream")]
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["error_code"] == "previous_response_owner_unavailable"
     assert request_logs.calls[0]["account_id"] is None
     select_account.assert_not_awaited()
@@ -23937,6 +23974,7 @@ async def test_compact_responses_budget_exhaustion_returns_request_timeout(monke
     exc = _assert_proxy_response_error(exc_info.value)
     assert exc.status_code == 502
     assert _proxy_error_code(exc) == "upstream_request_timeout"
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["error_code"] == "upstream_request_timeout"
     assert request_logs.calls[0]["transport"] == "http"
 
@@ -23987,6 +24025,7 @@ async def test_compact_responses_refresh_connection_reset_fails_over(monkeypatch
     assert seen_excluded_account_ids == [set(), {account_a.id}]
     record_error.assert_awaited_once_with(account_a)
     record_success.assert_awaited_once_with(account_b)
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["status"] == "success"
     assert request_logs.calls[0]["account_id"] == account_b.id
 
@@ -24047,6 +24086,7 @@ async def test_compact_responses_forced_refresh_connection_reset_fails_over(monk
     assert compact_account_ids == [account_a.chatgpt_account_id, account_b.chatgpt_account_id]
     record_error.assert_awaited_once_with(account_a)
     record_success.assert_awaited_once_with(account_b)
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["status"] == "success"
     assert request_logs.calls[0]["account_id"] == account_b.id
 
@@ -24097,6 +24137,7 @@ async def test_compact_responses_forced_refresh_connection_reset_preserves_file_
     assert _proxy_error_code(exc_info.value) == "upstream_unavailable"
     assert select_account.await_count == 1
     handle_stream_error.assert_not_awaited()
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["status"] == "error"
     assert request_logs.calls[0]["account_id"] == account.id
     assert request_logs.calls[0]["error_code"] == "upstream_unavailable"
@@ -24140,6 +24181,7 @@ async def test_compact_responses_initial_refresh_connection_reset_preserves_file
     assert select_account.await_count == 1
     handle_stream_error.assert_not_awaited()
     core_compact_responses.assert_not_awaited()
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["status"] == "error"
     assert request_logs.calls[0]["account_id"] == account.id
     assert request_logs.calls[0]["error_code"] == "upstream_unavailable"
@@ -24177,6 +24219,7 @@ async def test_compact_responses_refresh_non_transient_client_error_does_not_pen
     assert _proxy_error_message(exc) == str(cert_error)
     record_error.assert_not_awaited()
     record_success.assert_not_awaited()
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["status"] == "error"
     assert request_logs.calls[0]["account_id"] == account.id
 
@@ -24260,6 +24303,7 @@ async def test_compact_responses_preserves_codex_compaction_timeout_failure(monk
     assert exc.status_code == 502
     assert _proxy_error_code(exc) == "upstream_request_timeout"
     record_success.assert_not_awaited()
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["status"] == "error"
     assert request_logs.calls[0]["error_code"] == "upstream_request_timeout"
 
@@ -24302,6 +24346,7 @@ async def test_compact_responses_forwards_codex_compaction_to_upstream(monkeypat
     assert response.model_extra == {"compaction_summary": {"encrypted_content": "ENCRYPTED_COMPACTION"}}
     select_account.assert_awaited_once()
     upstream.assert_awaited_once()
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["status"] == "success"
 
 
@@ -24338,6 +24383,7 @@ async def test_compact_responses_bounds_silent_upstream_compaction(monkeypatch):
     exc = _assert_proxy_response_error(exc_info.value)
     assert exc.status_code == 502
     assert _proxy_error_code(exc) == "upstream_request_timeout"
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["status"] == "error"
     assert request_logs.calls[0]["error_code"] == "upstream_request_timeout"
 
@@ -24406,6 +24452,7 @@ async def test_compact_responses_maps_inner_timeout_to_budget_timeout(monkeypatc
     assert _proxy_error_code(exc) == "upstream_request_timeout"
     assert call_order[:2] == ["settle_compact_api_key_usage", "handle_stream_error"]
     sticky_sessions.delete.assert_awaited_once_with("sid-compact", kind=proxy_service.StickySessionKind.CODEX_SESSION)
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["status"] == "error"
     assert request_logs.calls[0]["account_id"] == account.id
     assert request_logs.calls[0]["error_code"] == "upstream_request_timeout"
@@ -24482,6 +24529,7 @@ async def test_compact_responses_surfaces_upstream_timeout_without_account_failo
     assert call_order[:2] == ["settle_compact_api_key_usage", "handle_stream_error"]
     record_errors.assert_not_awaited()
     sticky_sessions.delete.assert_awaited_once_with("sid-compact", kind=proxy_service.StickySessionKind.CODEX_SESSION)
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["status"] == "error"
     assert request_logs.calls[0]["account_id"] == account_a.id
     assert request_logs.calls[0]["error_code"] == "upstream_request_timeout"
@@ -24543,6 +24591,7 @@ async def test_compact_responses_preserves_codex_compaction_selection_timeout(mo
     exc = _assert_proxy_response_error(exc_info.value)
     assert exc.status_code == 502
     assert _proxy_error_code(exc) == "upstream_request_timeout"
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["status"] == "error"
     assert request_logs.calls[0]["error_code"] == "upstream_request_timeout"
 
@@ -24593,6 +24642,7 @@ async def test_compact_previous_response_not_found_is_masked_without_account_pen
     assert _proxy_error_code(exc) == "stream_incomplete"
     assert _proxy_error_message(exc) == "Upstream websocket closed before response.completed"
     assert "resp_compact_missing" not in json.dumps(exc.payload)
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["error_code"] == "stream_incomplete"
     assert "continuity_fail_closed surface=compact reason=previous_response_not_found" in caplog.text
     assert "resp_compact_missing" not in caplog.text
@@ -24641,6 +24691,7 @@ async def test_compact_responses_surfaces_local_create_overload_without_penalizi
     assert _proxy_error_code(exc) == "global_admission_timeout"
     failing_upstream.assert_not_awaited()
     record_error.assert_not_awaited()
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["error_code"] == "global_admission_timeout"
     select_account = cast(AsyncMock, service._load_balancer.select_account)
     assert select_account.await_args is not None
@@ -24761,6 +24812,7 @@ async def test_compact_responses_account_create_cap_is_local_overload(monkeypatc
     assert select_account.await_args.kwargs["lease_kind"] == "response_create"
     ensure_fresh.assert_not_awaited()
     upstream.assert_not_awaited()
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["error_code"] == "account_response_create_cap"
 
 
@@ -25151,6 +25203,7 @@ async def test_compact_selection_budget_exhaustion_returns_request_timeout(monke
     exc = _assert_proxy_response_error(exc_info.value)
     assert exc.status_code == 502
     assert _proxy_error_code(exc) == "upstream_unavailable"
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["error_code"] == "upstream_unavailable"
 
 
@@ -25305,6 +25358,7 @@ async def test_transcribe_budget_exhaustion_blocks_401_retry_with_timeout(monkey
     assert exc.status_code == 502
     assert _proxy_error_code(exc) == "upstream_request_timeout"
     assert transcribe_calls == 1
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["error_code"] == "upstream_request_timeout"
     assert request_logs.calls[0]["transport"] == "http"
 
@@ -25335,6 +25389,7 @@ async def test_transcribe_selection_budget_exhaustion_returns_request_timeout(mo
     exc = _assert_proxy_response_error(exc_info.value)
     assert exc.status_code == 502
     assert _proxy_error_code(exc) == "upstream_unavailable"
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["error_code"] == "upstream_unavailable"
 
 
@@ -25401,6 +25456,7 @@ async def test_auxiliary_proxy_routes_log_local_selection_failure_metadata(monke
     with pytest.raises(proxy_module.ProxyResponseError):
         await invoke(service)
 
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["error_code"] == "no_accounts"
     assert request_logs.calls[0]["upstream_error_code"] == "no_accounts"
     assert request_logs.calls[0]["upstream_status_code"] is None
@@ -25492,6 +25548,7 @@ async def test_compact_responses_propagates_selection_error_code(monkeypatch):
     exc = _assert_proxy_response_error(exc_info.value)
     assert exc.status_code == 503
     assert _proxy_error_code(exc) == "no_additional_quota_eligible_accounts"
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["error_code"] == "no_additional_quota_eligible_accounts"
 
 
@@ -26511,6 +26568,7 @@ async def test_thread_goal_refresh_connection_reset_fails_over(monkeypatch):
     assert seen_excluded_account_ids == [set(), {account_a.id}]
     record_error.assert_awaited_once_with(account_a)
     record_success.assert_awaited_once_with(account_b)
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["status"] == "success"
     assert request_logs.calls[0]["account_id"] == account_b.id
 
@@ -26567,6 +26625,7 @@ async def test_thread_goal_refresh_transport_error_fails_over(monkeypatch):
     assert seen_excluded_account_ids == [set(), {account_a.id}]
     record_error.assert_awaited_once_with(account_a)
     record_success.assert_awaited_once_with(account_b)
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["status"] == "success"
     assert request_logs.calls[0]["account_id"] == account_b.id
 
@@ -26617,6 +26676,7 @@ async def test_thread_goal_upstream_connection_reset_fails_over_after_freshness(
     assert seen_excluded_account_ids == [set(), {account_a.id}]
     record_error.assert_awaited_once_with(account_a)
     record_success.assert_awaited_once_with(account_b)
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["status"] == "success"
     assert request_logs.calls[0]["account_id"] == account_b.id
 
@@ -26684,6 +26744,7 @@ async def test_thread_goal_failover_401_force_refreshes_fallback_account(monkeyp
     assert seen_excluded_account_ids == [set(), {account_a.id}]
     record_error.assert_awaited_once_with(account_a)
     record_success.assert_awaited_once_with(refreshed_b)
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["status"] == "success"
     assert request_logs.calls[0]["account_id"] == refreshed_b.id
 
@@ -26733,6 +26794,7 @@ async def test_thread_goal_body_read_connection_reset_does_not_fail_over(monkeyp
     assert seen_excluded_account_ids == [set()]
     handle_proxy_error.assert_awaited_once_with(account_a, exc_info.value)
     record_success.assert_not_awaited()
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["status"] == "error"
     assert request_logs.calls[0]["account_id"] == account_a.id
 
@@ -26788,6 +26850,7 @@ async def test_thread_goal_failover_call_error_records_fallback_account(monkeypa
     assert seen_excluded_account_ids == [set(), {account_a.id}]
     assert [call.args[0] for call in handle_proxy_error.await_args_list] == [account_a, account_b]
     record_success.assert_not_awaited()
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["status"] == "error"
     assert request_logs.calls[0]["account_id"] == account_b.id
 
@@ -26843,6 +26906,7 @@ async def test_thread_goal_failover_freshness_connection_reset_marks_failover_ac
     assert upstream_accounts == [account_a.chatgpt_account_id]
     assert seen_excluded_account_ids == [set(), {account_a.id}]
     assert [call.args[0] for call in handle_proxy_error.await_args_list] == [account_a, account_b]
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["status"] == "error"
     assert request_logs.calls[0]["account_id"] == account_b.id
 
@@ -26904,6 +26968,7 @@ async def test_thread_goal_failover_refresh_transport_error_marks_failover_accou
     assert upstream_accounts == [account_a.chatgpt_account_id]
     assert seen_excluded_account_ids == [set(), {account_a.id}]
     assert [call.args[0] for call in handle_proxy_error.await_args_list] == [account_a, account_b]
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["status"] == "error"
     assert request_logs.calls[0]["account_id"] == account_b.id
 
@@ -26950,6 +27015,7 @@ async def test_thread_goal_second_refresh_connection_reset_marks_second_account(
     handle_proxy_call = handle_proxy_error.await_args
     assert handle_proxy_call is not None
     assert handle_proxy_call.args[0] == account_b
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["status"] == "error"
     assert request_logs.calls[0]["account_id"] == account_b.id
 
@@ -26987,6 +27053,7 @@ async def test_thread_goal_failover_refresh_error_marks_failover_account(monkeyp
     assert exc_info.value.status_code == 401
     assert seen_excluded_account_ids == [set(), {account_a.id}]
     mark_permanent_failure.assert_awaited_once_with(account_b, "refresh_token_expired")
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["status"] == "error"
     assert request_logs.calls[0]["account_id"] == account_b.id
 
@@ -27076,6 +27143,7 @@ async def test_codex_control_refresh_connection_reset_fails_over(monkeypatch):
     assert seen_excluded_account_ids == [set(), {account_a.id}]
     record_error.assert_awaited_once_with(account_a)
     record_success.assert_awaited_once_with(account_b)
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["status"] == "success"
     assert request_logs.calls[0]["account_id"] == account_b.id
 
@@ -27131,6 +27199,7 @@ async def test_codex_control_failed_routed_call_logs_actual_fallback_endpoint(mo
             headers={"session_id": "sid-control-routed-error"},
         )
 
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["status"] == "error"
     assert request_logs.calls[0]["upstream_proxy_route_mode"] == "account_bound"
     assert request_logs.calls[0]["upstream_proxy_pool_id"] == "pool_control"
@@ -27187,6 +27256,7 @@ async def test_transcribe_refresh_connection_reset_fails_over(monkeypatch):
     assert seen_excluded_account_ids == [set(), {account_a.id}]
     record_error.assert_awaited_once_with(account_a)
     record_success.assert_awaited_once_with(account_b)
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["status"] == "success"
     assert request_logs.calls[0]["account_id"] == account_b.id
 
@@ -27230,6 +27300,7 @@ async def test_files_create_refresh_connection_reset_fails_over(monkeypatch):
     assert seen_excluded_account_ids == [set(), {account_a.id}]
     record_error.assert_awaited_once_with(account_a)
     record_success.assert_awaited_once_with(account_b)
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["status"] == "success"
     assert request_logs.calls[0]["account_id"] == account_b.id
 
@@ -27276,6 +27347,7 @@ async def test_files_create_body_read_connection_reset_does_not_fail_over(monkey
     assert seen_excluded_account_ids == [set()]
     handle_proxy_error.assert_awaited_once_with(account_a, exc_info.value)
     record_success.assert_not_awaited()
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["status"] == "error"
     assert request_logs.calls[0]["account_id"] == account_a.id
 
@@ -27318,6 +27390,7 @@ async def test_files_finalize_pinned_refresh_connection_reset_fails_closed(monke
     assert seen_excluded_account_ids == [set()]
     record_error.assert_awaited_once_with(account)
     record_success.assert_not_awaited()
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["status"] == "error"
     assert request_logs.calls[0]["account_id"] == account.id
 
@@ -27355,6 +27428,7 @@ async def test_files_finalize_pinned_initial_selection_does_not_fall_back(monkey
     assert select_account_calls[0]["preferred_account_id"] == pinned_account.id
     assert select_account_calls[0]["fallback_on_preferred_account_unavailable"] is False
     finalize_file.assert_not_awaited()
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["status"] == "error"
     assert request_logs.calls[0]["account_id"] is None
 

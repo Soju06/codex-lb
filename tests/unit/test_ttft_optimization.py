@@ -183,6 +183,7 @@ async def test_stream_responses_tracks_latency_first_token_ms(monkeypatch) -> No
     payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
 
     chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-stream"})]
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     latency_first_token_ms = cast(int, request_logs.calls[0]["latency_first_token_ms"])
 
     assert len(chunks) == 2
@@ -221,6 +222,7 @@ async def test_stream_responses_ttft_ignores_control_frame_before_text_delta(mon
     payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
 
     chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-stream-control"})]
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
     latency_first_token_ms = cast(int, request_logs.calls[0]["latency_first_token_ms"])
 
     assert len(chunks) == 3

@@ -341,24 +341,23 @@ class _ApiKeyUsageMixin:
                 )
                 return False
 
+        # Detach unconditionally instead of shield-awaiting: the tracking
+        # callback already schedules a release when settlement fails or is
+        # cancelled, the caller's finally-net skips via
+        # usage_settlement_transferred, and reservations keep counting toward
+        # limits until finalized/released, so a briefly-lagging settlement can
+        # only over-restrict, never over-admit. Awaiting the ~5+2N-statement
+        # settlement transaction here made every keyed stream's close wait on
+        # it. Shutdown drains the task set (drain_persistence_tasks).
         task = asyncio.create_task(_settle_once(), name=f"proxy-stream-api-key-settle-{request_id}")
-        try:
-            with anyio.CancelScope(shield=True):
-                return await asyncio.shield(task)
-        except asyncio.CancelledError:
-            if task.done():
-                return task.result()
-            if not task.done():
-                settlement.usage_settlement_transferred = True
-                self._track_stream_usage_settlement_task(
-                    task,
-                    api_key=api_key,
-                    api_key_reservation=api_key_reservation,
-                    request_id=request_id,
-                )
-            raise
-
-        return False
+        settlement.usage_settlement_transferred = True
+        self._track_stream_usage_settlement_task(
+            task,
+            api_key=api_key,
+            api_key_reservation=api_key_reservation,
+            request_id=request_id,
+        )
+        return True
 
     def _track_stream_usage_settlement_task(
         self,

@@ -196,11 +196,15 @@ class _RequestLogMixin:
             ),
             name=f"proxy-request-log-{request_id}",
         )
-        try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError:
-            self._track_request_log_task(task, account_id=account_id, request_id=request_id)
-            raise
+        # Detach unconditionally: the row is observational (dashboards, usage
+        # aggregation) and nothing on the response path reads it back
+        # synchronously — the one post-hoc consumer, the images model
+        # rewrite, already retries while the row is missing. Awaiting the
+        # INSERT+COMMIT here made every stream's close wait on a DB write,
+        # and Codex CLI does not continue until the stream closes. Failures
+        # are logged by the tracking callback, and shutdown drains the task
+        # set (ProxyService.drain_persistence_tasks).
+        self._track_request_log_task(task, account_id=account_id, request_id=request_id)
         _record_proxy_phase_latency(
             phase="ttft",
             latency_ms=latency_first_token_ms,

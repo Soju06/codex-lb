@@ -950,6 +950,23 @@ class ProxyService(
         self._work_admission: WorkAdmissionController | None = None
         self._request_log_tasks: set[asyncio.Task[None]] = set()
 
+    async def drain_persistence_tasks(self, timeout_seconds: float) -> bool:
+        """Await detached request-log and settlement tasks, e.g. at shutdown.
+
+        Persistence runs detached from the response path, so a graceful
+        shutdown must flush whatever is still in flight or the final
+        requests' logs and reservation settlements would be lost. Returns
+        True when everything drained within the timeout.
+        """
+        pending = {task for task in (self._request_log_tasks | self._background_cleanup_tasks) if not task.done()}
+        if not pending:
+            return True
+        done, still_pending = await asyncio.wait(pending, timeout=timeout_seconds)
+        del done
+        for task in still_pending:
+            logger.warning("Persistence task did not drain before shutdown: %s", task.get_name())
+        return not still_pending
+
     def _get_work_admission(self) -> WorkAdmissionController:
         if self._work_admission is None:
             settings = get_settings()

@@ -17,14 +17,33 @@ pytestmark = pytest.mark.unit
 
 
 class _FakeResult:
-    def __init__(self, rowcount: int) -> None:
+    """Mimics a RETURNING result: one row carrying the remaining lease, or none.
+
+    The acquire/renew statements ``RETURNING`` the lease still remaining (a
+    single float) when they affect the row, and nothing when they match no row.
+    ``rowcount`` drives which case a fake produces so existing tests keep their
+    ``[1]`` / ``[0]`` scripting: ``1`` -> one row ``(remaining,)`` (the SQL's
+    RETURNING output), ``0`` -> ``first()`` is ``None``.
+    """
+
+    def __init__(self, rowcount: int, remaining: float) -> None:
         self.rowcount = rowcount
+        self._remaining = remaining
+
+    def first(self) -> tuple[float] | None:
+        if self.rowcount >= 1:
+            return (self._remaining,)
+        return None
 
 
 class _FakeSession:
     def __init__(self, dialect_name: str, rowcounts: list[int]) -> None:
         self._dialect_name = dialect_name
         self._rowcounts = rowcounts
+        # DB-returned remaining lease seconds for an affected row; ``_install``
+        # sets it to the configured TTL so the anchored local deadline lands
+        # ~TTL out, mirroring a fresh acquire/renewal on a real database.
+        self._remaining = 30.0
         self.statements: list[Any] = []
         self.params: list[Any] = []
         self.commits = 0
@@ -35,7 +54,7 @@ class _FakeSession:
     async def execute(self, statement: Any, params: Any = None) -> _FakeResult:
         self.statements.append(statement)
         self.params.append(params)
-        return _FakeResult(self._rowcounts.pop(0))
+        return _FakeResult(self._rowcounts.pop(0), self._remaining)
 
     async def commit(self) -> None:
         self.commits += 1
@@ -50,6 +69,9 @@ def _install(
 ) -> None:
     settings = SimpleNamespace(leader_election_enabled=enabled, leader_election_ttl_seconds=ttl)
     monkeypatch.setattr(leader_election_module, "get_settings", lambda: settings)
+    # Model the DB RETURNING a full-TTL remaining lease on every affected row.
+    if isinstance(session, _FakeSession):
+        session._remaining = float(ttl)
 
     @asynccontextmanager
     async def _session_cm():
@@ -246,6 +268,169 @@ async def test_sqlite_renew_delayed_past_expiry_matches_zero_rows_on_real_db(
         # The guarded UPDATE left the expired row untouched (not extended).
         expires_after = conn.exec_driver_sql("SELECT expires_at FROM scheduler_leader").scalar()
         assert expires_after == expires_before
+    finally:
+        conn.close()
+        engine.dispose()
+
+
+class _DelayedRealSqliteSession:
+    """Real-SQLite session whose ``execute`` sleeps before running the statement.
+
+    The sleep models the write-lock (``busy_timeout``) wait between issuing a
+    statement and SQLite actually executing it, so the database stamps
+    ``expires_at`` / evaluates ``RETURNING`` only after the delay — exactly when
+    a pre-statement Python instant would already be stale.
+    """
+
+    def __init__(self, conn: Any, delay: float) -> None:
+        self._conn = conn
+        self._delay = delay
+
+    def get_bind(self) -> SimpleNamespace:
+        return SimpleNamespace(dialect=SimpleNamespace(name="sqlite"))
+
+    async def execute(self, statement: Any, params: Any = None) -> Any:
+        await asyncio.sleep(self._delay)  # model the write-lock wait
+        return self._conn.execute(statement, params or {})
+
+    async def commit(self) -> None:
+        self._conn.commit()
+
+
+def _db_remaining_seconds(conn: Any) -> float:
+    """Lease still remaining per the database's OWN clock (seconds)."""
+    return float(
+        conn.exec_driver_sql(
+            "SELECT (julianday(expires_at) - julianday('now')) * 86400.0 FROM scheduler_leader"
+        ).scalar()
+    )
+
+
+@pytest.mark.asyncio
+async def test_acquire_deadline_reflects_full_remaining_after_lock_delay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Regression (P2, root cause): on a lock-delayed acquire the statement's
+    # execution — and thus the DB's expires_at stamp — lands well after the
+    # instant the acquire was issued. Anchoring the local deadline to a
+    # PRE-statement Python instant would BACKDATE it: with a lock wait longer
+    # than the TTL the acquire returns with an already-expired local deadline
+    # and run_if_leader would immediately skip/cancel leader work even though the
+    # DB lease is genuinely fresh for a full TTL. The deadline MUST instead
+    # reflect ~the full remaining TTL the database RETURNED, anchored to an
+    # instant captured AFTER the statement executed.
+    import sqlalchemy as sa
+
+    from app.db.models import Base
+
+    ttl = 1  # a short TTL; the modelled lock wait below exceeds it
+    engine = sa.create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    conn = engine.connect()
+    try:
+        _install(monkeypatch, _DelayedRealSqliteSession(conn, delay=1.5), ttl=ttl)
+
+        election = leader_election_module.LeaderElection(leader_id="node-a")
+        loop = asyncio.get_running_loop()
+        assert await election.try_acquire() is True
+        assert election.is_leader is True
+        assert election._lease_deadline is not None
+
+        local_remaining = election._lease_deadline - loop.time()
+        # Pre-fix (pre-statement anchor) this is ~ttl - lock_wait = -0.5s, i.e.
+        # already expired on arrival. Post-fix it reflects the full ~1s TTL the
+        # DB granted, so it is comfortably positive and near the TTL.
+        assert local_remaining > 0.5
+        assert local_remaining <= ttl + 0.3
+    finally:
+        conn.close()
+        engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_acquire_deadline_does_not_outrun_db_expiry_on_real_db(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Regression (P2, invariant): the local monotonic deadline MUST NOT outrun
+    # the database's authoritative expiry. Because it is anchored to the
+    # DB-RETURNED remaining lease (expires_at minus the DB's own clock), the
+    # local remaining tracks the DB remaining precisely — neither backdated nor
+    # overshooting — even across a modelled lock wait.
+    import sqlalchemy as sa
+
+    from app.db.models import Base
+
+    ttl = 5
+    engine = sa.create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    conn = engine.connect()
+    try:
+        _install(monkeypatch, _DelayedRealSqliteSession(conn, delay=0.3), ttl=ttl)
+
+        election = leader_election_module.LeaderElection(leader_id="node-a")
+        loop = asyncio.get_running_loop()
+        assert await election.try_acquire() is True
+        assert election._lease_deadline is not None
+
+        # Measure both clocks back-to-back so the comparison is not skewed.
+        local_remaining = election._lease_deadline - loop.time()
+        db_remaining = _db_remaining_seconds(conn)
+        # The local deadline does not outrun the DB expiry (bar sub-second
+        # transport slack) and is not backdated: it tracks the DB remaining.
+        assert local_remaining <= db_remaining + 0.25
+        assert local_remaining >= db_remaining - 0.25
+    finally:
+        conn.close()
+        engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_renew_deadline_reflects_full_remaining_after_lock_delay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Regression (P2, root cause): the same anchor fix applies to renew. A
+    # renewal whose execution is delayed behind the write lock extends
+    # expires_at from the DB's execution-time clock; the local deadline MUST be
+    # re-anchored to the DB-RETURNED remaining from an instant AFTER the
+    # statement, not a pre-statement instant that would land the renewed
+    # deadline in the past.
+    import sqlalchemy as sa
+
+    from app.db.models import Base
+
+    ttl = 1
+    engine = sa.create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    conn = engine.connect()
+    try:
+        # Seed a lease owned by node-a that is still valid when the renewal is
+        # issued but whose renewal execution is delayed past the original expiry.
+        conn.execute(
+            sa.text(
+                "INSERT INTO scheduler_leader (id, leader_id, acquired_at, expires_at) VALUES ("
+                "1, 'node-a', strftime('%Y-%m-%d %H:%M:%f','now')||'000', "
+                "strftime('%Y-%m-%d %H:%M:%f','now','+3 seconds')||'000')"
+            )
+        )
+        conn.commit()
+        _install(monkeypatch, _DelayedRealSqliteSession(conn, delay=1.2), ttl=ttl)
+
+        election = leader_election_module.LeaderElection(leader_id="node-a")
+        election._is_leader = True
+        loop = asyncio.get_running_loop()
+        # A stale pre-statement deadline the buggy path would have kept.
+        election._lease_deadline = loop.time() - 5
+
+        assert await election.renew() is True
+        assert election.is_leader is True
+        assert election._lease_deadline is not None
+
+        local_remaining = election._lease_deadline - loop.time()
+        db_remaining = _db_remaining_seconds(conn)
+        # The renewed deadline reflects the fresh ~1s TTL, not a backdated value,
+        # and still does not outrun the DB expiry.
+        assert local_remaining > 0.5
+        assert local_remaining <= db_remaining + 0.25
     finally:
         conn.close()
         engine.dispose()
@@ -460,15 +645,17 @@ async def test_renew_demotes_on_rowcount_zero_even_when_commit_fails(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_acquire_deadline_derived_before_commit(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Holistic hardening: the locally tracked lease deadline must be derived from
-    # a monotonic instant captured BEFORE the acquire statement, not after
-    # commit(). The database stamps expires_at from clock_timestamp() during
-    # statement execution, so a deadline read after a slow commit round-trip
-    # would outrun the true DB expiry and let the heartbeat believe it still
-    # leads after the row had expired. A slow commit exposes the difference: the
-    # recorded deadline must stay within ~ttl of the pre-call instant, not
-    # ttl + commit_latency.
+async def test_acquire_deadline_anchored_after_statement_not_after_commit(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Holistic hardening: the locally tracked lease deadline is anchored to a
+    # monotonic instant captured right AFTER the acquire statement returns (plus
+    # the DB-RETURNED remaining lease), NOT after commit(). Anchoring after a
+    # slow commit round-trip would push the deadline past the true DB expiry and
+    # let the heartbeat believe it still leads after the row had expired. A slow
+    # commit exposes the difference: the recorded deadline must stay within ~ttl
+    # of the pre-call instant, not ttl + commit_latency. (The complementary
+    # backdate failure — anchoring a PRE-statement instant so a lock-delayed
+    # acquire seeds an already-expired deadline — is covered on a real SQLite DB
+    # by test_acquire_deadline_reflects_full_remaining_after_lock_delay.)
     ttl = 30
 
     class _SlowCommitSession(_FakeSession):
@@ -646,7 +833,7 @@ async def test_run_if_leader_demotes_when_renewal_cancellation_hangs(monkeypatch
             while True:
                 try:
                     await unblock.wait()
-                    return _FakeResult(1)
+                    return _FakeResult(1, self._remaining)
                 except asyncio.CancelledError:
                     if unblock.is_set():
                         raise

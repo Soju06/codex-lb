@@ -4,9 +4,9 @@ import asyncio
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
-from typing import Any, TypeVar, cast
+from typing import Any, TypeVar
 
-from sqlalchemy import CursorResult, Float, Result, bindparam, delete, text
+from sqlalchemy import Float, Result, bindparam, delete, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config.settings import get_settings
@@ -51,6 +51,19 @@ _RELEASE_DRAIN_GRACE_SECONDS = 5.0
 # takeover decision is a single point-in-time read and staying on the snapshot
 # is the conservative choice (a waiter never over-eagerly steals a lease that
 # was refreshed while it was blocked on the lock).
+#
+# ``RETURNING`` reports the lease STILL REMAINING (``expires_at`` minus the
+# database's OWN clock, ``clock_timestamp()``, in the same statement) so the
+# caller can anchor its local monotonic deadline to the database's authoritative
+# remaining lease rather than to a Python instant. Both the stored expiry and
+# the returned ``db_now`` come from the one server clock, so the remaining is
+# correct regardless of how long the statement waited on the row lock. A
+# conflict no-op (another replica owns an unexpired lease) matches no row and
+# RETURNS nothing, so the caller reads it as "not acquired". See ``try_acquire``
+# for why anchoring a POST-statement monotonic instant to this remaining fixes
+# both the backdate (a pre-statement instant seeds an already-expired deadline
+# after a lock wait) and the outrun (a post-commit instant overshoots the DB
+# expiry) failure modes at once.
 _POSTGRES_ACQUIRE_SQL = text(
     """
     INSERT INTO scheduler_leader (id, leader_id, acquired_at, expires_at)
@@ -60,6 +73,7 @@ _POSTGRES_ACQUIRE_SQL = text(
         acquired_at = clock_timestamp(),
         expires_at = clock_timestamp() + make_interval(secs => :ttl)
     WHERE scheduler_leader.expires_at < now() OR scheduler_leader.leader_id = :leader_id
+    RETURNING extract(epoch FROM (expires_at - clock_timestamp()))
     """
 ).bindparams(bindparam("ttl", type_=Float))
 
@@ -74,12 +88,16 @@ _POSTGRES_ACQUIRE_SQL = text(
 # treats as lease loss and demotes on (see :meth:`renew`), letting the follower
 # take the row cleanly. ``clock_timestamp()`` (not ``now()``) is used so a
 # renewal that blocked on the row lock is judged against the CURRENT time, not
-# the transaction-start snapshot captured before it waited.
+# the transaction-start snapshot captured before it waited. ``RETURNING`` yields
+# the renewed lease's remaining (``expires_at`` minus the same server clock) so
+# :meth:`renew` can re-anchor its local deadline to the database's authoritative
+# remaining lease; a rowcount-0 no-match RETURNS nothing (read as lease loss).
 _POSTGRES_RENEW_SQL = text(
     """
     UPDATE scheduler_leader
     SET expires_at = clock_timestamp() + make_interval(secs => :ttl)
     WHERE id = 1 AND leader_id = :leader_id AND expires_at > clock_timestamp()
+    RETURNING extract(epoch FROM (expires_at - clock_timestamp()))
     """
 ).bindparams(bindparam("ttl", type_=Float))
 
@@ -109,6 +127,17 @@ _POSTGRES_RENEW_SQL = text(
 # separate transaction-snapshot clock within a statement).
 _SQLITE_NOW = "(strftime('%Y-%m-%d %H:%M:%f', 'now') || '000')"
 _SQLITE_NOW_PLUS_TTL = "(strftime('%Y-%m-%d %H:%M:%f', 'now', '+' || :ttl || ' seconds') || '000')"
+# Lease still remaining, in seconds, computed entirely on SQLite's own clock:
+# ``expires_at`` (the string this module stores) minus ``'now'``, both evaluated
+# in the SAME statement step so they share one instant. ``RETURNING`` this lets
+# the caller anchor its local monotonic deadline to the database's authoritative
+# remaining lease instead of a Python instant — see ``try_acquire`` — so the
+# deadline neither backdates (a pre-statement Python instant seeds an
+# already-expired deadline once the write lock is finally acquired after a long
+# ``busy_timeout`` wait) nor outruns (a post-commit instant overshoots the row).
+# ``julianday`` parses the 6-digit-microsecond-width string the acquire/renewal
+# paths persist; the difference in fractional days is scaled to seconds.
+_SQLITE_REMAINING = "((julianday(expires_at) - julianday('now')) * 86400.0)"
 
 _SQLITE_ACQUIRE_SQL = text(
     f"""
@@ -119,6 +148,7 @@ _SQLITE_ACQUIRE_SQL = text(
         acquired_at = {_SQLITE_NOW},
         expires_at = {_SQLITE_NOW_PLUS_TTL}
     WHERE scheduler_leader.expires_at < {_SQLITE_NOW} OR scheduler_leader.leader_id = :leader_id
+    RETURNING {_SQLITE_REMAINING}
     """
 ).bindparams(bindparam("ttl", type_=Float))
 
@@ -133,6 +163,7 @@ _SQLITE_RENEW_SQL = text(
     UPDATE scheduler_leader
     SET expires_at = {_SQLITE_NOW_PLUS_TTL}
     WHERE id = 1 AND leader_id = :leader_id AND expires_at > {_SQLITE_NOW}
+    RETURNING {_SQLITE_REMAINING}
     """
 ).bindparams(bindparam("ttl", type_=Float))
 
@@ -141,11 +172,23 @@ def _dialect_name(session: AsyncSession) -> str:
     return session.get_bind().dialect.name
 
 
-def _rowcount(result: Result[Any]) -> int:
-    # ``AsyncSession.execute`` is typed as returning ``Result``, but DML
-    # statements always produce a ``CursorResult`` at runtime, which is the
-    # only Result subtype that carries ``rowcount``.
-    return cast(CursorResult[Any], result).rowcount
+def _returned_remaining(result: Result[Any]) -> float | None:
+    """Return the DB-computed remaining lease seconds, or ``None`` on no-match.
+
+    The acquire/renew statements ``RETURNING`` the affected row's remaining
+    lease (``expires_at`` minus the database's OWN clock, computed in the same
+    statement so both share one instant). A single row means the write took
+    effect and its value is the authoritative remaining lease the caller
+    anchors its local monotonic deadline to; no row means the statement matched
+    nothing — another replica owns the lease, or a guarded renewal found it
+    already expired — which the caller treats as "not acquired / lease lost".
+    Relying on the RETURNING row (not ``rowcount``) is also portable: SQLite's
+    driver reports ``rowcount`` as ``-1`` for ``RETURNING`` statements.
+    """
+    row = result.first()
+    if row is None:
+        return None
+    return float(row[0])
 
 
 class LeaderElection:
@@ -197,12 +240,6 @@ class LeaderElection:
 
         ttl = settings.leader_election_ttl_seconds
         loop = asyncio.get_running_loop()
-        # Capture the monotonic instant BEFORE the acquire so the locally tracked
-        # deadline is derived from a point no later than the database's own
-        # expiry stamp (computed from ``clock_timestamp()`` during statement
-        # execution). Recording it after ``commit()`` would push the local
-        # deadline past the true DB expiry by the commit round-trip.
-        acquire_started = loop.time()
         try:
             async with get_background_session() as session:
                 acquire_sql = _SQLITE_ACQUIRE_SQL if _dialect_name(session) == "sqlite" else _POSTGRES_ACQUIRE_SQL
@@ -210,7 +247,20 @@ class LeaderElection:
                     acquire_sql,
                     {"leader_id": self._leader_id, "ttl": ttl},
                 )
-                acquired = _rowcount(result) == 1
+                # The statement RETURNS the lease still remaining, measured on
+                # the database's OWN clock (``expires_at`` minus ``db_now`` in
+                # the same statement), or nothing when another replica owns the
+                # lease. Capture the monotonic instant right AFTER the statement
+                # returns and add the DB-remaining to it: the local deadline then
+                # tracks the database's authoritative expiry precisely. Anchoring
+                # a PRE-statement instant would backdate the deadline by however
+                # long the statement waited on the row / write lock (a lock wait
+                # can exceed a short TTL, seeding an already-expired deadline);
+                # anchoring after ``commit()`` would push it past the true DB
+                # expiry by the commit round-trip. Reading the DB-remaining after
+                # a post-statement instant avoids both.
+                remaining = _returned_remaining(result)
+                acquired_at = loop.time()
                 await session.commit()
         except Exception:
             # A transient acquisition failure must not demote a lease this
@@ -236,8 +286,9 @@ class LeaderElection:
             self._lease_deadline = None
             return False
 
+        acquired = remaining is not None
         self._is_leader = acquired
-        self._lease_deadline = acquire_started + ttl if acquired else None
+        self._lease_deadline = acquired_at + remaining if remaining is not None else None
         return acquired
 
     async def renew(self) -> bool:
@@ -255,33 +306,28 @@ class LeaderElection:
 
         ttl = settings.leader_election_ttl_seconds
         loop = asyncio.get_running_loop()
-        # Capture the monotonic instant BEFORE issuing the renewal so the locally
-        # tracked deadline is derived from a point no later than the database's
-        # own ``clock_timestamp()`` expiry stamp (evaluated during statement
-        # execution, i.e. AFTER this instant). Reading the clock only after
-        # ``commit()`` would push the local deadline past the true DB expiry by
-        # the commit round-trip, letting the heartbeat believe it still leads
-        # after the row had already expired — the local deadline must never
-        # outrun the database expiry.
-        renew_started = loop.time()
         async with get_background_session() as session:
             # Both dialects evaluate the unexpired-lease guard and the new expiry
             # on the database's own execution-time clock, so a renewal delayed
             # past the deadline (event-loop stall, row/write-lock wait) matches 0
             # rows instead of resurrecting a row whose ``expires_at`` has already
-            # passed but no follower has yet claimed. A no-match falls through to
-            # the rowcount-0 demotion below.
+            # passed but no follower has yet claimed. A no-match RETURNS no row
+            # and falls through to the lease-loss demotion below.
             renew_sql = _SQLITE_RENEW_SQL if _dialect_name(session) == "sqlite" else _POSTGRES_RENEW_SQL
             result = await session.execute(
                 renew_sql,
                 {"leader_id": self._leader_id, "ttl": ttl},
             )
-            # Capture the affected rowcount BEFORE the commit. A rowcount of 0
-            # means the UPDATE matched no row because another replica now owns
-            # the lease; that verdict is authoritative and independent of whether
-            # the (functionally no-op) commit then succeeds.
-            renewed = _rowcount(result) == 1
-            if not renewed:
+            # The statement RETURNS the renewed lease's remaining (on the
+            # database's OWN clock) or nothing. Read it BEFORE the commit: a
+            # no-match means another replica now owns the lease (or the row had
+            # expired), an authoritative verdict independent of whether the
+            # (functionally no-op) commit then succeeds. Capture the monotonic
+            # instant right AFTER the statement returns to anchor the renewed
+            # deadline against the DB-remaining below.
+            remaining = _returned_remaining(result)
+            renew_anchor = loop.time()
+            if remaining is None:
                 # Demote on the authoritative lease loss BEFORE committing, so a
                 # ``commit()`` failure on a flaky connection cannot re-raise out
                 # of ``renew()`` and be misread by the heartbeat as a transient
@@ -305,8 +351,11 @@ class LeaderElection:
 
         # Extend the locally tracked deadline so a concurrent acquire that hits a
         # transient error keeps preserving leadership for the full renewed lease,
-        # not just the original acquisition window.
-        self._lease_deadline = renew_started + ttl
+        # not just the original acquisition window. Anchor the POST-statement
+        # monotonic instant to the DB-returned remaining so the deadline tracks
+        # the database's authoritative expiry — never backdated by a lock wait,
+        # never outrunning the row.
+        self._lease_deadline = renew_anchor + remaining
         return True
 
     async def release(self) -> None:
@@ -539,11 +588,6 @@ class LeaderElection:
                         lease_lost = True
                         return
                     await asyncio.sleep(min(float(renew_interval), remaining))
-                    # Stamp the working deadline from BEFORE the renewal is
-                    # dispatched (not from after it resolves) so the locally
-                    # tracked deadline never outruns the database ``expires_at``,
-                    # which is computed during the renewal statement's execution.
-                    renew_started = loop.time()
                     inflight = asyncio.ensure_future(self.renew())
                     # ``asyncio.wait`` returns on the timeout without cancelling
                     # or awaiting ``inflight``, so a renewal whose cancellation
@@ -576,8 +620,16 @@ class LeaderElection:
                         renewed = False
                     else:
                         consecutive_errors = 0
-                        if renewed:
-                            lease_deadline = renew_started + ttl
+                        if renewed and self._lease_deadline is not None:
+                            # ``renew`` anchored ``_lease_deadline`` to the lease
+                            # the database RETURNed as remaining (its ``expires_at``
+                            # minus the DB's own clock) from a monotonic instant
+                            # captured AFTER its statement, so the working deadline
+                            # tracks the DB's authoritative expiry — neither
+                            # backdated by a lock wait nor outrunning the row.
+                            # Adopt it rather than recomputing a pre-dispatch
+                            # ``loop.time() + ttl`` here.
+                            lease_deadline = self._lease_deadline
                     if not renewed:
                         lease_lost = True
                         return
@@ -761,7 +813,10 @@ class LeaderElection:
                     renew_sql,
                     {"leader_id": self._leader_id, "ttl": ttl},
                 )
-                renewed = _rowcount(result) == 1
+                # A RETURNING row means the guarded UPDATE extended the row; no
+                # row means it was expired/taken over (a harmless no-op here).
+                # The drain path holds no locally tracked deadline to re-anchor.
+                renewed = _returned_remaining(result) is not None
                 await session.commit()
                 return renewed
         except Exception:

@@ -166,6 +166,13 @@ class ReasoningLevelSchema(BaseModel):
     description: str
 
 
+class CodexTruncationPolicy(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    mode: str
+    limit: int
+
+
 class CodexModelEntry(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -187,6 +194,8 @@ class CodexModelEntry(BaseModel):
     available_in_plans: list[str] = []
     prefer_websockets: bool = False
     visibility: str = "list"
+    truncation_policy: CodexTruncationPolicy
+    experimental_supported_tools: list[str]
 
 
 class ModelMetadata(BaseModel):

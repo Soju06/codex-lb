@@ -5,7 +5,7 @@ from dataclasses import replace
 
 import pytest
 
-from app.core.openai.model_registry import ReasoningLevel, UpstreamModel, get_model_registry
+from app.core.openai.model_registry import ModelRegistryExport, ReasoningLevel, UpstreamModel, get_model_registry
 from app.core.types import JsonValue
 
 pytestmark = pytest.mark.integration
@@ -246,6 +246,10 @@ async def test_backend_codex_models_uses_bootstrap_upstream_metadata(async_clien
     assert set(entries) == set(EXPECTED_BOOTSTRAP_MINIMAL_CLIENT_VERSIONS)
     for slug, expected_version in EXPECTED_BOOTSTRAP_MINIMAL_CLIENT_VERSIONS.items():
         assert entries[slug]["minimal_client_version"] == expected_version
+        assert entries[slug]["shell_type"] == "shell_command"
+        assert isinstance(entries[slug]["experimental_supported_tools"], list)
+        assert entries[slug]["truncation_policy"]["mode"] in {"bytes", "tokens"}
+        assert isinstance(entries[slug]["truncation_policy"]["limit"], int)
 
     sol = entries["gpt-5.6-sol"]
     assert sol["display_name"] == "GPT-5.6-Sol"
@@ -1422,6 +1426,57 @@ async def test_codex_catalog_hides_last_known_metadata_omitted_by_live_refresh(a
     v1_resp = await async_client.get("/v1/models")
     assert v1_resp.status_code == 200
     assert "gpt-5.6-sol" not in {item["id"] for item in v1_resp.json()["data"]}
+
+
+@pytest.mark.asyncio
+async def test_codex_catalog_completes_required_fields_for_hidden_bootstrap_metadata(async_client):
+    registry = get_model_registry()
+    live_sol = _make_upstream_model(
+        "gpt-5.6-sol",
+        raw={
+            "shell_type": "shell_command",
+            "visibility": "list",
+            "truncation_policy": {"mode": "tokens", "limit": 4_096},
+            "experimental_supported_tools": ["live-tool"],
+        },
+    )
+    await registry.update({"pro": [live_sol]})
+    registry_state = await registry.export_state()
+    legacy_metadata = dict(registry_state.metadata_models or {})
+    legacy_raw: dict[str, JsonValue] = {
+        "shell_type": "shell_command",
+        "visibility": "list",
+        "availability_nux": None,
+    }
+    legacy_metadata["gpt-5.2"] = _make_upstream_model("gpt-5.2", raw=legacy_raw)
+    legacy_metadata["gpt-5.3-codex"] = _make_upstream_model("gpt-5.3-codex", raw=legacy_raw)
+    await registry.import_state(
+        ModelRegistryExport(snapshot=registry_state.snapshot, metadata_models=legacy_metadata),
+        content_hash="legacy-metadata-without-required-fields",
+    )
+
+    response = await async_client.get(
+        "/backend-api/codex/models",
+        params={"client_version": "0.144.3"},
+    )
+
+    assert response.status_code == 200
+    entries = {entry["slug"]: entry for entry in response.json()["models"]}
+    assert entries["gpt-5.2"]["visibility"] == "hide"
+    assert entries["gpt-5.2"]["truncation_policy"] == {"mode": "bytes", "limit": 10_000}
+    assert entries["gpt-5.2"]["experimental_supported_tools"] == []
+    assert entries["gpt-5.3-codex"]["visibility"] == "hide"
+    assert entries["gpt-5.3-codex"]["truncation_policy"] == {"mode": "tokens", "limit": 10_000}
+    assert entries["gpt-5.3-codex"]["experimental_supported_tools"] == []
+    assert entries["gpt-5.6-sol"]["truncation_policy"] == {"mode": "tokens", "limit": 4_096}
+    assert entries["gpt-5.6-sol"]["experimental_supported_tools"] == ["live-tool"]
+
+    alias_response = await async_client.get(
+        "/v1/models",
+        params={"client_version": "0.144.3"},
+    )
+    assert alias_response.status_code == 200
+    assert alias_response.json() == response.json()
 
 
 @pytest.mark.asyncio

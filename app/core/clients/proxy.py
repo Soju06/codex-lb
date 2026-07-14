@@ -492,6 +492,24 @@ class ProxyResponseError(Exception):
         self.retry_after_seconds = retry_after_seconds
 
 
+def is_confirmed_pre_dispatch_transport_error(exc: ProxyResponseError) -> bool:
+    """Return whether the transport proved the upstream request never dispatched.
+
+    Only this provenance authorizes replaying a movable request on another
+    account: a typed connector failure while reaching the account's routed
+    proxy endpoint, before any request bytes could leave for upstream.
+    Host-wide network loss (``proxy_network_unavailable``) stays on its
+    account-neutral process recovery path instead of penalizing the selected
+    account, and ambiguous dispatch outcomes remain non-replayable.
+    """
+
+    if not (exc.retryable_same_contract and exc.failure_phase == "connect"):
+        return False
+    error = exc.payload.get("error")
+    error_code = error.get("code") if isinstance(error, dict) else None
+    return error_code != PROCESS_NETWORK_UNAVAILABLE_CODE
+
+
 def _process_network_failure_error(
     message: str,
     exc: Exception,

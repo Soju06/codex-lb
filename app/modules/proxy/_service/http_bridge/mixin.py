@@ -5,6 +5,7 @@ import inspect
 import logging
 from collections import deque
 from collections.abc import Collection
+from dataclasses import replace
 from typing import Any, Literal, TypeVar, overload
 from uuid import uuid4
 
@@ -80,7 +81,6 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_can_single_instance_prompt_cache_takeover_without_anchor,
     _http_bridge_compatible,
     _http_bridge_continuity_lost_error_envelope,
-    _http_bridge_durable_release_allowed,
     _http_bridge_endpoint_matches_current_instance,
     _http_bridge_eviction_priority,
     _http_bridge_has_durable_recovery_anchor,
@@ -119,8 +119,12 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _require_http_bridge_bound_account_not_excluded,
     _reserve_http_bridge_unanchored_handoff,
 )
+from app.modules.proxy._service.http_bridge.helpers import (
+    _close_http_bridge_session as _helpers_close_http_bridge_session,
+)
 from app.modules.proxy._service.http_bridge.owner_forwarding import _HTTPBridgeOwnerForwardingMixin
 from app.modules.proxy._service.http_bridge.protocol import _HTTPBridgeServiceProtocol
+from app.modules.proxy._service.http_bridge.proxy_failover import _HTTPBridgePreDispatchFailover
 from app.modules.proxy._service.http_bridge.request_submit import _HTTPBridgeRequestSubmitMixin
 from app.modules.proxy._service.http_bridge.service_stubs import (
     _await_cancelled_task,
@@ -1637,77 +1641,7 @@ class _HTTPBridgeMixin(
                 sessions_to_close.append(session)
         return sessions_to_close
 
-    async def _close_http_bridge_session(
-        self,
-        session: "_HTTPBridgeSession",
-        *,
-        turn_state_lock_held: bool = False,
-        release_durable_session: bool = True,
-    ) -> None:
-        session.closed = True
-        if turn_state_lock_held:
-            self._unregister_http_bridge_turn_states_locked(session)
-            self._unregister_http_bridge_previous_response_ids_locked(session)
-        else:
-            await self._unregister_http_bridge_turn_states(session)
-            await self._unregister_http_bridge_previous_response_ids(session)
-        account_lease = getattr(session, "account_lease", None)
-        try:
-            await self._load_balancer.release_account_lease(account_lease)
-        except Exception:
-            logger.warning("Failed to release HTTP bridge account lease during close", exc_info=True)
-        finally:
-            session.account_lease = None
-        if release_durable_session and _http_bridge_durable_release_allowed(self, session):
-            try:
-                await self._durable_bridge.release_live_session(
-                    session_id=session.durable_session_id,
-                    instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
-                    owner_epoch=session.durable_owner_epoch,
-                    draining=shutdown_state.is_bridge_drain_active(),
-                )
-            except Exception:
-                logger.warning("Failed to release durable HTTP bridge session", exc_info=True)
-        upstream_reader = session.upstream_reader
-        if upstream_reader is not None:
-            if upstream_reader is asyncio.current_task():
-                session.upstream_reader = None
-            else:
-                await _await_cancelled_task(
-                    upstream_reader,
-                    label="http bridge upstream reader",
-                    cleanup_tasks=self._background_cleanup_tasks,
-                )
-                if session.upstream_reader is upstream_reader:
-                    session.upstream_reader = None
-        try:
-            await session.upstream.close()
-        except Exception:
-            logger.debug("Failed to close HTTP bridge upstream websocket", exc_info=True)
-        pending_requests = getattr(session, "pending_requests", None)
-        pending_lock = getattr(session, "pending_lock", None)
-        response_create_gate = getattr(session, "response_create_gate", None)
-        if pending_requests is not None and pending_lock is not None:
-            async with pending_lock:
-                session.queued_request_count = 0
-            await self._fail_pending_websocket_requests(
-                account=session.account,
-                account_id_value=session.account.id,
-                pending_requests=pending_requests,
-                pending_lock=pending_lock,
-                error_code="stream_incomplete",
-                error_message="HTTP bridge session closed before response.completed",
-                api_key=None,
-                response_create_gate=response_create_gate,
-            )
-        _log_http_bridge_event(
-            "close",
-            session.key,
-            account_id=session.account.id,
-            model=session.request_model,
-            cache_key_family=session.key.affinity_kind,
-            model_class=_extract_model_class(session.request_model) if session.request_model else None,
-        )
+    _close_http_bridge_session = _helpers_close_http_bridge_session
 
     async def _create_http_bridge_session(
         self,
@@ -1750,7 +1684,11 @@ class _HTTPBridgeMixin(
         if require_preferred_account:
             fallback_on_preferred_account_unavailable = False
         retry_same_account_once = preferred_account_id is not None
-        preferred_candidate_id = preferred_account_id
+        proxy_connect_failover = _HTTPBridgePreDispatchFailover(
+            excluded_account_ids,
+            preferred_account_id,
+            affinity.reallocate_sticky,
+        )
         selected_account_lease: AccountLease | None = None
         while True:
             select_kwargs = {
@@ -1758,14 +1696,18 @@ class _HTTPBridgeMixin(
                 "kind": "http_bridge",
                 "request_stage": request_stage,
                 "api_key": api_key,
-                "affinity_policy": affinity,
+                "affinity_policy": (
+                    replace(affinity, reallocate_sticky=True)
+                    if proxy_connect_failover.reallocate_sticky and not affinity.reallocate_sticky
+                    else affinity
+                ),
                 "prefer_earlier_reset_accounts": settings.prefer_earlier_reset_accounts,
                 "prefer_earlier_reset_window": _prefer_earlier_reset_window(settings),
                 "routing_strategy": _routing_strategy(settings),
                 "model": request_model,
                 "service_tier": request_service_tier,
                 "exclude_account_ids": excluded_account_ids,
-                "preferred_account_id": preferred_candidate_id,
+                "preferred_account_id": proxy_connect_failover.preferred_account_id,
                 "preferred_account_is_continuity_owner": preferred_account_is_continuity_owner,
                 "lease_kind": "stream",
                 "estimated_lease_tokens": _estimated_lease_tokens_from_request_usage_budget(request_usage_budget),
@@ -1781,6 +1723,11 @@ class _HTTPBridgeMixin(
                     preferred_account_id=preferred_account_id,
                     selected_account_id=None,
                 )
+                if proxy_connect_failover.last_error is not None:
+                    # No eligible replacement exists after a confirmed
+                    # pre-dispatch route failure: preserve the original
+                    # sanitized failure instead of generating ``no_accounts``.
+                    raise proxy_connect_failover.last_error
                 is_local_account_cap = _is_local_account_cap_code(selection.error_code)
                 if (
                     require_preferred_account
@@ -1838,6 +1785,15 @@ class _HTTPBridgeMixin(
                 )
                 break
             except ProxyResponseError as exc:
+                if await proxy_connect_failover.handle(
+                    self,
+                    account,
+                    selected_account_lease,
+                    exc,
+                    required_account=require_preferred_account and selected_is_preferred,
+                ):
+                    selected_account_lease = None
+                    continue
                 if exc.status_code != 401 or _remaining_budget_seconds(deadline) <= 0:
                     await self._load_balancer.release_account_lease(selected_account_lease)
                     selected_account_lease = None
@@ -1863,6 +1819,15 @@ class _HTTPBridgeMixin(
                     )
                     break
                 except ProxyResponseError as retry_exc:
+                    if await proxy_connect_failover.handle(
+                        self,
+                        account,
+                        selected_account_lease,
+                        retry_exc,
+                        required_account=require_preferred_account and selected_is_preferred,
+                    ):
+                        selected_account_lease = None
+                        continue
                     if retry_exc.status_code != 401:
                         await self._load_balancer.release_account_lease(selected_account_lease)
                         selected_account_lease = None
@@ -1873,7 +1838,7 @@ class _HTTPBridgeMixin(
                         selected_account_lease = None
                         raise
                     excluded_account_ids.add(account.id)
-                    preferred_candidate_id = None
+                    proxy_connect_failover.preferred_account_id = None
                     await self._load_balancer.release_account_lease(selected_account_lease)
                     selected_account_lease = None
                     continue
@@ -1885,7 +1850,7 @@ class _HTTPBridgeMixin(
                         selected_account_lease = None
                         raise
                     excluded_account_ids.add(account.id)
-                    preferred_candidate_id = None
+                    proxy_connect_failover.preferred_account_id = None
                     await self._load_balancer.release_account_lease(selected_account_lease)
                     selected_account_lease = None
                     continue
@@ -1910,7 +1875,7 @@ class _HTTPBridgeMixin(
                             ),
                         ) from exc
                     excluded_account_ids.add(account.id)
-                    preferred_candidate_id = None
+                    proxy_connect_failover.preferred_account_id = None
                     await self._load_balancer.release_account_lease(selected_account_lease)
                     selected_account_lease = None
                     continue
@@ -1949,7 +1914,7 @@ class _HTTPBridgeMixin(
                             ),
                         ) from exc
                     excluded_account_ids.add(account.id)
-                    preferred_candidate_id = None
+                    proxy_connect_failover.preferred_account_id = None
                     await self._load_balancer.release_account_lease(selected_account_lease)
                     selected_account_lease = None
                     continue

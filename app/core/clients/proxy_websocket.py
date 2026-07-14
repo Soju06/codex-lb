@@ -802,9 +802,22 @@ async def _connect_upstream_websocket(
                 status_code if policy.preserve_handshake_status else 502,
                 openai_error(error_code, message, error_type="server_error"),
                 failure_phase="connect",
+                # Carry the client's dispatch provenance across the sanitizing
+                # boundary: a typed connector failure against the routed proxy
+                # proves no ``response.create`` frame could have reached
+                # upstream, so service-level failover may replay the request
+                # on another account. TLS verification failures are stable
+                # endpoint configuration errors and stay non-replayable.
                 retryable_same_contract=(
-                    policy.retry_routed_network_errors and error_code == PROCESS_NETWORK_UNAVAILABLE_CODE
+                    (policy.retry_routed_network_errors and error_code == PROCESS_NETWORK_UNAVAILABLE_CODE)
+                    or (exc.retryable_same_contract and not exc.is_tls_verification_failure)
                 ),
+                failure_detail=(
+                    "proxy_connect_pre_dispatch"
+                    if exc.retryable_same_contract and not exc.is_tls_verification_failure
+                    else "transport_error"
+                ),
+                failure_exception_type=type(exc).__name__,
             ) from exc
         except Exception:
             if owns_codex_client:

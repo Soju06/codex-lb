@@ -275,6 +275,22 @@ DEFAULT_PRICING_MODELS: dict[str, ModelPrice] = {
         cached_input_per_1m=2.0,
         output_per_1m=30.0,
     ),
+    # gpt-5.6 models (July 2026)
+    "gpt-5.6-sol": ModelPrice(
+        input_per_1m=5.0,
+        cached_input_per_1m=0.5,
+        output_per_1m=30.0,
+    ),
+    "gpt-5.6-terra": ModelPrice(
+        input_per_1m=2.5,
+        cached_input_per_1m=0.25,
+        output_per_1m=15.0,
+    ),
+    "gpt-5.6-luna": ModelPrice(
+        input_per_1m=1.0,
+        cached_input_per_1m=0.10,
+        output_per_1m=6.0,
+    ),
 }
 
 DEFAULT_MODEL_ALIASES: dict[str, str] = {
@@ -293,6 +309,9 @@ DEFAULT_MODEL_ALIASES: dict[str, str] = {
     "gpt-5.2*": "gpt-5.2",
     "gpt-5-chat-latest*": "gpt-5-chat-latest",
     "gpt-5.1*": "gpt-5.1",
+    "gpt-5.6-sol*": "gpt-5.6-sol",
+    "gpt-5.6-terra*": "gpt-5.6-terra",
+    "gpt-5.6-luna*": "gpt-5.6-luna",
     "gpt-5*": "gpt-5",
     "gpt-5.1-codex-max*": "gpt-5.1-codex-max",
     "gpt-5.1-codex-mini*": "gpt-5.1-codex-mini",

@@ -98,6 +98,44 @@ def test_get_pricing_for_model_gpt_5_2_chat_latest_alias():
     assert model == "gpt-5.2-chat-latest"
 
 
+def test_get_pricing_for_model_gpt_5_6_sol_alias():
+    result = get_pricing_for_model("gpt-5.6-sol-2026-07-01", DEFAULT_PRICING_MODELS, DEFAULT_MODEL_ALIASES)
+    assert result is not None
+    model, price = result
+    assert model == "gpt-5.6-sol"
+    assert price.input_per_1m == 5.0
+    assert price.cached_input_per_1m == 0.5
+    assert price.output_per_1m == 30.0
+
+
+def test_get_pricing_for_model_gpt_5_6_terra_alias():
+    result = get_pricing_for_model("gpt-5.6-terra-2026-07-01", DEFAULT_PRICING_MODELS, DEFAULT_MODEL_ALIASES)
+    assert result is not None
+    model, price = result
+    assert model == "gpt-5.6-terra"
+    assert price.input_per_1m == 2.5
+    assert price.cached_input_per_1m == 0.25
+    assert price.output_per_1m == 15.0
+
+
+def test_get_pricing_for_model_gpt_5_6_luna_alias():
+    result = get_pricing_for_model("gpt-5.6-luna-2026-07-01", DEFAULT_PRICING_MODELS, DEFAULT_MODEL_ALIASES)
+    assert result is not None
+    model, price = result
+    assert model == "gpt-5.6-luna"
+    assert price.input_per_1m == 1.0
+    assert price.cached_input_per_1m == 0.10
+    assert price.output_per_1m == 6.0
+
+
+def test_get_pricing_for_model_gpt_5_6_does_not_fall_back_to_gpt_5():
+    result = get_pricing_for_model("gpt-5.6-sol", DEFAULT_PRICING_MODELS, DEFAULT_MODEL_ALIASES)
+    assert result is not None
+    model, _ = result
+    assert model != "gpt-5"
+    assert model == "gpt-5.6-sol"
+
+
 def test_calculate_cost_from_usage_cached_tokens():
     usage = ResponseUsage(
         input_tokens=1000,

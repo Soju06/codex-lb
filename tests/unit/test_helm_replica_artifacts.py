@@ -28,6 +28,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _CHART_DIR = _REPO_ROOT / "deploy" / "helm" / "codex-lb"
 _CHART_README = _CHART_DIR / "README.md"
 _SMOKE_SCRIPT = _REPO_ROOT / "scripts" / "helm-kind-smoke.sh"
+_ENV_EXAMPLE = _REPO_ROOT / ".env.example"
 _HTTP_PORT = 2455
 _DEPENDENCY_BUILD_COMPLETE = False
 
@@ -433,6 +434,50 @@ def test_kind_smoke_external_db_mode_exercises_two_replica_bridge_ring() -> None
     assert 'exec -i "${workload}-0"' in script
     # The probe result must be checked so a silent no-op cannot pass smoke again.
     assert 'if [[ "${probe_output}" != "bridge ring ok:"* ]]; then' in script
+
+
+def _env_example_active_assignments() -> dict[str, str]:
+    assignments: dict[str, str] = {}
+    for raw_line in _ENV_EXAMPLE.read_text().splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        assignments[key.strip()] = value.strip()
+    return assignments
+
+
+def test_env_example_does_not_force_leader_election_off() -> None:
+    """A fresh copy-the-sample deployment must inherit the hardened default (enabled).
+
+    The runtime default for ``leader_election_enabled`` is True, so the sample env
+    must not export ``CODEX_LB_LEADER_ELECTION_ENABLED=false`` as an active line;
+    otherwise multi-replica/multi-worker installs that copy .env.example silently
+    run every singleton scheduler instead of gating on the lease.
+    """
+    assignments = _env_example_active_assignments()
+
+    assert assignments.get("CODEX_LB_LEADER_ELECTION_ENABLED") != "false"
+
+    # A default-loaded Settings (with the sample's active assignments applied)
+    # keeps leader election enabled.
+    assert Settings().leader_election_enabled is True
+
+    # The opt-out is still documented as a commented single-instance escape hatch.
+    text = _ENV_EXAMPLE.read_text()
+    assert "# CODEX_LB_LEADER_ELECTION_ENABLED=false" in text
+
+
+def test_helm_configmap_enables_leader_election_by_default() -> None:
+    rendered = _helm_template(
+        "--set",
+        "postgresql.auth.password=test-password",
+        "--show-only",
+        "templates/configmap.yaml",
+    )
+    (configmap,) = _helm_documents(rendered)
+
+    assert configmap["data"]["CODEX_LB_LEADER_ELECTION_ENABLED"] == "true"
 
 
 def test_compose_files_declare_single_replica_topology() -> None:

@@ -441,6 +441,108 @@ async def test_claim_poll_sleep_capped_to_remaining_caller_budget(db_setup, monk
 
 
 @pytest.mark.asyncio
+async def test_saturated_admission_fails_fast_and_releases_claim_within_budget(db_setup, monkeypatch):
+    """Admission wait must be bounded by the caller budget while the claim is held.
+
+    The claim winner acquires token-refresh admission BEFORE the upstream OAuth
+    exchange. ``WorkAdmissionController`` waits up to
+    ``admission_wait_timeout_seconds`` for a slot on a saturated token-refresh
+    semaphore, and that wait happens while this shielded task already holds the
+    cross-replica DB refresh claim. Without capping the admission wait by the
+    caller budget, a small-budget request would hold the claim — blocking peer
+    replicas on the same account — for the full admission timeout.
+
+    Here the single token-refresh admission slot is pre-held (saturated) and the
+    admission wait timeout is a full 10s, but the caller budget is only 0.2s. The
+    refresh MUST fail fast with the transient (non-permanent) claim-timeout,
+    release the claim, and never start the exchange — all within roughly the
+    caller budget, NOT the 10s admission timeout.
+    """
+    import time
+
+    from app.core.auth.refresh import (
+        pop_token_refresh_timeout_override,
+        push_token_refresh_timeout_override,
+    )
+    from app.modules.proxy.work_admission import WorkAdmissionController
+
+    account_id = "acc_claim_admission_saturated"
+    await _create_account(account_id)
+
+    upstream_calls = 0
+
+    async def fake_refresh(refresh_token: str, **_kwargs: object) -> TokenRefreshResult:
+        nonlocal upstream_calls
+        upstream_calls += 1
+        return _rotated_result(account_id)
+
+    monkeypatch.setattr(auth_manager_module, "refresh_access_token", fake_refresh)
+
+    released: list[str] = []
+
+    class _ImmediateWinClaims:
+        @property
+        def claimant_id(self) -> str:
+            return "replica-admission"
+
+        async def try_acquire(self, account_id: str, *, ttl_seconds: float, owner: str) -> bool:
+            del account_id, ttl_seconds, owner
+            return True
+
+        async def release(self, account_id: str, *, owner: str) -> None:
+            del owner
+            released.append(account_id)
+
+    # One admission slot, held so the gate is saturated; a generous 10s wait
+    # timeout so ONLY the caller budget can bound the admission wait.
+    controller = WorkAdmissionController(
+        token_refresh_limit=1,
+        websocket_connect_limit=0,
+        response_create_limit=0,
+        compact_response_create_limit=0,
+        admission_wait_timeout_seconds=10.0,
+    )
+    held_slot = await controller.acquire_token_refresh()
+    try:
+        async with SessionLocal() as session:
+            repo = AccountsRepository(session)
+            account = await repo.get_by_id(account_id)
+            assert account is not None
+            manager = AuthManager(
+                repo,
+                acquire_refresh_admission=controller.acquire_token_refresh,
+                refresh_claims=_ImmediateWinClaims(),
+            )
+
+            token = push_token_refresh_timeout_override(0.2)
+            started = time.monotonic()
+            try:
+                with pytest.raises(RefreshError) as exc_info:
+                    await asyncio.wait_for(manager.refresh_account(account), timeout=5)
+            finally:
+                pop_token_refresh_timeout_override(token)
+            elapsed = time.monotonic() - started
+    finally:
+        held_slot.release()
+
+    assert exc_info.value.code == "refresh_claim_timeout"
+    assert exc_info.value.is_permanent is False
+    assert exc_info.value.transport_error is True
+    # No exchange ran, and the DB refresh claim was released on the way out
+    # (rather than held for the full 10s admission timeout, which would block
+    # peer replicas on this account's claim).
+    assert upstream_calls == 0
+    assert released == [account_id]
+    # Bounded by the ~0.2s budget, NOT the 10s admission wait timeout. A generous
+    # ceiling keeps this deterministic under load while still failing loudly if
+    # the full admission timeout is ever waited while holding the claim.
+    assert elapsed < 2.0, f"admission wait overran caller budget while holding claim: {elapsed:.3f}s"
+    status, stored_refresh_token, _ = await _account_snapshot(account_id)
+    assert status == AccountStatus.ACTIVE
+    assert stored_refresh_token == "refresh-old"
+
+
+@pytest.mark.asyncio
 async def test_winner_adopts_rotation_committed_before_its_claim(db_setup, monkeypatch):
     """Post-claim fresh re-read: when the material already rotated, the claim
     winner must adopt it with zero upstream calls."""

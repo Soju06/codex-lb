@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import inspect
 import logging
 import time
@@ -736,9 +737,24 @@ class AuthManager:
         ) from exc
 
     async def _refresh_tokens(self, refresh_token: str, *, account: Account) -> TokenRefreshResult:
-        refresh_lease: RefreshAdmissionLeasePort | None = None
-        if self._acquire_refresh_admission is not None:
-            refresh_lease = await self._acquire_refresh_admission()
+        # Bound the ENTIRE claim-holding work of this body — the token-refresh
+        # admission wait AND the upstream OAuth exchange — by the caller's
+        # remaining refresh budget. This runs inside the shielded singleflight
+        # task that outlives a cancelled caller and holds the cross-replica DB
+        # refresh claim, so any unbounded wait here keeps the claim held past the
+        # request deadline and blocks peer replicas on the same account's claim.
+        #
+        # ``token_refresh_timeout_override`` (set by the claim path to the
+        # remaining budget) only caps the HTTP exchange; without help,
+        # ``WorkAdmissionController`` waits up to
+        # ``proxy_admission_wait_timeout_seconds`` for a slot on a saturated
+        # token-refresh semaphore BEFORE that HTTP timeout is even armed. Derive
+        # one monotonic deadline from the budget and enforce it on BOTH the
+        # admission acquire and the exchange so their sum cannot overrun it.
+        budget = get_token_refresh_timeout_override()
+        deadline = time.monotonic() + max(0.0, budget) if budget is not None else None
+
+        refresh_lease = await self._acquire_refresh_admission_bounded(account, deadline)
         try:
             async with get_background_session() as session:
                 try:
@@ -765,17 +781,80 @@ class AuthManager:
                         transport_error=True,
                         upstream_proxy_fail_closed_reason="binding_route_unavailable",
                     )
-            return await _call_with_supported_optional_kwargs(
-                refresh_access_token,
-                refresh_token,
-                optional_kwargs={
-                    "route": route,
-                    "allow_direct_egress": route is None,
-                },
-            )
+            # Cap the exchange to what is actually LEFT after the admission wait
+            # (and route resolution). The pushed override still carries the full
+            # pre-admission remaining budget, so re-derive it here; otherwise a
+            # long admission wait followed by a full-remaining-budget exchange
+            # could hold the claim for up to twice the budget.
+            exchange_override: contextvars.Token[float | None] | None = None
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RefreshError(
+                        "refresh_claim_timeout",
+                        f"Token refresh for account {account.id} exhausted its refresh budget after "
+                        f"acquiring token-refresh admission but before the upstream exchange could start",
+                        False,
+                        transport_error=True,
+                    )
+                exchange_override = push_token_refresh_timeout_override(remaining)
+            try:
+                return await _call_with_supported_optional_kwargs(
+                    refresh_access_token,
+                    refresh_token,
+                    optional_kwargs={
+                        "route": route,
+                        "allow_direct_egress": route is None,
+                    },
+                )
+            finally:
+                if exchange_override is not None:
+                    pop_token_refresh_timeout_override(exchange_override)
         finally:
             if refresh_lease is not None:
                 refresh_lease.release()
+
+    async def _acquire_refresh_admission_bounded(
+        self,
+        account: Account,
+        deadline: float | None,
+    ) -> RefreshAdmissionLeasePort | None:
+        """Acquire token-refresh admission without overrunning the caller budget.
+
+        ``WorkAdmissionController`` waits up to
+        ``proxy_admission_wait_timeout_seconds`` for a slot on a saturated
+        token-refresh semaphore. That wait happens while this shielded task
+        already holds the cross-replica DB refresh claim, so it MUST be capped by
+        the caller's remaining refresh budget (``deadline``): otherwise a
+        small-budget request would hold the claim — and block peer replicas on
+        the same account — for the full admission timeout. When the budget is
+        already exhausted before/at admission, fail fast with the transient
+        ``refresh_claim_timeout`` so the claim is released (by the caller's
+        ``finally``) rather than held for the full wait.
+        """
+        if self._acquire_refresh_admission is None:
+            return None
+        if deadline is None:
+            return await self._acquire_refresh_admission()
+        admission_wait = deadline - time.monotonic()
+        if admission_wait <= 0:
+            raise RefreshError(
+                "refresh_claim_timeout",
+                f"Token refresh for account {account.id} exhausted its refresh budget before "
+                f"token-refresh admission could be acquired",
+                False,
+                transport_error=True,
+            )
+        try:
+            return await asyncio.wait_for(self._acquire_refresh_admission(), timeout=admission_wait)
+        except asyncio.TimeoutError as exc:
+            raise RefreshError(
+                "refresh_claim_timeout",
+                f"Token refresh for account {account.id} exhausted its refresh budget waiting for "
+                f"token-refresh admission on a saturated concurrency gate",
+                False,
+                transport_error=True,
+            ) from exc
 
     async def _ensure_chatgpt_account_id(self, account: Account) -> Account:
         if account.chatgpt_account_id:

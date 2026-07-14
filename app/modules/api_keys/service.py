@@ -404,7 +404,9 @@ def _compute_pooled_credits(
     # primary bar must read absent rather than frozen or optimistic.
     has_live_primary = any(row.reset_at is None or row.reset_at > now_epoch for row in primary_rows)
     primary_rows = usage_core.expire_elapsed_window_rows(primary_rows, now_epoch=now_epoch)
-    secondary_rows = usage_core.expire_elapsed_window_rows(secondary_rows, now_epoch=now_epoch)
+    # Secondary (weekly) rows pool raw: upstream still reports long windows,
+    # so an elapsed sample is transient staleness the next refresh rewrites —
+    # zeroing it would briefly report an exhausted weekly pool as 100% free.
     primary_rows = _seed_missing_usage_rows(primary_rows, account_ids)
     secondary_rows = _seed_missing_usage_rows(secondary_rows, account_ids)
 

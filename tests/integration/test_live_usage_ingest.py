@@ -8,7 +8,7 @@ from app.core.crypto import TokenEncryptor
 from app.core.usage import live_hub
 from app.core.usage.live_snapshots import LiveRateLimitSnapshot, LiveUsageWindow
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus
+from app.db.models import Account, AccountStatus, UsageHistory
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.usage import live_ingest
@@ -43,7 +43,7 @@ def _snapshot() -> LiveRateLimitSnapshot:
     )
 
 
-async def _wait_for_rows(account_id: str, *, timeout: float = 5.0) -> tuple[object | None, object | None]:
+async def _wait_for_rows(account_id: str, *, timeout: float = 5.0) -> tuple[UsageHistory | None, UsageHistory | None]:
     deadline = asyncio.get_event_loop().time() + timeout
     while True:
         async with SessionLocal() as session:

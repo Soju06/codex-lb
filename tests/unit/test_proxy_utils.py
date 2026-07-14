@@ -4548,6 +4548,54 @@ async def test_thread_goal_401_failover_preserves_dashboard_reset_window(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_ensure_fresh_with_budget_or_auth_error_maps_refresh_failures_by_kind(monkeypatch):
+    """The shared post-401 forced-refresh helper (file upload, transcription,
+    codex-control, thread-goal failover) MUST distinguish refresh failure kinds:
+
+    * a transient refresh-CLAIM-CONTENTION timeout -> retryable, UNPENALIZED
+      ``upstream_unavailable`` (502), never a bogus 401 ``invalid_api_key``;
+    * a genuine OAuth ``transport_error`` -> retryable ``upstream_unavailable``
+      that is still penalizable (NOT marked unpenalized);
+    * a permanent/non-transport failure -> terminal 401 ``invalid_api_key``.
+    """
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_ensure_fresh_kind")
+
+    def _patch_refresh(exc: Exception) -> None:
+        async def _raise(_account, *, force=False, timeout_seconds=None):
+            del force, timeout_seconds
+            raise exc
+
+        monkeypatch.setattr(service, "_ensure_fresh_with_budget", _raise)
+
+    # (1) Claim contention -> unpenalized retryable upstream_unavailable.
+    _patch_refresh(proxy_service.RefreshError("refresh_claim_timeout", "peer holds claim", False, transport_error=True))
+    with pytest.raises(proxy_module.ProxyResponseError) as claim_info:
+        await service._ensure_fresh_with_budget_or_auth_error(account, timeout_seconds=5.0)
+    assert claim_info.value.status_code == 502
+    assert claim_info.value.payload["error"]["code"] == "upstream_unavailable"
+    assert proxy_service.is_claim_contention_unpenalized(claim_info.value) is True
+
+    # (2) Genuine OAuth transport failure -> retryable but penalizable.
+    _patch_refresh(proxy_service.RefreshError("transport_error", "oauth timed out", False, transport_error=True))
+    with pytest.raises(proxy_module.ProxyResponseError) as transport_info:
+        await service._ensure_fresh_with_budget_or_auth_error(account, timeout_seconds=5.0)
+    assert transport_info.value.status_code == 502
+    assert transport_info.value.payload["error"]["code"] == "upstream_unavailable"
+    assert proxy_service.is_claim_contention_unpenalized(transport_info.value) is False
+
+    # (3) Permanent / non-transport failure -> terminal 401 invalid_api_key.
+    _patch_refresh(proxy_service.RefreshError("invalid_grant", "refresh rejected", True))
+    with pytest.raises(proxy_module.ProxyResponseError) as auth_info:
+        await service._ensure_fresh_with_budget_or_auth_error(account, timeout_seconds=5.0)
+    assert auth_info.value.status_code == 401
+    assert auth_info.value.payload["error"]["code"] == "invalid_api_key"
+
+
+@pytest.mark.asyncio
 async def test_codex_control_request_passes_dashboard_reset_window_to_selection(monkeypatch):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     settings.prefer_earlier_reset_accounts = True

@@ -14,7 +14,7 @@ fallback metadata.
 - Make the Codex-native catalog rendering boundary complete the required wire
   fields when legacy bootstrap, retained, or persisted metadata omits them.
 - Use model-appropriate conservative truncation defaults for bundled models and
-  an empty experimental-tool list, while preserving every value supplied by a
-  live upstream or model source.
+  an empty experimental-tool list, while preserving wire-valid values supplied
+  by a live upstream or model source and sanitizing invalid tool-list members.
 - Add route-level regressions for a partial refresh that leaves older bundled
   models as hidden metadata and for the uninitialized bootstrap catalog.

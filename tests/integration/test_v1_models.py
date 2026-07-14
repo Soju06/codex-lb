@@ -594,6 +594,44 @@ async def test_backend_codex_models_defaults_source_model_context_window(async_c
     assert source_entry["prefer_websockets"] is False
 
 
+@pytest.mark.parametrize(
+    ("case", "raw_tools", "expected_tools"),
+    [
+        ("mixed", ["custom", 42, {"type": "bad"}], ["custom"]),
+        ("non-list", "custom", []),
+    ],
+)
+@pytest.mark.asyncio
+async def test_codex_catalog_sanitizes_invalid_source_tool_metadata(
+    async_client,
+    case: str,
+    raw_tools: JsonValue,
+    expected_tools: list[str],
+):
+    model = f"external-{case}-tool-metadata"
+    await _create_model_source(
+        async_client,
+        name=f"codex-source-{case}-tool-metadata",
+        model=model,
+        supports_responses=True,
+        raw_metadata_json=json.dumps({"experimental_supported_tools": raw_tools}),
+    )
+
+    response = await async_client.get("/backend-api/codex/models")
+
+    assert response.status_code == 200
+    entry = next(item for item in response.json()["models"] if item["slug"] == model)
+    assert entry["experimental_supported_tools"] == expected_tools
+
+    alias_response = await async_client.get(
+        "/v1/models",
+        params={"client_version": "0.144.3"},
+    )
+    assert alias_response.status_code == 200
+    alias_entry = next(item for item in alias_response.json()["models"] if item["slug"] == model)
+    assert alias_entry["experimental_supported_tools"] == expected_tools
+
+
 @pytest.mark.asyncio
 async def test_backend_codex_models_never_exposes_source_request_overrides(async_client):
     await _create_model_source(

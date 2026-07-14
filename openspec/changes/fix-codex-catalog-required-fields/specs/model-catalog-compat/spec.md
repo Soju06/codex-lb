@@ -9,9 +9,12 @@ Every model entry returned by `GET /backend-api/codex/models` or the equivalent
 Codex wire fields `truncation_policy` and `experimental_supported_tools`, even
 when the entry comes from hidden retained bootstrap metadata or a persisted
 legacy registry snapshot. When either field is absent from stored raw metadata,
-the mapper MUST provide a conservative model-compatible default. Values
-provided by a live upstream catalog or model source MUST remain authoritative
-and MUST NOT be overwritten by the compatibility defaults.
+the mapper MUST provide a conservative model-compatible default. Wire-valid
+values provided by a live upstream catalog or model source MUST remain
+authoritative and MUST NOT be overwritten by the compatibility defaults. When
+`experimental_supported_tools` is not a list, the mapper MUST emit an empty
+list. When it contains non-string members, the mapper MUST omit those members
+rather than failing the complete catalog.
 
 #### Scenario: Hidden bootstrap metadata cannot invalidate the live catalog
 
@@ -24,12 +27,27 @@ and MUST NOT be overwritten by the compatibility defaults.
 - **AND** the complete catalog can be deserialized instead of falling back to
   bundled client metadata
 
-#### Scenario: Explicit upstream compatibility values win
+#### Scenario: Explicit valid upstream compatibility values win
 
 - **GIVEN** a live catalog or model source provides `truncation_policy` or
   `experimental_supported_tools`
 - **WHEN** codex-lb renders the Codex-native catalog entry
 - **THEN** it preserves those explicit values unchanged
+
+#### Scenario: Invalid source tool members cannot fail the catalog
+
+- **GIVEN** a model source provides `experimental_supported_tools` with both
+  string and non-string members
+- **WHEN** codex-lb renders the Codex-native catalog entry
+- **THEN** it retains the string tool names
+- **AND** it omits non-string members instead of returning a server error
+
+#### Scenario: Non-list source tool metadata cannot fail the catalog
+
+- **GIVEN** a model source provides a non-list value for
+  `experimental_supported_tools`
+- **WHEN** codex-lb renders the Codex-native catalog entry
+- **THEN** it emits an empty list instead of returning a server error
 
 #### Scenario: Client-version alias has the same complete contract
 

@@ -2964,12 +2964,10 @@ def _codex_model_truncation_policy(model: UpstreamModel) -> CodexTruncationPolic
 
 
 def _codex_model_experimental_supported_tools(model: UpstreamModel) -> list[str]:
-    if "experimental_supported_tools" not in model.raw:
+    tools = model.raw.get("experimental_supported_tools")
+    if not is_json_list(tools):
         return []
-    tools = model.raw["experimental_supported_tools"]
-    if not isinstance(tools, list) or not all(isinstance(tool, str) for tool in tools):
-        raise ValueError("experimental_supported_tools must be a list of strings")
-    return cast(list[str], tools)
+    return [tool for tool in tools if isinstance(tool, str)]
 
 
 def _to_codex_model_entry(model: UpstreamModel, *, visibility: str | None = None) -> CodexModelEntry:

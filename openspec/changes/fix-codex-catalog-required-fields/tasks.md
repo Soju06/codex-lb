@@ -9,3 +9,5 @@
 - [x] 4. Complete missing required Codex wire fields at the catalog mapper.
 - [x] 5. Run focused model-catalog tests, lint/type checks, strict OpenSpec
   validation, and the relevant broader gates.
+- [x] 6. Sanitize malformed model-source tool metadata at the Codex wire
+  boundary and cover both native catalog aliases.

@@ -89,6 +89,20 @@ def _server_error_sse_event() -> str:
     )
 
 
+def _server_is_overloaded_sse_event() -> str:
+    return _sse_event(
+        {
+            "type": "response.failed",
+            "response": {
+                "error": {
+                    "code": "server_is_overloaded",
+                    "message": "Our servers are currently overloaded. Please try again later.",
+                },
+            },
+        }
+    )
+
+
 def _stream_timeout_sse_event() -> str:
     return _sse_event(
         {
@@ -160,6 +174,38 @@ async def test_stream_server_error_succeeds_on_second_try_same_account(async_cli
     assert len(completed) == 1
 
     # Both calls should be to the same account
+    assert len(seen_account_ids) == 2
+    assert seen_account_ids[0] == seen_account_ids[1]
+
+
+@pytest.mark.asyncio
+async def test_stream_server_is_overloaded_succeeds_on_second_try_same_account(async_client, monkeypatch):
+    await _import_account(async_client, "acc_server_overloaded", "server-overloaded@example.com")
+
+    call_count = 0
+    seen_account_ids: list[str | None] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        nonlocal call_count
+        call_count += 1
+        seen_account_ids.append(account_id)
+        if call_count == 1:
+            yield _server_is_overloaded_sse_event()
+            return
+        yield _success_sse_event("resp_server_overloaded_ok")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
+    async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    events = _extract_events(lines)
+    assert [event["response"]["id"] for event in events if event.get("type") == "response.completed"] == [
+        "resp_server_overloaded_ok"
+    ]
+    assert [event for event in events if event.get("type") == "response.failed"] == []
     assert len(seen_account_ids) == 2
     assert seen_account_ids[0] == seen_account_ids[1]
 

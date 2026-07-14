@@ -181,7 +181,7 @@ When serving streaming `POST /v1/responses`, the first OpenAI-contract event the
 
 ### Requirement: Upstream overload envelopes are classified as retryable transient failures
 
-When `classify_upstream_failure` observes an upstream error envelope whose `code` is `overloaded_error`, the system MUST treat it as `retryable_transient` regardless of the accompanying HTTP status. Streamed Responses API traffic can deliver the overload envelope on a connection that has already returned HTTP 200, so a 5xx-only heuristic is insufficient to drive account fail-over and bounded retry.
+When `classify_upstream_failure` observes an upstream error envelope whose `code` is `overloaded_error` or `server_is_overloaded`, the system MUST treat it as `retryable_transient` regardless of the accompanying HTTP status. Streamed Responses API traffic can deliver the overload envelope on a connection that has already returned HTTP 200, so a 5xx-only heuristic is insufficient to drive account fail-over and bounded retry.
 
 #### Scenario: `overloaded_error` without a 5xx status is retryable transient
 
@@ -194,6 +194,12 @@ When `classify_upstream_failure` observes an upstream error envelope whose `code
 - **WHEN** `classify_upstream_failure` is called with `error_code="overloaded_error"` and `http_status` is 500, 502, 503, or 504
 - **THEN** the returned `failure_class` is `retryable_transient`
 - **AND** the result is the same as the no-status path, so the 5xx fallback heuristic is not the only signal driving the decision
+
+#### Scenario: `server_is_overloaded` without a 5xx status is retryable transient
+
+- **WHEN** `classify_upstream_failure` is called with `error_code="server_is_overloaded"` and `http_status` not in the 5xx range (including `None`)
+- **THEN** the returned `failure_class` is `retryable_transient`
+- **AND** the streaming retry layer is eligible to retry the request before surfacing the terminal overload event
 
 ### Requirement: Strict function tool parameter schemas are pre-validated
 

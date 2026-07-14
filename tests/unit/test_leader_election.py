@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import logging
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from sqlalchemy.dialects import postgresql
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.sql.dml import Delete
 from sqlalchemy.sql.elements import TextClause
 
@@ -732,6 +734,85 @@ async def test_release_swallows_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     await election.release()
 
     assert election.is_leader is False
+
+
+def _make_locked_error() -> OperationalError:
+    """Build a SQLAlchemy OperationalError wrapping a SQLite ``database is locked``."""
+    return OperationalError("UPDATE scheduler_leader ...", {}, Exception("database is locked"))
+
+
+@pytest.mark.asyncio
+async def test_renew_lease_row_swallows_database_locked_at_debug(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Regression (CI, #1253): the best-effort release-keeper/drain renewal runs
+    # on the shared single-writer SQLite file and can lose the write-lock race
+    # against the app's other DB work. A transient ``database is locked`` there
+    # must NOT propagate or spam a warning — it is swallowed at DEBUG and the
+    # next cadence retries. Any OTHER error still surfaces as a warning.
+    class _LockedSession(_FakeSession):
+        async def execute(self, statement: Any, params: Any = None) -> _FakeResult:
+            raise _make_locked_error()
+
+    session = _LockedSession("sqlite", [])
+    _install(monkeypatch, session)
+
+    election = leader_election_module.LeaderElection(leader_id="node-a")
+    with caplog.at_level(logging.DEBUG, logger="app.core.scheduling.leader_election"):
+        assert await election._renew_lease_row() is False
+
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert warnings == []
+    debug = [r for r in caplog.records if r.levelno == logging.DEBUG]
+    assert any("contended on a locked database" in r.getMessage() for r in debug)
+
+
+@pytest.mark.asyncio
+async def test_renew_lease_row_still_warns_on_non_lock_error(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A non-lock failure keeps its WARNING so genuine faults stay visible.
+    class _BrokenSession(_FakeSession):
+        async def execute(self, statement: Any, params: Any = None) -> _FakeResult:
+            raise RuntimeError("db down")
+
+    session = _BrokenSession("sqlite", [])
+    _install(monkeypatch, session)
+
+    election = leader_election_module.LeaderElection(leader_id="node-a")
+    with caplog.at_level(logging.DEBUG, logger="app.core.scheduling.leader_election"):
+        assert await election._renew_lease_row() is False
+
+    assert any(
+        r.levelno >= logging.WARNING and "Failed to renew leader lease" in r.getMessage() for r in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_release_swallows_database_locked_at_debug(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Regression (CI, #1253): a ``database is locked`` while deleting the lease
+    # row at shutdown is not a release failure — the row is left to expire after
+    # its TTL, the fallback the caller already tolerates. It must be swallowed at
+    # DEBUG, not logged as "Failed to release scheduler leader lease" (WARNING),
+    # which spammed the integration-core teardown when leader election contended
+    # with the schema DROP TABLE.
+    class _LockedDeleteSession(_FakeSession):
+        async def execute(self, statement: Any, params: Any = None) -> _FakeResult:
+            raise _make_locked_error()
+
+    session = _LockedDeleteSession("sqlite", [])
+    _install(monkeypatch, session)
+
+    election = leader_election_module.LeaderElection(leader_id="node-a")
+    election._is_leader = True
+    with caplog.at_level(logging.DEBUG, logger="app.core.scheduling.leader_election"):
+        await election.release()
+
+    assert election.is_leader is False
+    assert not any("Failed to release scheduler leader lease" in r.getMessage() for r in caplog.records)
+    assert any("release contended on a locked database" in r.getMessage() for r in caplog.records)
 
 
 @pytest.mark.asyncio

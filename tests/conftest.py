@@ -29,6 +29,15 @@ os.environ["CODEX_LB_REQUEST_LOG_COUNT_CACHE_TTL_SECONDS"] = "0"
 # claim_run. Tests drive automations via AutomationsService.run_due_jobs
 # with explicit clocks or construct AutomationsScheduler directly.
 os.environ["CODEX_LB_AUTOMATIONS_SCHEDULER_ENABLED"] = "false"
+# Leader election is default-enabled in production and performs REAL SQLite
+# writes (acquire/renew/release) on the shared single-writer test database via
+# the app lifespan's release keeper. Left on, its renewal/release writes contend
+# with unrelated integration tests' DB work and with schema teardown, surfacing
+# as `database is locked` at setup/teardown. Tests that exercise leader election
+# inject their own enabled settings (see tests/unit/test_leader_election.py and
+# tests/integration/test_multi_replica.py), so disabling it here only affects
+# the ambient app lifespan and restores test isolation.
+os.environ["CODEX_LB_LEADER_ELECTION_ENABLED"] = "false"
 
 from app.db.models import Base  # noqa: E402
 from app.db.session import engine  # noqa: E402

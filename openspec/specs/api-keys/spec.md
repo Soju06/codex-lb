@@ -656,7 +656,7 @@ Selectable accounts exclude accounts whose status is `paused` or `deactivated`, 
 
 The response SHALL include `pooled_remaining_percent_primary` (float or null), `pooled_remaining_percent_secondary` (float or null), and `pooled_capacity_credits_primary` (float, default 0.0) on each key object.
 
-When `pooled_capacity_credits_primary` is 0.0 (e.g., all assigned accounts are free-tier), `pooled_remaining_percent_primary` SHALL be null.
+When `pooled_capacity_credits_primary` is 0.0 (e.g., all assigned accounts are free-tier), `pooled_remaining_percent_primary` SHALL be null. Primary samples whose `reset_at` has elapsed SHALL be pooled as reset windows rather than frozen values, and when no live (unexpired) primary sample exists across the pooled accounts, `pooled_remaining_percent_primary` SHALL be null instead of an optimistic value.
 
 #### Scenario: Scoped key pools assigned accounts only
 
@@ -674,6 +674,11 @@ When `pooled_capacity_credits_primary` is 0.0 (e.g., all assigned accounts are f
 - **WHEN** all assigned accounts have plan_type "free" (primary capacity = 0)
 - **THEN** `pooled_capacity_credits_primary` = 0.0
 - **AND** `pooled_remaining_percent_primary` = null
+
+#### Scenario: Absent primary windows hide the pooled primary bar
+
+- **WHEN** upstream stopped reporting the primary window and every pooled account's primary sample has an elapsed `reset_at` or no primary sample at all
+- **THEN** `pooled_remaining_percent_primary` = null
 
 #### Scenario: Paused and deactivated accounts are excluded
 

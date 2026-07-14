@@ -6,9 +6,11 @@
 
 Before any upstream OAuth token exchange for an account, the system MUST acquire that account's row in `account_refresh_claims` via a conditional upsert that succeeds only when no unexpired claim by another claimant exists; the upsert MUST be atomic on both PostgreSQL (ON CONFLICT row lock) and SQLite (single-writer lock). After acquiring, the system MUST re-read the account's refresh-token material fresh from the database (bypassing session identity caches) and MUST skip the upstream exchange when the material has rotated since the refresh was requested, adopting the stored tokens instead. Claims MUST carry an expiry covering all work performed under the claim (TTL at least the refresh-admission wait timeout plus twice the refresh HTTP timeout, because the claim is held across the admission wait and the OAuth exchange) so a crashed claimant cannot block refresh indefinitely while a healthy claimant cannot lose its claim mid-work, MUST be released after the refreshed tokens are persisted, and MUST NOT be held as an open database transaction or lock across upstream network I/O. When the claim TTL is not explicitly configured, the system MUST derive its default to at least this floor from the related timeout settings, so a deployment that predates the claim-TTL setting but raised the refresh or admission timeouts still starts up (never crashing during settings construction against a fixed default); the system MUST reject only an explicitly configured TTL below the floor. The claimant identity MUST remain unique per OS process even when the configured instance id exceeds the stored column width (truncate the instance-id portion, never the per-process suffix). The per-process suffix MUST be derived per OS process and resolved at claim-build time (for example incorporating `os.getpid()`), never frozen at module import: in pre-fork/multi-worker deployments a module imported before the fork boundary MUST NOT hand every forked child an identical suffix, so two sibling workers sharing one instance id build DISTINCT claimant identities (and thus distinct `claimed_by` values) rather than both satisfying the re-entrant claim upsert and refreshing the single-use token concurrently. The suffix MUST also remain stable across repeated calls within a single process so genuine same-process re-entrant claims still match.
 
+The claim release runs after the token update has been persisted (in a cleanup/`finally` path). A failure of the release itself (a transient DB error such as a SQLite lock past the busy timeout or a dropped Postgres connection) MUST NOT mask an otherwise successful refresh: the release MUST be retried briefly and then logged and suppressed, never propagated over a successful `_perform_refresh`/adoption return value, because the committed rotation is already durable and the stale claim harmlessly expires by its TTL. Suppression MUST be scoped to the release operation's own errors only: an exception raised by the refresh body itself MUST still propagate unchanged.
+
 Claim ownership MUST be per-refresh, not process-wide: the stored claim identity MUST combine the claimant (replica/process) identity with a per-refresh owner token derived from the refresh-token material being exchanged (its fingerprint). The re-entrant same-owner takeover that lets a crashed refresh reclaim its own live claim MUST match only when BOTH the claimant AND the owner token are identical; a release MUST delete only the exact composed claim. Consequently, when two refreshes for the same account run in one process with different token fingerprints (for example a re-auth/import lands while an older forced refresh is still in flight), the second refresh MUST contend for the claim (wait until the first releases or the claim expires) rather than re-entering the first refresh's live claim, and neither refresh's release MAY delete the other's claim. The composed claim identity MUST fit the stored column width without truncating either the per-process suffix or the owner token.
 
-After a successful upstream exchange, the system MUST persist the newly issued tokens with a compare-and-set conditioned on the refresh-token ciphertext the exchange was requested with. When that compare-and-set misses, the system MUST NOT assume any ciphertext change is a newer rotation: it MUST compare the freshly observed refresh-token material against the material this attempt exchanged (by decrypted-plaintext fingerprint, because token ciphertext is non-deterministic and a concurrent re-authentication or import can re-encrypt the same plaintext to different bytes). Only when the stored material is a genuinely different refresh token MUST the system adopt the stored row without persisting its own result; when the stored material is the same plaintext merely re-encrypted, the system MUST retry the compare-and-set against the freshly observed ciphertext (bounded) so its own single-use rotation is persisted rather than discarding it and leaving the account holding the token it already consumed upstream. When the bounded retries are exhausted without the compare-and-set ever landing, the newly issued single-use token was already produced by the successful upstream exchange (which consumed the previously stored single-use token), so the system MUST NOT drop that rotation: after a successful exchange, the stored row MUST end holding the newly issued (usable) refresh token, never the already-consumed one. On exhaustion the system MUST first re-read the stored material once more and adopt it when a genuinely different peer rotation has landed; otherwise it MUST escalate to an unconditional write (keyed on account id only, not gated on the exchanged ciphertext) that forces the freshly issued material into the row, and then report success so the caller mirrors the rotated tokens. The system MUST raise a transient (non-permanent) refresh error that is not recorded in the permanent-failure cooldown ONLY when even that forced write cannot land because the row no longer exists — in which case there is no consumed token left stored to reuse. The system MUST NOT raise while leaving the already-consumed token as the authoritative stored value, because that would turn transient re-encryption contention into a permanent refresh-token-reuse failure on the next request.
+After a successful upstream exchange, the system MUST persist the newly issued tokens with a compare-and-set conditioned on the refresh-token ciphertext the exchange was requested with. When that compare-and-set misses, the system MUST NOT assume any ciphertext change is a newer rotation: it MUST compare the freshly observed refresh-token material against the material this attempt exchanged (by decrypted-plaintext fingerprint, because token ciphertext is non-deterministic and a concurrent re-authentication or import can re-encrypt the same plaintext to different bytes). Only when the stored material is a genuinely different refresh token MUST the system adopt the stored row without persisting its own result; when the stored material is the same plaintext merely re-encrypted, the system MUST retry the compare-and-set against the freshly observed ciphertext (bounded) so its own single-use rotation is persisted rather than discarding it and leaving the account holding the token it already consumed upstream. Every persistence write MUST remain a compare-and-set against the last observed ciphertext: the system MUST NOT fall back to an unconditional write (one that drops the ciphertext predicate), because a genuinely different peer rotation could commit between the last re-read and that write, and an unconditional write would clobber the peer's newer valid tokens with the material this attempt already consumed — the very clobber the fingerprint checks prevent. When the bounded retries are exhausted without the compare-and-set ever landing (a sustained same-plaintext re-encryption storm the system cannot win an atomic compare-and-set window against), the system MUST raise a transient (non-permanent) refresh error that is not recorded in the permanent-failure cooldown, so the caller retries the whole refresh once the contention clears, rather than forcing an unconditional write that could discard a peer rotation. If, on any compare-and-set miss, the freshly observed material is a genuinely different refresh token, the system MUST adopt that stored row instead of retrying or raising.
 
 #### Scenario: Two replicas force-refresh the same account concurrently
 
@@ -40,6 +42,20 @@ After a successful upstream exchange, the system MUST persist the newly issued t
 - **THEN** the second refresh does NOT re-enter the live claim and instead contends (waits until the first releases or the claim expires)
 - **AND** releasing either refresh's claim does not delete the other refresh's claim
 
+#### Scenario: Claim release failure does not mask a successful refresh
+
+- **GIVEN** a replica won the refresh claim, completed the upstream exchange, and persisted the rotated tokens
+- **WHEN** releasing the claim in the cleanup path raises a transient DB error (for example a SQLite lock past the busy timeout or a dropped Postgres connection)
+- **THEN** the release is retried briefly and then logged and suppressed
+- **AND** the caller still receives the successfully refreshed account (the release error never replaces the return value)
+- **AND** the stale claim is left to expire by its TTL
+
+#### Scenario: Claim release failure does not swallow a refresh-body error
+
+- **GIVEN** a replica won the refresh claim and its upstream exchange raised a refresh error
+- **WHEN** releasing the claim in the cleanup path also raises a transient DB error
+- **THEN** the original refresh-body error propagates to the caller unchanged (the release error is suppressed, not the body error)
+
 #### Scenario: Winner adopts a rotation that landed before its claim
 
 - **GIVEN** a replica acquires the refresh claim for an account
@@ -58,21 +74,19 @@ After a successful upstream exchange, the system MUST persist the newly issued t
 #### Scenario: Persistence compare-and-set never lands within the bounded retries
 
 - **GIVEN** a replica completed a successful upstream token exchange and holds the newly issued single-use tokens
-- **AND** the persistence compare-and-set keeps missing on same-plaintext re-encryption until the bounded retry budget is exhausted
-- **AND** a final re-read shows no genuinely different peer rotation
+- **AND** the persistence compare-and-set keeps missing on a sustained same-plaintext re-encryption storm until the bounded retry budget is exhausted, with no genuinely different peer rotation ever observed
 - **WHEN** the replica has not persisted its rotated tokens after the final compare-and-set attempt
-- **THEN** it escalates to an unconditional write (keyed on account id only) that forces the freshly issued tokens into the stored row
-- **AND** the stored row ends holding the newly issued (usable) refresh token, never the already-consumed one
-- **AND** it reports success without raising, so the account does not fail permanently on the next refresh
+- **THEN** it raises a transient, non-permanent refresh error that is not recorded in the permanent-failure cooldown, so the caller retries the whole refresh once the contention clears
+- **AND** it never issues an unconditional write (one that drops the ciphertext predicate), because that could clobber a peer rotation landing after the final re-read
 
-#### Scenario: Forced persistence write cannot land because the row is gone
+#### Scenario: Persistence compare-and-set misses on a genuine peer rotation at the exhaustion boundary
 
 - **GIVEN** a replica completed a successful upstream token exchange and holds the newly issued single-use tokens
-- **AND** the persistence compare-and-set keeps missing until the bounded retry budget is exhausted
-- **AND** the account row has since been deleted, so even the unconditional forced write matches no row
-- **WHEN** the forced write fails to persist
-- **THEN** it raises a transient, non-permanent refresh error that is not recorded in the permanent-failure cooldown
-- **AND** no already-consumed token is left as the authoritative stored value (the row no longer exists)
+- **AND** the persistence compare-and-set keeps missing on same-plaintext re-encryption through the bounded retry budget
+- **AND** a genuinely different peer rotation lands on the final re-read (exactly where an unconditional forced write would otherwise run)
+- **WHEN** the replica observes the changed refresh-token fingerprint
+- **THEN** it adopts the peer's stored tokens without persisting its own result
+- **AND** it never issues an unconditional write that would clobber the peer's newer valid tokens with the already-consumed material
 
 #### Scenario: Persistence compare-and-set misses on a genuine peer rotation
 

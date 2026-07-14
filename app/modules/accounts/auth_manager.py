@@ -104,6 +104,15 @@ logger = logging.getLogger(__name__)
 # same-plaintext re-encryption race and must stay small to avoid live-locking.
 _TOKEN_CAS_MAX_ATTEMPTS = 5
 
+# Bound on how many times releasing a refresh claim is retried when the release
+# DELETE hits a transient DB error (SQLite lock past the busy timeout, a dropped
+# Postgres connection). Release runs in ``finally`` after the token update has
+# already committed, so a release failure must never mask a successful refresh;
+# after a couple of brief retries we log and swallow and let the claim expire by
+# its TTL.
+_CLAIM_RELEASE_MAX_ATTEMPTS = 3
+_CLAIM_RELEASE_RETRY_BASE_SECONDS = 0.05
+
 
 _RefreshSingleflightKey: TypeAlias = tuple[str, str]
 
@@ -341,7 +350,7 @@ class AuthManager:
                             pop_token_refresh_timeout_override(override_token)
                     return await self._perform_refresh(account, refresh_token_encrypted=fresh_material)
                 finally:
-                    await claims.release(account.id, owner=requested_fingerprint)
+                    await self._release_claim_quietly(claims, account.id, owner=requested_fingerprint)
             # Claim held by another replica: adopt its rotation as soon as it
             # commits; never write account status from the losing side.
             latest = await self._repo.get_by_id_fresh(account.id)
@@ -367,6 +376,45 @@ class AuthManager:
             # callers join. Sleep the smaller of the poll interval and the time
             # remaining so the claim wait is truly bounded by the caller budget.
             await asyncio.sleep(min(poll_seconds, remaining))
+
+    async def _release_claim_quietly(
+        self,
+        claims: RefreshClaimCoordinatorPort,
+        account_id: str,
+        *,
+        owner: str,
+    ) -> None:
+        """Release the refresh claim without ever masking the refresh result.
+
+        The release runs in ``finally`` after the token update has already
+        committed, so a transient DB error here (a SQLite lock past the busy
+        timeout, a dropped Postgres connection) MUST NOT replace a successful
+        ``_perform_refresh``/adoption return value with a failure and leave the
+        claim blocking peers until its TTL: the committed rotation is already
+        durable and the claim harmlessly expires on its own. So retry a couple
+        of times for a transient hiccup, then log and swallow.
+
+        This suppresses only the release DELETE's own errors. An exception
+        raised by the refresh body still propagates: when the body raised, this
+        coroutine runs in the ``finally``, returns normally after swallowing any
+        release error, and the original body exception continues to unwind.
+        """
+        last_exc: Exception | None = None
+        for attempt in range(_CLAIM_RELEASE_MAX_ATTEMPTS):
+            try:
+                await claims.release(account_id, owner=owner)
+                return
+            except Exception as exc:  # noqa: BLE001 - release must never mask the refresh result
+                last_exc = exc
+                if attempt < _CLAIM_RELEASE_MAX_ATTEMPTS - 1:
+                    await asyncio.sleep(_CLAIM_RELEASE_RETRY_BASE_SECONDS * (2**attempt))
+        logger.warning(
+            "Failed to release refresh claim for account_id=%s after %d attempts; leaving it to "
+            "expire by TTL (the committed refresh result is unaffected)",
+            account_id,
+            _CLAIM_RELEASE_MAX_ATTEMPTS,
+            exc_info=last_exc,
+        )
 
     async def _perform_refresh(self, account: Account, *, refresh_token_encrypted: bytes) -> Account:
         attempted_fingerprint = _refresh_token_material_fingerprint(self._encryptor, refresh_token_encrypted)
@@ -499,16 +547,20 @@ class AuthManager:
         observed ciphertext so our rotation wins.
 
         If the CAS keeps missing on same-plaintext re-encryption until the
-        bounded budget is exhausted, we MUST NOT drop the freshly issued token:
-        the upstream exchange already consumed the single-use refresh token and
-        issued a new one, so leaving the DB holding the consumed token would
-        turn transient contention into a permanent ``refresh_token_reused`` /
-        ``invalid_grant`` failure on the next refresh. After a final re-read that
-        still shows no genuine peer rotation, we escalate to an unconditional
-        write (keyed on account id only) so the DB ends with the usable token.
-        Only when even that forced write cannot land (the row vanished) do we
-        raise a transient error — and then the consumed token is not left as the
-        authoritative stored value because the row no longer exists.
+        bounded budget is exhausted, we MUST NOT clobber the stored row with an
+        unconditional write: a genuine peer rotation could land between our last
+        re-read and that write, and an ``expected=None`` update would overwrite
+        the peer's newer valid tokens with the material we already consumed —
+        exactly the clobber the fingerprint checks above prevent. So every write
+        stays a compare-and-set against the LAST OBSERVED ciphertext; that CAS
+        only succeeds while the consumed material is still the stored value
+        (persisting our rotation), and it misses the instant a peer rotates
+        (which we then adopt on the next re-read). When the bounded retries are
+        exhausted without ever landing — a sustained re-encryption storm we
+        cannot get an atomic window against — we surface a transient
+        (non-permanent) error so the caller retries the whole refresh once the
+        contention clears, rather than forcing an unconditional write that could
+        discard a peer rotation.
         """
         expected = expected_refresh_token_encrypted
         for _ in range(_TOKEN_CAS_MAX_ATTEMPTS):
@@ -526,47 +578,27 @@ class AuthManager:
                 # rather than overwriting with the token we already consumed.
                 return _adopt_account_row(account, latest)
             # Same refresh-token plaintext, re-encrypted concurrently: retry the
-            # CAS against the observed ciphertext so our rotation lands.
+            # CAS against the freshly observed ciphertext so our rotation lands
+            # only while the consumed material is still stored. We never fall
+            # back to an unconditional write, which would clobber a peer rotation
+            # that lands between this re-read and the write.
             expected = latest.refresh_token_encrypted
-        # The compare-and-set never landed within the bounded budget, but the
-        # upstream exchange already consumed the single-use refresh token and
-        # issued a new one. The DB still holds the already-consumed token.
-        # Dropping the freshly issued material here (returning ``None`` would
-        # look like success; raising while leaving the consumed token stored
-        # would guarantee a permanent ``refresh_token_reused`` on the next
-        # refresh) would turn transient re-encryption contention into a
-        # permanent account failure. So reconcile toward the NEW token: re-read
-        # once more to adopt a genuine peer rotation if one just landed,
-        # otherwise force an unconditional write of the freshly issued material
-        # (keyed on account id only) so the DB ends with the usable token.
-        latest = await self._repo.get_by_id_fresh(account.id)
-        if latest is None:
-            # Row is gone; nothing to persist or adopt.
-            return None
-        if (
-            _refresh_token_material_fingerprint(self._encryptor, latest.refresh_token_encrypted)
-            != attempted_fingerprint
-        ):
-            # A peer stored genuinely newer refresh-token material after our last
-            # miss; adopt it rather than clobbering it with a forced write.
-            return _adopt_account_row(account, latest)
+        # The bounded compare-and-set never landed. The upstream exchange already
+        # consumed the single-use refresh token, so we would like to persist our
+        # freshly issued material — but only conditionally, never by dropping the
+        # ciphertext predicate: an unconditional write here could overwrite a
+        # genuine peer rotation that committed after our last re-read. Since we
+        # could not win an atomic CAS window against the sustained re-encryption,
+        # surface a transient (non-permanent) failure so the caller retries the
+        # whole refresh once the contention clears. ``transport_error`` keeps it
+        # out of the permanent-failure cooldown cache.
         logger.warning(
             "Token-refresh compare-and-set for account_id=%s kept missing on re-encrypted "
-            "same-plaintext material after %d attempts; forcing an unconditional write of the "
-            "freshly issued tokens so the consumed token is not left stored",
+            "same-plaintext material after %d attempts; surfacing a transient error rather than "
+            "forcing an unconditional write that could clobber a concurrent peer rotation",
             account.id,
             _TOKEN_CAS_MAX_ATTEMPTS,
         )
-        if await write(None):
-            # Forced write landed: the DB now holds the newly issued (usable)
-            # refresh token, never the consumed one. Report success so the
-            # caller mirrors the rotated material onto its in-memory account.
-            return None
-        # The unconditional write only fails when the row no longer exists, so
-        # there is no consumed token left stored to reuse. Surface a transient
-        # (non-permanent) failure so the caller retries the whole refresh rather
-        # than proceeding with unpersisted material. ``transport_error`` keeps it
-        # out of the permanent-failure cooldown cache.
         raise RefreshError(
             "token_persist_conflict",
             (

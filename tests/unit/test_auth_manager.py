@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from typing import cast
 
 import pytest
+from sqlalchemy.exc import OperationalError
 
 from app.core.auth.refresh import (
     RefreshError,
@@ -1019,15 +1020,19 @@ async def test_refresh_adopts_peer_rotation_when_cas_misses_on_new_material(monk
 
 
 class _TokenCasAlwaysMissRepo(_DummyRepo):
-    """Repo where NO write ever lands: every ``get_by_id_fresh`` returns a row
-    whose refresh-token ciphertext is a fresh re-encryption of the SAME
-    plaintext (Fernet is non-deterministic), so the fingerprint never changes
-    but the observed ciphertext keeps shifting under the writer, and
-    ``update_tokens`` never persists — not even the final unconditional
-    (``expected=None``) forced write. This models the residual case where the
-    account row is deleted between the final re-read and the forced write, so
-    even the escalation cannot land and the refresh must surface a transient
-    error (there is no consumed token left stored to reuse)."""
+    """Repo where NO conditional write ever lands: every ``get_by_id_fresh``
+    returns a row whose refresh-token ciphertext is a fresh re-encryption of the
+    SAME plaintext (Fernet is non-deterministic), so the fingerprint never
+    changes but the observed ciphertext keeps shifting under the writer, and
+    every conditional ``update_tokens`` misses. This models a sustained
+    re-encryption storm the refresh can never win an atomic compare-and-set
+    window against.
+
+    Crucially, an ``expected=None`` (unconditional) write MUST never be issued
+    by the persistence path: it would drop the ciphertext predicate and could
+    clobber a genuine peer rotation. If one is ever attempted this repo records a
+    clobbering payload so the regression tests catch it; the bounded CAS instead
+    surfaces a transient error."""
 
     def __init__(self, account: Account, *, plaintext: str, encryptor: TokenEncryptor) -> None:
         super().__init__()
@@ -1060,34 +1065,69 @@ class _TokenCasAlwaysMissRepo(_DummyRepo):
         seat_type: str | None = None,
         expected_refresh_token_encrypted: bytes | None = None,
     ) -> bool:
-        # Every write misses: the conditional CAS is rotated out from under this
-        # ``expected`` value, and the final unconditional (``expected=None``)
-        # forced write finds no row (deleted in the race window) too.
         self.update_attempts.append(expected_refresh_token_encrypted)
+        if expected_refresh_token_encrypted is None:
+            # Forbidden unconditional write: record it so a regression is caught.
+            return await super().update_tokens(
+                account_id,
+                access_token_encrypted=access_token_encrypted,
+                refresh_token_encrypted=refresh_token_encrypted,
+                id_token_encrypted=id_token_encrypted,
+                last_refresh=last_refresh,
+                plan_type=plan_type,
+                email=email,
+                chatgpt_account_id=chatgpt_account_id,
+                chatgpt_user_id=chatgpt_user_id,
+                workspace_id=workspace_id,
+                workspace_label=workspace_label,
+                seat_type=seat_type,
+                expected_refresh_token_encrypted=expected_refresh_token_encrypted,
+            )
+        # Conditional CAS: always missed by the same-plaintext re-encryption.
         return False
 
 
-class _TokenCasForcedWriteRepo(_DummyRepo):
-    """Repo where the conditional token compare-and-set never lands on a
-    same-plaintext re-encryption race, but the final unconditional
-    (``expected=None``) forced write persists the freshly issued tokens.
+class _TokenCasPeerRotationAtExhaustionRepo(_DummyRepo):
+    """Repo where the conditional token compare-and-set keeps missing on
+    same-plaintext re-encryption, and a genuinely DIFFERENT peer rotation lands
+    on the final re-read — exactly where the old code force-wrote
+    ``expected=None`` and would have clobbered the peer's valid tokens with the
+    already-consumed material. Proves the refresh adopts the peer rotation at
+    the exhaustion boundary instead of forcing an unconditional write.
 
-    Each ``get_by_id_fresh`` re-encrypts the SAME stored plaintext (so the
-    fingerprint stays equal to the consumed token and no peer rotation is
-    inferred); every ``update_tokens`` carrying an ``expected`` ciphertext
-    misses, while the unconditional escalation records the new material and
-    succeeds — exactly how the real repo's account-id-only write behaves."""
+    ``update_tokens`` misses for every conditional CAS. An ``expected=None``
+    write is FORBIDDEN and, if ever attempted, records a clobbering payload so
+    the regression is caught."""
 
-    def __init__(self, account: Account, *, plaintext: str, encryptor: TokenEncryptor) -> None:
+    def __init__(
+        self,
+        account: Account,
+        *,
+        plaintext: str,
+        peer_ciphertext: bytes,
+        encryptor: TokenEncryptor,
+        rotate_on_read: int,
+    ) -> None:
         super().__init__()
         self._plaintext = plaintext
+        self._peer_ciphertext = peer_ciphertext
         self._encryptor = encryptor
+        self._rotate_on_read = rotate_on_read
+        self._reads = 0
         self.accounts_by_id[account.id] = account
         self.update_attempts: list[bytes | None] = []
 
     async def get_by_id_fresh(self, account_id: str) -> Account | None:
         row = self.accounts_by_id.get(account_id)
-        if row is not None:
+        if row is None:
+            return None
+        self._reads += 1
+        if self._reads >= self._rotate_on_read:
+            # A peer committed a genuinely different rotation right as the
+            # bounded budget runs out.
+            row.refresh_token_encrypted = self._peer_ciphertext
+        else:
+            # Same plaintext, merely re-encrypted (non-deterministic Fernet).
             row.refresh_token_encrypted = self._encryptor.encrypt(self._plaintext)
         return row
 
@@ -1108,47 +1148,42 @@ class _TokenCasForcedWriteRepo(_DummyRepo):
         expected_refresh_token_encrypted: bytes | None = None,
     ) -> bool:
         self.update_attempts.append(expected_refresh_token_encrypted)
-        if expected_refresh_token_encrypted is not None:
-            # Conditional CAS: always missed by the same-plaintext re-encryption.
-            return False
-        # Unconditional forced write (keyed on account id only): persist the
-        # freshly issued material so the stored row ends with the usable token.
-        self.tokens_payload = {
-            "account_id": account_id,
-            "access_token_encrypted": access_token_encrypted,
-            "refresh_token_encrypted": refresh_token_encrypted,
-            "id_token_encrypted": id_token_encrypted,
-            "last_refresh": last_refresh,
-            "plan_type": plan_type,
-            "email": email,
-            "chatgpt_account_id": chatgpt_account_id,
-            "chatgpt_user_id": chatgpt_user_id,
-            "workspace_id": workspace_id,
-            "workspace_label": workspace_label,
-            "seat_type": seat_type,
-            "expected_refresh_token_encrypted": expected_refresh_token_encrypted,
-        }
-        return True
+        if expected_refresh_token_encrypted is None:
+            # Forbidden unconditional write: record the clobber for the assertion.
+            return await super().update_tokens(
+                account_id,
+                access_token_encrypted=access_token_encrypted,
+                refresh_token_encrypted=refresh_token_encrypted,
+                id_token_encrypted=id_token_encrypted,
+                last_refresh=last_refresh,
+                plan_type=plan_type,
+                email=email,
+                chatgpt_account_id=chatgpt_account_id,
+                chatgpt_user_id=chatgpt_user_id,
+                workspace_id=workspace_id,
+                workspace_label=workspace_label,
+                seat_type=seat_type,
+                expected_refresh_token_encrypted=expected_refresh_token_encrypted,
+            )
+        return False
 
 
 @pytest.mark.asyncio
-async def test_refresh_forces_write_of_new_tokens_when_token_cas_never_lands(monkeypatch):
-    """Regression (correctness): when the token compare-and-set keeps missing on
-    same-plaintext re-encryption until ``_TOKEN_CAS_MAX_ATTEMPTS`` is exhausted,
-    the successful upstream exchange has ALREADY consumed the previously stored
-    single-use token and issued a NEW one. Dropping that rotation (raising while
-    the DB retains the consumed token) would guarantee a permanent
-    ``refresh_token_reused`` / ``invalid_grant`` on the next refresh — turning
-    transient re-encryption contention into a permanent account failure. The
-    refresh must instead escalate to an unconditional forced write so the DB
-    ends holding the newly issued (usable) token, and report success."""
+async def test_refresh_adopts_peer_rotation_at_cas_exhaustion_boundary(monkeypatch):
+    """Regression (FINDING 1): when the token compare-and-set keeps missing on
+    same-plaintext re-encryption until ``_TOKEN_CAS_MAX_ATTEMPTS`` is exhausted
+    and a genuinely different peer rotation lands on the final re-read, the
+    refresh MUST adopt the peer rotation and MUST NOT force an unconditional
+    ``expected=None`` write. The old forced write dropped the ciphertext
+    predicate and could clobber the peer's newer valid tokens with the material
+    this attempt already consumed upstream."""
 
     async def _fake_refresh(_: str, **_kwargs: object) -> TokenRefreshResult:
         return TokenRefreshResult(
             access_token="access-new",
             refresh_token="refresh-new",
             id_token="id-new",
-            account_id="acc_cas_forced",
+            account_id="acc_cas_peer_exhaustion",
             plan_type="pro",
             email=None,
         )
@@ -1157,7 +1192,7 @@ async def test_refresh_forces_write_of_new_tokens_when_token_cas_never_lands(mon
 
     encryptor = TokenEncryptor()
     account = Account(
-        id="acc_cas_forced",
+        id="acc_cas_peer_exhaustion",
         email="user@example.com",
         plan_type="pro",
         access_token_encrypted=encryptor.encrypt("access-old"),
@@ -1167,33 +1202,41 @@ async def test_refresh_forces_write_of_new_tokens_when_token_cas_never_lands(mon
         status=AccountStatus.ACTIVE,
         deactivation_reason=None,
     )
-    repo = _TokenCasForcedWriteRepo(account, plaintext="refresh-old", encryptor=encryptor)
+    peer_ciphertext = encryptor.encrypt("refresh-peer")
+    repo = _TokenCasPeerRotationAtExhaustionRepo(
+        account,
+        plaintext="refresh-old",
+        peer_ciphertext=peer_ciphertext,
+        encryptor=encryptor,
+        # The peer rotation appears on the last re-read of the bounded loop,
+        # exactly where the old code would have force-written ``expected=None``.
+        rotate_on_read=auth_manager_module._TOKEN_CAS_MAX_ATTEMPTS,
+    )
     manager = AuthManager(cast(AccountsRepositoryPort, repo))
 
     result = await manager.refresh_account(account)
 
-    # No permanent failure: the newly issued token is persisted and returned.
-    assert result.status == AccountStatus.ACTIVE
-    assert encryptor.decrypt(result.refresh_token_encrypted) == "refresh-new"
-    # The DB (forced write) holds the NEW material, never the consumed token.
-    assert repo.tokens_payload is not None
-    assert encryptor.decrypt(cast(bytes, repo.tokens_payload["refresh_token_encrypted"])) == "refresh-new"
-    # The bounded conditional CAS ran to exhaustion, then one unconditional
-    # (account-id-only) forced write landed.
-    conditional_attempts = repo.update_attempts[:-1]
-    assert len(conditional_attempts) == auth_manager_module._TOKEN_CAS_MAX_ATTEMPTS
-    assert all(expected is not None for expected in conditional_attempts)
-    assert repo.update_attempts[-1] is None
+    # The peer's rotation is adopted; our consumed token is never written.
+    assert result is account
+    assert result.refresh_token_encrypted == peer_ciphertext
+    assert encryptor.decrypt(result.refresh_token_encrypted) == "refresh-peer"
+    # No unconditional (``expected=None``) forced write was ever issued, so the
+    # peer rotation could not be clobbered.
+    assert None not in repo.update_attempts
+    assert repo.tokens_payload is None
+    # Only bounded conditional CAS attempts ran before adoption.
+    assert all(expected is not None for expected in repo.update_attempts)
+    assert len(repo.update_attempts) <= auth_manager_module._TOKEN_CAS_MAX_ATTEMPTS
 
 
 @pytest.mark.asyncio
-async def test_refresh_surfaces_transient_error_when_forced_write_cannot_land(monkeypatch):
-    """Regression: the forced write escalation is the normal reconciliation, but
-    when even the unconditional write cannot land (the account row was deleted in
-    the race window) there is no consumed token left stored to reuse. In that
-    residual case the refresh must raise a transient (non-permanent)
-    ``RefreshError`` so the caller retries, rather than reporting success with
-    unpersisted material."""
+async def test_refresh_surfaces_transient_error_when_cas_never_lands(monkeypatch):
+    """Regression (FINDING 1): when the conditional compare-and-set keeps missing
+    on a sustained same-plaintext re-encryption storm through the bounded budget,
+    the refresh MUST surface a transient (non-permanent) ``RefreshError`` so the
+    caller retries once the contention clears. It MUST NOT fall back to an
+    unconditional ``expected=None`` write, which could clobber a genuine peer
+    rotation that lands after the final re-read."""
 
     async def _fake_refresh(_: str, **_kwargs: object) -> TokenRefreshResult:
         return TokenRefreshResult(
@@ -1230,10 +1273,11 @@ async def test_refresh_surfaces_transient_error_when_forced_write_cannot_land(mo
     assert excinfo.value.transport_error is True
     assert excinfo.value.is_permanent is False
     assert excinfo.value.code == "token_persist_conflict"
-    # The bounded conditional CAS ran to exhaustion, then one unconditional
-    # forced write was attempted and also failed (row gone).
-    assert len(repo.update_attempts) == auth_manager_module._TOKEN_CAS_MAX_ATTEMPTS + 1
-    assert repo.update_attempts[-1] is None
+    # Exactly the bounded conditional CAS attempts ran — no unconditional
+    # (``expected=None``) forced write was ever issued.
+    assert len(repo.update_attempts) == auth_manager_module._TOKEN_CAS_MAX_ATTEMPTS
+    assert all(expected is not None for expected in repo.update_attempts)
+    assert None not in repo.update_attempts
     assert repo.tokens_payload is None
     # The in-memory account was NOT mutated to advertise unpersisted material.
     assert encryptor.decrypt(account.refresh_token_encrypted) == "refresh-old"
@@ -1358,6 +1402,116 @@ async def test_claim_wait_is_capped_by_caller_refresh_budget(monkeypatch):
     assert exc_info.value.is_permanent is False
     assert exc_info.value.transport_error is True
     assert elapsed < 2.0
+
+
+@pytest.mark.asyncio
+async def test_successful_refresh_survives_claim_release_error(monkeypatch):
+    """Regression (FINDING 2): the claim-release runs in ``finally`` after the
+    token update has already committed. A transient DB error while releasing the
+    claim (a SQLite lock past the busy timeout, a dropped Postgres connection)
+    MUST NOT replace the successful refresh return value with a failure. The
+    caller still receives the refreshed account and the stale claim is left to
+    expire by its TTL."""
+
+    async def _fake_refresh(_: str, **_kwargs: object) -> TokenRefreshResult:
+        return TokenRefreshResult(
+            access_token="access-new",
+            refresh_token="refresh-new",
+            id_token="id-new",
+            account_id="acc_release_error",
+            plan_type="pro",
+            email=None,
+        )
+
+    monkeypatch.setattr(auth_manager_module, "refresh_access_token", _fake_refresh)
+
+    release_calls = 0
+
+    class _ReleaseFailingClaims:
+        claimant_id = "this-replica"
+
+        async def try_acquire(self, account_id: str, *, ttl_seconds: float, owner: str) -> bool:
+            del account_id, ttl_seconds, owner
+            return True
+
+        async def release(self, account_id: str, *, owner: str) -> None:
+            nonlocal release_calls
+            del account_id, owner
+            release_calls += 1
+            # Model a transient DB error releasing the claim row.
+            raise OperationalError("DELETE FROM account_refresh_claims", {}, Exception("database is locked"))
+
+    encryptor = TokenEncryptor()
+    account = Account(
+        id="acc_release_error",
+        email="user@example.com",
+        plan_type="pro",
+        access_token_encrypted=encryptor.encrypt("access-old"),
+        refresh_token_encrypted=encryptor.encrypt("refresh-old"),
+        id_token_encrypted=encryptor.encrypt("id-old"),
+        last_refresh=utcnow(),
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
+    )
+    repo = _DummyRepo()
+    repo.accounts_by_id[account.id] = account
+    manager = AuthManager(cast(AccountsRepositoryPort, repo), refresh_claims=_ReleaseFailingClaims())
+
+    # The release error is swallowed: the successful refresh result is returned.
+    result = await manager.refresh_account(account)
+
+    assert encryptor.decrypt(result.refresh_token_encrypted) == "refresh-new"
+    assert result.status == AccountStatus.ACTIVE
+    # The token update committed before the release failure.
+    assert repo.tokens_payload is not None
+    assert encryptor.decrypt(cast(bytes, repo.tokens_payload["refresh_token_encrypted"])) == "refresh-new"
+    # The release was retried the bounded number of times before being suppressed.
+    assert release_calls == auth_manager_module._CLAIM_RELEASE_MAX_ATTEMPTS
+
+
+@pytest.mark.asyncio
+async def test_claim_release_error_does_not_mask_refresh_body_error(monkeypatch):
+    """Regression (FINDING 2): suppressing the release error must not swallow a
+    genuine failure from the refresh body. When the upstream exchange raises, the
+    ORIGINAL error must still propagate even though the ``finally`` release also
+    fails."""
+
+    async def _failing_refresh(_: str, **_kwargs: object) -> TokenRefreshResult:
+        raise RefreshError("upstream_timeout", "boom", False, transport_error=True)
+
+    monkeypatch.setattr(auth_manager_module, "refresh_access_token", _failing_refresh)
+
+    class _ReleaseFailingClaims:
+        claimant_id = "this-replica"
+
+        async def try_acquire(self, account_id: str, *, ttl_seconds: float, owner: str) -> bool:
+            del account_id, ttl_seconds, owner
+            return True
+
+        async def release(self, account_id: str, *, owner: str) -> None:
+            del account_id, owner
+            raise OperationalError("DELETE FROM account_refresh_claims", {}, Exception("database is locked"))
+
+    encryptor = TokenEncryptor()
+    account = Account(
+        id="acc_release_error_body",
+        email="user@example.com",
+        plan_type="pro",
+        access_token_encrypted=encryptor.encrypt("access-old"),
+        refresh_token_encrypted=encryptor.encrypt("refresh-old"),
+        id_token_encrypted=encryptor.encrypt("id-old"),
+        last_refresh=utcnow(),
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
+    )
+    repo = _DummyRepo()
+    repo.accounts_by_id[account.id] = account
+    manager = AuthManager(cast(AccountsRepositoryPort, repo), refresh_claims=_ReleaseFailingClaims())
+
+    # The body's RefreshError propagates, NOT the release OperationalError.
+    with pytest.raises(RefreshError) as excinfo:
+        await manager.refresh_account(account)
+    assert excinfo.value.code == "upstream_timeout"
 
 
 @pytest.mark.parametrize(

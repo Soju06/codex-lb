@@ -205,7 +205,7 @@ async def test_stream_responses_tracks_latency_first_token_ms(monkeypatch, event
 
 
 @pytest.mark.asyncio
-async def test_stream_responses_ttft_ignores_control_frame_before_text_delta(monkeypatch) -> None:
+async def test_stream_responses_ttft_ignores_non_token_events_before_delta(monkeypatch) -> None:
     settings = _make_proxy_settings()
     request_logs = _RequestLogsRecorder()
     service = ProxyService(_repo_factory(request_logs))
@@ -227,8 +227,9 @@ async def test_stream_responses_ttft_ignores_control_frame_before_text_delta(mon
         yield (
             'data: {"type":"response.output_item.added","item":{"type":"message","role":"assistant","content":[]}}\n\n'
         )
+        yield ('data: {"type":"response.output_item.added","item":{"type":"function_call","arguments":""}}\n\n')
         await asyncio.sleep(0.03)
-        yield 'data: {"type":"response.output_text.delta","delta":"hi"}\n\n'
+        yield 'data: {"type":"response.function_call_arguments.delta","delta":"{}"}\n\n'
         yield (
             'data: {"type":"response.completed","response":{"id":"resp_ttft","usage":'
             '{"input_tokens":1,"output_tokens":1}}}\n\n'
@@ -242,5 +243,5 @@ async def test_stream_responses_ttft_ignores_control_frame_before_text_delta(mon
     assert await service.drain_persistence_tasks(timeout_seconds=1)
     latency_first_token_ms = cast(int, request_logs.calls[0]["latency_first_token_ms"])
 
-    assert len(chunks) == 4
+    assert len(chunks) == 5
     assert latency_first_token_ms >= 20

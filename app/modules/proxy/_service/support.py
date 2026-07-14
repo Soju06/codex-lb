@@ -51,6 +51,7 @@ _PENDING_TOOL_CALL_OUTPUT_ITEM_TYPE_BY_CALL_TYPE = {
 }
 _PENDING_TOOL_CALL_ITEM_TYPES = frozenset(_PENDING_TOOL_CALL_OUTPUT_ITEM_TYPE_BY_CALL_TYPE)
 _PENDING_TOOL_CALL_OUTPUT_ITEM_TYPES = frozenset(_PENDING_TOOL_CALL_OUTPUT_ITEM_TYPE_BY_CALL_TYPE.values())
+_TTFT_OUTPUT_ITEM_TYPES = _PENDING_TOOL_CALL_ITEM_TYPES - {"function_call"}
 _WEBSOCKET_FULL_REPLAY_WAIT_MIN_ITEMS = 20
 _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS = 0.05
 _HARD_HTTP_BRIDGE_AFFINITY_KINDS = frozenset(
@@ -78,7 +79,7 @@ def _is_ttft_event(event_type: str | None, payload: dict[str, JsonValue] | None)
     if event_type != "response.output_item.added" or not isinstance(payload, dict):
         return False
     item = payload.get("item")
-    return isinstance(item, dict) and item.get("type") in _PENDING_TOOL_CALL_ITEM_TYPES
+    return isinstance(item, dict) and item.get("type") in _TTFT_OUTPUT_ITEM_TYPES
 
 
 def _bind_propagated_capacity_startup_wait(event: asyncio.Event) -> Token[asyncio.Event | None]:

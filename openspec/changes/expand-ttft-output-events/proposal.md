@@ -6,7 +6,7 @@ Request logs currently record time to first token only for text and refusal delt
 
 ## What Changes
 
-- Treat streamed reasoning-summary and tool-call argument deltas, plus tool-call item-start events, as first-token events.
+- Treat streamed reasoning-summary and tool-call argument deltas, plus non-delta tool-call item-start events, as first-token events.
 - Preserve the existing distinction between control events such as `response.created` and token-bearing output.
 - Calculate dashboard and report TPS from non-reasoning output tokens generated after TTFT.
 

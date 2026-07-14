@@ -2,7 +2,7 @@
 
 ### Requirement: Websocket responses capture request-log latency timings
 
-The websocket responses proxy path MUST record first-upstream-event, response-created, and first-token latency into the same request-log latency fields the HTTP bridge populates, so websocket request logs expose TTFT and generation speed. First-token latency MUST use the first token-bearing output delta, including text, refusal, reasoning-summary, function-call argument, and tool-call output deltas, or a tool-call `response.output_item.added` event when the tool protocol does not stream argument deltas. Recording MUST NOT change routing, failover, or the bytes returned to the client.
+The websocket responses proxy path MUST record first-upstream-event, response-created, and first-token latency into the same request-log latency fields the HTTP bridge populates, so websocket request logs expose TTFT and generation speed. First-token latency MUST use the first token-bearing output delta, including text, refusal, reasoning-summary, function-call argument, and tool-call output deltas, or a custom/apply-patch tool-call `response.output_item.added` event when the tool protocol does not stream argument deltas. Recording MUST NOT change routing, failover, or the bytes returned to the client.
 
 #### Scenario: Websocket text response records latency timings
 
@@ -13,7 +13,7 @@ The websocket responses proxy path MUST record first-upstream-event, response-cr
 
 #### Scenario: Websocket tool call records first-token latency
 
-- **GIVEN** a websocket responses request whose first token-bearing output is a function-call argument delta, tool-call output delta, or tool-call `response.output_item.added` event
+- **GIVEN** a websocket responses request whose first token-bearing output is a function-call argument delta, tool-call output delta, or custom/apply-patch tool-call `response.output_item.added` event
 - **WHEN** the proxy persists the request log
 - **THEN** the log has a non-null first-token latency value
 - **AND** the proxy forwards the upstream event unchanged
@@ -23,7 +23,7 @@ The websocket responses proxy path MUST record first-upstream-event, response-cr
 - **GIVEN** a responses request whose upstream has emitted only control events such as `response.created`
 - **WHEN** the proxy inspects the request timing
 - **THEN** first-token latency remains null until a token-bearing output delta arrives
-- **AND** a message or reasoning `response.output_item.added` lifecycle event does not record first-token latency
+- **AND** a message, reasoning, or function-call `response.output_item.added` lifecycle event does not record first-token latency
 
 ### Requirement: Dashboard TPS excludes reasoning tokens
 

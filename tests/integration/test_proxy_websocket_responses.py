@@ -745,6 +745,168 @@ def test_backend_responses_websocket_transient_refresh_claim_fails_over_instead_
     assert permanent_failures == []
 
 
+def test_backend_responses_websocket_genuine_transport_error_penalizes_and_fails_over(
+    app_instance,
+    monkeypatch,
+):
+    """Regression for the WebSocket connect path (GENUINE OAuth transport error).
+
+    Unlike cross-replica refresh-claim contention (``refresh_claim_timeout``), a
+    ``code == "transport_error"`` ``RefreshError`` means the OAuth refresh request
+    itself failed — that IS the account/route's fault. It must be treated as a
+    real transport failure: routed through ``_handle_websocket_connect_error`` (the
+    account-health penalty / failover-decision path, via a retryable 502
+    ``upstream_unavailable``) rather than the unpenalized
+    ``_WebSocketTransientRefreshFailover`` claim-contention path, and NOT a
+    terminal 401 ``invalid_api_key``.
+    """
+    recovered_upstream = _SequencedUpstreamWebSocket(
+        [],
+        deferred_message_batches=[
+            [
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.created",
+                            "response": {"id": "resp_ws_transport_recovered", "status": "in_progress"},
+                        },
+                        separators=(",", ":"),
+                    ),
+                ),
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.completed",
+                            "response": {"id": "resp_ws_transport_recovered", "status": "completed"},
+                        },
+                        separators=(",", ":"),
+                    ),
+                ),
+            ]
+        ],
+    )
+
+    selected_accounts: list[str] = []
+    opened_accounts: list[str] = []
+    penalized_account_ids: list[str] = []
+    permanent_failures: list[tuple[str, str]] = []
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
+        return None
+
+    async def fake_select_websocket_connect_account(
+        self,
+        deadline,
+        *,
+        request_state,
+        exclude_account_ids,
+        **_rest,
+    ):
+        del self, deadline, _rest
+        for account_id in ("acct_ws_transport_a", "acct_ws_transport_b"):
+            if account_id in exclude_account_ids:
+                continue
+            selected_accounts.append(account_id)
+            request_state.websocket_stream_lease = SimpleNamespace(account_id=account_id)
+            return SimpleNamespace(id=account_id)
+        return None
+
+    async def fake_ensure_fresh(self, account, *, force=False, timeout_seconds=None):
+        del self, force, timeout_seconds
+        if account.id == "acct_ws_transport_a":
+            raise RefreshError(
+                "transport_error",
+                "Transport error during token refresh: connection reset",
+                False,
+                transport_error=True,
+            )
+        return account
+
+    async def fake_open_upstream_with_budget(self, account, headers, *, timeout_seconds, request_state=None):
+        del self, headers, timeout_seconds, request_state
+        opened_accounts.append(account.id)
+        return recovered_upstream
+
+    async def noop_release_account_lease(self, lease):
+        del self, lease
+        return None
+
+    async def fake_mark_permanent_failure(self, account, error_code):
+        del self
+        permanent_failures.append((account.id, error_code))
+
+    async def spy_handle_connect_error(self, account, exc):
+        # The connect-error penalty path (which records the account-health
+        # penalty). Claim contention NEVER reaches here; a genuine transport
+        # error MUST. Return a retryable classification so the loop fails over.
+        del self, exc
+        penalized_account_ids.append(account.id)
+        return {
+            "failure_class": "retryable_transient",
+            "phase": "connect",
+            "error_code": "upstream_unavailable",
+            "error": {"message": "transport"},
+            "http_status": 502,
+        }
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_select_websocket_connect_account",
+        fake_select_websocket_connect_account,
+    )
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh)
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_open_upstream_websocket_with_budget",
+        fake_open_upstream_with_budget,
+    )
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_handle_websocket_connect_error",
+        spy_handle_connect_error,
+    )
+    monkeypatch.setattr(proxy_module.LoadBalancer, "release_account_lease", noop_release_account_lease)
+    monkeypatch.setattr(proxy_module.LoadBalancer, "mark_permanent_failure", fake_mark_permanent_failure)
+
+    with TestClient(app_instance) as client:
+        with client.websocket_connect("/backend-api/codex/responses") as websocket:
+            websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "response.create",
+                        "model": "gpt-5.4",
+                        "input": "hello",
+                        "stream": True,
+                    }
+                )
+            )
+            created = json.loads(websocket.receive_text())
+            completed = json.loads(websocket.receive_text())
+
+    assert created["type"] == "response.created"
+    assert completed["type"] == "response.completed"
+    assert completed["response"]["id"] == "resp_ws_transport_recovered"
+    # The genuine-transport account was routed through the connect-error penalty
+    # path (NOT the unpenalized claim-contention failover), then failed over.
+    assert penalized_account_ids == ["acct_ws_transport_a"]
+    assert opened_accounts == ["acct_ws_transport_b"]
+    assert selected_accounts == ["acct_ws_transport_a", "acct_ws_transport_b"]
+    # A genuine transport error is not a permanent failure.
+    assert permanent_failures == []
+
+
 def test_backend_responses_websocket_transient_refresh_exhaustion_emits_error_not_silence(
     app_instance,
     monkeypatch,

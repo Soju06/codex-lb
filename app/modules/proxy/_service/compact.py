@@ -10,7 +10,7 @@ from typing import Any, NoReturn, Protocol, TypeVar, cast
 
 import aiohttp
 
-from app.core.auth.refresh import RefreshError
+from app.core.auth.refresh import RefreshError, is_refresh_claim_contention
 from app.core.balancer import ResetPreferenceWindow, RoutingStrategy, failover_decision
 from app.core.clients.proxy import (
     ProxyResponseError,
@@ -913,65 +913,62 @@ class _CompactMixin:
                         request_id,
                         account.id,
                     )
-                except RefreshError as exc:
+                except (RefreshError, aiohttp.ClientError, asyncio.TimeoutError) as exc:
                     await proxy._load_balancer.release_account_lease(selected_account_response_create_lease)
                     selected_account_response_create_lease = None
-                    if exc.is_permanent or not exc.transport_error:
-                        # Permanent or non-transport refresh failures keep their
-                        # prior escalation (they propagate to the caller); only
-                        # transient transport-level failures fail over below.
-                        raise
-                    # Transient, transport-level refresh failure on the freshness
-                    # preflight (for example the account's refresh claim is held
-                    # by another replica): fail over to a healthy account instead
-                    # of letting the non-permanent RefreshError escape unhandled
-                    # and surface a bogus hard auth/server error to the client.
-                    # This is definitionally transient, so — unlike a raw
-                    # transport error whose retriability is inferred from its
-                    # message — it always fails over (matching the streaming and
-                    # WebSocket paths) rather than gating on the message.
-                    message = exc.message or str(exc) or "Request to upstream timed out"
-                    logger.warning(
-                        "Compact refresh transient failure request_id=%s account_id=%s",
-                        request_id,
-                        account.id,
-                        exc_info=True,
-                    )
-                    if preferred_account_id is not None:
-                        # File/previous-response-pinned requests cannot fail over,
-                        # so surface a retryable upstream_unavailable. On the HTTP
-                        # bridge / forwarded path the caller passes an
-                        # ``api_key_reservation_override`` with ``owns_reservation``
-                        # false, making ``compact_responses`` responsible for
-                        # settling the reservation. Settle it here BEFORE raising —
-                        # matching the post-401 forced-refresh pinned branch below —
-                        # so the API-key reservation is finalized instead of leaking
-                        # held quota when the pinned refresh claim times out.
-                        await proxy._settle_compact_api_key_usage(
-                            api_key=api_key,
-                            api_key_reservation=api_key_reservation,
-                            response=None,
-                            request_service_tier=request_service_tier,
-                        )
-                        _raise_proxy_unavailable(message)
-                    # Peer-claim contention is NOT the account's fault: its
-                    # credentials are healthy and only its refresh claim is held
-                    # by another replica. Unlike the genuine transport-level
-                    # aiohttp/connect failure below, do NOT record an account
-                    # health penalty (``record_error`` via ``_handle_stream_error``)
-                    # for this transient claim timeout — that would push an
-                    # otherwise-healthy account into backoff for normal
-                    # cross-replica contention. Match the streaming and WebSocket
-                    # paths, which only release + exclude the account and surface a
-                    # retryable ``upstream_unavailable`` to the client on exhaustion
-                    # (``last_exc`` is raised once every candidate is exhausted).
-                    last_exc = ProxyResponseError(502, openai_error("upstream_unavailable", message))
-                    excluded_account_ids.add(account.id)
-                    continue
-                except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-                    await proxy._load_balancer.release_account_lease(selected_account_response_create_lease)
-                    selected_account_response_create_lease = None
-                    message = str(exc) or "Request to upstream timed out"
+                    if isinstance(exc, RefreshError):
+                        if exc.is_permanent:
+                            # Permanent refresh failures keep their prior
+                            # escalation (they propagate to the caller).
+                            raise
+                        if is_refresh_claim_contention(exc):
+                            # Transient CROSS-REPLICA refresh-claim contention (for
+                            # example ``refresh_claim_timeout``: the account's
+                            # refresh claim is held by another replica). This is
+                            # NOT a genuine ``transport_error`` OAuth failure — the
+                            # account's credentials are healthy and only its claim
+                            # is contended — so it fails over WITHOUT an
+                            # account-health penalty. Unlike the genuine
+                            # transport-level failure handled below, do NOT record
+                            # ``_handle_stream_error`` here: that would push an
+                            # otherwise-healthy account into backoff for normal
+                            # cross-replica contention. Surface a retryable
+                            # ``upstream_unavailable`` on exhaustion (``last_exc``).
+                            message = exc.message or str(exc) or "Request to upstream timed out"
+                            logger.warning(
+                                "Compact refresh claim contention request_id=%s account_id=%s",
+                                request_id,
+                                account.id,
+                                exc_info=True,
+                            )
+                            if preferred_account_id is not None:
+                                # File/previous-response-pinned requests cannot
+                                # fail over. On the HTTP bridge / forwarded path
+                                # the caller passes an ``api_key_reservation_override``
+                                # with ``owns_reservation`` false, making
+                                # ``compact_responses`` responsible for settling the
+                                # reservation. Settle it BEFORE raising so the
+                                # API-key reservation is finalized instead of leaking
+                                # held quota when the pinned refresh claim times out.
+                                await proxy._settle_compact_api_key_usage(
+                                    api_key=api_key,
+                                    api_key_reservation=api_key_reservation,
+                                    response=None,
+                                    request_service_tier=request_service_tier,
+                                )
+                                _raise_proxy_unavailable(message)
+                            last_exc = ProxyResponseError(502, openai_error("upstream_unavailable", message))
+                            excluded_account_ids.add(account.id)
+                            continue
+                        # A GENUINE OAuth transport failure (``code == "transport_error"``:
+                        # the refresh request itself timed out / its upstream
+                        # connection failed). This IS the account/route's fault, so
+                        # it falls through to the shared transport-failure handling
+                        # below — identical to a raw aiohttp/connect failure — which
+                        # records the account-health penalty (``_handle_stream_error``)
+                        # so a persistently broken account backs off instead of
+                        # being kept healthy and reselected on the next request.
+                    message = getattr(exc, "message", None) or str(exc) or "Request to upstream timed out"
                     logger.warning(
                         "Compact refresh/connect failed request_id=%s account_id=%s",
                         request_id,
@@ -1072,62 +1069,76 @@ class _CompactMixin:
                                     force=True,
                                     timeout_seconds=_compact_freshness_budget_seconds(remaining_budget),
                                 )
-                            except RefreshError as refresh_exc:
-                                if refresh_exc.is_permanent:
-                                    await proxy._load_balancer.mark_permanent_failure(account, refresh_exc.code)
-                                elif refresh_exc.transport_error:
-                                    # Transient, transport-level refresh failure
-                                    # on the post-401 forced refresh (for example
-                                    # the account's refresh claim is held by
-                                    # another replica): fail over to a healthy
-                                    # account and record a retryable
-                                    # upstream_unavailable so that if every
-                                    # candidate hits the held-claim condition,
-                                    # exhaustion surfaces 502 upstream_unavailable
-                                    # instead of re-raising the misleading
-                                    # original 401. Mirrors the freshness
-                                    # preflight branch above and the streaming /
-                                    # WebSocket post-401 forced-refresh paths.
-                                    message = refresh_exc.message or str(refresh_exc) or "Request to upstream timed out"
-                                    logger.warning(
-                                        "Compact forced refresh transient failure request_id=%s account_id=%s",
-                                        request_id,
-                                        account.id,
-                                        exc_info=True,
-                                    )
-                                    if preferred_account_id is not None:
+                            except (RefreshError, aiohttp.ClientError, asyncio.TimeoutError) as refresh_exc:
+                                if isinstance(refresh_exc, RefreshError):
+                                    if refresh_exc.is_permanent:
+                                        await proxy._load_balancer.mark_permanent_failure(account, refresh_exc.code)
                                         await proxy._settle_compact_api_key_usage(
                                             api_key=api_key,
                                             api_key_reservation=api_key_reservation,
                                             response=None,
                                             request_service_tier=request_service_tier,
                                         )
-                                        _raise_proxy_unavailable(message)
-                                    # Peer-claim contention is NOT this account's
-                                    # fault: its credentials are healthy and only
-                                    # its refresh claim is held by another replica.
-                                    # Do NOT record an account health penalty
-                                    # (``record_error`` via ``_handle_stream_error``)
-                                    # for this transient claim timeout — that would
-                                    # push an otherwise-healthy account into backoff
-                                    # for normal cross-replica contention. Match the
-                                    # preflight branch above and the streaming /
-                                    # WebSocket paths, which only release + exclude
-                                    # the account and surface a retryable
-                                    # ``upstream_unavailable`` on exhaustion.
-                                    last_exc = ProxyResponseError(502, openai_error("upstream_unavailable", message))
-                                    excluded_account_ids.add(account.id)
-                                    transient_exhausted = True
-                                    break
-                                await proxy._settle_compact_api_key_usage(
-                                    api_key=api_key,
-                                    api_key_reservation=api_key_reservation,
-                                    response=None,
-                                    request_service_tier=request_service_tier,
-                                )
-                                raise exc
-                            except (aiohttp.ClientError, asyncio.TimeoutError) as timeout_exc:
-                                message = str(timeout_exc) or "Request to upstream timed out"
+                                        raise exc
+                                    if is_refresh_claim_contention(refresh_exc):
+                                        # Transient CROSS-REPLICA refresh-claim
+                                        # contention on the post-401 forced refresh
+                                        # (for example ``refresh_claim_timeout``).
+                                        # This is NOT a genuine ``transport_error``
+                                        # OAuth failure — the account's credentials
+                                        # are healthy and only its claim is held by
+                                        # a peer replica — so fail over WITHOUT an
+                                        # account-health penalty and surface a
+                                        # retryable ``upstream_unavailable`` on
+                                        # exhaustion instead of the misleading
+                                        # original 401. Do NOT record
+                                        # ``_handle_stream_error`` here (that is
+                                        # reserved for the genuine transport failure
+                                        # handled below).
+                                        message = (
+                                            refresh_exc.message or str(refresh_exc) or "Request to upstream timed out"
+                                        )
+                                        logger.warning(
+                                            "Compact forced refresh claim contention request_id=%s account_id=%s",
+                                            request_id,
+                                            account.id,
+                                            exc_info=True,
+                                        )
+                                        if preferred_account_id is not None:
+                                            await proxy._settle_compact_api_key_usage(
+                                                api_key=api_key,
+                                                api_key_reservation=api_key_reservation,
+                                                response=None,
+                                                request_service_tier=request_service_tier,
+                                            )
+                                            _raise_proxy_unavailable(message)
+                                        last_exc = ProxyResponseError(
+                                            502, openai_error("upstream_unavailable", message)
+                                        )
+                                        excluded_account_ids.add(account.id)
+                                        transient_exhausted = True
+                                        break
+                                    if not refresh_exc.transport_error:
+                                        # Non-transport, non-permanent RefreshError
+                                        # keeps its prior escalation: re-raise the
+                                        # original 401 to the caller.
+                                        await proxy._settle_compact_api_key_usage(
+                                            api_key=api_key,
+                                            api_key_reservation=api_key_reservation,
+                                            response=None,
+                                            request_service_tier=request_service_tier,
+                                        )
+                                        raise exc
+                                    # A GENUINE OAuth transport failure
+                                    # (``code == "transport_error"``): the account/
+                                    # route is at fault, so it falls through to the
+                                    # shared transport-failure handling below —
+                                    # identical to a raw aiohttp/connect failure —
+                                    # which records the account-health penalty
+                                    # (``_handle_stream_error``) so the broken
+                                    # account backs off instead of being reselected.
+                                message = getattr(refresh_exc, "message", None) or str(refresh_exc)
+                                message = message or "Request to upstream timed out"
                                 logger.warning(
                                     "Compact forced refresh/connect failed request_id=%s account_id=%s",
                                     request_id,

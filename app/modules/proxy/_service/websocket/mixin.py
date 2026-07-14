@@ -16,6 +16,7 @@ from pydantic import ValidationError
 
 from app.core.auth.refresh import (
     RefreshError,
+    is_refresh_claim_contention,
 )
 from app.core.balancer import (
     ResetPreferenceWindow,
@@ -2316,19 +2317,22 @@ class _WebSocketMixin:
         except RefreshError as exc:
             if exc.is_permanent:
                 await proxy._load_balancer.mark_permanent_failure(account, exc.code)
-            elif can_transient_failover and exc.transport_error:
-                # Transient refresh failure on the proactive freshness check
-                # (for example the account's refresh claim is held by another
-                # replica): do not surface a bogus 401 invalid_api_key. Signal
-                # the connect loop to release this account's stream lease,
-                # exclude it, and fail over to a healthy account.
+            elif can_transient_failover and is_refresh_claim_contention(exc):
+                # Transient CROSS-REPLICA refresh-claim contention on the
+                # proactive freshness check (for example the account's refresh
+                # claim is held by another replica). This is NOT a genuine
+                # ``transport_error`` OAuth failure — the account's credentials
+                # are healthy and only its claim is contended — so do not surface
+                # a bogus 401 invalid_api_key. Signal the connect loop to release
+                # this account's stream lease, exclude it, and fail over to a
+                # healthy account WITHOUT an account-health penalty.
                 raise _WebSocketTransientRefreshFailover(account.id) from exc
-            elif exc.transport_error:
-                # PINNED transient refresh failure (require_preferred_account:
+            elif is_refresh_claim_contention(exc):
+                # PINNED refresh-claim contention (require_preferred_account:
                 # previous_response_id session continuity or file ownership).
                 # can_transient_failover is False, so the movable failover
                 # branch above is correctly skipped -- a pinned request must
-                # not cross accounts. But the owner account's credentials are
+                # not cross accounts. The owner account's credentials are
                 # healthy; its refresh claim is merely held by a peer replica,
                 # so a 401 invalid_api_key would be misleading and terminal.
                 # Stay on the owner (no crossing, no permanent mark), release
@@ -2352,6 +2356,24 @@ class _WebSocketMixin:
                     error_message=message,
                 )
                 return None
+            elif exc.transport_error:
+                # A GENUINE OAuth transport failure (``code == "transport_error"``:
+                # the refresh request itself timed out / its upstream connection
+                # failed). This IS the account/route's fault, so treat it exactly
+                # like the aiohttp/connect transport handler below — raise a
+                # retryable 502 ``upstream_unavailable`` so the connect loop
+                # applies its normal transport-failure failover/health handling —
+                # rather than a misleading terminal 401 invalid_api_key or the
+                # unpenalized claim-contention failover.
+                message = exc.message or str(exc) or "Request to upstream timed out"
+                raise ProxyResponseError(
+                    502,
+                    openai_error(
+                        "upstream_unavailable",
+                        message,
+                        error_type="server_error",
+                    ),
+                ) from exc
             await proxy._emit_websocket_connect_failure(
                 websocket,
                 client_send_lock=client_send_lock,
@@ -2412,22 +2434,23 @@ class _WebSocketMixin:
         except RefreshError as refresh_exc:
             if refresh_exc.is_permanent:
                 await proxy._load_balancer.mark_permanent_failure(account, refresh_exc.code)
-            elif can_transient_failover and refresh_exc.transport_error:
-                # Transient refresh failure on the post-401 forced refresh (for
-                # example the account's refresh claim is held by another
-                # replica): fail over to a healthy account instead of surfacing
-                # a bogus 401 invalid_api_key.
+            elif can_transient_failover and is_refresh_claim_contention(refresh_exc):
+                # Transient CROSS-REPLICA refresh-claim contention on the post-401
+                # forced refresh (for example the account's refresh claim is held
+                # by another replica). This is NOT a genuine ``transport_error``
+                # OAuth failure, so fail over to a healthy account WITHOUT an
+                # account-health penalty instead of surfacing a bogus 401
+                # invalid_api_key.
                 raise _WebSocketTransientRefreshFailover(account.id) from refresh_exc
-            elif refresh_exc.transport_error:
-                # PINNED transient refresh failure on the post-401 forced
-                # refresh: mirror the pre-open freshness branch. The request is
-                # hard-pinned (can_transient_failover is False), so it must not
-                # cross accounts, but the owner's credentials are healthy (its
-                # refresh claim is merely held by a peer replica). Stay on the
-                # owner (no crossing, no permanent mark), release the acquired
-                # stream lease (the caller releases it when this returns None),
-                # and surface a RETRYABLE upstream_unavailable instead of a
-                # terminal 401 invalid_api_key.
+            elif is_refresh_claim_contention(refresh_exc):
+                # PINNED refresh-claim contention on the post-401 forced refresh:
+                # mirror the pre-open freshness branch. The request is hard-pinned
+                # (can_transient_failover is False), so it must not cross accounts,
+                # but the owner's credentials are healthy (its refresh claim is
+                # merely held by a peer replica). Stay on the owner (no crossing,
+                # no permanent mark), release the acquired stream lease (the caller
+                # releases it when this returns None), and surface a RETRYABLE
+                # upstream_unavailable instead of a terminal 401 invalid_api_key.
                 message = refresh_exc.message or _WEBSOCKET_PINNED_REFRESH_UNAVAILABLE_MESSAGE
                 await proxy._emit_websocket_connect_failure(
                     websocket,
@@ -2445,6 +2468,23 @@ class _WebSocketMixin:
                     error_message=message,
                 )
                 return None
+            elif refresh_exc.transport_error:
+                # A GENUINE OAuth transport failure (``code == "transport_error"``):
+                # the account/route is at fault, so treat it exactly like the
+                # aiohttp/connect transport handler below — raise a retryable 502
+                # ``upstream_unavailable`` so the connect loop applies its normal
+                # transport-failure failover/health handling — rather than a
+                # misleading terminal 401 invalid_api_key or the unpenalized
+                # claim-contention failover.
+                message = refresh_exc.message or str(refresh_exc) or "Request to upstream timed out"
+                raise ProxyResponseError(
+                    502,
+                    openai_error(
+                        "upstream_unavailable",
+                        message,
+                        error_type="server_error",
+                    ),
+                ) from refresh_exc
             await proxy._emit_websocket_connect_failure(
                 websocket,
                 client_send_lock=client_send_lock,

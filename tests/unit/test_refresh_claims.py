@@ -182,6 +182,93 @@ def test_forked_children_get_distinct_claimant_ids_after_preload() -> None:
     assert len(composed) == 3
 
 
+def test_process_default_coordinator_yields_distinct_claimants_across_fork() -> None:
+    """Regression: the process-default coordinator froze its claimant id at
+    construction. In a pre-fork deployment the coordinator is built during
+    preload (``get_refresh_claim_coordinator()``) BEFORE the server forks its
+    workers, so every forked child inherited the SAME coordinator instance with
+    the SAME frozen ``claimant_id``. Siblings then composed identical
+    ``claimed_by`` values and both satisfied the re-entrant claim upsert
+    (``claimed_by == claimed_by``), refreshing the single-use token concurrently.
+
+    Building the process-default coordinator before forking (modelling preload)
+    and reading its claimant id from two forked children MUST yield DISTINCT
+    claimant ids and distinct composed ``claimed_by`` for the same account+owner,
+    while an explicitly injected claimant id stays untouched across the fork and
+    repeated reads within one process are stable."""
+    import os
+
+    from app.modules.accounts.refresh_claims import (
+        RefreshClaimCoordinator,
+        _compose_claimed_by,
+        get_refresh_claim_coordinator,
+        reset_refresh_claim_coordinator,
+    )
+
+    reset_refresh_claim_coordinator()
+    try:
+        # Model preload: build the process-default coordinator in the parent
+        # BEFORE forking, and resolve its id once so any lazy cache is warm with
+        # the parent's identity.
+        coordinator = get_refresh_claim_coordinator()
+        assert isinstance(coordinator, RefreshClaimCoordinator)
+        parent_id = coordinator.claimant_id
+        # Same-process reads are stable (genuine re-entrancy still matches).
+        assert coordinator.claimant_id == parent_id
+
+        # An explicitly injected id is owned by the caller and must not drift,
+        # neither across repeated reads nor across a fork.
+        explicit = RefreshClaimCoordinator(claimant_id="pinned-claimant")
+        assert explicit.claimant_id == "pinned-claimant"
+
+        owner = "f" * 64
+
+        def _child_ids() -> tuple[str, str]:
+            read_fd, write_fd = os.pipe()
+            pid = os.fork()
+            if pid == 0:  # pragma: no cover - runs in the forked child
+                os.close(read_fd)
+                try:
+                    payload = f"{coordinator.claimant_id}\n{explicit.claimant_id}"
+                    os.write(write_fd, payload.encode())
+                finally:
+                    os.close(write_fd)
+                    os._exit(0)
+            os.close(write_fd)
+            chunks: list[bytes] = []
+            while True:
+                chunk = os.read(read_fd, 4096)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            os.close(read_fd)
+            _, status = os.waitpid(pid, 0)
+            assert status == 0
+            default_id, explicit_id = b"".join(chunks).decode().split("\n")
+            return default_id, explicit_id
+
+        child_a_default, child_a_explicit = _child_ids()
+        child_b_default, child_b_explicit = _child_ids()
+
+        # The process-default coordinator's auto-derived id diverges per child.
+        assert child_a_default != parent_id
+        assert child_b_default != parent_id
+        assert child_a_default != child_b_default
+
+        composed = {
+            _compose_claimed_by(parent_id, owner),
+            _compose_claimed_by(child_a_default, owner),
+            _compose_claimed_by(child_b_default, owner),
+        }
+        assert len(composed) == 3
+
+        # The explicitly injected id is caller-owned and stable across the fork.
+        assert child_a_explicit == "pinned-claimant"
+        assert child_b_explicit == "pinned-claimant"
+    finally:
+        reset_refresh_claim_coordinator()
+
+
 def test_claim_ttl_must_cover_admission_wait_plus_twice_the_refresh_timeout() -> None:
     # The claim is held across the refresh-admission wait AND the OAuth
     # exchange, so a TTL sized only around the HTTP timeout is rejected.

@@ -159,11 +159,29 @@ class RefreshClaimCoordinator:
     """DB-backed per-account refresh claim shared by all replicas."""
 
     def __init__(self, *, claimant_id: str | None = None) -> None:
-        self._claimant_id = claimant_id if claimant_id is not None else default_refresh_claimant_id()
+        # An explicitly injected claimant id is frozen for the coordinator's
+        # lifetime (callers that pass one own its stability). The process-default
+        # / auto-derived id, by contrast, MUST NOT be frozen at construction:
+        # in pre-fork deployments the process-default coordinator is often built
+        # (via ``get_refresh_claim_coordinator()``) during preload/startup,
+        # BEFORE the server forks its workers. A frozen id would then be
+        # inherited *identically* by every forked child, so sibling workers
+        # would compose the same ``claimed_by`` and both satisfy the re-entrant
+        # claim upsert (``claimed_by == claimed_by``), refreshing the single-use
+        # token concurrently -- the exact cross-process race this module
+        # prevents. We therefore resolve the auto-derived id lazily on each use
+        # via ``default_refresh_claimant_id()``, whose per-OS-process suffix is
+        # memoized against ``os.getpid()`` (see ``_current_process_suffix``): a
+        # forked child's differing pid forces a fresh, distinct id while repeated
+        # calls within one process stay stable (preserving genuine same-process
+        # re-entrant claims).
+        self._explicit_claimant_id = claimant_id
 
     @property
     def claimant_id(self) -> str:
-        return self._claimant_id
+        if self._explicit_claimant_id is not None:
+            return self._explicit_claimant_id
+        return default_refresh_claimant_id()
 
     async def try_acquire(self, account_id: str, *, ttl_seconds: float, owner: str) -> bool:
         """Claim ``account_id`` for this claimant's ``owner`` refresh.
@@ -177,7 +195,7 @@ class RefreshClaimCoordinator:
         for one account with different material actually serialize instead of
         one silently piggybacking on the other's claim.
         """
-        claimed_by = _compose_claimed_by(self._claimant_id, owner)
+        claimed_by = _compose_claimed_by(self.claimant_id, owner)
         async with sqlite_writer_section():
             for attempt in range(_SQLITE_BUSY_RETRY_ATTEMPTS):
                 try:
@@ -207,7 +225,7 @@ class RefreshClaimCoordinator:
         one refresh's claim can never delete a concurrent refresh's claim for
         the same account held by this process under a different ``owner``.
         """
-        claimed_by = _compose_claimed_by(self._claimant_id, owner)
+        claimed_by = _compose_claimed_by(self.claimant_id, owner)
         async with sqlite_writer_section():
             async with get_background_session() as session:
                 await session.execute(

@@ -15,6 +15,7 @@ import anyio
 
 from app.core.auth.refresh import (
     RefreshError,
+    is_refresh_claim_contention,
     pop_token_refresh_timeout_override,
     push_token_refresh_timeout_override,
 )
@@ -1531,17 +1532,19 @@ class ProxyService(
                     timeout_seconds=remaining_budget,
                 )
             except RefreshError as exc:
-                if exc.transport_error:
-                    # A transient, transport-level refresh failure — for example
-                    # the account's refresh claim is held by another replica and
-                    # the caller's wait budget expired before the rotation
-                    # committed (``refresh_claim_timeout``). This is definitionally
-                    # transient, so — matching the streaming, compact, and
+                if is_refresh_claim_contention(exc):
+                    # Transient CROSS-REPLICA refresh-claim contention (for
+                    # example ``refresh_claim_timeout``: the account's refresh
+                    # claim is held by another replica and the caller's wait
+                    # budget expired before the rotation committed). This is NOT
+                    # a generic ``transport_error`` OAuth failure — it is
+                    # definitionally transient AND the account's credentials are
+                    # healthy, so — matching the streaming, compact, and
                     # WebSocket paths — it ALWAYS fails over rather than gating on
                     # the message text.
                     message = exc.message or str(exc) or "Request to upstream timed out"
                     logger.warning(
-                        "%s refresh transient failure request_id=%s account_id=%s",
+                        "%s refresh claim contention request_id=%s account_id=%s",
                         kind,
                         request_id,
                         current.id,
@@ -1564,15 +1567,54 @@ class ProxyService(
                     assert selected_account is not None
                     # Peer-claim contention is NOT the account's fault: its
                     # credentials are healthy and only its refresh claim is held
-                    # by another replica. Unlike the genuine aiohttp/connect
-                    # transport failure handled below, do NOT record an account
+                    # by another replica. Unlike the genuine transport-level
+                    # refresh failure handled below, do NOT record an account
                     # health penalty (``record_error`` via ``_handle_stream_error``)
-                    # for this transient refresh failure — that would push an
+                    # for this transient claim contention — that would push an
                     # otherwise-healthy account into backoff for normal
                     # cross-replica contention. Just exclude it and fail over,
                     # matching the streaming/compact/WebSocket paths, which surface
                     # a retryable ``upstream_unavailable`` on exhaustion without
                     # penalizing the claim-held account.
+                    current = selected_account
+                    force_current = False
+                    continue
+                if exc.transport_error:
+                    # A GENUINE transport-level refresh failure — the OAuth
+                    # refresh request itself timed out or its upstream connection
+                    # failed (``code == "transport_error"``), NOT cross-replica
+                    # claim contention. This IS the account/route's fault, so it
+                    # keeps its pre-existing health accounting: gate failover on
+                    # the message text, and record a transient account-health
+                    # penalty (``record_error`` via ``_handle_stream_error``) on
+                    # the skipped account so a persistently broken account is put
+                    # into transient backoff instead of being reselected on the
+                    # next request.
+                    message = exc.message or str(exc) or "Request to upstream timed out"
+                    logger.warning(
+                        "%s refresh transport failed request_id=%s account_id=%s",
+                        kind,
+                        request_id,
+                        current.id,
+                        exc_info=True,
+                    )
+                    if not _should_retry_transient_stream_error("upstream_unavailable", message):
+                        _raise_proxy_unavailable_for_account(message, current)
+                    if (
+                        strict_account_id is not None and current.id == strict_account_id
+                    ) or attempt >= max_account_attempts:
+                        _raise_proxy_unavailable_for_account(message, current)
+                    excluded_account_ids.add(current.id)
+                    selection = await select_next_account(excluded_account_ids)
+                    selected_account = selection.account
+                    if selected_account is None:
+                        _raise_proxy_unavailable_for_account(message, current)
+                    assert selected_account is not None
+                    await self._handle_stream_error(
+                        current,
+                        {"message": message},
+                        "upstream_unavailable",
+                    )
                     current = selected_account
                     force_current = False
                     continue

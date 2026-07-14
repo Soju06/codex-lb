@@ -72,6 +72,43 @@ class RefreshError(Exception):
         self.upstream_proxy_fail_closed_reason = upstream_proxy_fail_closed_reason
 
 
+# Transient cross-replica refresh-claim contention codes. These are raised by
+# the serialized cross-replica refresh coordinator (AuthManager) when THIS
+# caller lost or could not complete its refresh claim in time -- a peer replica
+# held the claim past the wait budget, admission could not be acquired within
+# the caller budget, or a compare-and-set on the rotated material/status did not
+# converge under a same-plaintext re-encryption storm. They all carry
+# ``transport_error=True`` (they are transient and retryable), but crucially the
+# account's OAuth credentials are healthy: only its refresh claim is contended.
+# This set is deliberately DISJOINT from ``code == "transport_error"``, which
+# ``refresh_access_token`` raises for a GENUINE OAuth transport failure (the
+# OAuth request itself timing out / the upstream connection failing).
+REFRESH_CLAIM_CONTENTION_CODES: frozenset[str] = frozenset(
+    {
+        "refresh_claim_timeout",
+        "status_downgrade_conflict",
+        "token_persist_conflict",
+    }
+)
+
+
+def is_refresh_claim_contention(exc: RefreshError) -> bool:
+    """True when ``exc`` is transient cross-replica refresh-claim contention.
+
+    Proxy failover paths gate their "skip the account-health penalty" behavior
+    on THIS predicate rather than on the broad ``transport_error`` flag. A
+    GENUINE OAuth transport failure (``code == "transport_error"`` -- the OAuth
+    request itself timing out or the upstream connection failing) is transient
+    too but IS the account/route's fault, so it MUST retain its normal health
+    accounting (``record_error`` / ``_handle_stream_error``) and push the broken
+    account into transient backoff instead of being reselected immediately.
+    Only the claim/CAS-contention codes -- where the account's credentials are
+    healthy and only its refresh claim is held by a peer replica -- skip the
+    penalty.
+    """
+    return exc.transport_error and exc.code in REFRESH_CLAIM_CONTENTION_CODES
+
+
 def should_refresh(last_refresh: datetime, now: datetime | None = None) -> bool:
     current = to_utc_naive(now) if now is not None else utcnow()
     last = to_utc_naive(last_refresh)

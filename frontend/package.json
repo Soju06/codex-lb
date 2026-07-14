@@ -6,14 +6,14 @@
   "packageManager": "bun@1.3.14",
   "scripts": {
     "dev": "vite",
-    "build": "node node_modules/typescript-7/bin/tsc -b && vite build",
+    "build": "bun node_modules/typescript-7/bin/tsc -b && vite build",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "lint": "eslint .",
     "doctor": "react-doctor . --diff false --no-score --blocking none",
     "doctor:score": "react-doctor . --diff false --blocking none --score",
     "doctor:changed": "react-doctor . --diff origin/main --no-score --blocking none",
-    "typecheck": "node node_modules/typescript-7/bin/tsc -b",
+    "typecheck": "bun node_modules/typescript-7/bin/tsc -b",
     "preview": "vite preview",
     "screenshots": "npx playwright test --config screenshots/playwright.config.ts"
   },

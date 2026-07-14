@@ -13,7 +13,13 @@ event neither assigns the response nor releases the gate. The retirement MUST
 emit a structured low-cardinality log and a Prometheus counter without raw keys
 or prompt content. Pre-created `response.*` lifecycle activity MUST count as
 response progress and suppress stuck-gate retirement even when it has not yet
-produced downstream-visible text.
+produced downstream-visible text. If the timing-out waiter has hard affinity
+and remains definitively unsubmitted, with no upstream response, replay, or
+downstream sequence markers, the proxy MUST acquire a fresh bridge and submit
+that waiter once within its original request deadline. An anchored waiter MUST
+remain pinned to the previous-response owner account. The proxy MUST NOT reuse
+the retired session object or transparently retry an ambiguously submitted
+request.
 
 #### Scenario: Leading rate-limit telemetry does not mask a stuck pre-created request
 
@@ -22,7 +28,14 @@ produced downstream-visible text.
 - **AND** the pending request becomes older than the configured stuck-gate retirement threshold
 - **WHEN** another visible request times out waiting for that gate
 - **THEN** the proxy retires the stuck bridge session
-- **AND** the waiter is rejected cleanly with `response_create_gate_timeout`
+- **AND** if the waiter has hard affinity and is still definitively unsubmitted, the proxy submits it once on a fresh bridge
+- **AND** the waiter keeps its original deadline and any previous-response account pin
+
+#### Scenario: Ambiguous waiter is not moved to a replacement bridge
+
+- **GIVEN** a gate waiter has a response event, downstream sequence, visible output, replay marker, or pending-queue membership
+- **WHEN** its bridge is retired during gate contention
+- **THEN** the proxy does not transparently submit that waiter on another bridge
 
 #### Scenario: Healthy active stream is not retired during a normal wait
 

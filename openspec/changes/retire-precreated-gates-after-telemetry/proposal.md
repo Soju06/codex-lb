@@ -20,6 +20,9 @@ blocked until process restart.
   even before text becomes visible.
 - Keep the existing transport, visible-request, gate-ownership, downstream
   visibility, response-created, and age safeguards unchanged.
+- Transparently submit the still-unsubmitted hard-affinity waiter on a fresh
+  bridge after it retires the stale owner, while preserving its original
+  request deadline and any previous-response account pin.
 - Add a bridge-path regression that processes real leading rate-limit telemetry
   before exercising the stale-gate timeout.
 
@@ -32,3 +35,6 @@ blocked until process restart.
   retirement.
 - Pre-created streams emitting response lifecycle events remain protected from
   retirement.
+- The waiter that discovers and retires a stale hard-affinity owner no longer
+  needs a client reconnect when its upstream acceptance boundary is provably
+  untouched.

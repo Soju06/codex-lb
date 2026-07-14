@@ -16,6 +16,8 @@ blocked until process restart.
   milestone that owns the gate: whether `response.created` arrived.
 - Do not let leading non-visible telemetry such as `codex.rate_limits` suppress
   stale-gate retirement.
+- Keep pre-created `response.*` lifecycle activity protected from retirement,
+  even before text becomes visible.
 - Keep the existing transport, visible-request, gate-ownership, downstream
   visibility, response-created, and age safeguards unchanged.
 - Add a bridge-path regression that processes real leading rate-limit telemetry
@@ -27,4 +29,6 @@ blocked until process restart.
 - HTTP bridge sessions whose upstream sends telemetry but never creates a
   response self-heal after the configured retirement threshold.
 - Healthy created or downstream-visible streams remain protected from
+  retirement.
+- Pre-created streams emitting response lifecycle events remain protected from
   retirement.

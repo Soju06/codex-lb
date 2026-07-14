@@ -832,8 +832,26 @@ async def test_response_create_gate_timeout_retires_old_precreated_request_after
 
 
 @pytest.mark.asyncio
-async def test_response_create_gate_timeout_does_not_retire_visible_active_stream(
+@pytest.mark.parametrize(
+    (
+        "awaiting_response_created",
+        "downstream_visible",
+        "latency_first_upstream_event_ms",
+        "latency_response_created_ms",
+        "response_event_count",
+    ),
+    [
+        (False, True, 100, 100, 1),
+        (True, False, 25, None, 1),
+    ],
+)
+async def test_response_create_gate_timeout_does_not_retire_active_response_progress(
     monkeypatch: pytest.MonkeyPatch,
+    awaiting_response_created: bool,
+    downstream_visible: bool,
+    latency_first_upstream_event_ms: int,
+    latency_response_created_ms: int | None,
+    response_event_count: int,
 ) -> None:
     settings = _make_app_settings(
         proxy_admission_wait_timeout_seconds=0.001,
@@ -853,10 +871,11 @@ async def test_response_create_gate_timeout_does_not_retire_visible_active_strea
         started_at=time.monotonic() - 301.0,
         transport="http",
         response_create_gate_acquired=True,
-        awaiting_response_created=False,
-        downstream_visible=True,
-        latency_response_created_ms=100,
-        response_event_count=1,
+        awaiting_response_created=awaiting_response_created,
+        downstream_visible=downstream_visible,
+        latency_first_upstream_event_ms=latency_first_upstream_event_ms,
+        latency_response_created_ms=latency_response_created_ms,
+        response_event_count=response_event_count,
     )
     waiter = proxy_service._WebSocketRequestState(
         request_id="req-visible-waiter",

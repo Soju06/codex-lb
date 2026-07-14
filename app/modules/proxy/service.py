@@ -1343,6 +1343,7 @@ class ProxyService(
                     and state.awaiting_response_created
                     and not state.downstream_visible
                     and state.latency_response_created_ms is None
+                    and state.response_event_count == 0
                     and max(0.0, now - state.started_at) >= threshold_seconds
                     for state in pending_states
                 )

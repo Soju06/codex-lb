@@ -11,7 +11,9 @@ non-visible upstream event before `response.created`, including
 `codex.rate_limits`, MUST NOT by itself suppress retirement because such an
 event neither assigns the response nor releases the gate. The retirement MUST
 emit a structured low-cardinality log and a Prometheus counter without raw keys
-or prompt content.
+or prompt content. Pre-created `response.*` lifecycle activity MUST count as
+response progress and suppress stuck-gate retirement even when it has not yet
+produced downstream-visible text.
 
 #### Scenario: Leading rate-limit telemetry does not mask a stuck pre-created request
 
@@ -27,3 +29,10 @@ or prompt content.
 - **GIVEN** a pending HTTP bridge request has received `response.created` or produced downstream-visible output
 - **WHEN** another visible request times out waiting for the gate
 - **THEN** the proxy does not classify the active stream as a stuck pre-created gate owner
+
+#### Scenario: Pre-created response lifecycle activity is not retired
+
+- **GIVEN** a pending HTTP bridge request has not received `response.created`
+- **BUT** upstream is emitting `response.*` lifecycle events for that request
+- **WHEN** another visible request times out waiting for the gate
+- **THEN** the proxy does not retire the actively progressing request

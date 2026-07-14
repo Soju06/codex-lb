@@ -1057,6 +1057,55 @@ class _StreamingRetryMixin:
                                 },
                                 exclude_account=True,
                             )
+                            continue
+                        elif refresh_exc.transport_error and (
+                            require_preferred_account or preferred_account_id is not None
+                        ):
+                            # Transient refresh failure on a PINNED request
+                            # (``previous_response_id`` / ``input_file.file_id``):
+                            # ``preferred_account_id`` is set, so the movable
+                            # failover branch above is correctly skipped -- a
+                            # pinned request must not cross accounts. But the
+                            # account's sole owner has its refresh claim held by a
+                            # peer replica, so reselecting the same pinned account
+                            # until attempts are exhausted is pointless: it would
+                            # leak the held stream lease each iteration and then
+                            # surface a misleading ``no_accounts`` result. Stay on
+                            # the owner account (no crossing), release the lease,
+                            # and surface a retryable ``upstream_unavailable``
+                            # promptly so the client can retry once the claim
+                            # clears. The credentials are fine (the claim is just
+                            # held elsewhere), so this is transient, not permanent.
+                            await _release_tracked_stream_lease(current_account_lease)
+                            current_account_lease = None
+                            message = refresh_exc.message or "Account refresh is temporarily unavailable; retry later."
+                            last_retryable_stream_error = _RetryableStreamError(
+                                "upstream_unavailable",
+                                {"message": message},
+                            )
+                            await proxy._write_stream_preflight_error(
+                                account_id=account.id,
+                                api_key=api_key,
+                                request_id=request_id,
+                                model=payload.model,
+                                start=start,
+                                error_code="upstream_unavailable",
+                                error_message=message,
+                                reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
+                                service_tier=payload.service_tier,
+                                transport=request_transport,
+                                upstream_transport=upstream_stream_transport,
+                                useragent=useragent,
+                                useragent_group=useragent_group,
+                                client_ip=client_ip,
+                            )
+                            event = response_failed_event(
+                                "upstream_unavailable",
+                                message,
+                                response_id=request_id,
+                            )
+                            yield format_sse_event(event)
+                            return
                         continue
                     except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
                         _facade().logger.warning(

@@ -5,8 +5,10 @@ import json
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
+from typing import cast as typing_cast
 
 from sqlalchemy import BigInteger, Date, Integer, case, cast, delete, func, literal_column, select
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.utils.time import utcnow
@@ -361,7 +363,7 @@ class RequestLogRetentionService:
 
     async def _delete_raw_rows(self, cutoff: datetime) -> int:
         result = await self._session.execute(delete(RequestLog).where(RequestLog.requested_at < cutoff))
-        return int(result.rowcount or 0)
+        return int(typing_cast(CursorResult[Any], result).rowcount or 0)
 
 
 def _cutoff_for_retention(*, retention_days: int, now: datetime) -> datetime:

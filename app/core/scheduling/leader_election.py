@@ -66,11 +66,23 @@ _POSTGRES_ACQUIRE_SQL = text(
     """
 ).bindparams(bindparam("ttl", type_=Float))
 
+# The renewal is conditional on the lease still being unexpired at
+# statement-execution time (``expires_at > clock_timestamp()``), matching the
+# same clock domain as the ``SET`` expiry. Keying only on ``id`` + ``leader_id``
+# is not enough: if a heartbeat is delayed past the lease deadline (event-loop
+# stall, row-lock wait) the row can already have expired while no follower has
+# claimed it yet, and an unconditional UPDATE would resurrect that dead lease —
+# extending leader-gated work past the TTL and delaying/overlapping failover. A
+# renewal that finds the lease already expired matches 0 rows, which the caller
+# treats as lease loss and demotes on (see :meth:`renew`), letting the follower
+# take the row cleanly. ``clock_timestamp()`` (not ``now()``) is used so a
+# renewal that blocked on the row lock is judged against the CURRENT time, not
+# the transaction-start snapshot captured before it waited.
 _POSTGRES_RENEW_SQL = text(
     """
     UPDATE scheduler_leader
     SET expires_at = clock_timestamp() + make_interval(secs => :ttl)
-    WHERE id = 1 AND leader_id = :leader_id
+    WHERE id = 1 AND leader_id = :leader_id AND expires_at > clock_timestamp()
     """
 ).bindparams(bindparam("ttl", type_=Float))
 
@@ -230,10 +242,20 @@ class LeaderElection:
         renew_started = loop.time()
         async with get_background_session() as session:
             if _dialect_name(session) == "sqlite":
+                # Bind the host clock on both sides (single host by construction)
+                # so the renewal only extends a lease that is still unexpired: a
+                # heartbeat delayed past the deadline must not resurrect a row
+                # whose ``expires_at`` has already passed but no follower has yet
+                # claimed. A no-match falls through to the rowcount-0 demotion.
+                now = datetime.now(UTC)
                 result = await session.execute(
                     update(SchedulerLeader)
-                    .where(SchedulerLeader.id == 1, SchedulerLeader.leader_id == self._leader_id)
-                    .values(expires_at=datetime.now(UTC) + timedelta(seconds=ttl))
+                    .where(
+                        SchedulerLeader.id == 1,
+                        SchedulerLeader.leader_id == self._leader_id,
+                        SchedulerLeader.expires_at > now,
+                    )
+                    .values(expires_at=now + timedelta(seconds=ttl))
                 )
             else:
                 result = await session.execute(
@@ -707,18 +729,29 @@ class LeaderElection:
         flag nor the locally tracked deadline: it is used by ``release`` while a
         body detached on the graceful-shutdown path may still be acting as
         leader, at which point ``_is_leader`` has already been cleared but the
-        database row is still ours. Errors are swallowed (shutdown must proceed);
-        the caller treats a failure as "lease not renewed".
+        database row is still ours. Like :meth:`renew` the UPDATE is guarded on
+        the lease still being unexpired, so it can never resurrect a row whose
+        ``expires_at`` has already passed (a follower is then free to take it).
+        Errors are swallowed (shutdown must proceed); the caller treats a
+        failure — or an expired/taken-over no-match — as "lease not renewed".
         """
         settings = get_settings()
         ttl = settings.leader_election_ttl_seconds
         try:
             async with get_background_session() as session:
                 if _dialect_name(session) == "sqlite":
+                    # Guard the renewal on the lease still being unexpired (host
+                    # clock, single host) so a shutdown/drain renewal can never
+                    # resurrect a row whose ``expires_at`` has already passed.
+                    now = datetime.now(UTC)
                     result = await session.execute(
                         update(SchedulerLeader)
-                        .where(SchedulerLeader.id == 1, SchedulerLeader.leader_id == self._leader_id)
-                        .values(expires_at=datetime.now(UTC) + timedelta(seconds=ttl))
+                        .where(
+                            SchedulerLeader.id == 1,
+                            SchedulerLeader.leader_id == self._leader_id,
+                            SchedulerLeader.expires_at > now,
+                        )
+                        .values(expires_at=now + timedelta(seconds=ttl))
                     )
                 else:
                     result = await session.execute(

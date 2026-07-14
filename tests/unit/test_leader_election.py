@@ -131,6 +131,76 @@ async def test_renew_uses_current_statement_clock_on_postgres(monkeypatch: pytes
     renew_sql = str(renew_statement)
     assert "clock_timestamp() + make_interval(secs => :ttl)" in renew_sql
     assert "now()" not in renew_sql
+    # Regression (P1): the renewal must be conditional on the lease still being
+    # unexpired so a heartbeat delayed past expires_at (event-loop stall,
+    # row-lock wait) cannot resurrect a dead row that no follower has claimed
+    # yet. The guard is evaluated on the same statement-execution clock
+    # (clock_timestamp()) as the SET expiry.
+    assert "leader_id = :leader_id AND expires_at > clock_timestamp()" in renew_sql
+
+
+@pytest.mark.asyncio
+async def test_renew_guards_on_unexpired_lease_on_sqlite(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Regression (P1): the SQLite renewal must carry the same unexpired-lease
+    # guard, bound to the host clock on both sides, so a delayed heartbeat
+    # cannot extend a row whose expires_at has already passed.
+    session = _FakeSession("sqlite", [1, 1])
+    _install(monkeypatch, session)
+
+    election = leader_election_module.LeaderElection(leader_id="node-a")
+    assert await election.try_acquire() is True
+    assert await election.renew() is True
+
+    renew_statement = session.statements[1]
+    assert isinstance(renew_statement, Update)
+    compiled = str(renew_statement.compile(dialect=sqlite.dialect()))
+    assert "expires_at >" in compiled
+
+
+@pytest.mark.asyncio
+async def test_renew_after_expiry_demotes_and_does_not_extend(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Regression (P1): a renewal whose guarded UPDATE matches 0 rows because the
+    # lease already expired (heartbeat delayed past expires_at while no follower
+    # has claimed the row yet) MUST demote and MUST NOT extend the lease — the
+    # guarded WHERE leaves the expired row untouched so a follower can take it.
+    session = _FakeSession("sqlite", [1, 0])
+    _install(monkeypatch, session, ttl=30)
+
+    election = leader_election_module.LeaderElection(leader_id="node-a")
+    assert await election.try_acquire() is True
+    assert election._lease_deadline is not None
+
+    assert await election.renew() is False
+    assert election.is_leader is False
+    assert election._lease_deadline is None
+    # The renewal UPDATE carried the unexpired predicate, so against a real
+    # database it would match 0 rows for an expired lease rather than reviving it.
+    compiled = str(session.statements[1].compile(dialect=sqlite.dialect()))
+    assert "expires_at >" in compiled
+
+
+@pytest.mark.asyncio
+async def test_drain_renewal_guards_on_unexpired_lease(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Regression (P1): the release/drain renewal path (_renew_lease_row) must
+    # likewise be guarded so it cannot resurrect an expired lease while a
+    # detached shutdown body drains.
+    session = _FakeSession("sqlite", [1])
+    _install(monkeypatch, session)
+
+    election = leader_election_module.LeaderElection(leader_id="node-a")
+    assert await election._renew_lease_row() is True
+
+    statement = session.statements[0]
+    assert isinstance(statement, Update)
+    compiled = str(statement.compile(dialect=sqlite.dialect()))
+    assert "expires_at >" in compiled
+
+    # The PostgreSQL drain renewal reuses the guarded _POSTGRES_RENEW_SQL text.
+    pg_session = _FakeSession("postgresql", [1])
+    _install(monkeypatch, pg_session)
+    pg_election = leader_election_module.LeaderElection(leader_id="node-a")
+    assert await pg_election._renew_lease_row() is True
+    assert "expires_at > clock_timestamp()" in str(pg_session.statements[0])
 
 
 @pytest.mark.asyncio

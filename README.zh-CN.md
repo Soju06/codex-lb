@@ -155,7 +155,7 @@ responses_websockets_v2 = true
 
 ```toml
 [model_providers.codex-lb]
-name = "OpenAI"
+name = "openai"
 base_url = "http://127.0.0.1:2455/backend-api/codex"
 wire_api = "responses"
 env_key = "CODEX_LB_API_KEY"

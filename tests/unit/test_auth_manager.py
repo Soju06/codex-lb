@@ -1022,19 +1022,19 @@ async def test_refresh_adopts_peer_rotation_when_cas_misses_on_new_material(monk
 class _TokenCasAlwaysMissRepo(_DummyRepo):
     """Repo where NO conditional write ever lands: every ``get_by_id_fresh``
     returns a row whose refresh-token ciphertext is a fresh re-encryption of the
-    SAME plaintext (Fernet is non-deterministic), so the fingerprint never
+    SAME plaintext (Fernet is non-deterministic), so the stored plaintext never
     changes but the observed ciphertext keeps shifting under the writer, and
     every conditional ``update_tokens`` misses. This models a sustained
     re-encryption storm the refresh can never win an atomic compare-and-set
     window against.
 
-    Under the plaintext-based CAS-exhaustion resolution, once the bounded
-    conditional CAS is exhausted and the stored plaintext is still the consumed
-    token (no peer rotation), the persistence path force-persists the freshly
-    rotated token with a single unconditional ``expected=None`` write. This repo
-    records every ``expected`` value (including that final ``None``) and applies
-    the unconditional write via the base repo so tests can assert the freshly
-    rotated token is persisted rather than dropped."""
+    Under the no-unconditional-write invariant, once the bounded guarded CAS is
+    exhausted the persistence path raises a transient ``token_persist_conflict``
+    rather than falling back to a clobber-prone unconditional write. An
+    ``expected=None`` (unconditional) write is FORBIDDEN here; if a regression
+    ever reintroduces it, this repo applies it via the base repo and records the
+    ``None`` in ``update_attempts`` so the test's ``None not in update_attempts``
+    assertion trips."""
 
     def __init__(self, account: Account, *, plaintext: str, encryptor: TokenEncryptor) -> None:
         super().__init__()
@@ -1069,8 +1069,9 @@ class _TokenCasAlwaysMissRepo(_DummyRepo):
     ) -> bool:
         self.update_attempts.append(expected_refresh_token_encrypted)
         if expected_refresh_token_encrypted is None:
-            # Force-persist (unconditional) write at exhaustion: apply it via the
-            # base repo so the test can assert the freshly rotated token landed.
+            # FORBIDDEN unconditional write: the no-unconditional-write invariant
+            # means this must never happen. Apply it via the base repo so a
+            # regression that reintroduces it is caught by the test assertions.
             return await super().update_tokens(
                 account_id,
                 access_token_encrypted=access_token_encrypted,
@@ -1233,18 +1234,20 @@ async def test_refresh_adopts_peer_rotation_at_cas_exhaustion_boundary(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_refresh_force_persists_new_token_when_cas_never_lands_on_same_plaintext(monkeypatch):
-    """Regression (plaintext-based CAS-exhaustion resolution): when the conditional
+async def test_refresh_raises_transient_when_cas_never_lands_on_same_plaintext_storm(monkeypatch):
+    """Regression (no-unconditional-write invariant): when the guarded
     compare-and-set keeps missing on a sustained same-plaintext re-encryption storm
-    through the bounded budget AND the stored plaintext is still the token this
-    attempt consumed upstream (no peer rotation), the refresh MUST force-persist its
-    freshly rotated token with a single unconditional ``expected=None`` write.
+    through the bounded budget, the refresh MUST NOT fall back to an unconditional
+    ``expected=None`` write. Every persist is ciphertext-guarded, so on exhaustion
+    the refresh raises a transient (non-permanent) ``token_persist_conflict`` and the
+    whole refresh is retried once the contention clears.
 
-    Raising a transient error here (the previous behavior) would DROP the just-rotated
-    token and leave the database holding the already-consumed refresh token, so the
-    next refresh would read that consumed token and fail with ``invalid_grant``. The
-    decision is made on the DECRYPTED plaintext, not the non-deterministic ciphertext,
-    so a genuine peer rotation would still be adopted (see the sibling test)."""
+    The removed unconditional write was the root of this finding's oscillation: it
+    left a TOCTOU gap where a genuine peer rotation landing after the final
+    plaintext-confirming read was clobbered with the already-consumed material. The
+    transient error is acceptable and rare (it requires the writer to out-race us on
+    every one of ``_TOKEN_CAS_MAX_ATTEMPTS`` consecutive windows) and can never
+    clobber."""
 
     async def _fake_refresh(_: str, **_kwargs: object) -> TokenRefreshResult:
         return TokenRefreshResult(
@@ -1273,20 +1276,279 @@ async def test_refresh_force_persists_new_token_when_cas_never_lands_on_same_pla
     repo = _TokenCasAlwaysMissRepo(account, plaintext="refresh-old", encryptor=encryptor)
     manager = AuthManager(cast(AccountsRepositoryPort, repo))
 
-    # No transient error: the freshly rotated token is persisted, never dropped.
+    with pytest.raises(RefreshError) as excinfo:
+        await manager.refresh_account(account)
+
+    # Transient (non-permanent) claim-contention error, kept out of the
+    # permanent-failure cooldown so callers retry the whole refresh.
+    assert excinfo.value.code == "token_persist_conflict"
+    assert excinfo.value.is_permanent is False
+    assert excinfo.value.transport_error is True
+    # Exactly the bounded guarded CAS attempts ran; NO unconditional write was
+    # ever issued, so nothing could be clobbered and nothing was persisted.
+    assert len(repo.update_attempts) == auth_manager_module._TOKEN_CAS_MAX_ATTEMPTS
+    assert None not in repo.update_attempts
+    assert all(expected is not None for expected in repo.update_attempts)
+    assert repo.tokens_payload is None
+
+
+class _TokenCasPeerRotationInReadWriteGapRepo(_DummyRepo):
+    """Reproduces the exact TOCTOU the guarded CAS closes.
+
+    The refresh's confirming re-read observes the SAME refresh-token plaintext it
+    exchanged FROM (only re-encrypted), so it decides its rotation is still safe
+    to persist. But a genuinely DIFFERENT peer rotation lands in the read->write
+    gap — AFTER that plaintext-confirming read and BEFORE the persist. Because
+    every persist is a ciphertext-guarded compare-and-set (never an unconditional
+    write), the guarded write MISSES the peer's ciphertext and clobbers nothing;
+    the refresh re-reads, sees the different plaintext, and ADOPTS the peer
+    rotation. An unconditional ``expected=None`` write would instead overwrite the
+    peer's valid tokens with the already-consumed material — the clobber this
+    finding removes.
+
+    ``_db_ciphertext`` tracks the authoritative stored bytes independently of the
+    row object handed back, so the guard compares against DB truth. An
+    ``expected=None`` write is FORBIDDEN; if reintroduced it is applied and
+    recorded so the assertions trip."""
+
+    def __init__(
+        self,
+        account: Account,
+        *,
+        consumed_plaintext: str,
+        peer_ciphertext: bytes,
+        encryptor: TokenEncryptor,
+    ) -> None:
+        super().__init__()
+        self._encryptor = encryptor
+        self._consumed_plaintext = consumed_plaintext
+        self._peer_ciphertext = peer_ciphertext
+        self.accounts_by_id[account.id] = account
+        # Seed DB truth with a re-encryption of the consumed token so the FIRST
+        # guarded write (against the caller's original ciphertext) already misses.
+        self._db_ciphertext = encryptor.encrypt(consumed_plaintext)
+        self._reads = 0
+        self.update_attempts: list[bytes | None] = []
+
+    async def get_by_id_fresh(self, account_id: str) -> Account | None:
+        row = self.accounts_by_id.get(account_id)
+        if row is None:
+            return None
+        self._reads += 1
+        # Reflect current DB truth on the row the caller inspects.
+        row.refresh_token_encrypted = self._db_ciphertext
+        if self._reads == 1:
+            # This confirming re-read returned the consumed token (same plaintext,
+            # merely re-encrypted). A genuine peer rotation now lands in the gap
+            # BEFORE the refresh issues its next guarded write.
+            self._db_ciphertext = self._peer_ciphertext
+        return row
+
+    async def update_tokens(
+        self,
+        account_id: str,
+        access_token_encrypted: bytes,
+        refresh_token_encrypted: bytes,
+        id_token_encrypted: bytes,
+        last_refresh: datetime,
+        plan_type: str | None = None,
+        email: str | None = None,
+        chatgpt_account_id: str | None = None,
+        chatgpt_user_id: str | None = None,
+        workspace_id: str | None = None,
+        workspace_label: str | None = None,
+        seat_type: str | None = None,
+        expected_refresh_token_encrypted: bytes | None = None,
+    ) -> bool:
+        self.update_attempts.append(expected_refresh_token_encrypted)
+        if expected_refresh_token_encrypted is not None and expected_refresh_token_encrypted != self._db_ciphertext:
+            # Guarded miss: DB truth changed (peer rotation) after the read.
+            return False
+        # A landing write (guarded match) or a FORBIDDEN unconditional write.
+        self._db_ciphertext = refresh_token_encrypted
+        return await super().update_tokens(
+            account_id,
+            access_token_encrypted=access_token_encrypted,
+            refresh_token_encrypted=refresh_token_encrypted,
+            id_token_encrypted=id_token_encrypted,
+            last_refresh=last_refresh,
+            plan_type=plan_type,
+            email=email,
+            chatgpt_account_id=chatgpt_account_id,
+            chatgpt_user_id=chatgpt_user_id,
+            workspace_id=workspace_id,
+            workspace_label=workspace_label,
+            seat_type=seat_type,
+            expected_refresh_token_encrypted=expected_refresh_token_encrypted,
+        )
+
+
+@pytest.mark.asyncio
+async def test_refresh_adopts_peer_rotation_landing_in_read_write_gap(monkeypatch):
+    """Regression (FINDING: no-unconditional-write / TOCTOU): a genuinely different
+    peer rotation that lands AFTER the plaintext-confirming re-read but BEFORE the
+    persist MUST NOT be overwritten. Because the persist is a ciphertext-guarded
+    compare-and-set, the write misses the peer's ciphertext (clobbering nothing) and
+    the refresh adopts the peer's rotation instead. The removed unconditional write
+    would have clobbered the peer's valid tokens with the already-consumed material."""
+
+    async def _fake_refresh(_: str, **_kwargs: object) -> TokenRefreshResult:
+        return TokenRefreshResult(
+            access_token="access-new",
+            refresh_token="refresh-new",
+            id_token="id-new",
+            account_id="acc_cas_gap_peer",
+            plan_type="pro",
+            email=None,
+        )
+
+    monkeypatch.setattr(auth_manager_module, "refresh_access_token", _fake_refresh)
+
+    encryptor = TokenEncryptor()
+    account = Account(
+        id="acc_cas_gap_peer",
+        email="user@example.com",
+        plan_type="pro",
+        access_token_encrypted=encryptor.encrypt("access-old"),
+        refresh_token_encrypted=encryptor.encrypt("refresh-old"),
+        id_token_encrypted=encryptor.encrypt("id-old"),
+        last_refresh=utcnow(),
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
+    )
+    peer_ciphertext = encryptor.encrypt("refresh-peer")
+    repo = _TokenCasPeerRotationInReadWriteGapRepo(
+        account,
+        consumed_plaintext="refresh-old",
+        peer_ciphertext=peer_ciphertext,
+        encryptor=encryptor,
+    )
+    manager = AuthManager(cast(AccountsRepositoryPort, repo))
+
     result = await manager.refresh_account(account)
 
+    # The peer rotation is adopted, never overwritten with the consumed token.
+    assert result is account
+    assert encryptor.decrypt(result.refresh_token_encrypted) == "refresh-peer"
+    # No unconditional (``expected=None``) write was ever issued, so the peer
+    # rotation could not be clobbered, and this attempt persisted nothing.
+    assert None not in repo.update_attempts
+    assert repo.tokens_payload is None
+
+
+class _TokenCasSamePlaintextInReadWriteGapRepo(_DummyRepo):
+    """Companion to the peer-rotation gap repo: here the material that lands in the
+    read->write gap is a same-plaintext RE-ENCRYPTION (Fernet non-determinism), not a
+    genuine rotation. The guarded write misses the shifted ciphertext, but because the
+    stored plaintext is still the consumed token, the refresh retries the guarded CAS
+    against the freshly observed ciphertext and its own freshly rotated token LANDS —
+    it is never dropped. The gap re-encryption happens only once, so a later guarded
+    retry can win."""
+
+    def __init__(self, account: Account, *, plaintext: str, encryptor: TokenEncryptor) -> None:
+        super().__init__()
+        self._encryptor = encryptor
+        self._plaintext = plaintext
+        self.accounts_by_id[account.id] = account
+        # Seed DB truth with a re-encryption so the first guarded write misses.
+        self._db_ciphertext = encryptor.encrypt(plaintext)
+        self._reads = 0
+        self.update_attempts: list[bytes | None] = []
+
+    async def get_by_id_fresh(self, account_id: str) -> Account | None:
+        row = self.accounts_by_id.get(account_id)
+        if row is None:
+            return None
+        self._reads += 1
+        row.refresh_token_encrypted = self._db_ciphertext
+        if self._reads == 1:
+            # One same-plaintext re-encryption lands in the read->write gap.
+            self._db_ciphertext = self._encryptor.encrypt(self._plaintext)
+        return row
+
+    async def update_tokens(
+        self,
+        account_id: str,
+        access_token_encrypted: bytes,
+        refresh_token_encrypted: bytes,
+        id_token_encrypted: bytes,
+        last_refresh: datetime,
+        plan_type: str | None = None,
+        email: str | None = None,
+        chatgpt_account_id: str | None = None,
+        chatgpt_user_id: str | None = None,
+        workspace_id: str | None = None,
+        workspace_label: str | None = None,
+        seat_type: str | None = None,
+        expected_refresh_token_encrypted: bytes | None = None,
+    ) -> bool:
+        self.update_attempts.append(expected_refresh_token_encrypted)
+        if expected_refresh_token_encrypted is not None and expected_refresh_token_encrypted != self._db_ciphertext:
+            return False
+        self._db_ciphertext = refresh_token_encrypted
+        return await super().update_tokens(
+            account_id,
+            access_token_encrypted=access_token_encrypted,
+            refresh_token_encrypted=refresh_token_encrypted,
+            id_token_encrypted=id_token_encrypted,
+            last_refresh=last_refresh,
+            plan_type=plan_type,
+            email=email,
+            chatgpt_account_id=chatgpt_account_id,
+            chatgpt_user_id=chatgpt_user_id,
+            workspace_id=workspace_id,
+            workspace_label=workspace_label,
+            seat_type=seat_type,
+            expected_refresh_token_encrypted=expected_refresh_token_encrypted,
+        )
+
+
+@pytest.mark.asyncio
+async def test_refresh_persists_new_token_when_same_plaintext_reencryption_lands_in_gap(monkeypatch):
+    """Regression (no-unconditional-write, horn A): a same-plaintext re-encryption
+    landing in the read->write gap misses the guarded compare-and-set, but the refresh
+    does NOT give up — it retries the guarded CAS against the freshly observed
+    ciphertext and its own freshly rotated token still LANDS. This proves removing the
+    unconditional write does not drop the freshly rotated token when no peer rotated."""
+
+    async def _fake_refresh(_: str, **_kwargs: object) -> TokenRefreshResult:
+        return TokenRefreshResult(
+            access_token="access-new",
+            refresh_token="refresh-new",
+            id_token="id-new",
+            account_id="acc_cas_gap_same",
+            plan_type="pro",
+            email=None,
+        )
+
+    monkeypatch.setattr(auth_manager_module, "refresh_access_token", _fake_refresh)
+
+    encryptor = TokenEncryptor()
+    account = Account(
+        id="acc_cas_gap_same",
+        email="user@example.com",
+        plan_type="pro",
+        access_token_encrypted=encryptor.encrypt("access-old"),
+        refresh_token_encrypted=encryptor.encrypt("refresh-old"),
+        id_token_encrypted=encryptor.encrypt("id-old"),
+        last_refresh=utcnow(),
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
+    )
+    repo = _TokenCasSamePlaintextInReadWriteGapRepo(account, plaintext="refresh-old", encryptor=encryptor)
+    manager = AuthManager(cast(AccountsRepositoryPort, repo))
+
+    result = await manager.refresh_account(account)
+
+    # Our freshly rotated token lands via the guarded retry; it is never dropped
+    # and never adopted the re-encrypted consumed token.
     assert result is account
     assert encryptor.decrypt(result.refresh_token_encrypted) == "refresh-new"
-    # The bounded conditional CAS ran, then exactly one forced unconditional write.
-    assert len(repo.update_attempts) == auth_manager_module._TOKEN_CAS_MAX_ATTEMPTS + 1
-    assert all(expected is not None for expected in repo.update_attempts[:-1])
-    assert repo.update_attempts[-1] is None
-    # The forced write persisted the NEW token; the database no longer holds the
-    # consumed token, so the next refresh cannot fail with ``invalid_grant``.
     assert repo.tokens_payload is not None
-    assert repo.tokens_payload["expected_refresh_token_encrypted"] is None
     assert encryptor.decrypt(cast(bytes, repo.tokens_payload["refresh_token_encrypted"])) == "refresh-new"
+    # Every persist was guarded; no unconditional (``expected=None``) write.
+    assert None not in repo.update_attempts
+    assert all(expected is not None for expected in repo.update_attempts)
 
 
 @pytest.mark.asyncio

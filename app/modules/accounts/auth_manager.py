@@ -481,7 +481,7 @@ class AuthManager:
         if workspace_matches_current_slot and result.seat_type:
             new_seat_type = result.seat_type
 
-        async def _write_tokens(expected_refresh_token_encrypted: bytes | None) -> bool:
+        async def _write_tokens(expected_refresh_token_encrypted: bytes) -> bool:
             return await self._repo.update_tokens(
                 account.id,
                 access_token_encrypted=new_access_token_encrypted,
@@ -502,7 +502,6 @@ class AuthManager:
             account,
             write=_write_tokens,
             expected_refresh_token_encrypted=refresh_token_encrypted,
-            attempted_fingerprint=attempted_fingerprint,
         )
         if adopted is not None:
             return adopted
@@ -524,11 +523,10 @@ class AuthManager:
         self,
         account: Account,
         *,
-        write: Callable[[bytes | None], Awaitable[bool]],
+        write: Callable[[bytes], Awaitable[bool]],
         expected_refresh_token_encrypted: bytes,
-        attempted_fingerprint: str,
     ) -> Account | None:
-        """Persist freshly rotated tokens with a compare-and-set on the exchanged material.
+        """Persist freshly rotated tokens through a *guarded* compare-and-set only.
 
         Returns the latest account row to adopt when a peer committed a
         genuinely newer refresh-token rotation (different material) — that write
@@ -536,105 +534,119 @@ class AuthManager:
         persisted (the caller then mirrors the new tokens onto its object), or
         when the row vanished.
 
-        A compare-and-set miss does not by itself imply a newer rotation: a
-        concurrent re-auth/import can re-encrypt the *same* refresh-token
-        plaintext, and Fernet ciphertext is non-deterministic, so the stored
-        bytes change without any new token being issued. Adopting that row would
-        hand back the single-use token this attempt already consumed upstream,
-        leaving the account active with invalid material. So on a miss we compare
-        refresh-token fingerprints: a different fingerprint means a real peer
-        rotation to adopt; the same fingerprint means our successful exchange
-        holds the only valid tokens, and we retry the CAS against the freshly
-        observed ciphertext so our rotation wins.
+        INVARIANT: there is NO unconditional token write anywhere in this
+        helper. Every persist is a compare-and-set conditioned on the exact
+        refresh-token ciphertext observed in the immediately-preceding read
+        (``WHERE refresh_token_encrypted == :expected``). That comparison is
+        atomic in the database, so there is no read->write gap: if ANYTHING
+        changed the row after our read — a non-deterministic re-encryption of the
+        same plaintext OR a genuine peer rotation — the guarded write MISSES and
+        clobbers nothing.
 
-        If the CAS keeps missing on same-plaintext re-encryption until the
-        bounded budget is exhausted, the decision is made on the DECRYPTED
-        refresh-token PLAINTEXT (never on the non-deterministic ciphertext, and
-        never by blindly forcing or blindly raising — the two horns that made
-        this code oscillate). We re-read once more and compare the stored
-        plaintext against the plaintext we exchanged FROM:
+        This structurally resolves the long-oscillating tension between "don't
+        drop the freshly-rotated token" and "don't clobber a genuine peer
+        rotation". The old exhaustion tail did an unconditional ``write(None)``
+        after a final plaintext-confirming re-read, which left a TOCTOU gap: a
+        peer rotation landing between that read and the unconditional write was
+        clobbered with a token minted from the already-consumed material.
+        Removing the unconditional write closes BOTH horns at once:
 
-        * If the stored plaintext still equals the consumed token, no peer
-          rotated — the ciphertext only changed because of non-deterministic
-          re-encryption — so it is safe to FORCE-PERSIST our freshly issued
-          token. Raising instead would drop the just-rotated token and leave the
-          database holding the token we already consumed upstream, so the next
-          refresh would read that consumed token and fail with ``invalid_grant``.
-        * If the stored plaintext is a genuinely DIFFERENT valid token, a peer
-          rotated; we ADOPT it and never overwrite.
-        * Only when the plaintext cannot be decrypted/compared do we surface a
-          transient (non-permanent) error so the caller retries once the
-          contention clears.
+        * (A) don't drop the freshly rotated token — when the stored plaintext is
+          confirmed to be the same token we consumed (only re-encrypted), we do
+          NOT give up: we retry the ciphertext-guarded CAS against the freshly
+          observed ciphertext so our new token still lands.
+        * (B) don't clobber a peer rotation — because every write is guarded, a
+          genuine rotation that lands in the former read->write gap now simply
+          causes a MISS, and we re-read, see the different plaintext, and ADOPT
+          it instead of overwriting.
 
-        This plaintext-based rule guarantees the freshly rotated token is never
-        dropped AND a genuine peer rotation is never clobbered.
+        On a guarded-write miss we re-read and decrypt the stored plaintext to
+        decide (never on the non-deterministic ciphertext):
+
+        * genuinely DIFFERENT valid plaintext -> a peer rotated -> ADOPT it
+          (return the peer row), never overwrite;
+        * SAME plaintext as the token we exchanged FROM (re-encryption noise of
+          the still-consumed token) -> retry the ciphertext-guarded CAS against
+          the newly observed ciphertext so our rotation wins;
+        * plaintext cannot be decrypted/compared -> raise the transient
+          ``token_persist_conflict`` (we cannot prove a retry is safe).
+
+        When the bounded guarded retries are exhausted (a sustained same-plaintext
+        re-encryption storm out-raced every atomic CAS window) we raise the
+        transient ``token_persist_conflict`` so the whole refresh is retried once
+        the contention clears. That is acceptable and rare — it requires the
+        writer to out-race us on every one of ``_TOKEN_CAS_MAX_ATTEMPTS``
+        consecutive windows — and it never risks a clobber, unlike the removed
+        unconditional write.
         """
+        consumed_plaintext = _decrypt_refresh_token_plaintext(self._encryptor, expected_refresh_token_encrypted)
         expected = expected_refresh_token_encrypted
         for _ in range(_TOKEN_CAS_MAX_ATTEMPTS):
             if await write(expected):
+                # Guarded write landed: the row still held exactly the ciphertext
+                # we observed, so our freshly rotated token replaced it atomically
+                # and nothing was clobbered.
                 return None
             latest = await self._repo.get_by_id_fresh(account.id)
             if latest is None:
                 # Row is gone; nothing to persist or adopt.
                 return None
-            if (
-                _refresh_token_material_fingerprint(self._encryptor, latest.refresh_token_encrypted)
-                != attempted_fingerprint
-            ):
-                # A peer stored genuinely newer refresh-token material; adopt it
+            latest_plaintext = _decrypt_refresh_token_plaintext(self._encryptor, latest.refresh_token_encrypted)
+            if consumed_plaintext is None or latest_plaintext is None:
+                # Cannot prove plaintext identity, so we cannot prove another
+                # guarded retry (or an adoption) is safe. Surface a transient
+                # (non-permanent) error so the caller retries once the contention
+                # clears. ``transport_error`` keeps it out of the
+                # permanent-failure cooldown cache.
+                logger.warning(
+                    "Token-refresh compare-and-set for account_id=%s missed and the stored "
+                    "refresh-token plaintext could not be decrypted for comparison; surfacing a "
+                    "transient error rather than risking a clobber",
+                    account.id,
+                )
+                raise RefreshError(
+                    "token_persist_conflict",
+                    (
+                        f"Token-refresh compare-and-set for account_id={account.id} could not persist "
+                        f"rotated tokens (stored refresh-token plaintext was undecryptable)"
+                    ),
+                    False,
+                    transport_error=True,
+                )
+            if latest_plaintext != consumed_plaintext:
+                # A peer stored genuinely newer refresh-token material after our
+                # read; the guarded write MISSED and clobbered nothing. Adopt it
                 # rather than overwriting with the token we already consumed.
                 return _adopt_account_row(account, latest)
             # Same refresh-token plaintext, re-encrypted concurrently: retry the
-            # CAS against the freshly observed ciphertext so our rotation lands
-            # only while the consumed material is still stored.
+            # guarded CAS against the freshly observed ciphertext so our rotation
+            # lands only while the consumed material is still stored. No
+            # unconditional write is ever issued.
             expected = latest.refresh_token_encrypted
-        # The bounded compare-and-set never landed under a sustained same-plaintext
-        # re-encryption storm. Resolve on the DECRYPTED PLAINTEXT: re-read once
-        # more and compare the stored refresh-token plaintext against the token we
-        # exchanged FROM.
-        latest = await self._repo.get_by_id_fresh(account.id)
-        if latest is None:
-            # Row is gone; nothing to persist or adopt.
-            return None
-        consumed_plaintext = _decrypt_refresh_token_plaintext(self._encryptor, expected_refresh_token_encrypted)
-        latest_plaintext = _decrypt_refresh_token_plaintext(self._encryptor, latest.refresh_token_encrypted)
-        if consumed_plaintext is None or latest_plaintext is None:
-            # Cannot prove plaintext identity, so we cannot prove a force-persist
-            # is safe. Surface a transient (non-permanent) error so the caller
-            # retries once the contention clears. ``transport_error`` keeps it out
-            # of the permanent-failure cooldown cache.
-            logger.warning(
-                "Token-refresh compare-and-set for account_id=%s exhausted and the stored "
-                "refresh-token plaintext could not be decrypted for comparison; surfacing a "
-                "transient error rather than risking a clobber",
-                account.id,
-            )
-            raise RefreshError(
-                "token_persist_conflict",
-                (
-                    f"Token-refresh compare-and-set for account_id={account.id} could not persist "
-                    f"rotated tokens after {_TOKEN_CAS_MAX_ATTEMPTS} attempts"
-                ),
-                False,
-                transport_error=True,
-            )
-        if latest_plaintext != consumed_plaintext:
-            # A genuinely different peer rotation landed exactly where a forced
-            # write would otherwise run; adopt it, never overwrite.
-            return _adopt_account_row(account, latest)
-        # Stored plaintext is still the token we consumed upstream: no peer
-        # rotation happened, only non-deterministic re-encryption. FORCE-PERSIST
-        # our freshly rotated token so we never drop it and cause an
-        # ``invalid_grant`` on the next refresh.
+        # The bounded, always-guarded compare-and-set never landed under a
+        # sustained same-plaintext re-encryption storm: we could not win an atomic
+        # CAS window. Rather than fall back to an unconditional write (which could
+        # clobber a peer rotation landing in the read->write gap — the exact
+        # TOCTOU this helper now structurally forbids), surface a transient
+        # (non-permanent) error so the caller retries the whole refresh once the
+        # contention clears. ``transport_error`` keeps it out of the
+        # permanent-failure cooldown cache.
         logger.warning(
             "Token-refresh compare-and-set for account_id=%s kept missing on re-encrypted "
-            "same-plaintext material after %d attempts; force-persisting the freshly rotated "
-            "token because the stored plaintext is still the consumed token (no peer rotation)",
+            "same-plaintext material after %d attempts; surfacing a transient error so the caller "
+            "retries the whole refresh rather than risking a clobber with an unconditional write",
             account.id,
             _TOKEN_CAS_MAX_ATTEMPTS,
         )
-        await write(None)
-        return None
+        raise RefreshError(
+            "token_persist_conflict",
+            (
+                f"Token-refresh compare-and-set for account_id={account.id} could not persist "
+                f"rotated tokens after {_TOKEN_CAS_MAX_ATTEMPTS} attempts"
+            ),
+            False,
+            transport_error=True,
+        )
 
     async def _handle_permanent_refresh_failure(
         self,

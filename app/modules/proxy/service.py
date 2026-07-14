@@ -1334,13 +1334,16 @@ class ProxyService(
                         300.0,
                     )
                 )
+                # Leading telemetry such as ``codex.rate_limits`` records
+                # first-upstream-event latency but does not assign a response
+                # or release this gate.  Only the response-created milestone
+                # proves that a pre-created gate owner made protocol progress.
                 should_retire_stuck_session = any(
                     state.transport == _REQUEST_TRANSPORT_HTTP
                     and not state.skip_request_log
                     and state.response_create_gate_acquired
                     and state.awaiting_response_created
                     and not state.downstream_visible
-                    and state.latency_first_upstream_event_ms is None
                     and state.latency_response_created_ms is None
                     and max(0.0, now - state.started_at) >= threshold_seconds
                     for state in pending_states

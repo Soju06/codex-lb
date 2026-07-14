@@ -742,6 +742,96 @@ async def test_response_create_gate_timeout_retires_session_with_old_pending_vis
 
 
 @pytest.mark.asyncio
+async def test_response_create_gate_timeout_retires_old_precreated_request_after_rate_limit_telemetry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _make_app_settings(
+        proxy_admission_wait_timeout_seconds=0.001,
+        http_responses_session_bridge_stuck_gate_retire_after_seconds=300.0,
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    service = proxy_service.ProxyService(cast(Any, SimpleNamespace()))
+    session = _make_bridge_session()
+    service._http_bridge_sessions[session.key] = session
+    await session.response_create_gate.acquire()
+    old_pending = proxy_service._WebSocketRequestState(
+        request_id="req-old-pending-after-telemetry",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort="high",
+        api_key_reservation=None,
+        started_at=time.monotonic() - 301.0,
+        transport="http",
+        response_create_gate=session.response_create_gate,
+        response_create_gate_acquired=True,
+        awaiting_response_created=True,
+        downstream_visible=False,
+        event_queue=asyncio.Queue(),
+    )
+    waiter = proxy_service._WebSocketRequestState(
+        request_id="req-visible-waiter-after-telemetry",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort="high",
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        transport="http",
+        downstream_visible=True,
+    )
+    async with session.pending_lock:
+        session.pending_requests.append(old_pending)
+        session.queued_request_count = 1
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {
+                "type": "codex.rate_limits",
+                "plan_type": "pro",
+                "rate_limits": {"allowed": True, "limit_reached": False},
+            },
+            separators=(",", ":"),
+        ),
+    )
+
+    assert old_pending.latency_first_upstream_event_ms is not None
+    assert old_pending.latency_response_created_ms is None
+    assert old_pending.awaiting_response_created is True
+    assert old_pending.response_id is None
+    assert old_pending.downstream_visible is False
+    assert session.response_create_gate.locked() is True
+
+    retire_calls: list[str] = []
+
+    async def fake_retire(
+        retire_session: proxy_service._HTTPBridgeSession,
+        *,
+        detail: str,
+    ) -> None:
+        retire_calls.append(detail)
+        retire_session.closed = True
+
+    monkeypatch.setattr(service, "_retire_stale_pending_http_bridge_session", fake_retire)
+
+    try:
+        with pytest.raises(ProxyResponseError) as exc_info:
+            await service._acquire_request_state_response_create_admission(
+                waiter,
+                response_create_gate=session.response_create_gate,
+                account_id=session.account.id,
+                surface="http_bridge",
+                bridge_session=session,
+            )
+    finally:
+        if session.response_create_gate.locked():
+            session.response_create_gate.release()
+
+    assert exc_info.value.payload["error"]["code"] == "response_create_gate_timeout"
+    assert retire_calls == ["response_create_gate_timeout_stuck_pending"]
+    assert session.closed is True
+
+
+@pytest.mark.asyncio
 async def test_response_create_gate_timeout_does_not_retire_visible_active_stream(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

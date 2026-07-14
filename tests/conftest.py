@@ -29,15 +29,12 @@ os.environ["CODEX_LB_REQUEST_LOG_COUNT_CACHE_TTL_SECONDS"] = "0"
 # claim_run. Tests drive automations via AutomationsService.run_due_jobs
 # with explicit clocks or construct AutomationsScheduler directly.
 os.environ["CODEX_LB_AUTOMATIONS_SCHEDULER_ENABLED"] = "false"
-# Leader election is default-enabled in production and performs REAL SQLite
-# writes (acquire/renew/release) on the shared single-writer test database via
-# the app lifespan's release keeper. Left on, its renewal/release writes contend
-# with unrelated integration tests' DB work and with schema teardown, surfacing
-# as `database is locked` at setup/teardown. Tests that exercise leader election
-# inject their own enabled settings (see tests/unit/test_leader_election.py and
-# tests/integration/test_multi_replica.py), so disabling it here only affects
-# the ambient app lifespan and restores test isolation.
-os.environ["CODEX_LB_LEADER_ELECTION_ENABLED"] = "false"
+# NOTE: Leader election is intentionally NOT disabled via an env override here.
+# It is default-enabled in production, and a global override would leak into
+# every ``Settings()`` constructed anywhere in the suite — breaking the
+# production-default assertion in test_settings_multi_replica.py. Instead the
+# ambient app lifespan's leader election is replaced with a no-op by the autouse
+# ``_disable_leader_election_startup`` fixture below (see its docstring).
 
 from app.db.models import Base  # noqa: E402
 from app.db.session import engine  # noqa: E402
@@ -49,6 +46,48 @@ class _NoopScheduler:
         return None
 
     async def stop(self) -> None:
+        return None
+
+
+class _NoopLeaderElection:
+    """Stand-in for the leader-election singleton during the test app lifespan.
+
+    Leader election is default-enabled in production and performs REAL SQLite
+    writes (acquire / renew / release) on the shared single-writer test database
+    via the app lifespan's release keeper. Left running, those renewal/release
+    writes contend with unrelated integration tests' DB work and with schema
+    teardown, surfacing as ``database is locked`` at setup/teardown.
+
+    Rather than override the production default (which would leak into every
+    ``Settings()`` and defeat the default-value unit tests), we scope the
+    disabling to the app lifespan by swapping the resolved singleton for this
+    no-op. It mirrors the module's own ``leader_election_enabled=False`` escape
+    hatch — always "leader", body runs inline, keeper/release are no-ops — but
+    without touching ``Settings`` and without any DB writes. Tests that exercise
+    leader election construct their own ``LeaderElection`` instances with their
+    own enabled settings (see tests/unit/test_leader_election.py and
+    tests/integration/test_multi_replica.py) and are unaffected.
+    """
+
+    leader_id = "test-noop-leader"
+
+    @property
+    def is_leader(self) -> bool:
+        return True
+
+    async def try_acquire(self) -> bool:
+        return True
+
+    async def renew(self) -> bool:
+        return True
+
+    async def run_if_leader(self, fn):
+        return await fn()
+
+    def start_release_keeper(self) -> None:
+        return None
+
+    async def release(self) -> None:
         return None
 
 
@@ -110,6 +149,29 @@ def _disable_data_retention_scheduler_startup(monkeypatch):
     import app.main as main_module
 
     monkeypatch.setattr(main_module, "build_data_retention_scheduler", lambda: _NoopScheduler())
+
+
+@pytest.fixture(autouse=True)
+def _disable_leader_election_startup(monkeypatch):
+    """Replace the ambient app-lifespan leader election with a no-op.
+
+    Scoped exactly like the sibling ``_disable_*_scheduler_startup`` fixtures:
+    it swaps what ``get_leader_election()`` resolves to (both the reference the
+    app lifespan imported into ``app.main`` and the source-module singleton
+    every scheduler resolves via ``importlib``), so the lifespan's release
+    keeper and any leader-gated scheduler tick become no-ops instead of writing
+    to the shared test SQLite. Crucially it leaves ``Settings`` untouched, so
+    unit tests still observe the real production default
+    (``leader_election_enabled is True``). Tests that patch the leader election
+    themselves (e.g. test_graceful_shutdown, the scheduler unit tests, and
+    test_multi_replica) override this per-test and keep working.
+    """
+    import app.core.scheduling.leader_election as leader_election_module
+    import app.main as main_module
+
+    election = _NoopLeaderElection()
+    monkeypatch.setattr(leader_election_module, "get_leader_election", lambda: election)
+    monkeypatch.setattr(main_module, "get_leader_election", lambda: election)
 
 
 @pytest_asyncio.fixture(scope="session", autouse=True)

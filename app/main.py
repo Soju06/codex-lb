@@ -65,6 +65,7 @@ from app.modules.model_sources import api as model_sources_api
 from app.modules.oauth import api as oauth_api
 from app.modules.proxy import api as proxy_api
 from app.modules.proxy.cap_partitioning import refresh_cap_partition
+from app.modules.proxy.durable_bridge_coordinator import DurableBridgeSessionCoordinator
 from app.modules.proxy.durable_bridge_repository import missing_durable_bridge_tables
 from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
 from app.modules.proxy.ring_membership import (
@@ -209,8 +210,19 @@ async def lifespan(app: FastAPI):
         log_bootstrap_token(logger, _auto_bootstrap_token)
     await init_http_client()
     bridge_durable_schema_ready = await _ensure_bridge_durable_schema_ready(settings)
-    if bridge_durable_schema_ready:
+    if bridge_durable_schema_ready is True:
         startup_module.mark_bridge_durable_schema_ready()
+        deleted_bridge_rows = await DurableBridgeSessionCoordinator(SessionLocal).purge_owned_sessions_on_startup(
+            instance_id=settings.http_responses_session_bridge_instance_id,
+        )
+        if deleted_bridge_rows > 0:
+            logger.info(
+                "Purged durable HTTP bridge rows from previous process instance",
+                extra={
+                    "instance_id": settings.http_responses_session_bridge_instance_id,
+                    "deleted": deleted_bridge_rows,
+                },
+            )
     from app.core.auth.api_key_cache import get_api_key_cache
     from app.core.cache.invalidation import (
         NAMESPACE_ACCOUNT_ROUTING,

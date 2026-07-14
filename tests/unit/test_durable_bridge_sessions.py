@@ -8,7 +8,7 @@ from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.utils.time import utcnow
-from app.db.models import Base, HttpBridgeSessionAlias
+from app.db.models import Base, HttpBridgeSessionAlias, StickySession, StickySessionKind
 from app.modules.proxy.durable_bridge_coordinator import DurableBridgeSessionCoordinator
 
 pytestmark = pytest.mark.unit
@@ -902,3 +902,101 @@ async def test_mark_instance_draining_keeps_current_owner_lease_active(
     assert lookup.owner_instance_id == "instance-a"
     assert lookup.lease_expires_at == claimed.lease_expires_at
     assert lookup.lease_is_active(now=utcnow()) is True
+
+
+@pytest.mark.asyncio
+async def test_startup_purges_owned_bridge_rows(
+    coordinator: DurableBridgeSessionCoordinator,
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    async with async_session_factory() as session:
+        session.add(
+            StickySession(
+                key="parent-cache",
+                kind=StickySessionKind.PROMPT_CACHE,
+                account_id="acc-1",
+            )
+        )
+        await session.commit()
+
+    await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-restart",
+        api_key_id=None,
+        instance_id="instance-a",
+        lease_ttl_seconds=60.0,
+        account_id="acc-1",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state="http_turn_1",
+        latest_response_id="resp_1",
+        allow_takeover=True,
+    )
+
+    deleted = await coordinator.purge_owned_sessions_on_startup(instance_id="instance-a")
+
+    assert deleted == 1
+    assert (
+        await coordinator.lookup_request_targets(
+            session_key_kind="session_header",
+            session_key_value="sid-restart",
+            api_key_id=None,
+            turn_state=None,
+            session_header="sid-restart",
+            previous_response_id=None,
+        )
+        is None
+    )
+
+    async with async_session_factory() as session:
+        sticky = await session.get(
+            StickySession,
+            ("parent-cache", StickySessionKind.PROMPT_CACHE),
+        )
+        assert sticky is not None
+
+
+@pytest.mark.asyncio
+async def test_startup_purges_ownerless_stale_rows(
+    coordinator: DurableBridgeSessionCoordinator,
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    from datetime import timedelta
+
+    from app.db.models import HttpBridgeSessionRecord, HttpBridgeSessionState
+
+    stale_time = utcnow() - timedelta(seconds=120)
+
+    async with async_session_factory() as session:
+        session.add(
+            HttpBridgeSessionRecord(
+                session_key_kind="session_header",
+                session_key_value="sid-stale",
+                session_key_hash="hash-stale",
+                api_key_scope="__anonymous__",
+                owner_instance_id=None,
+                owner_epoch=1,
+                lease_expires_at=stale_time,
+                state=HttpBridgeSessionState.ACTIVE,
+                account_id="acc-1",
+                model="gpt-5.4",
+                last_seen_at=stale_time,
+                closed_at=None,
+            )
+        )
+        await session.commit()
+
+    deleted = await coordinator.purge_owned_sessions_on_startup(instance_id="instance-a")
+
+    assert deleted == 1
+    assert (
+        await coordinator.lookup_request_targets(
+            session_key_kind="session_header",
+            session_key_value="sid-stale",
+            api_key_id=None,
+            turn_state=None,
+            session_header="sid-stale",
+            previous_response_id=None,
+        )
+        is None
+    )

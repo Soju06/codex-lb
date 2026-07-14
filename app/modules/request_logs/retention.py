@@ -13,7 +13,7 @@ from app.core.utils.time import utcnow
 from app.db.models import RequestLog, RequestLogDailyAggregate
 from app.db.session import sqlite_writer_section
 
-MIN_REQUEST_LOG_RETENTION_DAYS = 14
+MIN_REQUEST_LOG_RETENTION_DAYS = 7
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,6 +97,12 @@ class RequestLogRetentionService:
                 aggregate_rows_written += 1
 
             raw_rows_deleted = await self._delete_raw_rows(cutoff) if groups else 0
+            if raw_rows_deleted != eligible_rows:
+                await self._session.rollback()
+                raise RuntimeError(
+                    "request log retention aborted because aggregated and deleted row counts differ: "
+                    f"aggregated {eligible_rows}, deleted {raw_rows_deleted}"
+                )
             await self._session.commit()
 
         return RequestLogRetentionResult(

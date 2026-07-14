@@ -13,13 +13,13 @@ an apply-mode retention command.
 
 ### Requirement: Retention keeps a raw safety window
 
-Request-log retention SHALL enforce a minimum raw retention window of 14 days.
-Operators MAY configure a longer raw retention window. The service MUST reject
-or refuse to apply a retention window below the minimum.
+Request-log retention SHALL default to and enforce a minimum raw retention
+window of 7 days. Operators MAY configure a longer raw retention window. The
+service MUST reject or refuse to apply a retention window below the minimum.
 
 #### Scenario: Too-short retention is rejected
 
-- **WHEN** an operator requests request-log pruning with a raw retention window below 14 days
+- **WHEN** an operator requests request-log pruning with a raw retention window below 7 days
 - **THEN** the command fails before deleting raw rows
 
 #### Scenario: Recent rows remain available
@@ -44,6 +44,13 @@ fields needed to preserve historical totals.
 - **WHEN** retention runs in apply mode
 - **THEN** matching daily aggregate rows are upserted before raw rows are deleted
 - **AND** summed aggregate totals match the raw rows that were deleted
+
+#### Scenario: Apply mode fails closed on row-count mismatch
+
+- **GIVEN** apply mode grouped a set of eligible raw request logs
+- **WHEN** the raw-row deletion count differs from the grouped request count
+- **THEN** the retention transaction fails before commit
+- **AND** neither aggregate mutations nor raw-row deletions are persisted
 
 #### Scenario: Dry-run mode reports without mutation
 

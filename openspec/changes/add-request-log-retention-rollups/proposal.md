@@ -19,7 +19,9 @@ changing recent request continuity or losing historical usage totals.
 
 - Add a daily aggregate table for request-log usage totals.
 - Add an operator-invoked retention/pruning service with dry-run and apply modes.
-- Preserve raw request logs inside a minimum safety window.
+- Preserve raw request logs inside a seven-day minimum safety window.
+- Fail closed unless apply mode deletes exactly the rows included in the daily
+  aggregate groups.
 - Keep retention dry-run by default.
 - Add tests proving totals are rolled up before raw rows are deleted.
 

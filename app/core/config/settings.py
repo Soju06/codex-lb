@@ -195,6 +195,9 @@ class Settings(BaseSettings):
     usage_fetch_max_retries: int = 2
     usage_refresh_enabled: bool = True
     usage_refresh_interval_seconds: int = Field(default=60, gt=0)
+    live_usage_ingestion_enabled: bool = True
+    live_usage_write_min_interval_seconds: float = Field(default=5.0, ge=0)
+    live_usage_queue_size: int = Field(default=512, gt=0)
     rate_limit_reset_credits_refresh_interval_seconds: int = Field(default=60, gt=0)
     openai_cache_affinity_max_age_seconds: int = Field(default=1800, gt=0)
     warmup_model: str = "gpt-5.4-mini"
@@ -273,6 +276,9 @@ class Settings(BaseSettings):
     # catalog (GPT-5.6 requires 0.144.0) or a degraded-startup refresh would
     # receive an upstream catalog without those models.
     model_registry_client_version: str = "0.144.0"
+    # Persisted registry snapshots older than this are ignored at load time
+    # (bootstrap catalog remains the floor until the next leader refresh).
+    model_registry_snapshot_max_age_seconds: int = Field(default=86400, gt=0)
     codex_fingerprint_os: str = "Mac OS 26.5.0"
     codex_fingerprint_arch: str = "arm64"
     codex_fingerprint_terminal: str = "iTerm.app/3.6.10"
@@ -300,8 +306,8 @@ class Settings(BaseSettings):
     log_format: str = "text"  # "text" or "json"
 
     # Leader election
-    leader_election_enabled: bool = False
-    leader_election_ttl_seconds: int = 600
+    leader_election_enabled: bool = True
+    leader_election_ttl_seconds: int = Field(default=60, ge=5)
 
     # Circuit breaker
     circuit_breaker_enabled: bool = False

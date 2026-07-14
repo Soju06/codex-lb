@@ -81,7 +81,8 @@ The system MUST treat stored `prolite` account plan types as Pro-equivalent when
 - **AND** the selection does not fail with `no_accounts`
 
 ### Requirement: Background usage refresh reconciles recoverable blocked statuses
-Background usage refresh SHALL reconcile persisted `rate_limited` and `quota_exceeded` accounts back to `active` after it writes fresh usage snapshots that prove the blocked window has recovered. This reconciliation SHALL be recovery-only and SHALL NOT promote `active` accounts into blocked statuses.
+
+Background usage refresh SHALL reconcile persisted `rate_limited` and `quota_exceeded` accounts back to `active` after it writes fresh usage snapshots that prove the blocked window has recovered. This reconciliation SHALL be recovery-only and SHALL NOT promote `active` accounts into blocked statuses. For `rate_limited` accounts, recovery evidence SHALL come from the most recently recorded main-window row: when a post-block refresh no longer reports a short primary window and the last primary sample's own reset deadline has elapsed (or no primary sample exists), a fresh long-window row recorded after the block that still reports usage below `100%` proves recovery. While the last primary sample still claims an unexpired window (or omits reset metadata), or the newer long-window row is itself exhausted, primary freshness SHALL keep gating recovery.
 
 #### Scenario: Scheduler recovers a stale rate-limited account from fresh primary usage
 - **WHEN** an account is persisted as `rate_limited`
@@ -90,6 +91,28 @@ Background usage refresh SHALL reconcile persisted `rate_limited` and `quota_exc
 - **AND** that primary usage row reports usage below `100%`
 - **THEN** the scheduler marks the account `active`
 - **AND** it clears persisted `reset_at` and `blocked_at`
+
+#### Scenario: Scheduler recovers a rate-limited account that never had a primary row
+- **WHEN** an account is persisted as `rate_limited` with no stored primary-slot row at all
+- **AND** the persisted rate-limit reset deadline has already elapsed
+- **AND** a later background usage refresh records a fresh long-window row below `100%` after the persisted block marker
+- **THEN** the scheduler marks the account `active`
+- **AND** it clears persisted `reset_at` and `blocked_at`
+
+#### Scenario: Scheduler recovers a rate-limited account when upstream stops reporting the primary window
+- **WHEN** an account is persisted as `rate_limited`
+- **AND** the persisted rate-limit reset deadline has already elapsed
+- **AND** the last primary usage sample's own reset deadline has also elapsed
+- **AND** a later background usage refresh records only a long-window usage row after the persisted block marker
+- **AND** that long-window row reports usage below `100%`
+- **THEN** the scheduler marks the account `active`
+- **AND** it clears persisted `reset_at` and `blocked_at`
+
+#### Scenario: Unexpired primary sample keeps gating recovery evidence
+- **WHEN** an account is persisted as `rate_limited`
+- **AND** the last primary usage sample predates the block but still claims an unexpired reset deadline
+- **AND** a later refresh recorded only a fresh long-window row
+- **THEN** the account stays `rate_limited` until fresh primary evidence arrives or the primary sample's reset deadline elapses
 
 #### Scenario: Scheduler recovers a legacy rate-limited account without a block marker
 - **WHEN** an account is persisted as `rate_limited`
@@ -104,6 +127,7 @@ Background usage refresh SHALL reconcile persisted `rate_limited` and `quota_exc
 - **AND** the persisted rate-limit reset deadline has already elapsed
 - **AND** the account has no persisted block marker
 - **AND** the latest primary usage row is not recent enough to prove background refresh recovery
+- **AND** no newer long-window row proves a post-block refresh
 - **THEN** the scheduler leaves the account `rate_limited`
 
 #### Scenario: Scheduler preserves an unexpired rate-limit cooldown
@@ -126,6 +150,7 @@ Background usage refresh SHALL reconcile persisted `rate_limited` and `quota_exc
 #### Scenario: Scheduler ignores stale pre-block recovery evidence
 - **WHEN** an account is persisted as `rate_limited`
 - **AND** the latest primary usage row was recorded before the persisted block marker
+- **AND** no newer long-window row was recorded after the persisted block marker
 - **THEN** the scheduler leaves the account blocked
 
 #### Scenario: Scheduler skips recovery when the account row changed concurrently
@@ -139,15 +164,31 @@ Background usage refresh SHALL reconcile persisted `rate_limited` and `quota_exc
 
 ### Requirement: Usage refresh does not trust elapsed reset windows
 
-Background usage refresh MUST treat a latest usage row as stale when that row's `reset_at` timestamp is in the past, even when the row's `recorded_at` timestamp is still within the normal refresh interval.
+Background usage refresh MUST treat a latest usage row as stale when that row's `reset_at` timestamp is in the past, even when the row's `recorded_at` timestamp is still within the normal refresh interval — unless a strictly newer main-window row exists for the same account. When a later fetch recorded a sibling-window row after the elapsed row, upstream demonstrably no longer reports the elapsed window, and the newest row's freshness governs the account instead.
 
 #### Scenario: Past reset_at bypasses freshness
 
 - **GIVEN** the latest usage row was recorded within the normal refresh interval
 - **AND** that row's `reset_at` timestamp has already elapsed
+- **AND** no strictly newer main-window row exists for the account
 - **WHEN** background usage refresh evaluates the account
 - **THEN** the row is treated as stale
 - **AND** codex-lb attempts a fresh upstream usage fetch
+
+#### Scenario: Newer sibling row supersedes an elapsed primary row
+
+- **GIVEN** an account whose latest primary row has an elapsed `reset_at`
+- **AND** a later refresh recorded a secondary-window row within the normal refresh interval
+- **WHEN** background usage refresh evaluates the account
+- **THEN** the account is treated as fresh
+- **AND** codex-lb does not fetch upstream usage again until the newest row ages out or its own reset elapses
+
+#### Scenario: Secondary-only accounts are fresh by their newest row
+
+- **GIVEN** an account with no primary-slot row at all because upstream omitted the short window
+- **AND** a fresh secondary-window row within the normal refresh interval
+- **WHEN** background usage refresh evaluates the account
+- **THEN** the account is treated as fresh instead of fetching on every sweep visit
 
 ### Requirement: Blocked accounts refresh once their reset deadline elapses
 
@@ -200,12 +241,10 @@ This credit-aware interpretation MUST be shared by proxy account selection and a
 
 The system SHALL support an optional limit warm-up mechanism that is disabled by default. When enabled globally and for an account, background usage refresh MAY send one minimal upstream Responses request after it confirms that a selected quota window has moved from an exhausted sample to a newly available reset window.
 
-The system SHALL also support a separate disabled-by-default staggered idle warm-up mode. When that mode is enabled globally and the account is opted in, background usage refresh MAY send one minimal upstream Responses request for an active account whose primary 5h usage window is effectively unused. The `limit_warmup_idle_threshold_percent` setting (default 1.0) controls the idle gate for the staggered idle path: an account with `used_percent` at or below the configured threshold is considered idle. This setting is independent from `limit_warmup_exhausted_threshold_percent` (default 99.0), which controls the pre-reset exhaustion gate for the regular warm-up path. Idle warm-up attempts MUST be deduplicated per account/window/reset tuple and MUST be scheduled deterministically across the primary reset window instead of all firing immediately.
-
 #### Scenario: Warm-up is skipped unless reset is confirmed
 - **GIVEN** limit warm-up is enabled globally and for an account
 - **AND** the account's previous usage sample for a selected window was exhausted
-- **WHEN** background usage refresh records a newer sample for that window with `used_percent < 100` and a `reset_at` that advanced by at least 60 seconds
+- **WHEN** background usage refresh records a newer sample for that window with `used_percent < 100` and a later `reset_at`
 - **THEN** the system sends at most one warm-up request for that account/window/reset tuple
 
 #### Scenario: Warm-up is not triggered by upstream reset_at timestamp jitter
@@ -238,24 +277,24 @@ The system SHALL also support a separate disabled-by-default staggered idle warm
 #### Scenario: Staggered idle warm-up pre-starts rolling primary windows
 - **GIVEN** limit warm-up and staggered idle warm-up are enabled globally
 - **AND** multiple active accounts are opted into limit warm-up
-- **AND** an opted-in account has a healthy idle primary 5h usage sample with `used_percent` at or below the configured `limit_warmup_idle_threshold_percent`
+- **AND** an opted-in account has a healthy idle short-window primary usage sample (any sample reporting a duration over 24 hours is not eligible) with `used_percent` at or below the configured `limit_warmup_idle_threshold_percent`
 - **AND** no prior warm-up attempt places the account inside the configured cooldown
 - **AND** the usage sample was refreshed for the current cycle
 - **WHEN** background usage refresh evaluates that account inside its deterministic stagger slot
-- **THEN** the system MUST attempt to send one minimal upstream warm-up request for that account's current 300-minute cycle
+- **THEN** the system MUST attempt to send one minimal upstream warm-up request for that account's current rolling-window cycle, whose length is the account's observed primary window duration (defaulting to 300 minutes when duration metadata is missing)
 - **AND** the system MUST NOT send another staggered idle warm-up for that same account/cycle tuple
-- **AND** account slots MUST be spread deterministically across the 300-minute rolling window so restarts do not align all opted-in accounts into the same phase
+- **AND** account slots MUST be spread deterministically across the account's rolling window so restarts do not align all opted-in accounts into the same phase
 
 #### Scenario: Staggered idle warm-up is skipped for accounts with real usage
 - **GIVEN** staggered idle warm-up is enabled globally
-- **AND** an active opted-in account has a primary 5h usage window with `used_percent` above the configured `limit_warmup_idle_threshold_percent`
+- **AND** an active opted-in account has a short-window primary usage sample with `used_percent` above the configured `limit_warmup_idle_threshold_percent`
 - **WHEN** background usage refresh evaluates that account
 - **THEN** the system MUST NOT send staggered idle warm-up traffic for that account
 
 #### Scenario: Staggered idle warm-up remains opt-in
 - **GIVEN** limit warm-up is enabled globally and for an account
 - **AND** staggered idle warm-up is disabled
-- **WHEN** background usage refresh observes an idle primary 5h sample that is not a reset-confirmed transition
+- **WHEN** background usage refresh observes an idle short-window primary sample that is not a reset-confirmed transition
 - **THEN** limit warm-up MUST NOT send synthetic traffic for that idle sample
 
 ### Requirement: Operators can probe an account to wake the upstream limiter
@@ -555,4 +594,23 @@ Auth Guardian SHALL use the existing leader-election mechanism so only the elect
 - **AND** the current replica does not acquire leadership
 - **WHEN** Auth Guardian wakes
 - **THEN** the scheduler skips refresh work for that pass
+
+### Requirement: Aggregated rate-limit surfaces expire elapsed windows
+
+Aggregated downstream rate-limit surfaces — the pooled `x-codex-{window}-*` response headers and the rate-limit status payload — SHALL treat a usage row whose `reset_at` has elapsed as a reset window (`0%` used, no reset timestamp) when computing pooled summaries and availability. These surfaces SHALL NOT report `limit_reached` from elapsed samples alone.
+
+#### Scenario: Elapsed primary rows stop freezing pooled headers
+
+- **GIVEN** upstream stopped reporting a primary window and every stored primary row has an elapsed `reset_at`
+- **WHEN** pooled rate-limit headers are computed
+- **THEN** the pooled primary used percentage reflects the expired rows as `0%`
+- **AND** no elapsed reset timestamp is emitted for the primary window
+
+#### Scenario: Elapsed samples do not report limit_reached
+
+- **GIVEN** every account's stored primary row reports `100%` used with an elapsed `reset_at`
+- **AND** fresh secondary rows report usage below `100%`
+- **WHEN** the rate-limit status payload is computed
+- **THEN** `limit_reached` is false
+- **AND** the primary window is omitted from the payload instead of advertising the elapsed reset
 

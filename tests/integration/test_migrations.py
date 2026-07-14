@@ -992,3 +992,38 @@ async def test_reset_credit_redeem_tables_migration_upgrade_and_downgrade(tmp_pa
     # Upgrading again after the downgrade must succeed (round-trip safety).
     await to_thread.run_sync(lambda: run_upgrade(db_url, revision, bootstrap_legacy=False))
     assert "reset_credit_redeem_requests" in await _table_names()
+
+
+@pytest.mark.asyncio
+async def test_model_registry_snapshot_migration_upgrade_and_downgrade(tmp_path):
+    from alembic import command
+    from sqlalchemy import inspect as sa_inspect
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'model-registry-snapshot.sqlite'}"
+    parent_revision = "20260712_020000_add_api_key_usage_rollups"
+
+    def _table_state(sync_conn):
+        inspector = sa_inspect(sync_conn)
+        if not inspector.has_table("model_registry_snapshot"):
+            return None
+        return {column["name"] for column in inspector.get_columns("model_registry_snapshot")}
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+    engine = create_async_engine(db_url)
+    try:
+        async with engine.connect() as conn:
+            columns = await conn.run_sync(_table_state)
+        assert columns == {"id", "schema_version", "content_hash", "payload", "refreshed_at", "leader_id"}
+
+        await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), parent_revision))
+        async with engine.connect() as conn:
+            assert await conn.run_sync(_table_state) is None
+
+        result = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+        assert result.current_revision == _HEAD_REVISION
+        async with engine.connect() as conn:
+            assert await conn.run_sync(_table_state) is not None
+    finally:
+        await engine.dispose()

@@ -146,7 +146,7 @@ class TestComputePooledCredits:
         assert result.remaining_percent_secondary is None
         assert result.capacity_credits_primary == 0.0
 
-    def test_assigned_accounts_without_usage_history_still_count_capacity(self) -> None:
+    def test_assigned_accounts_without_usage_history_hide_primary_but_count_capacity(self) -> None:
         acc_a = _make_account("acc-a", "plus")
 
         result = _compute_pooled_credits(
@@ -156,9 +156,86 @@ class TestComputePooledCredits:
             secondary_usage={},
         )
 
-        assert result.remaining_percent_primary == pytest.approx(100.0)
+        # No live primary sample exists, so the pooled primary bar reads
+        # absent rather than an optimistic 100%; capacity still counts.
+        assert result.remaining_percent_primary is None
         assert result.remaining_percent_secondary == pytest.approx(100.0)
         assert result.capacity_credits_primary == 225.0
+
+    def test_expired_primary_samples_hide_the_pooled_primary_bar(self) -> None:
+        import time as _time
+
+        now_epoch = int(_time.time())
+        acc_a = _make_account("acc-a", "plus")
+        expired_primary = UsageHistory(
+            account_id="acc-a",
+            used_percent=87.0,
+            recorded_at=datetime.now(timezone.utc).replace(tzinfo=None),
+            window="primary",
+            reset_at=now_epoch - 7200,
+            window_minutes=300,
+        )
+
+        result = _compute_pooled_credits(
+            assigned_account_ids=["acc-a"],
+            all_accounts=[acc_a],
+            primary_usage={"acc-a": expired_primary},
+            secondary_usage={},
+        )
+
+        # The frozen expired sample neither pools its stale value nor keeps
+        # the bar alive: no live primary sample exists.
+        assert result.remaining_percent_primary is None
+        assert result.capacity_credits_primary == 225.0
+
+    def test_live_primary_sample_keeps_pooled_primary_bar(self) -> None:
+        import time as _time
+
+        now_epoch = int(_time.time())
+        acc_a = _make_account("acc-a", "plus")
+        live_primary = UsageHistory(
+            account_id="acc-a",
+            used_percent=10.0,
+            recorded_at=datetime.now(timezone.utc).replace(tzinfo=None),
+            window="primary",
+            reset_at=now_epoch + 300,
+            window_minutes=300,
+        )
+
+        result = _compute_pooled_credits(
+            assigned_account_ids=["acc-a"],
+            all_accounts=[acc_a],
+            primary_usage={"acc-a": live_primary},
+            secondary_usage={},
+        )
+
+        assert result.remaining_percent_primary == pytest.approx(90.0)
+
+    def test_elapsed_secondary_sample_pools_raw_instead_of_optimistic(self) -> None:
+        import time as _time
+
+        now_epoch = int(_time.time())
+        acc_a = _make_account("acc-a", "plus")
+        elapsed_secondary = UsageHistory(
+            account_id="acc-a",
+            used_percent=100.0,
+            recorded_at=datetime.now(timezone.utc).replace(tzinfo=None),
+            window="secondary",
+            reset_at=now_epoch - 60,
+            window_minutes=10080,
+        )
+
+        result = _compute_pooled_credits(
+            assigned_account_ids=["acc-a"],
+            all_accounts=[acc_a],
+            primary_usage={},
+            secondary_usage={"acc-a": elapsed_secondary},
+        )
+
+        # Long windows are still reported upstream: a just-elapsed exhausted
+        # weekly sample pools raw until the next refresh rewrites it, rather
+        # than zeroing into a 100%-free pool.
+        assert result.remaining_percent_secondary == pytest.approx(0.0)
 
     def test_mixed_plans_sums_capacity(self) -> None:
         acc_plus = _make_account("acc-plus", "plus")

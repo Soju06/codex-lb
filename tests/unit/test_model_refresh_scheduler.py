@@ -4,6 +4,7 @@ import contextlib
 import errno
 import logging
 import socket
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from types import SimpleNamespace
 from typing import Any
@@ -485,8 +486,8 @@ async def test_refresh_once_closes_account_read_session_before_fetch_models(
     session_closed = False
 
     class _Leader:
-        async def try_acquire(self) -> bool:
-            return True
+        async def run_if_leader(self, fn: Callable[[], Awaitable[object]]) -> object:
+            return await fn()
 
     class _Session:
         def expunge_all(self) -> None:
@@ -549,8 +550,8 @@ async def test_refresh_once_clears_registry_when_no_active_accounts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class _Leader:
-        async def try_acquire(self) -> bool:
-            return True
+        async def run_if_leader(self, fn: Callable[[], Awaitable[object]]) -> object:
+            return await fn()
 
     class _Session:
         def expunge_all(self) -> None:

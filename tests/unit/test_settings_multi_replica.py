@@ -14,8 +14,8 @@ def test_settings_multi_replica_defaults():
     assert settings.metrics_enabled is False
     assert settings.metrics_port == 9090
     assert settings.log_format == "text"
-    assert settings.leader_election_enabled is False
-    assert settings.leader_election_ttl_seconds == 600
+    assert settings.leader_election_enabled is True
+    assert settings.leader_election_ttl_seconds == 60
     assert settings.auth_guardian_enabled is False
     assert settings.circuit_breaker_enabled is False
     assert settings.circuit_breaker_failure_threshold == 5
@@ -91,15 +91,21 @@ def test_settings_conversation_archive_queue_max_bytes_from_env(monkeypatch):
 
 
 def test_settings_leader_election_enabled_from_env(monkeypatch):
-    monkeypatch.setenv("CODEX_LB_LEADER_ELECTION_ENABLED", "true")
+    monkeypatch.setenv("CODEX_LB_LEADER_ELECTION_ENABLED", "false")
     settings = Settings()
-    assert settings.leader_election_enabled is True
+    assert settings.leader_election_enabled is False
 
 
 def test_settings_leader_election_ttl_from_env(monkeypatch):
-    monkeypatch.setenv("CODEX_LB_LEADER_ELECTION_TTL_SECONDS", "60")
+    monkeypatch.setenv("CODEX_LB_LEADER_ELECTION_TTL_SECONDS", "90")
     settings = Settings()
-    assert settings.leader_election_ttl_seconds == 60
+    assert settings.leader_election_ttl_seconds == 90
+
+
+def test_settings_leader_election_ttl_rejects_below_minimum(monkeypatch):
+    monkeypatch.setenv("CODEX_LB_LEADER_ELECTION_TTL_SECONDS", "2")
+    with pytest.raises(ValidationError):
+        Settings()
 
 
 def test_settings_circuit_breaker_enabled_from_env(monkeypatch):

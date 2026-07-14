@@ -539,39 +539,25 @@ class _StreamingMixin(_StreamingRetryMixin):
                 concurrency_caps=concurrency_caps or _facade().effective_account_concurrency_caps(),
             )
             response_create_lease = await proxy._get_work_admission().acquire_response_create()
+            stream_optional_kwargs: dict[str, object] = {
+                "route": route,
+                "allow_direct_egress": route is None,
+                "route_trace": route_trace,
+                "codex_installation_id": account.codex_installation_id,
+                "enforce_openai_sdk_contract": enforce_openai_sdk_contract,
+                "codex_lb_account_id": account.id,
+            }
             if upstream_stream_transport is not None:
-                stream = _facade()._call_stream_with_supported_optional_kwargs(
-                    _facade().core_stream_responses,
-                    payload,
-                    headers,
-                    access_token,
-                    account_id,
-                    optional_kwargs={
-                        "route": route,
-                        "allow_direct_egress": route is None,
-                        "route_trace": route_trace,
-                        "codex_installation_id": account.codex_installation_id,
-                        "enforce_openai_sdk_contract": enforce_openai_sdk_contract,
-                        "upstream_stream_transport_override": upstream_stream_transport,
-                    },
-                    raise_for_status=True,
-                )
-            else:
-                stream = _facade()._call_stream_with_supported_optional_kwargs(
-                    _facade().core_stream_responses,
-                    payload,
-                    headers,
-                    access_token,
-                    account_id,
-                    optional_kwargs={
-                        "route": route,
-                        "allow_direct_egress": route is None,
-                        "route_trace": route_trace,
-                        "codex_installation_id": account.codex_installation_id,
-                        "enforce_openai_sdk_contract": enforce_openai_sdk_contract,
-                    },
-                    raise_for_status=True,
-                )
+                stream_optional_kwargs["upstream_stream_transport_override"] = upstream_stream_transport
+            stream = _facade()._call_stream_with_supported_optional_kwargs(
+                _facade().core_stream_responses,
+                payload,
+                headers,
+                access_token,
+                account_id,
+                optional_kwargs=stream_optional_kwargs,
+                raise_for_status=True,
+            )
             iterator = _facade()._stream_iterator_after_capacity_admission(stream)
             try:
                 first = await iterator.__anext__()

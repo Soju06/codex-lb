@@ -44,6 +44,7 @@ from app.core.resilience.backpressure import BackpressureMiddleware
 from app.core.resilience.bulkhead import BulkheadMiddleware, get_bulkhead
 from app.core.resilience.memory_monitor import configure as configure_memory_monitor
 from app.core.retention.scheduler import build_data_retention_scheduler
+from app.core.scheduling.leader_election import get_leader_election
 from app.core.usage.refresh_scheduler import build_usage_refresh_scheduler
 from app.core.usage.reset_credits_refresh_scheduler import build_rate_limit_reset_credits_scheduler
 from app.db.session import SessionLocal, close_db, close_session, init_background_db, init_db
@@ -83,8 +84,43 @@ from app.modules.sticky_sessions import api as sticky_sessions_api
 from app.modules.sticky_sessions.cleanup_scheduler import build_sticky_session_cleanup_scheduler
 from app.modules.usage import api as usage_api
 from app.modules.usage.additional_quota_keys import reload_additional_quota_registry
+from app.modules.usage.live_ingest import start_live_usage_ingestor, stop_live_usage_ingestor
 
 logger = logging.getLogger(__name__)
+
+
+def _log_abandoned_lease_release(task: asyncio.Task[None]) -> None:
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.warning("Abandoned scheduler leader lease release finished with error", exc_info=exc)
+
+
+async def _release_leader_lease_within(timeout: float) -> None:
+    """Release the scheduler leader lease without ever pinning shutdown.
+
+    ``release()`` uses a background DB session whose rollback/close shield and
+    await their own cleanup, so wrapping it in ``asyncio.wait_for`` would only
+    cancel the awaiting wrapper while a wedged database call keeps unwinding —
+    shutdown could still hang past the deadline. Run the release as a task and,
+    if it does not finish within ``timeout``, abandon it (logging its eventual
+    outcome from a done callback) so shutdown always proceeds within the
+    deadline; the lease then expires after its TTL, which is acceptable.
+    """
+    release_task: asyncio.Task[None] = asyncio.ensure_future(get_leader_election().release())
+    done, _ = await asyncio.wait({release_task}, timeout=timeout)
+    if release_task not in done:
+        logger.warning(
+            "Scheduler leader lease release did not finish within %.1fs; abandoning it so "
+            "shutdown can proceed (the lease will expire after its TTL)",
+            timeout,
+        )
+        release_task.add_done_callback(_log_abandoned_lease_release)
+        return
+    exc = release_task.exception()
+    if exc is not None:
+        logger.warning("Failed to release scheduler leader lease during shutdown", exc_info=exc)
 
 
 class _MetricsServer(Protocol):
@@ -175,6 +211,98 @@ async def lifespan(app: FastAPI):
     bridge_durable_schema_ready = await _ensure_bridge_durable_schema_ready(settings)
     if bridge_durable_schema_ready:
         startup_module.mark_bridge_durable_schema_ready()
+    from app.core.auth.api_key_cache import get_api_key_cache
+    from app.core.cache.invalidation import (
+        NAMESPACE_ACCOUNT_ROUTING,
+        NAMESPACE_ACCOUNT_SELECTION,
+        NAMESPACE_API_KEY,
+        NAMESPACE_FIREWALL,
+        NAMESPACE_MODEL_REGISTRY,
+        NAMESPACE_RESET_CREDITS,
+        NAMESPACE_SETTINGS,
+        CacheInvalidationPoller,
+        get_cache_invalidation_poller,
+        set_cache_invalidation_poller,
+    )
+    from app.core.middleware.firewall_cache import get_firewall_ip_cache
+    from app.modules.proxy.account_cache import get_account_selection_cache, get_routing_availability_cache
+    from app.modules.rate_limit_reset_credits.store import get_rate_limit_reset_credits_store
+
+    # The poller MUST be installed before the model scheduler starts: a first
+    # leader tick that persists a changed snapshot bumps the model_registry
+    # namespace through the global poller, and a not-yet-installed poller would
+    # silently drop that bump (followers would then wait for the refresh-tick
+    # backstop instead of the cache poll bound).
+    cache_poller = CacheInvalidationPoller(SessionLocal)
+    cache_poller.on_invalidation(NAMESPACE_API_KEY, get_api_key_cache().clear)
+    cache_poller.on_invalidation(NAMESPACE_FIREWALL, get_firewall_ip_cache().invalidate_all)
+    routing_availability_cache = get_routing_availability_cache()
+    # Remote-bump callbacks must be non-propagating variants: a propagating callback
+    # would re-bump on every observed bump and feedback-loop across replicas.
+    cache_poller.on_invalidation(NAMESPACE_ACCOUNT_ROUTING, routing_availability_cache.refresh_from_db)
+    cache_poller.on_invalidation(
+        NAMESPACE_ACCOUNT_SELECTION,
+        lambda: get_account_selection_cache().invalidate(propagate=False),
+    )
+    cache_poller.on_invalidation(
+        NAMESPACE_SETTINGS,
+        lambda: get_settings_cache().invalidate(propagate=False),
+    )
+    # The bus carries no payload, so a peer redeem clears this replica's whole
+    # reset-credits store; the refresh scheduler repopulates it on its next tick.
+    cache_poller.on_invalidation(NAMESPACE_RESET_CREDITS, get_rate_limit_reset_credits_store().invalidate)
+    if settings.model_registry_enabled:
+        from app.core.openai.model_registry_store import reconcile_model_registry_from_store
+
+        # raise_on_error=True so a transient load failure leaves the
+        # model_registry version unacknowledged and is retried on the next poll
+        # cycle (matching the account_routing refresh callback) instead of being
+        # swallowed, which would strand this replica on the stale catalog until
+        # the non-leader scheduler backstop.
+        cache_poller.on_invalidation(
+            NAMESPACE_MODEL_REGISTRY,
+            lambda: reconcile_model_registry_from_store(raise_on_error=True),
+        )
+    set_cache_invalidation_poller(cache_poller)
+
+    # Seed the invalidation version baseline BEFORE loading the routing snapshot
+    # and BEFORE the one-shot model-registry reconcile below. prime() records the
+    # current version of every namespace (and flushes any pending bumps) without
+    # firing callbacks, so a peer bump committed after this point is observed as a
+    # change on the first background poll instead of being silently acknowledged
+    # as pre-existing state. In particular a leader that persists-and-bumps the
+    # model_registry namespace in the window between the reconcile's snapshot read
+    # and the poller's first background tick would otherwise be absorbed as the
+    # initial baseline, leaving this replica on the pre-refresh catalog until the
+    # non-leader scheduler backstop (default 300s) instead of the sub-second cache
+    # poll bound.
+    try:
+        await cache_poller.prime()
+    except Exception:
+        # prime() raises when the baseline version read fails; degrade to
+        # first-poll-baselines (matching initialize()'s contract) rather than
+        # continuing as if the seed succeeded. A peer bump landing before the
+        # first background poll may then be absorbed as the initial baseline
+        # and only converge on the fallback TTL / next bump, but the failure is
+        # surfaced here instead of silently voiding the delivery guarantee.
+        logger.warning("cache invalidation baseline prime failed", exc_info=True)
+    try:
+        await routing_availability_cache.refresh_from_db()
+    except Exception:
+        # Unseeded snapshot degrades to local-mark semantics; the next
+        # account_routing bump retries the refresh via the poller callback.
+        logger.warning("initial routing availability snapshot refresh failed", exc_info=True)
+
+    if settings.model_registry_enabled:
+        from app.core.openai.model_registry_store import reconcile_model_registry_from_store
+
+        # Warm the in-memory registry from the persisted snapshot before any
+        # scheduler starts so a restarted replica serves the refreshed catalog
+        # instead of the bootstrap floor. Never fails startup.
+        await reconcile_model_registry_from_store()
+
+    await cache_poller.start()
+
     usage_scheduler = build_usage_refresh_scheduler()
     api_key_limit_reset_scheduler = build_api_key_limit_reset_scheduler()
     model_scheduler = build_model_refresh_scheduler()
@@ -185,6 +313,7 @@ async def lifespan(app: FastAPI):
     rate_limit_reset_credits_scheduler = build_rate_limit_reset_credits_scheduler()
     account_usage_rollup_scheduler = build_account_usage_rollup_scheduler()
     data_retention_scheduler = build_data_retention_scheduler()
+    start_live_usage_ingestor()
     await usage_scheduler.start()
     await api_key_limit_reset_scheduler.start()
     await model_scheduler.start()
@@ -288,59 +417,6 @@ async def lifespan(app: FastAPI):
             return
         await svc.register(iid, endpoint_base_url=bridge_endpoint_base_url)
 
-    from app.core.auth.api_key_cache import get_api_key_cache
-    from app.core.cache.invalidation import (
-        NAMESPACE_ACCOUNT_ROUTING,
-        NAMESPACE_ACCOUNT_SELECTION,
-        NAMESPACE_API_KEY,
-        NAMESPACE_FIREWALL,
-        NAMESPACE_RESET_CREDITS,
-        NAMESPACE_SETTINGS,
-        CacheInvalidationPoller,
-        get_cache_invalidation_poller,
-        set_cache_invalidation_poller,
-    )
-    from app.core.middleware.firewall_cache import get_firewall_ip_cache
-    from app.modules.proxy.account_cache import get_account_selection_cache, get_routing_availability_cache
-    from app.modules.rate_limit_reset_credits.store import get_rate_limit_reset_credits_store
-
-    cache_poller = CacheInvalidationPoller(SessionLocal)
-    cache_poller.on_invalidation(NAMESPACE_API_KEY, get_api_key_cache().clear)
-    cache_poller.on_invalidation(NAMESPACE_FIREWALL, get_firewall_ip_cache().invalidate_all)
-    routing_availability_cache = get_routing_availability_cache()
-    # Remote-bump callbacks must be non-propagating variants: a propagating callback
-    # would re-bump on every observed bump and feedback-loop across replicas.
-    cache_poller.on_invalidation(NAMESPACE_ACCOUNT_ROUTING, routing_availability_cache.refresh_from_db)
-    cache_poller.on_invalidation(
-        NAMESPACE_ACCOUNT_SELECTION,
-        lambda: get_account_selection_cache().invalidate(propagate=False),
-    )
-    cache_poller.on_invalidation(
-        NAMESPACE_SETTINGS,
-        lambda: get_settings_cache().invalidate(propagate=False),
-    )
-    # The bus carries no payload, so a peer redeem clears this replica's whole
-    # reset-credits store; the refresh scheduler repopulates it on its next tick.
-    cache_poller.on_invalidation(NAMESPACE_RESET_CREDITS, get_rate_limit_reset_credits_store().invalidate)
-    set_cache_invalidation_poller(cache_poller)
-    try:
-        # Seed baseline namespace versions before loading the routing snapshot
-        # and before serving traffic, so a peer bump committed after this point
-        # is observed as a change on the first poll instead of being silently
-        # acknowledged as pre-existing state.
-        await cache_poller.initialize()
-    except Exception:
-        # Degrades to first-poll-baselines: a peer bump landing before the first
-        # poll may be acknowledged without invalidating until the fallback TTL.
-        logger.warning("cache invalidation baseline seed failed", exc_info=True)
-    try:
-        await routing_availability_cache.refresh_from_db()
-    except Exception:
-        # Unseeded snapshot degrades to local-mark semantics; the next
-        # account_routing bump retries the refresh via the poller callback.
-        logger.warning("initial routing availability snapshot refresh failed", exc_info=True)
-    await cache_poller.start()
-
     ring_service: RingMembershipService | None = None
     instance_id: str | None = None
     heartbeat_task: asyncio.Task[None] | None = None
@@ -406,20 +482,47 @@ async def lifespan(app: FastAPI):
         if metrics_server is not None:
             metrics_server.should_exit = True
 
-        await cache_poller.stop()
-        if get_cache_invalidation_poller() is cache_poller:
-            # A stopped poller must not keep receiving propagation requests.
-            set_cache_invalidation_poller(None)
+        # Start the single process-level lease-renewal keeper BEFORE stopping any
+        # scheduler. Schedulers are stopped one at a time and only the final
+        # release() renews the lease while draining detached bodies; an earlier
+        # scheduler's stop() can detach a shielded leader-gated body (which stops
+        # that scheduler's own heartbeat) while the remaining schedulers are still
+        # stopping. If that stop sequence takes >= the (minimum 5s) TTL, the DB
+        # lease would otherwise expire while the detached body still runs as
+        # leader, letting a follower acquire it and run duplicate singleton work.
+        # The keeper renews the lease continuously across the whole stop sequence
+        # and is stopped by release(), which then owns renewal for its bounded
+        # drain. It is a no-op when leader election is disabled.
+        get_leader_election().start_release_keeper()
         await quota_planner_scheduler.stop()
         await auth_guardian_scheduler.stop()
         await automations_scheduler.stop()
         await sticky_session_cleanup_scheduler.stop()
         await model_scheduler.stop()
+        # Stop the invalidation poller only after the model scheduler: a final
+        # leader tick may still bump through the installed poller.
+        await cache_poller.stop()
+        if get_cache_invalidation_poller() is cache_poller:
+            # A stopped poller must not keep receiving propagation requests.
+            set_cache_invalidation_poller(None)
         await api_key_limit_reset_scheduler.stop()
         await usage_scheduler.stop()
+        await stop_live_usage_ingestor()
         await rate_limit_reset_credits_scheduler.stop()
         await account_usage_rollup_scheduler.stop()
         await data_retention_scheduler.stop()
+        # Release the scheduler leader lease only after every leader-gated
+        # scheduler has stopped so no local tick re-acquires it; followers can
+        # then take over immediately instead of waiting out the lease TTL.
+        # release() itself first drains bodies that were detached still
+        # draining shielded work, and skips the early release (letting the
+        # lease expire by TTL) if any is still running, so a follower cannot
+        # become leader while this process may still act as one. The deadline
+        # covers that bounded drain plus the row delete, and — because the
+        # release path shields and awaits its own session teardown — is
+        # enforced by abandoning the release task rather than awaiting a
+        # potentially wedged cancellation, so shutdown always proceeds.
+        await _release_leader_lease_within(10)
         try:
             await close_http_client()
         finally:

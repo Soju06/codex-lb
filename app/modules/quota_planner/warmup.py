@@ -487,6 +487,11 @@ class QuotaWarmupService:
             access_token,
             upstream_account_id,
             raise_for_status=True,
+            # The probe's own live signals must not pre-write fresh usage
+            # rows: _record_warmup_effect measures the post-probe window via
+            # its controlled refresh, which would otherwise skip as fresh
+            # and downgrade the observation to unknown.
+            suppress_live_usage=True,
         ):
             event = parse_sse_event(event_block)
             if event is None or event.response is None or event.response.usage is None:

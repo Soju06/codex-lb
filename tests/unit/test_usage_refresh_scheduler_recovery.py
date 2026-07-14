@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, cast
@@ -730,8 +731,8 @@ async def test_refresh_once_closes_read_session_before_usage_fetch(monkeypatch: 
     release_fetch = asyncio.Event()
 
     class _Leader:
-        async def try_acquire(self) -> bool:
-            return True
+        async def run_if_leader(self, fn: Callable[[], Awaitable[object]]) -> object:
+            return await fn()
 
     class _UsageRepo:
         def __init__(self, _session: object) -> None:
@@ -795,8 +796,8 @@ async def test_refresh_once_cancellation_closes_read_session(monkeypatch: pytest
     release_list_accounts = asyncio.Event()
 
     class _Leader:
-        async def try_acquire(self) -> bool:
-            return True
+        async def run_if_leader(self, fn: Callable[[], Awaitable[object]]) -> object:
+            return await fn()
 
     class _UsageRepo:
         def __init__(self, _session: object) -> None:

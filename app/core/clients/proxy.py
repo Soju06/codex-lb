@@ -83,6 +83,8 @@ from app.core.resilience.network_recovery import (
 )
 from app.core.types import JsonObject, JsonValue
 from app.core.upstream_proxy import ResolvedUpstreamRoute
+from app.core.usage.live_hub import publish_live_usage
+from app.core.usage.live_snapshots import EVENT_MARKER, parse_rate_limit_event_text, parse_rate_limit_headers
 from app.core.utils.json_guards import is_json_mapping
 from app.core.utils.request_id import get_request_id
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
@@ -2592,6 +2594,8 @@ async def stream_responses(
     allow_direct_egress: bool = True,
     codex_installation_id: str | None = None,
     enforce_openai_sdk_contract: bool = True,
+    codex_lb_account_id: str | None = None,
+    suppress_live_usage: bool = False,
 ) -> AsyncIterator[str]:
     effective_allow_direct_egress = allow_direct_egress or (route is None and session is not None)
     async with lease_http_session(session) as client_session:
@@ -2610,7 +2614,15 @@ async def stream_responses(
             allow_direct_egress=effective_allow_direct_egress,
             codex_installation_id=codex_installation_id,
             enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+            codex_lb_account_id=codex_lb_account_id,
+            suppress_live_usage=suppress_live_usage,
         ):
+            if not suppress_live_usage and (codex_lb_account_id or account_id) and EVENT_MARKER in event_block:
+                publish_live_usage(
+                    parse_rate_limit_event_text(event_block),
+                    account_id=codex_lb_account_id,
+                    chatgpt_account_id=None if codex_lb_account_id else account_id,
+                )
             yield event_block
 
 
@@ -2629,6 +2641,8 @@ async def _stream_responses_with_session(
     allow_direct_egress: bool = True,
     codex_installation_id: str | None = None,
     enforce_openai_sdk_contract: bool = True,
+    codex_lb_account_id: str | None = None,
+    suppress_live_usage: bool = False,
 ) -> AsyncIterator[str]:
     settings = get_settings()
     headers = apply_codex_installation_headers(headers, codex_installation_id)
@@ -2745,6 +2759,15 @@ async def _stream_responses_with_session(
                 resp = _CodexSSEResponse(raw_resp)
                 status_code = resp.status
                 last_stream_activity_at = time.monotonic()
+                # Error responses (429/403) carry the saturated-window
+                # snapshot — exactly when freshness matters most — so headers
+                # are ingested regardless of status.
+                if not suppress_live_usage:
+                    publish_live_usage(
+                        parse_rate_limit_headers(getattr(raw_resp, "headers", None)),
+                        account_id=codex_lb_account_id,
+                        chatgpt_account_id=None if codex_lb_account_id else account_id,
+                    )
                 if resp.status >= 400:
                     if raise_for_status:
                         error_payload = await _error_payload_from_response(resp)
@@ -2833,6 +2856,12 @@ async def _stream_responses_with_session(
         ) as resp:
             status_code = resp.status
             last_stream_activity_at = time.monotonic()
+            if not suppress_live_usage:
+                publish_live_usage(
+                    parse_rate_limit_headers(getattr(resp, "headers", None)),
+                    account_id=codex_lb_account_id,
+                    chatgpt_account_id=None if codex_lb_account_id else account_id,
+                )
             if resp.status >= 400:
                 if raise_for_status:
                     error_payload = await _error_payload_from_response(resp)

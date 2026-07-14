@@ -661,10 +661,11 @@ async def test_delete_account_with_delete_history_hard_deletes_request_logs(asyn
 
 @pytest.mark.asyncio
 async def test_accounts_list_includes_per_account_reset_times(async_client, db_setup):
-    primary_a = 1735689600
-    primary_b = 1735693200
-    secondary_a = 1736294400
-    secondary_b = 1736380800
+    now_epoch = int(utcnow().replace(tzinfo=timezone.utc).timestamp())
+    primary_a = now_epoch + 300
+    primary_b = now_epoch + 3900
+    secondary_a = now_epoch + 5 * 24 * 3600
+    secondary_b = now_epoch + 6 * 24 * 3600
 
     async with SessionLocal() as session:
         accounts_repo = AccountsRepository(session)
@@ -997,6 +998,112 @@ async def test_accounts_list_exposes_monthly_only_free_quota(async_client, db_se
     assert account["windowMinutesPrimary"] is None
     assert account["windowMinutesSecondary"] is None
     assert account["windowMinutesMonthly"] == 43200
+
+
+@pytest.mark.asyncio
+async def test_accounts_list_hides_expired_primary_window(async_client, db_setup):
+    now_epoch = int(utcnow().replace(tzinfo=timezone.utc).timestamp())
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+
+        await accounts_repo.upsert(_make_account("acc_expired_display", "expired-display@example.com"))
+        # Upstream stopped reporting the short window: the frozen 87% sample
+        # with an elapsed reset must display as absent, not stale.
+        await usage_repo.add_entry(
+            "acc_expired_display",
+            87.0,
+            window="primary",
+            reset_at=now_epoch - 7200,
+            window_minutes=300,
+            recorded_at=utcnow() - timedelta(hours=3),
+        )
+        await usage_repo.add_entry(
+            "acc_expired_display",
+            40.0,
+            window="secondary",
+            reset_at=now_epoch + 5 * 24 * 3600,
+            window_minutes=10080,
+            recorded_at=utcnow(),
+        )
+
+    response = await async_client.get("/api/accounts")
+    assert response.status_code == 200
+    accounts = {item["accountId"]: item for item in response.json()["accounts"]}
+
+    account = accounts["acc_expired_display"]
+    assert account["status"] == AccountStatus.ACTIVE.value
+    assert account["usage"]["primaryRemainingPercent"] is None
+    assert account["remainingCreditsPrimary"] is None
+    assert account["resetAtPrimary"] is None
+    assert account["windowMinutesPrimary"] is None
+    assert account["usage"]["secondaryRemainingPercent"] == pytest.approx(60.0)
+    assert account["windowMinutesSecondary"] == 10080
+
+
+@pytest.mark.asyncio
+async def test_accounts_list_expired_exhausted_primary_does_not_show_rate_limited(async_client, db_setup):
+    now_epoch = int(utcnow().replace(tzinfo=timezone.utc).timestamp())
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+
+        await accounts_repo.upsert(_make_account("acc_expired_exhausted", "expired-exhausted@example.com"))
+        # A frozen 100% sample whose window already reset: routing zeroes it
+        # before status decisions, so the badge must not infer rate-limited.
+        await usage_repo.add_entry(
+            "acc_expired_exhausted",
+            100.0,
+            window="primary",
+            reset_at=now_epoch - 7200,
+            window_minutes=300,
+            recorded_at=utcnow() - timedelta(hours=3),
+        )
+        await usage_repo.add_entry(
+            "acc_expired_exhausted",
+            40.0,
+            window="secondary",
+            reset_at=now_epoch + 5 * 24 * 3600,
+            window_minutes=10080,
+            recorded_at=utcnow(),
+        )
+
+    response = await async_client.get("/api/accounts")
+    assert response.status_code == 200
+    accounts = {item["accountId"]: item for item in response.json()["accounts"]}
+
+    account = accounts["acc_expired_exhausted"]
+    assert account["status"] == AccountStatus.ACTIVE.value
+    assert account["usage"]["primaryRemainingPercent"] is None
+    assert account["resetAtPrimary"] is None
+    assert account["windowMinutesPrimary"] is None
+
+
+@pytest.mark.asyncio
+async def test_accounts_list_missing_primary_row_is_not_optimistic(async_client, db_setup):
+    now_epoch = int(utcnow().replace(tzinfo=timezone.utc).timestamp())
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+
+        await accounts_repo.upsert(_make_account("acc_no_primary", "no-primary@example.com"))
+        await usage_repo.add_entry(
+            "acc_no_primary",
+            40.0,
+            window="secondary",
+            reset_at=now_epoch + 5 * 24 * 3600,
+            window_minutes=10080,
+            recorded_at=utcnow(),
+        )
+
+    response = await async_client.get("/api/accounts")
+    assert response.status_code == 200
+    accounts = {item["accountId"]: item for item in response.json()["accounts"]}
+
+    account = accounts["acc_no_primary"]
+    # No primary sample exists: display absent instead of an optimistic 100%.
+    assert account["usage"]["primaryRemainingPercent"] is None
+    assert account["usage"]["secondaryRemainingPercent"] == pytest.approx(60.0)
 
 
 @pytest.mark.asyncio
@@ -1527,7 +1634,9 @@ async def test_accounts_list_stale_rate_limited_status_recovers_after_background
     assert stale.status_code == 200
     stale_account = next(item for item in stale.json()["accounts"] if item["accountId"] == "acc_stuck_status")
     assert stale_account["status"] == "rate_limited"
-    assert stale_account["usage"]["primaryRemainingPercent"] == pytest.approx(90.0)
+    # The sample's reset elapsed, so the display shows the window as absent
+    # even while the stale status awaits reconciliation.
+    assert stale_account["usage"]["primaryRemainingPercent"] is None
 
     async with SessionLocal() as session:
         accounts_repo = AccountsRepository(session)
@@ -1545,4 +1654,6 @@ async def test_accounts_list_stale_rate_limited_status_recovers_after_background
     assert reconciled.status_code == 200
     reconciled_account = next(item for item in reconciled.json()["accounts"] if item["accountId"] == "acc_stuck_status")
     assert reconciled_account["status"] == "active"
-    assert reconciled_account["usage"]["primaryRemainingPercent"] == pytest.approx(90.0)
+    # The recovered account's only sample still has an elapsed reset; the
+    # display stays absent until a fresh sample arrives.
+    assert reconciled_account["usage"]["primaryRemainingPercent"] is None

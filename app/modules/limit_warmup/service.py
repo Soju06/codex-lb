@@ -227,6 +227,7 @@ class StreamingLimitWarmupSender:
                 route=route,
                 route_trace=route_trace,
                 allow_direct_egress=route is None,
+                codex_lb_account_id=fresh_account.id,
             ):
                 event = parse_sse_event(event_block)
                 if event is None:

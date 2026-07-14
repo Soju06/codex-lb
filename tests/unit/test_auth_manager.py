@@ -1348,6 +1348,105 @@ async def test_permanent_failure_adopts_peer_rotation_landing_after_fresh_read(m
     assert account.deactivation_reason is None
 
 
+class _StatusCasAlwaysMissRepo(_DummyRepo):
+    """Repo where the permanent-failure status compare-and-set can never win an
+    atomic window: ``get_by_id_fresh`` re-encrypts the SAME refresh-token
+    plaintext on each read (Fernet is non-deterministic), so the fingerprint
+    stays constant (no peer rotation to adopt) while the observed ciphertext
+    keeps shifting under the writer, and every conditional
+    ``update_status_if_current`` misses. Models a sustained same-plaintext
+    re-encryption storm that exhausts the bounded status-downgrade budget while
+    the account still holds the material that just failed permanently."""
+
+    def __init__(self, account: Account, *, plaintext: str, encryptor: TokenEncryptor) -> None:
+        super().__init__()
+        self._plaintext = plaintext
+        self._encryptor = encryptor
+        self.accounts_by_id[account.id] = account
+        self.status_cas_attempts: list[bytes | None] = []
+
+    async def get_by_id_fresh(self, account_id: str) -> Account | None:
+        row = self.accounts_by_id.get(account_id)
+        if row is not None:
+            # Same plaintext, merely re-encrypted (non-deterministic Fernet):
+            # fingerprint unchanged, ciphertext shifted.
+            row.refresh_token_encrypted = self._encryptor.encrypt(self._plaintext)
+        return row
+
+    async def update_status_if_current(
+        self,
+        account_id: str,
+        status: AccountStatus,
+        deactivation_reason: str | None = None,
+        reset_at: int | None = None,
+        *,
+        expected_status: AccountStatus,
+        expected_deactivation_reason: str | None = None,
+        expected_reset_at: int | None = None,
+        expected_refresh_token_encrypted: bytes | None = None,
+    ) -> bool:
+        # The conditional CAS is always conditioned on the freshly observed
+        # ciphertext; record it and miss to model the storm.
+        self.status_cas_attempts.append(expected_refresh_token_encrypted)
+        return False
+
+
+@pytest.mark.asyncio
+async def test_permanent_failure_status_cas_exhaustion_surfaces_transient_error(monkeypatch):
+    """Regression: a genuine permanent refresh failure whose status downgrade
+    CAS is EXHAUSTED by a same-plaintext re-encryption storm MUST surface a
+    TRANSIENT (``transport_error``, non-permanent) ``RefreshError`` — not return
+    ``None`` and re-raise the original permanent error.
+
+    Returning ``None`` here re-raises the permanent error, which sends proxy
+    callers into ``LoadBalancer.mark_permanent_failure()`` whose
+    ``update_status`` write is NOT guarded by the refresh-token ciphertext CAS.
+    In a storm — or if a genuine peer re-auth/import rotation lands after the
+    final re-read but before that unguarded write — a REPAIRED account would be
+    clobbered with ``REAUTH_REQUIRED``, exactly the clobber the CAS guards
+    prevent. Surfacing a transient error makes the caller RETRY instead of
+    running the unguarded permanent mark, and keeps the failure out of the
+    permanent-failure cooldown cache."""
+
+    async def _fake_refresh(_: str, **_kwargs: object) -> TokenRefreshResult:
+        raise RefreshError("invalid_grant", "refresh failed", True)
+
+    monkeypatch.setattr(auth_manager_module, "refresh_access_token", _fake_refresh)
+
+    encryptor = TokenEncryptor()
+    stale_refresh = utcnow().replace(year=utcnow().year - 1)
+    account = Account(
+        id="acc_status_cas_storm",
+        email="user@example.com",
+        plan_type="plus",
+        access_token_encrypted=encryptor.encrypt("access-old"),
+        refresh_token_encrypted=encryptor.encrypt("refresh-storm"),
+        id_token_encrypted=encryptor.encrypt("id-old"),
+        last_refresh=stale_refresh,
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
+    )
+    repo = _StatusCasAlwaysMissRepo(account, plaintext="refresh-storm", encryptor=encryptor)
+    manager = AuthManager(cast(AccountsRepositoryPort, repo))
+
+    with pytest.raises(RefreshError) as exc_info:
+        await manager.refresh_account(account)
+
+    # Transient (retryable) failure, never a permanent one that would be cached
+    # or leave the proxy to run the unguarded permanent mark.
+    assert exc_info.value.transport_error is True
+    assert exc_info.value.is_permanent is False
+    assert exc_info.value.code == "status_downgrade_conflict"
+    # The status downgrade never landed: the account was NOT marked REAUTH.
+    assert repo.status_payload is None
+    assert account.status == AccountStatus.ACTIVE
+    assert account.deactivation_reason is None
+    # Exactly the bounded conditional CAS attempts ran, all conditioned on a
+    # freshly observed ciphertext (never an unconditional ``expected=None``).
+    assert len(repo.status_cas_attempts) == auth_manager_module._TOKEN_CAS_MAX_ATTEMPTS
+    assert all(expected is not None for expected in repo.status_cas_attempts)
+
+
 @pytest.mark.asyncio
 async def test_claim_wait_is_capped_by_caller_refresh_budget(monkeypatch):
     """Regression: the shielded singleflight body outlives a cancelled caller,

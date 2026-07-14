@@ -315,6 +315,27 @@ and retry the compare-and-set against the freshly observed ciphertext (bounded)
 so the downgrade lands, rather than skipping the status write and leaving the
 account active with dead credentials.
 
+When the bounded status-downgrade compare-and-set is EXHAUSTED without ever
+landing — a sustained same-plaintext re-encryption storm the system cannot win
+an atomic compare-and-set window against, with no genuinely different peer
+rotation ever observed — the system MUST NOT return the success/no-op sentinel
+that re-raises the original permanent error, and MUST NOT fall back to an
+unconditional (unguarded) status write. Because the system could not
+authoritatively persist `reauth_required` under the ciphertext guard, re-raising
+the permanent error would send proxy callers into the permanent-failure path (for
+example `LoadBalancer.mark_permanent_failure()`), whose status write is NOT
+guarded by this refresh-token compare-and-set — so in the storm, or if a genuine
+peer re-authentication/import rotation lands after the final re-read but before
+that unguarded write, it would clobber a repaired account with `reauth_required`,
+the exact clobber the compare-and-set guards prevent. The system MUST instead
+raise a transient (non-permanent, transport-level) refresh error that is not
+recorded in the permanent-failure cooldown, so the caller retries the whole
+refresh once the contention clears rather than running the unguarded permanent
+mark. This transient escalation applies ONLY to contention-driven exhaustion
+while the account still holds the failed material; a status compare-and-set that
+SUCCEEDS still stands as a real permanent failure, and a genuinely different peer
+rotation observed on re-read is still adopted as a repair.
+
 #### Scenario: Refresh-time `app_session_terminated` is classified as permanent
 
 - **WHEN** `classify_refresh_error("app_session_terminated")` is evaluated
@@ -365,6 +386,25 @@ account active with dead credentials.
 - **AND** no `reauth_required` write occurs and the original permanent error is
   not re-raised, so the caller does not enter the permanent-failure path for the
   already-repaired account
+
+#### Scenario: Status CAS exhausts on a same-plaintext re-encryption storm
+
+- **GIVEN** this replica's exchange failed permanently and the account still
+  holds the same refresh-token plaintext that failed
+- **AND** a sustained concurrent re-encryption of that SAME plaintext keeps
+  shifting the observed ciphertext, so every conditional status compare-and-set
+  misses through the bounded retry budget with no genuinely different peer
+  rotation ever observed
+- **WHEN** the bounded status-downgrade compare-and-set is exhausted without ever
+  landing
+- **THEN** the guard raises a transient, non-permanent (transport-level) refresh
+  error that is not recorded in the permanent-failure cooldown
+- **AND** it does not write `reauth_required` and does not fall back to an
+  unconditional status write
+- **AND** the original permanent error is not re-raised, so the caller retries
+  the whole refresh rather than running the unguarded
+  `LoadBalancer.mark_permanent_failure()` path that could clobber a concurrent
+  peer rotation
 
 ### Requirement: Multi-replica leader guard
 

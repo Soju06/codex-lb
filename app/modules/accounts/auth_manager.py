@@ -619,10 +619,17 @@ class AuthManager:
 
         Returns the latest account row when its refresh-token material rotated
         after this attempt began (the caller adopts it instead of raising);
-        returns ``None`` when the permanent failure stands. The comparison uses
-        the fingerprint of the material this attempt exchanged, captured before
-        the fresh re-read, because ``get_by_id_fresh`` may refresh the caller's
-        own identity-map object in place.
+        returns ``None`` when the permanent failure stands (the status CAS
+        landed, or the row vanished). Raises a TRANSIENT ``RefreshError``
+        (``transport_error=True``, non-permanent) when the status-downgrade CAS
+        is EXHAUSTED by contention while the account still holds the failed
+        material — we could not authoritatively persist ``REAUTH_REQUIRED``, so
+        the caller must retry rather than fall back to the unguarded
+        ``LoadBalancer.mark_permanent_failure()`` write that could clobber a
+        peer rotation landing in the same window. The comparison uses the
+        fingerprint of the material this attempt exchanged, captured before the
+        fresh re-read, because ``get_by_id_fresh`` may refresh the caller's own
+        identity-map object in place.
 
         The status downgrade uses a compare-and-set conditioned on the freshly
         observed account state including the refresh-token ciphertext: a
@@ -689,14 +696,44 @@ class AuthManager:
             # still holding the material that just failed permanently, so retry
             # the CAS against the freshly observed ciphertext so the downgrade
             # lands rather than leaving a dead account active.
+        # The bounded status-downgrade compare-and-set never landed: the account
+        # still holds the material that failed permanently, but a sustained
+        # re-encryption storm kept changing the observed ciphertext so we could
+        # not authoritatively persist REAUTH_REQUIRED. Returning ``None`` here
+        # would make ``_perform_refresh`` re-raise the ORIGINAL permanent
+        # ``RefreshError``; proxy callers then commonly invoke
+        # ``LoadBalancer.mark_permanent_failure()`` whose ``update_status`` path
+        # is NOT guarded by the refresh-token ciphertext CAS — so a genuine peer
+        # re-auth/import rotation that lands after our final re-read but before
+        # that fallback write would be clobbered with ``REAUTH_REQUIRED``,
+        # exactly the repaired-account clobber the CAS guards exist to prevent.
+        # Since we could not win an atomic CAS window, surface a transient
+        # (non-permanent) error so the caller RETRIES the whole refresh once the
+        # contention clears rather than running the unguarded permanent mark.
+        # ``transport_error`` keeps it out of the permanent-failure cooldown
+        # cache. A genuinely different peer rotation is still adopted above (that
+        # stays a repair); a status CAS that SUCCEEDS above still stands as a
+        # real permanent failure — only contention-driven exhaustion becomes
+        # transient here.
         logger.warning(
             "Permanent refresh-failure status CAS for account_id=%s code=%s kept missing on "
-            "unchanged token material after %d attempts; leaving status unchanged",
+            "unchanged token material after %d attempts; surfacing a transient error so the caller "
+            "retries rather than running the unguarded permanent-failure mark that could clobber a "
+            "concurrent peer rotation",
             account.id,
             exc.code,
             _TOKEN_CAS_MAX_ATTEMPTS,
         )
-        return None
+        raise RefreshError(
+            "status_downgrade_conflict",
+            (
+                f"Permanent refresh-failure status downgrade for account_id={account.id} "
+                f"(code={exc.code}) could not persist REAUTH_REQUIRED after "
+                f"{_TOKEN_CAS_MAX_ATTEMPTS} attempts due to concurrent writes"
+            ),
+            False,
+            transport_error=True,
+        ) from exc
 
     async def _refresh_tokens(self, refresh_token: str, *, account: Account) -> TokenRefreshResult:
         refresh_lease: RefreshAdmissionLeasePort | None = None

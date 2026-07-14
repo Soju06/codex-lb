@@ -7193,6 +7193,1314 @@ def test_backend_responses_websocket_keeps_downstream_open_after_clean_upstream_
     assert [json.loads(text)["model"] for text in second_upstream.sent_text] == ["gpt-5.5"]
 
 
+@pytest.mark.asyncio
+async def test_proxy_responses_websocket_prioritizes_precreated_replay_when_both_tasks_complete(
+    monkeypatch,
+):
+    service = proxy_module.ProxyService(cast(Any, None))
+    first_completed = asyncio.Event()
+    third_completed = asyncio.Event()
+    second_request_sent = asyncio.Event()
+    upstream_close_waiting = asyncio.Event()
+    third_receive_waiting = asyncio.Event()
+    release_race = asyncio.Event()
+    forced_simultaneous_wait = False
+
+    def response_batch(response_id: str) -> list[_FakeUpstreamMessage]:
+        return [
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {"type": "response.created", "response": {"id": response_id, "status": "in_progress"}},
+                    separators=(",", ":"),
+                ),
+            ),
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "response.completed",
+                        "response": {
+                            "id": response_id,
+                            "status": "completed",
+                            "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                        },
+                    },
+                    separators=(",", ":"),
+                ),
+            ),
+        ]
+
+    first_request = {
+        "type": "response.create",
+        "model": "gpt-5.4-mini",
+        "instructions": "",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "first"}]}],
+        "stream": True,
+    }
+    second_request = {
+        "type": "response.create",
+        "model": "gpt-5.4-mini",
+        "instructions": "",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "second"}]}],
+        "stream": True,
+    }
+    third_request = {
+        "type": "response.create",
+        "model": "gpt-5.4-mini",
+        "instructions": "",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "third"}]}],
+        "stream": True,
+    }
+
+    class _CoordinatedDownstreamWebSocket:
+        def __init__(self) -> None:
+            self._step = 0
+            self.sent_text: list[str] = []
+
+        async def receive(self) -> dict[str, object]:
+            if self._step == 0:
+                self._step = 1
+                return {"type": "websocket.receive", "text": json.dumps(first_request)}
+            if self._step == 1:
+                await first_completed.wait()
+                self._step = 2
+                return {"type": "websocket.receive", "text": json.dumps(second_request)}
+            if self._step == 2:
+                await second_request_sent.wait()
+                third_receive_waiting.set()
+                await upstream_close_waiting.wait()
+                release_race.set()
+                await asyncio.sleep(0)
+                self._step = 3
+                return {"type": "websocket.receive", "text": json.dumps(third_request)}
+            if self._step == 3:
+                await third_completed.wait()
+                self._step = 4
+            return {"type": "websocket.disconnect"}
+
+        async def send_text(self, text: str) -> None:
+            self.sent_text.append(text)
+            payload = json.loads(text)
+            if payload.get("type") == "response.completed":
+                response = cast(dict[str, object], payload["response"])
+                if response.get("id") == "resp_ws_simultaneous_first":
+                    first_completed.set()
+                if response.get("id") == "resp_ws_simultaneous_third":
+                    third_completed.set()
+            if payload.get("type") in {"response.failed", "error"}:
+                third_completed.set()
+
+        async def send_bytes(self, _data: bytes) -> None:
+            return None
+
+        async def close(self, code: int = 1000, reason: str | None = None) -> None:
+            del code, reason
+            third_completed.set()
+
+    class _CoordinatedCloseUpstreamWebSocket(_FakeUpstreamWebSocket):
+        def __init__(self) -> None:
+            super().__init__([])
+            self._close_returned = False
+
+        async def send_text(self, text: str) -> None:
+            await super().send_text(text)
+            if len(self.sent_text) == 1:
+                for message in response_batch("resp_ws_simultaneous_first"):
+                    self._messages.put_nowait(message)
+            elif len(self.sent_text) == 2:
+                second_request_sent.set()
+
+        async def receive(self) -> _FakeUpstreamMessage:
+            if not self._messages.empty():
+                return await super().receive()
+            assert not self._close_returned
+            await second_request_sent.wait()
+            upstream_close_waiting.set()
+            await third_receive_waiting.wait()
+            await release_race.wait()
+            await asyncio.sleep(0)
+            self._close_returned = True
+            return _FakeUpstreamMessage("close", close_code=1000)
+
+    first_upstream = _CoordinatedCloseUpstreamWebSocket()
+    replay_upstream = _SequencedUpstreamWebSocket(
+        [],
+        deferred_message_batches=[
+            response_batch("resp_ws_simultaneous_second"),
+            response_batch("resp_ws_simultaneous_third"),
+        ],
+    )
+    upstreams = deque([first_upstream, replay_upstream])
+    connect_calls: list[str | None] = []
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def fake_connect_proxy_websocket(self, headers, **kwargs):
+        del self, headers
+        connect_calls.append(cast(str | None, kwargs.get("model")))
+        return SimpleNamespace(id=f"acct_ws_simultaneous_{len(connect_calls)}"), upstreams.popleft()
+
+    original_wait = asyncio.wait
+
+    async def deterministic_wait(awaitables, *, timeout=None, return_when=asyncio.ALL_COMPLETED):
+        nonlocal forced_simultaneous_wait
+        waiters = set(awaitables)
+        completed, pending = await original_wait(waiters, timeout=timeout, return_when=return_when)
+        if (
+            not forced_simultaneous_wait
+            and len(waiters) == 2
+            and second_request_sent.is_set()
+            and upstream_close_waiting.is_set()
+            and third_receive_waiting.is_set()
+        ):
+            await asyncio.gather(*waiters)
+            forced_simultaneous_wait = True
+            return waiters, set()
+        return completed, pending
+
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module, "_proxy_admission_wait_timeout_seconds", lambda: 0.05)
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+    monkeypatch.setattr(proxy_module.asyncio, "wait", deterministic_wait)
+
+    downstream = _CoordinatedDownstreamWebSocket()
+    await asyncio.wait_for(
+        service.proxy_responses_websocket(
+            cast(Any, downstream),
+            {"x-codex-turn-state": "turn_simultaneous_ws"},
+            codex_session_affinity=True,
+            openai_cache_affinity=True,
+            api_key=None,
+        ),
+        timeout=2.0,
+    )
+
+    emitted_events = [json.loads(event) for event in downstream.sent_text]
+    assert forced_simultaneous_wait is True
+    assert [event["type"] for event in emitted_events] == [
+        "response.created",
+        "response.completed",
+        "response.created",
+        "response.completed",
+        "response.created",
+        "response.completed",
+    ]
+    assert [event["response"]["id"] for event in emitted_events] == [
+        "resp_ws_simultaneous_first",
+        "resp_ws_simultaneous_first",
+        "resp_ws_simultaneous_second",
+        "resp_ws_simultaneous_second",
+        "resp_ws_simultaneous_third",
+        "resp_ws_simultaneous_third",
+    ]
+    assert connect_calls == ["gpt-5.4-mini", "gpt-5.4-mini"]
+    assert [json.loads(text)["input"][0]["content"][0]["text"] for text in first_upstream.sent_text] == [
+        "first",
+        "second",
+    ]
+    assert [json.loads(text)["input"][0]["content"][0]["text"] for text in replay_upstream.sent_text] == [
+        "second",
+        "third",
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("during_idle_recheck", [False, True], ids=["receive-wait", "idle-recheck"])
+@pytest.mark.parametrize("completion_phase", ["prepare", "admission"])
+async def test_proxy_responses_websocket_defers_prepared_frame_when_replay_completes_late(
+    monkeypatch,
+    during_idle_recheck,
+    completion_phase,
+):
+    service = proxy_module.ProxyService(cast(Any, None))
+    first_completed = asyncio.Event()
+    second_replay_completed = asyncio.Event()
+    third_completed = asyncio.Event()
+    second_request_sent = asyncio.Event()
+    replay_state_ready = asyncio.Event()
+    upstream_close_waiting = asyncio.Event()
+    third_receive_waiting = asyncio.Event()
+    release_third_receive = asyncio.Event()
+    allow_upstream_close = asyncio.Event()
+    reader_finished = asyncio.Event()
+    forced_downstream_only_wait = False
+    deferred_to_idle_wait = False
+    third_prepare_calls = 0
+    third_admission_calls = 0
+    quota_reservation_calls = 0
+    third_request_state: Any | None = None
+
+    def response_batch(response_id: str) -> list[_FakeUpstreamMessage]:
+        return [
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {"type": "response.created", "response": {"id": response_id, "status": "in_progress"}},
+                    separators=(",", ":"),
+                ),
+            ),
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "response.completed",
+                        "response": {
+                            "id": response_id,
+                            "status": "completed",
+                            "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                        },
+                    },
+                    separators=(",", ":"),
+                ),
+            ),
+        ]
+
+    def request_payload(text: str) -> dict[str, object]:
+        return {
+            "type": "response.create",
+            "model": "gpt-5.4-mini",
+            "instructions": "",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": text}]}],
+            "stream": True,
+        }
+
+    first_request = request_payload("first")
+    second_request = request_payload("second")
+    third_request = request_payload("third")
+
+    class _CoordinatedDownstreamWebSocket:
+        def __init__(self) -> None:
+            self.receive_calls = 0
+            self.sent_text: list[str] = []
+
+        async def receive(self) -> dict[str, object]:
+            self.receive_calls += 1
+            if self.receive_calls == 1:
+                return {"type": "websocket.receive", "text": json.dumps(first_request)}
+            if self.receive_calls == 2:
+                await first_completed.wait()
+                return {"type": "websocket.receive", "text": json.dumps(second_request)}
+            if self.receive_calls == 3:
+                await second_request_sent.wait()
+                third_receive_waiting.set()
+                await release_third_receive.wait()
+                return {"type": "websocket.receive", "text": json.dumps(third_request)}
+            await second_replay_completed.wait()
+            await third_completed.wait()
+            return {"type": "websocket.disconnect"}
+
+        async def send_text(self, text: str) -> None:
+            self.sent_text.append(text)
+            payload = json.loads(text)
+            if payload.get("type") == "response.completed":
+                response = cast(dict[str, object], payload["response"])
+                if response.get("id") == "resp_ws_late_prepare_first":
+                    first_completed.set()
+                elif response.get("id") == "resp_ws_late_prepare_second":
+                    second_replay_completed.set()
+                elif response.get("id") == "resp_ws_late_prepare_third":
+                    third_completed.set()
+            if payload.get("type") in {"response.failed", "error"}:
+                third_completed.set()
+
+        async def send_bytes(self, _data: bytes) -> None:
+            return None
+
+        async def close(self, code: int = 1000, reason: str | None = None) -> None:
+            del code, reason
+            second_replay_completed.set()
+            third_completed.set()
+
+    class _CleanClosingUpstreamWebSocket(_FakeUpstreamWebSocket):
+        def __init__(self) -> None:
+            super().__init__([])
+            self._close_returned = False
+
+        async def send_text(self, text: str) -> None:
+            await super().send_text(text)
+            if len(self.sent_text) == 1:
+                for message in response_batch("resp_ws_late_prepare_first"):
+                    self._messages.put_nowait(message)
+            elif len(self.sent_text) == 2:
+                second_request_sent.set()
+
+        async def receive(self) -> _FakeUpstreamMessage:
+            if not self._messages.empty():
+                return await super().receive()
+            assert not self._close_returned
+            await second_request_sent.wait()
+            upstream_close_waiting.set()
+            await allow_upstream_close.wait()
+            self._close_returned = True
+            return _FakeUpstreamMessage("close", close_code=1000)
+
+    first_upstream = _CleanClosingUpstreamWebSocket()
+    replay_upstream = _SequencedUpstreamWebSocket(
+        [],
+        deferred_message_batches=[
+            response_batch("resp_ws_late_prepare_second"),
+            response_batch("resp_ws_late_prepare_third"),
+        ],
+    )
+    upstreams = deque([first_upstream, replay_upstream])
+    connect_calls: list[Any] = []
+    stream_leases = [object(), object()]
+    response_leases: list[object] = []
+    released_stream_leases: list[object] = []
+    released_response_leases: list[object] = []
+    runtime_settings = _websocket_settings(
+        proxy_downstream_websocket_idle_timeout_seconds=0.0 if during_idle_recheck else 120.0
+    )
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def fake_connect_proxy_websocket(self, headers, **kwargs):
+        del self, headers
+        request_state = kwargs["request_state"]
+        connect_calls.append(request_state)
+        request_state.websocket_stream_lease = stream_leases[len(connect_calls) - 1]
+        return SimpleNamespace(id=f"acct_ws_late_prepare_{len(connect_calls)}"), upstreams.popleft()
+
+    async def fake_acquire_account_response_create_lease(self, **kwargs):
+        del self, kwargs
+        lease = object()
+        response_leases.append(lease)
+        return lease
+
+    async def fake_release_account_lease(lease):
+        if lease in stream_leases:
+            released_stream_leases.append(lease)
+        elif lease in response_leases:
+            released_response_leases.append(lease)
+        elif lease is not None:
+            pytest.fail("unexpected account lease released")
+
+    original_relay = proxy_module.ProxyService._relay_upstream_websocket_messages
+
+    async def coordinated_relay(self, websocket, upstream, **kwargs):
+        await original_relay(self, websocket, upstream, **kwargs)
+        if upstream is first_upstream:
+            assert kwargs["upstream_control"].replay_request_state is not None
+            replay_state_ready.set()
+            reader_finished.set()
+
+    original_prepare = proxy_module.ProxyService._prepare_websocket_response_create_request
+
+    async def coordinated_prepare(self, payload, **kwargs):
+        nonlocal third_prepare_calls, third_request_state
+        prepared = await original_prepare(self, payload, **kwargs)
+        request_text = cast(str, cast(list[dict[str, Any]], payload["input"])[0]["content"][0]["text"])
+        if request_text == "third":
+            third_prepare_calls += 1
+            if third_request_state is None:
+                third_request_state = prepared.request_state
+            else:
+                assert prepared.request_state is third_request_state
+            if completion_phase == "prepare" and not reader_finished.is_set():
+                allow_upstream_close.set()
+                await replay_state_ready.wait()
+                await reader_finished.wait()
+                await asyncio.sleep(0)
+        return prepared
+
+    original_acquire_admission = proxy_module.ProxyService._acquire_request_state_response_create_admission
+
+    async def coordinated_acquire_admission(self, request_state, **kwargs):
+        nonlocal third_admission_calls
+        if request_state is third_request_state:
+            third_admission_calls += 1
+            if completion_phase == "admission" and not reader_finished.is_set():
+                allow_upstream_close.set()
+                await replay_state_ready.wait()
+                await reader_finished.wait()
+                await asyncio.sleep(0)
+        await original_acquire_admission(self, request_state, **kwargs)
+
+    original_reserve_quota = proxy_module.ProxyService._reserve_websocket_api_key_usage
+
+    async def capture_reserve_quota(self, *args, **kwargs):
+        nonlocal quota_reservation_calls
+        quota_reservation_calls += 1
+        return await original_reserve_quota(self, *args, **kwargs)
+
+    original_wait = asyncio.wait
+
+    async def deterministic_wait(awaitables, *, timeout=None, return_when=asyncio.ALL_COMPLETED):
+        nonlocal deferred_to_idle_wait, forced_downstream_only_wait
+        waiters = set(awaitables)
+        waits_for_downstream = any(
+            "_CoordinatedDownstreamWebSocket.receive" in task.get_coro().__qualname__ for task in waiters
+        )
+        if (
+            not forced_downstream_only_wait
+            and len(waiters) == 2
+            and waits_for_downstream
+            and second_request_sent.is_set()
+        ):
+            await upstream_close_waiting.wait()
+            await third_receive_waiting.wait()
+        if (
+            not forced_downstream_only_wait
+            and len(waiters) == 2
+            and upstream_close_waiting.is_set()
+            and third_receive_waiting.is_set()
+        ):
+            if during_idle_recheck and not deferred_to_idle_wait:
+                deferred_to_idle_wait = True
+                return set(), waiters
+            release_third_receive.set()
+            completed, pending = await original_wait(waiters, timeout=timeout, return_when=return_when)
+            assert len(completed) == 1
+            forced_downstream_only_wait = True
+            return completed, pending
+        return await original_wait(waiters, timeout=timeout, return_when=return_when)
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: runtime_settings)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module, "_proxy_admission_wait_timeout_seconds", lambda: 0.05)
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_acquire_account_response_create_lease_or_overload",
+        fake_acquire_account_response_create_lease,
+    )
+    monkeypatch.setattr(proxy_module.ProxyService, "_relay_upstream_websocket_messages", coordinated_relay)
+    monkeypatch.setattr(proxy_module.ProxyService, "_prepare_websocket_response_create_request", coordinated_prepare)
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_acquire_request_state_response_create_admission",
+        coordinated_acquire_admission,
+    )
+    monkeypatch.setattr(proxy_module.ProxyService, "_reserve_websocket_api_key_usage", capture_reserve_quota)
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", fake_release_account_lease)
+    monkeypatch.setattr(proxy_module.asyncio, "wait", deterministic_wait)
+
+    downstream = _CoordinatedDownstreamWebSocket()
+    await asyncio.wait_for(
+        service.proxy_responses_websocket(
+            cast(Any, downstream),
+            {"x-codex-turn-state": "turn_late_prepare_ws"},
+            codex_session_affinity=True,
+            openai_cache_affinity=True,
+            api_key=None,
+        ),
+        timeout=2.0,
+    )
+
+    emitted_events = [json.loads(event) for event in downstream.sent_text]
+    assert forced_downstream_only_wait is True
+    assert deferred_to_idle_wait is during_idle_recheck
+    assert [event["type"] for event in emitted_events] == [
+        "response.created",
+        "response.completed",
+        "response.created",
+        "response.completed",
+        "response.created",
+        "response.completed",
+    ]
+    assert [event["response"]["id"] for event in emitted_events] == [
+        "resp_ws_late_prepare_first",
+        "resp_ws_late_prepare_first",
+        "resp_ws_late_prepare_second",
+        "resp_ws_late_prepare_second",
+        "resp_ws_late_prepare_third",
+        "resp_ws_late_prepare_third",
+    ]
+    assert len(connect_calls) == 2
+    assert [json.loads(text)["input"][0]["content"][0]["text"] for text in first_upstream.sent_text] == [
+        "first",
+        "second",
+    ]
+    assert [json.loads(text)["input"][0]["content"][0]["text"] for text in replay_upstream.sent_text] == [
+        "second",
+        "third",
+    ]
+    assert third_prepare_calls == 1
+    assert quota_reservation_calls == 3
+    assert third_admission_calls == (2 if completion_phase == "admission" else 1)
+    assert released_stream_leases == stream_leases
+    assert released_response_leases == response_leases
+    assert third_request_state is not None
+    assert third_request_state.response_create_gate is None
+    assert third_request_state.response_create_gate_acquired is False
+    assert third_request_state.response_create_admission is None
+    assert third_request_state.account_response_create_lease is None
+    assert third_request_state.websocket_stream_lease is None
+    assert third_request_state.api_key_reservation_heartbeat_task is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("during_idle_recheck", [False, True], ids=["receive-wait", "idle-recheck"])
+@pytest.mark.parametrize("terminal_outcome", ["disconnect", "failure", "cancelled"])
+@pytest.mark.parametrize("terminal_phase", ["upstream-close", "stream-lease-release", "reconnect"])
+async def test_proxy_responses_websocket_late_terminal_receive_stops_replay_at_next_safe_boundary(
+    monkeypatch,
+    during_idle_recheck,
+    terminal_outcome,
+    terminal_phase,
+):
+    service = proxy_module.ProxyService(cast(Any, None))
+    request_sent = asyncio.Event()
+    receiver_waiting = asyncio.Event()
+    replay_state_ready = asyncio.Event()
+    release_terminal = asyncio.Event()
+    terminal_completed = asyncio.Event()
+    terminal_phase_waiting = asyncio.Event()
+    forced_upstream_only_wait = False
+    deferred_to_idle_wait = False
+    captured_request_states: list[Any] = []
+    stream_leases = [object(), object()]
+    response_lease = object()
+    released_stream_leases: list[object] = []
+    released_response_leases: list[object] = []
+    response_lease_calls = 0
+    admission_calls = 0
+    quota_reservation_calls = 0
+
+    request = {
+        "type": "response.create",
+        "model": "gpt-5.4-mini",
+        "instructions": "",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
+        "stream": True,
+    }
+
+    class _LateTerminalDownstreamWebSocket:
+        def __init__(self) -> None:
+            self.receive_calls = 0
+            self.active_receives = 0
+            self.sent_text: list[str] = []
+
+        async def receive(self) -> dict[str, object]:
+            self.receive_calls += 1
+            receive_call = self.receive_calls
+            self.active_receives += 1
+            try:
+                if receive_call == 1:
+                    return {"type": "websocket.receive", "text": json.dumps(request)}
+                receiver_waiting.set()
+                await release_terminal.wait()
+                if terminal_outcome == "failure":
+                    raise RuntimeError("late downstream receive failed")
+                if terminal_outcome == "cancelled":
+                    raise asyncio.CancelledError
+                return {"type": "websocket.disconnect"}
+            finally:
+                self.active_receives -= 1
+                if receive_call == 2:
+                    terminal_completed.set()
+
+        async def send_text(self, text: str) -> None:
+            self.sent_text.append(text)
+
+        async def send_bytes(self, _data: bytes) -> None:
+            return None
+
+        async def close(self, code: int = 1000, reason: str | None = None) -> None:
+            del code, reason
+
+    class _CleanClosingUpstreamWebSocket(_FakeUpstreamWebSocket):
+        def __init__(self) -> None:
+            super().__init__([])
+            self.close_calls = 0
+
+        async def send_text(self, text: str) -> None:
+            await super().send_text(text)
+            request_sent.set()
+
+        async def receive(self) -> _FakeUpstreamMessage:
+            await request_sent.wait()
+            await receiver_waiting.wait()
+            return _FakeUpstreamMessage("close", close_code=1000)
+
+        async def close(self) -> None:
+            self.close_calls += 1
+            if terminal_phase == "upstream-close" and self.close_calls == 2:
+                terminal_phase_waiting.set()
+                release_terminal.set()
+                await terminal_completed.wait()
+                await asyncio.sleep(0)
+            await super().close()
+
+    class _UnusedReplayUpstreamWebSocket(_FakeUpstreamWebSocket):
+        async def send_text(self, text: str) -> None:
+            await super().send_text(text)
+
+    first_upstream = _CleanClosingUpstreamWebSocket()
+    replay_upstream = _UnusedReplayUpstreamWebSocket([])
+    upstreams = deque([first_upstream, replay_upstream])
+    runtime_settings = _websocket_settings(
+        proxy_downstream_websocket_idle_timeout_seconds=0.0 if during_idle_recheck else 120.0
+    )
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def fake_connect_proxy_websocket(self, headers, **kwargs):
+        del self, headers
+        request_state = kwargs["request_state"]
+        captured_request_states.append(request_state)
+        request_state.websocket_stream_lease = stream_leases[len(captured_request_states) - 1]
+        if len(captured_request_states) == 2 and terminal_phase == "reconnect":
+            terminal_phase_waiting.set()
+            release_terminal.set()
+            await terminal_completed.wait()
+            await asyncio.sleep(0)
+        return SimpleNamespace(id=f"acct_ws_late_terminal_{len(captured_request_states)}"), upstreams.popleft()
+
+    async def fake_acquire_account_response_create_lease(self, **kwargs):
+        nonlocal response_lease_calls
+        del self, kwargs
+        response_lease_calls += 1
+        return response_lease
+
+    async def fake_release_account_lease(lease):
+        if lease in stream_leases:
+            if (
+                lease is stream_leases[0]
+                and terminal_phase == "stream-lease-release"
+                and not terminal_phase_waiting.is_set()
+            ):
+                terminal_phase_waiting.set()
+                release_terminal.set()
+                await terminal_completed.wait()
+                await asyncio.sleep(0)
+            released_stream_leases.append(lease)
+        elif lease is response_lease:
+            released_response_leases.append(lease)
+        elif lease is not None:
+            pytest.fail("unexpected account lease released")
+
+    original_relay = proxy_module.ProxyService._relay_upstream_websocket_messages
+
+    async def coordinated_relay(self, websocket, upstream, **kwargs):
+        await original_relay(self, websocket, upstream, **kwargs)
+        if upstream is first_upstream:
+            assert kwargs["upstream_control"].replay_request_state is not None
+            replay_state_ready.set()
+
+    original_acquire_admission = proxy_module.ProxyService._acquire_request_state_response_create_admission
+
+    async def capture_acquire_admission(self, request_state, **kwargs):
+        nonlocal admission_calls
+        admission_calls += 1
+        await original_acquire_admission(self, request_state, **kwargs)
+
+    original_reserve_quota = proxy_module.ProxyService._reserve_websocket_api_key_usage
+
+    async def capture_reserve_quota(self, *args, **kwargs):
+        nonlocal quota_reservation_calls
+        quota_reservation_calls += 1
+        return await original_reserve_quota(self, *args, **kwargs)
+
+    original_wait = asyncio.wait
+
+    async def deterministic_wait(awaitables, *, timeout=None, return_when=asyncio.ALL_COMPLETED):
+        nonlocal deferred_to_idle_wait, forced_upstream_only_wait
+        waiters = set(awaitables)
+        downstream_waiters = {
+            task for task in waiters if "_LateTerminalDownstreamWebSocket.receive" in task.get_coro().__qualname__
+        }
+        if (
+            not forced_upstream_only_wait
+            and len(waiters) == 2
+            and len(downstream_waiters) == 1
+            and request_sent.is_set()
+        ):
+            await receiver_waiting.wait()
+            await replay_state_ready.wait()
+            if during_idle_recheck and not deferred_to_idle_wait:
+                deferred_to_idle_wait = True
+                return set(), waiters
+            completed, pending = await original_wait(waiters, timeout=timeout, return_when=return_when)
+            assert len(completed) == 1
+            assert completed.isdisjoint(downstream_waiters)
+            forced_upstream_only_wait = True
+            return completed, pending
+        return await original_wait(waiters, timeout=timeout, return_when=return_when)
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: runtime_settings)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_acquire_account_response_create_lease_or_overload",
+        fake_acquire_account_response_create_lease,
+    )
+    monkeypatch.setattr(proxy_module.ProxyService, "_relay_upstream_websocket_messages", coordinated_relay)
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_acquire_request_state_response_create_admission",
+        capture_acquire_admission,
+    )
+    monkeypatch.setattr(proxy_module.ProxyService, "_reserve_websocket_api_key_usage", capture_reserve_quota)
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", fake_release_account_lease)
+    monkeypatch.setattr(proxy_module.asyncio, "wait", deterministic_wait)
+
+    downstream = _LateTerminalDownstreamWebSocket()
+    proxy_call = service.proxy_responses_websocket(
+        cast(Any, downstream),
+        {"x-codex-turn-state": "turn_late_terminal_ws"},
+        codex_session_affinity=True,
+        openai_cache_affinity=True,
+        api_key=None,
+    )
+    if terminal_outcome == "failure":
+        with pytest.raises(RuntimeError, match="late downstream receive failed"):
+            await asyncio.wait_for(proxy_call, timeout=2.0)
+    elif terminal_outcome == "cancelled":
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(proxy_call, timeout=2.0)
+    else:
+        await asyncio.wait_for(proxy_call, timeout=2.0)
+
+    expected_connect_calls = 2 if terminal_phase == "reconnect" else 1
+    assert forced_upstream_only_wait is True
+    assert deferred_to_idle_wait is during_idle_recheck
+    assert replay_state_ready.is_set()
+    assert terminal_phase_waiting.is_set()
+    assert terminal_completed.is_set()
+    assert downstream.receive_calls == 2
+    assert downstream.active_receives == 0
+    assert downstream.sent_text == []
+    assert first_upstream.closed is True
+    assert first_upstream.close_calls == 2
+    assert len(first_upstream.sent_text) == 1
+    assert len(captured_request_states) == expected_connect_calls
+    assert all(request_state is captured_request_states[0] for request_state in captured_request_states)
+    assert replay_upstream.sent_text == []
+    assert replay_upstream.closed is (terminal_phase == "reconnect")
+    assert list(upstreams) == ([] if terminal_phase == "reconnect" else [replay_upstream])
+    assert admission_calls == 1
+    assert quota_reservation_calls == 1
+    assert response_lease_calls == 1
+    assert released_stream_leases == stream_leases[:expected_connect_calls]
+    assert released_response_leases == [response_lease]
+    request_state = captured_request_states[0]
+    assert request_state.response_create_gate is None
+    assert request_state.response_create_gate_acquired is False
+    assert request_state.response_create_admission is None
+    assert request_state.account_response_create_lease is None
+    assert request_state.websocket_stream_lease is None
+    assert request_state.api_key_reservation is None
+    assert request_state.api_key_reservation_heartbeat_task is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("during_idle_recheck", [False, True], ids=["receive-wait", "idle-recheck"])
+async def test_proxy_responses_websocket_simultaneous_disconnect_aborts_before_replay(
+    monkeypatch,
+    during_idle_recheck,
+):
+    service = proxy_module.ProxyService(cast(Any, None))
+    cleanup_events: list[str] = []
+    captured_request_states: list[Any] = []
+    request_sent = asyncio.Event()
+    upstream_close_waiting = asyncio.Event()
+    receiver_disconnect_waiting = asyncio.Event()
+    release_race = asyncio.Event()
+    stream_leases = [object(), object()]
+    response_create_lease = object()
+    admission_calls = 0
+    quota_reservation_calls = 0
+    forced_simultaneous_wait = False
+    deferred_to_idle_wait = False
+
+    class _DisconnectingDownstreamWebSocket:
+        def __init__(self) -> None:
+            self.receive_calls = 0
+            self.sent_text: list[str] = []
+
+        async def receive(self) -> dict[str, object]:
+            self.receive_calls += 1
+            if self.receive_calls == 1:
+                return {
+                    "type": "websocket.receive",
+                    "text": json.dumps(
+                        {
+                            "type": "response.create",
+                            "model": "gpt-5.4-mini",
+                            "instructions": "",
+                            "input": [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
+                            "stream": True,
+                        }
+                    ),
+                }
+            receiver_disconnect_waiting.set()
+            await upstream_close_waiting.wait()
+            release_race.set()
+            await asyncio.sleep(0)
+            return {"type": "websocket.disconnect"}
+
+        async def send_text(self, text: str) -> None:
+            cleanup_events.append("unexpected_downstream_send")
+            self.sent_text.append(text)
+
+        async def send_bytes(self, _data: bytes) -> None:
+            return None
+
+        async def close(self, code: int = 1000, reason: str | None = None) -> None:
+            del code, reason
+
+    class _CleanClosingUpstreamWebSocket(_FakeUpstreamWebSocket):
+        async def send_text(self, text: str) -> None:
+            await super().send_text(text)
+            request_sent.set()
+
+        async def receive(self) -> _FakeUpstreamMessage:
+            await request_sent.wait()
+            upstream_close_waiting.set()
+            await receiver_disconnect_waiting.wait()
+            await release_race.wait()
+            await asyncio.sleep(0)
+            return _FakeUpstreamMessage("close", close_code=1000)
+
+        async def close(self) -> None:
+            if not self.closed:
+                cleanup_events.append("first_upstream_closed")
+            await super().close()
+
+    class _UnusedReplayUpstreamWebSocket(_FakeUpstreamWebSocket):
+        async def send_text(self, text: str) -> None:
+            cleanup_events.append("unexpected_replay_send")
+            await super().send_text(text)
+
+        async def close(self) -> None:
+            cleanup_events.append("unexpected_replay_upstream_closed")
+            await super().close()
+
+    first_upstream = _CleanClosingUpstreamWebSocket([])
+    replay_upstream = _UnusedReplayUpstreamWebSocket([])
+    upstreams = deque([first_upstream, replay_upstream])
+    runtime_settings = _websocket_settings(
+        proxy_downstream_websocket_idle_timeout_seconds=0.0 if during_idle_recheck else 120.0
+    )
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def fake_connect_proxy_websocket(self, headers, **kwargs):
+        del self, headers
+        request_state = kwargs["request_state"]
+        captured_request_states.append(request_state)
+        request_state.websocket_stream_lease = stream_leases[len(captured_request_states) - 1]
+        return SimpleNamespace(id=f"acct_ws_disconnect_cleanup_{len(captured_request_states)}"), upstreams.popleft()
+
+    async def fake_acquire_account_response_create_lease(self, **kwargs):
+        del self, kwargs
+        return response_create_lease
+
+    async def fake_release_account_lease(lease):
+        if lease is stream_leases[0]:
+            cleanup_events.append("first_stream_lease_released")
+        elif lease is stream_leases[1]:
+            cleanup_events.append("unexpected_replay_stream_lease_released")
+        elif lease is response_create_lease:
+            cleanup_events.append("response_lease_released")
+        else:
+            pytest.fail("unexpected account lease released")
+
+    original_acquire_admission = proxy_module.ProxyService._acquire_request_state_response_create_admission
+
+    async def capture_acquire_admission(self, request_state, **kwargs):
+        nonlocal admission_calls
+        admission_calls += 1
+        await original_acquire_admission(self, request_state, **kwargs)
+
+    original_reserve_quota = proxy_module.ProxyService._reserve_websocket_api_key_usage
+
+    async def capture_reserve_quota(self, *args, **kwargs):
+        nonlocal quota_reservation_calls
+        quota_reservation_calls += 1
+        return await original_reserve_quota(self, *args, **kwargs)
+
+    original_wait = asyncio.wait
+
+    async def deterministic_wait(awaitables, *, timeout=None, return_when=asyncio.ALL_COMPLETED):
+        nonlocal deferred_to_idle_wait, forced_simultaneous_wait
+        waiters = set(awaitables)
+        completed, pending = await original_wait(waiters, timeout=timeout, return_when=return_when)
+        if (
+            not forced_simultaneous_wait
+            and len(waiters) == 2
+            and upstream_close_waiting.is_set()
+            and receiver_disconnect_waiting.is_set()
+        ):
+            await asyncio.gather(*waiters)
+            if during_idle_recheck and not deferred_to_idle_wait:
+                deferred_to_idle_wait = True
+                return set(), waiters
+            forced_simultaneous_wait = True
+            return waiters, set()
+        return completed, pending
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: runtime_settings)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_acquire_account_response_create_lease_or_overload",
+        fake_acquire_account_response_create_lease,
+    )
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_acquire_request_state_response_create_admission",
+        capture_acquire_admission,
+    )
+    monkeypatch.setattr(proxy_module.ProxyService, "_reserve_websocket_api_key_usage", capture_reserve_quota)
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", fake_release_account_lease)
+    monkeypatch.setattr(proxy_module.asyncio, "wait", deterministic_wait)
+
+    downstream = _DisconnectingDownstreamWebSocket()
+    await asyncio.wait_for(
+        service.proxy_responses_websocket(
+            cast(Any, downstream),
+            {"x-codex-turn-state": "turn_disconnect_cleanup_ws"},
+            codex_session_affinity=True,
+            openai_cache_affinity=True,
+            api_key=None,
+        ),
+        timeout=2.0,
+    )
+
+    assert forced_simultaneous_wait is True
+    assert deferred_to_idle_wait is during_idle_recheck
+    assert downstream.receive_calls == 2
+    assert first_upstream.closed is True
+    assert replay_upstream.closed is False
+    assert cleanup_events == [
+        "first_upstream_closed",
+        "first_stream_lease_released",
+        "response_lease_released",
+    ]
+    assert len(first_upstream.sent_text) == 1
+    assert replay_upstream.sent_text == []
+    assert list(upstreams) == [replay_upstream]
+    assert downstream.sent_text == []
+    assert len(captured_request_states) == 1
+    assert admission_calls == 1
+    assert quota_reservation_calls == 1
+    request_state = captured_request_states[0]
+    assert request_state.response_create_gate is None
+    assert request_state.response_create_gate_acquired is False
+    assert request_state.response_create_admission is None
+    assert request_state.account_response_create_lease is None
+    assert request_state.websocket_stream_lease is None
+    assert request_state.api_key_reservation is None
+
+
+@pytest.mark.asyncio
+async def test_proxy_responses_websocket_failed_simultaneous_receiver_aborts_before_replay(monkeypatch):
+    service = proxy_module.ProxyService(cast(Any, None))
+    cleanup_events: list[str] = []
+    captured_request_states: list[Any] = []
+    request_sent = asyncio.Event()
+    upstream_close_waiting = asyncio.Event()
+    receiver_exception_waiting = asyncio.Event()
+    release_race = asyncio.Event()
+    stream_leases = [object(), object()]
+    response_create_lease = object()
+    forced_simultaneous_wait = False
+
+    class _FailingDownstreamWebSocket:
+        def __init__(self) -> None:
+            self.receive_calls = 0
+            self.sent_text: list[str] = []
+
+        async def receive(self) -> dict[str, object]:
+            self.receive_calls += 1
+            if self.receive_calls == 1:
+                return {
+                    "type": "websocket.receive",
+                    "text": json.dumps(
+                        {
+                            "type": "response.create",
+                            "model": "gpt-5.4-mini",
+                            "instructions": "",
+                            "input": [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
+                            "stream": True,
+                        }
+                    ),
+                }
+            receiver_exception_waiting.set()
+            await upstream_close_waiting.wait()
+            release_race.set()
+            await asyncio.sleep(0)
+            raise RuntimeError("downstream receive failed")
+
+        async def send_text(self, text: str) -> None:
+            cleanup_events.append("pending_failed")
+            self.sent_text.append(text)
+
+        async def send_bytes(self, _data: bytes) -> None:
+            return None
+
+        async def close(self, code: int = 1000, reason: str | None = None) -> None:
+            del code, reason
+
+    class _CleanClosingUpstreamWebSocket(_FakeUpstreamWebSocket):
+        async def send_text(self, text: str) -> None:
+            await super().send_text(text)
+            request_sent.set()
+
+        async def receive(self) -> _FakeUpstreamMessage:
+            await request_sent.wait()
+            upstream_close_waiting.set()
+            await receiver_exception_waiting.wait()
+            await release_race.wait()
+            await asyncio.sleep(0)
+            return _FakeUpstreamMessage("close", close_code=1000)
+
+        async def close(self) -> None:
+            if not self.closed:
+                cleanup_events.append("first_upstream_closed")
+            await super().close()
+
+    class _UnusedReplayUpstreamWebSocket(_FakeUpstreamWebSocket):
+        async def close(self) -> None:
+            cleanup_events.append("unexpected_replay_upstream_closed")
+            await super().close()
+
+    first_upstream = _CleanClosingUpstreamWebSocket([])
+    replay_upstream = _UnusedReplayUpstreamWebSocket([])
+    upstreams = deque([first_upstream, replay_upstream])
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def fake_connect_proxy_websocket(self, headers, **kwargs):
+        del self, headers
+        request_state = kwargs["request_state"]
+        captured_request_states.append(request_state)
+        request_state.websocket_stream_lease = stream_leases[len(captured_request_states) - 1]
+        return SimpleNamespace(id=f"acct_ws_receiver_cleanup_{len(captured_request_states)}"), upstreams.popleft()
+
+    async def fake_acquire_account_response_create_lease(self, **kwargs):
+        del self, kwargs
+        return response_create_lease
+
+    async def fake_release_account_lease(lease):
+        if lease is stream_leases[0]:
+            cleanup_events.append("first_stream_lease_released")
+        elif lease is stream_leases[1]:
+            cleanup_events.append("unexpected_replay_stream_lease_released")
+        elif lease is response_create_lease:
+            cleanup_events.append("response_lease_released")
+        else:
+            pytest.fail("unexpected account lease released")
+
+    original_wait = asyncio.wait
+
+    async def deterministic_wait(awaitables, *, timeout=None, return_when=asyncio.ALL_COMPLETED):
+        nonlocal forced_simultaneous_wait
+        waiters = set(awaitables)
+        completed, pending = await original_wait(waiters, timeout=timeout, return_when=return_when)
+        if (
+            not forced_simultaneous_wait
+            and len(waiters) == 2
+            and upstream_close_waiting.is_set()
+            and receiver_exception_waiting.is_set()
+        ):
+            await asyncio.gather(*waiters, return_exceptions=True)
+            forced_simultaneous_wait = True
+            return waiters, set()
+        return completed, pending
+
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_acquire_account_response_create_lease_or_overload",
+        fake_acquire_account_response_create_lease,
+    )
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", fake_release_account_lease)
+    monkeypatch.setattr(proxy_module.asyncio, "wait", deterministic_wait)
+
+    downstream = _FailingDownstreamWebSocket()
+    with pytest.raises(RuntimeError, match="downstream receive failed"):
+        await asyncio.wait_for(
+            service.proxy_responses_websocket(
+                cast(Any, downstream),
+                {"x-codex-turn-state": "turn_receiver_cleanup_ws"},
+                codex_session_affinity=True,
+                openai_cache_affinity=True,
+                api_key=None,
+            ),
+            timeout=2.0,
+        )
+
+    assert forced_simultaneous_wait is True
+    assert downstream.receive_calls == 2
+    assert first_upstream.closed is True
+    assert replay_upstream.closed is False
+    assert cleanup_events == [
+        "first_upstream_closed",
+        "first_stream_lease_released",
+        "response_lease_released",
+    ]
+    assert len(first_upstream.sent_text) == 1
+    assert replay_upstream.sent_text == []
+    assert list(upstreams) == [replay_upstream]
+    assert downstream.sent_text == []
+    assert len(captured_request_states) == 1
+    request_state = captured_request_states[0]
+    assert request_state.response_create_gate is None
+    assert request_state.response_create_gate_acquired is False
+    assert request_state.response_create_admission is None
+    assert request_state.account_response_create_lease is None
+    assert request_state.websocket_stream_lease is None
+
+
+@pytest.mark.asyncio
+async def test_proxy_responses_websocket_replay_connect_failure_preserves_primary_when_receiver_also_fails(
+    monkeypatch,
+    caplog,
+):
+    service = proxy_module.ProxyService(cast(Any, None))
+    cleanup_events: list[str] = []
+    captured_request_states: list[Any] = []
+    request_sent = asyncio.Event()
+    replay_connect_started = asyncio.Event()
+    receiver_failure_started = asyncio.Event()
+    stream_lease = object()
+    response_create_lease = object()
+
+    class _FailingDownstreamWebSocket:
+        def __init__(self) -> None:
+            self.receive_calls = 0
+            self.sent_text: list[str] = []
+
+        async def receive(self) -> dict[str, object]:
+            self.receive_calls += 1
+            if self.receive_calls == 1:
+                return {
+                    "type": "websocket.receive",
+                    "text": json.dumps(
+                        {
+                            "type": "response.create",
+                            "model": "gpt-5.4-mini",
+                            "instructions": "",
+                            "input": [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
+                            "stream": True,
+                        }
+                    ),
+                }
+            await replay_connect_started.wait()
+            receiver_failure_started.set()
+            raise RuntimeError("downstream receive failed during replay connect")
+
+        async def send_text(self, text: str) -> None:
+            cleanup_events.append("pending_failed")
+            self.sent_text.append(text)
+
+        async def send_bytes(self, _data: bytes) -> None:
+            return None
+
+        async def close(self, code: int = 1000, reason: str | None = None) -> None:
+            del code, reason
+
+    class _CleanClosingUpstreamWebSocket(_FakeUpstreamWebSocket):
+        async def send_text(self, text: str) -> None:
+            await super().send_text(text)
+            request_sent.set()
+
+        async def receive(self) -> _FakeUpstreamMessage:
+            await request_sent.wait()
+            return _FakeUpstreamMessage("close", close_code=1000)
+
+        async def close(self) -> None:
+            if not self.closed:
+                cleanup_events.append("first_upstream_closed")
+            await super().close()
+
+    first_upstream = _CleanClosingUpstreamWebSocket([])
+    connect_calls = 0
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def fake_connect_proxy_websocket(self, headers, **kwargs):
+        nonlocal connect_calls
+        del self, headers
+        connect_calls += 1
+        request_state = kwargs["request_state"]
+        captured_request_states.append(request_state)
+        if connect_calls == 1:
+            request_state.websocket_stream_lease = stream_lease
+            return SimpleNamespace(id="acct_ws_replay_connect_primary"), first_upstream
+        replay_connect_started.set()
+        await receiver_failure_started.wait()
+        await asyncio.sleep(0)
+        raise RuntimeError("replay connect failed")
+
+    async def fake_acquire_account_response_create_lease(self, **kwargs):
+        del self, kwargs
+        return response_create_lease
+
+    async def fake_release_account_lease(lease):
+        if lease is None:
+            return
+        if lease is stream_lease:
+            cleanup_events.append("stream_lease_released")
+        elif lease is response_create_lease:
+            cleanup_events.append("response_lease_released")
+        else:
+            pytest.fail("unexpected account lease released")
+
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_acquire_account_response_create_lease_or_overload",
+        fake_acquire_account_response_create_lease,
+    )
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", fake_release_account_lease)
+
+    downstream = _FailingDownstreamWebSocket()
+    with pytest.raises(RuntimeError, match="replay connect failed"):
+        await asyncio.wait_for(
+            service.proxy_responses_websocket(
+                cast(Any, downstream),
+                {"x-codex-turn-state": "turn_replay_connect_primary_ws"},
+                codex_session_affinity=True,
+                openai_cache_affinity=True,
+                api_key=None,
+            ),
+            timeout=2.0,
+        )
+
+    assert connect_calls == 2
+    assert downstream.receive_calls == 2
+    assert first_upstream.closed is True
+    assert cleanup_events == [
+        "first_upstream_closed",
+        "stream_lease_released",
+        "response_lease_released",
+        "pending_failed",
+    ]
+    assert len(first_upstream.sent_text) == 1
+    assert len(downstream.sent_text) == 1
+    assert json.loads(downstream.sent_text[0])["type"] == "response.failed"
+    assert len(captured_request_states) == 2
+    assert captured_request_states[0] is captured_request_states[1]
+    request_state = captured_request_states[0]
+    assert request_state.response_create_gate is None
+    assert request_state.response_create_gate_acquired is False
+    assert request_state.response_create_admission is None
+    assert request_state.account_response_create_lease is None
+    assert request_state.websocket_stream_lease is None
+    assert "Downstream websocket receiver failed during session cleanup" in caplog.messages
+
+
 def test_backend_responses_websocket_reclaims_idle_downstream_session_and_upstream(app_instance, monkeypatch):
     fake_upstream = _FakeUpstreamWebSocket(
         [

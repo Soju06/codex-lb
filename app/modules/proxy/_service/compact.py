@@ -938,6 +938,21 @@ class _CompactMixin:
                         exc_info=True,
                     )
                     if preferred_account_id is not None:
+                        # File/previous-response-pinned requests cannot fail over,
+                        # so surface a retryable upstream_unavailable. On the HTTP
+                        # bridge / forwarded path the caller passes an
+                        # ``api_key_reservation_override`` with ``owns_reservation``
+                        # false, making ``compact_responses`` responsible for
+                        # settling the reservation. Settle it here BEFORE raising —
+                        # matching the post-401 forced-refresh pinned branch below —
+                        # so the API-key reservation is finalized instead of leaking
+                        # held quota when the pinned refresh claim times out.
+                        await proxy._settle_compact_api_key_usage(
+                            api_key=api_key,
+                            api_key_reservation=api_key_reservation,
+                            response=None,
+                            request_service_tier=request_service_tier,
+                        )
                         _raise_proxy_unavailable(message)
                     # Peer-claim contention is NOT the account's fault: its
                     # credentials are healthy and only its refresh claim is held
@@ -1088,11 +1103,18 @@ class _CompactMixin:
                                             request_service_tier=request_service_tier,
                                         )
                                         _raise_proxy_unavailable(message)
-                                    await proxy._handle_stream_error(
-                                        account,
-                                        {"message": message},
-                                        "upstream_unavailable",
-                                    )
+                                    # Peer-claim contention is NOT this account's
+                                    # fault: its credentials are healthy and only
+                                    # its refresh claim is held by another replica.
+                                    # Do NOT record an account health penalty
+                                    # (``record_error`` via ``_handle_stream_error``)
+                                    # for this transient claim timeout — that would
+                                    # push an otherwise-healthy account into backoff
+                                    # for normal cross-replica contention. Match the
+                                    # preflight branch above and the streaming /
+                                    # WebSocket paths, which only release + exclude
+                                    # the account and surface a retryable
+                                    # ``upstream_unavailable`` on exhaustion.
                                     last_exc = ProxyResponseError(502, openai_error("upstream_unavailable", message))
                                     excluded_account_ids.add(account.id)
                                     transient_exhausted = True

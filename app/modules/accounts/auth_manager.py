@@ -619,43 +619,32 @@ class AuthManager:
         * plaintext cannot be decrypted/compared -> raise the transient
           ``token_persist_conflict`` (we cannot prove a retry is safe).
 
-        When the bounded guarded retries are exhausted (a sustained same-plaintext
-        re-encryption storm out-raced every atomic CAS window) we raise the
-        transient ``token_persist_conflict`` so the whole refresh is retried once
-        the contention clears. That is acceptable and rare — it requires the
-        writer to out-race us on every one of ``_TOKEN_CAS_MAX_ATTEMPTS``
-        consecutive windows — and it never risks a clobber, unlike the removed
-        unconditional write.
+        When the bounded guarded retries are exhausted OR the claim/caller
+        deadline cuts the retry loop mid-storm, we do NOT drop the freshly rotated
+        token: we make ONE FINAL ciphertext-guarded persist attempt keyed on the
+        LAST-OBSERVED ciphertext (the row read in the immediately-preceding miss).
+        That final attempt is still a compare-and-set, so it is safe — it lands
+        only if nothing changed since that read (persisting our new token and
+        evicting the already-consumed one) and clobbers nothing otherwise. Only
+        when that final guarded attempt ALSO misses do we re-read once more and
+        decide: a genuinely different peer plaintext is ADOPTED (never
+        overwritten), and only a persistent same-plaintext re-encryption storm (or
+        undecryptable material) raises the transient ``token_persist_conflict``.
+
+        The transient raise is therefore ALWAYS the LAST RESORT *after* a guarded
+        persist ATTEMPT of the new token — never a substitute for attempting to
+        persist it. This is what ends the long "drop the rotated token vs clobber a
+        peer rotation" oscillation: deadline exhaustion still gets that one final
+        guarded attempt, because the deadline bounds the RETRY LOOP and the
+        network/admission waits, not this single cheap final safety UPDATE. The
+        raise is acceptable and rare — it requires the writer to out-race us on the
+        bounded retries AND the final attempt — and it never risks a clobber,
+        unlike the removed unconditional write.
         """
         consumed_plaintext = _decrypt_refresh_token_plaintext(self._encryptor, expected_refresh_token_encrypted)
         expected = expected_refresh_token_encrypted
-        for attempt in range(_TOKEN_CAS_MAX_ATTEMPTS):
-            # The FIRST guarded write always runs -- the single-use token was
-            # already consumed upstream, so it must be persisted best-effort. The
-            # RETRIES (same-plaintext re-encryption storm), however, are bounded
-            # by the claim/caller deadline too, not just the attempt count: a
-            # contended DB write must not keep the loop -- and the held claim --
-            # spinning past the budget, after which a peer could win the claim
-            # and re-exchange the already-consumed token. When the deadline has
-            # passed, stop and surface the transient conflict so the claim is
-            # released and the caller retries once contention clears.
-            if attempt > 0 and deadline is not None and time.monotonic() >= deadline:
-                logger.warning(
-                    "Token-refresh compare-and-set for account_id=%s exceeded the claim/caller "
-                    "deadline after %d attempt(s); surfacing a transient conflict and releasing the "
-                    "claim rather than looping past the budget",
-                    account.id,
-                    attempt,
-                )
-                raise RefreshError(
-                    "token_persist_conflict",
-                    (
-                        f"Token-refresh compare-and-set for account_id={account.id} exceeded the "
-                        f"refresh claim/caller deadline before it could persist rotated tokens"
-                    ),
-                    False,
-                    transport_error=True,
-                )
+        deadline_elapsed = False
+        for _attempt in range(_TOKEN_CAS_MAX_ATTEMPTS):
             if await write(expected):
                 # Guarded write landed: the row still held exactly the ciphertext
                 # we observed, so our freshly rotated token replaced it atomically
@@ -668,9 +657,11 @@ class AuthManager:
             latest_plaintext = _decrypt_refresh_token_plaintext(self._encryptor, latest.refresh_token_encrypted)
             if consumed_plaintext is None or latest_plaintext is None:
                 # Cannot prove plaintext identity, so we cannot prove another
-                # guarded retry (or an adoption) is safe. Surface a transient
-                # (non-permanent) error so the caller retries once the contention
-                # clears. ``transport_error`` keeps it out of the
+                # guarded retry (or an adoption) is safe. A guarded persist was
+                # already ATTEMPTED just above (it missed), so surfacing a
+                # transient (non-permanent) error here is still a last resort, not
+                # a raise-in-place-of-persist. The caller retries once the
+                # contention clears; ``transport_error`` keeps it out of the
                 # permanent-failure cooldown cache.
                 logger.warning(
                     "Token-refresh compare-and-set for account_id=%s missed and the stored "
@@ -697,26 +688,59 @@ class AuthManager:
             # lands only while the consumed material is still stored. No
             # unconditional write is ever issued.
             expected = latest.refresh_token_encrypted
-        # The bounded, always-guarded compare-and-set never landed under a
-        # sustained same-plaintext re-encryption storm: we could not win an atomic
-        # CAS window. Rather than fall back to an unconditional write (which could
-        # clobber a peer rotation landing in the read->write gap — the exact
-        # TOCTOU this helper now structurally forbids), surface a transient
-        # (non-permanent) error so the caller retries the whole refresh once the
+            # The RETRY LOOP -- not the final safety persist below -- is bounded by
+            # the claim/caller deadline: a contended DB write must not keep the
+            # loop (and the held claim) spinning past the budget, after which a
+            # peer could win the claim and re-exchange the already-consumed token.
+            # On deadline expiry we STOP retrying but still fall through to the
+            # single final guarded persist so the rotated token is never dropped
+            # unpersisted.
+            if deadline is not None and time.monotonic() >= deadline:
+                deadline_elapsed = True
+                break
+
+        # FINAL, always-guarded persist of the freshly rotated token, keyed on the
+        # LAST-OBSERVED ciphertext. Reached when the bounded retries were exhausted
+        # OR the deadline cut the retry loop. This is the invariant that ends the
+        # long "drop the rotated token vs clobber a peer rotation" oscillation: the
+        # transient raise is the LAST RESORT *after* a guarded persist ATTEMPT of
+        # the newly rotated token, never a substitute for it. It is a single
+        # compare-and-set, so it lands only if nothing changed since the last read
+        # (persisting our new token and evicting the consumed one) and clobbers
+        # nothing otherwise. Deadline exhaustion still gets this one attempt --
+        # the deadline bounds the RETRY LOOP and the network/admission waits, not
+        # this cheap final safety UPDATE.
+        if await write(expected):
+            return None
+        latest = await self._repo.get_by_id_fresh(account.id)
+        if latest is None:
+            # Row is gone; nothing to persist or adopt.
+            return None
+        latest_plaintext = _decrypt_refresh_token_plaintext(self._encryptor, latest.refresh_token_encrypted)
+        if consumed_plaintext is not None and latest_plaintext is not None and latest_plaintext != consumed_plaintext:
+            # A genuine peer rotation landed on the final re-read: ADOPT it (our
+            # freshly rotated token is legitimately superseded), never overwrite.
+            return _adopt_account_row(account, latest)
+        # The final guarded attempt also missed on unchanged (same-plaintext, or
+        # undecryptable) material: a sustained re-encryption storm out-raced every
+        # atomic CAS window, including this last safety persist. Only NOW -- after a
+        # guarded persist ATTEMPT of the new token -- surface the transient
+        # (non-permanent) conflict so the caller retries the whole refresh once the
         # contention clears. ``transport_error`` keeps it out of the
-        # permanent-failure cooldown cache.
+        # permanent-failure cooldown cache. This never risks a clobber, unlike the
+        # removed unconditional write.
         logger.warning(
-            "Token-refresh compare-and-set for account_id=%s kept missing on re-encrypted "
-            "same-plaintext material after %d attempts; surfacing a transient error so the caller "
-            "retries the whole refresh rather than risking a clobber with an unconditional write",
+            "Token-refresh compare-and-set for account_id=%s could not persist the freshly rotated "
+            "token even after a final guarded attempt (%s); surfacing a transient conflict so the "
+            "caller retries the whole refresh rather than risking a clobber",
             account.id,
-            _TOKEN_CAS_MAX_ATTEMPTS,
+            "claim/caller deadline elapsed" if deadline_elapsed else f"{_TOKEN_CAS_MAX_ATTEMPTS} attempts exhausted",
         )
         raise RefreshError(
             "token_persist_conflict",
             (
                 f"Token-refresh compare-and-set for account_id={account.id} could not persist "
-                f"rotated tokens after {_TOKEN_CAS_MAX_ATTEMPTS} attempts"
+                f"rotated tokens before a final guarded attempt missed on unchanged material"
             ),
             False,
             transport_error=True,

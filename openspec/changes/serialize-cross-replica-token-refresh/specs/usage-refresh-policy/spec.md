@@ -368,6 +368,8 @@ Refresh-token ciphertext writes MUST be compare-and-set at the repository layer.
 
 The `chatgpt_account_id` backfill (`_ensure_chatgpt_account_id`), which runs on every `ensure_fresh` — including the fast no-refresh path — for a legacy account still missing its `chatgpt_account_id`, MUST persist the derived `chatgpt_account_id` through the metadata-only writer, which structurally cannot touch token material. Its caller-time in-memory selection snapshot is not re-read under a claim, so routing the backfill through a token-writing method would risk clobbering a concurrent peer rotation of the single-use token that lands in the read→write window with already-consumed material; the metadata-only path removes that risk entirely (a concurrent rotation is simply not observable to this write, and the derived id is persisted without ever reading or writing the refresh-token ciphertext). No `ensure_fresh` path may perform an unconditional token write, and no metadata-only path may write token ciphertext at all.
 
+The post-exchange token persist MUST NOT drop a freshly rotated token on a compare-and-set miss. After the upstream OAuth exchange has succeeded (the old single-use refresh token consumed, a new one minted), a compare-and-set miss — whether the bounded same-plaintext re-encryption retries are exhausted OR the claim/caller deadline cuts the retry loop — MUST NOT raise a transient `token_persist_conflict` in place of attempting to persist the new token. On any such miss the newly-rotated token MUST get a FINAL ciphertext-guarded persist attempt keyed on the LAST-OBSERVED ciphertext (the ciphertext read in the immediately-preceding re-read) before any transient raise; because that attempt is itself a compare-and-set it lands only when nothing changed since the read (no clobber) and misses harmlessly otherwise. If that final guarded attempt MISSES, the system MUST re-read once more: a genuinely different stored plaintext means a peer rotation legitimately superseded ours and MUST be ADOPTED (never overwritten), while unchanged (same-plaintext) or undecryptable material is the only case that MAY then raise the transient conflict for the caller to retry. The deadline therefore bounds the RETRY LOOP and the network/admission waits, never this single final guarded safety persist — a crashed-storm retry budget can never be the reason a freshly minted token is dropped while the database keeps a consumed one.
+
 The permanent-status downgrade MUST have a SINGLE guarded authority. `AuthManager` (`_handle_permanent_refresh_failure`) owns the primary refresh-token-ciphertext-guarded compare-and-set. The proxy load balancer's `mark_permanent_failure` MUST NOT perform an UNGUARDED database status write on the permanent-refresh-failure path: its persistence MUST route through a compare-and-set conditioned on the account's refresh-token ciphertext (`update_status_if_current` with `expected_refresh_token_encrypted`), so a concurrent peer re-authentication/import rotation causes a MISS instead of clobbering the peer's repaired `ACTIVE`/rotated row back to `reauth_required` (and tearing down its sticky/bridge sessions). A genuine permanent failure MUST still result in exactly ONE guarded database downgrade: in the single-caller case `AuthManager` has already CAS-written the downgrade and mutated the in-memory object, so the load balancer's guarded write is predicate-skipped as redundant; the load balancer's guarded write covers only the callers whose in-memory object did not go through that CAS (an intra-process singleflight joiner sharing the winner's permanent error) and non-refresh permanent failures. No path may perform an unguarded status downgrade write on the refresh-permanent-failure path.
 
 The proxy warmup submit path MUST classify a refresh failure with the same taxonomy as the core proxy request paths: a transient cross-replica refresh-CLAIM-CONTENTION failure (`is_refresh_claim_contention` — the `refresh_claim_timeout`, `status_downgrade_conflict`, and `token_persist_conflict` codes) MUST surface as a retryable `upstream_unavailable` in the warmup result and request log, NOT as `invalid_api_key`, because the account's OAuth credentials are healthy (only its refresh claim is held by a peer replica). A permanent `RefreshError` keeps its `invalid_api_key` classification (and marks the permanent failure), and a genuine non-contention transport-level `RefreshError` also keeps `invalid_api_key`.
@@ -408,13 +410,28 @@ The proxy warmup submit path MUST classify a refresh failure with the same taxon
 - **WHEN** the proxy calls `mark_permanent_failure` for the account
 - **THEN** the single guarded status compare-and-set lands and the account is downgraded to `reauth_required`
 
-#### Scenario: Post-exchange persist stops at the claim/caller deadline instead of looping
+#### Scenario: Post-exchange persist makes a final guarded attempt when the deadline cuts the retry loop
 
-- **GIVEN** a claim winner completed the upstream exchange and enters the token-persist compare-and-set loop while holding the claim
+- **GIVEN** a claim winner completed the upstream exchange (new refresh token minted, old one consumed) and enters the token-persist compare-and-set loop while holding the claim
 - **AND** the guarded compare-and-set keeps missing on a sustained same-plaintext re-encryption storm while the claim/caller deadline has already passed
-- **WHEN** the loop would retry past the deadline
-- **THEN** only the first best-effort guarded write ran, and the loop stops and raises the transient (non-permanent) `token_persist_conflict` rather than looping until the attempt budget is exhausted
+- **WHEN** the deadline cuts the retry loop
+- **THEN** the loop stops retrying but STILL makes one FINAL ciphertext-guarded persist attempt keyed on the last-observed ciphertext (two guarded writes total, not the full attempt budget, and no unconditional write)
+- **AND** only because that final guarded attempt also misses on unchanged (same-plaintext) material is the transient (non-permanent) `token_persist_conflict` raised
 - **AND** the claim is released so the total claim-hold stays within the caller budget plus a small fixed release
+
+#### Scenario: Deadline-cut persist lands the rotated token when the stored plaintext is unchanged
+
+- **GIVEN** a claim winner completed the upstream exchange and the claim/caller deadline has already elapsed
+- **AND** the stored refresh-token plaintext is still exactly the consumed token (only re-encrypted), so the first guarded write missed on the shifted ciphertext
+- **WHEN** the deadline cuts the retry loop and the final ciphertext-guarded persist runs against the last-observed ciphertext
+- **THEN** the final guarded write lands the freshly rotated token, the database no longer holds the consumed token, and NO transient conflict is raised
+
+#### Scenario: Deadline-cut persist adopts a genuine peer rotation on the final re-read
+
+- **GIVEN** a claim winner completed the upstream exchange and the claim/caller deadline has already elapsed
+- **AND** a genuinely different peer rotation lands right before the final guarded persist
+- **WHEN** the final ciphertext-guarded persist misses the peer's ciphertext and the persist re-reads the row
+- **THEN** the stored plaintext is genuinely different, so the peer rotation is ADOPTED (the winner's freshly rotated token is legitimately superseded) rather than overwritten, and no unconditional write is ever issued
 
 #### Scenario: Warmup refresh-claim contention surfaces upstream_unavailable, not invalid_api_key
 

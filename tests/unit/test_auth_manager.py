@@ -1277,8 +1277,8 @@ async def test_refresh_raises_transient_when_cas_never_lands_on_same_plaintext_s
     left a TOCTOU gap where a genuine peer rotation landing after the final
     plaintext-confirming read was clobbered with the already-consumed material. The
     transient error is acceptable and rare (it requires the writer to out-race us on
-    every one of ``_TOKEN_CAS_MAX_ATTEMPTS`` consecutive windows) and can never
-    clobber."""
+    every one of ``_TOKEN_CAS_MAX_ATTEMPTS`` bounded retries AND the final guarded
+    persist attempt) and can never clobber."""
 
     async def _fake_refresh(_: str, **_kwargs: object) -> TokenRefreshResult:
         return TokenRefreshResult(
@@ -1315,9 +1315,10 @@ async def test_refresh_raises_transient_when_cas_never_lands_on_same_plaintext_s
     assert excinfo.value.code == "token_persist_conflict"
     assert excinfo.value.is_permanent is False
     assert excinfo.value.transport_error is True
-    # Exactly the bounded guarded CAS attempts ran; NO unconditional write was
-    # ever issued, so nothing could be clobbered and nothing was persisted.
-    assert len(repo.update_attempts) == auth_manager_module._TOKEN_CAS_MAX_ATTEMPTS
+    # The bounded guarded CAS retries plus the FINAL guarded persist attempt ran
+    # (attempt budget + 1); NO unconditional write was ever issued, so nothing
+    # could be clobbered and nothing was persisted.
+    assert len(repo.update_attempts) == auth_manager_module._TOKEN_CAS_MAX_ATTEMPTS + 1
     assert None not in repo.update_attempts
     assert all(expected is not None for expected in repo.update_attempts)
     assert repo.tokens_payload is None
@@ -1369,15 +1370,24 @@ async def test_ensure_chatgpt_account_id_backfill_never_writes_token_material(mo
 
 
 @pytest.mark.asyncio
-async def test_persist_cas_stops_at_deadline_instead_of_looping(monkeypatch):
-    """Regression (finding #3): the post-exchange token-persist compare-and-set
-    loop runs while the cross-replica refresh claim is held. It MUST be bounded
-    by the claim/caller deadline, not only the attempt count -- otherwise a
-    contended DB write can keep the loop (and the held claim) spinning past the
-    budget, after which a peer could win the claim and re-exchange the consumed
-    single-use token. With the deadline already passed, only the FIRST
-    best-effort guarded write runs; the storm retries are abandoned and a
-    transient token_persist_conflict is raised so the claim is released."""
+async def test_persist_cas_deadline_still_attempts_final_guarded_persist_before_raising(monkeypatch):
+    """Regression (finding: do not drop rotated tokens after CAS misses): the
+    post-exchange token-persist compare-and-set loop runs while the cross-replica
+    refresh claim is held and is bounded by the claim/caller deadline -- a
+    contended DB write must not keep the loop (and the held claim) spinning past
+    the budget. But the deadline MUST bound only the RETRY LOOP, never drop the
+    freshly rotated single-use token unpersisted: on deadline expiry the persist
+    path STILL makes one FINAL ciphertext-guarded persist attempt keyed on the
+    last-observed ciphertext before raising.
+
+    Here the write is a sustained same-plaintext re-encryption storm that never
+    lets an atomic CAS window land (the PATHOLOGICAL case). Even so, the final
+    guarded attempt runs (two guarded writes total, not the full loop), and only
+    because that final attempt ALSO misses on unchanged (same-plaintext) material
+    is the transient ``token_persist_conflict`` raised so the claim is released
+    and the caller retries once contention clears. The DB is left holding the
+    consumed token in this rare storm, but the raise is transient (non-permanent)
+    -- documented, bounded, and retried -- and never a clobber."""
 
     async def _fake_refresh(_: str, **_kwargs: object) -> TokenRefreshResult:
         return TokenRefreshResult(
@@ -1416,10 +1426,264 @@ async def test_persist_cas_stops_at_deadline_instead_of_looping(monkeypatch):
     assert excinfo.value.code == "token_persist_conflict"
     assert excinfo.value.is_permanent is False
     assert excinfo.value.transport_error is True
-    # Only the first best-effort guarded write ran before the deadline abandoned
-    # the storm retries -- NOT the full _TOKEN_CAS_MAX_ATTEMPTS loop.
-    assert len(repo.update_attempts) == 1
+    # The deadline cut the retry loop after the first guarded write, but a FINAL
+    # guarded persist attempt still ran before raising: two guarded writes, NOT
+    # the full _TOKEN_CAS_MAX_ATTEMPTS loop, and NO unconditional write.
+    assert len(repo.update_attempts) == 2
     assert None not in repo.update_attempts
+    assert all(expected is not None for expected in repo.update_attempts)
+
+
+class _TokenCasLandsOnFinalGuardedPersistRepo(_DummyRepo):
+    """Real compare-and-set repo whose reads are STABLE: ``get_by_id_fresh``
+    reflects current DB truth on the row but does not mutate it, so a guarded
+    write keyed on the just-read ciphertext lands. Seeded with a re-encryption of
+    the consumed plaintext so the FIRST guarded write (against the caller's
+    original ciphertext) misses; the FINAL guarded persist keyed on the
+    last-observed ciphertext then lands. Models the deadline-cut path where
+    nothing actually changed since the last read, so the freshly rotated token is
+    persisted rather than dropped."""
+
+    def __init__(self, account: Account, *, plaintext: str, encryptor: TokenEncryptor) -> None:
+        super().__init__()
+        self._encryptor = encryptor
+        self.accounts_by_id[account.id] = account
+        self._db_ciphertext = encryptor.encrypt(plaintext)
+        self.update_attempts: list[bytes | None] = []
+
+    async def get_by_id_fresh(self, account_id: str) -> Account | None:
+        row = self.accounts_by_id.get(account_id)
+        if row is None:
+            return None
+        row.refresh_token_encrypted = self._db_ciphertext
+        return row
+
+    async def rotate_tokens(
+        self,
+        account_id: str,
+        access_token_encrypted: bytes,
+        refresh_token_encrypted: bytes,
+        id_token_encrypted: bytes,
+        last_refresh: datetime,
+        *,
+        expected_refresh_token_encrypted: bytes,
+        plan_type: str | None = None,
+        email: str | None = None,
+        chatgpt_account_id: str | None = None,
+        chatgpt_user_id: str | None = None,
+        workspace_id: str | None = None,
+        workspace_label: str | None = None,
+        seat_type: str | None = None,
+    ) -> bool:
+        self.update_attempts.append(expected_refresh_token_encrypted)
+        if expected_refresh_token_encrypted is not None and expected_refresh_token_encrypted != self._db_ciphertext:
+            return False
+        self._db_ciphertext = refresh_token_encrypted
+        return await super().rotate_tokens(
+            account_id,
+            access_token_encrypted=access_token_encrypted,
+            refresh_token_encrypted=refresh_token_encrypted,
+            id_token_encrypted=id_token_encrypted,
+            last_refresh=last_refresh,
+            plan_type=plan_type,
+            email=email,
+            chatgpt_account_id=chatgpt_account_id,
+            chatgpt_user_id=chatgpt_user_id,
+            workspace_id=workspace_id,
+            workspace_label=workspace_label,
+            seat_type=seat_type,
+            expected_refresh_token_encrypted=expected_refresh_token_encrypted,
+        )
+
+
+@pytest.mark.asyncio
+async def test_persist_cas_deadline_lands_final_guarded_persist(monkeypatch):
+    """Regression (finding: do not drop rotated tokens after CAS misses): when the
+    claim/caller deadline has ALREADY elapsed after a successful upstream exchange
+    and the stored plaintext is still exactly the consumed token (only
+    re-encrypted), the FINAL ciphertext-guarded persist keyed on the last-observed
+    ciphertext MUST land the freshly rotated token. The DB no longer holds the
+    consumed token and NO transient conflict is raised -- the deadline bounds the
+    retry loop, not this one safety persist."""
+
+    async def _fake_refresh(_: str, **_kwargs: object) -> TokenRefreshResult:
+        return TokenRefreshResult(
+            access_token="access-new",
+            refresh_token="refresh-new",
+            id_token="id-new",
+            account_id="acc_persist_deadline_lands",
+            plan_type="pro",
+            email=None,
+        )
+
+    monkeypatch.setattr(auth_manager_module, "refresh_access_token", _fake_refresh)
+
+    encryptor = TokenEncryptor()
+    account = Account(
+        id="acc_persist_deadline_lands",
+        email="user@example.com",
+        plan_type="pro",
+        access_token_encrypted=encryptor.encrypt("access-old"),
+        refresh_token_encrypted=encryptor.encrypt("refresh-old"),
+        id_token_encrypted=encryptor.encrypt("id-old"),
+        last_refresh=utcnow(),
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
+    )
+    repo = _TokenCasLandsOnFinalGuardedPersistRepo(account, plaintext="refresh-old", encryptor=encryptor)
+    manager = AuthManager(cast(AccountsRepositoryPort, repo))
+
+    result = await manager._perform_refresh(
+        account,
+        refresh_token_encrypted=account.refresh_token_encrypted,
+        deadline=time.monotonic() - 1.0,
+    )
+
+    # The freshly rotated token is persisted via the final guarded CAS; the DB no
+    # longer holds the consumed token and no transient was raised.
+    assert result is account
+    assert encryptor.decrypt(result.refresh_token_encrypted) == "refresh-new"
+    assert repo.tokens_payload is not None
+    assert encryptor.decrypt(cast(bytes, repo.tokens_payload["refresh_token_encrypted"])) == "refresh-new"
+    assert encryptor.decrypt(repo._db_ciphertext) == "refresh-new"
+    # First guarded write missed (seeded re-encryption); the final guarded write
+    # landed. No unconditional (``expected=None``) write was ever issued.
+    assert len(repo.update_attempts) == 2
+    assert None not in repo.update_attempts
+
+
+class _TokenCasPeerRotationOnFinalPersistRepo(_DummyRepo):
+    """Real compare-and-set repo where the deadline cuts the retry loop after one
+    same-plaintext re-encryption miss, then a genuinely DIFFERENT peer rotation
+    lands right before the FINAL guarded persist. The final guarded write misses
+    the peer's ciphertext (clobbering nothing) and the persist re-reads, sees the
+    different plaintext, and ADOPTS the peer rotation instead of overwriting with
+    the already-consumed token."""
+
+    def __init__(
+        self,
+        account: Account,
+        *,
+        consumed_plaintext: str,
+        peer_ciphertext: bytes,
+        encryptor: TokenEncryptor,
+    ) -> None:
+        super().__init__()
+        self._encryptor = encryptor
+        self._peer_ciphertext = peer_ciphertext
+        self.accounts_by_id[account.id] = account
+        # Seed a re-encryption of the consumed token so the first guarded write misses.
+        self._db_ciphertext = encryptor.encrypt(consumed_plaintext)
+        self._reads = 0
+        self.update_attempts: list[bytes | None] = []
+
+    async def get_by_id_fresh(self, account_id: str) -> Account | None:
+        row = self.accounts_by_id.get(account_id)
+        if row is None:
+            return None
+        self._reads += 1
+        row.refresh_token_encrypted = self._db_ciphertext
+        if self._reads == 1:
+            # After the first miss's re-read (same plaintext), a genuine peer
+            # rotation commits before the final guarded persist runs.
+            self._db_ciphertext = self._peer_ciphertext
+        return row
+
+    async def rotate_tokens(
+        self,
+        account_id: str,
+        access_token_encrypted: bytes,
+        refresh_token_encrypted: bytes,
+        id_token_encrypted: bytes,
+        last_refresh: datetime,
+        *,
+        expected_refresh_token_encrypted: bytes,
+        plan_type: str | None = None,
+        email: str | None = None,
+        chatgpt_account_id: str | None = None,
+        chatgpt_user_id: str | None = None,
+        workspace_id: str | None = None,
+        workspace_label: str | None = None,
+        seat_type: str | None = None,
+    ) -> bool:
+        self.update_attempts.append(expected_refresh_token_encrypted)
+        if expected_refresh_token_encrypted is not None and expected_refresh_token_encrypted != self._db_ciphertext:
+            return False
+        self._db_ciphertext = refresh_token_encrypted
+        return await super().rotate_tokens(
+            account_id,
+            access_token_encrypted=access_token_encrypted,
+            refresh_token_encrypted=refresh_token_encrypted,
+            id_token_encrypted=id_token_encrypted,
+            last_refresh=last_refresh,
+            plan_type=plan_type,
+            email=email,
+            chatgpt_account_id=chatgpt_account_id,
+            chatgpt_user_id=chatgpt_user_id,
+            workspace_id=workspace_id,
+            workspace_label=workspace_label,
+            seat_type=seat_type,
+            expected_refresh_token_encrypted=expected_refresh_token_encrypted,
+        )
+
+
+@pytest.mark.asyncio
+async def test_persist_cas_adopts_peer_rotation_on_final_guarded_persist(monkeypatch):
+    """Regression (finding: do not drop rotated tokens after CAS misses): when the
+    deadline cuts the retry loop and a genuinely different peer rotation lands
+    right before the FINAL guarded persist, the persist MUST adopt the peer
+    rotation (its freshly rotated token is legitimately superseded) rather than
+    overwrite it. Every write is a ciphertext-guarded CAS, so the final write
+    misses the peer's ciphertext (clobbering nothing) and the peer row is adopted;
+    no unconditional write is ever issued and no transient conflict is raised."""
+
+    async def _fake_refresh(_: str, **_kwargs: object) -> TokenRefreshResult:
+        return TokenRefreshResult(
+            access_token="access-new",
+            refresh_token="refresh-new",
+            id_token="id-new",
+            account_id="acc_persist_deadline_peer",
+            plan_type="pro",
+            email=None,
+        )
+
+    monkeypatch.setattr(auth_manager_module, "refresh_access_token", _fake_refresh)
+
+    encryptor = TokenEncryptor()
+    account = Account(
+        id="acc_persist_deadline_peer",
+        email="user@example.com",
+        plan_type="pro",
+        access_token_encrypted=encryptor.encrypt("access-old"),
+        refresh_token_encrypted=encryptor.encrypt("refresh-old"),
+        id_token_encrypted=encryptor.encrypt("id-old"),
+        last_refresh=utcnow(),
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
+    )
+    peer_ciphertext = encryptor.encrypt("refresh-peer")
+    repo = _TokenCasPeerRotationOnFinalPersistRepo(
+        account,
+        consumed_plaintext="refresh-old",
+        peer_ciphertext=peer_ciphertext,
+        encryptor=encryptor,
+    )
+    manager = AuthManager(cast(AccountsRepositoryPort, repo))
+
+    result = await manager._perform_refresh(
+        account,
+        refresh_token_encrypted=account.refresh_token_encrypted,
+        deadline=time.monotonic() - 1.0,
+    )
+
+    # The peer's rotation is adopted, never overwritten with the consumed token.
+    assert result is account
+    assert encryptor.decrypt(result.refresh_token_encrypted) == "refresh-peer"
+    # No unconditional (``expected=None``) write, and this attempt persisted
+    # nothing of its own (the peer's row was adopted).
+    assert None not in repo.update_attempts
+    assert all(expected is not None for expected in repo.update_attempts)
+    assert repo.tokens_payload is None
 
 
 class _TokenCasPeerRotationInReadWriteGapRepo(_DummyRepo):

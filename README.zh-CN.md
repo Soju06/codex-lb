@@ -284,7 +284,7 @@ opencode
           {
             "id": "gpt-5.6-sol",
             "name": "gpt-5.6-sol (codex-lb)",
-            "contextWindow": 1050000,
+            "contextWindow": 372000,
             "contextTokens": 372000,
             "maxTokens": 4096,
             "input": ["text"],
@@ -293,7 +293,7 @@ opencode
           {
             "id": "gpt-5.6-terra",
             "name": "gpt-5.6-terra (codex-lb)",
-            "contextWindow": 1050000,
+            "contextWindow": 372000,
             "contextTokens": 372000,
             "maxTokens": 4096,
             "input": ["text"],
@@ -302,7 +302,7 @@ opencode
           {
             "id": "gpt-5.6-luna",
             "name": "gpt-5.6-luna (codex-lb)",
-            "contextWindow": 1050000,
+            "contextWindow": 372000,
             "contextTokens": 372000,
             "maxTokens": 4096,
             "input": ["text"],

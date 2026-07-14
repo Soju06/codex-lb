@@ -555,6 +555,7 @@ async def test_proxy_responses_compaction_trigger_streams_single_compaction_item
             {
                 "object": "response.compaction",
                 "compaction_summary": {
+                    "id": "cmp_trigger_summary",
                     "encrypted_content": "ENCRYPTED_CONTEXT_COMPACTION_SUMMARY",
                     "summary_text": "condensed thread state",
                 },
@@ -598,11 +599,13 @@ async def test_proxy_responses_compaction_trigger_streams_single_compaction_item
     assert "include" not in compact_payload
     assert "stream" not in compact_payload
     assert events[0]["item"] == {
+        "id": "cmp_trigger_summary",
         "type": "compaction",
         "encrypted_content": "ENCRYPTED_CONTEXT_COMPACTION_SUMMARY",
     }
     assert events[1]["response"]["output"] == [
         {
+            "id": "cmp_trigger_summary",
             "type": "compaction",
             "encrypted_content": "ENCRYPTED_CONTEXT_COMPACTION_SUMMARY",
         }

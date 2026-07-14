@@ -7055,7 +7055,7 @@ def test_backend_responses_websocket_slims_historical_inline_artifacts_and_succe
 
 
 def test_backend_responses_websocket_keeps_downstream_open_after_clean_upstream_close(app_instance, monkeypatch):
-    first_upstream = _FakeUpstreamWebSocket(
+    first_upstream = _SequencedUpstreamWebSocket(
         [
             _FakeUpstreamMessage(
                 "text",
@@ -7078,8 +7078,8 @@ def test_backend_responses_websocket_keeps_downstream_open_after_clean_upstream_
                     separators=(",", ":"),
                 ),
             ),
-            _FakeUpstreamMessage("close", close_code=1000),
-        ]
+        ],
+        deferred_message_batches=[[], [_FakeUpstreamMessage("close", close_code=1000)]],
     )
     second_upstream = _FakeUpstreamWebSocket(
         [
@@ -7189,6 +7189,8 @@ def test_backend_responses_websocket_keeps_downstream_open_after_clean_upstream_
     assert [event["type"] for event in first_events] == ["response.created", "response.completed"]
     assert [event["type"] for event in second_events] == ["response.created", "response.completed"]
     assert connect_models == ["gpt-5.4", "gpt-5.5"]
+    assert [json.loads(text)["model"] for text in first_upstream.sent_text] == ["gpt-5.4", "gpt-5.5"]
+    assert [json.loads(text)["model"] for text in second_upstream.sent_text] == ["gpt-5.5"]
 
 
 def test_backend_responses_websocket_reclaims_idle_downstream_session_and_upstream(app_instance, monkeypatch):

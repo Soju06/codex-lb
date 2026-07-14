@@ -699,6 +699,7 @@ class _WebSocketMixin:
         upstream_turn_state: str | None = _sticky_key_from_turn_state_header(headers)
         upstream_account_id: str | None = None
         downstream_activity = _DownstreamWebSocketActivity()
+        downstream_receive_task: asyncio.Task[Any] | None = None
         replay_request_state: _WebSocketRequestState | None = None
 
         async def release_current_account_lease() -> None:
@@ -797,14 +798,28 @@ class _WebSocketMixin:
                 else:
                     downstream_idle_timeout_seconds = runtime_settings.proxy_downstream_websocket_idle_timeout_seconds
                     message: Any | None = None
-                    try:
-                        message = await asyncio.wait_for(
-                            websocket.receive(),
-                            timeout=min(
-                                downstream_idle_timeout_seconds, _facade()._DOWNSTREAM_WEBSOCKET_RECEIVE_POLL_SECONDS
-                            ),
-                        )
-                    except asyncio.TimeoutError:
+                    if downstream_receive_task is None:
+                        downstream_receive_task = asyncio.create_task(websocket.receive())
+                    receive_waiters: set[asyncio.Task[Any]] = {downstream_receive_task}
+                    if upstream_reader is not None:
+                        receive_waiters.add(upstream_reader)
+                    completed_waiters, _ = await asyncio.wait(
+                        receive_waiters,
+                        timeout=min(
+                            downstream_idle_timeout_seconds, _facade()._DOWNSTREAM_WEBSOCKET_RECEIVE_POLL_SECONDS
+                        ),
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if downstream_receive_task in completed_waiters:
+                        message = downstream_receive_task.result()
+                        downstream_receive_task = None
+                    elif upstream_reader is not None and upstream_reader in completed_waiters:
+                        # Keep the pending downstream receive alive while the
+                        # completed upstream generation is retired.  Cancelling
+                        # and recreating the ASGI receive here can consume the
+                        # next response.create during a clean-close rollover.
+                        continue
+                    else:
                         if not await proxy._downstream_websocket_is_idle(
                             pending_requests,
                             pending_lock=pending_lock,
@@ -814,24 +829,34 @@ class _WebSocketMixin:
                             continue
                         idle_close = False
                         async with client_send_lock:
-                            if await proxy._downstream_websocket_is_idle(
+                            if not await proxy._downstream_websocket_is_idle(
                                 pending_requests,
                                 pending_lock=pending_lock,
                                 downstream_activity=downstream_activity,
                                 idle_timeout_seconds=downstream_idle_timeout_seconds,
                             ):
+                                continue
+                            idle_waiters: set[asyncio.Task[Any]] = {downstream_receive_task}
+                            if upstream_reader is not None:
+                                idle_waiters.add(upstream_reader)
+                            completed_idle_waiters, _ = await asyncio.wait(
+                                idle_waiters,
+                                timeout=0.05,
+                                return_when=asyncio.FIRST_COMPLETED,
+                            )
+                            if downstream_receive_task in completed_idle_waiters:
+                                message = downstream_receive_task.result()
+                                downstream_receive_task = None
+                            elif upstream_reader is not None and upstream_reader in completed_idle_waiters:
+                                continue
+                            else:
                                 try:
-                                    message = await asyncio.wait_for(websocket.receive(), timeout=0.05)
-                                except asyncio.TimeoutError:
-                                    try:
-                                        await websocket.close(
-                                            code=1001, reason=_facade()._DOWNSTREAM_WEBSOCKET_IDLE_CLOSE_REASON
-                                        )
-                                    except Exception:
-                                        _facade().logger.debug(
-                                            "Failed to close idle downstream websocket", exc_info=True
-                                        )
-                                    idle_close = True
+                                    await websocket.close(
+                                        code=1001, reason=_facade()._DOWNSTREAM_WEBSOCKET_IDLE_CLOSE_REASON
+                                    )
+                                except Exception:
+                                    _facade().logger.debug("Failed to close idle downstream websocket", exc_info=True)
+                                idle_close = True
                         if idle_close:
                             break
                     assert message is not None
@@ -1389,6 +1414,11 @@ class _WebSocketMixin:
                     account = None
                     continue
         finally:
+            if downstream_receive_task is not None:
+                await _facade()._await_cancelled_task(
+                    downstream_receive_task,
+                    label="proxy websocket downstream receiver",
+                )
             if upstream_reader is not None:
                 await _facade()._await_cancelled_task(upstream_reader, label="proxy websocket upstream reader")
             if upstream is not None:

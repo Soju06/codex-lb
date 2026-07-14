@@ -88,6 +88,7 @@ DRAIN_PRIMARY_THRESHOLD_PCT = 85.0
 DRAIN_SECONDARY_THRESHOLD_PCT = 90.0
 DRAIN_ERROR_WINDOW_SECONDS = 60.0
 DRAIN_ERROR_COUNT_THRESHOLD = 2
+ERROR_BACKOFF_THRESHOLD = 3
 PROBE_QUIET_SECONDS = 60.0
 PROBE_SUCCESS_STREAK_REQUIRED = 3
 ROUTING_POLICY_NORMAL = "normal"
@@ -467,8 +468,8 @@ def select_account(
             state.error_count = 0
         if state.cooldown_until and current < state.cooldown_until:
             continue
-        if state.error_count >= 3:
-            backoff = min(300, 30 * (2 ** (state.error_count - 3)))
+        if state.error_count >= ERROR_BACKOFF_THRESHOLD:
+            backoff = min(300, 30 * (2 ** (state.error_count - ERROR_BACKOFF_THRESHOLD)))
             if state.last_error_at and current - state.last_error_at < backoff:
                 in_error_backoff.append(state)
                 continue
@@ -505,7 +506,7 @@ def select_account(
         if allow_backoff_fallback and (len(in_error_backoff) > 1 or (in_error_backoff and hard_blocked_exists)):
 
             def _backoff_expires_at(s: AccountState) -> float:
-                backoff = min(300, 30 * (2 ** (s.error_count - 3)))
+                backoff = min(300, 30 * (2 ** (s.error_count - ERROR_BACKOFF_THRESHOLD)))
                 return (s.last_error_at or 0.0) + backoff
 
             available.append(min(in_error_backoff, key=_backoff_expires_at))

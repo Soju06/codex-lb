@@ -5,9 +5,15 @@ from typing import Any, cast
 
 import aiohttp
 import pytest
+from aiohttp.client_reqrep import ConnectionKey
 from python_socks import ProxyType
 
-from app.core.clients.codex import CodexClient, require_route_or_direct_egress_opt_in
+from app.core.clients.codex import (
+    CodexClient,
+    CodexTransportDispatchState,
+    CodexTransportError,
+    require_route_or_direct_egress_opt_in,
+)
 from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
 
 pytestmark = pytest.mark.unit
@@ -40,6 +46,31 @@ class _Session:
     async def ws_connect(self, url: str, **kwargs: Any) -> object:
         self.calls.append({"url": url, **kwargs})
         return object()
+
+
+def _proxy_connect_error() -> aiohttp.ClientProxyConnectionError:
+    key = ConnectionKey(
+        host="proxy.test",
+        port=8080,
+        is_ssl=False,
+        ssl=False,
+        proxy=None,
+        proxy_auth=None,
+        proxy_headers_hash=None,
+    )
+    return aiohttp.ClientProxyConnectionError(key, OSError("proxy credentials must stay private"))
+
+
+class _ProxyConnectFailureSession(_Session):
+    def __init__(self, *, fail_all: bool = False) -> None:
+        super().__init__()
+        self.fail_all_proxy_connects = fail_all
+
+    async def request(self, method: str, url: str, **kwargs: Any) -> _Response:
+        self.calls.append({"method": method, "url": url, **kwargs})
+        if self.fail_all_proxy_connects or len(self.calls) == 1:
+            raise _proxy_connect_error()
+        return _Response(headers={"content-type": "application/json"})
 
 
 class _HandshakeFailure(Exception):
@@ -209,6 +240,49 @@ async def test_non_idempotent_request_failure_does_not_fallback(route: ResolvedU
     assert "ep_1" in str(exc_info.value)
     assert len(session.calls) == 1
     assert session.calls[0]["proxy"] == "http://u:p@proxy.test:8080"
+
+
+@pytest.mark.asyncio
+async def test_non_idempotent_pre_dispatch_proxy_failure_uses_same_pool_fallback(
+    route: ResolvedUpstreamRoute,
+) -> None:
+    session = _ProxyConnectFailureSession()
+    client = CodexClient(session)
+
+    result = await client.request_with_route_metadata(
+        "POST",
+        "https://upstream.test",
+        route=route,
+        buffer_response=False,
+        json={"x": 1},
+    )
+
+    assert result.fallback_used is True
+    assert result.route.endpoint_id == "ep_2"
+    assert [call["proxy"] for call in session.calls] == [
+        "http://u:p@proxy.test:8080",
+        "http://proxy-two.test:8081",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_exhausted_proxy_connect_failures_preserve_pre_dispatch_provenance(
+    route: ResolvedUpstreamRoute,
+) -> None:
+    client = CodexClient(_ProxyConnectFailureSession(fail_all=True))
+
+    with pytest.raises(CodexTransportError) as exc_info:
+        await client.request_with_route_metadata(
+            "POST",
+            "https://upstream.test",
+            route=route,
+            buffer_response=False,
+            json={"x": 1},
+        )
+
+    assert exc_info.value.dispatch_state is CodexTransportDispatchState.NOT_DISPATCHED
+    assert exc_info.value.exception_type == "ClientProxyConnectionError"
+    assert "credentials must stay private" not in str(exc_info.value)
 
 
 @pytest.mark.asyncio

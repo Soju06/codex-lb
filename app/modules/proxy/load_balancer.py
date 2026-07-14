@@ -13,6 +13,7 @@ from uuid import uuid4
 
 from app.core import usage as usage_core
 from app.core.balancer import (
+    ERROR_BACKOFF_THRESHOLD,
     HEALTH_TIER_DRAINING,
     HEALTH_TIER_HEALTHY,
     HEALTH_TIER_PROBING,
@@ -1535,7 +1536,17 @@ class LoadBalancer:
     async def record_error(self, account: Account) -> None:
         await self.record_errors(account, 1)
 
-    async def record_errors(self, account: Account, count: int) -> None:
+    async def record_error_backoff(self, account: Account) -> None:
+        """Record one error and immediately enter the bounded transient backoff."""
+        await self.record_errors(account, 1, minimum_error_count=ERROR_BACKOFF_THRESHOLD)
+
+    async def record_errors(
+        self,
+        account: Account,
+        count: int,
+        *,
+        minimum_error_count: int = 0,
+    ) -> None:
         """Record *count* transient errors in a single lock acquisition."""
         if count < 1:
             return
@@ -1543,7 +1554,7 @@ class LoadBalancer:
         async with lock:
             account_snapshot = _clone_account(account)
             state = self._state_for(account)
-            state.error_count += count
+            state.error_count = max(state.error_count + count, minimum_error_count)
             state.last_error_at = time.time()
             self._sync_runtime_state(account, state)
             runtime = self._runtime.get(account.id)

@@ -1,4 +1,5 @@
 from app.core.balancer.logic import (
+    ERROR_BACKOFF_THRESHOLD,
     HEALTH_TIER_DRAINING,
     HEALTH_TIER_HEALTHY,
     HEALTH_TIER_PROBING,
@@ -33,6 +34,7 @@ __all__ = [
     "HEALTH_TIER_DRAINING",
     "HEALTH_TIER_HEALTHY",
     "HEALTH_TIER_PROBING",
+    "ERROR_BACKOFF_THRESHOLD",
     "REAUTH_REQUIRED_FAILURE_CODES",
     "AccountState",
     "RoutingCost",

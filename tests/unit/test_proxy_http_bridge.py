@@ -18,6 +18,7 @@ import pytest
 from fastapi import WebSocket
 
 from app.core.auth.refresh import RefreshError
+from app.core.clients.codex import CodexTransportDispatchState
 from app.core.clients.proxy import CODEX_RESPONSES_LITE_WEBSOCKET_METADATA_KEY, ProxyResponseError
 from app.core.clients.proxy_websocket import (
     CodexResponsesWebSocket,
@@ -59,6 +60,17 @@ def _without_installation_metadata(text: str) -> dict[str, Any]:
 
 def _make_app_settings(*, bridge_enabled: bool = True, **overrides: Any) -> Settings:
     return Settings(http_responses_session_bridge_enabled=bridge_enabled, **overrides)
+
+
+def _pre_dispatch_proxy_error(message: str = "sanitized proxy connect failure") -> ProxyResponseError:
+    return ProxyResponseError(
+        502,
+        openai_error("upstream_unavailable", message),
+        failure_phase="connect",
+        failure_detail="proxy_connect_pre_dispatch",
+        failure_exception_type="ClientProxyConnectionError",
+        upstream_dispatch_state=CodexTransportDispatchState.NOT_DISPATCHED,
+    )
 
 
 def _make_bridge_session(
@@ -3516,6 +3528,173 @@ async def test_create_http_bridge_session_passes_dashboard_reset_window_to_selec
 
     assert selection_kwargs[0]["prefer_earlier_reset_accounts"] is True
     assert selection_kwargs[0]["prefer_earlier_reset_window"] == "primary"
+
+
+@pytest.mark.asyncio
+async def test_create_http_bridge_session_fails_over_confirmed_proxy_connect_after_lease_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    settings = SimpleNamespace(
+        prefer_earlier_reset_accounts=False,
+        prefer_earlier_reset_window="secondary",
+        routing_strategy="usage_weighted",
+    )
+    account_a = cast(Any, SimpleNamespace(id="acc-proxy-a", status=AccountStatus.ACTIVE, plan_type="plus"))
+    account_b = cast(Any, SimpleNamespace(id="acc-proxy-b", status=AccountStatus.ACTIVE, plan_type="plus"))
+    lease_a = proxy_service.AccountLease("lease-bridge-a", account_a.id, "stream", time.monotonic())
+    lease_b = proxy_service.AccountLease("lease-bridge-b", account_b.id, "stream", time.monotonic())
+    selections: list[set[str]] = []
+    released_leases: list[proxy_service.AccountLease] = []
+    upstream = cast(
+        UpstreamResponsesWebSocket,
+        SimpleNamespace(response_header=lambda _name: None, close=AsyncMock()),
+    )
+
+    async def select_account(_deadline: float, **kwargs: object) -> proxy_service.AccountSelection:
+        excluded = set(cast(set[str], kwargs["exclude_account_ids"]))
+        selections.append(excluded)
+        if not excluded:
+            return proxy_service.AccountSelection(account=account_a, error_message=None, lease=lease_a)
+        return proxy_service.AccountSelection(account=account_b, error_message=None, lease=lease_b)
+
+    async def release_account_lease(lease: proxy_service.AccountLease | None) -> None:
+        if lease is not None:
+            released_leases.append(lease)
+
+    async def record_error_backoff(account: object) -> None:
+        assert account is account_a
+        assert lease_a in released_leases
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(
+        proxy_service, "get_settings_cache", lambda: SimpleNamespace(get=AsyncMock(return_value=settings))
+    )
+    monkeypatch.setattr(service, "_select_account_with_budget_for_stream", select_account)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=[account_a, account_b]))
+    monkeypatch.setattr(
+        service,
+        "_open_upstream_websocket_with_budget",
+        AsyncMock(side_effect=[_pre_dispatch_proxy_error(), upstream]),
+    )
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release_account_lease)
+    monkeypatch.setattr(service._load_balancer, "record_error_backoff", record_error_backoff)
+    monkeypatch.setattr(service, "_relay_http_bridge_upstream_messages", AsyncMock())
+
+    session = await service._create_http_bridge_session(
+        proxy_service._HTTPBridgeSessionKey("session_header", "sid-proxy-failover", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(key="sid-proxy-failover"),
+        api_key=None,
+        request_model="gpt-5.4",
+        idle_ttl_seconds=120.0,
+    )
+
+    assert session.account is account_b
+    assert selections == [set(), {account_a.id}]
+    assert lease_a in released_leases
+
+
+@pytest.mark.asyncio
+async def test_create_http_bridge_session_confirmed_proxy_failure_keeps_hard_owner_pinned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    settings = SimpleNamespace(
+        prefer_earlier_reset_accounts=False,
+        prefer_earlier_reset_window="secondary",
+        routing_strategy="usage_weighted",
+    )
+    account = cast(Any, SimpleNamespace(id="acc-proxy-owner", status=AccountStatus.ACTIVE, plan_type="plus"))
+    lease = proxy_service.AccountLease("lease-bridge-owner", account.id, "stream", time.monotonic())
+    select_account = AsyncMock(
+        return_value=proxy_service.AccountSelection(account=account, error_message=None, lease=lease)
+    )
+    release_account_lease = AsyncMock()
+    record_error_backoff = AsyncMock()
+    original_error = _pre_dispatch_proxy_error("owner proxy unavailable")
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(
+        proxy_service, "get_settings_cache", lambda: SimpleNamespace(get=AsyncMock(return_value=settings))
+    )
+    monkeypatch.setattr(service, "_select_account_with_budget_for_stream", select_account)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=account))
+    monkeypatch.setattr(
+        service,
+        "_open_upstream_websocket_with_budget",
+        AsyncMock(side_effect=original_error),
+    )
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release_account_lease)
+    monkeypatch.setattr(service._load_balancer, "record_error_backoff", record_error_backoff)
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await service._create_http_bridge_session(
+            proxy_service._HTTPBridgeSessionKey("turn_state_header", "turn-owner", None, strength="hard"),
+            headers={"x-codex-turn-state": "turn-owner"},
+            affinity=proxy_service._AffinityPolicy(key="turn-owner"),
+            api_key=None,
+            request_model="gpt-5.4",
+            idle_ttl_seconds=120.0,
+            preferred_account_id=account.id,
+            require_preferred_account=True,
+            fallback_on_preferred_account_unavailable=False,
+        )
+
+    assert exc_info.value is original_error
+    select_account.assert_awaited_once()
+    release_account_lease.assert_awaited_once_with(lease)
+    record_error_backoff.assert_awaited_once_with(account)
+
+
+@pytest.mark.asyncio
+async def test_create_http_bridge_session_preserves_proxy_failure_when_no_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    settings = SimpleNamespace(
+        prefer_earlier_reset_accounts=False,
+        prefer_earlier_reset_window="secondary",
+        routing_strategy="usage_weighted",
+    )
+    account = cast(Any, SimpleNamespace(id="acc-proxy-only", status=AccountStatus.ACTIVE, plan_type="plus"))
+    lease = proxy_service.AccountLease("lease-bridge-only", account.id, "stream", time.monotonic())
+    selections: list[set[str]] = []
+    original_error = _pre_dispatch_proxy_error("original bridge proxy failure")
+
+    async def select_account(_deadline: float, **kwargs: object) -> proxy_service.AccountSelection:
+        excluded = set(cast(set[str], kwargs["exclude_account_ids"]))
+        selections.append(excluded)
+        if not excluded:
+            return proxy_service.AccountSelection(account=account, error_message=None, lease=lease)
+        return proxy_service.AccountSelection(
+            account=None,
+            error_message="No active accounts available",
+            error_code="no_accounts",
+        )
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(
+        proxy_service, "get_settings_cache", lambda: SimpleNamespace(get=AsyncMock(return_value=settings))
+    )
+    monkeypatch.setattr(service, "_select_account_with_budget_for_stream", select_account)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=account))
+    monkeypatch.setattr(service, "_open_upstream_websocket_with_budget", AsyncMock(side_effect=original_error))
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", AsyncMock())
+    monkeypatch.setattr(service._load_balancer, "record_error_backoff", AsyncMock())
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await service._create_http_bridge_session(
+            proxy_service._HTTPBridgeSessionKey("session_header", "sid-proxy-only", None),
+            headers={},
+            affinity=proxy_service._AffinityPolicy(key="sid-proxy-only"),
+            api_key=None,
+            request_model="gpt-5.4",
+            idle_ttl_seconds=120.0,
+        )
+
+    assert exc_info.value is original_error
+    assert selections == [set(), {account.id}]
 
 
 @pytest.mark.asyncio

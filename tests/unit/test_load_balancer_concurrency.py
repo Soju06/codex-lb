@@ -278,6 +278,24 @@ async def test_record_error_updates_are_atomic_with_per_account_lock() -> None:
 
 
 @pytest.mark.asyncio
+async def test_record_error_backoff_enters_floor_without_adding_full_threshold() -> None:
+    account = _make_account("acc-error-backoff")
+    accounts_repo = _StubAccountsRepository([account])
+    usage_repo = _StubUsageRepository(primary={}, secondary={})
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo))
+
+    await balancer.record_error_backoff(account)
+
+    runtime = balancer._runtime[account.id]
+    assert runtime.error_count == 3
+    assert runtime.last_error_at is not None
+
+    await balancer.record_error_backoff(account)
+
+    assert runtime.error_count == 4
+
+
+@pytest.mark.asyncio
 async def test_stale_reclaim_keeps_active_stream_lease_within_stream_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

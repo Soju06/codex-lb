@@ -22,6 +22,7 @@ from websockets.typing import Origin
 
 from app.core.clients.codex import (
     CodexClient,
+    CodexTransportDispatchState,
     CodexTransportError,
     codex_transport_error_message,
     create_codex_session,
@@ -454,6 +455,15 @@ async def connect_responses_websocket(
             raise ProxyResponseError(
                 502,
                 openai_error("upstream_unavailable", str(exc), error_type="server_error"),
+                failure_phase="connect",
+                retryable_same_contract=exc.dispatch_state is CodexTransportDispatchState.NOT_DISPATCHED,
+                failure_detail=(
+                    "proxy_connect_pre_dispatch"
+                    if exc.dispatch_state is CodexTransportDispatchState.NOT_DISPATCHED
+                    else "transport_error"
+                ),
+                failure_exception_type=exc.exception_type or type(exc).__name__,
+                upstream_dispatch_state=exc.dispatch_state,
             ) from exc
         except Exception:
             if owns_codex_client:

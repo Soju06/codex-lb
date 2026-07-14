@@ -5,6 +5,7 @@ import json
 from collections import deque
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -12,6 +13,7 @@ from starlette.websockets import WebSocketDisconnect
 
 import app.modules.proxy.api as proxy_api_module
 import app.modules.proxy.service as proxy_module
+from app.core.clients.codex import CodexTransportDispatchState
 from app.core.utils.request_id import get_request_id
 
 pytestmark = pytest.mark.integration
@@ -162,6 +164,117 @@ def _websocket_settings(**overrides):
     }
     values.update(overrides)
     return SimpleNamespace(**values)
+
+
+def test_backend_responses_websocket_fails_over_confirmed_proxy_connect_before_dispatch(
+    app_instance,
+    monkeypatch,
+):
+    upstream = _FakeUpstreamWebSocket(
+        [
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "response.created",
+                        "response": {"id": "resp_ws_proxy_failover", "status": "in_progress"},
+                    },
+                    separators=(",", ":"),
+                ),
+            ),
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "response.completed",
+                        "response": {
+                            "id": "resp_ws_proxy_failover",
+                            "status": "completed",
+                            "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                        },
+                    },
+                    separators=(",", ":"),
+                ),
+            ),
+        ]
+    )
+    accounts = [SimpleNamespace(id="acct_ws_proxy_a"), SimpleNamespace(id="acct_ws_proxy_b")]
+    selection_exclusions: list[set[str]] = []
+    connect_accounts: list[str] = []
+    backed_off_accounts: list[str] = []
+    handle_connect_error = AsyncMock()
+    proxy_connect_error = proxy_module.ProxyResponseError(
+        502,
+        proxy_module.openai_error("upstream_unavailable", "sanitized websocket proxy failure"),
+        failure_phase="connect",
+        failure_detail="proxy_connect_pre_dispatch",
+        failure_exception_type="ClientProxyConnectionError",
+        upstream_dispatch_state=CodexTransportDispatchState.NOT_DISPATCHED,
+    )
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
+        return None
+
+    async def fake_select_websocket_connect_account(self, deadline, **kwargs):
+        del self, deadline
+        excluded = set(cast(set[str], kwargs["exclude_account_ids"]))
+        selection_exclusions.append(excluded)
+        return accounts[1] if accounts[0].id in excluded else accounts[0]
+
+    async def fake_try_open_websocket_connect_attempt(self, account, headers, **kwargs):
+        del self, headers, kwargs
+        connect_accounts.append(account.id)
+        if account.id == accounts[0].id:
+            raise proxy_connect_error
+        return account, upstream
+
+    async def fake_record_error_backoff(self, account):
+        del self
+        backed_off_accounts.append(account.id)
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_select_websocket_connect_account",
+        fake_select_websocket_connect_account,
+    )
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_try_open_websocket_connect_attempt",
+        fake_try_open_websocket_connect_attempt,
+    )
+    monkeypatch.setattr(proxy_module.ProxyService, "_handle_websocket_connect_error", handle_connect_error)
+    monkeypatch.setattr(proxy_module.LoadBalancer, "record_error_backoff", fake_record_error_backoff)
+
+    request_payload = {
+        "type": "response.create",
+        "model": "gpt-5.4",
+        "instructions": "",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "retry safely"}]}],
+        "stream": True,
+    }
+
+    with TestClient(app_instance) as client:
+        with client.websocket_connect("/backend-api/codex/responses") as websocket:
+            websocket.send_text(json.dumps(request_payload))
+            first_event = json.loads(websocket.receive_text())
+            second_event = json.loads(websocket.receive_text())
+
+    assert first_event["type"] == "response.created"
+    assert second_event["type"] == "response.completed"
+    assert connect_accounts == [accounts[0].id, accounts[1].id]
+    assert selection_exclusions == [set(), {accounts[0].id}]
+    assert backed_off_accounts == [accounts[0].id]
+    handle_connect_error.assert_not_awaited()
 
 
 def test_backend_responses_websocket_session_ended_auth_failure_fails_over_before_visible_output(

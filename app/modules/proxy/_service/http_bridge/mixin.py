@@ -34,7 +34,6 @@ from app.core.clients.proxy import (  # noqa: F401  # noqa: F401
 from app.core.clients.proxy import codex_control_request as core_codex_control_request  # noqa: F401
 from app.core.clients.proxy import compact_responses as core_compact_responses  # noqa: F401
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
-from app.core.config.settings import Settings
 from app.core.errors import openai_error
 from app.core.metrics.prometheus import (
     PROMETHEUS_AVAILABLE,
@@ -111,6 +110,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _persist_http_bridge_previous_response_alias,
     _persist_http_bridge_turn_state_alias,
     _preferred_http_bridge_reconnect_turn_state,
+    _promote_http_bridge_session_to_codex_affinity,
     _raise_http_bridge_incompatible_admission_handoff,
     _reconcile_durable_http_bridge_ownership,
     _record_bridge_drain_recovery_allowed,
@@ -124,6 +124,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
 )
 from app.modules.proxy._service.http_bridge.owner_forwarding import _HTTPBridgeOwnerForwardingMixin
 from app.modules.proxy._service.http_bridge.protocol import _HTTPBridgeServiceProtocol
+from app.modules.proxy._service.http_bridge.proxy_failover import _HTTPBridgePreDispatchFailover
 from app.modules.proxy._service.http_bridge.request_submit import _HTTPBridgeRequestSubmitMixin
 from app.modules.proxy._service.http_bridge.service_stubs import (
     _await_cancelled_task,
@@ -1714,22 +1715,7 @@ class _HTTPBridgeMixin(
         session.previous_response_ids.clear()
         getattr(session, "previous_response_alias_registration_generations", {}).clear()
 
-    def _promote_http_bridge_session_to_codex_affinity(
-        self,
-        session: "_HTTPBridgeSession",
-        *,
-        turn_state: str,
-        settings: Settings,
-    ) -> None:
-        session.affinity = _AffinityPolicy(key=turn_state, kind=StickySessionKind.CODEX_SESSION)
-        session.codex_session = True
-        session.downstream_turn_state = turn_state
-        session.downstream_turn_state_aliases.add(turn_state)
-        session.idle_ttl_seconds = max(
-            session.idle_ttl_seconds,
-            float(settings.http_responses_session_bridge_codex_idle_ttl_seconds),
-        )
-        session.headers = _headers_with_turn_state(session.headers, turn_state)
+    _promote_http_bridge_session_to_codex_affinity = staticmethod(_promote_http_bridge_session_to_codex_affinity)
 
     async def _claim_durable_http_bridge_session(
         self,
@@ -1809,15 +1795,8 @@ class _HTTPBridgeMixin(
                 return
             raise
 
-    async def _refresh_durable_http_bridge_session(self, session: "_HTTPBridgeSession") -> None:
-        """Renew the durable lease; callers must hold ``self._http_bridge_lock``."""
-
-        await _renew_durable_http_bridge_lease(self, session)
-
-    async def reconcile_durable_http_bridge_ownership(self) -> int:
-        """Close local sessions whose durable row is owned by another instance/epoch."""
-
-        return await _reconcile_durable_http_bridge_ownership(self)
+    _refresh_durable_http_bridge_session = _renew_durable_http_bridge_lease
+    reconcile_durable_http_bridge_ownership = _reconcile_durable_http_bridge_ownership
 
     async def _create_http_bridge_session(
         self,
@@ -1856,8 +1835,11 @@ class _HTTPBridgeMixin(
         settings = await _service_get_settings_cache().get()
         excluded_account_ids: set[str] = set()
         retry_same_account_once = preferred_account_id is not None
-        preferred_candidate_id = preferred_account_id
+        proxy_connect_failover = _HTTPBridgePreDispatchFailover(
+            excluded_account_ids, preferred_account_id, affinity.reallocate_sticky
+        )
         selected_account_lease: AccountLease | None = None
+
         while True:
             select_kwargs = {
                 "request_id": request_state.request_log_id or request_state.request_id,
@@ -1866,7 +1848,7 @@ class _HTTPBridgeMixin(
                 "api_key": api_key,
                 "sticky_key": affinity.key,
                 "sticky_kind": affinity.kind,
-                "reallocate_sticky": affinity.reallocate_sticky,
+                "reallocate_sticky": proxy_connect_failover.reallocate_sticky,
                 "sticky_max_age_seconds": affinity.max_age_seconds,
                 "prefer_earlier_reset_accounts": settings.prefer_earlier_reset_accounts,
                 "prefer_earlier_reset_window": _prefer_earlier_reset_window(settings),
@@ -1874,7 +1856,7 @@ class _HTTPBridgeMixin(
                 "model": request_model,
                 "service_tier": request_service_tier,
                 "exclude_account_ids": excluded_account_ids,
-                "preferred_account_id": preferred_candidate_id,
+                "preferred_account_id": proxy_connect_failover.preferred_account_id,
                 "lease_kind": "stream",
                 "estimated_lease_tokens": _estimated_lease_tokens_from_request_usage_budget(request_usage_budget),
                 "fallback_on_preferred_account_unavailable": fallback_on_preferred_account_unavailable,
@@ -1889,6 +1871,8 @@ class _HTTPBridgeMixin(
                     preferred_account_id=preferred_account_id,
                     selected_account_id=None,
                 )
+                if proxy_connect_failover.last_error is not None:
+                    raise proxy_connect_failover.last_error
                 status_code = 429 if _is_local_account_cap_code(selection.error_code) else 503
                 error_type = "rate_limit_error" if status_code == 429 else "server_error"
                 raise ProxyResponseError(
@@ -1937,6 +1921,15 @@ class _HTTPBridgeMixin(
                 )
                 break
             except ProxyResponseError as exc:
+                if await proxy_connect_failover.handle(
+                    self,
+                    account,
+                    selected_account_lease,
+                    exc,
+                    required_account=require_preferred_account and selected_is_preferred,
+                ):
+                    selected_account_lease = None
+                    continue
                 if exc.status_code != 401 or _remaining_budget_seconds(deadline) <= 0:
                     await self._load_balancer.release_account_lease(selected_account_lease)
                     selected_account_lease = None
@@ -1962,6 +1955,15 @@ class _HTTPBridgeMixin(
                     )
                     break
                 except ProxyResponseError as retry_exc:
+                    if await proxy_connect_failover.handle(
+                        self,
+                        account,
+                        selected_account_lease,
+                        retry_exc,
+                        required_account=require_preferred_account and selected_is_preferred,
+                    ):
+                        selected_account_lease = None
+                        continue
                     if retry_exc.status_code != 401:
                         await self._load_balancer.release_account_lease(selected_account_lease)
                         selected_account_lease = None
@@ -1972,7 +1974,7 @@ class _HTTPBridgeMixin(
                         selected_account_lease = None
                         raise
                     excluded_account_ids.add(account.id)
-                    preferred_candidate_id = None
+                    proxy_connect_failover.preferred_account_id = None
                     await self._load_balancer.release_account_lease(selected_account_lease)
                     selected_account_lease = None
                     continue
@@ -1984,7 +1986,7 @@ class _HTTPBridgeMixin(
                         selected_account_lease = None
                         raise
                     excluded_account_ids.add(account.id)
-                    preferred_candidate_id = None
+                    proxy_connect_failover.preferred_account_id = None
                     await self._load_balancer.release_account_lease(selected_account_lease)
                     selected_account_lease = None
                     continue
@@ -2009,7 +2011,7 @@ class _HTTPBridgeMixin(
                             ),
                         ) from exc
                     excluded_account_ids.add(account.id)
-                    preferred_candidate_id = None
+                    proxy_connect_failover.preferred_account_id = None
                     await self._load_balancer.release_account_lease(selected_account_lease)
                     selected_account_lease = None
                     continue
@@ -2048,7 +2050,7 @@ class _HTTPBridgeMixin(
                             ),
                         ) from exc
                     excluded_account_ids.add(account.id)
-                    preferred_candidate_id = None
+                    proxy_connect_failover.preferred_account_id = None
                     await self._load_balancer.release_account_lease(selected_account_lease)
                     selected_account_lease = None
                     continue

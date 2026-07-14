@@ -85,6 +85,7 @@ from app.modules.proxy._service.compact import (
     _sticky_key_from_compact_payload as _sticky_key_from_compact_payload,
 )
 from app.modules.proxy._service.http_bridge.protocol import _HTTPBridgeServiceProtocol
+from app.modules.proxy._service.http_bridge.service_stubs import _headers_with_turn_state
 from app.modules.proxy._service.observability import (
     _hash_identifier as _hash_identifier,
 )
@@ -1062,6 +1063,23 @@ def _make_http_bridge_session_header_fallback_key(
         affinity_key,
         api_key.id if api_key is not None else None,
     )
+
+
+def _promote_http_bridge_session_to_codex_affinity(
+    session: "_HTTPBridgeSession",
+    *,
+    turn_state: str,
+    settings: Settings,
+) -> None:
+    session.affinity = _AffinityPolicy(key=turn_state, kind=StickySessionKind.CODEX_SESSION)
+    session.codex_session = True
+    session.downstream_turn_state = turn_state
+    session.downstream_turn_state_aliases.add(turn_state)
+    session.idle_ttl_seconds = max(
+        session.idle_ttl_seconds,
+        float(settings.http_responses_session_bridge_codex_idle_ttl_seconds),
+    )
+    session.headers = _headers_with_turn_state(session.headers, turn_state)
 
 
 async def _http_bridge_should_wait_for_registration(

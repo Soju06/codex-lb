@@ -13,6 +13,7 @@ from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.proxy.durable_bridge_coordinator import DurableBridgeSessionCoordinator
 from app.modules.proxy.durable_bridge_repository import DurableBridgeRepository
+from app.modules.proxy.sticky_repository import StickySessionsRepository
 from app.modules.settings.repository import SettingsRepository
 from app.modules.sticky_sessions.cleanup_scheduler import StickySessionCleanupScheduler
 
@@ -59,6 +60,40 @@ async def _set_affinity_ttl(seconds: int) -> None:
         settings = await SettingsRepository(session).get_or_create()
         settings.openai_cache_affinity_max_age_seconds = seconds
         await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_subagent_prompt_cache_purge_does_not_delete_parent_mapping(db_setup):
+    del db_setup
+    accounts = await _create_accounts()
+    async with SessionLocal() as session:
+        repository = StickySessionsRepository(session)
+        await repository.upsert(
+            "subagent-cache",
+            accounts[0].id,
+            kind=StickySessionKind.PROMPT_CACHE,
+            is_subagent=True,
+        )
+        await repository.upsert(
+            "parent-cache",
+            accounts[0].id,
+            kind=StickySessionKind.PROMPT_CACHE,
+        )
+        stale_at = utcnow() - timedelta(seconds=31)
+        await session.execute(
+            text("UPDATE sticky_sessions SET updated_at = :stale_at WHERE key IN ('subagent-cache', 'parent-cache')"),
+            {"stale_at": stale_at},
+        )
+        await session.commit()
+
+        deleted = await repository.purge_prompt_cache_before(
+            utcnow() - timedelta(seconds=30),
+            is_subagent=True,
+        )
+
+        assert deleted == 1
+        assert await repository.get_entry("subagent-cache", kind=StickySessionKind.PROMPT_CACHE) is None
+        assert await repository.get_entry("parent-cache", kind=StickySessionKind.PROMPT_CACHE) is not None
 
 
 async def _insert_sticky_session(

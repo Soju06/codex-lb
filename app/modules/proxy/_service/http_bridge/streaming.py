@@ -76,6 +76,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_request_needs_unanchored_handoff,
     _http_bridge_request_stage,
     _http_bridge_runtime_config,
+    _http_bridge_session_has_visible_requests,
     _http_bridge_should_attempt_local_bootstrap_rebind,
     _http_bridge_should_attempt_local_previous_response_recovery,
     _http_bridge_should_attempt_soft_affinity_reroute,
@@ -472,7 +473,30 @@ async def _registered_turn_state_anchor_lookup(
     return lookup
 
 
+def _http_bridge_session_is_unanchored_parallel_fork(session: Any) -> bool:
+    return session.key.affinity_kind == "internal_unanchored_parallel"
+
+
 class _HTTPBridgeStreamingMixin:
+    async def _refresh_completed_subagent_sticky_mapping(self, session: _HTTPBridgeSession) -> None:
+        if not (
+            session.is_subagent
+            and session.subagent_prompt_cache_ttl_seconds is not None
+            and session.affinity.kind is StickySessionKind.PROMPT_CACHE
+            and session.affinity.key
+        ):
+            return
+        try:
+            async with cast(Any, self)._repo_factory() as repositories:
+                await repositories.sticky_sessions.upsert(
+                    session.affinity.key,
+                    session.account.id,
+                    kind=StickySessionKind.PROMPT_CACHE,
+                    is_subagent=True,
+                )
+        except Exception:
+            logger.warning("Failed to refresh completed subagent sticky mapping", exc_info=True)
+
     async def validate_http_bridge_legacy_forward_anchor(
         self: Any,
         *,
@@ -2268,3 +2292,26 @@ class _HTTPBridgeStreamingMixin:
             with anyio.CancelScope(shield=True):
                 await self._detach_http_bridge_request(session, request_state=request_state)
                 session.last_used_at = _service_time().monotonic()
+                if _http_bridge_session_is_unanchored_parallel_fork(session):
+                    await self._close_http_bridge_session(session)
+                elif session.is_subagent:
+                    ttl = session.subagent_prompt_cache_ttl_seconds
+                    if ttl is None:
+                        await self._close_http_bridge_session(session)
+                    else:
+                        scheduled_last_used_at = session.last_used_at
+                        await self._refresh_completed_subagent_sticky_mapping(session)
+
+                        async def _delayed_subagent_close() -> None:
+                            await asyncio.sleep(ttl)
+                            if session.closed or session.last_used_at != scheduled_last_used_at:
+                                return
+                            if _http_bridge_session_has_visible_requests(session):
+                                return
+                            await self._close_http_bridge_session(session)
+
+                        self._schedule_cancel_safe_cleanup(
+                            _delayed_subagent_close(),
+                            action="http_bridge_session_close",
+                            request_id=session.key.affinity_key,
+                        )

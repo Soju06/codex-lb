@@ -14,6 +14,8 @@ See `openspec/specs/sticky-session-operations/spec.md` for normative requirement
 - Raw and legacy Codex rows remain hard during rolling upgrades because they may represent explicit turn-state ownership.
 - Live file pins, responses, conversations, live/durable bridges, replay, and reattach sources are independent hard evidence; conflicting evidence fails closed instead of using source precedence. Opaque file IDs with no live pin remain unpinned for compatibility with uploads that occurred outside the current process.
 - Dashboard prompt-cache TTL is persisted in settings so operators can adjust it without restart.
+- Subagent requests are identified by `x-parent-session-id`. Their prompt-cache affinity is `NULL` by default (No Cache) and may be enabled with a positive, dashboard-configured TTL.
+- Subagent bridge sessions close at response-stream completion independently of sticky-mapping retention, so retained mappings do not retain account stream leases.
 - Background cleanup removes stale prompt-cache rows proactively, while manual delete and purge endpoints provide operator override.
 
 ## Constraints
@@ -23,6 +25,7 @@ See `openspec/specs/sticky-session-operations/spec.md` for normative requirement
 - HTTP forbids CR/LF in headers and affinity parsing strips surrounding whitespace, while database text preserves LF. The internal soft-key sentinel therefore cannot be reproduced by a normalized client turn-state header.
 - Every transport resolves live and durable turn-state aliases; an existing route or socket is not itself proof that a newly supplied conversation belongs to that account.
 - File owner indexes are process-local. Cross-replica bridge forwarding authenticates the origin-resolved owner rather than requiring a duplicate index on the remote owner.
+- No-Cache subagent cleanup may remove a stale `prompt_cache` mapping, but it never removes the canonical parent mapping or a deliberately retained subagent mapping.
 
 ## Failure Modes
 

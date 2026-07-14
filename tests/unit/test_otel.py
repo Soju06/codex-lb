@@ -288,6 +288,7 @@ async def test_lifespan_runs_normally_when_otel_is_disabled(monkeypatch: pytest.
 
     monkeypatch.setattr(main, "get_settings", lambda: settings)
     monkeypatch.setattr(main, "get_settings_cache", lambda: settings_cache)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: settings_cache)
     monkeypatch.setattr(main, "ensure_auto_bootstrap_token", AsyncMock(return_value=None))
     monkeypatch.setattr(main, "get_rate_limit_headers_cache", lambda: rate_limit_cache)
     monkeypatch.setattr(main, "reload_additional_quota_registry", lambda: None)
@@ -372,6 +373,7 @@ async def test_lifespan_marks_bridge_membership_stale_on_shutdown(monkeypatch: p
 
     monkeypatch.setattr(main, "get_settings", lambda: settings)
     monkeypatch.setattr(main, "get_settings_cache", lambda: settings_cache)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: settings_cache)
     monkeypatch.setattr(main, "ensure_auto_bootstrap_token", AsyncMock(return_value=None))
     monkeypatch.setattr(main, "get_rate_limit_headers_cache", lambda: rate_limit_cache)
     monkeypatch.setattr(main, "reload_additional_quota_registry", lambda: None)
@@ -464,6 +466,7 @@ async def test_lifespan_shutdown_fails_bridge_capacity_waiter_and_cancels_usage_
 
     monkeypatch.setattr(main, "get_settings", lambda: settings)
     monkeypatch.setattr(main, "get_settings_cache", lambda: settings_cache)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: settings_cache)
     monkeypatch.setattr(main, "ensure_auto_bootstrap_token", AsyncMock(return_value=None))
     monkeypatch.setattr(main, "get_rate_limit_headers_cache", lambda: rate_limit_cache)
     monkeypatch.setattr(main, "reload_additional_quota_registry", lambda: None)
@@ -638,6 +641,7 @@ async def test_lifespan_marks_bridge_membership_stale_for_hostname_shared_ids(
 
     monkeypatch.setattr(main, "get_settings", lambda: settings)
     monkeypatch.setattr(main, "get_settings_cache", lambda: settings_cache)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: settings_cache)
     monkeypatch.setattr(main, "ensure_auto_bootstrap_token", AsyncMock(return_value=None))
     monkeypatch.setattr(main, "get_rate_limit_headers_cache", lambda: rate_limit_cache)
     monkeypatch.setattr(main, "reload_additional_quota_registry", lambda: None)
@@ -713,6 +717,7 @@ async def test_lifespan_registers_bridge_without_waiting_for_advertise_self_prob
 
     monkeypatch.setattr(main, "get_settings", lambda: settings)
     monkeypatch.setattr(main, "get_settings_cache", lambda: settings_cache)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: settings_cache)
     monkeypatch.setattr(main, "ensure_auto_bootstrap_token", AsyncMock(return_value=None))
     monkeypatch.setattr(main, "get_rate_limit_headers_cache", lambda: rate_limit_cache)
     monkeypatch.setattr(main, "reload_additional_quota_registry", lambda: None)
@@ -786,6 +791,7 @@ async def test_lifespan_fails_fast_when_bridge_durable_schema_is_missing(monkeyp
 
     monkeypatch.setattr(main, "get_settings", lambda: settings)
     monkeypatch.setattr(main, "get_settings_cache", lambda: settings_cache)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: settings_cache)
     monkeypatch.setattr(main, "ensure_auto_bootstrap_token", AsyncMock(return_value=None))
     monkeypatch.setattr(main, "get_rate_limit_headers_cache", lambda: rate_limit_cache)
     monkeypatch.setattr(main, "reload_additional_quota_registry", lambda: None)
@@ -839,6 +845,7 @@ async def test_lifespan_allows_missing_bridge_schema_when_fail_fast_disabled(mon
 
     monkeypatch.setattr(main, "get_settings", lambda: settings)
     monkeypatch.setattr(main, "get_settings_cache", lambda: settings_cache)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: settings_cache)
     monkeypatch.setattr(main, "ensure_auto_bootstrap_token", AsyncMock(return_value=None))
     monkeypatch.setattr(main, "get_rate_limit_headers_cache", lambda: rate_limit_cache)
     monkeypatch.setattr(main, "reload_additional_quota_registry", lambda: None)

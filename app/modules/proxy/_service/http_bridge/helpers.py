@@ -1851,6 +1851,48 @@ def _http_bridge_previous_response_owner_unavailable_error() -> ProxyResponseErr
     )
 
 
+_SUBAGENT_HEADER_NAMES = ("x-parent-session-id", "x-openai-subagent", "x-codex-parent-thread-id")
+
+
+def _detect_subagent_session(
+    headers: Mapping[str, str],
+    dashboard_settings: Any,
+) -> tuple[bool, int | None]:
+    ttl = getattr(
+        dashboard_settings,
+        "http_responses_session_bridge_subagent_prompt_cache_ttl_seconds",
+        None,
+    )
+    if ttl is not None and ttl <= 0:
+        ttl = None
+    is_subagent = any(headers.get(name, "").strip() for name in _SUBAGENT_HEADER_NAMES)
+    return is_subagent, ttl
+
+
+async def _delete_completed_subagent_sticky_mapping(
+    repo_factory: Callable[..., Any],
+    session: Any,
+) -> None:
+    if not (
+        getattr(session, "is_subagent", False)
+        and getattr(session, "subagent_prompt_cache_ttl_seconds", None) is None
+        and getattr(getattr(session, "affinity", None), "kind", None) is StickySessionKind.PROMPT_CACHE
+    ):
+        return
+    affinity = getattr(session, "affinity", None)
+    if affinity is None:
+        return
+    try:
+        async with repo_factory() as repositories:
+            await repositories.sticky_sessions.delete(
+                affinity.key,
+                kind=StickySessionKind.PROMPT_CACHE,
+                is_subagent=True,
+            )
+    except Exception:
+        logger.warning("Failed to delete completed subagent sticky mapping", exc_info=True)
+
+
 def _http_bridge_should_attempt_local_previous_response_recovery(exc: ProxyResponseError) -> bool:
     payload = exc.payload
     if not isinstance(payload, dict):
@@ -2182,6 +2224,8 @@ for _helper_name in (
     "_http_bridge_previous_response_error_envelope",
     "_http_bridge_continuity_lost_error_envelope",
     "_http_bridge_owner_lookup_unavailable_error_envelope",
+    "_detect_subagent_session",
+    "_delete_completed_subagent_sticky_mapping",
     "_http_bridge_should_attempt_local_previous_response_recovery",
     "_http_bridge_is_previous_response_owner_unavailable",
     "_http_bridge_should_attempt_soft_affinity_reroute",

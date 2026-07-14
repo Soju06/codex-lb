@@ -20,6 +20,7 @@ class StickySessionEntryData:
     updated_at: datetime
     expires_at: datetime | None
     is_stale: bool
+    is_subagent: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +71,7 @@ class StickySessionsService:
     ) -> StickySessionListData:
         settings = await self._settings_repository.get_or_create()
         ttl_seconds = settings.openai_cache_affinity_max_age_seconds
+        subagent_ttl_seconds = settings.http_responses_session_bridge_subagent_prompt_cache_ttl_seconds
         stale_cutoff = utcnow() - timedelta(seconds=ttl_seconds)
         normalized_account_query = account_query.strip() if account_query else None
         normalized_key_query = key_query.strip() if key_query else None
@@ -98,7 +100,9 @@ class StickySessionsService:
             offset=offset,
             limit=limit,
         )
-        entries = [self._to_entry(row, ttl_seconds=ttl_seconds) for row in rows]
+        entries = [
+            self._to_entry(row, ttl_seconds=ttl_seconds, subagent_ttl_seconds=subagent_ttl_seconds) for row in rows
+        ]
         return StickySessionListData(
             entries=entries,
             stale_prompt_cache_count=stale_prompt_cache_count,
@@ -161,12 +165,22 @@ class StickySessionsService:
         cutoff = utcnow() - timedelta(seconds=settings.openai_cache_affinity_max_age_seconds)
         return await self._repository.purge_prompt_cache_before(cutoff)
 
-    def _to_entry(self, row: StickySessionListEntryRecord, *, ttl_seconds: int) -> StickySessionEntryData:
+    def _to_entry(
+        self,
+        row: StickySessionListEntryRecord,
+        *,
+        ttl_seconds: int,
+        subagent_ttl_seconds: int | None,
+    ) -> StickySessionEntryData:
         sticky_session = row.sticky_session
         expires_at: datetime | None = None
         is_stale = False
         if sticky_session.kind == StickySessionKind.PROMPT_CACHE:
-            expires_at = to_utc_naive(sticky_session.updated_at) + timedelta(seconds=ttl_seconds)
+            effective_ttl_seconds = subagent_ttl_seconds if sticky_session.is_subagent else ttl_seconds
+            if effective_ttl_seconds is None:
+                expires_at = to_utc_naive(sticky_session.updated_at)
+            else:
+                expires_at = to_utc_naive(sticky_session.updated_at) + timedelta(seconds=effective_ttl_seconds)
             is_stale = expires_at <= utcnow()
         return StickySessionEntryData(
             key=sticky_session.key,
@@ -176,6 +190,7 @@ class StickySessionsService:
             updated_at=sticky_session.updated_at,
             expires_at=expires_at,
             is_stale=is_stale,
+            is_subagent=sticky_session.is_subagent,
         )
 
     async def _count_stale_prompt_cache_entries(

@@ -39,6 +39,7 @@ async def test_cleanup_once_purges_prompt_cache_only(monkeypatch) -> None:
     dashboard_settings = SimpleNamespace(
         openai_cache_affinity_max_age_seconds=600,
         http_responses_session_bridge_prompt_cache_idle_ttl_seconds=600,
+        http_responses_session_bridge_subagent_prompt_cache_ttl_seconds=30,
     )
 
     settings_repo = AsyncMock()
@@ -84,7 +85,9 @@ async def test_cleanup_once_purges_prompt_cache_only(monkeypatch) -> None:
     ):
         await scheduler._cleanup_once()
 
-    sticky_repo.purge_prompt_cache_before.assert_called_once()
+    assert sticky_repo.purge_prompt_cache_before.await_count == 2
+    assert sticky_repo.purge_prompt_cache_before.await_args_list[0].kwargs["is_subagent"] is False
+    assert sticky_repo.purge_prompt_cache_before.await_args_list[1].kwargs["is_subagent"] is True
     sticky_repo.purge_before.assert_not_called()
     bridge_repo.purge_closed_before.assert_called_once()
     bridge_repo.purge_abandoned_before.assert_called_once()
@@ -96,6 +99,7 @@ async def test_cleanup_once_skips_bridge_purge_when_schema_is_not_ready(monkeypa
     dashboard_settings = SimpleNamespace(
         openai_cache_affinity_max_age_seconds=600,
         http_responses_session_bridge_prompt_cache_idle_ttl_seconds=600,
+        http_responses_session_bridge_subagent_prompt_cache_ttl_seconds=30,
     )
 
     settings_repo = AsyncMock()
@@ -145,7 +149,7 @@ async def test_cleanup_once_skips_bridge_purge_when_schema_is_not_ready(monkeypa
     ):
         await scheduler._cleanup_once()
 
-    sticky_repo.purge_prompt_cache_before.assert_called_once()
+    assert sticky_repo.purge_prompt_cache_before.await_count == 2
     bridge_repo.purge_closed_before.assert_not_called()
     bridge_repo.purge_abandoned_before.assert_not_called()
     ring_service.purge_stale_before.assert_called_once()
@@ -156,6 +160,7 @@ async def test_cleanup_once_purges_bridge_when_schema_exists_after_startup_flag_
     dashboard_settings = SimpleNamespace(
         openai_cache_affinity_max_age_seconds=600,
         http_responses_session_bridge_prompt_cache_idle_ttl_seconds=600,
+        http_responses_session_bridge_subagent_prompt_cache_ttl_seconds=30,
     )
 
     settings_repo = AsyncMock()
@@ -201,7 +206,7 @@ async def test_cleanup_once_purges_bridge_when_schema_exists_after_startup_flag_
     ):
         await scheduler._cleanup_once()
 
-    sticky_repo.purge_prompt_cache_before.assert_called_once()
+    assert sticky_repo.purge_prompt_cache_before.await_count == 2
     bridge_repo.purge_closed_before.assert_called_once()
     bridge_repo.purge_abandoned_before.assert_called_once()
     ring_service.purge_stale_before.assert_called_once()

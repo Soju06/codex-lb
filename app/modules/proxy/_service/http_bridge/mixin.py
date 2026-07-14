@@ -71,6 +71,8 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _HTTP_BRIDGE_INFLIGHT_STARTED_AT_ATTR,
     _active_http_bridge_instance_ring,
     _close_http_bridge_session_bounded,
+    _delete_completed_subagent_sticky_mapping,
+    _detect_subagent_session,
     _durable_bridge_lookup_active_owner,
     _durable_bridge_lookup_allows_local_reuse,
     _forwarded_http_bridge_session_key,
@@ -252,20 +254,10 @@ class _HTTPBridgeMixin(
     _HTTPBridgeUpstreamEventsMixin,
     _HTTPBridgeServiceProtocol,
 ):
-    async def _close_http_bridge_session_bounded(
-        self,
-        session: "_HTTPBridgeSession",
-        *,
-        reason: str,
-    ) -> None:
+    async def _close_http_bridge_session_bounded(self, session: "_HTTPBridgeSession", *, reason: str) -> None:
         await _close_http_bridge_session_bounded(self, session, reason=reason)
 
-    def _schedule_http_bridge_session_closes(
-        self,
-        sessions: list["_HTTPBridgeSession"],
-        *,
-        reason: str,
-    ) -> None:
+    def _schedule_http_bridge_session_closes(self, sessions: list["_HTTPBridgeSession"], *, reason: str) -> None:
         for session in sessions:
             if len(self._background_cleanup_tasks) >= _HTTP_BRIDGE_BACKGROUND_CLEANUP_WARN_THRESHOLD:
                 logger.warning(
@@ -435,6 +427,7 @@ class _HTTPBridgeMixin(
         session_header_fallback_key: "_HTTPBridgeSessionKey | None" = None,
     ) -> "_HTTPBridgeSession | _HTTPBridgeOwnerForward":
         settings = _service_get_settings()
+        dashboard_settings = await _service_get_settings_cache().get()
         request_scope_id = ensure_request_scope_id()
         api_key_id = api_key.id if api_key is not None else None
         incoming_turn_state = _sticky_key_from_turn_state_header(headers)
@@ -475,6 +468,7 @@ class _HTTPBridgeMixin(
                         ),
                     )
         effective_idle_ttl_seconds = idle_ttl_seconds
+        is_subagent_session, subagent_prompt_cache_ttl_seconds = _detect_subagent_session(headers, dashboard_settings)
         forwarded_affinity = (
             _forwarded_http_bridge_session_key(
                 headers,
@@ -1386,6 +1380,8 @@ class _HTTPBridgeMixin(
                     "request_model": request_model,
                     "request_service_tier": request_service_tier,
                     "idle_ttl_seconds": effective_idle_ttl_seconds,
+                    "is_subagent": is_subagent_session,
+                    "subagent_prompt_cache_ttl_seconds": subagent_prompt_cache_ttl_seconds,
                     "request_stage": request_stage,
                     "preferred_account_id": preferred_account_id,
                     "require_preferred_account": require_preferred_account,
@@ -1404,7 +1400,13 @@ class _HTTPBridgeMixin(
                     for parameter in create_signature.parameters.values()
                 )
                 if create_signature is not None and not create_accepts_var_keyword:
-                    for optional_kwarg in ("request_service_tier", "request_usage_budget", "request_deadline"):
+                    for optional_kwarg in (
+                        "request_service_tier",
+                        "request_usage_budget",
+                        "request_deadline",
+                        "is_subagent",
+                        "subagent_prompt_cache_ttl_seconds",
+                    ):
                         if optional_kwarg not in create_signature.parameters:
                             create_kwargs.pop(optional_kwarg, None)
                 created_session = await create_session(key, **create_kwargs)
@@ -1598,6 +1600,7 @@ class _HTTPBridgeMixin(
                 api_key=None,
                 response_create_gate=response_create_gate,
             )
+        await _delete_completed_subagent_sticky_mapping(self._repo_factory, session)
         _log_http_bridge_event(
             "close",
             session.key,
@@ -1841,6 +1844,8 @@ class _HTTPBridgeMixin(
         fallback_on_preferred_account_unavailable: bool = True,
         request_usage_budget: ApiKeyRequestUsageBudget | None = None,
         request_deadline: float | None = None,
+        is_subagent: bool = False,
+        subagent_prompt_cache_ttl_seconds: int | None = None,
     ) -> "_HTTPBridgeSession":
         request_state = _WebSocketRequestState(
             request_id=f"http_bridge_connect_{uuid4().hex}",
@@ -1865,12 +1870,23 @@ class _HTTPBridgeMixin(
         preferred_candidate_id = preferred_account_id
         selected_account_lease: AccountLease | None = None
         while True:
+            subagent_no_cache = is_subagent and subagent_prompt_cache_ttl_seconds is None
             select_kwargs = {
                 "request_id": request_state.request_log_id or request_state.request_id,
                 "kind": "http_bridge",
                 "request_stage": request_stage,
                 "api_key": api_key,
-                "affinity_policy": affinity,
+                "sticky_key": None if subagent_no_cache else affinity.selection_key,
+                "sticky_kind": None if subagent_no_cache else affinity.kind,
+                "reallocate_sticky": affinity.reallocate_sticky,
+                "sticky_source": None if subagent_no_cache else affinity.codex_session_source,
+                "legacy_sticky_key": None if subagent_no_cache else affinity.legacy_selection_key,
+                "spill_bare_session_on_account_cap": False if subagent_no_cache else affinity.spill_on_account_cap,
+                "require_unambiguous_account": False if subagent_no_cache else affinity.require_unambiguous_account,
+                "sticky_max_age_seconds": subagent_prompt_cache_ttl_seconds
+                if is_subagent
+                else affinity.max_age_seconds,
+                "sticky_is_subagent": is_subagent,
                 "prefer_earlier_reset_accounts": settings.prefer_earlier_reset_accounts,
                 "prefer_earlier_reset_window": _prefer_earlier_reset_window(settings),
                 "routing_strategy": _routing_strategy(settings),
@@ -2087,6 +2103,8 @@ class _HTTPBridgeMixin(
             downstream_turn_state=None,
             account_lease=selected_account_lease,
             catalog_omission_quota_admission=selection.catalog_omission_quota_admission,
+            is_subagent=is_subagent,
+            subagent_prompt_cache_ttl_seconds=subagent_prompt_cache_ttl_seconds,
         )
         _copy_websocket_route_metadata_to_session(session, request_state)
         session.upstream_reader = asyncio.create_task(self._relay_http_bridge_upstream_messages(session))

@@ -18,6 +18,7 @@ describe("StickySessionEntrySchema", () => {
       updatedAt: "2026-03-10T12:05:00Z",
       expiresAt: "2026-03-10T12:10:00Z",
       isStale: false,
+      isSubagent: false,
     });
 
     expect(parsed.kind).toBe("prompt_cache");

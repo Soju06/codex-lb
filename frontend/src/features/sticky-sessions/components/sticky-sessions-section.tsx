@@ -31,14 +31,14 @@ import { useDialogState } from "@/hooks/use-dialog-state";
 import { getErrorMessageOrNull } from "@/utils/errors";
 import { formatTimeLong } from "@/utils/formatters";
 
-function kindLabel(kind: StickySessionKind, t: ReturnType<typeof useTranslation>["t"]): string {
+function kindLabel(kind: StickySessionKind, t: ReturnType<typeof useTranslation>["t"], isSubagent = false): string {
   switch (kind) {
     case "codex_session":
       return t("stickySessions.kinds.codexSession");
     case "sticky_thread":
       return t("stickySessions.kinds.stickyThread");
     case "prompt_cache":
-      return t("stickySessions.kinds.promptCache");
+      return isSubagent ? t("stickySessions.kinds.subagentPromptCache") : t("stickySessions.kinds.promptCache");
   }
 }
 
@@ -313,7 +313,7 @@ export function StickySessionsSection({ disabled = false }: StickySessionsSectio
                           {entry.key}
                         </TableCell>
                         <TableCell>
-	                          <Badge variant="outline">{kindLabel(entry.kind, t)}</Badge>
+                          <Badge variant="outline">{kindLabel(entry.kind, t, entry.isSubagent)}</Badge>
                         </TableCell>
                         <TableCell className="truncate text-xs">{entry.displayName}</TableCell>
                         <TableCell className="text-xs text-muted-foreground">

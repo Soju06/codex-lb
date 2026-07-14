@@ -16,6 +16,7 @@ export const StickySessionEntrySchema = z.object({
   updatedAt: z.iso.datetime({ offset: true }),
   expiresAt: z.iso.datetime({ offset: true }).nullable(),
   isStale: z.boolean(),
+  isSubagent: z.boolean(),
 });
 
 export const StickySessionIdentifierSchema = z.object({

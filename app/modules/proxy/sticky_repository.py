@@ -64,13 +64,25 @@ class StickySessionsRepository:
         result = await self._session.execute(statement)
         return result.scalar_one_or_none()
 
-    async def upsert(self, key: str, account_id: str, *, kind: StickySessionKind) -> StickySession:
+    async def upsert(
+        self,
+        key: str,
+        account_id: str,
+        *,
+        kind: StickySessionKind,
+        is_subagent: bool = False,
+    ) -> StickySession:
         # RETURNING collapses the previous upsert + re-select + refresh
         # (4 round trips) into one statement; this runs inline before the
         # first upstream byte on sticky requests, so round trips are TTFT.
         # populate_existing forces the returned row to overwrite any stale
         # identity-map instance the session may already hold for this key.
-        statement = self._build_upsert_statement(key, account_id, kind).returning(StickySession)
+        statement = self._build_upsert_statement(
+            key,
+            account_id,
+            kind,
+            is_subagent=is_subagent,
+        ).returning(StickySession)
         async with sqlite_writer_section():
             result = await self._session.execute(statement, execution_options={"populate_existing": True})
             row = result.scalar_one_or_none()
@@ -79,13 +91,21 @@ class StickySessionsRepository:
             raise RuntimeError(f"StickySession upsert failed for key={key!r} kind={kind.value!r}")
         return row
 
-    async def delete(self, key: str, *, kind: StickySessionKind) -> bool:
+    async def delete(
+        self,
+        key: str,
+        *,
+        kind: StickySessionKind,
+        is_subagent: bool | None = None,
+    ) -> bool:
         if not key:
             return False
         statement = delete(StickySession).where(
             StickySession.key == key,
             StickySession.kind == kind,
         )
+        if is_subagent is not None:
+            statement = statement.where(StickySession.is_subagent == is_subagent)
         async with sqlite_writer_section():
             result = await self._session.execute(statement.returning(StickySession.key))
             await self._session.commit()
@@ -190,20 +210,35 @@ class StickySessionsRepository:
         result = await self._session.execute(statement)
         return int(result.scalar_one())
 
-    async def purge_prompt_cache_before(self, cutoff: datetime) -> int:
-        return await self.purge_before(cutoff, kind=StickySessionKind.PROMPT_CACHE)
+    async def purge_prompt_cache_before(self, cutoff: datetime, *, is_subagent: bool | None = None) -> int:
+        return await self.purge_before(cutoff, kind=StickySessionKind.PROMPT_CACHE, is_subagent=is_subagent)
 
-    async def purge_before(self, cutoff: datetime, *, kind: StickySessionKind | None = None) -> int:
+    async def purge_before(
+        self,
+        cutoff: datetime,
+        *,
+        kind: StickySessionKind | None = None,
+        is_subagent: bool | None = None,
+    ) -> int:
         stmt = delete(StickySession).where(StickySession.updated_at < to_utc_naive(cutoff))
         if kind is not None:
             stmt = stmt.where(StickySession.kind == kind)
+        if is_subagent is not None:
+            stmt = stmt.where(StickySession.is_subagent == is_subagent)
         async with sqlite_writer_section():
             result = await self._session.execute(stmt.returning(StickySession.key))
             deleted = len(result.scalars().all())
             await self._session.commit()
         return deleted
 
-    def _build_upsert_statement(self, key: str, account_id: str, kind: StickySessionKind) -> Insert:
+    def _build_upsert_statement(
+        self,
+        key: str,
+        account_id: str,
+        kind: StickySessionKind,
+        *,
+        is_subagent: bool,
+    ) -> Insert:
         dialect = self._session.get_bind().dialect.name
         if dialect == "postgresql":
             insert_fn = pg_insert
@@ -211,11 +246,17 @@ class StickySessionsRepository:
             insert_fn = sqlite_insert
         else:
             raise RuntimeError(f"StickySession upsert unsupported for dialect={dialect!r}")
-        statement = insert_fn(StickySession).values(key=key, account_id=account_id, kind=kind)
+        statement = insert_fn(StickySession).values(
+            key=key,
+            account_id=account_id,
+            kind=kind,
+            is_subagent=is_subagent,
+        )
         return statement.on_conflict_do_update(
             index_elements=[StickySession.key, StickySession.kind],
             set_={
                 "account_id": account_id,
+                "is_subagent": is_subagent,
                 "updated_at": func.now(),
             },
         )

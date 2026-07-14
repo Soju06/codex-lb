@@ -143,6 +143,7 @@ def _dashboard_settings_response(settings) -> DashboardSettingsResponse:
         openai_cache_affinity_max_age_seconds=settings.openai_cache_affinity_max_age_seconds,
         dashboard_session_ttl_seconds=settings.dashboard_session_ttl_seconds,
         http_responses_session_bridge_prompt_cache_idle_ttl_seconds=settings.http_responses_session_bridge_prompt_cache_idle_ttl_seconds,
+        http_responses_session_bridge_subagent_prompt_cache_ttl_seconds=settings.http_responses_session_bridge_subagent_prompt_cache_ttl_seconds,
         http_responses_session_bridge_gateway_safe_mode=settings.http_responses_session_bridge_gateway_safe_mode,
         sticky_reallocation_budget_threshold_pct=settings.sticky_reallocation_budget_threshold_pct,
         sticky_reallocation_primary_budget_threshold_pct=settings.sticky_reallocation_primary_budget_threshold_pct,
@@ -699,6 +700,11 @@ async def update_settings(
                     payload.http_responses_session_bridge_prompt_cache_idle_ttl_seconds
                     if payload.http_responses_session_bridge_prompt_cache_idle_ttl_seconds is not None
                     else current.http_responses_session_bridge_prompt_cache_idle_ttl_seconds
+                ),
+                http_responses_session_bridge_subagent_prompt_cache_ttl_seconds=(
+                    payload.http_responses_session_bridge_subagent_prompt_cache_ttl_seconds
+                    if "http_responses_session_bridge_subagent_prompt_cache_ttl_seconds" in payload.model_fields_set
+                    else current.http_responses_session_bridge_subagent_prompt_cache_ttl_seconds
                 ),
                 http_responses_session_bridge_gateway_safe_mode=(
                     payload.http_responses_session_bridge_gateway_safe_mode

@@ -112,6 +112,8 @@ Point any OpenAI-compatible client at codex-lb. If [API key auth](#api-key-authe
 
 Model availability is discovered from the upstream Codex model catalog and can vary by account plan, workspace, rollout, and upstream deprecation state. Prefer the live `GET /v1/models` or `GET /backend-api/codex/models` response over a copied static table when configuring clients or API-key model allowlists.
 
+The examples below default to `gpt-5.6-sol`. When present in your live catalog, use `gpt-5.6-terra` for balanced everyday work or `gpt-5.6-luna` for faster, lower-cost workloads.
+
 | Logo | Client | Endpoint | Config |
 |---|--------|----------|--------|
 | <img src="https://avatars.githubusercontent.com/u/14957082?s=200" width="32" alt="OpenAI"> | **Codex CLI** | `http://127.0.0.1:2455/backend-api/codex` | `~/.codex/config.toml` |
@@ -126,8 +128,8 @@ Model availability is discovered from the upstream Codex model catalog and can v
 `~/.codex/config.toml`:
 
 ```toml
-model = "gpt-5.3-codex"
-model_reasoning_effort = "xhigh"
+model = "gpt-5.6-sol"
+model_reasoning_effort = "max"
 model_provider = "codex-lb"
 
 [model_providers.codex-lb]
@@ -242,34 +244,28 @@ You can clean the config by using this one-liner
         "apiKey": "{env:CODEX_LB_API_KEY}"
       },
       "models": {
-        "gpt-5.4": {
-          "name": "GPT-5.4",
+        "gpt-5.6-sol": {
+          "name": "GPT-5.6 Sol",
           "reasoning": true,
           "options": { "reasoningEffort": "high", "reasoningSummary": "detailed" },
           "limit": { "context": 1050000, "output": 128000 }
         },
-        "gpt-5.3-codex": {
-          "name": "GPT-5.3 Codex",
+        "gpt-5.6-terra": {
+          "name": "GPT-5.6 Terra",
           "reasoning": true,
           "options": { "reasoningEffort": "high", "reasoningSummary": "detailed" },
-          "limit": { "context": 272000, "output": 65536 }
+          "limit": { "context": 1050000, "output": 128000 }
         },
-        "gpt-5.1-codex-mini": {
-          "name": "GPT-5.1 Codex Mini",
+        "gpt-5.6-luna": {
+          "name": "GPT-5.6 Luna",
           "reasoning": true,
           "options": { "reasoningEffort": "high", "reasoningSummary": "detailed" },
-          "limit": { "context": 272000, "output": 65536 }
-        },
-        "gpt-5.3-codex-spark": {
-          "name": "GPT-5.3 Codex Spark",
-          "reasoning": true,
-          "options": { "reasoningEffort": "xhigh", "reasoningSummary": "detailed" },
-          "limit": { "context": 128000, "output": 65536 }
+          "limit": { "context": 1050000, "output": 128000 }
         }
       }
     }
   },
-  "model": "openai/gpt-5.3-codex"
+  "model": "openai/gpt-5.6-sol"
 }
 ```
 
@@ -292,11 +288,11 @@ opencode
 {
   "agents": {
     "defaults": {
-      "model": { "primary": "codex-lb/gpt-5.4" },
+      "model": { "primary": "codex-lb/gpt-5.6-sol" },
       "models": {
-        "codex-lb/gpt-5.4": { "params": { "cacheRetention": "short" } }
-        "codex-lb/gpt-5.4-mini": { "params": { "cacheRetention": "short" } }
-        "codex-lb/gpt-5.3-codex": { "params": { "cacheRetention": "short" } }
+        "codex-lb/gpt-5.6-sol": { "params": { "cacheRetention": "short" } },
+        "codex-lb/gpt-5.6-terra": { "params": { "cacheRetention": "short" } },
+        "codex-lb/gpt-5.6-luna": { "params": { "cacheRetention": "short" } }
       }
     }
   },
@@ -309,28 +305,28 @@ opencode
         "api": "openai-responses",
         "models": [
           {
-            "id": "gpt-5.4",
-            "name": "gpt-5.4 (codex-lb)",
+            "id": "gpt-5.6-sol",
+            "name": "gpt-5.6-sol (codex-lb)",
             "contextWindow": 1050000,
-            "contextTokens": 272000,
+            "contextTokens": 372000,
             "maxTokens": 4096,
             "input": ["text"],
             "reasoning": false
           },
           {
-            "id": "gpt-5.4-mini",
-            "name": "gpt-5.4-mini (codex-lb)",
-            "contextWindow": 400000,
-            "contextTokens": 272000,
+            "id": "gpt-5.6-terra",
+            "name": "gpt-5.6-terra (codex-lb)",
+            "contextWindow": 1050000,
+            "contextTokens": 372000,
             "maxTokens": 4096,
             "input": ["text"],
             "reasoning": false
           },
           {
-            "id": "gpt-5.3-codex",
-            "name": "gpt-5.3-codex (codex-lb)",
-            "contextWindow": 400000,
-            "contextTokens": 272000,
+            "id": "gpt-5.6-luna",
+            "name": "gpt-5.6-luna (codex-lb)",
+            "contextWindow": 1050000,
+            "contextTokens": 372000,
             "maxTokens": 4096,
             "input": ["text"],
             "reasoning": false
@@ -362,7 +358,7 @@ client = OpenAI(
 )
 
 response = client.chat.completions.create(
-    model="gpt-5.3-codex",
+    model="gpt-5.6-sol",
     messages=[{"role": "user", "content": "Hello!"}],
 )
 print(response.choices[0].message.content)

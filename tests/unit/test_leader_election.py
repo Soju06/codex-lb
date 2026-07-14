@@ -1325,6 +1325,81 @@ async def test_run_if_leader_demotes_by_deadline_when_renewal_stalls_near_deadli
 
 
 @pytest.mark.asyncio
+async def test_run_if_leader_preserves_shared_lease_renewed_by_concurrent_heartbeat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Regression (P2): run_if_leader is a SHARED singleton across every
+    # scheduler, so two gated bodies can heartbeat the SAME LeaderElection
+    # concurrently — each with its OWN local lease_deadline but sharing
+    # self._is_leader and self._lease_deadline. If heartbeat A renews (advancing
+    # the shared self._lease_deadline) while heartbeat B hits the consecutive
+    # transient-renewal-error cap, B must NOT clear the shared leader flag /
+    # deadline using B's stale local deadline: doing so would cancel A's
+    # otherwise-valid leader work AND make A's next renew() return False without
+    # touching the database, even though the DB lease is freshly held by the same
+    # process. B may stop trusting its own renewals, but shared leadership must
+    # survive on the authoritative shared lease state.
+    ttl = 6  # renew_interval = 2s, renew_timeout = ttl / 6 = 1.0s
+    loop = asyncio.get_running_loop()
+
+    class _SiblingRenewedSession(_FakeSession):
+        # The acquire succeeds; every renewal on THIS heartbeat then raises a
+        # transient error, but each attempt first advances the SHARED
+        # self._lease_deadline slightly into the future to model a concurrent
+        # sibling heartbeat that just renewed the row on the same election.
+        def __init__(self) -> None:
+            super().__init__("postgresql", [1])
+            self.election: leader_election_module.LeaderElection | None = None
+            self.renew_errors = 0
+
+        async def execute(self, statement: Any, params: Any = None) -> _FakeResult:
+            self.statements.append(statement)
+            self.params.append(params)
+            if self._rowcounts:
+                # The one-time acquire.
+                return _FakeResult(self._rowcounts.pop(0), self._remaining)
+            # A renewal by THIS heartbeat: a concurrent sibling heartbeat keeps
+            # the shared lease fresh (advancing it just ahead of this
+            # heartbeat's local deadline), then this attempt fails transiently.
+            assert self.election is not None
+            self.election._lease_deadline = loop.time() + 0.3
+            self.renew_errors += 1
+            raise RuntimeError("db down")
+
+    session = _SiblingRenewedSession()
+    _install(monkeypatch, session, ttl=ttl)
+    # A short acquire remaining so the heartbeat's first renewal fires promptly.
+    session._remaining = 0.3
+
+    election = leader_election_module.LeaderElection(leader_id="node-a")
+    session.election = election
+
+    async def _body() -> str:
+        # Run until this heartbeat has failed several renewals while the sibling
+        # kept the shared lease fresh, then complete normally.
+        while session.renew_errors < 3:
+            await asyncio.sleep(0.02)
+        return "ran"
+
+    result = await election.run_if_leader(_body)
+
+    # B's body ran to completion (never cancelled by a wrongful demotion) and the
+    # shared leadership state survived B's exhausted local renewal errors.
+    assert result == "ran"
+    assert session.renew_errors >= 3
+    assert election.is_leader is True
+    assert election._lease_deadline is not None
+    assert election._lease_deadline > loop.time()
+
+    # A's next renew() succeeds because _is_leader was never cleared. Swap in a
+    # session whose renewal affects the row (rowcount 1) and confirm renew().
+    success = _FakeSession("postgresql", [1])
+    _install(monkeypatch, success, ttl=ttl)
+    assert await election.renew() is True
+    assert election.is_leader is True
+
+
+@pytest.mark.asyncio
 async def test_run_if_leader_keeps_renewing_during_shutdown_drain(monkeypatch: pytest.MonkeyPatch) -> None:
     # Regression (P1): when run_if_leader is cancelled externally by graceful
     # shutdown (a scheduler's stop()) while the lease is still HELD, the gate

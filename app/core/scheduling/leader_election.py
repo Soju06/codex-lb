@@ -577,7 +577,16 @@ class LeaderElection:
         cancelled the instant the deadline is reached with no successful
         renewal. Two consecutive failed attempts, or any failed attempt at/after
         the locally tracked lease deadline, demote the holder no later than the
-        lease TTL. The time-box is enforced with ``asyncio.wait`` (not
+        lease TTL — EXCEPT when a concurrent heartbeat on this shared
+        ``LeaderElection`` has advanced ``self._lease_deadline`` past this
+        heartbeat's local deadline: because the election is a shared singleton
+        across every scheduler, clearing the shared leadership on one
+        heartbeat's local transient errors would cancel a sibling's still-valid
+        leader work and make its next ``renew`` return ``False`` even though the
+        DB lease is freshly held. In that case this heartbeat adopts the
+        sibling's fresher deadline and keeps renewing; the shared flag is cleared
+        only on an authoritative rowcount-0 loss or a genuinely expired shared
+        lease. The time-box is enforced with ``asyncio.wait`` (not
         ``asyncio.wait_for``) so a renewal whose cancellation cleanup itself
         stalls — e.g. a blocked rollback in session teardown — cannot pin the
         heartbeat past the timeout: once the timeout elapses the attempt is
@@ -651,6 +660,18 @@ class LeaderElection:
                     # singleton work concurrently. Bound each sleep (especially
                     # the first) by the time remaining, and demote immediately
                     # when the deadline has already passed rather than sleeping.
+                    # ``run_if_leader`` is a SHARED singleton across every
+                    # scheduler, so a concurrent heartbeat on the SAME
+                    # ``LeaderElection`` instance may have renewed the row and
+                    # advanced ``self._lease_deadline`` past this heartbeat's
+                    # local view. Adopt that later shared deadline before judging
+                    # expiry so a stale local deadline cannot demote (and cancel
+                    # a sibling's still-valid leader work) while the DB lease is
+                    # freshly held by the same process. ``self._lease_deadline``
+                    # only ever advances via a real DB-confirmed acquire/renewal,
+                    # so adopting it can never outrun the true lease.
+                    if self._lease_deadline is not None and self._lease_deadline > lease_deadline:
+                        lease_deadline = self._lease_deadline
                     remaining = lease_deadline - loop.time()
                     if remaining <= 0:
                         self._is_leader = False
@@ -705,6 +726,35 @@ class LeaderElection:
                             exc_info=True,
                         )
                         if consecutive_errors < _MAX_CONSECUTIVE_RENEW_ERRORS and loop.time() < lease_deadline:
+                            continue
+                        # This heartbeat lost local confidence (two consecutive
+                        # transient renewal errors, or a failure at/after its
+                        # local deadline). Before clearing the SHARED leadership
+                        # state, consult the authoritative shared lease: because
+                        # ``run_if_leader`` is a shared singleton across every
+                        # scheduler, a concurrent heartbeat on the SAME instance
+                        # may have renewed the row and advanced
+                        # ``self._lease_deadline`` past this heartbeat's stale
+                        # local deadline. Clearing ``self._is_leader`` /
+                        # ``self._lease_deadline`` here would cancel that
+                        # sibling's otherwise-valid leader work and make its next
+                        # ``renew()`` return ``False`` without touching the
+                        # database, even though the DB lease is freshly held.
+                        # Demotion of the shared flag is authoritative only for a
+                        # rowcount-0 loss (already cleared by ``renew`` and
+                        # handled in the ``else`` branch) or a genuinely expired
+                        # shared lease. When a sibling has advanced the shared
+                        # deadline beyond this heartbeat's local view, adopt it
+                        # and keep renewing rather than tearing down shared
+                        # leadership; this heartbeat's own transient errors are
+                        # not evidence the DB lease is gone.
+                        if (
+                            self._is_leader
+                            and self._lease_deadline is not None
+                            and self._lease_deadline > lease_deadline
+                        ):
+                            lease_deadline = self._lease_deadline
+                            consecutive_errors = 0
                             continue
                         self._is_leader = False
                         self._lease_deadline = None

@@ -1532,31 +1532,47 @@ class ProxyService(
                 )
             except RefreshError as exc:
                 if exc.transport_error:
+                    # A transient, transport-level refresh failure — for example
+                    # the account's refresh claim is held by another replica and
+                    # the caller's wait budget expired before the rotation
+                    # committed (``refresh_claim_timeout``). This is definitionally
+                    # transient, so — matching the streaming, compact, and
+                    # WebSocket paths — it ALWAYS fails over rather than gating on
+                    # the message text.
                     message = exc.message or str(exc) or "Request to upstream timed out"
                     logger.warning(
-                        "%s refresh transport failed request_id=%s account_id=%s",
+                        "%s refresh transient failure request_id=%s account_id=%s",
                         kind,
                         request_id,
                         current.id,
                         exc_info=True,
                     )
-                    if not _should_retry_transient_stream_error("upstream_unavailable", message):
-                        _raise_proxy_unavailable_for_account(message, current)
                     if (
                         strict_account_id is not None and current.id == strict_account_id
                     ) or attempt >= max_account_attempts:
-                        _raise_proxy_unavailable_for_account(message, current)
+                        # Exhaustion / strict-pin give-up. Surface a retryable
+                        # ``upstream_unavailable`` marked as claim contention so
+                        # the caller's terminal handler does NOT record a health
+                        # penalty on this otherwise-healthy account (matching the
+                        # compact path, which raises ``last_exc`` unpenalized).
+                        _raise_proxy_unavailable_for_claim_contention(message, current)
                     excluded_account_ids.add(current.id)
                     selection = await select_next_account(excluded_account_ids)
                     selected_account = selection.account
                     if selected_account is None:
-                        _raise_proxy_unavailable_for_account(message, current)
+                        _raise_proxy_unavailable_for_claim_contention(message, current)
                     assert selected_account is not None
-                    await self._handle_stream_error(
-                        current,
-                        {"message": message},
-                        "upstream_unavailable",
-                    )
+                    # Peer-claim contention is NOT the account's fault: its
+                    # credentials are healthy and only its refresh claim is held
+                    # by another replica. Unlike the genuine aiohttp/connect
+                    # transport failure handled below, do NOT record an account
+                    # health penalty (``record_error`` via ``_handle_stream_error``)
+                    # for this transient refresh failure — that would push an
+                    # otherwise-healthy account into backoff for normal
+                    # cross-replica contention. Just exclude it and fail over,
+                    # matching the streaming/compact/WebSocket paths, which surface
+                    # a retryable ``upstream_unavailable`` on exhaustion without
+                    # penalizing the claim-held account.
                     current = selected_account
                     force_current = False
                     continue
@@ -1997,6 +2013,12 @@ class ProxyService(
         )
 
     async def _handle_proxy_error(self, account: Account, exc: ProxyResponseError) -> None:
+        if getattr(exc, _CLAIM_CONTENTION_UNPENALIZED_ATTR, False):
+            # Transient refresh-claim contention surfaced by the previsible-unary
+            # freshness failover: the account is healthy (a peer replica merely
+            # held its refresh claim), so it must not be penalized. Fail over /
+            # surface the retryable error without health accounting.
+            return
         error = _parse_openai_error(exc.payload)
         code = _normalize_error_code(
             error.code if error else None,
@@ -2406,6 +2428,24 @@ def _raise_proxy_unavailable_for_account(message: str, account: Account) -> NoRe
         openai_error("upstream_unavailable", message),
     )
     setattr(exc, _FAILED_ACCOUNT_ATTR, account)
+    raise exc
+
+
+# Marks a retryable ``upstream_unavailable`` that originated from transient
+# refresh-claim contention (a peer replica held the account's refresh claim past
+# the wait budget). The account's credentials are healthy, so ``_handle_proxy_error``
+# must NOT record a health penalty for it — only genuine upstream/transport
+# failures keep their health accounting.
+_CLAIM_CONTENTION_UNPENALIZED_ATTR = "_codex_lb_claim_contention_unpenalized"
+
+
+def _raise_proxy_unavailable_for_claim_contention(message: str, account: Account) -> NoReturn:
+    exc = ProxyResponseError(
+        502,
+        openai_error("upstream_unavailable", message),
+    )
+    setattr(exc, _FAILED_ACCOUNT_ATTR, account)
+    setattr(exc, _CLAIM_CONTENTION_UNPENALIZED_ATTR, True)
     raise exc
 
 

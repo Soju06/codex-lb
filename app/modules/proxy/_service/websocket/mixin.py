@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import sys
 import time
 from collections import deque
@@ -16,7 +17,8 @@ from pydantic import ValidationError
 
 from app.core.auth.refresh import (
     RefreshError,
-    is_refresh_claim_contention,
+    is_transient_refresh_contention,
+    refresh_contention_kind,
 )
 from app.core.balancer import (
     ResetPreferenceWindow,
@@ -455,7 +457,24 @@ def _facade() -> Any:
     return sys.modules["app.modules.proxy.service"]
 
 
+logger = logging.getLogger(__name__)
+
 _WEBSOCKET_PINNED_REFRESH_UNAVAILABLE_MESSAGE = "Account refresh is temporarily unavailable; retry later."
+
+
+def _log_websocket_persist_conflict(context: str, exc: RefreshError, account_id: str) -> None:
+    """Surface a post-exchange persist/status CAS conflict distinctly in logs.
+
+    Benign claim contention is expected and unlogged here; a post-exchange
+    persist conflict is a rarer, more-serious internal race worth surfacing.
+    """
+    if refresh_contention_kind(exc) == "persist_conflict":
+        logger.warning(
+            "WebSocket %s refresh post-exchange persist conflict code=%s account_id=%s",
+            context,
+            exc.code,
+            account_id,
+        )
 
 
 async def _reject_websocket_owner_switch_blocked(
@@ -2317,18 +2336,21 @@ class _WebSocketMixin:
         except RefreshError as exc:
             if exc.is_permanent:
                 await proxy._load_balancer.mark_permanent_failure(account, exc.code)
-            elif can_transient_failover and is_refresh_claim_contention(exc):
-                # Transient CROSS-REPLICA refresh-claim contention on the
-                # proactive freshness check (for example the account's refresh
-                # claim is held by another replica). This is NOT a genuine
-                # ``transport_error`` OAuth failure — the account's credentials
-                # are healthy and only its claim is contended — so do not surface
-                # a bogus 401 invalid_api_key. Signal the connect loop to release
-                # this account's stream lease, exclude it, and fail over to a
-                # healthy account WITHOUT an account-health penalty.
+            elif can_transient_failover and is_transient_refresh_contention(exc):
+                # Transient CROSS-REPLICA refresh contention on the proactive
+                # freshness check: benign claim contention (the account's refresh
+                # claim is held by another replica) OR a post-exchange persist/status
+                # CAS conflict (``token_persist_conflict`` / ``status_downgrade_conflict``).
+                # This is NOT a genuine ``transport_error`` OAuth failure — the
+                # account's credentials are healthy — so do not surface a bogus 401
+                # invalid_api_key. Signal the connect loop to release this account's
+                # stream lease, exclude it, and fail over to a healthy account
+                # WITHOUT an account-health penalty. Log a post-exchange persist
+                # conflict distinctly (rarer, more-serious than benign contention).
+                _log_websocket_persist_conflict("freshness-check", exc, account.id)
                 raise _WebSocketTransientRefreshFailover(account.id) from exc
-            elif is_refresh_claim_contention(exc):
-                # PINNED refresh-claim contention (require_preferred_account:
+            elif is_transient_refresh_contention(exc):
+                # PINNED refresh contention (require_preferred_account:
                 # previous_response_id session continuity or file ownership).
                 # can_transient_failover is False, so the movable failover
                 # branch above is correctly skipped -- a pinned request must
@@ -2339,6 +2361,9 @@ class _WebSocketMixin:
                 # the acquired stream lease (the caller releases it when this
                 # returns None), and surface a RETRYABLE upstream_unavailable so
                 # the client can retry once the peer replica releases the claim.
+                # (Also covers a pinned post-exchange persist/status CAS conflict,
+                # logged distinctly.)
+                _log_websocket_persist_conflict("pinned freshness-check", exc, account.id)
                 message = exc.message or _WEBSOCKET_PINNED_REFRESH_UNAVAILABLE_MESSAGE
                 await proxy._emit_websocket_connect_failure(
                     websocket,
@@ -2434,16 +2459,17 @@ class _WebSocketMixin:
         except RefreshError as refresh_exc:
             if refresh_exc.is_permanent:
                 await proxy._load_balancer.mark_permanent_failure(account, refresh_exc.code)
-            elif can_transient_failover and is_refresh_claim_contention(refresh_exc):
-                # Transient CROSS-REPLICA refresh-claim contention on the post-401
-                # forced refresh (for example the account's refresh claim is held
-                # by another replica). This is NOT a genuine ``transport_error``
-                # OAuth failure, so fail over to a healthy account WITHOUT an
-                # account-health penalty instead of surfacing a bogus 401
-                # invalid_api_key.
+            elif can_transient_failover and is_transient_refresh_contention(refresh_exc):
+                # Transient CROSS-REPLICA refresh contention on the post-401 forced
+                # refresh: benign claim contention (the account's refresh claim is
+                # held by another replica) OR a post-exchange persist/status CAS
+                # conflict. This is NOT a genuine ``transport_error`` OAuth failure,
+                # so fail over to a healthy account WITHOUT an account-health penalty
+                # instead of surfacing a bogus 401 invalid_api_key.
+                _log_websocket_persist_conflict("post-401 forced-refresh", refresh_exc, account.id)
                 raise _WebSocketTransientRefreshFailover(account.id) from refresh_exc
-            elif is_refresh_claim_contention(refresh_exc):
-                # PINNED refresh-claim contention on the post-401 forced refresh:
+            elif is_transient_refresh_contention(refresh_exc):
+                # PINNED refresh contention on the post-401 forced refresh:
                 # mirror the pre-open freshness branch. The request is hard-pinned
                 # (can_transient_failover is False), so it must not cross accounts,
                 # but the owner's credentials are healthy (its refresh claim is
@@ -2451,6 +2477,9 @@ class _WebSocketMixin:
                 # no permanent mark), release the acquired stream lease (the caller
                 # releases it when this returns None), and surface a RETRYABLE
                 # upstream_unavailable instead of a terminal 401 invalid_api_key.
+                # (Also covers a pinned post-exchange persist/status CAS conflict,
+                # logged distinctly.)
+                _log_websocket_persist_conflict("pinned post-401 forced-refresh", refresh_exc, account.id)
                 message = refresh_exc.message or _WEBSOCKET_PINNED_REFRESH_UNAVAILABLE_MESSAGE
                 await proxy._emit_websocket_connect_failure(
                     websocket,

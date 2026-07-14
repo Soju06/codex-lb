@@ -479,6 +479,71 @@ async def test_warmup_refresh_claim_contention_surfaces_upstream_unavailable(asy
 
 
 @pytest.mark.asyncio
+async def test_warmup_post_exchange_persist_conflict_surfaces_upstream_unavailable_and_logs_distinctly(
+    async_client, monkeypatch, caplog
+):
+    """A post-exchange ``token_persist_conflict`` shares the SAME external outcome
+    as benign claim contention (retryable ``upstream_unavailable``, no health
+    penalty, no bogus ``invalid_api_key``) but MUST be logged DISTINCTLY -- it
+    signals a rarer, more-serious internal race than benign contention."""
+    await _enable_api_key_auth(async_client)
+    settings_response = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "apiKeyAuthEnabled": True,
+            "warmupModel": "gpt-5.4-nano",
+        },
+    )
+    assert settings_response.status_code == 200
+    upstream_account_id = "acc-warmup-persist-conflict"
+    eligible_id = await _import_account(async_client, upstream_account_id, "warmup-persist@example.com")
+    await _add_primary_usage(eligible_id, used_percent=0.0, window_minutes=300)
+    _, key = await _create_api_key(async_client, name="warmup-persist")
+
+    async def _fake_ensure_fresh(self, account, *, force=False, timeout_seconds=None):
+        del self, account, force, timeout_seconds
+        raise RefreshError(
+            "token_persist_conflict",
+            "guarded persist CAS never landed",
+            False,
+            transport_error=True,
+        )
+
+    compact = AsyncMock()
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", _fake_ensure_fresh)
+    monkeypatch.setattr(proxy_module, "core_compact_responses", compact)
+
+    with caplog.at_level("WARNING"):
+        response = await async_client.post(
+            "/v1/warmup",
+            headers={"Authorization": f"Bearer {key}"},
+            json={"mode": "normal"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["failed"][0]["account_id"] == eligible_id
+    # Same external outcome as benign claim contention: retryable, unpenalized.
+    assert payload["failed"][0]["error_code"] == "upstream_unavailable"
+    compact.assert_not_awaited()
+
+    # Distinct observability: the post-exchange persist conflict is logged with a
+    # message that names it, unlike benign claim contention.
+    assert any(
+        "persist conflict" in record.getMessage() and "token_persist_conflict" in record.getMessage()
+        for record in caplog.records
+    )
+
+    async with SessionLocal() as session:
+        row = (await session.execute(select(RequestLog).where(RequestLog.request_kind == "warmup"))).scalar_one()
+
+    assert row.status == "error"
+    assert row.error_code == "upstream_unavailable"
+
+
+@pytest.mark.asyncio
 async def test_warmup_normalizes_model_alias_before_upstream(async_client, monkeypatch):
     _set_warmup_model_env(monkeypatch, "gpt-5.4-mini-high")
     await _enable_api_key_auth(async_client)

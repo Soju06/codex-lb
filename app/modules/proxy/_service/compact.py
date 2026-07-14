@@ -10,7 +10,7 @@ from typing import Any, NoReturn, Protocol, TypeVar, cast
 
 import aiohttp
 
-from app.core.auth.refresh import RefreshError, is_refresh_claim_contention
+from app.core.auth.refresh import RefreshError, is_transient_refresh_contention, refresh_contention_kind
 from app.core.balancer import ResetPreferenceWindow, RoutingStrategy, failover_decision
 from app.core.clients.proxy import (
     ProxyResponseError,
@@ -934,26 +934,37 @@ class _CompactMixin:
                                 request_service_tier=request_service_tier,
                             )
                             raise
-                        if is_refresh_claim_contention(exc):
-                            # Transient CROSS-REPLICA refresh-claim contention (for
-                            # example ``refresh_claim_timeout``: the account's
-                            # refresh claim is held by another replica). This is
-                            # NOT a genuine ``transport_error`` OAuth failure — the
-                            # account's credentials are healthy and only its claim
-                            # is contended — so it fails over WITHOUT an
-                            # account-health penalty. Unlike the genuine
-                            # transport-level failure handled below, do NOT record
-                            # ``_handle_stream_error`` here: that would push an
+                        if is_transient_refresh_contention(exc):
+                            # Transient CROSS-REPLICA refresh contention: benign
+                            # claim contention (``refresh_claim_timeout``: the
+                            # account's refresh claim is held by another replica) OR
+                            # a post-exchange persist/status CAS conflict
+                            # (``token_persist_conflict`` / ``status_downgrade_conflict``).
+                            # This is NOT a genuine ``transport_error`` OAuth failure
+                            # — the account's credentials are healthy — so it fails
+                            # over WITHOUT an account-health penalty. Unlike the
+                            # genuine transport-level failure handled below, do NOT
+                            # record ``_handle_stream_error`` here: that would push an
                             # otherwise-healthy account into backoff for normal
                             # cross-replica contention. Surface a retryable
                             # ``upstream_unavailable`` on exhaustion (``last_exc``).
                             message = exc.message or str(exc) or "Request to upstream timed out"
-                            logger.warning(
-                                "Compact refresh claim contention request_id=%s account_id=%s",
-                                request_id,
-                                account.id,
-                                exc_info=True,
-                            )
+                            if refresh_contention_kind(exc) == "persist_conflict":
+                                logger.warning(
+                                    "Compact refresh post-exchange persist conflict code=%s "
+                                    "request_id=%s account_id=%s",
+                                    exc.code,
+                                    request_id,
+                                    account.id,
+                                    exc_info=True,
+                                )
+                            else:
+                                logger.warning(
+                                    "Compact refresh claim contention request_id=%s account_id=%s",
+                                    request_id,
+                                    account.id,
+                                    exc_info=True,
+                                )
                             if preferred_account_id is not None:
                                 # File/previous-response-pinned requests cannot
                                 # fail over. On the HTTP bridge / forwarded path
@@ -1112,30 +1123,41 @@ class _CompactMixin:
                                             request_service_tier=request_service_tier,
                                         )
                                         raise exc
-                                    if is_refresh_claim_contention(refresh_exc):
-                                        # Transient CROSS-REPLICA refresh-claim
-                                        # contention on the post-401 forced refresh
-                                        # (for example ``refresh_claim_timeout``).
-                                        # This is NOT a genuine ``transport_error``
-                                        # OAuth failure — the account's credentials
-                                        # are healthy and only its claim is held by
-                                        # a peer replica — so fail over WITHOUT an
-                                        # account-health penalty and surface a
-                                        # retryable ``upstream_unavailable`` on
-                                        # exhaustion instead of the misleading
-                                        # original 401. Do NOT record
-                                        # ``_handle_stream_error`` here (that is
-                                        # reserved for the genuine transport failure
-                                        # handled below).
+                                    if is_transient_refresh_contention(refresh_exc):
+                                        # Transient CROSS-REPLICA refresh contention
+                                        # on the post-401 forced refresh: benign
+                                        # claim contention (``refresh_claim_timeout``)
+                                        # OR a post-exchange persist/status CAS
+                                        # conflict (``token_persist_conflict`` /
+                                        # ``status_downgrade_conflict``). This is NOT
+                                        # a genuine ``transport_error`` OAuth failure
+                                        # — the account's credentials are healthy — so
+                                        # fail over WITHOUT an account-health penalty
+                                        # and surface a retryable
+                                        # ``upstream_unavailable`` on exhaustion
+                                        # instead of the misleading original 401. Do
+                                        # NOT record ``_handle_stream_error`` here
+                                        # (that is reserved for the genuine transport
+                                        # failure handled below).
                                         message = (
                                             refresh_exc.message or str(refresh_exc) or "Request to upstream timed out"
                                         )
-                                        logger.warning(
-                                            "Compact forced refresh claim contention request_id=%s account_id=%s",
-                                            request_id,
-                                            account.id,
-                                            exc_info=True,
-                                        )
+                                        if refresh_contention_kind(refresh_exc) == "persist_conflict":
+                                            logger.warning(
+                                                "Compact forced refresh post-exchange persist conflict code=%s "
+                                                "request_id=%s account_id=%s",
+                                                refresh_exc.code,
+                                                request_id,
+                                                account.id,
+                                                exc_info=True,
+                                            )
+                                        else:
+                                            logger.warning(
+                                                "Compact forced refresh claim contention request_id=%s account_id=%s",
+                                                request_id,
+                                                account.id,
+                                                exc_info=True,
+                                            )
                                         if preferred_account_id is not None:
                                             await proxy._settle_compact_api_key_usage(
                                                 api_key=api_key,

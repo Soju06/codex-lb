@@ -11,7 +11,7 @@ from typing import Any, AsyncIterator, Mapping, cast
 
 import aiohttp
 
-from app.core.auth.refresh import RefreshError, is_refresh_claim_contention
+from app.core.auth.refresh import RefreshError, is_transient_refresh_contention, refresh_contention_kind
 from app.core.balancer import failover_decision
 from app.core.balancer.types import UpstreamError
 from app.core.clients.proxy import ProxyResponseError, _resolve_stream_transport, pop_stream_timeout_overrides
@@ -1032,15 +1032,24 @@ class _StreamingRetryMixin:
                                 await _release_tracked_stream_lease(current_account_lease)
                                 current_account_lease = None
                                 continue
-                            if is_refresh_claim_contention(exc):
-                                # Transient CROSS-REPLICA refresh-claim contention
-                                # (for example the account's refresh claim is held
-                                # by another replica). This is NOT a genuine
+                            if is_transient_refresh_contention(exc):
+                                # Transient CROSS-REPLICA refresh contention: benign
+                                # claim contention (the account's refresh claim is
+                                # held by another replica) OR a post-exchange
+                                # persist/status CAS conflict. This is NOT a genuine
                                 # ``transport_error`` OAuth failure — the account's
-                                # credentials are healthy and only its claim is
-                                # contended — so fail over WITHOUT an account-health
-                                # penalty (no ``_handle_stream_error``); the genuine
-                                # transport failure handled below keeps its penalty.
+                                # credentials are healthy — so fail over WITHOUT an
+                                # account-health penalty (no ``_handle_stream_error``);
+                                # the genuine transport failure handled below keeps
+                                # its penalty. A post-exchange persist conflict is
+                                # logged distinctly (rarer, more-serious race).
+                                if refresh_contention_kind(exc) == "persist_conflict":
+                                    logger.warning(
+                                        "Stream freshness-check refresh post-exchange persist conflict "
+                                        "code=%s account_id=%s",
+                                        exc.code,
+                                        account.id,
+                                    )
                                 if not require_preferred_account and preferred_account_id is None:
                                     # Movable request: release the stream lease and
                                     # fail over to a different account instead of
@@ -1613,17 +1622,25 @@ class _StreamingRetryMixin:
                                     await _release_tracked_stream_lease(current_account_lease)
                                     current_account_lease = None
                                     continue
-                                if is_refresh_claim_contention(refresh_exc):
-                                    # Transient CROSS-REPLICA refresh-claim
-                                    # contention on the post-401 forced refresh.
-                                    # This is NOT a genuine ``transport_error``
-                                    # OAuth failure — the account's credentials are
-                                    # healthy and only its claim is held by a peer
-                                    # replica — so fail over WITHOUT an
-                                    # account-health penalty (no
+                                if is_transient_refresh_contention(refresh_exc):
+                                    # Transient CROSS-REPLICA refresh contention on
+                                    # the post-401 forced refresh: benign claim
+                                    # contention OR a post-exchange persist/status
+                                    # CAS conflict. This is NOT a genuine
+                                    # ``transport_error`` OAuth failure — the
+                                    # account's credentials are healthy — so fail
+                                    # over WITHOUT an account-health penalty (no
                                     # ``_handle_stream_error``); the genuine
                                     # transport failure handled below keeps its
-                                    # penalty.
+                                    # penalty. A post-exchange persist conflict is
+                                    # logged distinctly (rarer, more-serious race).
+                                    if refresh_contention_kind(refresh_exc) == "persist_conflict":
+                                        logger.warning(
+                                            "Stream post-401 forced-refresh post-exchange persist conflict "
+                                            "code=%s account_id=%s",
+                                            refresh_exc.code,
+                                            account.id,
+                                        )
                                     if not require_preferred_account and preferred_account_id is None:
                                         # Movable request: release the skipped
                                         # account's stream lease and fail over to a

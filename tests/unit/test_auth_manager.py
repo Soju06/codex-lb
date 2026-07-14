@@ -771,6 +771,62 @@ async def test_ensure_fresh_does_not_reuse_recent_transport_failure(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_ensure_fresh_retry_after_persist_conflict_re_exchanges(monkeypatch):
+    """A post-exchange ``token_persist_conflict`` MUST NOT be cached.
+
+    ``token_persist_conflict`` is transient (``transport_error=True``): after it,
+    the DB may still hold the just-consumed refresh token, so a retry MUST re-run
+    the WHOLE refresh (a fresh upstream re-exchange) rather than reusing a cached
+    result or being treated as an immediate permanent knockout. This mirrors the
+    genuine-transport-error not-cached behavior and proves the retry re-exchanges.
+    """
+    refresh_calls = 0
+
+    async def _fake_refresh(_: str, **_kwargs: object) -> TokenRefreshResult:
+        nonlocal refresh_calls
+        refresh_calls += 1
+        # Simulate the post-exchange persist CAS loss surfacing as the transient
+        # conflict (raised after the exchange in production; here the singleflight
+        # caching semantics are what we assert).
+        raise RefreshError("token_persist_conflict", "cas never landed", False, transport_error=True)
+
+    monkeypatch.setattr(auth_manager_module, "refresh_access_token", _fake_refresh)
+    monkeypatch.setattr(
+        auth_manager_module,
+        "get_settings",
+        lambda: SimpleNamespace(proxy_refresh_failure_cooldown_seconds=30.0),
+    )
+
+    encryptor = TokenEncryptor()
+    stale_refresh = utcnow().replace(year=utcnow().year - 1)
+    account = Account(
+        id="acc_persist_conflict_cache",
+        email="user@example.com",
+        plan_type="plus",
+        access_token_encrypted=encryptor.encrypt("access-old"),
+        refresh_token_encrypted=encryptor.encrypt("refresh-old"),
+        id_token_encrypted=encryptor.encrypt("id-old"),
+        last_refresh=stale_refresh,
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
+    )
+    repo = _DummyRepo()
+    manager = AuthManager(cast(AccountsRepositoryPort, repo))
+
+    with pytest.raises(RefreshError) as first:
+        await manager.ensure_fresh(account, force=True)
+    assert first.value.code == "token_persist_conflict"
+    assert first.value.transport_error is True
+    await asyncio.sleep(0)
+    with pytest.raises(RefreshError):
+        await manager.ensure_fresh(account, force=True)
+
+    # Two full refresh invocations: the transient conflict was not cached, so the
+    # retry re-exchanged instead of reusing a cached failure.
+    assert refresh_calls == 2
+
+
+@pytest.mark.asyncio
 async def test_ensure_fresh_does_not_reuse_failure_after_refresh_token_changes(monkeypatch):
     refresh_calls = 0
 

@@ -15,7 +15,7 @@ import anyio
 
 from app.core.auth.refresh import (
     RefreshError,
-    is_refresh_claim_contention,
+    is_transient_refresh_contention,
     pop_token_refresh_timeout_override,
     push_token_refresh_timeout_override,
 )
@@ -1541,7 +1541,7 @@ class ProxyService(
                     timeout_seconds=remaining_budget,
                 )
             except RefreshError as exc:
-                if not (is_refresh_claim_contention(exc) or exc.transport_error):
+                if not (is_transient_refresh_contention(exc) or exc.transport_error):
                     # Permanent / non-transport refresh failures keep their prior
                     # escalation: tag the failed account and propagate.
                     setattr(exc, _FAILED_ACCOUNT_ATTR, current)
@@ -1654,13 +1654,14 @@ class ProxyService(
             return await self._ensure_fresh_with_budget(account, force=force, timeout_seconds=timeout_seconds)
         except RefreshError as refresh_exc:
             failed_account = _refresh_error_failed_account(refresh_exc, account)
-            if is_refresh_claim_contention(refresh_exc):
-                # Transient cross-replica refresh-claim contention: the account is
-                # healthy (a peer replica holds its refresh claim). Surface a
-                # retryable, unpenalized ``upstream_unavailable`` instead of a bogus
-                # 401 ``invalid_api_key`` — matching the previsible-unary/compact/
-                # streaming/WebSocket paths — so file-upload, transcription, and
-                # codex-control post-401 forced refreshes fail retryably.
+            if is_transient_refresh_contention(refresh_exc):
+                # Transient cross-replica refresh contention (benign claim
+                # contention OR a post-exchange persist/status CAS conflict): the
+                # account is healthy. Surface a retryable, unpenalized
+                # ``upstream_unavailable`` instead of a bogus 401 ``invalid_api_key``
+                # — matching the previsible-unary/compact/streaming/WebSocket paths
+                # — so file-upload, transcription, and codex-control post-401 forced
+                # refreshes fail retryably.
                 raise_proxy_unavailable_for_claim_contention(
                     refresh_exc.message or str(refresh_exc) or "Request to upstream timed out",
                     failed_account,

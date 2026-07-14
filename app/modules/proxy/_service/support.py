@@ -13,7 +13,7 @@ from typing import Any, Literal, NoReturn, Protocol
 
 import anyio
 
-from app.core.auth.refresh import RefreshError, is_refresh_claim_contention
+from app.core.auth.refresh import RefreshError, is_transient_refresh_contention, refresh_contention_kind
 from app.core.balancer.types import UpstreamError
 from app.core.clients.proxy import ProxyResponseError
 from app.core.clients.proxy_websocket import UpstreamResponsesWebSocket
@@ -295,13 +295,14 @@ class _WebSocketTransientRefreshFailover(Exception):
 
 # ---- Refresh-claim contention failover helpers -----------------------------
 #
-# A transient cross-replica refresh-claim contention (``is_refresh_claim_contention``:
-# ONLY the ``refresh_claim_timeout`` / ``status_downgrade_conflict`` /
-# ``token_persist_conflict`` codes, NOT the broad ``transport_error`` flag) means
-# the account's credentials are healthy and only its refresh claim is held by a
-# peer replica. These helpers let the proxy previsible-unary failover surface a
-# retryable ``upstream_unavailable`` WITHOUT recording an account-health penalty,
-# while a genuine OAuth transport failure keeps its normal health accounting.
+# A transient cross-replica refresh contention (``is_transient_refresh_contention``:
+# ONLY the benign ``refresh_claim_timeout`` claim-contention code and the
+# post-exchange ``token_persist_conflict`` / ``status_downgrade_conflict`` CAS
+# codes, NOT the broad ``transport_error`` flag) means the account's credentials
+# are healthy and only its refresh claim/persist lost to a peer replica. These
+# helpers let the proxy previsible-unary failover surface a retryable
+# ``upstream_unavailable`` WITHOUT recording an account-health penalty, while a
+# genuine OAuth transport failure keeps its normal health accounting.
 
 _FAILED_ACCOUNT_ATTR = "_codex_lb_failed_account"
 _CLAIM_CONTENTION_UNPENALIZED_ATTR = "_codex_lb_claim_contention_unpenalized"
@@ -354,11 +355,14 @@ async def failover_after_previsible_refresh_error(
     Consolidates the transient ``RefreshError`` claim-contention and transport
     paths plus raw aiohttp/connect errors into one decision:
 
-    * Claim contention (``is_refresh_claim_contention``) is ALWAYS retryable and
-      NEVER penalizes the skipped account (its credentials are healthy; only its
-      refresh claim is held by a peer). On strict-pin / attempt exhaustion or an
-      empty selection it raises a claim-contention-marked ``upstream_unavailable``
-      that the caller's terminal ``_handle_proxy_error`` skips penalizing.
+    * Transient refresh contention (``is_transient_refresh_contention``) is ALWAYS
+      retryable and NEVER penalizes the skipped account (its credentials are
+      healthy; only its refresh claim/persist lost to a peer). This covers BOTH
+      benign claim contention and a post-exchange persist/status CAS conflict; the
+      latter is logged distinctly (a rarer, more-serious internal race). On
+      strict-pin / attempt exhaustion or an empty selection it raises a
+      claim-contention-marked ``upstream_unavailable`` that the caller's terminal
+      ``_handle_proxy_error`` skips penalizing.
     * A genuine OAuth ``transport_error`` refresh failure or a raw aiohttp/connect
       failure keeps its health accounting: failover is gated on the message text
       and the skipped account is penalized via ``_handle_stream_error`` so a
@@ -368,16 +372,30 @@ async def failover_after_previsible_refresh_error(
     """
     from app.modules.proxy._service.streaming.helpers import _should_retry_transient_stream_error
 
-    claim = isinstance(exc, RefreshError) and is_refresh_claim_contention(exc)
+    claim = isinstance(exc, RefreshError) and is_transient_refresh_contention(exc)
+    contention_kind = refresh_contention_kind(exc) if isinstance(exc, RefreshError) else None
     message = getattr(exc, "message", None) or str(exc) or "Request to upstream timed out"
-    logger.warning(
-        "%s refresh %s request_id=%s account_id=%s",
-        kind,
-        "claim contention" if claim else "failed",
-        request_id,
-        current.id,
-        exc_info=True,
-    )
+    if contention_kind == "persist_conflict":
+        # Post-exchange guarded-write CAS conflict: rarer/more-serious than benign
+        # claim contention, so surface it distinctly (it still fails over with no
+        # penalty, identically to benign contention).
+        logger.warning(
+            "%s refresh post-exchange persist conflict code=%s request_id=%s account_id=%s",
+            kind,
+            getattr(exc, "code", None),
+            request_id,
+            current.id,
+            exc_info=True,
+        )
+    else:
+        logger.warning(
+            "%s refresh %s request_id=%s account_id=%s",
+            kind,
+            "claim contention" if claim else "failed",
+            request_id,
+            current.id,
+            exc_info=True,
+        )
     if not claim and not _should_retry_transient_stream_error("upstream_unavailable", message):
         _raise_proxy_unavailable_for_account(message, current)
 

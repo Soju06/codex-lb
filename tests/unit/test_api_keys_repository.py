@@ -258,6 +258,7 @@ async def test_cost_limit_backfill_uses_bigint_cast_for_microdollars() -> None:
     int32_max = 2_147_483_647
     overflow_total = int32_max + 100
     executed_sql: list[str] = []
+    values = iter((overflow_total, 0))
 
     async def _execute(statement):
         executed_sql.append(
@@ -268,7 +269,8 @@ async def test_cost_limit_backfill_uses_bigint_cast_for_microdollars() -> None:
                 )
             )
         )
-        return SimpleNamespace(scalar_one=lambda: overflow_total)
+        value = next(values)
+        return SimpleNamespace(scalar_one=lambda: value)
 
     session.execute.side_effect = _execute
 
@@ -285,3 +287,4 @@ async def test_cost_limit_backfill_uses_bigint_cast_for_microdollars() -> None:
     assert "BIGINT" in executed_sql[0]
     assert "sum(CAST(floor(coalesce(request_logs.cost_usd, 0.0) * 1000000) AS BIGINT))" in executed_sql[0]
     assert "request_logs.request_kind NOT IN ('warmup', 'limit_warmup')" in executed_sql[0]
+    assert "sum(request_log_daily_aggregates.cost_microdollars)" in executed_sql[1]

@@ -35,6 +35,7 @@ def _clear_refresh_state() -> None:
 class _DummyRepo:
     def __init__(self) -> None:
         self.tokens_payload: dict[str, object] | None = None
+        self.metadata_payload: dict[str, object] | None = None
         self.status_payload: dict[str, object] | None = None
         self.accounts_by_id: dict[str, Account] = {}
         self.taken_workspace_slots: set[tuple[str, str | None, str]] = set()
@@ -91,13 +92,15 @@ class _DummyRepo:
         }
         return True
 
-    async def update_tokens(
+    async def rotate_tokens(
         self,
         account_id: str,
         access_token_encrypted: bytes,
         refresh_token_encrypted: bytes,
         id_token_encrypted: bytes,
         last_refresh: datetime,
+        *,
+        expected_refresh_token_encrypted: bytes,
         plan_type: str | None = None,
         email: str | None = None,
         chatgpt_account_id: str | None = None,
@@ -105,7 +108,6 @@ class _DummyRepo:
         workspace_id: str | None = None,
         workspace_label: str | None = None,
         seat_type: str | None = None,
-        expected_refresh_token_encrypted: bytes | None = None,
     ) -> bool:
         self.tokens_payload = {
             "account_id": account_id,
@@ -121,6 +123,32 @@ class _DummyRepo:
             "workspace_label": workspace_label,
             "seat_type": seat_type,
             "expected_refresh_token_encrypted": expected_refresh_token_encrypted,
+        }
+        return True
+
+    async def update_account_metadata(
+        self,
+        account_id: str,
+        *,
+        plan_type: str | None = None,
+        email: str | None = None,
+        chatgpt_account_id: str | None = None,
+        chatgpt_user_id: str | None = None,
+        workspace_id: str | None = None,
+        workspace_label: str | None = None,
+        seat_type: str | None = None,
+        last_refresh: datetime | None = None,
+    ) -> bool:
+        self.metadata_payload = {
+            "account_id": account_id,
+            "plan_type": plan_type,
+            "email": email,
+            "chatgpt_account_id": chatgpt_account_id,
+            "chatgpt_user_id": chatgpt_user_id,
+            "workspace_id": workspace_id,
+            "workspace_label": workspace_label,
+            "seat_type": seat_type,
+            "last_refresh": last_refresh,
         }
         return True
 
@@ -877,13 +905,15 @@ class _TokenCasMissRepo(_DummyRepo):
     async def get_by_id_fresh(self, account_id: str) -> Account | None:
         return self.accounts_by_id.get(account_id)
 
-    async def update_tokens(
+    async def rotate_tokens(
         self,
         account_id: str,
         access_token_encrypted: bytes,
         refresh_token_encrypted: bytes,
         id_token_encrypted: bytes,
         last_refresh: datetime,
+        *,
+        expected_refresh_token_encrypted: bytes,
         plan_type: str | None = None,
         email: str | None = None,
         chatgpt_account_id: str | None = None,
@@ -891,14 +921,13 @@ class _TokenCasMissRepo(_DummyRepo):
         workspace_id: str | None = None,
         workspace_label: str | None = None,
         seat_type: str | None = None,
-        expected_refresh_token_encrypted: bytes | None = None,
     ) -> bool:
         self.update_attempts.append(expected_refresh_token_encrypted)
         stored = self._latest.refresh_token_encrypted
         if expected_refresh_token_encrypted is not None and expected_refresh_token_encrypted != stored:
             return False
         self._latest.refresh_token_encrypted = refresh_token_encrypted
-        return await super().update_tokens(
+        return await super().rotate_tokens(
             account_id,
             access_token_encrypted=access_token_encrypted,
             refresh_token_encrypted=refresh_token_encrypted,
@@ -1051,13 +1080,15 @@ class _TokenCasAlwaysMissRepo(_DummyRepo):
             row.refresh_token_encrypted = self._encryptor.encrypt(self._plaintext)
         return row
 
-    async def update_tokens(
+    async def rotate_tokens(
         self,
         account_id: str,
         access_token_encrypted: bytes,
         refresh_token_encrypted: bytes,
         id_token_encrypted: bytes,
         last_refresh: datetime,
+        *,
+        expected_refresh_token_encrypted: bytes,
         plan_type: str | None = None,
         email: str | None = None,
         chatgpt_account_id: str | None = None,
@@ -1065,14 +1096,13 @@ class _TokenCasAlwaysMissRepo(_DummyRepo):
         workspace_id: str | None = None,
         workspace_label: str | None = None,
         seat_type: str | None = None,
-        expected_refresh_token_encrypted: bytes | None = None,
     ) -> bool:
         self.update_attempts.append(expected_refresh_token_encrypted)
         if expected_refresh_token_encrypted is None:
             # FORBIDDEN unconditional write: the no-unconditional-write invariant
             # means this must never happen. Apply it via the base repo so a
             # regression that reintroduces it is caught by the test assertions.
-            return await super().update_tokens(
+            return await super().rotate_tokens(
                 account_id,
                 access_token_encrypted=access_token_encrypted,
                 refresh_token_encrypted=refresh_token_encrypted,
@@ -1135,13 +1165,15 @@ class _TokenCasPeerRotationAtExhaustionRepo(_DummyRepo):
             row.refresh_token_encrypted = self._encryptor.encrypt(self._plaintext)
         return row
 
-    async def update_tokens(
+    async def rotate_tokens(
         self,
         account_id: str,
         access_token_encrypted: bytes,
         refresh_token_encrypted: bytes,
         id_token_encrypted: bytes,
         last_refresh: datetime,
+        *,
+        expected_refresh_token_encrypted: bytes,
         plan_type: str | None = None,
         email: str | None = None,
         chatgpt_account_id: str | None = None,
@@ -1149,12 +1181,11 @@ class _TokenCasPeerRotationAtExhaustionRepo(_DummyRepo):
         workspace_id: str | None = None,
         workspace_label: str | None = None,
         seat_type: str | None = None,
-        expected_refresh_token_encrypted: bytes | None = None,
     ) -> bool:
         self.update_attempts.append(expected_refresh_token_encrypted)
         if expected_refresh_token_encrypted is None:
             # Forbidden unconditional write: record the clobber for the assertion.
-            return await super().update_tokens(
+            return await super().rotate_tokens(
                 account_id,
                 access_token_encrypted=access_token_encrypted,
                 refresh_token_encrypted=refresh_token_encrypted,
@@ -1293,16 +1324,19 @@ async def test_refresh_raises_transient_when_cas_never_lands_on_same_plaintext_s
 
 
 @pytest.mark.asyncio
-async def test_ensure_chatgpt_account_id_backfill_is_ciphertext_guarded(monkeypatch):
-    """Regression (finding #1): ensure_fresh ends with _ensure_chatgpt_account_id,
-    which for a legacy account missing chatgpt_account_id previously issued an
-    UNCONDITIONAL update_tokens (expected_refresh_token_encrypted=None) OUTSIDE
-    any refresh claim, rewriting the refresh-token ciphertext from the in-memory
-    selection snapshot. A concurrent peer rotation of the single-use refresh
-    token in that read->write window was clobbered with already-consumed
-    material. The backfill MUST now be a compare-and-set guarded on the
-    refresh-token ciphertext this replica read, so a peer rotation MISSES rather
-    than clobbering."""
+async def test_ensure_chatgpt_account_id_backfill_never_writes_token_material(monkeypatch):
+    """Regression (finding #1, root enforcement): ensure_fresh ends with
+    _ensure_chatgpt_account_id, which for a legacy account missing
+    chatgpt_account_id previously issued an UNCONDITIONAL token write
+    (expected_refresh_token_encrypted=None) OUTSIDE any refresh claim, rewriting
+    the refresh-token ciphertext from the in-memory selection snapshot. A
+    concurrent peer rotation of the single-use refresh token in that
+    read->write window was clobbered with already-consumed material.
+
+    The backfill now routes through the metadata-only writer, which
+    STRUCTURALLY cannot write token ciphertext (no parameter for it). It can
+    only persist chatgpt_account_id, so a peer rotation can never be clobbered
+    by this sibling regardless of how stale the snapshot is."""
 
     monkeypatch.setattr(auth_manager_module, "_chatgpt_account_id_from_id_token", lambda _token: "chatgpt-derived-id")
 
@@ -1326,12 +1360,12 @@ async def test_ensure_chatgpt_account_id_backfill_is_ciphertext_guarded(monkeypa
     result = await manager.ensure_fresh(account)
 
     assert result.chatgpt_account_id == "chatgpt-derived-id"
-    assert repo.tokens_payload is not None
-    assert repo.tokens_payload["chatgpt_account_id"] == "chatgpt-derived-id"
-    # GUARDED write: the compare-and-set is conditioned on the refresh-token
-    # ciphertext this replica observed (pre-fix this was None -- an unconditional
-    # write that could clobber a concurrent peer rotation).
-    assert repo.tokens_payload["expected_refresh_token_encrypted"] == account.refresh_token_encrypted
+    # Metadata-only write: chatgpt_account_id is persisted, and NO token
+    # ciphertext write was ever issued (the token path is structurally
+    # unreachable from this backfill).
+    assert repo.metadata_payload is not None
+    assert repo.metadata_payload["chatgpt_account_id"] == "chatgpt-derived-id"
+    assert repo.tokens_payload is None
 
 
 @pytest.mark.asyncio
@@ -1440,13 +1474,15 @@ class _TokenCasPeerRotationInReadWriteGapRepo(_DummyRepo):
             self._db_ciphertext = self._peer_ciphertext
         return row
 
-    async def update_tokens(
+    async def rotate_tokens(
         self,
         account_id: str,
         access_token_encrypted: bytes,
         refresh_token_encrypted: bytes,
         id_token_encrypted: bytes,
         last_refresh: datetime,
+        *,
+        expected_refresh_token_encrypted: bytes,
         plan_type: str | None = None,
         email: str | None = None,
         chatgpt_account_id: str | None = None,
@@ -1454,7 +1490,6 @@ class _TokenCasPeerRotationInReadWriteGapRepo(_DummyRepo):
         workspace_id: str | None = None,
         workspace_label: str | None = None,
         seat_type: str | None = None,
-        expected_refresh_token_encrypted: bytes | None = None,
     ) -> bool:
         self.update_attempts.append(expected_refresh_token_encrypted)
         if expected_refresh_token_encrypted is not None and expected_refresh_token_encrypted != self._db_ciphertext:
@@ -1462,7 +1497,7 @@ class _TokenCasPeerRotationInReadWriteGapRepo(_DummyRepo):
             return False
         # A landing write (guarded match) or a FORBIDDEN unconditional write.
         self._db_ciphertext = refresh_token_encrypted
-        return await super().update_tokens(
+        return await super().rotate_tokens(
             account_id,
             access_token_encrypted=access_token_encrypted,
             refresh_token_encrypted=refresh_token_encrypted,
@@ -1562,13 +1597,15 @@ class _TokenCasSamePlaintextInReadWriteGapRepo(_DummyRepo):
             self._db_ciphertext = self._encryptor.encrypt(self._plaintext)
         return row
 
-    async def update_tokens(
+    async def rotate_tokens(
         self,
         account_id: str,
         access_token_encrypted: bytes,
         refresh_token_encrypted: bytes,
         id_token_encrypted: bytes,
         last_refresh: datetime,
+        *,
+        expected_refresh_token_encrypted: bytes,
         plan_type: str | None = None,
         email: str | None = None,
         chatgpt_account_id: str | None = None,
@@ -1576,13 +1613,12 @@ class _TokenCasSamePlaintextInReadWriteGapRepo(_DummyRepo):
         workspace_id: str | None = None,
         workspace_label: str | None = None,
         seat_type: str | None = None,
-        expected_refresh_token_encrypted: bytes | None = None,
     ) -> bool:
         self.update_attempts.append(expected_refresh_token_encrypted)
         if expected_refresh_token_encrypted is not None and expected_refresh_token_encrypted != self._db_ciphertext:
             return False
         self._db_ciphertext = refresh_token_encrypted
-        return await super().update_tokens(
+        return await super().rotate_tokens(
             account_id,
             access_token_encrypted=access_token_encrypted,
             refresh_token_encrypted=refresh_token_encrypted,

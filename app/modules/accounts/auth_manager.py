@@ -64,13 +64,15 @@ class AccountsRepositoryPort(Protocol):
         expected_refresh_token_encrypted: bytes | None = None,
     ) -> bool: ...
 
-    async def update_tokens(
+    async def rotate_tokens(
         self,
         account_id: str,
         access_token_encrypted: bytes,
         refresh_token_encrypted: bytes,
         id_token_encrypted: bytes,
         last_refresh: datetime,
+        *,
+        expected_refresh_token_encrypted: bytes,
         plan_type: str | None = None,
         email: str | None = None,
         chatgpt_account_id: str | None = None,
@@ -78,7 +80,20 @@ class AccountsRepositoryPort(Protocol):
         workspace_id: str | None = None,
         workspace_label: str | None = None,
         seat_type: str | None = None,
-        expected_refresh_token_encrypted: bytes | None = None,
+    ) -> bool: ...
+
+    async def update_account_metadata(
+        self,
+        account_id: str,
+        *,
+        plan_type: str | None = None,
+        email: str | None = None,
+        chatgpt_account_id: str | None = None,
+        chatgpt_user_id: str | None = None,
+        workspace_id: str | None = None,
+        workspace_label: str | None = None,
+        seat_type: str | None = None,
+        last_refresh: datetime | None = None,
     ) -> bool: ...
 
     async def workspace_slot_taken(
@@ -513,7 +528,7 @@ class AuthManager:
             new_seat_type = result.seat_type
 
         async def _write_tokens(expected_refresh_token_encrypted: bytes) -> bool:
-            return await self._repo.update_tokens(
+            return await self._repo.rotate_tokens(
                 account.id,
                 access_token_encrypted=new_access_token_encrypted,
                 refresh_token_encrypted=new_refresh_token_encrypted,
@@ -997,31 +1012,17 @@ class AuthManager:
         try:
             # This backfill runs on EVERY ensure_fresh for a legacy account (the
             # fast, no-refresh path included) against the caller's selection-time
-            # snapshot, OUTSIDE any refresh claim. It MUST NOT be an unconditional
-            # token write: doing so would rewrite the refresh-token ciphertext
-            # from that stale in-memory snapshot and, if a peer replica rotated
-            # the single-use token in the read->write window, clobber the peer's
-            # fresh rotation with already-consumed material -- the exact
-            # lost-update the refresh persist path was rebuilt to forbid,
-            # re-entering via this sibling. Guard the write with a compare-and-set
-            # on the refresh-token ciphertext this replica observed: a concurrent
-            # rotation makes it MISS (no write, no clobber; the derived id is
-            # simply re-derived and re-attempted on a later request), while the
-            # common no-rotation case persists the derived chatgpt_account_id
-            # atomically alongside the unchanged token material it read.
-            await self._repo.update_tokens(
+            # snapshot, OUTSIDE any refresh claim. It derives and persists only
+            # the missing chatgpt_account_id, so it routes through the
+            # metadata-only writer, which STRUCTURALLY cannot write token
+            # ciphertext. That makes it impossible for this stale in-memory
+            # snapshot to rewrite the refresh-token material and clobber a peer
+            # replica's concurrent single-use rotation -- the exact lost-update
+            # the refresh persist path was rebuilt to forbid, which previously
+            # re-entered via this sibling.
+            await self._repo.update_account_metadata(
                 account.id,
-                access_token_encrypted=account.access_token_encrypted,
-                refresh_token_encrypted=account.refresh_token_encrypted,
-                id_token_encrypted=account.id_token_encrypted,
-                last_refresh=account.last_refresh,
-                plan_type=account.plan_type,
-                email=account.email,
                 chatgpt_account_id=raw_account_id,
-                workspace_id=account.workspace_id,
-                workspace_label=account.workspace_label,
-                seat_type=account.seat_type,
-                expected_refresh_token_encrypted=account.refresh_token_encrypted,
             )
         except Exception:
             logger.warning("Failed to persist chatgpt_account_id account_id=%s", account.id, exc_info=True)

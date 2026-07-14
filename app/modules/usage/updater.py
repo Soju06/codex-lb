@@ -780,12 +780,13 @@ class UsageUpdater:
         if not self._auth_manager:
             return True
 
-        await self._auth_manager._repo.update_tokens(
+        # Identity/plan/workspace sync only. This runs against a stale in-memory
+        # ``account`` snapshot taken well before the write, so it MUST route
+        # through the metadata-only writer, which structurally cannot touch
+        # token ciphertext. Persisting token material from this snapshot would
+        # clobber a peer replica's concurrent refresh-token rotation.
+        await self._auth_manager._repo.update_account_metadata(
             account.id,
-            access_token_encrypted=account.access_token_encrypted,
-            refresh_token_encrypted=account.refresh_token_encrypted,
-            id_token_encrypted=account.id_token_encrypted,
-            last_refresh=account.last_refresh,
             plan_type=account.plan_type,
             email=account.email,
             chatgpt_account_id=account.chatgpt_account_id,

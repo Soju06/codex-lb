@@ -672,13 +672,15 @@ class AccountsRepository:
                 _clear_bulk_history_since_sqlite_cache()
             return deleted_id is not None
 
-    async def update_tokens(
+    async def rotate_tokens(
         self,
         account_id: str,
         access_token_encrypted: bytes,
         refresh_token_encrypted: bytes,
         id_token_encrypted: bytes,
         last_refresh: datetime,
+        *,
+        expected_refresh_token_encrypted: bytes,
         plan_type: str | None = None,
         email: str | None = None,
         chatgpt_account_id: str | None = None,
@@ -686,8 +688,21 @@ class AccountsRepository:
         workspace_id: str | None = None,
         workspace_label: str | None = None,
         seat_type: str | None = None,
-        expected_refresh_token_encrypted: bytes | None = None,
     ) -> bool:
+        """Persist rotated access/refresh/id token ciphertext under a mandatory
+        compare-and-set on the refresh-token ciphertext.
+
+        This is the ONLY method that writes token ciphertext, and the CAS
+        predicate (``expected_refresh_token_encrypted``) is REQUIRED — there is
+        no code path that writes ``refresh_token_encrypted`` unconditionally.
+        The comparison is atomic in the database, so a concurrent rotation
+        committed after the caller read ``expected`` makes this write MISS (it
+        returns ``False`` and touches no row) rather than clobbering the peer's
+        fresh material. Metadata is co-written here only because a genuine
+        rotation carries a fresh identity/plan/workspace snapshot; metadata-only
+        writers must use ``update_account_metadata`` (which cannot touch token
+        material at all).
+        """
         async with sqlite_writer_section():
             values: dict[str, bytes | datetime | str] = {
                 "access_token_encrypted": access_token_encrypted,
@@ -709,13 +724,67 @@ class AccountsRepository:
                 values["workspace_label"] = workspace_label
             if seat_type is not None:
                 values["seat_type"] = seat_type
-            stmt = update(Account).where(Account.id == account_id).values(**values).returning(Account.id)
-            if expected_refresh_token_encrypted is not None:
+            stmt = (
+                update(Account)
+                .where(Account.id == account_id)
                 # Compare-and-set on the exact ciphertext the caller read before
                 # the upstream exchange, so a concurrent rotation is never
                 # clobbered by a slower writer.
-                stmt = stmt.where(Account.refresh_token_encrypted == expected_refresh_token_encrypted)
+                .where(Account.refresh_token_encrypted == expected_refresh_token_encrypted)
+                .values(**values)
+                .returning(Account.id)
+            )
             result = await self._session.execute(stmt)
+            await self._session.commit()
+            return result.scalar_one_or_none() is not None
+
+    async def update_account_metadata(
+        self,
+        account_id: str,
+        *,
+        plan_type: str | None = None,
+        email: str | None = None,
+        chatgpt_account_id: str | None = None,
+        chatgpt_user_id: str | None = None,
+        workspace_id: str | None = None,
+        workspace_label: str | None = None,
+        seat_type: str | None = None,
+        last_refresh: datetime | None = None,
+    ) -> bool:
+        """Update non-token account metadata (identity/plan/workspace fields).
+
+        This method structurally CANNOT write access/refresh/id token
+        ciphertext — there is no parameter for it — so a metadata-only writer
+        holding a stale ``Account`` snapshot can never clobber a concurrent
+        cross-replica token rotation. It is the correct path for backfills and
+        identity syncs that must never touch token material. Only the provided
+        (non-``None``) fields are written; a call with nothing to set is a
+        no-op existence check.
+        """
+        async with sqlite_writer_section():
+            values: dict[str, str | datetime] = {}
+            if plan_type is not None:
+                values["plan_type"] = plan_type
+            if email is not None:
+                values["email"] = email
+            if chatgpt_account_id is not None:
+                values["chatgpt_account_id"] = chatgpt_account_id
+            if chatgpt_user_id is not None:
+                values["chatgpt_user_id"] = chatgpt_user_id
+            if workspace_id is not None:
+                values["workspace_id"] = workspace_id
+            if workspace_label is not None:
+                values["workspace_label"] = workspace_label
+            if seat_type is not None:
+                values["seat_type"] = seat_type
+            if last_refresh is not None:
+                values["last_refresh"] = last_refresh
+            if not values:
+                existing = await self._session.get(Account, account_id)
+                return existing is not None
+            result = await self._session.execute(
+                update(Account).where(Account.id == account_id).values(**values).returning(Account.id)
+            )
             await self._session.commit()
             return result.scalar_one_or_none() is not None
 

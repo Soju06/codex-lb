@@ -13,6 +13,7 @@ deleting the account's sticky sessions).
 from __future__ import annotations
 
 import asyncio
+import inspect
 from datetime import timedelta
 
 import pytest
@@ -562,12 +563,13 @@ async def test_winner_adopts_rotation_committed_before_its_claim(db_setup, monke
 
         # Another replica rotates and commits after our snapshot was taken.
         async with SessionLocal() as winner_session:
-            await AccountsRepository(winner_session).update_tokens(
+            await AccountsRepository(winner_session).rotate_tokens(
                 account_id,
                 access_token_encrypted=encryptor.encrypt("access-new"),
                 refresh_token_encrypted=encryptor.encrypt("refresh-new"),
                 id_token_encrypted=encryptor.encrypt("id-new"),
                 last_refresh=utcnow(),
+                expected_refresh_token_encrypted=account.refresh_token_encrypted,
             )
 
         manager = AuthManager(repo, refresh_claims=RefreshClaimCoordinator(claimant_id="replica-a"))
@@ -602,12 +604,13 @@ async def test_permanent_failure_guard_sees_committed_rotation_despite_identity_
 
         # Winner commits the rotation through a different session (replica).
         async with SessionLocal() as winner_session:
-            await AccountsRepository(winner_session).update_tokens(
+            await AccountsRepository(winner_session).rotate_tokens(
                 account_id,
                 access_token_encrypted=encryptor.encrypt("access-new"),
                 refresh_token_encrypted=encryptor.encrypt("refresh-new"),
                 id_token_encrypted=encryptor.encrypt("id-new"),
                 last_refresh=utcnow(),
+                expected_refresh_token_encrypted=loser_account.refresh_token_encrypted,
             )
 
         # Exercise the legacy (unclaimed) path: the hardening must protect
@@ -623,7 +626,7 @@ async def test_permanent_failure_guard_sees_committed_rotation_despite_identity_
 
 
 @pytest.mark.asyncio
-async def test_update_tokens_cas_rejects_stale_writer(db_setup):
+async def test_rotate_tokens_cas_rejects_stale_writer(db_setup):
     account_id = "acc_cas"
     await _create_account(account_id)
     encryptor = TokenEncryptor()
@@ -634,7 +637,7 @@ async def test_update_tokens_cas_rejects_stale_writer(db_setup):
         assert account is not None
         current_ciphertext = account.refresh_token_encrypted
 
-        stale = await repo.update_tokens(
+        stale = await repo.rotate_tokens(
             account_id,
             access_token_encrypted=encryptor.encrypt("access-stale"),
             refresh_token_encrypted=encryptor.encrypt("refresh-stale"),
@@ -644,7 +647,7 @@ async def test_update_tokens_cas_rejects_stale_writer(db_setup):
         )
         assert stale is False
 
-        applied = await repo.update_tokens(
+        applied = await repo.rotate_tokens(
             account_id,
             access_token_encrypted=encryptor.encrypt("access-new"),
             refresh_token_encrypted=encryptor.encrypt("refresh-new"),
@@ -656,6 +659,71 @@ async def test_update_tokens_cas_rejects_stale_writer(db_setup):
 
     _, stored_refresh_token, _ = await _account_snapshot(account_id)
     assert stored_refresh_token == "refresh-new"
+
+
+@pytest.mark.asyncio
+async def test_rotate_tokens_requires_cas_predicate_no_unguarded_write(db_setup):
+    """Root-enforcement regression (P1): the ONLY method that writes refresh-token
+    ciphertext (``rotate_tokens``) makes the compare-and-set predicate mandatory.
+    There is no keyword to omit it, so no caller can issue an unconditional token
+    write, and a concurrent rotation always turns a stale writer into a guarded
+    MISS (no clobber) rather than an unconditional overwrite."""
+    signature = inspect.signature(AccountsRepository.rotate_tokens)
+    cas_param = signature.parameters["expected_refresh_token_encrypted"]
+    # Required (no default) and keyword-only: it cannot be dropped by any caller.
+    assert cas_param.default is inspect.Parameter.empty
+    assert cas_param.kind is inspect.Parameter.KEYWORD_ONLY
+
+    account_id = "acc_rotate_guarded"
+    await _create_account(account_id)
+    encryptor = TokenEncryptor()
+
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        # A stale writer (expected ciphertext no longer stored) is a no-op MISS.
+        missed = await repo.rotate_tokens(
+            account_id,
+            access_token_encrypted=encryptor.encrypt("access-stale"),
+            refresh_token_encrypted=encryptor.encrypt("refresh-stale"),
+            id_token_encrypted=encryptor.encrypt("id-stale"),
+            last_refresh=utcnow(),
+            expected_refresh_token_encrypted=b"stale-ciphertext",
+        )
+        assert missed is False
+
+    _, stored_refresh_token, _ = await _account_snapshot(account_id)
+    # The concurrent (stored) material survives untouched.
+    assert stored_refresh_token == "refresh-old"
+
+
+@pytest.mark.asyncio
+async def test_update_account_metadata_cannot_touch_token_material(db_setup):
+    """Root-enforcement regression (P1): the metadata-only writer STRUCTURALLY
+    cannot write token ciphertext (there is no parameter for it), so a
+    metadata-only caller holding a stale ``Account`` snapshot can never clobber
+    a concurrent refresh-token rotation. It persists only identity/plan/
+    workspace fields while token material stays exactly as stored."""
+    metadata_params = set(inspect.signature(AccountsRepository.update_account_metadata).parameters)
+    # No token ciphertext parameter exists on the metadata writer.
+    assert "refresh_token_encrypted" not in metadata_params
+    assert "access_token_encrypted" not in metadata_params
+    assert "id_token_encrypted" not in metadata_params
+
+    account_id = "acc_metadata_only"
+    await _create_account(account_id)
+
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        applied = await repo.update_account_metadata(
+            account_id,
+            plan_type="pro",
+            workspace_label="Renamed Workspace",
+        )
+        assert applied is True
+
+    _, stored_refresh_token, _ = await _account_snapshot(account_id)
+    # Token material is untouched by the metadata write.
+    assert stored_refresh_token == "refresh-old"
 
 
 @pytest.mark.asyncio
@@ -718,12 +786,13 @@ async def test_permanent_failure_cas_loses_to_rotation_committed_during_status_w
             # Concurrent re-auth commits a rotation through another session in
             # the window between this fresh read and the status CAS.
             async with SessionLocal() as winner_session:
-                await AccountsRepository(winner_session).update_tokens(
+                await AccountsRepository(winner_session).rotate_tokens(
                     account_id,
                     access_token_encrypted=encryptor.encrypt("access-rotated"),
                     refresh_token_encrypted=encryptor.encrypt("refresh-rotated"),
                     id_token_encrypted=encryptor.encrypt("id-rotated"),
                     last_refresh=utcnow(),
+                    expected_refresh_token_encrypted=latest.refresh_token_encrypted if latest else b"",
                 )
             return latest
 
@@ -778,12 +847,13 @@ async def test_permanent_failure_cas_retries_when_same_plaintext_re_encrypted(db
                 # the window between this fresh read and the status CAS. Status/
                 # reason/reset are untouched, so only the ciphertext guard trips.
                 async with SessionLocal() as reauth_session:
-                    await AccountsRepository(reauth_session).update_tokens(
+                    await AccountsRepository(reauth_session).rotate_tokens(
                         account_id,
                         access_token_encrypted=encryptor.encrypt("access-old"),
                         refresh_token_encrypted=encryptor.encrypt("refresh-old"),
                         id_token_encrypted=encryptor.encrypt("id-old"),
                         last_refresh=utcnow(),
+                        expected_refresh_token_encrypted=latest.refresh_token_encrypted if latest else b"",
                     )
             return latest
 

@@ -83,13 +83,15 @@ class BackgroundAccountsRepository:
                 **kwargs,
             )
 
-    async def update_tokens(
+    async def rotate_tokens(
         self,
         account_id: str,
         access_token_encrypted: bytes,
         refresh_token_encrypted: bytes,
         id_token_encrypted: bytes,
         last_refresh: datetime,
+        *,
+        expected_refresh_token_encrypted: bytes,
         plan_type: str | None = None,
         email: str | None = None,
         chatgpt_account_id: str | None = None,
@@ -97,15 +99,15 @@ class BackgroundAccountsRepository:
         workspace_id: str | None = None,
         workspace_label: str | None = None,
         seat_type: str | None = None,
-        expected_refresh_token_encrypted: bytes | None = None,
     ) -> bool:
         async with get_background_session() as session:
-            return await AccountsRepository(session).update_tokens(
+            return await AccountsRepository(session).rotate_tokens(
                 account_id,
                 access_token_encrypted=access_token_encrypted,
                 refresh_token_encrypted=refresh_token_encrypted,
                 id_token_encrypted=id_token_encrypted,
                 last_refresh=last_refresh,
+                expected_refresh_token_encrypted=expected_refresh_token_encrypted,
                 plan_type=plan_type,
                 email=email,
                 chatgpt_account_id=chatgpt_account_id,
@@ -113,7 +115,32 @@ class BackgroundAccountsRepository:
                 workspace_id=workspace_id,
                 workspace_label=workspace_label,
                 seat_type=seat_type,
-                expected_refresh_token_encrypted=expected_refresh_token_encrypted,
+            )
+
+    async def update_account_metadata(
+        self,
+        account_id: str,
+        *,
+        plan_type: str | None = None,
+        email: str | None = None,
+        chatgpt_account_id: str | None = None,
+        chatgpt_user_id: str | None = None,
+        workspace_id: str | None = None,
+        workspace_label: str | None = None,
+        seat_type: str | None = None,
+        last_refresh: datetime | None = None,
+    ) -> bool:
+        async with get_background_session() as session:
+            return await AccountsRepository(session).update_account_metadata(
+                account_id,
+                plan_type=plan_type,
+                email=email,
+                chatgpt_account_id=chatgpt_account_id,
+                chatgpt_user_id=chatgpt_user_id,
+                workspace_id=workspace_id,
+                workspace_label=workspace_label,
+                seat_type=seat_type,
+                last_refresh=last_refresh,
             )
 
     async def workspace_slot_taken(

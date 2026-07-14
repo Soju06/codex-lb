@@ -362,21 +362,37 @@ The previsible-unary failover path (`_ensure_previsible_unary_fresh_with_failove
 
 ### Requirement: Refresh-path sibling writes never clobber a peer rotation, and the warmup path honors the claim-contention taxonomy
 
-The no-unconditional-write and no-clobber guarantees MUST hold across the WHOLE write surface reachable on the refresh/`ensure_fresh` hot path, not only inside the three rewritten helpers. In particular:
+The no-unconditional-write and no-clobber guarantees MUST hold across the WHOLE write surface reachable on the refresh/`ensure_fresh` hot path, not only inside the three rewritten helpers. This invariant MUST be enforced STRUCTURALLY at the repository (data) layer so no current or future caller can reopen the clobber class:
 
-The `chatgpt_account_id` backfill (`_ensure_chatgpt_account_id`), which runs on every `ensure_fresh` — including the fast no-refresh path — for a legacy account still missing its `chatgpt_account_id`, MUST NOT issue an UNCONDITIONAL token write from the caller's in-memory selection snapshot: that snapshot is not re-read under a claim, so an unconditional write of the refresh-token ciphertext would clobber a concurrent peer rotation of the single-use token that lands in the read→write window with already-consumed material. The backfill write MUST instead be a compare-and-set guarded on the refresh-token ciphertext this replica observed (`expected_refresh_token_encrypted`), so a concurrent rotation causes a MISS (no write, no clobber; the derived id is simply re-derived and re-attempted on a later request) while the common no-rotation case persists the derived `chatgpt_account_id` atomically alongside the unchanged token material it read. No `ensure_fresh` path may perform an unconditional token write.
+Refresh-token ciphertext writes MUST be compare-and-set at the repository layer. The accounts repository MUST expose exactly ONE method that writes access/refresh/id token ciphertext (`rotate_tokens`), and that method MUST take a REQUIRED (non-optional) `expected_refresh_token_encrypted` compare-and-set predicate — there MUST be no parameter combination that writes `refresh_token_encrypted` unconditionally. Metadata writes MUST NOT touch token material: the repository MUST expose a separate metadata-only method (`update_account_metadata`) for identity/plan/workspace fields (`chatgpt_account_id`, `chatgpt_user_id`, `plan_type`, `email`, `workspace_id`, `workspace_label`, `seat_type`, `last_refresh`) that STRUCTURALLY cannot write token ciphertext (it has no parameter for it). Consequently a metadata-only writer holding a stale `Account` snapshot — loaded before a peer replica's guarded refresh — can never clobber a concurrent rotation, because the only code path that touches `refresh_token_encrypted` is the mandatory compare-and-set in `rotate_tokens`. Every caller MUST route to the correct method: token-rotation callers (the refresh persist and permanent-failure paths) to the guarded `rotate_tokens`, and metadata-only callers (the `chatgpt_account_id` backfill and the usage identity/plan/workspace sync) to `update_account_metadata`.
+
+The `chatgpt_account_id` backfill (`_ensure_chatgpt_account_id`), which runs on every `ensure_fresh` — including the fast no-refresh path — for a legacy account still missing its `chatgpt_account_id`, MUST persist the derived `chatgpt_account_id` through the metadata-only writer, which structurally cannot touch token material. Its caller-time in-memory selection snapshot is not re-read under a claim, so routing the backfill through a token-writing method would risk clobbering a concurrent peer rotation of the single-use token that lands in the read→write window with already-consumed material; the metadata-only path removes that risk entirely (a concurrent rotation is simply not observable to this write, and the derived id is persisted without ever reading or writing the refresh-token ciphertext). No `ensure_fresh` path may perform an unconditional token write, and no metadata-only path may write token ciphertext at all.
 
 The permanent-status downgrade MUST have a SINGLE guarded authority. `AuthManager` (`_handle_permanent_refresh_failure`) owns the primary refresh-token-ciphertext-guarded compare-and-set. The proxy load balancer's `mark_permanent_failure` MUST NOT perform an UNGUARDED database status write on the permanent-refresh-failure path: its persistence MUST route through a compare-and-set conditioned on the account's refresh-token ciphertext (`update_status_if_current` with `expected_refresh_token_encrypted`), so a concurrent peer re-authentication/import rotation causes a MISS instead of clobbering the peer's repaired `ACTIVE`/rotated row back to `reauth_required` (and tearing down its sticky/bridge sessions). A genuine permanent failure MUST still result in exactly ONE guarded database downgrade: in the single-caller case `AuthManager` has already CAS-written the downgrade and mutated the in-memory object, so the load balancer's guarded write is predicate-skipped as redundant; the load balancer's guarded write covers only the callers whose in-memory object did not go through that CAS (an intra-process singleflight joiner sharing the winner's permanent error) and non-refresh permanent failures. No path may perform an unguarded status downgrade write on the refresh-permanent-failure path.
 
 The proxy warmup submit path MUST classify a refresh failure with the same taxonomy as the core proxy request paths: a transient cross-replica refresh-CLAIM-CONTENTION failure (`is_refresh_claim_contention` — the `refresh_claim_timeout`, `status_downgrade_conflict`, and `token_persist_conflict` codes) MUST surface as a retryable `upstream_unavailable` in the warmup result and request log, NOT as `invalid_api_key`, because the account's OAuth credentials are healthy (only its refresh claim is held by a peer replica). A permanent `RefreshError` keeps its `invalid_api_key` classification (and marks the permanent failure), and a genuine non-contention transport-level `RefreshError` also keeps `invalid_api_key`.
 
-#### Scenario: Legacy chatgpt_account_id backfill is refresh-token-ciphertext guarded
+#### Scenario: Legacy chatgpt_account_id backfill routes through the metadata-only writer
 
 - **GIVEN** a legacy account whose `chatgpt_account_id` is unset but whose stored id-token yields a derivable `chatgpt_account_id`
 - **AND** the account's token material is fresh, so `ensure_fresh` takes the no-refresh fast path straight into the backfill
 - **WHEN** `ensure_fresh` runs and persists the derived `chatgpt_account_id`
-- **THEN** the write is a compare-and-set guarded on the refresh-token ciphertext this replica observed (`expected_refresh_token_encrypted` is the read ciphertext, never `None`)
-- **AND** a concurrent peer rotation of the single-use refresh token causes the guarded write to MISS rather than clobbering the peer's rotation with already-consumed material
+- **THEN** the write goes through the metadata-only repository method, which has no parameter for token ciphertext and therefore never reads or writes `refresh_token_encrypted`
+- **AND** a concurrent peer rotation of the single-use refresh token is untouched, because the backfill is structurally incapable of writing token material
+
+#### Scenario: Repository refuses an unguarded refresh-token write
+
+- **GIVEN** the accounts repository's token-writing method (`rotate_tokens`)
+- **WHEN** any caller attempts to persist token ciphertext
+- **THEN** the method requires a non-optional `expected_refresh_token_encrypted` compare-and-set predicate, so there is no code path that writes `refresh_token_encrypted` unconditionally
+- **AND** a concurrent rotation committed after the caller read the expected ciphertext turns a stale writer into a guarded MISS (no write, no clobber), never an unconditional overwrite
+
+#### Scenario: Metadata write cannot touch token material
+
+- **GIVEN** the accounts repository's metadata-only method (`update_account_metadata`)
+- **WHEN** an identity/plan/workspace sync writes account metadata from a stale in-memory snapshot
+- **THEN** the method has no parameter for access/refresh/id token ciphertext and persists only metadata columns
+- **AND** the stored token material is left exactly as it was, so a concurrent refresh-token rotation is never clobbered by a metadata write
 
 #### Scenario: Proxy permanent-failure mark does not clobber a peer's rotated repair
 

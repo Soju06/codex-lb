@@ -2,15 +2,22 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any, Mapping
 
 import aiohttp
+from aiohttp_socks import ProxyConnectionError as SocksProxyConnectionError
 from aiohttp_socks import ProxyConnector
 from python_socks import ProxyType
 
 from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
 
 _RESERVED = frozenset({"akamai", "extra_fp", "impersonate", "ja3", "proxies", "proxy"})
+
+
+class CodexTransportDispatchState(StrEnum):
+    UNKNOWN = "unknown"
+    NOT_DISPATCHED = "not_dispatched"
 
 
 class CodexTransportError(RuntimeError):
@@ -21,9 +28,18 @@ class CodexTransportError(RuntimeError):
     instead of the original transport message.
     """
 
-    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        dispatch_state: CodexTransportDispatchState = CodexTransportDispatchState.UNKNOWN,
+        exception_type: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
+        self.dispatch_state = dispatch_state
+        self.exception_type = exception_type
 
 
 def require_route_or_direct_egress_opt_in(
@@ -174,7 +190,8 @@ class CodexClient:
                     response = await _buffer_response(response)
                 return CodexRequestResult(response, candidate, index > 0)
             except Exception as exc:
-                if index == len(endpoints) - 1 or not allow_fallback:
+                pre_dispatch = _transport_dispatch_state(exc) is CodexTransportDispatchState.NOT_DISPATCHED
+                if index == len(endpoints) - 1 or not (allow_fallback or pre_dispatch):
                     raise _transport_error("request", endpoint.id, exc) from None
         raise RuntimeError("unreachable Codex client fallback state")
 
@@ -384,7 +401,15 @@ def _transport_error(operation: str, endpoint_id: str, exc: Exception) -> CodexT
     return CodexTransportError(
         codex_transport_error_message(operation, endpoint_id, exc),
         status_code=_transport_error_status_code(exc),
+        dispatch_state=_transport_dispatch_state(exc),
+        exception_type=type(exc).__name__,
     )
+
+
+def _transport_dispatch_state(exc: Exception) -> CodexTransportDispatchState:
+    if isinstance(exc, (aiohttp.ClientProxyConnectionError, SocksProxyConnectionError)):
+        return CodexTransportDispatchState.NOT_DISPATCHED
+    return CodexTransportDispatchState.UNKNOWN
 
 
 def _transport_error_status_code(exc: Exception) -> int | None:

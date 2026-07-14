@@ -14,7 +14,13 @@ import aiohttp
 from app.core.auth.refresh import RefreshError
 from app.core.balancer import failover_decision
 from app.core.balancer.types import UpstreamError
-from app.core.clients.proxy import ProxyResponseError, _resolve_stream_transport, pop_stream_timeout_overrides
+from app.core.clients.proxy import (
+    ProxyResponseError,
+    _resolve_stream_transport,
+    is_ambiguous_dispatch_transport_error,
+    is_confirmed_pre_dispatch_transport_error,
+    pop_stream_timeout_overrides,
+)
 from app.core.errors import openai_error, response_failed_event
 from app.core.openai.requests import ResponsesRequest, extract_input_file_ids
 from app.core.upstream_proxy import UpstreamProxyRouteError
@@ -326,6 +332,8 @@ class _StreamingRetryMixin:
         upstream_transport_metric_recorded = False
         settlement = _StreamSettlement()
         last_transient_exc: ProxyResponseError | None = None
+        last_pre_dispatch_transport_error: ProxyResponseError | None = None
+        handled_dispatch_transport_error: ProxyResponseError | None = None
         last_security_work_retry_error: _RetryableStreamError | None = None
         excluded_account_ids: set[str] = set()
         deferred_capacity_account: Account | None = None
@@ -336,6 +344,7 @@ class _StreamingRetryMixin:
         last_retryable_stream_error: _RetryableStreamError | None = None
         require_security_work_authorized = False
         account_leases: list[AccountLease] = []
+        current_account_lease: AccountLease | None = None
         estimated_lease_tokens = _facade()._estimated_lease_tokens_from_request_usage_budget(
             estimate_api_key_request_usage(payload)
         )
@@ -464,6 +473,71 @@ class _StreamingRetryMixin:
                 sticky=upstream_transport_sticky,
                 status=status,
             )
+
+        def _render_dispatch_transport_error(exc: ProxyResponseError) -> str:
+            error = _parse_openai_error(exc.payload)
+            error_code = (
+                _normalize_error_code(
+                    error.code if error else None,
+                    error.type if error else None,
+                )
+                or "upstream_unavailable"
+            )
+            error_message = error.message if error and error.message else "Upstream transport failed"
+            event = response_failed_event(
+                error_code,
+                error_message,
+                error_type=(error.type if error else None) or "server_error",
+                response_id=request_id,
+                error_param=error.param if error else None,
+            )
+            _apply_error_metadata(event["response"]["error"], error)
+            return format_sse_event(event)
+
+        async def _handle_dispatch_transport_error(
+            exc: ProxyResponseError,
+            account: Account,
+            *,
+            outcome: str,
+        ) -> bool | None:
+            nonlocal affinity, current_account_lease
+            nonlocal handled_dispatch_transport_error, last_pre_dispatch_transport_error
+            confirmed_pre_dispatch = is_confirmed_pre_dispatch_transport_error(exc)
+            ambiguous_dispatch = is_ambiguous_dispatch_transport_error(exc)
+            if not confirmed_pre_dispatch and not ambiguous_dispatch:
+                return None
+            handled_dispatch_transport_error = exc
+            await _release_tracked_stream_lease(current_account_lease)
+            current_account_lease = None
+            if ambiguous_dispatch:
+                error = _parse_openai_error(exc.payload)
+                error_code = _normalize_error_code(
+                    error.code if error else None,
+                    error.type if error else None,
+                )
+                await proxy._handle_stream_error(
+                    account,
+                    _upstream_error_from_openai(error),
+                    error_code,
+                    http_status=exc.status_code,
+                )
+                return False
+            last_pre_dispatch_transport_error = exc
+            await proxy._load_balancer.record_error_backoff(account)
+            can_try_other_account = (
+                not require_preferred_account and account.id != file_preferred_account_id and attempt < max_attempts - 1
+            )
+            if not can_try_other_account:
+                return False
+            excluded_account_ids.add(account.id)
+            affinity = replace(affinity, reallocate_sticky=True)
+            logger.info(
+                "Retrying stream after confirmed pre-dispatch proxy failure request_id=%s account_id=%s phase=%s",
+                request_id,
+                account.id,
+                outcome,
+            )
+            return True
 
         try:
             if payload.previous_response_id is not None:
@@ -700,6 +774,7 @@ class _StreamingRetryMixin:
                         deferred_capacity_lease = None
                     if (
                         not account
+                        and last_pre_dispatch_transport_error is None
                         and (
                             selection.error_code in _LOCAL_ACCOUNT_CAP_ERROR_CODES
                             or not (propagate_http_errors and last_transient_exc is not None)
@@ -730,6 +805,11 @@ class _StreamingRetryMixin:
                             continue
                     break
                 if not account:
+                    if last_pre_dispatch_transport_error is not None:
+                        if propagate_http_errors:
+                            raise last_pre_dispatch_transport_error
+                        yield _render_dispatch_transport_error(last_pre_dispatch_transport_error)
+                        return
                     if selection.error_code in _LOCAL_ACCOUNT_CAP_ERROR_CODES:
                         no_accounts_msg = selection.error_message or "Local account capacity is exhausted"
                         error_code = selection.error_code
@@ -1224,6 +1304,19 @@ class _StreamingRetryMixin:
                                     request_id,
                                 )
                                 return
+                            if isinstance(tex, ProxyResponseError):
+                                dispatch_transport_retry = await _handle_dispatch_transport_error(
+                                    tex,
+                                    account,
+                                    outcome="previsible",
+                                )
+                                if dispatch_transport_retry is not None:
+                                    if dispatch_transport_retry:
+                                        break
+                                    if propagate_http_errors:
+                                        raise tex
+                                    yield _render_dispatch_transport_error(tex)
+                                    return
                             if isinstance(tex, ProxyResponseError) and tex.status_code != 500:
                                 error = _parse_openai_error(tex.payload)
                                 code = _normalize_error_code(
@@ -1458,6 +1551,22 @@ class _StreamingRetryMixin:
                         await proxy._handle_stream_error(account, exc.error, exc.code)
                     return
                 except ProxyResponseError as exc:
+                    if is_confirmed_pre_dispatch_transport_error(exc) or is_ambiguous_dispatch_transport_error(exc):
+                        dispatch_transport_retry = (
+                            False
+                            if handled_dispatch_transport_error is exc and current_account_lease is None
+                            else await _handle_dispatch_transport_error(
+                                exc,
+                                account,
+                                outcome="outer",
+                            )
+                        )
+                        if dispatch_transport_retry:
+                            continue
+                        if propagate_http_errors:
+                            raise
+                        yield _render_dispatch_transport_error(exc)
+                        return
                     if exc.status_code == 401:
                         remaining_budget = _facade()._remaining_budget_seconds(deadline)
                         if remaining_budget <= 0:
@@ -1631,6 +1740,18 @@ class _StreamingRetryMixin:
                                     request_id,
                                 )
                                 return
+                            dispatch_transport_retry = await _handle_dispatch_transport_error(
+                                retry_exc,
+                                account,
+                                outcome="post_refresh",
+                            )
+                            if dispatch_transport_retry is not None:
+                                if dispatch_transport_retry:
+                                    continue
+                                if propagate_http_errors:
+                                    raise retry_exc
+                                yield _render_dispatch_transport_error(retry_exc)
+                                return
                             error = _parse_openai_error(retry_exc.payload)
                             error_code = _normalize_error_code(
                                 error.code if error else None,
@@ -1787,6 +1908,11 @@ class _StreamingRetryMixin:
                     return
             # When HTTP error propagation is enabled and the last failure was
             # a transient 500, re-raise to preserve the upstream status/payload.
+            if last_pre_dispatch_transport_error is not None:
+                if propagate_http_errors:
+                    raise last_pre_dispatch_transport_error
+                yield _render_dispatch_transport_error(last_pre_dispatch_transport_error)
+                return
             if propagate_http_errors and last_transient_exc is not None:
                 raise last_transient_exc
             if last_retryable_stream_error is not None:

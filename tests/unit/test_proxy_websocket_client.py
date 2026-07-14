@@ -13,7 +13,7 @@ from websockets.exceptions import InvalidHandshake, InvalidProxy, InvalidStatus
 from websockets.http11 import Response
 
 import app.core.clients.proxy_websocket as proxy_websocket_module
-from app.core.clients.codex import CodexTransportError, CodexWebSocketResult
+from app.core.clients.codex import CodexTransportDispatchState, CodexTransportError, CodexWebSocketResult
 from app.core.clients.proxy import ProxyResponseError
 from app.core.clients.proxy_websocket import connect_responses_websocket
 from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
@@ -174,7 +174,11 @@ class _FailingCodexClient:
         **kwargs: object,
     ) -> CodexWebSocketResult:
         del url, route, kwargs
-        raise CodexTransportError("Codex upstream websocket failed via proxy endpoint ep_1: OSError")
+        raise CodexTransportError(
+            "Codex upstream websocket failed via proxy endpoint ep_1: ClientProxyConnectionError",
+            dispatch_state=CodexTransportDispatchState.NOT_DISPATCHED,
+            exception_type="ClientProxyConnectionError",
+        )
 
     async def close(self) -> None:
         self.closed = True
@@ -310,6 +314,9 @@ async def test_connect_responses_websocket_routed_transport_error_maps_proxy_err
     assert exc_info.value.status_code == 502
     assert _proxy_error_code(exc_info.value) == "upstream_unavailable"
     assert "ep_1" in (_proxy_error_message(exc_info.value) or "")
+    assert exc_info.value.upstream_dispatch_state is CodexTransportDispatchState.NOT_DISPATCHED
+    assert exc_info.value.failure_detail == "proxy_connect_pre_dispatch"
+    assert exc_info.value.failure_exception_type == "ClientProxyConnectionError"
 
 
 @pytest.mark.asyncio

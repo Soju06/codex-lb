@@ -40,6 +40,7 @@ from app.core.clients.proxy import (  # noqa: F401  # noqa: F401
     apply_codex_installation_headers,
     apply_codex_installation_metadata,
     filter_inbound_headers,
+    is_confirmed_pre_dispatch_transport_error,
     pop_compact_timeout_overrides,
     pop_stream_timeout_overrides,
     pop_transcribe_timeout_overrides,
@@ -1869,6 +1870,7 @@ class _WebSocketMixin:
                     force_refresh=forced_refresh_account_id == account.id,
                 )
             except ProxyResponseError as exc:
+                confirmed_pre_dispatch = is_confirmed_pre_dispatch_transport_error(exc)
                 action = await proxy._decide_websocket_failover_action(
                     account=account,
                     exc=exc,
@@ -1876,9 +1878,13 @@ class _WebSocketMixin:
                     attempt=attempt + 1,
                     max_attempts=max_attempts,
                     deterministic_failover_enabled=getattr(base_settings, "deterministic_failover_enabled", True),
+                    require_preferred_account=require_preferred_account,
                 )
                 if action == "failover_next":
                     await proxy._load_balancer.release_account_lease(selected_stream_lease)
+                    selected_stream_lease = None
+                    if confirmed_pre_dispatch:
+                        await proxy._load_balancer.record_error_backoff(account)
                     last_failover_exc = exc
                     last_failover_account = account
                     excluded_account_ids.add(account.id)
@@ -1888,6 +1894,8 @@ class _WebSocketMixin:
                 error_message = error.message if error else None
                 await proxy._load_balancer.release_account_lease(selected_stream_lease)
                 selected_stream_lease = None
+                if confirmed_pre_dispatch:
+                    await proxy._load_balancer.record_error_backoff(account)
                 await proxy._emit_websocket_connect_failure(
                     websocket,
                     client_send_lock=client_send_lock,
@@ -2396,13 +2404,20 @@ class _WebSocketMixin:
         attempt: int,
         max_attempts: int,
         deterministic_failover_enabled: bool,
+        require_preferred_account: bool = False,
     ) -> str:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
-        classified = await proxy._handle_websocket_connect_error(account, exc)
-        failure_class = classified["failure_class"] if isinstance(classified, dict) else "non_retryable"
+        confirmed_pre_dispatch = is_confirmed_pre_dispatch_transport_error(exc)
+        if confirmed_pre_dispatch:
+            failure_class = "retryable_transient"
+        else:
+            classified = await proxy._handle_websocket_connect_error(account, exc)
+            failure_class = classified["failure_class"] if isinstance(classified, dict) else "non_retryable"
         candidates_remaining = max_attempts - attempt
-        if exc.status_code == 401 and candidates_remaining > 0:
+        if confirmed_pre_dispatch:
+            action = "surface" if require_preferred_account or candidates_remaining <= 0 else "failover_next"
+        elif exc.status_code == 401 and candidates_remaining > 0:
             action = "failover_next"
         elif deterministic_failover_enabled:
             action = failover_decision(

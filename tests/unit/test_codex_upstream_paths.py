@@ -6,7 +6,7 @@ import aiohttp
 import pytest
 
 import app.core.clients.proxy as proxy_module
-from app.core.clients.codex import CodexTransportError, CodexWebSocketResult
+from app.core.clients.codex import CodexTransportDispatchState, CodexTransportError, CodexWebSocketResult
 from app.core.clients.files import create_file, finalize_file
 from app.core.clients.proxy import (
     ProxyResponseError,
@@ -111,6 +111,23 @@ class _TransportErrorCodexClient:
     async def request(self, method: str, url: str, *, route: ResolvedUpstreamRoute, **kwargs: Any) -> object:
         self.calls.append({"method": method, "url": url, "route": route, **kwargs})
         raise CodexTransportError("Codex upstream request failed via proxy endpoint ep_1: OSError")
+
+
+class _PreDispatchTransportErrorCodexClient:
+    async def request_with_route_metadata(
+        self,
+        method: str,
+        url: str,
+        *,
+        route: ResolvedUpstreamRoute,
+        **kwargs: Any,
+    ) -> object:
+        del method, url, route, kwargs
+        raise CodexTransportError(
+            "Codex upstream request failed via proxy endpoint ep_1: ClientProxyConnectionError",
+            dispatch_state=CodexTransportDispatchState.NOT_DISPATCHED,
+            exception_type="ClientProxyConnectionError",
+        )
 
 
 class _FakeCodexWebSocket:
@@ -589,6 +606,58 @@ async def test_stream_responses_routed_transport_errors_are_unavailable(route: R
     combined = "".join(events)
     assert '"code":"upstream_unavailable"' in combined
     assert "ep_1" in combined
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_propagates_confirmed_pre_dispatch_failure_for_status_retry(
+    route: ResolvedUpstreamRoute,
+) -> None:
+    payload = ResponsesRequest(model="gpt-5.2", instructions="Reply.", input="hello", stream=True)
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        async for _ in stream_responses(
+            payload,
+            {"user-agent": "codex"},
+            "access",
+            "chatgpt_account",
+            session=cast(Any, object()),
+            upstream_stream_transport_override="http",
+            route=route,
+            codex_client=cast(Any, _PreDispatchTransportErrorCodexClient()),
+            raise_for_status=True,
+        ):
+            pass
+
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.upstream_dispatch_state is CodexTransportDispatchState.NOT_DISPATCHED
+    assert exc_info.value.failure_detail == "proxy_connect_pre_dispatch"
+    assert exc_info.value.failure_exception_type == "ClientProxyConnectionError"
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_propagates_ambiguous_dispatch_failure_without_retry_authorization(
+    route: ResolvedUpstreamRoute,
+) -> None:
+    payload = ResponsesRequest(model="gpt-5.2", instructions="Reply.", input="hello", stream=True)
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        async for _ in stream_responses(
+            payload,
+            {"user-agent": "codex"},
+            "access",
+            "chatgpt_account",
+            session=cast(Any, object()),
+            upstream_stream_transport_override="http",
+            route=route,
+            codex_client=cast(Any, _TransportErrorCodexClient()),
+            raise_for_status=True,
+        ):
+            pass
+
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.upstream_dispatch_state is CodexTransportDispatchState.UNKNOWN
+    assert exc_info.value.retryable_same_contract is False
+    assert exc_info.value.failure_detail == "transport_error"
 
 
 @pytest.mark.asyncio

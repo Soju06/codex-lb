@@ -39,6 +39,7 @@ from multidict import CIMultiDict
 
 from app.core.clients.codex import (
     CodexClient,
+    CodexTransportDispatchState,
     CodexTransportError,
     codex_transport_error_message,
     create_codex_session,
@@ -445,6 +446,7 @@ class ProxyResponseError(Exception):
         failure_exception_type: str | None = None,
         upstream_status_code: int | None = None,
         upstream_error_code: str | None = None,
+        upstream_dispatch_state: CodexTransportDispatchState | None = None,
     ) -> None:
         super().__init__(f"Proxy response error ({status_code})")
         self.status_code = status_code
@@ -455,6 +457,15 @@ class ProxyResponseError(Exception):
         self.failure_exception_type = failure_exception_type
         self.upstream_status_code = upstream_status_code
         self.upstream_error_code = upstream_error_code
+        self.upstream_dispatch_state = upstream_dispatch_state
+
+
+def is_confirmed_pre_dispatch_transport_error(exc: ProxyResponseError) -> bool:
+    return exc.upstream_dispatch_state is CodexTransportDispatchState.NOT_DISPATCHED
+
+
+def is_ambiguous_dispatch_transport_error(exc: ProxyResponseError) -> bool:
+    return exc.upstream_dispatch_state is CodexTransportDispatchState.UNKNOWN
 
 
 @dataclass(frozen=True)
@@ -3033,7 +3044,18 @@ async def _stream_responses_with_session(
         failure_phase = "upstream"
         failure_detail = "transport_error"
         failure_exception_type = type(exc).__name__
-        retryable_same_contract = True
+        retryable_same_contract = exc.dispatch_state is CodexTransportDispatchState.NOT_DISPATCHED
+        if raise_for_status:
+            confirmed_pre_dispatch = exc.dispatch_state is CodexTransportDispatchState.NOT_DISPATCHED
+            raise ProxyResponseError(
+                502,
+                openai_error("upstream_unavailable", response_error_message, error_type="server_error"),
+                failure_phase="connect" if confirmed_pre_dispatch else "upstream",
+                retryable_same_contract=confirmed_pre_dispatch,
+                failure_detail="proxy_connect_pre_dispatch" if confirmed_pre_dispatch else "transport_error",
+                failure_exception_type=exc.exception_type or type(exc).__name__,
+                upstream_dispatch_state=exc.dispatch_state,
+            ) from exc
         yield format_sse_event(
             response_failed_event("upstream_unavailable", response_error_message, response_id=get_request_id()),
         )

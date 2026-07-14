@@ -638,6 +638,9 @@ async def test_codex_catalog_sanitizes_invalid_source_tool_metadata(
         ("null", None),
         ("non-object", "tokens"),
         ("missing-limit", {"mode": "tokens"}),
+        ("invalid-mode", {"mode": "characters", "limit": 1_234}),
+        ("string-limit", {"mode": "tokens", "limit": "4096"}),
+        ("limit-overflow", {"mode": "tokens", "limit": 2**63}),
     ],
 )
 @pytest.mark.asyncio
@@ -1512,7 +1515,7 @@ async def test_codex_catalog_completes_required_fields_for_hidden_bootstrap_meta
         raw={
             "shell_type": "shell_command",
             "visibility": "list",
-            "truncation_policy": {"mode": "tokens", "limit": 4_096},
+            "truncation_policy": {"mode": "tokens", "limit": 4_096, "future_setting": "preserved"},
             "experimental_supported_tools": ["live-tool"],
         },
     )
@@ -1544,7 +1547,11 @@ async def test_codex_catalog_completes_required_fields_for_hidden_bootstrap_meta
     assert entries["gpt-5.3-codex"]["visibility"] == "hide"
     assert entries["gpt-5.3-codex"]["truncation_policy"] == {"mode": "tokens", "limit": 10_000}
     assert entries["gpt-5.3-codex"]["experimental_supported_tools"] == []
-    assert entries["gpt-5.6-sol"]["truncation_policy"] == {"mode": "tokens", "limit": 4_096}
+    assert entries["gpt-5.6-sol"]["truncation_policy"] == {
+        "mode": "tokens",
+        "limit": 4_096,
+        "future_setting": "preserved",
+    }
     assert entries["gpt-5.6-sol"]["experimental_supported_tools"] == ["live-tool"]
 
     alias_response = await async_client.get(

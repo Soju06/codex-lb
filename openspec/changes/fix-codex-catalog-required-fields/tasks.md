@@ -13,3 +13,5 @@
   boundary and cover both native catalog aliases.
 - [x] 7. Fall back from malformed model-source truncation policies without
   failing the complete Codex catalog.
+- [x] 8. Match Codex's closed truncation-mode enum and signed 64-bit limit wire
+  types while preserving forward-compatible extra fields.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -169,8 +170,8 @@ class ReasoningLevelSchema(BaseModel):
 class CodexTruncationPolicy(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    mode: str
-    limit: int
+    mode: Literal["bytes", "tokens"]
+    limit: int = Field(strict=True, ge=-(2**63), le=2**63 - 1)
 
 
 class CodexModelEntry(BaseModel):

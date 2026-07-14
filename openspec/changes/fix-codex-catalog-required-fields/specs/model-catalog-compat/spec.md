@@ -14,9 +14,11 @@ values provided by a live upstream catalog or model source MUST remain
 authoritative and MUST NOT be overwritten by the compatibility defaults. When
 `experimental_supported_tools` is not a list, the mapper MUST emit an empty
 list. When it contains non-string members, the mapper MUST omit those members
-rather than failing the complete catalog. When an explicit `truncation_policy`
-cannot be parsed into the required wire shape, the mapper MUST emit the same
-conservative model-compatible policy used when the field is absent.
+rather than failing the complete catalog. A wire-valid `truncation_policy` MUST
+use the `bytes` or `tokens` mode and a JSON integer representable by Codex's
+signed 64-bit `limit` field. When an explicit policy does not satisfy that wire
+shape, the mapper MUST emit the same conservative model-compatible policy used
+when the field is absent.
 
 #### Scenario: Hidden bootstrap metadata cannot invalidate the live catalog
 
@@ -54,7 +56,8 @@ conservative model-compatible policy used when the field is absent.
 #### Scenario: Malformed source truncation policy cannot fail the catalog
 
 - **GIVEN** a model source provides an invalid `truncation_policy`, such as a
-  null, non-object, or incomplete object value
+  null, non-object, incomplete object, unknown mode, non-integer limit, or
+  out-of-range limit
 - **WHEN** codex-lb renders the Codex-native catalog entry
 - **THEN** it emits the conservative model-compatible truncation policy
 - **AND** it does not return a server error

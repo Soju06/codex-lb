@@ -26,6 +26,11 @@ such as `{"truncation_policy": null}` or an object missing `limit` falls back
 to the model-compatible byte/token policy described above. Valid complete
 policies, including forward-compatible extra fields, remain authoritative.
 
+Codex's upstream protocol defines `TruncationMode` as the closed snake-case
+`bytes | tokens` enum and `limit` as an `i64`. The mapper mirrors that wire
+shape exactly: it rejects coercible-but-invalid JSON values such as a numeric
+string and falls back when an integer is outside the signed 64-bit range.
+
 ## Failure mode
 
 Codex parses the complete `models` array atomically. For example, a visible

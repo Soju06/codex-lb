@@ -919,7 +919,20 @@ class _CompactMixin:
                     if isinstance(exc, RefreshError):
                         if exc.is_permanent:
                             # Permanent refresh failures keep their prior
-                            # escalation (they propagate to the caller).
+                            # escalation (they propagate to the caller). On the
+                            # HTTP bridge / forwarded path the caller passes an
+                            # ``api_key_reservation_override`` with
+                            # ``owns_reservation`` false, so ``compact_responses``
+                            # is the sole settler; settle BEFORE raising so the
+                            # reservation is finalized instead of leaking held
+                            # API-key quota (matching the post-401 permanent
+                            # branch, which settles before re-raising).
+                            await proxy._settle_compact_api_key_usage(
+                                api_key=api_key,
+                                api_key_reservation=api_key_reservation,
+                                response=None,
+                                request_service_tier=request_service_tier,
+                            )
                             raise
                         if is_refresh_claim_contention(exc):
                             # Transient CROSS-REPLICA refresh-claim contention (for
@@ -975,9 +988,28 @@ class _CompactMixin:
                         account.id,
                         exc_info=True,
                     )
+                    # Both terminal (non-failover) transport-failure raises below
+                    # exit compact_responses without reaching the retry loop's
+                    # settle sites, so on the HTTP bridge / forwarded path
+                    # (owns_reservation false, compact_responses is the sole
+                    # settler) the API-key reservation would leak held quota.
+                    # Settle BEFORE raising, mirroring the claim-contention and
+                    # post-401 transport branches.
                     if not _should_retry_transient_stream_error("upstream_unavailable", message):
+                        await proxy._settle_compact_api_key_usage(
+                            api_key=api_key,
+                            api_key_reservation=api_key_reservation,
+                            response=None,
+                            request_service_tier=request_service_tier,
+                        )
                         _raise_proxy_unavailable(message)
                     if preferred_account_id is not None:
+                        await proxy._settle_compact_api_key_usage(
+                            api_key=api_key,
+                            api_key_reservation=api_key_reservation,
+                            response=None,
+                            request_service_tier=request_service_tier,
+                        )
                         _raise_proxy_unavailable(message)
                     await proxy._handle_stream_error(
                         account,

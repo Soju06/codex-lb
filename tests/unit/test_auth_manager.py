@@ -1292,6 +1292,102 @@ async def test_refresh_raises_transient_when_cas_never_lands_on_same_plaintext_s
     assert repo.tokens_payload is None
 
 
+@pytest.mark.asyncio
+async def test_ensure_chatgpt_account_id_backfill_is_ciphertext_guarded(monkeypatch):
+    """Regression (finding #1): ensure_fresh ends with _ensure_chatgpt_account_id,
+    which for a legacy account missing chatgpt_account_id previously issued an
+    UNCONDITIONAL update_tokens (expected_refresh_token_encrypted=None) OUTSIDE
+    any refresh claim, rewriting the refresh-token ciphertext from the in-memory
+    selection snapshot. A concurrent peer rotation of the single-use refresh
+    token in that read->write window was clobbered with already-consumed
+    material. The backfill MUST now be a compare-and-set guarded on the
+    refresh-token ciphertext this replica read, so a peer rotation MISSES rather
+    than clobbering."""
+
+    monkeypatch.setattr(auth_manager_module, "_chatgpt_account_id_from_id_token", lambda _token: "chatgpt-derived-id")
+
+    encryptor = TokenEncryptor()
+    account = Account(
+        id="acc_legacy_backfill",
+        email="user@example.com",
+        plan_type="plus",
+        access_token_encrypted=encryptor.encrypt("access-old"),
+        refresh_token_encrypted=encryptor.encrypt("refresh-old"),
+        id_token_encrypted=encryptor.encrypt("id-old"),
+        last_refresh=utcnow(),  # fresh: ensure_fresh takes the no-refresh fast path
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
+        chatgpt_account_id=None,
+    )
+    repo = _DummyRepo()
+    repo.accounts_by_id[account.id] = account
+    manager = AuthManager(cast(AccountsRepositoryPort, repo), refresh_claims=None)
+
+    result = await manager.ensure_fresh(account)
+
+    assert result.chatgpt_account_id == "chatgpt-derived-id"
+    assert repo.tokens_payload is not None
+    assert repo.tokens_payload["chatgpt_account_id"] == "chatgpt-derived-id"
+    # GUARDED write: the compare-and-set is conditioned on the refresh-token
+    # ciphertext this replica observed (pre-fix this was None -- an unconditional
+    # write that could clobber a concurrent peer rotation).
+    assert repo.tokens_payload["expected_refresh_token_encrypted"] == account.refresh_token_encrypted
+
+
+@pytest.mark.asyncio
+async def test_persist_cas_stops_at_deadline_instead_of_looping(monkeypatch):
+    """Regression (finding #3): the post-exchange token-persist compare-and-set
+    loop runs while the cross-replica refresh claim is held. It MUST be bounded
+    by the claim/caller deadline, not only the attempt count -- otherwise a
+    contended DB write can keep the loop (and the held claim) spinning past the
+    budget, after which a peer could win the claim and re-exchange the consumed
+    single-use token. With the deadline already passed, only the FIRST
+    best-effort guarded write runs; the storm retries are abandoned and a
+    transient token_persist_conflict is raised so the claim is released."""
+
+    async def _fake_refresh(_: str, **_kwargs: object) -> TokenRefreshResult:
+        return TokenRefreshResult(
+            access_token="access-new",
+            refresh_token="refresh-new",
+            id_token="id-new",
+            account_id="acc_persist_deadline",
+            plan_type="pro",
+            email=None,
+        )
+
+    monkeypatch.setattr(auth_manager_module, "refresh_access_token", _fake_refresh)
+
+    encryptor = TokenEncryptor()
+    account = Account(
+        id="acc_persist_deadline",
+        email="user@example.com",
+        plan_type="pro",
+        access_token_encrypted=encryptor.encrypt("access-old"),
+        refresh_token_encrypted=encryptor.encrypt("refresh-old"),
+        id_token_encrypted=encryptor.encrypt("id-old"),
+        last_refresh=utcnow(),
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
+    )
+    repo = _TokenCasAlwaysMissRepo(account, plaintext="refresh-old", encryptor=encryptor)
+    manager = AuthManager(cast(AccountsRepositoryPort, repo))
+
+    with pytest.raises(RefreshError) as excinfo:
+        await manager._perform_refresh(
+            account,
+            refresh_token_encrypted=account.refresh_token_encrypted,
+            deadline=time.monotonic() - 1.0,
+        )
+
+    assert excinfo.value.code == "token_persist_conflict"
+    assert excinfo.value.is_permanent is False
+    assert excinfo.value.transport_error is True
+    # Only the first best-effort guarded write ran before the deadline abandoned
+    # the storm retries -- NOT the full _TOKEN_CAS_MAX_ATTEMPTS loop.
+    assert len(repo.update_attempts) == 1
+    assert None not in repo.update_attempts
+
+
 class _TokenCasPeerRotationInReadWriteGapRepo(_DummyRepo):
     """Reproduces the exact TOCTOU the guarded CAS closes.
 

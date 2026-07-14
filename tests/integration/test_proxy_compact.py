@@ -950,6 +950,107 @@ async def test_proxy_compact_pinned_preflight_claim_timeout_settles_reservation(
 
 
 @pytest.mark.asyncio
+async def test_proxy_compact_pinned_preflight_transport_error_settles_reservation(async_client, monkeypatch):
+    """Regression (finding #5): a file/previous-response-pinned compact whose
+    freshness-check preflight fails with a GENUINE OAuth ``transport_error``
+    (NOT claim contention) MUST settle the API-key reservation before raising the
+    retryable ``upstream_unavailable``. On the HTTP bridge / forwarded path
+    (``owns_reservation`` false) ``compact_responses`` is the sole settler; the
+    pinned transport-error preflight branch previously raised via
+    ``_raise_proxy_unavailable`` WITHOUT settling, leaking API-key quota (the
+    claim-contention sibling settled, but the transport-error/permanent siblings
+    did not)."""
+    from app.core.auth.refresh import RefreshError
+
+    email = "compact-pinned-preflight-transport@example.com"
+    raw_account_id = "acc_compact_pinned_preflight_transport"
+    auth_json = _make_auth_json(raw_account_id, email)
+    response = await async_client.post(
+        "/api/accounts/import",
+        files={"auth_json": ("auth.json", json.dumps(auth_json), "application/json")},
+    )
+    assert response.status_code == 200
+
+    async with SessionLocal() as session:
+        owner_account_id = (await session.execute(select(Account.id))).scalars().one()
+
+    async def fake_owner(self, *, previous_response_id, api_key, session_id=None, surface):
+        del self, previous_response_id, api_key, session_id, surface
+        return owner_account_id
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_resolve_websocket_previous_response_owner", fake_owner)
+
+    async def fake_ensure_fresh(self, account, *, force: bool = False, timeout_seconds=None):
+        del self, account, force, timeout_seconds
+        raise RefreshError(
+            "transport_error",
+            "oauth refresh upstream timed out",
+            False,
+            transport_error=True,
+        )
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh)
+
+    settle_compact_usage = AsyncMock()
+    monkeypatch.setattr(proxy_module.ProxyService, "_settle_compact_api_key_usage", settle_compact_usage)
+
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [],
+        "previous_response_id": "resp_pinned_owner_transport",
+    }
+    response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
+
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "upstream_unavailable"
+    # The reservation is settled before the pinned transport-error branch raises.
+    settle_compact_usage.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_proxy_compact_preflight_permanent_refresh_settles_reservation(async_client, monkeypatch):
+    """Regression (finding #5): a permanent ``RefreshError`` on the compact
+    freshness-check preflight MUST settle the API-key reservation before
+    propagating (bridge/forwarded path: ``owns_reservation`` false, so
+    ``compact_responses`` is the sole settler). The permanent preflight branch
+    previously re-raised WITHOUT settling, leaking API-key quota."""
+    from app.core.auth.refresh import RefreshError
+
+    email = "compact-preflight-permanent-settle@example.com"
+    raw_account_id = "acc_compact_preflight_permanent_settle"
+    auth_json = _make_auth_json(raw_account_id, email)
+    response = await async_client.post(
+        "/api/accounts/import",
+        files={"auth_json": ("auth.json", json.dumps(auth_json), "application/json")},
+    )
+    assert response.status_code == 200
+
+    async def fake_ensure_fresh(self, account, *, force: bool = False, timeout_seconds=None):
+        del self, account, force, timeout_seconds
+        raise RefreshError(
+            "invalid_grant",
+            "refresh token permanently rejected",
+            True,
+        )
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh)
+
+    settle_compact_usage = AsyncMock()
+    monkeypatch.setattr(proxy_module.ProxyService, "_settle_compact_api_key_usage", settle_compact_usage)
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": []}
+    # The permanent preflight failure keeps its prior escalation (it propagates
+    # to the caller). Crucially the reservation is settled BEFORE that raise (the
+    # fix): pre-fix the permanent preflight branch re-raised without settling,
+    # leaking API-key quota on the bridge/forwarded path.
+    with pytest.raises(RefreshError):
+        await async_client.post("/backend-api/codex/responses/compact", json=payload)
+
+    settle_compact_usage.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_proxy_compact_retryable_transport_failure_retries_same_contract_only(async_client, monkeypatch):
     email = "compact-safe-retry@example.com"
     raw_account_id = "acc_compact_safe_retry"

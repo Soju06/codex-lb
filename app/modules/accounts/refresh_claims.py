@@ -29,22 +29,75 @@ import os
 import threading
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Protocol
 
-from sqlalchemy import delete, or_, select
-from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy import Float, bindparam, delete, select, text
 from sqlalchemy.exc import OperationalError
-from sqlalchemy.sql.dml import Insert
+from sqlalchemy.sql.elements import TextClause
 
 from app.core.config.settings import get_settings
-from app.core.utils.time import utcnow
 from app.db.models import AccountRefreshClaim
 from app.db.session import get_background_session, sqlite_writer_section
 
 _SQLITE_BUSY_RETRY_ATTEMPTS = 4
 _SQLITE_BUSY_RETRY_BASE_SECONDS = 0.05
+
+# The claim TTL lease is evaluated on the DATABASE server clock, not each
+# replica's Python wall clock, so inter-replica NTP skew can never let one
+# replica treat another's still-live claim as expired and steal it (which would
+# let two replicas exchange the same single-use refresh token concurrently --
+# the exact reuse race this module exists to prevent). This mirrors the
+# clock-domain fix in ``app/core/scheduling/leader_election.py``.
+#
+# PostgreSQL: the stored ``claim_expires_at`` uses ``clock_timestamp()`` (the
+# actual statement-execution time) so a claim that blocked on the row lock
+# extends from the CURRENT time; the conflict-update path recomputes it in the
+# ``DO UPDATE SET`` clause rather than copying ``excluded.*`` (the ``VALUES``
+# tuple was evaluated before the statement blocked). The takeover predicate keeps
+# the transaction-snapshot clock (``now()``): a waiter never over-eagerly steals
+# a claim refreshed while it was blocked on the lock (``now()`` <=
+# ``clock_timestamp()`` is the conservative choice).
+_POSTGRES_CLAIM_UPSERT_SQL = text(
+    """
+    INSERT INTO account_refresh_claims (account_id, claimed_by, claimed_at, claim_expires_at)
+    VALUES (:account_id, :claimed_by, clock_timestamp(), clock_timestamp() + make_interval(secs => :ttl))
+    ON CONFLICT (account_id) DO UPDATE SET
+        claimed_by = excluded.claimed_by,
+        claimed_at = clock_timestamp(),
+        claim_expires_at = clock_timestamp() + make_interval(secs => :ttl)
+    WHERE account_refresh_claims.claim_expires_at < now()
+       OR account_refresh_claims.claimed_by = :claimed_by
+    RETURNING account_refresh_claims.account_id
+    """
+).bindparams(bindparam("ttl", type_=Float))
+
+# SQLite evaluates the lease clock inside the statement using its OWN
+# execution-time clock (``strftime(..., 'now')``), mirroring the PostgreSQL
+# ``clock_timestamp()`` fix: a claim upsert that sat behind SQLite's single-
+# writer lock is judged against the CURRENT instant, not a pre-wait Python one.
+# ``strftime('%Y-%m-%d %H:%M:%f', 'now')`` renders 3-digit milliseconds;
+# ``|| '000'`` pads to the 6-digit-microsecond WIDTH SQLAlchemy's ``DateTime``
+# persists so stored strings stay lexicographically comparable across the
+# acquire path. SQLite's ``'now'`` is UTC, matching the naive-UTC wall clock
+# SQLAlchemy writes. Every ``'now'`` in one statement shares a single
+# ``sqlite3_step()`` instant, so the stored expiry and the takeover predicate
+# stay in one clock domain.
+_SQLITE_NOW = "(strftime('%Y-%m-%d %H:%M:%f', 'now') || '000')"
+_SQLITE_NOW_PLUS_TTL = "(strftime('%Y-%m-%d %H:%M:%f', 'now', '+' || :ttl || ' seconds') || '000')"
+_SQLITE_CLAIM_UPSERT_SQL = text(
+    f"""
+    INSERT INTO account_refresh_claims (account_id, claimed_by, claimed_at, claim_expires_at)
+    VALUES (:account_id, :claimed_by, {_SQLITE_NOW}, {_SQLITE_NOW_PLUS_TTL})
+    ON CONFLICT (account_id) DO UPDATE SET
+        claimed_by = excluded.claimed_by,
+        claimed_at = {_SQLITE_NOW},
+        claim_expires_at = {_SQLITE_NOW_PLUS_TTL}
+    WHERE account_refresh_claims.claim_expires_at < {_SQLITE_NOW}
+       OR account_refresh_claims.claimed_by = :claimed_by
+    RETURNING account_id
+    """
+).bindparams(bindparam("ttl", type_=Float))
 
 # Per-OS-process claimant suffix. Distinguishes workers/processes that share one
 # bridge instance id so a claim is always scoped to exactly one event loop's
@@ -200,15 +253,15 @@ class RefreshClaimCoordinator:
             for attempt in range(_SQLITE_BUSY_RETRY_ATTEMPTS):
                 try:
                     async with get_background_session() as session:
-                        now = utcnow()
-                        stmt = build_refresh_claim_upsert(
-                            dialect_name=session.get_bind().dialect.name,
-                            account_id=account_id,
-                            claimed_by=claimed_by,
-                            now=now,
-                            claim_expires_at=now + timedelta(seconds=ttl_seconds),
+                        stmt = build_refresh_claim_upsert(dialect_name=session.get_bind().dialect.name)
+                        result = await session.execute(
+                            stmt,
+                            {
+                                "account_id": account_id,
+                                "claimed_by": claimed_by,
+                                "ttl": float(ttl_seconds),
+                            },
                         )
-                        result = await session.execute(stmt)
                         claimed = result.scalar_one_or_none() is not None
                         await session.commit()
                         return claimed
@@ -251,43 +304,21 @@ class RefreshClaimCoordinator:
         return RefreshClaimSnapshot(claimed_by=row[0], claimed_at=row[1], claim_expires_at=row[2])
 
 
-def build_refresh_claim_upsert(
-    *,
-    dialect_name: str,
-    account_id: str,
-    claimed_by: str,
-    now: datetime,
-    claim_expires_at: datetime,
-) -> Insert:
-    """Conditional claim upsert; RETURNING yields a row iff the claim was won."""
+def build_refresh_claim_upsert(*, dialect_name: str) -> TextClause:
+    """Conditional claim upsert; RETURNING yields a row iff the claim was won.
+
+    The statement binds ``account_id``, ``claimed_by`` and ``ttl`` and evaluates
+    BOTH the stored ``claim_expires_at`` AND the takeover predicate on the
+    DATABASE server clock (``clock_timestamp()``/``now()`` on PostgreSQL,
+    in-statement ``strftime(..., 'now')`` on SQLite), so the "exactly one replica
+    exchanges" guarantee no longer depends on inter-replica wall-clock skew
+    staying below the TTL.
+    """
     if dialect_name == "postgresql":
-        insert_fn = pg_insert
-    elif dialect_name == "sqlite":
-        insert_fn = sqlite_insert
-    else:
-        raise RuntimeError(f"Refresh claims unsupported for dialect={dialect_name!r}")
-    return (
-        insert_fn(AccountRefreshClaim)
-        .values(
-            account_id=account_id,
-            claimed_by=claimed_by,
-            claimed_at=now,
-            claim_expires_at=claim_expires_at,
-        )
-        .on_conflict_do_update(
-            index_elements=["account_id"],
-            set_={
-                "claimed_by": claimed_by,
-                "claimed_at": now,
-                "claim_expires_at": claim_expires_at,
-            },
-            where=or_(
-                AccountRefreshClaim.claim_expires_at < now,
-                AccountRefreshClaim.claimed_by == claimed_by,
-            ),
-        )
-        .returning(AccountRefreshClaim.account_id)
-    )
+        return _POSTGRES_CLAIM_UPSERT_SQL
+    if dialect_name == "sqlite":
+        return _SQLITE_CLAIM_UPSERT_SQL
+    raise RuntimeError(f"Refresh claims unsupported for dialect={dialect_name!r}")
 
 
 def _is_sqlite_database_locked(exc: OperationalError) -> bool:

@@ -1528,7 +1528,28 @@ class LoadBalancer:
             handle_permanent_failure(state, error_code)
             self._sync_runtime_state(account, state)
             async with self._repo_factory() as repos:
-                await self._persist_state(repos.accounts, account, state)
+                # Guard the DB permanent-status downgrade on the refresh-token
+                # ciphertext this replica currently holds so a concurrent peer
+                # re-auth/import rotation (which changes the ciphertext) is never
+                # clobbered back to a permanent-failure status. On the refresh
+                # path AuthManager._handle_permanent_refresh_failure is the
+                # PRIMARY guarded authority: it has already CAS-written the
+                # downgrade and, in the single-caller case, mutated THIS object's
+                # status to the failure status, so the predicate inside
+                # _persist_state_if_current sees no status change and issues no
+                # redundant write (exactly one guarded downgrade total). This
+                # guarded write covers only the callers whose in-memory object
+                # did not go through that CAS -- an intra-process singleflight
+                # joiner sharing the winner's permanent error, and non-refresh
+                # permanent failures -- without reintroducing the unguarded
+                # update_status that would clobber a peer's ACTIVE/rotated repair
+                # and tear down its live sticky/bridge sessions.
+                await self._persist_state_if_current(
+                    repos.accounts,
+                    account,
+                    state,
+                    expected_refresh_token_encrypted=account.refresh_token_encrypted,
+                )
             mark_account_routing_unavailable(account.id)
             self._selection_inputs_cache.invalidate()
 
@@ -1678,6 +1699,8 @@ class LoadBalancer:
         accounts_repo: AccountsRepository,
         account: Account,
         state: AccountState,
+        *,
+        expected_refresh_token_encrypted: bytes | None = None,
     ) -> bool:
         reset_at_int = int(state.reset_at) if state.reset_at else None
         blocked_at_int = int(state.blocked_at) if state.blocked_at else None
@@ -1697,6 +1720,7 @@ class LoadBalancer:
                 expected_deactivation_reason=account.deactivation_reason,
                 expected_reset_at=account.reset_at,
                 expected_blocked_at=account.blocked_at,
+                expected_refresh_token_encrypted=expected_refresh_token_encrypted,
             )
             if updated:
                 account.status = state.status

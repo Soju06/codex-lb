@@ -6,7 +6,6 @@ from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.engine import Dialect
 
 from app.core.config.settings import Settings
-from app.core.utils.time import utcnow
 from app.modules.accounts.refresh_claims import (
     build_refresh_claim_upsert,
     default_refresh_claimant_id,
@@ -16,14 +15,7 @@ pytestmark = pytest.mark.unit
 
 
 def _compile(dialect_name: str, dialect: Dialect) -> str:
-    now = utcnow()
-    stmt = build_refresh_claim_upsert(
-        dialect_name=dialect_name,
-        account_id="acc_1",
-        claimed_by="replica-a",
-        now=now,
-        claim_expires_at=now,
-    )
+    stmt = build_refresh_claim_upsert(dialect_name=dialect_name)
     return str(stmt.compile(dialect=dialect))
 
 
@@ -36,24 +28,26 @@ def test_claim_upsert_compiles_for_postgresql() -> None:
     assert "RETURNING account_refresh_claims.account_id" in sql
 
 
-def test_claim_upsert_compiles_for_sqlite() -> None:
-    sql = _compile("sqlite", sqlite.dialect())
-    assert "INSERT INTO account_refresh_claims" in sql
-    assert "ON CONFLICT (account_id) DO UPDATE" in sql
-    assert "claim_expires_at <" in sql
-    assert "RETURNING account_id" in sql
+def test_claim_upsert_uses_database_server_clock_not_bound_python_now() -> None:
+    """Regression: claim TTL/expiry MUST be evaluated on the DB server clock so
+    inter-replica wall-clock skew cannot steal a live claim. A skewed replica
+    binding its local ``now`` would treat a peer's live claim as expired and
+    re-exchange the same single-use refresh token."""
+    pg = _compile("postgresql", postgresql.dialect())
+    assert "clock_timestamp()" in pg
+    assert "make_interval(secs =>" in pg
+    # The takeover predicate compares against the server clock, never a client
+    # bind parameter for the current instant.
+    assert "claim_expires_at < now()" in pg
+
+    lite = _compile("sqlite", sqlite.dialect())
+    assert "strftime('%Y-%m-%d %H:%M:%f', 'now')" in lite
+    assert "'now', '+' ||" in lite
 
 
 def test_claim_upsert_rejects_unknown_dialect() -> None:
-    now = utcnow()
     with pytest.raises(RuntimeError):
-        build_refresh_claim_upsert(
-            dialect_name="mysql",
-            account_id="acc_1",
-            claimed_by="replica-a",
-            now=now,
-            claim_expires_at=now,
-        )
+        build_refresh_claim_upsert(dialect_name="mysql")
 
 
 def test_default_claimant_id_includes_instance_id_and_fits_column() -> None:

@@ -11,7 +11,7 @@ from uuid import uuid4
 
 import aiohttp
 
-from app.core.auth.refresh import RefreshError
+from app.core.auth.refresh import RefreshError, is_refresh_claim_contention
 from app.core.clients.proxy import ProxyResponseError, UpstreamProxyRouteTrace, filter_inbound_headers
 from app.core.clients.proxy import compact_responses as core_compact_responses
 from app.core.config.settings import get_settings
@@ -369,7 +369,23 @@ class _WarmupMixin:
         except RefreshError as exc:
             if exc.is_permanent:
                 await proxy._load_balancer.mark_permanent_failure(live_account, exc.code)
-            error_code = "invalid_api_key"
+                error_code = "invalid_api_key"
+            elif is_refresh_claim_contention(exc):
+                # Transient CROSS-REPLICA refresh-claim contention (for example
+                # ``refresh_claim_timeout``: a peer replica held the account's
+                # refresh claim past the wait budget). The account's OAuth
+                # credentials are healthy -- only its claim is contended -- so it
+                # MUST surface as a retryable ``upstream_unavailable`` (matching
+                # the five core proxy request paths) rather than a bogus
+                # ``invalid_api_key`` that presents a healthy account as an auth
+                # failure in the warmup result and request log. No health penalty
+                # is applied (mirroring those paths).
+                error_code = "upstream_unavailable"
+            else:
+                # A genuine OAuth transport failure (``code == "transport_error"``)
+                # or any other non-permanent refresh failure keeps the prior
+                # ``invalid_api_key`` classification.
+                error_code = "invalid_api_key"
             error_message = exc.message
         except UpstreamProxyRouteError as exc:
             upstream_proxy_fail_closed_reason = exc.reason

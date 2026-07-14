@@ -311,6 +311,21 @@ class AuthManager:
                 ttl_seconds=settings.token_refresh_claim_ttl_seconds,
                 owner=requested_fingerprint,
             ):
+                # Monotonic deadline covering the ENTIRE claim hold from this
+                # point: the exchange AND the post-exchange DB persist/status-CAS
+                # loops all run while this claim is held. The exchange itself is
+                # already budget-bounded, but the persist/status write loops were
+                # bounded only by attempt count -- a contended DB write could keep
+                # them looping past the claim TTL, after which a peer can win the
+                # claim and re-exchange the (now consumed) single-use token. Bound
+                # the persist section by the smaller of the claim TTL and the
+                # caller's remaining budget so total claim-hold stays within
+                # budget + a small fixed release, and a persist that runs past the
+                # deadline stops (releasing the claim) instead of looping.
+                claim_ttl = max(0.0, float(settings.token_refresh_claim_ttl_seconds))
+                persist_deadline = time.monotonic() + claim_ttl
+                if caller_deadline is not None:
+                    persist_deadline = min(persist_deadline, caller_deadline)
                 try:
                     # Post-claim fresh re-read: another replica may have rotated
                     # the material between the caller's read and our claim.
@@ -346,10 +361,18 @@ class AuthManager:
                             )
                         override_token = push_token_refresh_timeout_override(remaining_budget)
                         try:
-                            return await self._perform_refresh(account, refresh_token_encrypted=fresh_material)
+                            return await self._perform_refresh(
+                                account,
+                                refresh_token_encrypted=fresh_material,
+                                deadline=persist_deadline,
+                            )
                         finally:
                             pop_token_refresh_timeout_override(override_token)
-                    return await self._perform_refresh(account, refresh_token_encrypted=fresh_material)
+                    return await self._perform_refresh(
+                        account,
+                        refresh_token_encrypted=fresh_material,
+                        deadline=persist_deadline,
+                    )
                 finally:
                     await self._release_claim_quietly(claims, account.id, owner=requested_fingerprint)
             # Claim held by another replica: adopt its rotation as soon as it
@@ -417,14 +440,22 @@ class AuthManager:
             exc_info=last_exc,
         )
 
-    async def _perform_refresh(self, account: Account, *, refresh_token_encrypted: bytes) -> Account:
+    async def _perform_refresh(
+        self,
+        account: Account,
+        *,
+        refresh_token_encrypted: bytes,
+        deadline: float | None = None,
+    ) -> Account:
         attempted_fingerprint = _refresh_token_material_fingerprint(self._encryptor, refresh_token_encrypted)
         refresh_token = self._encryptor.decrypt(refresh_token_encrypted)
         try:
             result = await self._refresh_tokens(refresh_token, account=account)
         except RefreshError as exc:
             if exc.is_permanent:
-                adopted = await self._handle_permanent_refresh_failure(account, exc, attempted_fingerprint)
+                adopted = await self._handle_permanent_refresh_failure(
+                    account, exc, attempted_fingerprint, deadline=deadline
+                )
                 if adopted is not None:
                     return adopted
             raise
@@ -502,6 +533,7 @@ class AuthManager:
             account,
             write=_write_tokens,
             expected_refresh_token_encrypted=refresh_token_encrypted,
+            deadline=deadline,
         )
         if adopted is not None:
             return adopted
@@ -525,6 +557,7 @@ class AuthManager:
         *,
         write: Callable[[bytes], Awaitable[bool]],
         expected_refresh_token_encrypted: bytes,
+        deadline: float | None = None,
     ) -> Account | None:
         """Persist freshly rotated tokens through a *guarded* compare-and-set only.
 
@@ -581,7 +614,33 @@ class AuthManager:
         """
         consumed_plaintext = _decrypt_refresh_token_plaintext(self._encryptor, expected_refresh_token_encrypted)
         expected = expected_refresh_token_encrypted
-        for _ in range(_TOKEN_CAS_MAX_ATTEMPTS):
+        for attempt in range(_TOKEN_CAS_MAX_ATTEMPTS):
+            # The FIRST guarded write always runs -- the single-use token was
+            # already consumed upstream, so it must be persisted best-effort. The
+            # RETRIES (same-plaintext re-encryption storm), however, are bounded
+            # by the claim/caller deadline too, not just the attempt count: a
+            # contended DB write must not keep the loop -- and the held claim --
+            # spinning past the budget, after which a peer could win the claim
+            # and re-exchange the already-consumed token. When the deadline has
+            # passed, stop and surface the transient conflict so the claim is
+            # released and the caller retries once contention clears.
+            if attempt > 0 and deadline is not None and time.monotonic() >= deadline:
+                logger.warning(
+                    "Token-refresh compare-and-set for account_id=%s exceeded the claim/caller "
+                    "deadline after %d attempt(s); surfacing a transient conflict and releasing the "
+                    "claim rather than looping past the budget",
+                    account.id,
+                    attempt,
+                )
+                raise RefreshError(
+                    "token_persist_conflict",
+                    (
+                        f"Token-refresh compare-and-set for account_id={account.id} exceeded the "
+                        f"refresh claim/caller deadline before it could persist rotated tokens"
+                    ),
+                    False,
+                    transport_error=True,
+                )
             if await write(expected):
                 # Guarded write landed: the row still held exactly the ciphertext
                 # we observed, so our freshly rotated token replaced it atomically
@@ -653,6 +712,8 @@ class AuthManager:
         account: Account,
         exc: RefreshError,
         attempted_fingerprint: str,
+        *,
+        deadline: float | None = None,
     ) -> Account | None:
         """Persist a permanent refresh failure without clobbering a concurrent rotation.
 
@@ -694,7 +755,34 @@ class AuthManager:
             return _adopt_account_row(account, latest)
         reason = PERMANENT_FAILURE_CODES.get(exc.code, exc.message)
         status = account_status_for_permanent_failure(exc.code)
-        for _ in range(_TOKEN_CAS_MAX_ATTEMPTS):
+        for attempt in range(_TOKEN_CAS_MAX_ATTEMPTS):
+            # The FIRST status CAS always runs so a genuine permanent failure is
+            # persisted best-effort. The RETRIES are additionally bounded by the
+            # claim/caller deadline (not just the attempt count): the status
+            # write loop runs while the claim is held, and a contended DB write
+            # must not keep looping -- and holding the claim -- past the budget.
+            # On deadline expiry surface the transient status-downgrade conflict
+            # so the claim is released and the caller retries rather than running
+            # the unguarded permanent mark that could clobber a peer rotation.
+            if attempt > 0 and deadline is not None and time.monotonic() >= deadline:
+                logger.warning(
+                    "Permanent refresh-failure status CAS for account_id=%s code=%s exceeded the "
+                    "claim/caller deadline after %d attempt(s); surfacing a transient conflict and "
+                    "releasing the claim rather than looping past the budget",
+                    account.id,
+                    exc.code,
+                    attempt,
+                )
+                raise RefreshError(
+                    "status_downgrade_conflict",
+                    (
+                        f"Permanent refresh-failure status downgrade for account_id={account.id} "
+                        f"(code={exc.code}) exceeded the refresh claim/caller deadline before it "
+                        f"could persist REAUTH_REQUIRED"
+                    ),
+                    False,
+                    transport_error=True,
+                ) from exc
             applied = await self._repo.update_status_if_current(
                 account.id,
                 status,
@@ -907,6 +995,20 @@ class AuthManager:
 
         account.chatgpt_account_id = raw_account_id
         try:
+            # This backfill runs on EVERY ensure_fresh for a legacy account (the
+            # fast, no-refresh path included) against the caller's selection-time
+            # snapshot, OUTSIDE any refresh claim. It MUST NOT be an unconditional
+            # token write: doing so would rewrite the refresh-token ciphertext
+            # from that stale in-memory snapshot and, if a peer replica rotated
+            # the single-use token in the read->write window, clobber the peer's
+            # fresh rotation with already-consumed material -- the exact
+            # lost-update the refresh persist path was rebuilt to forbid,
+            # re-entering via this sibling. Guard the write with a compare-and-set
+            # on the refresh-token ciphertext this replica observed: a concurrent
+            # rotation makes it MISS (no write, no clobber; the derived id is
+            # simply re-derived and re-attempted on a later request), while the
+            # common no-rotation case persists the derived chatgpt_account_id
+            # atomically alongside the unchanged token material it read.
             await self._repo.update_tokens(
                 account.id,
                 access_token_encrypted=account.access_token_encrypted,
@@ -919,6 +1021,7 @@ class AuthManager:
                 workspace_id=account.workspace_id,
                 workspace_label=account.workspace_label,
                 seat_type=account.seat_type,
+                expected_refresh_token_encrypted=account.refresh_token_encrypted,
             )
         except Exception:
             logger.warning("Failed to persist chatgpt_account_id account_id=%s", account.id, exc_info=True)

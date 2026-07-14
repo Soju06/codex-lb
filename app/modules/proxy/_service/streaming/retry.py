@@ -1163,6 +1163,16 @@ class _StreamingRetryMixin:
                                 {"message": message},
                                 exclude_account=True,
                             )
+                            # The account keeps its health penalty above and is now
+                            # excluded from reselection, but its stream-concurrency
+                            # slot is still occupied by the lease appended at
+                            # selection. Release it before the failover ``continue``
+                            # (matching the claim-contention and permanent branches)
+                            # so the dead account's slot is freed immediately instead
+                            # of being held for the entire duration of the
+                            # replacement stream.
+                            await _release_tracked_stream_lease(current_account_lease)
+                            current_account_lease = None
                             excluded_account_ids.add(account.id)
                             continue
                         await proxy._write_stream_preflight_error(
@@ -1713,6 +1723,13 @@ class _StreamingRetryMixin:
                                     {"message": message},
                                     exclude_account=True,
                                 )
+                                # Release the excluded account's stream lease before
+                                # the failover ``continue`` so its stream-concurrency
+                                # slot is not held for the duration of the replacement
+                                # stream (matching the pre-refresh transport branch and
+                                # the claim-contention/permanent branches above).
+                                await _release_tracked_stream_lease(current_account_lease)
+                                current_account_lease = None
                                 excluded_account_ids.add(account.id)
                                 continue
                             await proxy._write_stream_preflight_error(

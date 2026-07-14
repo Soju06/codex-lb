@@ -939,11 +939,17 @@ class _CompactMixin:
                     )
                     if preferred_account_id is not None:
                         _raise_proxy_unavailable(message)
-                    await proxy._handle_stream_error(
-                        account,
-                        {"message": message},
-                        "upstream_unavailable",
-                    )
+                    # Peer-claim contention is NOT the account's fault: its
+                    # credentials are healthy and only its refresh claim is held
+                    # by another replica. Unlike the genuine transport-level
+                    # aiohttp/connect failure below, do NOT record an account
+                    # health penalty (``record_error`` via ``_handle_stream_error``)
+                    # for this transient claim timeout — that would push an
+                    # otherwise-healthy account into backoff for normal
+                    # cross-replica contention. Match the streaming and WebSocket
+                    # paths, which only release + exclude the account and surface a
+                    # retryable ``upstream_unavailable`` to the client on exhaustion
+                    # (``last_exc`` is raised once every candidate is exhausted).
                     last_exc = ProxyResponseError(502, openai_error("upstream_unavailable", message))
                     excluded_account_ids.add(account.id)
                     continue

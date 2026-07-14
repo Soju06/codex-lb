@@ -243,6 +243,133 @@ async def test_unexpired_foreign_claim_times_out_transient_and_is_not_cached(db_
 
 
 @pytest.mark.asyncio
+async def test_claim_wait_then_exchange_caps_to_remaining_budget(db_setup, monkeypatch):
+    """Budget recompute after a claim wait: when the winner acquires the claim
+    only after waiting out a foreign claim, it MUST cap the upstream OAuth
+    exchange to the caller's REMAINING budget rather than restarting with the
+    original full budget. The singleflight body is shielded from caller
+    cancellation, so a full-budget exchange after a full-budget wait would
+    overrun the request deadline while pinning the repo session and singleflight
+    entry."""
+    from app.core.auth.refresh import (
+        get_token_refresh_timeout_override,
+        pop_token_refresh_timeout_override,
+        push_token_refresh_timeout_override,
+    )
+
+    account_id = "acc_claim_budget_cap"
+    await _create_account(account_id)
+
+    observed_override: list[float | None] = []
+
+    async def fake_refresh(refresh_token: str, **_kwargs: object) -> TokenRefreshResult:
+        observed_override.append(get_token_refresh_timeout_override())
+        return _rotated_result(account_id)
+
+    monkeypatch.setattr(auth_manager_module, "refresh_access_token", fake_refresh)
+
+    class _WaitThenWinClaims:
+        @property
+        def claimant_id(self) -> str:
+            return "replica-slow-win"
+
+        async def try_acquire(self, account_id: str, *, ttl_seconds: float, owner: str) -> bool:
+            del account_id, ttl_seconds, owner
+            # Simulate waiting out a foreign claim that then releases: consume a
+            # chunk of the caller budget before this replica wins the claim.
+            await asyncio.sleep(0.5)
+            return True
+
+        async def release(self, account_id: str, *, owner: str) -> None:
+            del account_id, owner
+
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        account = await repo.get_by_id(account_id)
+        assert account is not None
+        manager = AuthManager(repo, refresh_claims=_WaitThenWinClaims())
+
+        token = push_token_refresh_timeout_override(5.0)
+        try:
+            result = await asyncio.wait_for(manager.refresh_account(account), timeout=5)
+        finally:
+            pop_token_refresh_timeout_override(token)
+
+    assert TokenEncryptor().decrypt(result.refresh_token_encrypted) == "refresh-new"
+    # The exchange ran exactly once and saw a capped override well below the
+    # original 5.0s budget (roughly the remaining ~4.5s), never the full budget.
+    assert len(observed_override) == 1
+    capped = observed_override[0]
+    assert capped is not None
+    assert 0.0 < capped < 4.9
+
+
+@pytest.mark.asyncio
+async def test_claim_wait_exhausting_budget_fails_fast_without_exchange(db_setup, monkeypatch):
+    """Fail fast when the claim wait consumes the whole caller budget: the
+    winner MUST raise the transient (non-permanent) claim-timeout error before
+    starting the upstream exchange rather than launching a full-budget OAuth
+    exchange that overruns the request deadline."""
+    from app.core.auth.refresh import (
+        pop_token_refresh_timeout_override,
+        push_token_refresh_timeout_override,
+    )
+
+    account_id = "acc_claim_budget_exhausted"
+    await _create_account(account_id)
+
+    upstream_calls = 0
+
+    async def fake_refresh(refresh_token: str, **_kwargs: object) -> TokenRefreshResult:
+        nonlocal upstream_calls
+        upstream_calls += 1
+        return _rotated_result(account_id)
+
+    monkeypatch.setattr(auth_manager_module, "refresh_access_token", fake_refresh)
+
+    released: list[str] = []
+
+    class _WaitPastBudgetClaims:
+        @property
+        def claimant_id(self) -> str:
+            return "replica-late-win"
+
+        async def try_acquire(self, account_id: str, *, ttl_seconds: float, owner: str) -> bool:
+            del ttl_seconds, owner
+            # Wait longer than the 0.2s caller budget before winning the claim.
+            await asyncio.sleep(0.3)
+            del account_id
+            return True
+
+        async def release(self, account_id: str, *, owner: str) -> None:
+            del owner
+            released.append(account_id)
+
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        account = await repo.get_by_id(account_id)
+        assert account is not None
+        manager = AuthManager(repo, refresh_claims=_WaitPastBudgetClaims())
+
+        token = push_token_refresh_timeout_override(0.2)
+        try:
+            with pytest.raises(RefreshError) as exc_info:
+                await asyncio.wait_for(manager.refresh_account(account), timeout=5)
+        finally:
+            pop_token_refresh_timeout_override(token)
+
+    assert exc_info.value.code == "refresh_claim_timeout"
+    assert exc_info.value.is_permanent is False
+    assert exc_info.value.transport_error is True
+    # No upstream exchange ran, and the claim we won was released on the way out.
+    assert upstream_calls == 0
+    assert released == [account_id]
+    status, stored_refresh_token, _ = await _account_snapshot(account_id)
+    assert status == AccountStatus.ACTIVE
+    assert stored_refresh_token == "refresh-old"
+
+
+@pytest.mark.asyncio
 async def test_winner_adopts_rotation_committed_before_its_claim(db_setup, monkeypatch):
     """Post-claim fresh re-read: when the material already rotated, the claim
     winner must adopt it with zero upstream calls."""
@@ -1236,6 +1363,89 @@ async def test_compact_preflight_claim_timeout_fails_over_and_releases_lease(asy
     assert failed_chatgpt_id not in served_account_ids
     # Its response_create lease was released before the failover compact call.
     assert failed_internal_id in released_before_compact
+
+
+@pytest.mark.asyncio
+async def test_compact_preflight_claim_timeout_does_not_penalize_account_health(async_client, monkeypatch):
+    """The compact freshness-check transient-claim failover MUST NOT record an
+    account-health penalty for peer-claim contention.
+
+    The account's credentials are healthy — only its refresh claim is held by
+    another replica — so, like the streaming and WebSocket paths, the compact
+    account-attempt loop must merely release + exclude the account and never call
+    ``record_error``. Before the fix the branch routed the transient claim
+    timeout through ``_handle_stream_error(..., "upstream_unavailable")``, which
+    treats ``upstream_unavailable`` as a transient account error and calls
+    ``record_error``, pushing an otherwise-healthy account into backoff for
+    normal cross-replica claim contention.
+    """
+    import json
+
+    import app.modules.proxy.service as proxy_module
+    from app.core.openai.models import OpenAIResponsePayload
+
+    for raw_account_id, email in (
+        ("acc_compact_nopenalty_a", "compact-nopenalty-a@example.com"),
+        ("acc_compact_nopenalty_b", "compact-nopenalty-b@example.com"),
+    ):
+        auth_json = _make_auth_json(raw_account_id, email)
+        files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+        response = await async_client.post("/api/accounts/import", files=files)
+        assert response.status_code == 200
+
+    first_seen: dict[str, str | None] = {"internal_id": None}
+
+    async def fake_ensure_fresh(self, account, *, force=False, timeout_seconds=None):
+        del self, force, timeout_seconds
+        if first_seen["internal_id"] is None:
+            first_seen["internal_id"] = account.id
+        if account.id == first_seen["internal_id"]:
+            raise RefreshError(
+                "refresh_claim_timeout",
+                "refresh claim held by another replica",
+                False,
+                transport_error=True,
+            )
+        return account
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh)
+
+    recorded_error_account_ids: list[str] = []
+    original_record_error = proxy_module.LoadBalancer.record_error
+
+    async def spy_record_error(self, account):
+        recorded_error_account_ids.append(account.id)
+        return await original_record_error(self, account)
+
+    monkeypatch.setattr(proxy_module.LoadBalancer, "record_error", spy_record_error)
+
+    served_account_ids: list[str] = []
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token
+        served_account_ids.append(account_id)
+        return OpenAIResponsePayload.model_validate({"output": []})
+
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": []}
+    response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
+
+    assert response.status_code == 200
+    assert response.json()["output"] == []
+
+    failed_internal_id = first_seen["internal_id"]
+    assert failed_internal_id is not None
+    # A different, healthy account served the request.
+    assert served_account_ids
+    # The account that hit peer-claim contention was NOT penalized, and in fact
+    # no account was penalized at all for this healthy fallback.
+    assert failed_internal_id not in recorded_error_account_ids
+    assert recorded_error_account_ids == []
+
+    async with SessionLocal() as session:
+        accounts = {account.id: account for account in (await session.execute(select(Account))).scalars().all()}
+        assert {account.status for account in accounts.values()} == {AccountStatus.ACTIVE}
 
 
 @pytest.mark.asyncio

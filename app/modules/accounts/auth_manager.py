@@ -19,6 +19,8 @@ from app.core.auth.refresh import (
     RefreshError,
     TokenRefreshResult,
     get_token_refresh_timeout_override,
+    pop_token_refresh_timeout_override,
+    push_token_refresh_timeout_override,
     refresh_access_token,
     should_refresh,
 )
@@ -276,9 +278,17 @@ class AuthManager:
         # the inflight singleflight entry that later callers join).
         wait_seconds = max(0.0, float(settings.token_refresh_claim_wait_seconds))
         caller_budget = get_token_refresh_timeout_override()
+        start = time.monotonic()
+        # Absolute deadline of the caller's ORIGINAL refresh budget (if any).
+        # Used to cap the post-wait upstream exchange so a long claim wait
+        # cannot be followed by a full-budget OAuth exchange that overruns the
+        # request deadline.
+        caller_deadline: float | None = None
         if caller_budget is not None:
-            wait_seconds = min(wait_seconds, max(0.0, caller_budget))
-        deadline = time.monotonic() + wait_seconds
+            caller_budget = max(0.0, caller_budget)
+            caller_deadline = start + caller_budget
+            wait_seconds = min(wait_seconds, caller_budget)
+        deadline = start + wait_seconds
         poll_seconds = max(0.01, float(settings.token_refresh_claim_poll_seconds))
         # NOTE: comparisons below use the fingerprint captured at entry, not
         # ``account.refresh_token_encrypted``: when ``account`` is attached to
@@ -303,6 +313,32 @@ class AuthManager:
                     fresh_material = (
                         latest.refresh_token_encrypted if latest is not None else account.refresh_token_encrypted
                     )
+                    # The claim wait may have consumed most/all of the caller's
+                    # refresh budget. This singleflight body is shielded from
+                    # caller cancellation, so proceeding with the ORIGINAL
+                    # ``token_refresh_timeout_override`` still active would let the
+                    # OAuth exchange spend a whole budget AGAIN — overrunning the
+                    # request deadline while pinning this repo session and the
+                    # inflight singleflight entry that later callers join.
+                    # Recompute the remaining budget: fail fast with the transient
+                    # claim timeout when nothing is left, otherwise cap the
+                    # exchange to what remains of the caller's deadline.
+                    if caller_deadline is not None:
+                        remaining_budget = caller_deadline - time.monotonic()
+                        if remaining_budget <= 0:
+                            raise RefreshError(
+                                "refresh_claim_timeout",
+                                f"Token refresh for account {account.id} exhausted its "
+                                f"{caller_budget:.3f}s budget waiting for a peer replica's refresh "
+                                f"claim before the upstream exchange could start",
+                                False,
+                                transport_error=True,
+                            )
+                        override_token = push_token_refresh_timeout_override(remaining_budget)
+                        try:
+                            return await self._perform_refresh(account, refresh_token_encrypted=fresh_material)
+                        finally:
+                            pop_token_refresh_timeout_override(override_token)
                     return await self._perform_refresh(account, refresh_token_encrypted=fresh_material)
                 finally:
                     await claims.release(account.id, owner=requested_fingerprint)

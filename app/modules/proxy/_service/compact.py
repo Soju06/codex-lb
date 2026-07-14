@@ -1054,6 +1054,43 @@ class _CompactMixin:
                             except RefreshError as refresh_exc:
                                 if refresh_exc.is_permanent:
                                     await proxy._load_balancer.mark_permanent_failure(account, refresh_exc.code)
+                                elif refresh_exc.transport_error:
+                                    # Transient, transport-level refresh failure
+                                    # on the post-401 forced refresh (for example
+                                    # the account's refresh claim is held by
+                                    # another replica): fail over to a healthy
+                                    # account and record a retryable
+                                    # upstream_unavailable so that if every
+                                    # candidate hits the held-claim condition,
+                                    # exhaustion surfaces 502 upstream_unavailable
+                                    # instead of re-raising the misleading
+                                    # original 401. Mirrors the freshness
+                                    # preflight branch above and the streaming /
+                                    # WebSocket post-401 forced-refresh paths.
+                                    message = refresh_exc.message or str(refresh_exc) or "Request to upstream timed out"
+                                    logger.warning(
+                                        "Compact forced refresh transient failure request_id=%s account_id=%s",
+                                        request_id,
+                                        account.id,
+                                        exc_info=True,
+                                    )
+                                    if preferred_account_id is not None:
+                                        await proxy._settle_compact_api_key_usage(
+                                            api_key=api_key,
+                                            api_key_reservation=api_key_reservation,
+                                            response=None,
+                                            request_service_tier=request_service_tier,
+                                        )
+                                        _raise_proxy_unavailable(message)
+                                    await proxy._handle_stream_error(
+                                        account,
+                                        {"message": message},
+                                        "upstream_unavailable",
+                                    )
+                                    last_exc = ProxyResponseError(502, openai_error("upstream_unavailable", message))
+                                    excluded_account_ids.add(account.id)
+                                    transient_exhausted = True
+                                    break
                                 await proxy._settle_compact_api_key_usage(
                                     api_key=api_key,
                                     api_key_reservation=api_key_reservation,

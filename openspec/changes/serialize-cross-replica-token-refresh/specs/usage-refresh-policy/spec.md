@@ -89,7 +89,7 @@ When a proxy stream turn encounters this transient claim failure, the streaming 
 
 The WebSocket connect loop MUST apply the same failover for a transient, transport-level claim failure reaching the connect path (on both the proactive freshness check and the post-401 forced refresh): rather than surfacing a bogus 401 `invalid_api_key`, it MUST release the skipped account's already-acquired stream lease, exclude the account, and reselect a healthy account. This failover MUST be gated only on whether the request is *hard-pinned to a required account* — that is, session-continuity (a `previous_response_id` bound to a preferred account) or a file-required preferred account; it MUST NOT be suppressed merely because a *soft* preferred account is set. In particular, a forced-refresh reconnect auth replay sets the stale account as both the forced-refresh target and the preferred account, but a movable request (no session continuity, no file pin) MUST still exclude the stale account and fail over on a transient transport claim failure. Only a hard-pinned request MUST stay on its required account and surface the error there, preserving the account-ownership invariant for session-continuity and file-pinned requests. When every account attempt is exhausted by such transient claim failovers, the connect loop MUST emit a proper terminal error to the client (a 503/capacity-style upstream error, not a 401 `invalid_api_key` and not a silent no-op that leaves the client waiting).
 
-The compact-responses freshness-check preflight MUST apply the same failover for a transient, transport-level claim failure raised by its proactive `_ensure_fresh_with_budget` refresh: rather than letting the non-permanent `RefreshError` escape unhandled (which surfaces to the client as an unhandled server error), it MUST release the selected account's `response_create` lease, record the failure as a transient upstream error, exclude the account, and reselect a healthy account within the compact account-attempt loop. When the request is pinned to a preferred account, the preflight MUST instead surface a retriable upstream-unavailable error on that account rather than crossing to another account. A permanent or non-transport refresh failure MUST keep its prior escalation (it propagates to the caller) rather than being reinterpreted as a transient failover.
+The compact-responses path MUST apply the same failover for a transient, transport-level claim failure raised on BOTH its proactive `_ensure_fresh_with_budget` freshness-check preflight AND the post-401 forced (`force=True`) refresh recovery attempt: rather than letting the non-permanent `RefreshError` escape unhandled on the preflight (which surfaces to the client as an unhandled server error) or re-raising the original upstream 401 on the post-401 recovery (which surfaces a misleading `invalid_api_key`), it MUST record the failure as a transient `upstream_unavailable` error, exclude the account, and reselect a healthy account within the compact account-attempt loop. The preflight branch MUST additionally release the selected account's `response_create` lease before failover. When the request is pinned to a preferred account, both branches MUST instead surface a retriable upstream-unavailable error on that account rather than crossing to another account. When EVERY candidate account hits the transient claim timeout and the account-attempt loop is exhausted, the client MUST receive the recorded retryable `upstream_unavailable` error rather than the misleading original 401. A permanent or non-transport refresh failure MUST keep its prior escalation (it propagates to the caller) rather than being reinterpreted as a transient failover.
 
 #### Scenario: Claim held by another replica past the wait cap
 
@@ -120,6 +120,14 @@ The compact-responses freshness-check preflight MUST apply the same failover for
 - **GIVEN** a proxy stream turn not pinned to a preferred/required account
 - **AND** every candidate account's refresh claim is held by another replica so its proactive freshness check raises the transient claim error before the stream opens
 - **WHEN** the streaming retry loop excludes each account and exhausts its attempts
+- **THEN** the client receives a retryable `upstream_unavailable` error rather than a generic `no_accounts` response
+- **AND** the transient claim contention is never recorded as a permanent failure
+
+#### Scenario: Stream retry exhausts every account on post-401 forced-refresh claim failovers
+
+- **GIVEN** a proxy stream turn not pinned to a preferred/required account
+- **AND** every candidate account opens far enough to receive an upstream 401, and its subsequent forced (`force=True`) refresh raises the transient claim error because the claim is held by another replica
+- **WHEN** the streaming retry loop releases each account's stream lease, excludes it, and exhausts its attempts
 - **THEN** the client receives a retryable `upstream_unavailable` error rather than a generic `no_accounts` response
 - **AND** the transient claim contention is never recorded as a permanent failure
 
@@ -165,6 +173,15 @@ The compact-responses freshness-check preflight MUST apply the same failover for
 - **WHEN** the freshness-check preflight raises the transient, transport-level claim error
 - **THEN** the compact account-attempt loop releases the account's `response_create` lease, excludes that account, and fails over to a healthy account
 - **AND** the client receives a normal compact response rather than an unhandled server error
+- **AND** the transient claim contention is never recorded as a permanent failure
+
+#### Scenario: Compact post-401 forced-refresh claim timeout fails over instead of surfacing 401
+
+- **GIVEN** a compact-responses request not pinned to a preferred account whose selected account returns an upstream 401
+- **AND** the post-401 forced (`force=True`) refresh raises the transient, transport-level claim error because the claim is held by another replica
+- **WHEN** the compact account-attempt loop records a transient `upstream_unavailable`, excludes that account, and fails over to a healthy account
+- **THEN** the client receives a normal compact response rather than the misleading original 401
+- **AND** when every candidate account hits the transient claim timeout and attempts are exhausted, the client receives the retryable `upstream_unavailable` error rather than the 401
 - **AND** the transient claim contention is never recorded as a permanent failure
 
 ## MODIFIED Requirements

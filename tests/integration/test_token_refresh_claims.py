@@ -810,6 +810,88 @@ async def test_proxy_preflight_claim_timeout_exhaustion_reports_upstream_unavail
 
 
 @pytest.mark.asyncio
+async def test_proxy_post_401_forced_refresh_claim_timeout_exhaustion_reports_upstream_unavailable(
+    async_client, monkeypatch
+):
+    """Route-level regression for the post-401 forced-refresh sibling branch.
+
+    When EVERY candidate account opens far enough to receive an upstream 401 and
+    its subsequent forced (``force=True``) refresh raises a transient refresh-claim
+    timeout (claim held by another replica), exhaustion must surface a retryable
+    ``upstream_unavailable`` error, not a misleading generic ``no_accounts``.
+
+    Before the fix the post-401 forced-refresh transient-claim branch released
+    the lease and excluded the account but left ``last_retryable_stream_error``
+    unset (unlike its pre-stream-open sibling), so after attempts were exhausted
+    the loop fell through to the no-accounts path.
+    """
+    import json
+
+    import app.modules.proxy.service as proxy_module
+
+    for raw_account_id, email in (
+        ("acc_post401_claim_a", "post401-claim-a@example.com"),
+        ("acc_post401_claim_b", "post401-claim-b@example.com"),
+    ):
+        auth_json = _make_auth_json(raw_account_id, email)
+        files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+        response = await async_client.post("/api/accounts/import", files=files)
+        assert response.status_code == 200
+
+    # The proactive freshness check (force=False) succeeds so the stream opens;
+    # the post-401 forced refresh (force=True) raises the transient claim timeout
+    # for EVERY account, as if a foreign replica holds each account's claim.
+    async def fake_ensure_fresh(self, account, *, force=False, timeout_seconds=None):
+        del self, timeout_seconds
+        if force:
+            raise RefreshError(
+                "refresh_claim_timeout",
+                "refresh claim held by another replica",
+                False,
+                transport_error=True,
+            )
+        return account
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh)
+
+    streamed_account_ids: list[str] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
+        del payload, headers, access_token, base_url, raise_for_status, kwargs
+        streamed_account_ids.append(account_id)
+        raise proxy_module.ProxyResponseError(
+            401,
+            {"error": {"code": "invalid_api_key", "message": "token invalidated"}},
+        )
+        yield ""  # pragma: no cover - makes this an async generator
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        json={"model": "gpt-5.4", "instructions": "hi", "input": [], "stream": True},
+    ) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    events = [json.loads(line[6:]) for line in lines if line.startswith("data: ") and line != "data: [DONE]"]
+    failed_events = [event for event in events if event.get("type") == "response.failed"]
+    assert failed_events, f"expected a response.failed event, got {events}"
+    error_codes = {event["response"]["error"]["code"] for event in failed_events}
+    # Transient contention surfaces as retryable upstream_unavailable, NOT no_accounts.
+    assert error_codes == {"upstream_unavailable"}
+    assert "no_accounts" not in error_codes
+    # Every candidate account was attempted (each hit the 401 -> transient forced refresh).
+    assert len(set(streamed_account_ids)) == 2
+
+    # The transient claim contention is never recorded as a permanent failure.
+    async with SessionLocal() as session:
+        accounts = list((await session.execute(select(Account))).scalars().all())
+        assert {account.status for account in accounts} == {AccountStatus.ACTIVE}
+
+
+@pytest.mark.asyncio
 async def test_compact_preflight_claim_timeout_fails_over_and_releases_lease(async_client, monkeypatch):
     """Route-level regression for the compact freshness-check preflight.
 
@@ -896,6 +978,147 @@ async def test_compact_preflight_claim_timeout_fails_over_and_releases_lease(asy
     assert failed_chatgpt_id not in served_account_ids
     # Its response_create lease was released before the failover compact call.
     assert failed_internal_id in released_before_compact
+
+
+@pytest.mark.asyncio
+async def test_compact_post_401_forced_refresh_claim_timeout_fails_over(async_client, monkeypatch):
+    """Route-level regression for the compact post-401 forced-refresh path.
+
+    A compact request whose first-selected account returns an upstream 401 must,
+    when the subsequent forced (``force=True``) refresh raises a transient
+    refresh-claim timeout (claim held by another replica), fail over to a healthy
+    account instead of re-raising the misleading original 401. Before the fix the
+    compact post-401 branch handled only permanent RefreshErrors and re-raised the
+    401 for a transient claim timeout, so the client saw ``invalid_api_key`` for
+    what is really transient cross-replica contention.
+    """
+    import json
+
+    import app.modules.proxy.service as proxy_module
+    from app.core.openai.models import OpenAIResponsePayload
+
+    for raw_account_id, email in (
+        ("acc_compact_p401_a", "compact-p401-a@example.com"),
+        ("acc_compact_p401_b", "compact-p401-b@example.com"),
+    ):
+        auth_json = _make_auth_json(raw_account_id, email)
+        files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+        response = await async_client.post("/api/accounts/import", files=files)
+        assert response.status_code == 200
+
+    # The proactive freshness check (force=False) succeeds; the post-401 forced
+    # refresh (force=True) raises the transient claim timeout for the first
+    # account only, the other account freshens cleanly.
+    first_seen: dict[str, str | None] = {"internal_id": None}
+
+    async def fake_ensure_fresh(self, account, *, force=False, timeout_seconds=None):
+        del self, timeout_seconds
+        if not force:
+            return account
+        if first_seen["internal_id"] is None:
+            first_seen["internal_id"] = account.id
+        if account.id == first_seen["internal_id"]:
+            raise RefreshError(
+                "refresh_claim_timeout",
+                "refresh claim held by another replica",
+                False,
+                transport_error=True,
+            )
+        return account
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh)
+
+    served_account_ids: list[str] = []
+    raised_401_for: set[str] = set()
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token
+        # Each account returns a single upstream 401 the first time it is called,
+        # forcing the post-401 refresh; after a successful forced refresh it
+        # would serve, but the failed account's forced refresh never succeeds.
+        if account_id not in raised_401_for:
+            raised_401_for.add(account_id)
+            raise proxy_module.ProxyResponseError(
+                401,
+                {"error": {"code": "invalid_api_key", "message": "token invalidated"}},
+            )
+        served_account_ids.append(account_id)
+        return OpenAIResponsePayload.model_validate({"output": []})
+
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": []}
+    response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
+
+    assert response.status_code == 200
+    assert response.json()["output"] == []
+    # A different account served the compact request after the transient failover.
+    assert served_account_ids
+
+    async with SessionLocal() as session:
+        accounts = list((await session.execute(select(Account))).scalars().all())
+        assert {account.status for account in accounts} == {AccountStatus.ACTIVE}
+
+
+@pytest.mark.asyncio
+async def test_compact_post_401_forced_refresh_claim_timeout_exhaustion_reports_upstream_unavailable(
+    async_client, monkeypatch
+):
+    """Route-level regression: when EVERY compact candidate account returns a 401
+    and its post-401 forced refresh raises the transient claim timeout, exhaustion
+    must surface a retryable ``upstream_unavailable`` (502) error, not the
+    misleading original 401.
+    """
+    import json
+
+    import app.modules.proxy.service as proxy_module
+
+    for raw_account_id, email in (
+        ("acc_compact_p401x_a", "compact-p401x-a@example.com"),
+        ("acc_compact_p401x_b", "compact-p401x-b@example.com"),
+    ):
+        auth_json = _make_auth_json(raw_account_id, email)
+        files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+        response = await async_client.post("/api/accounts/import", files=files)
+        assert response.status_code == 200
+
+    async def fake_ensure_fresh(self, account, *, force=False, timeout_seconds=None):
+        del self, timeout_seconds
+        if force:
+            raise RefreshError(
+                "refresh_claim_timeout",
+                "refresh claim held by another replica",
+                False,
+                transport_error=True,
+            )
+        return account
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh)
+
+    served_account_ids: list[str] = []
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token
+        served_account_ids.append(account_id)
+        raise proxy_module.ProxyResponseError(
+            401,
+            {"error": {"code": "invalid_api_key", "message": "token invalidated"}},
+        )
+
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": []}
+    response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
+
+    # Transient contention surfaces as retryable upstream_unavailable (502), NOT the 401.
+    assert response.status_code == 502
+    body = response.json()
+    assert body["error"]["code"] == "upstream_unavailable"
+    assert body["error"]["code"] != "invalid_api_key"
+
+    async with SessionLocal() as session:
+        accounts = list((await session.execute(select(Account))).scalars().all())
+        assert {account.status for account in accounts} == {AccountStatus.ACTIVE}
 
 
 @pytest.mark.asyncio

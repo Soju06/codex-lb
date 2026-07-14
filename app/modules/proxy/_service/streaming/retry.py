@@ -1548,6 +1548,30 @@ class _StreamingRetryMixin:
                                 await _release_tracked_stream_lease(current_account_lease)
                                 current_account_lease = None
                                 excluded_account_ids.add(account.id)
+                                # Record a retryable upstream-unavailable error
+                                # (mirroring the pre-stream-open transient
+                                # refresh branch, the aiohttp/connect transient
+                                # path, and the WebSocket connect loop) so that
+                                # if EVERY candidate account hits a transient
+                                # refresh-claim timeout on the post-401 forced
+                                # refresh, exhaustion surfaces the temporary
+                                # upstream_unavailable condition instead of a
+                                # misleading generic no_accounts response. The
+                                # account credentials are fine (its refresh
+                                # claim is just held by another replica), so
+                                # this is a retryable capacity-style error, not
+                                # a permanent failure.
+                                last_retryable_stream_error = _RetryableStreamError(
+                                    "upstream_unavailable",
+                                    {
+                                        "message": (
+                                            refresh_exc.message
+                                            or "Account refresh is temporarily unavailable; "
+                                            "no healthy account could be reached."
+                                        )
+                                    },
+                                    exclude_account=True,
+                                )
                             continue
                         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
                             _facade().logger.warning(

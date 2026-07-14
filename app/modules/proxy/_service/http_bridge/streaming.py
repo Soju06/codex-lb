@@ -146,6 +146,7 @@ from app.modules.proxy._service.support import (
     _HTTPBridgeOwnerForward,
     _HTTPBridgeSession,
     _HTTPBridgeSessionKey,
+    _is_ttft_event,
     _signal_propagated_capacity_startup_ready,
     _signal_propagated_capacity_startup_wait,
     _WebSocketRequestState,
@@ -2061,7 +2062,7 @@ class _HTTPBridgeStreamingMixin:
                 keepalive_count = 0
                 block_payload = parse_sse_data_json(event_block)
                 block_event_type = _event_type_from_payload(None, block_payload)
-                if request_state.latency_first_token_ms is None and block_event_type in _TEXT_DELTA_EVENT_TYPES:
+                if request_state.latency_first_token_ms is None and _is_ttft_event(block_event_type, block_payload):
                     request_state.latency_first_token_ms = int(
                         (_service_time().monotonic() - request_state.started_at) * 1000
                     )

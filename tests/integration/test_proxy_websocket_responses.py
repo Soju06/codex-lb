@@ -596,7 +596,27 @@ def test_backend_responses_websocket_generic_auth_refresh_budget_is_per_account(
     assert permanent_failures == [("acct_ws_auth_a", "account_auth_invalidated")]
 
 
-def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_instance, monkeypatch):
+@pytest.mark.parametrize(
+    ("output_event_type", "output_event_fields"),
+    [
+        ("response.output_text.delta", {"delta": "hello"}),
+        ("response.function_call_arguments.delta", {"delta": "hello"}),
+        (
+            "response.output_item.added",
+            {
+                "item": {
+                    "type": "custom_tool_call",
+                    "call_id": "call_shell_1",
+                    "name": "shell",
+                    "input": "",
+                }
+            },
+        ),
+    ],
+)
+def test_backend_responses_websocket_proxies_upstream_and_persists_log(
+    app_instance, monkeypatch, output_event_type: str, output_event_fields: dict[str, object]
+):
     upstream_messages = [
         _FakeUpstreamMessage(
             "text",
@@ -612,9 +632,9 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_insta
             "text",
             text=json.dumps(
                 {
-                    "type": "response.output_text.delta",
+                    "type": output_event_type,
                     "response_id": "resp_ws_1",
-                    "delta": "hello",
+                    **output_event_fields,
                 },
                 separators=(",", ":"),
             ),
@@ -742,7 +762,7 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_insta
             third = json.loads(websocket.receive_text())
 
     assert first["type"] == "response.created"
-    assert second["type"] == "response.output_text.delta"
+    assert second["type"] == output_event_type
     assert third["type"] == "response.completed"
     seen_headers = cast(dict[str, str], seen["headers"])
     assert seen_headers["session_id"] == "thread-ws-1"

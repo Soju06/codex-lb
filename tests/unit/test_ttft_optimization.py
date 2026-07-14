@@ -153,7 +153,21 @@ def test_normalize_sse_event_block_skips_json_parsing_without_type(monkeypatch) 
 
 
 @pytest.mark.asyncio
-async def test_stream_responses_tracks_latency_first_token_ms(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    "event_json",
+    [
+        '{"type":"response.output_text.delta","delta":"hi"}',
+        '{"type":"response.refusal.delta","delta":"hi"}',
+        '{"type":"response.function_call_arguments.delta","delta":"hi"}',
+        '{"type":"response.output_tool_call.delta","delta":"hi"}',
+        '{"type":"response.reasoning_summary_text.delta","delta":"hi"}',
+        (
+            '{"type":"response.output_item.added","item":'
+            '{"type":"custom_tool_call","call_id":"call_1","name":"shell","input":""}}'
+        ),
+    ],
+)
+async def test_stream_responses_tracks_latency_first_token_ms(monkeypatch, event_json: str) -> None:
     settings = _make_proxy_settings()
     request_logs = _RequestLogsRecorder()
     service = ProxyService(_repo_factory(request_logs))
@@ -172,7 +186,7 @@ async def test_stream_responses_tracks_latency_first_token_ms(monkeypatch) -> No
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
         del payload, headers, access_token, account_id, base_url, raise_for_status
         await asyncio.sleep(0.02)
-        yield 'data: {"type":"response.output_text.delta","delta":"hi"}\n\n'
+        yield f"data: {event_json}\n\n"
         yield (
             'data: {"type":"response.completed","response":{"id":"resp_ttft","usage":'
             '{"input_tokens":1,"output_tokens":1}}}\n\n'
@@ -210,6 +224,9 @@ async def test_stream_responses_ttft_ignores_control_frame_before_text_delta(mon
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
         del payload, headers, access_token, account_id, base_url, raise_for_status
         yield 'data: {"type":"response.created","response":{"id":"resp_ttft"}}\n\n'
+        yield (
+            'data: {"type":"response.output_item.added","item":{"type":"message","role":"assistant","content":[]}}\n\n'
+        )
         await asyncio.sleep(0.03)
         yield 'data: {"type":"response.output_text.delta","delta":"hi"}\n\n'
         yield (
@@ -225,5 +242,5 @@ async def test_stream_responses_ttft_ignores_control_frame_before_text_delta(mon
     assert await service.drain_persistence_tasks(timeout_seconds=1)
     latency_first_token_ms = cast(int, request_logs.calls[0]["latency_first_token_ms"])
 
-    assert len(chunks) == 3
+    assert len(chunks) == 4
     assert latency_first_token_ms >= 20

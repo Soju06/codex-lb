@@ -35,6 +35,22 @@ logger = logging.getLogger(__name__)
 
 _REQUEST_TRANSPORT_HTTP = "http"
 _REQUEST_TRANSPORT_WEBSOCKET = "websocket"
+_TTFT_EVENT_TYPES = frozenset(
+    {
+        "response.output_text.delta",
+        "response.refusal.delta",
+        "response.function_call_arguments.delta",
+        "response.output_tool_call.delta",
+        "response.reasoning_summary_text.delta",
+    }
+)
+_PENDING_TOOL_CALL_OUTPUT_ITEM_TYPE_BY_CALL_TYPE = {
+    "function_call": "function_call_output",
+    "custom_tool_call": "custom_tool_call_output",
+    "apply_patch_call": "apply_patch_call_output",
+}
+_PENDING_TOOL_CALL_ITEM_TYPES = frozenset(_PENDING_TOOL_CALL_OUTPUT_ITEM_TYPE_BY_CALL_TYPE)
+_PENDING_TOOL_CALL_OUTPUT_ITEM_TYPES = frozenset(_PENDING_TOOL_CALL_OUTPUT_ITEM_TYPE_BY_CALL_TYPE.values())
 _WEBSOCKET_FULL_REPLAY_WAIT_MIN_ITEMS = 20
 _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS = 0.05
 _HARD_HTTP_BRIDGE_AFFINITY_KINDS = frozenset(
@@ -54,6 +70,15 @@ _PROPAGATED_CAPACITY_STARTUP_READY: ContextVar[asyncio.Event | None] = ContextVa
     "propagated_capacity_startup_ready",
     default=None,
 )
+
+
+def _is_ttft_event(event_type: str | None, payload: dict[str, JsonValue] | None) -> bool:
+    if event_type in _TTFT_EVENT_TYPES:
+        return True
+    if event_type != "response.output_item.added" or not isinstance(payload, dict):
+        return False
+    item = payload.get("item")
+    return isinstance(item, dict) and item.get("type") in _PENDING_TOOL_CALL_ITEM_TYPES
 
 
 def _bind_propagated_capacity_startup_wait(event: asyncio.Event) -> Token[asyncio.Event | None]:

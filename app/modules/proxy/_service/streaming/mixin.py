@@ -754,7 +754,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                 else:
                     if first_payload is not None and not preserve_raw_sse_line:
                         first = format_sse_event(first_payload)
-                    if latency_first_token_ms is None and event_type in _facade()._TEXT_DELTA_EVENT_TYPES:
+                    if latency_first_token_ms is None and _facade()._is_ttft_event(event_type, first_payload):
                         latency_first_token_ms = int((time.monotonic() - request_started_at) * 1000)
                     settlement.downstream_visible = True
                     if event_type in _facade()._TEXT_DELTA_EVENT_TYPES:
@@ -921,7 +921,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                     error_message = _facade()._SUPPRESSED_DUPLICATE_TOOL_CALL_MESSAGE
                     settlement.record_success = False
                     settlement.account_health_error = False
-                if latency_first_token_ms is None and event_type in _facade()._TEXT_DELTA_EVENT_TYPES:
+                if latency_first_token_ms is None and _facade()._is_ttft_event(event_type, event_payload):
                     latency_first_token_ms = int((time.monotonic() - request_started_at) * 1000)
                 if mark_duplicate_tool_call_downstream_event(
                     event_payload,

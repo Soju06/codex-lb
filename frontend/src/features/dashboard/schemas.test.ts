@@ -206,6 +206,7 @@ describe("RequestLogsResponseSchema", () => {
           inputTokens: 8,
           outputTokens: 2,
           outputTokensRaw: 2,
+          reasoningTokens: 1,
           cachedInputTokens: 0,
           reasoningEffort: null,
           costUsd: 0.001,
@@ -240,6 +241,7 @@ describe("RequestLogsResponseSchema", () => {
     expect(parsed.requests[0]?.inputTokens).toBe(8);
     expect(parsed.requests[0]?.outputTokens).toBe(2);
     expect(parsed.requests[0]?.outputTokensRaw).toBe(2);
+    expect(parsed.requests[0]?.reasoningTokens).toBe(1);
     expect(parsed.requests[0]?.costBreakdown?.totalUsd).toBe(0.001);
   });
 

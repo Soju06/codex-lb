@@ -558,6 +558,7 @@ from app.modules.proxy._service.support import (
     _FilePinEntry,
     _HTTPBridgeSession,
     _HTTPBridgeSessionKey,
+    _is_ttft_event,  # noqa: F401
     _PreparedWebSocketRequest,  # noqa: F401
     _record_response_event,  # noqa: F401
     _record_websocket_route_metadata,  # noqa: F401

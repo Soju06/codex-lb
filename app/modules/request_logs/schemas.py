@@ -48,6 +48,7 @@ class RequestLogEntry(DashboardModel):
     input_tokens: int | None = None
     output_tokens: int | None = None
     output_tokens_raw: int | None = None
+    reasoning_tokens: int | None = None
     cached_input_tokens: int | None = None
     reasoning_effort: str | None = None
     cost_usd: float | None = None

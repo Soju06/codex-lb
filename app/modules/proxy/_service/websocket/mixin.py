@@ -1221,6 +1221,7 @@ class _WebSocketMixin:
                                     pending_requests.remove(request_state)
                             await _release_websocket_response_create_gate(request_state, response_create_gate)
                         continue
+                    await release_current_account_lease()
                     account_lease = request_state.websocket_stream_lease
                     request_state.websocket_stream_lease = None
                     if upstream_account_id is not None and account.id != upstream_account_id:
@@ -4092,6 +4093,9 @@ class _WebSocketMixin:
                 )
             if response_create_gate is not None:
                 await _release_websocket_response_create_gate(request_state, response_create_gate)
+            if request_state.websocket_stream_lease is not None:
+                await proxy._load_balancer.release_account_lease(request_state.websocket_stream_lease)
+                request_state.websocket_stream_lease = None
             if request_state.event_queue is not None:
                 await request_state.event_queue.put(
                     format_sse_event(

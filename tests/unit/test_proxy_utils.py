@@ -16566,6 +16566,48 @@ async def test_fail_pending_websocket_requests_marks_client_disconnect_without_p
 
 
 @pytest.mark.asyncio
+async def test_fail_pending_websocket_requests_releases_orphaned_stream_lease(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_ws_orphaned_lease")
+
+    handle_stream_error = AsyncMock()
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    monkeypatch.setattr(service, "_release_websocket_reservation", AsyncMock())
+
+    lease = await service._load_balancer.acquire_account_lease(account.id, kind="stream")
+    assert lease is not None
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_orphaned",
+        response_id="resp_ws_orphaned",
+        model="gpt-5.5",
+        service_tier="auto",
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+    )
+    request_state.websocket_stream_lease = lease
+    pending_requests = deque([request_state])
+
+    await service._fail_pending_websocket_requests(
+        account=account,
+        account_id_value=account.id,
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        error_code="stream_incomplete",
+        error_message="Upstream websocket closed before response.completed",
+        api_key=None,
+    )
+
+    assert request_state.websocket_stream_lease is None
+    snapshot = await service._load_balancer.account_pressure_snapshot(account.id)
+    assert snapshot[1] == 0, f"inflight_streams should be 0, got {snapshot[1]}"
+    assert list(pending_requests) == []
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+
+
+@pytest.mark.asyncio
 async def test_finalize_websocket_request_state_updates_balancer_state(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))

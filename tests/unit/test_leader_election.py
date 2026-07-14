@@ -7,8 +7,8 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from sqlalchemy.dialects import postgresql, sqlite
-from sqlalchemy.sql.dml import Delete, Insert, Update
+from sqlalchemy.dialects import postgresql
+from sqlalchemy.sql.dml import Delete
 from sqlalchemy.sql.elements import TextClause
 
 leader_election_module = importlib.import_module("app.core.scheduling.leader_election")
@@ -43,7 +43,7 @@ class _FakeSession:
 
 def _install(
     monkeypatch: pytest.MonkeyPatch,
-    session: _FakeSession,
+    session: Any,
     *,
     enabled: bool = True,
     ttl: int = 30,
@@ -141,9 +141,11 @@ async def test_renew_uses_current_statement_clock_on_postgres(monkeypatch: pytes
 
 @pytest.mark.asyncio
 async def test_renew_guards_on_unexpired_lease_on_sqlite(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Regression (P1): the SQLite renewal must carry the same unexpired-lease
-    # guard, bound to the host clock on both sides, so a delayed heartbeat
-    # cannot extend a row whose expires_at has already passed.
+    # Regression (P1/P2): the SQLite renewal must carry the same unexpired-lease
+    # guard, evaluated on SQLite's OWN execution-time clock on both sides, so a
+    # renewal delayed past the deadline cannot extend a row whose expires_at has
+    # already passed. The clock lives in the SQL (strftime('...','now')), not in
+    # a Python value bound before execute.
     session = _FakeSession("sqlite", [1, 1])
     _install(monkeypatch, session)
 
@@ -152,9 +154,12 @@ async def test_renew_guards_on_unexpired_lease_on_sqlite(monkeypatch: pytest.Mon
     assert await election.renew() is True
 
     renew_statement = session.statements[1]
-    assert isinstance(renew_statement, Update)
-    compiled = str(renew_statement.compile(dialect=sqlite.dialect()))
-    assert "expires_at >" in compiled
+    assert isinstance(renew_statement, TextClause)
+    renew_sql = str(renew_statement)
+    # The guard and the new expiry both use SQLite's statement-execution clock.
+    assert "expires_at > (strftime('%Y-%m-%d %H:%M:%f', 'now')" in renew_sql
+    assert "SET expires_at = (strftime('%Y-%m-%d %H:%M:%f', 'now', '+' || :ttl || ' seconds')" in renew_sql
+    assert session.params[1] == {"leader_id": "node-a", "ttl": 30}
 
 
 @pytest.mark.asyncio
@@ -173,10 +178,77 @@ async def test_renew_after_expiry_demotes_and_does_not_extend(monkeypatch: pytes
     assert await election.renew() is False
     assert election.is_leader is False
     assert election._lease_deadline is None
-    # The renewal UPDATE carried the unexpired predicate, so against a real
-    # database it would match 0 rows for an expired lease rather than reviving it.
-    compiled = str(session.statements[1].compile(dialect=sqlite.dialect()))
-    assert "expires_at >" in compiled
+    # The renewal UPDATE carried the unexpired predicate evaluated on SQLite's
+    # execution-time clock, so against a real database it matches 0 rows for an
+    # expired lease rather than reviving it.
+    assert "expires_at > (strftime('%Y-%m-%d %H:%M:%f', 'now')" in str(session.statements[1])
+
+
+@pytest.mark.asyncio
+async def test_sqlite_renew_delayed_past_expiry_matches_zero_rows_on_real_db(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Regression (P2): on SQLite a renewal can sit behind the single-writer lock
+    # (busy_timeout ~30s) for longer than the lease TTL (min 5s). The guard and
+    # the new expiry MUST be evaluated on SQLite's OWN execution-time clock, so a
+    # renewal whose EXECUTION lands after expires_at has passed matches 0 rows
+    # and demotes — it must NOT extend the row from a stale pre-wait instant.
+    #
+    # This exercises a REAL SQLite database and injects the delay INSIDE
+    # session.execute (modelling the write-lock wait between issuing the
+    # statement and SQLite actually running it). A pre-execute Python `now`
+    # captured before that wait would still match the not-yet-expired lease and
+    # extend it; the in-SQL clock evaluated at execution time does not.
+    import sqlalchemy as sa
+
+    from app.db.models import Base
+
+    engine = sa.create_engine("sqlite://")  # single-connection in-memory DB
+    Base.metadata.create_all(engine)
+    conn = engine.connect()
+    try:
+        # Seed a lease owned by node-a that expires 0.4s from now, stored in the
+        # same 6-digit-microsecond-width format the acquire path writes.
+        conn.execute(
+            sa.text(
+                "INSERT INTO scheduler_leader (id, leader_id, acquired_at, expires_at) VALUES ("
+                "1, 'node-a', strftime('%Y-%m-%d %H:%M:%f','now')||'000', "
+                "strftime('%Y-%m-%d %H:%M:%f','now','+0.4 seconds')||'000')"
+            )
+        )
+        conn.commit()
+        expires_before = conn.exec_driver_sql("SELECT expires_at FROM scheduler_leader").scalar()
+
+        class _DelayedSqliteSession:
+            def __init__(self, delay: float) -> None:
+                self._delay = delay
+
+            def get_bind(self) -> SimpleNamespace:
+                return SimpleNamespace(dialect=SimpleNamespace(name="sqlite"))
+
+            async def execute(self, statement: Any, params: Any = None) -> Any:
+                await asyncio.sleep(self._delay)  # model the write-lock wait
+                return conn.execute(statement, params or {})
+
+            async def commit(self) -> None:
+                conn.commit()
+
+        _install(monkeypatch, _DelayedSqliteSession(delay=0.6), ttl=30)
+
+        election = leader_election_module.LeaderElection(leader_id="node-a")
+        election._is_leader = True
+        election._lease_deadline = asyncio.get_running_loop().time() + 30
+
+        # The renewal's execution lands ~0.6s in, past the 0.4s expiry.
+        assert await election.renew() is False
+        assert election.is_leader is False
+        assert election._lease_deadline is None
+        # The guarded UPDATE left the expired row untouched (not extended).
+        expires_after = conn.exec_driver_sql("SELECT expires_at FROM scheduler_leader").scalar()
+        assert expires_after == expires_before
+    finally:
+        conn.close()
+        engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -191,9 +263,8 @@ async def test_drain_renewal_guards_on_unexpired_lease(monkeypatch: pytest.Monke
     assert await election._renew_lease_row() is True
 
     statement = session.statements[0]
-    assert isinstance(statement, Update)
-    compiled = str(statement.compile(dialect=sqlite.dialect()))
-    assert "expires_at >" in compiled
+    assert isinstance(statement, TextClause)
+    assert "expires_at > (strftime('%Y-%m-%d %H:%M:%f', 'now')" in str(statement)
 
     # The PostgreSQL drain renewal reuses the guarded _POSTGRES_RENEW_SQL text.
     pg_session = _FakeSession("postgresql", [1])
@@ -204,7 +275,13 @@ async def test_drain_renewal_guards_on_unexpired_lease(monkeypatch: pytest.Monke
 
 
 @pytest.mark.asyncio
-async def test_try_acquire_binds_host_clock_upsert_on_sqlite_dialect(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_try_acquire_uses_execution_time_clock_upsert_on_sqlite_dialect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Regression (P2): the SQLite acquire upsert must stamp acquired_at/expires_at
+    # and evaluate the takeover predicate from SQLite's OWN execution-time clock
+    # (strftime('...','now')), not a Python value bound before execute — so an
+    # upsert that waited on the single-writer lock extends from the current time.
     session = _FakeSession("sqlite", [1])
     _install(monkeypatch, session)
 
@@ -212,10 +289,17 @@ async def test_try_acquire_binds_host_clock_upsert_on_sqlite_dialect(monkeypatch
 
     assert await election.try_acquire() is True
     [statement] = session.statements
-    assert isinstance(statement, Insert)
-    compiled = str(statement.compile(dialect=sqlite.dialect()))
-    assert "INSERT INTO scheduler_leader" in compiled
-    assert "ON CONFLICT (id) DO UPDATE" in compiled
+    assert isinstance(statement, TextClause)
+    sql = str(statement)
+    assert "INSERT INTO scheduler_leader" in sql
+    assert "ON CONFLICT (id) DO UPDATE" in sql
+    # The stored expiry uses the execution-time clock on both the insert and the
+    # conflict-update path (recomputed, not copied from excluded).
+    assert "excluded.expires_at" not in sql
+    assert sql.count("strftime('%Y-%m-%d %H:%M:%f', 'now', '+' || :ttl || ' seconds')") == 2
+    # The takeover predicate necessarily shares that same execution-time clock.
+    assert "scheduler_leader.expires_at < (strftime('%Y-%m-%d %H:%M:%f', 'now')" in sql
+    assert session.params[0] == {"leader_id": "node-a", "ttl": 30}
 
 
 @pytest.mark.asyncio
@@ -416,7 +500,7 @@ async def test_renew_extends_on_rowcount_one(monkeypatch: pytest.MonkeyPatch) ->
 
     assert await election.renew() is True
     assert election.is_leader is True
-    assert isinstance(session.statements[1], Update)
+    assert isinstance(session.statements[1], TextClause)
 
 
 @pytest.mark.asyncio

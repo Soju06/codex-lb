@@ -4,13 +4,10 @@ import asyncio
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime, timedelta
 from typing import Any, TypeVar, cast
 
-from sqlalchemy import CursorResult, Float, Result, bindparam, delete, text, update
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy import CursorResult, Float, Result, bindparam, delete, text
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.sql.dml import Insert
 
 from app.core.config.settings import get_settings
 from app.db.models import SchedulerLeader
@@ -87,25 +84,57 @@ _POSTGRES_RENEW_SQL = text(
 ).bindparams(bindparam("ttl", type_=Float))
 
 
-def _sqlite_acquire_statement(leader_id: str, now: datetime, expires_at: datetime) -> Insert:
-    # A shared SQLite file implies a single host, so binding the host clock on
-    # both sides of the comparison keeps a single clock domain. The upsert is
-    # atomic under SQLite's single-writer lock, so it arbitrates for real.
-    statement = sqlite_insert(SchedulerLeader).values(
-        id=1,
-        leader_id=leader_id,
-        acquired_at=now,
-        expires_at=expires_at,
-    )
-    return statement.on_conflict_do_update(
-        index_elements=["id"],
-        set_={
-            "leader_id": statement.excluded.leader_id,
-            "acquired_at": statement.excluded.acquired_at,
-            "expires_at": statement.excluded.expires_at,
-        },
-        where=(SchedulerLeader.expires_at < now) | (SchedulerLeader.leader_id == leader_id),
-    )
+# SQLite evaluates the lease clock inside the statement using its OWN
+# execution-time clock, mirroring the PostgreSQL ``clock_timestamp()`` fix
+# above. A shared SQLite file implies a single host, so there is one clock
+# domain — but a renewal or same-leader re-acquire can still sit behind SQLite's
+# single-writer lock (``busy_timeout``, default ~30s) for far longer than the
+# lease TTL (the minimum is 5s). Binding a Python ``now`` captured BEFORE
+# ``session.execute`` would then evaluate the unexpired-lease guard AND the new
+# ``expires_at`` against a STALE pre-wait instant once the write lock is finally
+# acquired: a heartbeat that should have lost the lease could still match and
+# extend the row, running leader-gated work past the real TTL and overlapping
+# failover. Computing the clock in-SQL removes that gap — SQLite evaluates
+# ``'now'`` once per ``sqlite3_step()`` (every ``strftime(..., 'now')`` in one
+# statement shares that single instant, so the guard predicate and the ``SET``
+# expiry stay in one clock domain) and only after the write lock is actually
+# held, exactly like ``clock_timestamp()`` on PostgreSQL. ``strftime('%Y-%m-%d
+# %H:%M:%f', 'now')`` renders a 3-digit-millisecond fractional field;
+# ``|| '000'`` pads it to the 6-digit-microsecond WIDTH SQLAlchemy's
+# ``DateTime`` persists, so the stored string stays lexicographically
+# comparable with existing rows and with the acquire path. SQLite's ``'now'``
+# is UTC, matching the naive-UTC wall clock SQLAlchemy writes for the tz-aware
+# ``expires_at`` column, so no extra anchoring is needed. The takeover
+# predicate necessarily shares this same execution-time clock (SQLite has no
+# separate transaction-snapshot clock within a statement).
+_SQLITE_NOW = "(strftime('%Y-%m-%d %H:%M:%f', 'now') || '000')"
+_SQLITE_NOW_PLUS_TTL = "(strftime('%Y-%m-%d %H:%M:%f', 'now', '+' || :ttl || ' seconds') || '000')"
+
+_SQLITE_ACQUIRE_SQL = text(
+    f"""
+    INSERT INTO scheduler_leader (id, leader_id, acquired_at, expires_at)
+    VALUES (1, :leader_id, {_SQLITE_NOW}, {_SQLITE_NOW_PLUS_TTL})
+    ON CONFLICT (id) DO UPDATE SET
+        leader_id = excluded.leader_id,
+        acquired_at = {_SQLITE_NOW},
+        expires_at = {_SQLITE_NOW_PLUS_TTL}
+    WHERE scheduler_leader.expires_at < {_SQLITE_NOW} OR scheduler_leader.leader_id = :leader_id
+    """
+).bindparams(bindparam("ttl", type_=Float))
+
+# The SQLite renewal mirrors ``_POSTGRES_RENEW_SQL``: it extends ``expires_at``
+# from the execution-time clock and is conditional on the lease still being
+# unexpired at that same clock, so a heartbeat delayed past the deadline (event-
+# loop stall, single-writer-lock wait) matches 0 rows instead of resurrecting a
+# dead row that no follower has claimed yet. Shared by :meth:`renew` and the
+# release/drain path (:meth:`_renew_lease_row`).
+_SQLITE_RENEW_SQL = text(
+    f"""
+    UPDATE scheduler_leader
+    SET expires_at = {_SQLITE_NOW_PLUS_TTL}
+    WHERE id = 1 AND leader_id = :leader_id AND expires_at > {_SQLITE_NOW}
+    """
+).bindparams(bindparam("ttl", type_=Float))
 
 
 def _dialect_name(session: AsyncSession) -> str:
@@ -176,16 +205,11 @@ class LeaderElection:
         acquire_started = loop.time()
         try:
             async with get_background_session() as session:
-                if _dialect_name(session) == "sqlite":
-                    now = datetime.now(UTC)
-                    result = await session.execute(
-                        _sqlite_acquire_statement(self._leader_id, now, now + timedelta(seconds=ttl))
-                    )
-                else:
-                    result = await session.execute(
-                        _POSTGRES_ACQUIRE_SQL,
-                        {"leader_id": self._leader_id, "ttl": ttl},
-                    )
+                acquire_sql = _SQLITE_ACQUIRE_SQL if _dialect_name(session) == "sqlite" else _POSTGRES_ACQUIRE_SQL
+                result = await session.execute(
+                    acquire_sql,
+                    {"leader_id": self._leader_id, "ttl": ttl},
+                )
                 acquired = _rowcount(result) == 1
                 await session.commit()
         except Exception:
@@ -241,27 +265,17 @@ class LeaderElection:
         # outrun the database expiry.
         renew_started = loop.time()
         async with get_background_session() as session:
-            if _dialect_name(session) == "sqlite":
-                # Bind the host clock on both sides (single host by construction)
-                # so the renewal only extends a lease that is still unexpired: a
-                # heartbeat delayed past the deadline must not resurrect a row
-                # whose ``expires_at`` has already passed but no follower has yet
-                # claimed. A no-match falls through to the rowcount-0 demotion.
-                now = datetime.now(UTC)
-                result = await session.execute(
-                    update(SchedulerLeader)
-                    .where(
-                        SchedulerLeader.id == 1,
-                        SchedulerLeader.leader_id == self._leader_id,
-                        SchedulerLeader.expires_at > now,
-                    )
-                    .values(expires_at=now + timedelta(seconds=ttl))
-                )
-            else:
-                result = await session.execute(
-                    _POSTGRES_RENEW_SQL,
-                    {"leader_id": self._leader_id, "ttl": ttl},
-                )
+            # Both dialects evaluate the unexpired-lease guard and the new expiry
+            # on the database's own execution-time clock, so a renewal delayed
+            # past the deadline (event-loop stall, row/write-lock wait) matches 0
+            # rows instead of resurrecting a row whose ``expires_at`` has already
+            # passed but no follower has yet claimed. A no-match falls through to
+            # the rowcount-0 demotion below.
+            renew_sql = _SQLITE_RENEW_SQL if _dialect_name(session) == "sqlite" else _POSTGRES_RENEW_SQL
+            result = await session.execute(
+                renew_sql,
+                {"leader_id": self._leader_id, "ttl": ttl},
+            )
             # Capture the affected rowcount BEFORE the commit. A rowcount of 0
             # means the UPDATE matched no row because another replica now owns
             # the lease; that verdict is authoritative and independent of whether
@@ -739,25 +753,14 @@ class LeaderElection:
         ttl = settings.leader_election_ttl_seconds
         try:
             async with get_background_session() as session:
-                if _dialect_name(session) == "sqlite":
-                    # Guard the renewal on the lease still being unexpired (host
-                    # clock, single host) so a shutdown/drain renewal can never
-                    # resurrect a row whose ``expires_at`` has already passed.
-                    now = datetime.now(UTC)
-                    result = await session.execute(
-                        update(SchedulerLeader)
-                        .where(
-                            SchedulerLeader.id == 1,
-                            SchedulerLeader.leader_id == self._leader_id,
-                            SchedulerLeader.expires_at > now,
-                        )
-                        .values(expires_at=now + timedelta(seconds=ttl))
-                    )
-                else:
-                    result = await session.execute(
-                        _POSTGRES_RENEW_SQL,
-                        {"leader_id": self._leader_id, "ttl": ttl},
-                    )
+                # Guard the renewal on the lease still being unexpired at the
+                # database's execution-time clock so a shutdown/drain renewal can
+                # never resurrect a row whose ``expires_at`` has already passed.
+                renew_sql = _SQLITE_RENEW_SQL if _dialect_name(session) == "sqlite" else _POSTGRES_RENEW_SQL
+                result = await session.execute(
+                    renew_sql,
+                    {"leader_id": self._leader_id, "ttl": ttl},
+                )
                 renewed = _rowcount(result) == 1
                 await session.commit()
                 return renewed

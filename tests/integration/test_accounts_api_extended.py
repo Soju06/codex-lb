@@ -1042,6 +1042,44 @@ async def test_accounts_list_hides_expired_primary_window(async_client, db_setup
 
 
 @pytest.mark.asyncio
+async def test_accounts_list_expired_exhausted_primary_does_not_show_rate_limited(async_client, db_setup):
+    now_epoch = int(utcnow().replace(tzinfo=timezone.utc).timestamp())
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+
+        await accounts_repo.upsert(_make_account("acc_expired_exhausted", "expired-exhausted@example.com"))
+        # A frozen 100% sample whose window already reset: routing zeroes it
+        # before status decisions, so the badge must not infer rate-limited.
+        await usage_repo.add_entry(
+            "acc_expired_exhausted",
+            100.0,
+            window="primary",
+            reset_at=now_epoch - 7200,
+            window_minutes=300,
+            recorded_at=utcnow() - timedelta(hours=3),
+        )
+        await usage_repo.add_entry(
+            "acc_expired_exhausted",
+            40.0,
+            window="secondary",
+            reset_at=now_epoch + 5 * 24 * 3600,
+            window_minutes=10080,
+            recorded_at=utcnow(),
+        )
+
+    response = await async_client.get("/api/accounts")
+    assert response.status_code == 200
+    accounts = {item["accountId"]: item for item in response.json()["accounts"]}
+
+    account = accounts["acc_expired_exhausted"]
+    assert account["status"] == AccountStatus.ACTIVE.value
+    assert account["usage"]["primaryRemainingPercent"] is None
+    assert account["resetAtPrimary"] is None
+    assert account["windowMinutesPrimary"] is None
+
+
+@pytest.mark.asyncio
 async def test_accounts_list_missing_primary_row_is_not_optimistic(async_client, db_setup):
     now_epoch = int(utcnow().replace(tzinfo=timezone.utc).timestamp())
     async with SessionLocal() as session:

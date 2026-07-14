@@ -141,6 +141,15 @@ def _account_to_summary(
 
     status_primary_usage = effective_primary_usage
     status_primary_used_percent = primary_used_percent
+    now_epoch = int(datetime.now(timezone.utc).timestamp())
+    if _display_window_expired(status_primary_usage, now_epoch):
+        # Mirror routing (`_state_from_account`): an elapsed primary sample
+        # describes a reset window, not exhaustion evidence. Zero the used
+        # percentage (not None, so usage-derived recovery still evaluates)
+        # and drop the stale reset so a frozen >=100% sample cannot infer a
+        # rate-limited badge the selector would never apply.
+        status_primary_usage = None
+        status_primary_used_percent = 0.0
     status_runtime_reset = float(account.reset_at) if account.reset_at else None
     status_seed = account.status
     allow_missing_runtime_reset_recovery = False
@@ -235,9 +244,8 @@ def _account_to_summary(
     # window entirely). Long windows stay raw: weekly/monthly consumers
     # (e.g. the weekly credit pace) advance elapsed resets by design, and
     # upstream still reports them so staleness is transient. Status
-    # derivation above keeps the raw inputs so the badge stays aligned with
-    # routing.
-    now_epoch = int(datetime.now(timezone.utc).timestamp())
+    # derivation above expired the sample the same way routing does, so the
+    # badge stays aligned with the selector.
     if _display_window_expired(effective_primary_usage, now_epoch):
         primary_remaining_percent = None
         remaining_credits_primary = None

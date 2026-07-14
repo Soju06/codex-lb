@@ -2,7 +2,7 @@
 
 ### Requirement: Account quota displays hide expired windows
 
-Account summary payloads SHALL present the primary (short) quota window as absent — null remaining percentage, remaining credits, reset timestamp, and window duration — when its last usage sample has an elapsed `reset_at`, instead of freezing the stale sample. Accounts without any primary sample SHALL NOT display an optimistic 100% primary remaining default. Long (weekly/monthly) window displays keep the raw samples: their consumers advance elapsed resets by design (weekly credit pace) and upstream still reports them, so staleness is transient. Displayed account status SHALL keep deriving from the same inputs routing uses, so hiding an expired window does not change the status badge.
+Account summary payloads SHALL present the primary (short) quota window as absent — null remaining percentage, remaining credits, reset timestamp, and window duration — when its last usage sample has an elapsed `reset_at`, instead of freezing the stale sample. Accounts without any primary sample SHALL NOT display an optimistic 100% primary remaining default. Long (weekly/monthly) window displays keep the raw samples: their consumers advance elapsed resets by design (weekly credit pace) and upstream still reports them, so staleness is transient. Displayed account status SHALL apply the same expired-window treatment routing applies before deriving the badge: an elapsed primary sample is a reset window, not exhaustion evidence, so a frozen ≥100% sample MUST NOT surface a rate-limited badge that the selector would never apply.
 
 #### Scenario: Expired 5h sample displays as absent
 
@@ -10,6 +10,13 @@ Account summary payloads SHALL present the primary (short) quota window as absen
 - **WHEN** the dashboard loads account summaries
 - **THEN** the account's primary window fields are null
 - **AND** the UI renders the 5h quota as absent, matching the weekly-only presentation
+
+#### Scenario: Expired exhausted sample does not display rate-limited
+
+- **GIVEN** an active account whose last primary sample reports 100% used with an elapsed `reset_at`
+- **WHEN** account summaries are built
+- **THEN** the primary window fields are null
+- **AND** the account status stays active instead of inferring rate-limited from the stale sample
 
 #### Scenario: Missing primary data is not optimistic
 

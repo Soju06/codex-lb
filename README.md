@@ -248,19 +248,19 @@ You can clean the config by using this one-liner
           "name": "GPT-5.6 Sol",
           "reasoning": true,
           "options": { "reasoningEffort": "high", "reasoningSummary": "detailed" },
-          "limit": { "context": 1050000, "output": 128000 }
+          "limit": { "context": 372000, "output": 128000 }
         },
         "gpt-5.6-terra": {
           "name": "GPT-5.6 Terra",
           "reasoning": true,
           "options": { "reasoningEffort": "high", "reasoningSummary": "detailed" },
-          "limit": { "context": 1050000, "output": 128000 }
+          "limit": { "context": 372000, "output": 128000 }
         },
         "gpt-5.6-luna": {
           "name": "GPT-5.6 Luna",
           "reasoning": true,
           "options": { "reasoningEffort": "high", "reasoningSummary": "detailed" },
-          "limit": { "context": 1050000, "output": 128000 }
+          "limit": { "context": 372000, "output": 128000 }
         }
       }
     }

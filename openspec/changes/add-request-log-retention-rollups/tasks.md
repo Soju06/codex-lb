@@ -13,4 +13,4 @@
   - [x] 7.2 Add a fail-closed row-count parity check before committing a prune.
   - [x] 7.3 Add regression coverage for the seven-day boundary, aggregate totals, and parity rollback.
   - [x] 7.4 Preserve API-key fallback, account dedupe, dashboard, report user-agent, and limit projections.
-  - [ ] 7.5 Validate locally, deploy through Railway, and prove live raw-plus-aggregate totals are preserved.
+  - [x] 7.5 Validate locally, deploy through Railway, and prove live raw-plus-aggregate totals are preserved.

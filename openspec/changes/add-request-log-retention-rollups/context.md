@@ -46,3 +46,26 @@ Run a dry-run first, capture raw-plus-aggregate totals, create a verified
 SQLite backup, then apply. After apply, require zero remaining eligible rows,
 aggregate request-count growth equal to deleted raw rows, unchanged projection
 totals, and `PRAGMA quick_check = ok`. File compaction is a separate operation.
+
+## Production verification on 2026-07-14
+
+Railway deployment `a84956b8-0c0b-4a7a-b750-805b95ffb802` ran the
+seven-day change against the production SQLite volume. A dry-run selected
+54,551 raw rows before 2026-07-07 00:00 UTC and 2,740 aggregate groups. Apply
+wrote all 2,740 groups and deleted exactly 54,551 rows; the immediate repeated
+dry-run selected zero rows.
+
+Fixed-cutoff API-key, account-deduplicated, and general dashboard/report
+projections were compared before and after apply. All API-key and general
+checksums matched. The account repository projection covered 84 accounts and
+had identical before/after checksums with zero field differences. SQLite
+`quick_check` returned `ok` before apply, after apply, and after compaction.
+
+The pre-prune backup is
+`/var/lib/codex-lb/store.pre-prune-20260714T012557Z.db` with SHA-256
+`f6f0d2d3a508f9dab3a8ab6556d031fc12e0bbafc948394aa8c2995367089d61`.
+Its gzip copy has SHA-256
+`20e82369baf16ec733cb56d46b977566bf981928b86daaf9a24129af77382011`.
+Compaction reduced `store.db` from 1,292,894,208 bytes before the snapshot to
+1,059,004,416 bytes after live traffic resumed. Health checks and proxied
+Responses API requests continued to return HTTP 200.

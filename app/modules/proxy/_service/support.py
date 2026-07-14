@@ -35,14 +35,17 @@ logger = logging.getLogger(__name__)
 
 _REQUEST_TRANSPORT_HTTP = "http"
 _REQUEST_TRANSPORT_WEBSOCKET = "websocket"
+_REASONING_SUMMARY_BLANK_HTML_COMMENT_RE = re.compile(r"(?m)^[ \t]*<!--\s*-->[ \t]*(?:\r?\n|\Z)")
 _TTFT_EVENT_TYPES = frozenset(
     {
         "response.output_text.delta",
         "response.refusal.delta",
         "response.function_call_arguments.delta",
         "response.output_tool_call.delta",
-        "response.reasoning_summary_text.delta",
     }
+)
+_TTFT_REASONING_EVENT_TYPES = frozenset(
+    {"response.reasoning_summary_text.delta", "response.reasoning_summary_text.done"}
 )
 _PENDING_TOOL_CALL_OUTPUT_ITEM_TYPE_BY_CALL_TYPE = {
     "function_call": "function_call_output",
@@ -73,7 +76,76 @@ _PROPAGATED_CAPACITY_STARTUP_READY: ContextVar[asyncio.Event | None] = ContextVa
 )
 
 
-def _is_ttft_event(event_type: str | None, payload: dict[str, JsonValue] | None) -> bool:
+def _strip_blank_html_comment_lines(text: str) -> str:
+    terminal_match = None
+    for match in _REASONING_SUMMARY_BLANK_HTML_COMMENT_RE.finditer(text):
+        if match.end() == len(text):
+            terminal_match = match
+    cleaned, count = _REASONING_SUMMARY_BLANK_HTML_COMMENT_RE.subn("", text)
+    if count == 0:
+        return text
+    if terminal_match is not None:
+        return cleaned.rstrip("\r\n")
+    return cleaned
+
+
+def _reasoning_summary_delta_key(payload: Mapping[str, JsonValue]) -> tuple[str | None, int | None, int | None]:
+    item_id = payload.get("item_id")
+    output_index = payload.get("output_index")
+    summary_index = payload.get("summary_index")
+    return (
+        item_id if isinstance(item_id, str) else None,
+        output_index if isinstance(output_index, int) else None,
+        summary_index if isinstance(summary_index, int) else None,
+    )
+
+
+def _could_be_blank_html_comment_line(text: str) -> bool:
+    candidate = text.rsplit("\n", 1)[-1].lstrip(" \t")
+    if not candidate:
+        return False
+    if not candidate.startswith("<!--"):
+        return "<!--".startswith(candidate)
+    remainder = candidate[4:].lstrip()
+    if not remainder.startswith("-->"):
+        return "-->".startswith(remainder)
+    return not remainder[3:].strip(" \t\r")
+
+
+def _is_reasoning_summary_interleavable_event(event_type: JsonValue | None) -> bool:
+    return isinstance(event_type, str) and (event_type == "response.in_progress" or event_type.startswith("codex."))
+
+
+def _is_ttft_event(
+    event_type: str | None,
+    payload: dict[str, JsonValue] | None,
+    pending_reasoning_deltas: dict[tuple[str | None, int | None, int | None], str] | None = None,
+) -> bool:
+    pending = pending_reasoning_deltas if pending_reasoning_deltas is not None else {}
+    event_key = _reasoning_summary_delta_key(payload) if payload is not None else (None, None, None)
+    if (
+        pending
+        and not _is_reasoning_summary_interleavable_event(event_type)
+        and not (event_type in _TTFT_REASONING_EVENT_TYPES and event_key in pending)
+    ):
+        pending_visible = any(_strip_blank_html_comment_lines(text) for text in pending.values())
+        pending.clear()
+        if pending_visible:
+            return True
+    if event_type == "response.reasoning_summary_text.delta":
+        delta = payload.get("delta") if payload is not None else None
+        if not isinstance(delta, str):
+            return False
+        combined = pending.pop(event_key, "") + delta
+        cleaned = _strip_blank_html_comment_lines(combined)
+        if cleaned != combined:
+            return bool(cleaned)
+        if _could_be_blank_html_comment_line(combined):
+            pending[event_key] = combined
+            return False
+        return bool(combined)
+    if event_type == "response.reasoning_summary_text.done" and event_key in pending:
+        return bool(_strip_blank_html_comment_lines(pending.pop(event_key)))
     if event_type in _TTFT_EVENT_TYPES:
         return True
     if event_type != "response.output_item.added" or not isinstance(payload, dict):
@@ -392,6 +464,7 @@ class _WebSocketRequestState:
     started_at: float
     responses_lite_model: str | None = None
     latency_first_token_ms: int | None = None
+    ttft_reasoning_deltas: dict[tuple[str | None, int | None, int | None], str] = field(default_factory=dict)
     latency_response_created_ms: int | None = None
     latency_first_upstream_event_ms: int | None = None
     latency_response_create_gate_wait_ms: int | None = None

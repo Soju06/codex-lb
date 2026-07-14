@@ -228,8 +228,23 @@ async def test_stream_responses_ttft_ignores_non_token_events_before_delta(monke
             'data: {"type":"response.output_item.added","item":{"type":"message","role":"assistant","content":[]}}\n\n'
         )
         yield ('data: {"type":"response.output_item.added","item":{"type":"function_call","arguments":""}}\n\n')
+        yield (
+            'data: {"type":"response.reasoning_summary_text.delta","item_id":"rs_1",'
+            '"output_index":0,"summary_index":0,"delta":"<!"}\n\n'
+        )
+        yield (
+            'data: {"type":"response.reasoning_summary_text.delta","item_id":"rs_1",'
+            '"output_index":0,"summary_index":0,"delta":"-- -->"}\n\n'
+        )
+        yield (
+            'data: {"type":"response.reasoning_summary_text.delta","item_id":"rs_1",'
+            '"output_index":0,"summary_index":0,"delta":"Plan\\n\\n<!"}\n\n'
+        )
         await asyncio.sleep(0.03)
-        yield 'data: {"type":"response.function_call_arguments.delta","delta":"{}"}\n\n'
+        yield (
+            'data: {"type":"response.reasoning_summary_text.delta","item_id":"rs_1",'
+            '"output_index":0,"summary_index":0,"delta":"-- -->"}\n\n'
+        )
         yield (
             'data: {"type":"response.completed","response":{"id":"resp_ttft","usage":'
             '{"input_tokens":1,"output_tokens":1}}}\n\n'
@@ -243,5 +258,5 @@ async def test_stream_responses_ttft_ignores_non_token_events_before_delta(monke
     assert await service.drain_persistence_tasks(timeout_seconds=1)
     latency_first_token_ms = cast(int, request_logs.calls[0]["latency_first_token_ms"])
 
-    assert len(chunks) == 5
+    assert len(chunks) == 8
     assert latency_first_token_ms >= 20

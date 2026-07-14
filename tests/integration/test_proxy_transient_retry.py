@@ -89,13 +89,13 @@ def _server_error_sse_event() -> str:
     )
 
 
-def _server_is_overloaded_sse_event() -> str:
+def _overload_sse_event(error_code: str) -> str:
     return _sse_event(
         {
             "type": "response.failed",
             "response": {
                 "error": {
-                    "code": "server_is_overloaded",
+                    "code": error_code,
                     "message": "Our servers are currently overloaded. Please try again later.",
                 },
             },
@@ -179,8 +179,9 @@ async def test_stream_server_error_succeeds_on_second_try_same_account(async_cli
 
 
 @pytest.mark.asyncio
-async def test_stream_server_is_overloaded_succeeds_on_second_try_same_account(async_client, monkeypatch):
-    await _import_account(async_client, "acc_server_overloaded", "server-overloaded@example.com")
+@pytest.mark.parametrize("error_code", ["overloaded_error", "server_is_overloaded"])
+async def test_stream_overload_alias_succeeds_on_second_try_same_account(async_client, monkeypatch, error_code):
+    await _import_account(async_client, f"acc_{error_code}", f"{error_code}@example.com")
 
     call_count = 0
     seen_account_ids: list[str | None] = []
@@ -190,7 +191,7 @@ async def test_stream_server_is_overloaded_succeeds_on_second_try_same_account(a
         call_count += 1
         seen_account_ids.append(account_id)
         if call_count == 1:
-            yield _server_is_overloaded_sse_event()
+            yield _overload_sse_event(error_code)
             return
         yield _success_sse_event("resp_server_overloaded_ok")
 

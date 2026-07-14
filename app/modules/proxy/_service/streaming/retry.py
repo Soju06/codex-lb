@@ -14,7 +14,12 @@ import aiohttp
 from app.core.auth.refresh import RefreshError, is_transient_refresh_contention, refresh_contention_kind
 from app.core.balancer import failover_decision
 from app.core.balancer.types import UpstreamError
-from app.core.clients.proxy import ProxyResponseError, _resolve_stream_transport, pop_stream_timeout_overrides
+from app.core.clients.proxy import (
+    ProxyResponseError,
+    _resolve_stream_transport,
+    is_confirmed_pre_dispatch_transport_error,
+    pop_stream_timeout_overrides,
+)
 from app.core.errors import openai_error, response_failed_event
 from app.core.openai.requests import ResponsesRequest, extract_input_file_ids
 from app.core.resilience.network_recovery import (
@@ -351,6 +356,7 @@ class _StreamingRetryMixin:
         network_recovery = ProcessNetworkRecovery(transport="stream", request_id=request_id)
         settlement = _StreamSettlement()
         last_transient_exc: ProxyResponseError | None = None
+        last_pre_dispatch_transport_error: ProxyResponseError | None = None
         last_account_model_rejection: ProxyResponseError | None = None
         last_account_model_rejection_account_id: str | None = None
         account_model_replacement_account_id: str | None = None
@@ -388,6 +394,29 @@ class _StreamingRetryMixin:
             except ValueError:
                 pass
             await proxy._load_balancer.release_account_lease(lease)
+
+        def _render_dispatch_transport_error(exc: ProxyResponseError) -> str:
+            # Terminal render of the preserved sanitized transport failure:
+            # the client sees the original upstream-unavailable error instead
+            # of a misleading generated ``no_accounts`` response.
+            error = _parse_openai_error(exc.payload)
+            error_code = (
+                _normalize_error_code(
+                    error.code if error else None,
+                    error.type if error else None,
+                )
+                or "upstream_unavailable"
+            )
+            error_message = error.message if error and error.message else "Upstream transport failed"
+            event = response_failed_event(
+                error_code,
+                error_message,
+                error_type=(error.type if error else None) or "server_error",
+                response_id=request_id,
+                error_param=error.param if error else None,
+            )
+            _apply_error_metadata(event["response"]["error"], error)
+            return format_sse_event(event)
 
         async def _settle_stream_usage_before_pending_penalty(
             current_settlement: _StreamSettlement,
@@ -1073,6 +1102,13 @@ class _StreamingRetryMixin:
                         )
                         and (
                             selection.error_code in _LOCAL_ACCOUNT_CAP_ERROR_CODES
+                            # A preserved confirmed pre-dispatch failure is
+                            # terminal for this request: waiting for capacity
+                            # recovery cannot resurrect the dead proxy route.
+                            or last_pre_dispatch_transport_error is None
+                        )
+                        and (
+                            selection.error_code in _LOCAL_ACCOUNT_CAP_ERROR_CODES
                             or (last_retryable_stream_error is None and last_security_work_retry_error is None)
                         )
                     ):
@@ -1105,6 +1141,15 @@ class _StreamingRetryMixin:
                             last_account_model_rejection,
                             account_id=last_account_model_rejection_account_id,
                         )
+                        return
+                    if last_pre_dispatch_transport_error is not None:
+                        # No eligible replacement exists: preserve the original
+                        # sanitized upstream-unavailable failure instead of
+                        # generating a misleading ``no_accounts`` response.
+                        await _drain_pending_post_refresh_penalty_on_terminal(settlement)
+                        if propagate_http_errors:
+                            raise last_pre_dispatch_transport_error
+                        yield _render_dispatch_transport_error(last_pre_dispatch_transport_error)
                         return
                     if selection.error_code in _LOCAL_ACCOUNT_CAP_ERROR_CODES:
                         await _drain_pending_post_refresh_penalty_on_terminal(settlement)
@@ -1885,6 +1930,43 @@ class _StreamingRetryMixin:
                                     _facade()._raise_proxy_budget_exhausted()
                                 if _facade()._is_account_neutral_error_code(code):
                                     raise
+                                if is_confirmed_pre_dispatch_transport_error(tex):
+                                    # The transport proved the request never
+                                    # dispatched: this account's proxy route is
+                                    # dead. Release the account's stream lease
+                                    # before recording health so its slot never
+                                    # outlives the failed route, then jump
+                                    # straight to the bounded transient backoff
+                                    # floor so independent requests stop
+                                    # rediscovering the dead route one generic
+                                    # error at a time.
+                                    await _release_tracked_stream_lease(current_account_lease)
+                                    current_account_lease = None
+                                    await proxy._load_balancer.record_error_backoff(account)
+                                    can_try_other_account = (
+                                        not require_preferred_account
+                                        and account.id != file_preferred_account_id
+                                        and attempt < max_attempts - 1
+                                    )
+                                    if not can_try_other_account:
+                                        # Hard account ownership or exhausted
+                                        # attempts: fail closed on the original
+                                        # sanitized failure without crossing
+                                        # accounts.
+                                        raise
+                                    last_transient_exc = tex
+                                    last_pre_dispatch_transport_error = tex
+                                    transient_failed_account_id = account.id
+                                    excluded_account_ids.add(account.id)
+                                    affinity = replace(affinity, reallocate_sticky=True)
+                                    _facade().logger.info(
+                                        "Retrying stream after confirmed pre-dispatch proxy connect failure "
+                                        "request_id=%s account_id=%s attempt=%d",
+                                        request_id,
+                                        account.id,
+                                        attempt + 1,
+                                    )
+                                    break
                                 classified = await proxy._handle_stream_error(
                                     account,
                                     _upstream_error_from_openai(error),
@@ -2436,12 +2518,24 @@ class _StreamingRetryMixin:
                                 action,
                             )
                             if action == "failover_next":
-                                await proxy._handle_stream_error(
-                                    account,
-                                    current_error_payload,
-                                    current_error_code,
-                                    http_status=retry_exc.status_code,
-                                )
+                                if is_confirmed_pre_dispatch_transport_error(retry_exc):
+                                    # Confirmed dead proxy route on the
+                                    # post-refresh attempt: release the lease
+                                    # first, then apply the bounded transient
+                                    # backoff floor instead of a single generic
+                                    # error, and preserve the sanitized failure
+                                    # for terminal rendering.
+                                    await _release_tracked_stream_lease(current_account_lease)
+                                    current_account_lease = None
+                                    await proxy._load_balancer.record_error_backoff(account)
+                                    last_pre_dispatch_transport_error = retry_exc
+                                else:
+                                    await proxy._handle_stream_error(
+                                        account,
+                                        current_error_payload,
+                                        current_error_code,
+                                        http_status=retry_exc.status_code,
+                                    )
                                 last_transient_exc = retry_exc
                                 await _release_tracked_stream_lease(current_account_lease)
                                 current_account_lease = None
@@ -2572,6 +2666,12 @@ class _StreamingRetryMixin:
                 return
             if propagate_http_errors and last_transient_exc is not None:
                 raise last_transient_exc
+            if last_pre_dispatch_transport_error is not None:
+                # Attempt budget exhausted after confirmed pre-dispatch route
+                # failures: surface the original sanitized failure rather than
+                # a generated ``no_accounts`` response.
+                yield _render_dispatch_transport_error(last_pre_dispatch_transport_error)
+                return
             if last_retryable_stream_error is not None:
                 retries_exhausted_msg = str(last_retryable_stream_error.error.get("message") or "Upstream error")
                 event = response_failed_event(

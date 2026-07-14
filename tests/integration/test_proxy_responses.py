@@ -531,6 +531,58 @@ async def test_proxy_responses_repeated_401_after_refresh_fails_over(async_clien
 
 
 @pytest.mark.asyncio
+async def test_proxy_responses_confirmed_proxy_connect_failure_fails_over_before_dispatch(async_client, monkeypatch):
+    for raw_account_id, email in (
+        ("acc_stream_proxy_connect_a", "stream-proxy-connect-a@example.com"),
+        ("acc_stream_proxy_connect_b", "stream-proxy-connect-b@example.com"),
+    ):
+        auth_json = _make_auth_json(raw_account_id, email)
+        files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+        response = await async_client.post("/api/accounts/import", files=files)
+        assert response.status_code == 200
+
+    captured_account_ids: list[str | None] = []
+    failed_account_id: str | None = None
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
+        del payload, headers, access_token, base_url, kwargs
+        nonlocal failed_account_id
+        assert raise_for_status is True
+        if failed_account_id is None:
+            failed_account_id = account_id
+        captured_account_ids.append(account_id)
+        if account_id == failed_account_id:
+            raise proxy_module.ProxyResponseError(
+                502,
+                proxy_module.openai_error("upstream_unavailable", "sanitized account proxy failure"),
+                failure_phase="connect",
+                retryable_same_contract=True,
+                failure_detail="proxy_connect_pre_dispatch",
+                failure_exception_type="ClientProxyConnectionError",
+            )
+        yield (
+            'data: {"type":"response.completed","response":{"id":"resp_stream_proxy_failover",'
+            '"object":"response","status":"completed","usage":{"input_tokens":2,"output_tokens":1}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        json={"model": "gpt-5.4", "instructions": "hi", "input": [], "stream": True},
+    ) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    event = _extract_first_event(lines)
+    assert event["type"] == "response.completed"
+    assert event["response"]["id"] == "resp_stream_proxy_failover"
+    assert captured_account_ids[0] == failed_account_id
+    assert captured_account_ids[1] != failed_account_id
+
+
+@pytest.mark.asyncio
 async def test_proxy_responses_compaction_trigger_streams_single_compaction_item(async_client, monkeypatch):
     email = "compact-trigger@example.com"
     raw_account_id = "acc_compact_trigger"

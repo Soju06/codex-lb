@@ -17,6 +17,7 @@ from app.core.clients.proxy import (
     UpstreamProxyRouteTrace,
     codex_control_request,
     compact_responses,
+    is_confirmed_pre_dispatch_transport_error,
     stream_responses,
     thread_goal_request,
     transcribe_audio,
@@ -697,6 +698,65 @@ async def test_stream_responses_marks_typed_routed_connector_failure_replay_safe
     assert exc_info.value.retryable_same_contract is True
     assert exc_info.value.failure_phase == "connect"
     assert exc_info.value.failed_session is None
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_propagates_confirmed_pre_dispatch_failure_for_status_retry(
+    route: ResolvedUpstreamRoute,
+) -> None:
+    key = ConnectionKey("proxy.test", 8080, False, False, None, None, None)
+    network_error = aiohttp.ClientProxyConnectionError(key, ConnectionRefusedError("connection refused"))
+    client = CodexClient(_NetworkFailureSession(network_error))
+    payload = ResponsesRequest(model="gpt-5.2", instructions="Reply.", input="hello", stream=True)
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        async for _ in stream_responses(
+            payload,
+            {"user-agent": "codex"},
+            "access",
+            "chatgpt_account",
+            session=cast(Any, object()),
+            upstream_stream_transport_override="http",
+            route=route,
+            codex_client=client,
+            raise_for_status=True,
+        ):
+            pass
+
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.payload["error"]["code"] == "upstream_unavailable"
+    assert exc_info.value.retryable_same_contract is True
+    assert exc_info.value.failure_phase == "connect"
+    assert is_confirmed_pre_dispatch_transport_error(exc_info.value) is True
+    assert "connection refused" not in str(exc_info.value.payload["error"]["message"])
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_ambiguous_transport_failure_stays_terminal_without_retry_authorization(
+    route: ResolvedUpstreamRoute,
+) -> None:
+    payload = ResponsesRequest(model="gpt-5.2", instructions="Reply.", input="hello", stream=True)
+
+    events = [
+        event
+        async for event in stream_responses(
+            payload,
+            {"user-agent": "codex"},
+            "access",
+            "chatgpt_account",
+            session=cast(Any, object()),
+            upstream_stream_transport_override="http",
+            route=route,
+            codex_client=cast(Any, _TransportErrorCodexClient()),
+            raise_for_status=True,
+        )
+    ]
+
+    # Dispatch is unknown, so even ``raise_for_status`` callers receive the
+    # terminal downstream event rather than a replay-authorizing exception.
+    combined = "".join(events)
+    assert '"type":"response.failed"' in combined or '"type": "response.failed"' in combined
+    assert '"code":"upstream_unavailable"' in combined or '"code": "upstream_unavailable"' in combined
 
 
 @pytest.mark.asyncio

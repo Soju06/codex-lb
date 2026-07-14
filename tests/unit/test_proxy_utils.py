@@ -9497,6 +9497,61 @@ async def test_stream_once_marks_downstream_cancel_after_visible_event(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_stream_once_marks_downstream_cancel_before_first_event(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_stream_previsible_cancel")
+    settlement = proxy_service._StreamSettlement()
+    started = asyncio.Event()
+
+    async def fake_stream(
+        payload,
+        headers,
+        access_token,
+        account_id,
+        base_url=None,
+        raise_for_status=False,
+        enforce_openai_sdk_contract=True,
+    ):
+        del payload, headers, access_token, account_id, base_url, raise_for_status, enforce_openai_sdk_contract
+        started.set()
+        await asyncio.Event().wait()
+        yield ""
+
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.4", "instructions": "hi", "input": [], "stream": True})
+    stream = service._stream_once(
+        account,
+        payload,
+        {"session_id": "sid-stream"},
+        "req_stream_previsible_cancel",
+        False,
+        request_started_at=time.monotonic(),
+        api_key=None,
+        api_key_reservation=None,
+        settlement=settlement,
+        suppress_text_done_events=False,
+        upstream_stream_transport="http",
+        request_transport="http",
+    )
+    next_event = asyncio.ensure_future(anext(stream))
+    await asyncio.wait_for(started.wait(), timeout=1)
+    next_event.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await next_event
+
+    assert settlement.status == "cancelled"
+    assert settlement.error == {"message": "Downstream client disconnected before response.completed"}
+    assert settlement.account_health_error is False
+    assert request_logs.calls[0]["status"] == "cancelled"
+    assert request_logs.calls[0]["error_code"] == "client_disconnected"
+    assert request_logs.calls[0]["failure_phase"] == "downstream"
+    assert request_logs.calls[0]["failure_detail"] == "client_disconnected_before_terminal_event"
+
+
+@pytest.mark.asyncio
 async def test_service_stream_responses_records_typeless_raw_codex_error_after_created(monkeypatch):
     settings = _make_proxy_settings()
     request_logs = _RequestLogsRecorder()

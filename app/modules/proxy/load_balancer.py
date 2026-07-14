@@ -6,7 +6,7 @@ import json
 import logging
 import time
 from collections.abc import Collection, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Iterable
 from uuid import uuid4
@@ -53,6 +53,7 @@ from app.core.plan_types import account_plan_matches_allowed, normalize_account_
 from app.core.resilience.circuit_breaker import are_all_account_circuit_breakers_open
 from app.core.resilience.degradation import get_status as get_degradation_status
 from app.core.resilience.degradation import set_degraded, set_normal
+from app.core.usage.account_limits import evaluate_standard_usage_limit
 from app.core.usage.quota import apply_usage_quota
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, AdditionalUsageHistory, StickySessionKind, UsageHistory
@@ -62,7 +63,7 @@ from app.modules.proxy._load_balancer.sticky_selection import (
     StickySelectionRequest,
     _account_cap_error_code,
     _clone_account,
-    _filter_states_for_account_caps,
+    _filter_states_for_usage_limit_and_account_caps,
     _select_account_preferring_budget_safe,
     _StickySelectionOutcome,
     run_sticky_selection_path,
@@ -216,6 +217,9 @@ class _SelectionInputs(SelectionInputsProtocol):
     # exclusion, runtime-health, budget, and account-cap filters. Keep that
     # stronger candidate pool alongside the effective routing pool.
     continuity_owner_candidates: list[Account] | None = None
+    standard_latest_primary: dict[str, UsageHistory] = field(default_factory=dict)
+    standard_latest_secondary: dict[str, UsageHistory] = field(default_factory=dict)
+    standard_latest_monthly: dict[str, UsageHistory] = field(default_factory=dict)
     quota_planner_settings: PlannerSettings = PlannerSettings()
     runtime_accounts: list[Account] | None = None
     error_message: str | None = None
@@ -475,6 +479,9 @@ class LoadBalancer:
                         latest_secondary={},
                         latest_monthly=selection_inputs.latest_monthly,
                         continuity_owner_candidates=authorized_owner_candidates,
+                        standard_latest_primary=selection_inputs.standard_latest_primary,
+                        standard_latest_secondary=selection_inputs.standard_latest_secondary,
+                        standard_latest_monthly=selection_inputs.standard_latest_monthly,
                         quota_planner_settings=selection_inputs.quota_planner_settings,
                         runtime_accounts=selection_inputs.runtime_accounts,
                         error_message="No accounts marked as authorized for security work",
@@ -486,6 +493,9 @@ class LoadBalancer:
                     latest_secondary=selection_inputs.latest_secondary,
                     latest_monthly=selection_inputs.latest_monthly,
                     continuity_owner_candidates=authorized_owner_candidates,
+                    standard_latest_primary=selection_inputs.standard_latest_primary,
+                    standard_latest_secondary=selection_inputs.standard_latest_secondary,
+                    standard_latest_monthly=selection_inputs.standard_latest_monthly,
                     quota_planner_settings=selection_inputs.quota_planner_settings,
                     runtime_accounts=selection_inputs.runtime_accounts,
                     error_message=selection_inputs.error_message,
@@ -507,6 +517,9 @@ class LoadBalancer:
                         latest_secondary={},
                         latest_monthly=selection_inputs.latest_monthly,
                         continuity_owner_candidates=selection_inputs.effective_continuity_owner_candidates,
+                        standard_latest_primary=selection_inputs.standard_latest_primary,
+                        standard_latest_secondary=selection_inputs.standard_latest_secondary,
+                        standard_latest_monthly=selection_inputs.standard_latest_monthly,
                         quota_planner_settings=selection_inputs.quota_planner_settings,
                         runtime_accounts=selection_inputs.runtime_accounts,
                         error_message="No accounts marked as authorized for security work",
@@ -518,6 +531,9 @@ class LoadBalancer:
                     latest_secondary=selection_inputs.latest_secondary,
                     latest_monthly=selection_inputs.latest_monthly,
                     continuity_owner_candidates=selection_inputs.effective_continuity_owner_candidates,
+                    standard_latest_primary=selection_inputs.standard_latest_primary,
+                    standard_latest_secondary=selection_inputs.standard_latest_secondary,
+                    standard_latest_monthly=selection_inputs.standard_latest_monthly,
                     quota_planner_settings=selection_inputs.quota_planner_settings,
                     runtime_accounts=selection_inputs.runtime_accounts,
                     error_message=selection_inputs.error_message,
@@ -1108,6 +1124,17 @@ class LoadBalancer:
                     account_id: _clone_standard_usage_history(entry) for account_id, entry in latest_monthly.items()
                 },
                 continuity_owner_candidates=[_clone_account(account) for account in continuity_owner_candidates],
+                standard_latest_primary={
+                    account_id: _clone_standard_usage_history(entry)
+                    for account_id, entry in standard_latest_primary.items()
+                },
+                standard_latest_secondary={
+                    account_id: _clone_standard_usage_history(entry)
+                    for account_id, entry in standard_latest_secondary.items()
+                },
+                standard_latest_monthly={
+                    account_id: _clone_standard_usage_history(entry) for account_id, entry in latest_monthly.items()
+                },
                 quota_planner_settings=quota_planner_settings,
                 runtime_accounts=[_clone_account(account) for account in all_accounts],
                 ignore_standard_quota_account_ids=ignore_standard_quota_account_ids,
@@ -1154,17 +1181,20 @@ class LoadBalancer:
                 latest_primary=selection_inputs.latest_primary,
                 latest_secondary=selection_inputs.latest_secondary,
                 latest_monthly=selection_inputs.latest_monthly,
+                standard_latest_primary=selection_inputs.standard_latest_primary,
+                standard_latest_secondary=selection_inputs.standard_latest_secondary,
+                standard_latest_monthly=selection_inputs.standard_latest_monthly,
                 runtime=self._runtime,
                 routing_policy_override=selection_inputs.routing_policy_override,
                 ignore_standard_quota_account_ids=selection_inputs.ignore_standard_quota_account_ids,
             )
-            selection_states = _filter_states_for_account_caps(
+            selection_states, account_caps_exhausted = _filter_states_for_usage_limit_and_account_caps(
                 states,
                 lease_kind=lease_kind,
                 caps=caps,
                 stream_reserve_slots=stream_reserve_slots,
             )
-            if not selection_states and states:
+            if account_caps_exhausted:
                 logger.warning(
                     "Account cap exhausted during opportunistic admission lease_kind=%s reason=%s candidates=%s",
                     lease_kind,
@@ -1193,7 +1223,7 @@ class LoadBalancer:
             return AccountSelection(
                 account=None,
                 error_message=result.error_message,
-                error_code=OPPORTUNISTIC_BURN_WINDOW_CLOSED,
+                error_code=result.error_code or OPPORTUNISTIC_BURN_WINDOW_CLOSED,
             )
         account = account_map.get(result.account.account_id)
         if account is None:
@@ -1349,6 +1379,9 @@ class LoadBalancer:
             latest_primary=selection_inputs.latest_primary,
             latest_secondary=selection_inputs.latest_secondary,
             latest_monthly=selection_inputs.latest_monthly,
+            standard_latest_primary=selection_inputs.standard_latest_primary,
+            standard_latest_secondary=selection_inputs.standard_latest_secondary,
+            standard_latest_monthly=selection_inputs.standard_latest_monthly,
             runtime=self._runtime,
             routing_policy_override=selection_inputs.routing_policy_override,
             ignore_standard_quota_account_ids=selection_inputs.ignore_standard_quota_account_ids,
@@ -1814,12 +1847,22 @@ def _build_states(
     latest_primary: Mapping[str, UsageHistory | AdditionalUsageHistory],
     latest_secondary: Mapping[str, UsageHistory | AdditionalUsageHistory],
     latest_monthly: Mapping[str, UsageHistory],
+    standard_latest_primary: Mapping[str, UsageHistory] | None = None,
+    standard_latest_secondary: Mapping[str, UsageHistory] | None = None,
+    standard_latest_monthly: Mapping[str, UsageHistory] | None = None,
     runtime: dict[str, RuntimeState],
     routing_policy_override: str | None = None,
     ignore_standard_quota_account_ids: frozenset[str] = frozenset(),
 ) -> tuple[list[AccountState], dict[str, Account]]:
     states: list[AccountState] = []
     account_map: dict[str, Account] = {}
+    effective_standard_primary = standard_latest_primary or {
+        account_id: entry for account_id, entry in latest_primary.items() if isinstance(entry, UsageHistory)
+    }
+    effective_standard_secondary = standard_latest_secondary or {
+        account_id: entry for account_id, entry in latest_secondary.items() if isinstance(entry, UsageHistory)
+    }
+    effective_standard_monthly = standard_latest_monthly or latest_monthly
 
     for account in accounts:
         secondary_entry: UsageHistory | AdditionalUsageHistory | None = latest_secondary.get(account.id)
@@ -1835,6 +1878,28 @@ def _build_states(
             secondary_entry=secondary_entry,
             runtime=runtime.setdefault(account.id, RuntimeState()),
         )
+        state.usage_limit_state = evaluate_standard_usage_limit(
+            enabled=bool(account.usage_limit_enabled),
+            limit_percent=account.usage_limit_percent,
+            plan_type=account.plan_type,
+            primary=(
+                usage_history_to_window_row(entry)
+                if (entry := effective_standard_primary.get(account.id)) is not None
+                else None
+            ),
+            secondary=(
+                usage_history_to_window_row(entry)
+                if (entry := effective_standard_secondary.get(account.id)) is not None
+                else None
+            ),
+            monthly=(
+                usage_history_to_window_row(entry)
+                if (entry := effective_standard_monthly.get(account.id)) is not None
+                else None
+            ),
+            refresh_interval_seconds=_usage_refresh_interval_seconds(),
+        )
+        state.usage_limit_percent = account.usage_limit_percent
         if routing_policy_override is not None and account.id in ignore_standard_quota_account_ids:
             state.routing_policy = routing_policy_override
         state.ignore_standard_quota = account.id in ignore_standard_quota_account_ids
@@ -2773,6 +2838,18 @@ def _clone_selection_inputs(selection_inputs: SelectionInputs) -> SelectionInput
             if selection_inputs.continuity_owner_candidates is None
             else [_clone_account(account) for account in selection_inputs.continuity_owner_candidates]
         ),
+        standard_latest_primary={
+            account_id: _clone_standard_usage_history(entry)
+            for account_id, entry in selection_inputs.standard_latest_primary.items()
+        },
+        standard_latest_secondary={
+            account_id: _clone_standard_usage_history(entry)
+            for account_id, entry in selection_inputs.standard_latest_secondary.items()
+        },
+        standard_latest_monthly={
+            account_id: _clone_standard_usage_history(entry)
+            for account_id, entry in selection_inputs.standard_latest_monthly.items()
+        },
         quota_planner_settings=selection_inputs.quota_planner_settings,
         runtime_accounts=(
             None

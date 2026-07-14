@@ -17,6 +17,23 @@ For low-volume, policy-compliant personal use, start with **Capacity weighted** 
 
 Change the strategy live in the dashboard under **Settings → Routing** — no restart required.
 
+## Reserve quota on individual accounts
+
+On the **Accounts** page, an account can have an optional maximum-used
+percentage. For example, a limit of `10%` reserves roughly 90% of that
+account's standard quota for direct use.
+
+When enabled, the limit is a hard routing gate for every strategy, including
+sticky and single-account routing. Codex LB stops selecting the account once a
+current standard quota window reports usage at or above the configured
+percentage. It also preserves the account when current usage data is missing or
+stale. The account's upstream status is not changed.
+
+You can disable a configured limit without forgetting its percentage, or remove
+it to clear the value. Because upstream usage is observed after requests finish,
+delayed reporting and requests already in flight can move actual usage past the
+displayed limit before the gate sees it.
+
 ---
 
 *Spec: [account-routing](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/account-routing)*

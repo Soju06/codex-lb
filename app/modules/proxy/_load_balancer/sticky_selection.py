@@ -21,6 +21,7 @@ from app.core.balancer import (
     RoutingStrategy,
     SelectionResult,
     TrafficClass,
+    account_usage_limit_blocks_selection,
     select_account,
 )
 from app.db.models import Account, AccountStatus, AdditionalUsageHistory, StickySessionKind, UsageHistory
@@ -62,6 +63,9 @@ class SelectionInputsProtocol(Protocol):
     latest_primary: dict[str, UsageHistory | AdditionalUsageHistory]
     latest_secondary: dict[str, UsageHistory | AdditionalUsageHistory]
     latest_monthly: dict[str, UsageHistory]
+    standard_latest_primary: dict[str, UsageHistory]
+    standard_latest_secondary: dict[str, UsageHistory]
+    standard_latest_monthly: dict[str, UsageHistory]
     quota_planner_settings: PlannerSettings
     runtime_accounts: list[Account] | None
     error_message: str | None
@@ -359,14 +363,16 @@ async def run_sticky_selection_path(
                 # health, and caps may make it unavailable, but must
                 # never delete or rebind it.
                 selection_states = [state for state in states if state.account_id == sticky_existing_account_id]
+                account_caps_exhausted = False
             elif bare_session_key and isinstance(sticky_existing_account_id, str) and not cap_spillover_allowed:
                 # Mobility was revoked by owner-bearing payload or
                 # recovery stage. Keep the old cap exception for this
                 # soft hint; the authoritative preferred-owner path
                 # normally bypasses it.
                 selection_states = states
+                account_caps_exhausted = False
             else:
-                selection_states = _filter_states_for_account_caps(
+                selection_states, account_caps_exhausted = _filter_states_for_usage_limit_and_account_caps(
                     states,
                     lease_kind=lease_kind,
                     caps=caps,
@@ -377,7 +383,7 @@ async def run_sticky_selection_path(
                 # admission. Prefer an account that can satisfy both,
                 # while preserving the later create-cap error when all
                 # are full.
-                response_create_states = _filter_states_for_account_caps(
+                response_create_states, _ = _filter_states_for_usage_limit_and_account_caps(
                     selection_states,
                     lease_kind="response_create",
                     caps=caps,
@@ -406,7 +412,7 @@ async def run_sticky_selection_path(
         if hard_sticky and not selection_states:
             selection_error_code = "hard_affinity_saturated"
             result = SelectionResult(None, "Hard affinity owner account is unavailable")
-        elif not selection_states and states:
+        elif account_caps_exhausted:
             selection_error_code = _account_cap_error_code(lease_kind)
             result = SelectionResult(None, _account_cap_error_message(lease_kind, caps))
             logger.warning(
@@ -434,10 +440,11 @@ async def run_sticky_selection_path(
                 routing_costs_by_account_id=effective_routing_costs,
             )
             if result.account is None:
-                selection_error_code = "hard_affinity_saturated"
+                selection_error_code = result.error_code or "hard_affinity_saturated"
                 result = SelectionResult(
                     None,
                     result.error_message or "Hard affinity owner account is unavailable",
+                    selection_error_code,
                 )
             else:
                 selection_error_code = None
@@ -467,6 +474,7 @@ async def run_sticky_selection_path(
                         routing_costs_by_account_id=effective_routing_costs,
                     )
                     result = sticky_outcome.selection
+                    selection_error_code = result.error_code
             except BaseException:
                 async with owner._runtime_lock:
                     owner._release_due_probe_reservation_locked(probe_reservation)
@@ -1176,6 +1184,33 @@ def _filter_states_for_account_caps(
     return filtered
 
 
+def _filter_states_for_usage_limit_and_account_caps(
+    states: Iterable[AccountState],
+    *,
+    lease_kind: AccountLeaseKind | None,
+    caps: AccountConcurrencyCaps,
+    stream_reserve_slots: int = 0,
+) -> tuple[list[AccountState], bool]:
+    state_list = list(states)
+    usage_limit_blocked = [state for state in state_list if account_usage_limit_blocks_selection(state)]
+    usage_limit_eligible = [state for state in state_list if not account_usage_limit_blocks_selection(state)]
+    if not usage_limit_eligible:
+        # Preserve blocked states so the canonical selector returns the stable
+        # local-policy error instead of misclassifying the pool as cap-bound.
+        return state_list, False
+    filtered = _filter_states_for_account_caps(
+        usage_limit_eligible,
+        lease_kind=lease_kind,
+        caps=caps,
+        stream_reserve_slots=stream_reserve_slots,
+    )
+    if not filtered:
+        return filtered, True
+    # The canonical selector excludes policy-blocked states before selection,
+    # but retaining them preserves terminal error precedence on fallback paths.
+    return [*filtered, *usage_limit_blocked], False
+
+
 def _probing_result_requires_recovery_reservation(
     states: Collection[AccountState],
     result_account: AccountState | None,
@@ -1309,12 +1344,28 @@ def _select_account_preferring_budget_safe(
     ignore_standard_quota: bool = False,
     routing_costs_by_account_id: RoutingCostsByAccount | None = None,
 ) -> SelectionResult:
-    state_list = list(states)
+    all_states = list(states)
+    usage_limit_blocked = [state for state in all_states if account_usage_limit_blocks_selection(state)]
+    state_list = [state for state in all_states if not account_usage_limit_blocks_selection(state)]
+    if not state_list:
+        return select_account(
+            all_states,
+            prefer_earlier_reset=prefer_earlier_reset,
+            prefer_earlier_reset_window=prefer_earlier_reset_window,
+            routing_strategy=routing_strategy,
+            allow_backoff_fallback=allow_backoff_fallback,
+            deterministic_probe=deterministic_probe,
+            relative_availability_power=relative_availability_power,
+            relative_availability_top_k=relative_availability_top_k,
+            traffic_class=traffic_class,
+            ignore_standard_quota=ignore_standard_quota,
+            routing_costs=routing_costs_by_account_id,
+        )
     if routing_strategy not in ("sequential_drain", "reset_drain", "single_account"):
         # This pass must precede budget-safe and routing-policy shortcuts below;
         # otherwise a healthy preferred account can starve PROBING indefinitely.
         recovery_probe = select_account(
-            state_list,
+            [*state_list, *usage_limit_blocked],
             prefer_earlier_reset=prefer_earlier_reset,
             prefer_earlier_reset_window=prefer_earlier_reset_window,
             routing_strategy=routing_strategy,
@@ -1347,7 +1398,7 @@ def _select_account_preferring_budget_safe(
             if state.routing_policy != ROUTING_POLICY_PRESERVE and not state_budget_threshold(state)
         ]
         return select_account(
-            budget_safe_states or state_list,
+            [*(budget_safe_states or state_list), *usage_limit_blocked],
             prefer_earlier_reset=prefer_earlier_reset,
             prefer_earlier_reset_window=prefer_earlier_reset_window,
             routing_strategy=routing_strategy,
@@ -1386,8 +1437,11 @@ def _select_account_preferring_budget_safe(
     ]
     if preferred_states:
         selection_pool = preferred_states if len(preferred_states) != len(state_list) else state_list
+        terminal_pool = (
+            [*selection_pool, *usage_limit_blocked] if len(preferred_states) == len(state_list) else selection_pool
+        )
         preferred = select_account(
-            selection_pool,
+            terminal_pool,
             prefer_earlier_reset=prefer_earlier_reset,
             prefer_earlier_reset_window=prefer_earlier_reset_window,
             routing_strategy=routing_strategy,
@@ -1405,7 +1459,7 @@ def _select_account_preferring_budget_safe(
             return preferred
     if routing_strategy == "usage_weighted" and state_list:
         return select_account(
-            state_list,
+            [*state_list, *usage_limit_blocked],
             prefer_earlier_reset=prefer_earlier_reset,
             prefer_earlier_reset_window=prefer_earlier_reset_window,
             routing_strategy=routing_strategy,
@@ -1417,7 +1471,7 @@ def _select_account_preferring_budget_safe(
             routing_costs=routing_costs_by_account_id,
         )
     return select_account(
-        state_list,
+        [*state_list, *usage_limit_blocked],
         prefer_earlier_reset=prefer_earlier_reset,
         prefer_earlier_reset_window=prefer_earlier_reset_window,
         routing_strategy=routing_strategy,

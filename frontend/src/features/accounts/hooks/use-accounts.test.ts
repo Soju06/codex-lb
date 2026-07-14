@@ -75,6 +75,15 @@ describe("useAccounts", () => {
       routingPolicy: "preserve",
     });
     expect(routingPolicyResult.routingPolicy).toBe("preserve");
+    const usageLimitResult = await result.current.usageLimitMutation.mutateAsync({
+      accountId: firstAccountId as string,
+      update: { enabled: true, percent: 10 },
+    });
+    expect(usageLimitResult).toEqual({
+      accountId: firstAccountId,
+      enabled: true,
+      percent: 10,
+    });
 
     const imported = await result.current.importMutation.mutateAsync(
       new File(["{}"], "auth.json", { type: "application/json" }),

@@ -4699,6 +4699,7 @@ def test_request_log_failure_metadata_does_not_use_status_code_for_local_proxy_f
     [
         "no_plan_support_for_model",
         "additional_quota_data_unavailable",
+        "account_usage_limit_reached",
         "no_additional_quota_eligible_accounts",
         "bridge_instance_mismatch",
         "previous_response_owner_unavailable",
@@ -11401,7 +11402,24 @@ async def test_compact_owner_miss_uses_api_key_scope_before_fail_closed(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_stream_responses_propagates_selection_error_code(monkeypatch):
+@pytest.mark.parametrize(
+    ("selection_error_code", "selection_error_message"),
+    [
+        (
+            "additional_quota_data_unavailable",
+            "No fresh additional quota data available for model 'gpt-5.3-codex-spark'",
+        ),
+        (
+            "account_usage_limit_reached",
+            "All otherwise available accounts have reached their usage limit or lack current usage data",
+        ),
+    ],
+)
+async def test_stream_responses_propagates_selection_error_code(
+    monkeypatch,
+    selection_error_code,
+    selection_error_message,
+):
     settings = _make_proxy_settings()
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
@@ -11414,8 +11432,8 @@ async def test_stream_responses_propagates_selection_error_code(monkeypatch):
         AsyncMock(
             return_value=AccountSelection(
                 account=None,
-                error_message="No fresh additional quota data available for model 'gpt-5.3-codex-spark'",
-                error_code="additional_quota_data_unavailable",
+                error_message=selection_error_message,
+                error_code=selection_error_code,
             )
         ),
     )
@@ -11432,9 +11450,10 @@ async def test_stream_responses_propagates_selection_error_code(monkeypatch):
     chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-stream"})]
 
     event = json.loads(chunks[0].split("data: ", 1)[1])
-    assert event["response"]["error"]["code"] == "additional_quota_data_unavailable"
+    assert event["response"]["error"]["code"] == selection_error_code
+    assert event["response"]["error"]["message"] == selection_error_message
     assert await service.drain_persistence_tasks(timeout_seconds=1)
-    assert request_logs.calls[0]["error_code"] == "additional_quota_data_unavailable"
+    assert request_logs.calls[0]["error_code"] == selection_error_code
 
 
 @pytest.mark.asyncio

@@ -120,6 +120,9 @@ export function createAccountSummary(
 		displayName: "primary@example.com",
 		planType: "plus",
 		routingPolicy: "normal",
+		usageLimitEnabled: false,
+		usageLimitPercent: null,
+		usageLimitState: "disabled",
 		status: "active",
 		securityWorkAuthorized: false,
 		usage: {

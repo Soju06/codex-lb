@@ -11,6 +11,7 @@ from typing import Collection, Iterable, Literal
 
 from app.core.balancer.types import FailureClass, UpstreamError
 from app.core.usage import PLAN_CAPACITY_CREDITS_SECONDARY
+from app.core.usage.account_limits import AccountUsageLimitState
 from app.core.utils.retry import backoff_seconds, parse_retry_after
 from app.db.models import AccountStatus
 
@@ -103,6 +104,10 @@ PRESERVE_MIN_WEEKLY_FLOOR_PCT = 5.0
 PRESERVE_MIN_SHORT_WINDOW_FLOOR_PCT = 10.0
 NORMAL_LAST_ACCOUNT_EMERGENCY_FLOOR_PCT = 5.0
 RECENT_FOREGROUND_ACTIVITY_SECONDS = 30 * 60
+ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE = "account_usage_limit_reached"
+ACCOUNT_USAGE_LIMIT_REACHED_ERROR_MESSAGE = (
+    "All otherwise available accounts have reached their usage limit or lack current usage data"
+)
 
 logger = logging.getLogger(__name__)
 
@@ -140,6 +145,8 @@ class AccountState:
     leased_tokens: float = 0.0
     routing_policy: str = ROUTING_POLICY_NORMAL
     ignore_standard_quota: bool = False
+    usage_limit_state: AccountUsageLimitState = AccountUsageLimitState.DISABLED
+    usage_limit_percent: float | None = None
 
 
 @dataclass
@@ -534,9 +541,11 @@ def select_account(
     in_error_backoff: list[AccountState] = []
     all_states = list(states)
     usage_exhaustion_state_list = list(usage_exhaustion_states) if usage_exhaustion_states is not None else all_states
+    usage_limit_blocked = [state for state in all_states if account_usage_limit_blocks_selection(state)]
+    selectable_states = [state for state in all_states if not account_usage_limit_blocks_selection(state)]
     bypass_account_ids = None if bypass_quota_exceeded_account_ids is None else set(bypass_quota_exceeded_account_ids)
 
-    for state in all_states:
+    for state in selectable_states:
         bypass_standard_quota = (
             ignore_standard_quota
             or state.ignore_standard_quota
@@ -592,7 +601,7 @@ def select_account(
 
     if not available:
         in_error_backoff_ids = {state.account_id for state in in_error_backoff}
-        hard_blocked_exists = any(
+        hard_blocked_exists = bool(_routing_relevant_usage_limit_blocks(usage_limit_blocked)) or any(
             state.status
             in (
                 AccountStatus.PAUSED,
@@ -602,7 +611,7 @@ def select_account(
                 AccountStatus.QUOTA_EXCEEDED,
             )
             and state.account_id not in in_error_backoff_ids
-            for state in all_states
+            for state in selectable_states
         )
         if allow_backoff_fallback and (len(in_error_backoff) > 1 or (in_error_backoff and hard_blocked_exists)):
 
@@ -617,6 +626,12 @@ def select_account(
                     return SelectionResult(None, f"opportunistic burn window closed: {reason}")
                 available = opportunistic_available
         else:
+            if _routing_relevant_usage_limit_blocks(usage_limit_blocked):
+                return SelectionResult(
+                    None,
+                    ACCOUNT_USAGE_LIMIT_REACHED_ERROR_MESSAGE,
+                    ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE,
+                )
             if allow_usage_exhaustion_error:
                 usage_exhaustion = pool_usage_exhaustion(
                     usage_exhaustion_state_list,
@@ -800,6 +815,21 @@ def _oldest_due_probing_account(
             state.account_id,
         ),
     )
+
+
+def account_usage_limit_blocks_selection(state: AccountState) -> bool:
+    return state.usage_limit_state in {
+        AccountUsageLimitState.REACHED,
+        AccountUsageLimitState.DATA_UNAVAILABLE,
+    }
+
+
+def _routing_relevant_usage_limit_blocks(states: Iterable[AccountState]) -> list[AccountState]:
+    return [
+        state
+        for state in states
+        if state.status not in {AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED}
+    ]
 
 
 def _remaining_secondary_credits(state: AccountState) -> float:

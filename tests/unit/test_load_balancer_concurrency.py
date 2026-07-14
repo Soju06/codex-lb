@@ -2808,6 +2808,34 @@ async def test_bare_codex_stream_avoids_owner_at_response_create_cap() -> None:
 
 
 @pytest.mark.asyncio
+async def test_bare_codex_stream_does_not_spill_to_usage_limited_account() -> None:
+    balancer, owner, alternate, sticky_repo = _make_cap_spillover_balancer("cap-second-stage-usage-limited")
+    assert alternate is not None
+    alternate.usage_limit_enabled = True
+    alternate.usage_limit_percent = 10.0
+    create_leases = [await balancer.acquire_account_lease(owner.id, kind="response_create") for _ in range(4)]
+    raw_session = "bare-session-second-stage-usage-limited"
+    sticky_repo.account_ids_by_key = {_codex_session_selection_key(raw_session): owner.id}
+
+    selected = await balancer.select_account(
+        sticky_key=_codex_session_selection_key(raw_session),
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+        sticky_source="session_header",
+        legacy_sticky_key=raw_session,
+        spill_bare_session_on_account_cap=True,
+        routing_strategy="usage_weighted",
+        lease_kind="stream",
+    )
+
+    assert selected.account is not None
+    assert selected.account.id == owner.id
+    assert sticky_repo.account_id == owner.id
+
+    for lease in [*create_leases, selected.lease]:
+        await balancer.release_account_lease(lease)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("lease_kind", "cap", "error_code"),
     [

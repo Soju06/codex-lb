@@ -4,6 +4,7 @@ import {
   AccountAuthExportResponseSchema,
   AccountProbeResponseSchema,
   AccountSummarySchema,
+  AccountUsageLimitUpdateRequestSchema,
   ConsumeRateLimitResetCreditResponseSchema,
   ImportStateSchema,
   OAuthStateSchema,
@@ -71,6 +72,29 @@ describe("AccountSummarySchema", () => {
     });
 
     expect(parsed.routingPolicy).toBe("preserve");
+  });
+
+  it("parses account usage limit configuration and evaluated state", () => {
+    const parsed = AccountSummarySchema.parse({
+      accountId: "acc-1",
+      email: "user@example.com",
+      displayName: "User",
+      planType: "pro",
+      status: "active",
+      usageLimitEnabled: true,
+      usageLimitPercent: 10,
+      usageLimitState: "reached",
+    });
+
+    expect(parsed.usageLimitEnabled).toBe(true);
+    expect(parsed.usageLimitPercent).toBe(10);
+    expect(parsed.usageLimitState).toBe("reached");
+  });
+
+  it("rejects enabling an account usage limit without a percentage", () => {
+    expect(() =>
+      AccountUsageLimitUpdateRequestSchema.parse({ enabled: true, percent: null }),
+    ).toThrow();
   });
 });
 

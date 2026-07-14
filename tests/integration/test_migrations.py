@@ -5,6 +5,7 @@ from collections.abc import Callable
 import pytest
 from anyio import to_thread
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.core.auth import DEFAULT_PLAN
@@ -707,6 +708,114 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
             assert remaining_log[1] is None
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_account_usage_limits_migration_upgrade_and_downgrade(tmp_path):
+    from alembic import command
+    from sqlalchemy import inspect as sa_inspect
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'account-usage-limits.sqlite'}"
+    revision = "20260728_010000_add_account_usage_limits"
+    parent_revision = "20260725_000000_add_http_bridge_pending_tool_calls"
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=True))
+
+    engine = create_async_engine(db_url, future=True)
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    """
+                    INSERT INTO accounts (
+                        id, codex_installation_id, email, plan_type,
+                        access_token_encrypted, refresh_token_encrypted, id_token_encrypted,
+                        last_refresh, status
+                    )
+                    VALUES (
+                        'acc_usage_limit_migration', '00000000-0000-0000-0000-000000000001',
+                        'usage-limit@example.com', 'plus',
+                        x'01', x'02', x'03', '2026-01-01 00:00:00', 'active'
+                    )
+                    """
+                )
+            )
+    finally:
+        await engine.dispose()
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, revision, bootstrap_legacy=False))
+
+    engine = create_async_engine(db_url, future=True)
+    try:
+        async with engine.connect() as conn:
+            columns = await conn.run_sync(
+                lambda sync_conn: {column["name"] for column in sa_inspect(sync_conn).get_columns("accounts")}
+            )
+            row = (
+                await conn.execute(
+                    text(
+                        """
+                        SELECT usage_limit_enabled, usage_limit_percent
+                        FROM accounts
+                        WHERE id = 'acc_usage_limit_migration'
+                        """
+                    )
+                )
+            ).one()
+        assert {"usage_limit_enabled", "usage_limit_percent"} <= columns
+        assert row == (0, None)
+
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    """
+                    UPDATE accounts
+                    SET usage_limit_enabled = 1, usage_limit_percent = 10.0
+                    WHERE id = 'acc_usage_limit_migration'
+                    """
+                )
+            )
+        with pytest.raises(IntegrityError):
+            async with engine.begin() as conn:
+                await conn.execute(
+                    text(
+                        """
+                        UPDATE accounts
+                        SET usage_limit_enabled = 1, usage_limit_percent = NULL
+                        WHERE id = 'acc_usage_limit_migration'
+                        """
+                    )
+                )
+        with pytest.raises(IntegrityError):
+            async with engine.begin() as conn:
+                await conn.execute(
+                    text(
+                        """
+                        UPDATE accounts
+                        SET usage_limit_enabled = 0, usage_limit_percent = 101.0
+                        WHERE id = 'acc_usage_limit_migration'
+                        """
+                    )
+                )
+    finally:
+        await engine.dispose()
+
+    await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), parent_revision))
+
+    engine = create_async_engine(db_url, future=True)
+    try:
+        async with engine.connect() as conn:
+            downgraded_columns = await conn.run_sync(
+                lambda sync_conn: {column["name"] for column in sa_inspect(sync_conn).get_columns("accounts")}
+            )
+        assert "usage_limit_enabled" not in downgraded_columns
+        assert "usage_limit_percent" not in downgraded_columns
+    finally:
+        await engine.dispose()
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, revision, bootstrap_legacy=False))
 
 
 @pytest.mark.asyncio

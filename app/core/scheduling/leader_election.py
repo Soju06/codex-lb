@@ -282,6 +282,32 @@ class LeaderElection:
                 # a post-statement instant avoids both.
                 remaining = _returned_remaining(result)
                 acquired_at = loop.time()
+                if remaining is None:
+                    # No RETURNING row is an AUTHORITATIVE non-owner result:
+                    # another replica owns an unexpired lease. Demote BEFORE
+                    # committing — mirroring :meth:`renew`'s rowcount-0 path — so
+                    # that a ``commit()`` failure on a flaky connection cannot
+                    # re-raise into the generic ``except`` below, whose
+                    # preservation branch (``_is_leader`` + unexpired deadline)
+                    # would keep leadership and let ``run_if_leader`` run ANOTHER
+                    # singleton body even though the database row is owned by a
+                    # different leader. The non-owner verdict is captured before
+                    # the commit and is authoritative regardless of whether the
+                    # (functionally no-op) commit then succeeds. Only a genuine
+                    # connection error observed BEFORE this authoritative row
+                    # result may fall through to the preservation branch.
+                    self._is_leader = False
+                    self._lease_deadline = None
+                    try:
+                        await session.commit()
+                    except Exception:
+                        logger.warning(
+                            "Leader lease acquisition observed a non-owner result (no row) but "
+                            "the commit failed; treating the lease as not acquired leader_id=%s",
+                            self._leader_id,
+                            exc_info=True,
+                        )
+                    return False
                 await session.commit()
         except Exception:
             # A transient acquisition failure must not demote a lease this
@@ -292,8 +318,9 @@ class LeaderElection:
             # the valid leader; clearing ``_is_leader`` here would make that
             # body's next ``renew`` return ``False`` without touching the
             # database and cancel otherwise-valid leader work. Demotion is
-            # reserved for an authoritative non-owner result (below) or a
-            # failure observed after the held lease has already expired.
+            # reserved for an authoritative non-owner result (the no-row branch
+            # ABOVE, which returns before reaching here even if its commit fails)
+            # or a failure observed after the held lease has already expired.
             if self._is_leader and self._lease_deadline is not None and loop.time() < self._lease_deadline:
                 logger.warning(
                     "Leader lease acquisition failed but the held lease is still valid; "
@@ -307,10 +334,12 @@ class LeaderElection:
             self._lease_deadline = None
             return False
 
-        acquired = remaining is not None
-        self._is_leader = acquired
-        self._lease_deadline = acquired_at + remaining if remaining is not None else None
-        return acquired
+        # A no-row (authoritative non-owner) result already returned False above,
+        # so ``remaining`` is the DB-RETURNED remaining lease of a row this
+        # statement wrote. Anchor the local deadline to it and promote.
+        self._is_leader = True
+        self._lease_deadline = acquired_at + remaining
+        return True
 
     async def renew(self) -> bool:
         """Extend the held lease; demote when the lease is no longer ours.

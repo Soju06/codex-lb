@@ -606,6 +606,43 @@ async def test_try_acquire_demotes_on_transient_error_after_lease_expiry(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_try_acquire_demotes_on_no_row_even_when_commit_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Regression (P2): try_acquire is the acquire-path analog of the renew()
+    # rowcount-0 fix. When this instance already holds a valid lease and an
+    # acquire's upsert RETURNS no row (an AUTHORITATIVE non-owner result: another
+    # replica owns the unexpired lease), the demotion must be applied BEFORE the
+    # commit so a commit() failure on a flaky connection cannot re-raise into the
+    # generic except, whose preservation branch (_is_leader + unexpired deadline)
+    # would otherwise return True and let run_if_leader run a SECOND singleton
+    # body against a row owned by a different leader. The no-row verdict is
+    # authoritative regardless of whether the (no-op) commit then succeeds.
+    class _NoRowThenCommitFailsSession(_FakeSession):
+        async def commit(self) -> None:
+            self.commits += 1
+            # First commit is the initial acquire (must succeed); the second
+            # acquire observes a non-owner no-row result and its commit fails.
+            if self.commits >= 2:
+                raise RuntimeError("commit failed after takeover")
+
+    session = _NoRowThenCommitFailsSession("postgresql", [1, 0])
+    _install(monkeypatch, session, ttl=30)
+
+    election = leader_election_module.LeaderElection(leader_id="node-a")
+    assert await election.try_acquire() is True
+    assert election.is_leader is True
+    # Held deadline is still unexpired, so the buggy path would preserve True.
+    assert election._lease_deadline is not None
+    assert election._lease_deadline > asyncio.get_running_loop().time()
+
+    # The second acquire returns no row (another replica owns the lease) and its
+    # commit raises: try_acquire must return False (not preserve True, not raise)
+    # and demote so run_if_leader does not run another singleton body.
+    assert await election.try_acquire() is False
+    assert election.is_leader is False
+    assert election._lease_deadline is None
+
+
+@pytest.mark.asyncio
 async def test_renew_demotes_on_rowcount_zero(monkeypatch: pytest.MonkeyPatch) -> None:
     session = _FakeSession("postgresql", [1, 0])
     _install(monkeypatch, session)

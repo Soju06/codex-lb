@@ -1521,7 +1521,20 @@ class LoadBalancer:
                 await self._persist_state(repos.accounts, account, state)
             self._selection_inputs_cache.invalidate()
 
-    async def mark_permanent_failure(self, account: Account, error_code: str) -> None:
+    async def mark_permanent_failure(self, account: Account, error_code: str) -> bool:
+        """Downgrade *account* to its permanent-failure status and, when that
+        downgrade actually lands, exclude it from local routing.
+
+        Returns whether the permanent downgrade applied (or was already in
+        effect). When the guarded status write MISSES because a peer replica
+        concurrently re-authed/imported and rotated ``refresh_token_encrypted``
+        (the DB row was repaired and left ACTIVE), the account is NOT marked
+        routing-unavailable in this replica's local overlay -- excluding a
+        freshly repaired healthy account would be a self-inflicted routing loss
+        that undermines the CAS guard. Only a real downgrade (CAS applied, or no
+        write needed because the primary refresh authority already CAS-wrote it)
+        both persists the failure status and applies the local exclusion.
+        """
         lock = await self._get_account_lock(account.id)
         async with lock:
             state = self._state_for(account)
@@ -1544,14 +1557,20 @@ class LoadBalancer:
                 # permanent failures -- without reintroducing the unguarded
                 # update_status that would clobber a peer's ACTIVE/rotated repair
                 # and tear down its live sticky/bridge sessions.
-                await self._persist_state_if_current(
+                downgraded = await self._persist_state_if_current(
                     repos.accounts,
                     account,
                     state,
                     expected_refresh_token_encrypted=account.refresh_token_encrypted,
                 )
-            mark_account_routing_unavailable(account.id)
+            # Honor the guarded-CAS result: only exclude the account from local
+            # routing when the permanent downgrade actually applied. A CAS miss
+            # means a peer replica repaired/rotated the row (still ACTIVE), so
+            # keep the healthy account selectable here.
+            if downgraded:
+                mark_account_routing_unavailable(account.id)
             self._selection_inputs_cache.invalidate()
+            return downgraded
 
     async def record_error(self, account: Account) -> None:
         await self.record_errors(account, 1)

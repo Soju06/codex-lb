@@ -3520,3 +3520,61 @@ async def test_mark_permanent_failure_downgrades_when_token_matches() -> None:
     assert account.status == AccountStatus.REAUTH_REQUIRED
     assert [update["account_id"] for update in accounts_repo.status_updates] == [account.id]
     assert [update["status"] for update in accounts_repo.status_updates] == [AccountStatus.REAUTH_REQUIRED]
+
+
+@pytest.mark.asyncio
+async def test_mark_permanent_failure_skips_routing_exclusion_on_peer_rotation() -> None:
+    """Honor the guarded-CAS result before quarantining locally.
+
+    When a peer replica concurrently re-authed/imported and rotated
+    ``refresh_token_encrypted`` (the DB row was REPAIRED and left ACTIVE), the
+    guarded status write MISSES. The caller must NOT then mark the account
+    routing-unavailable in this replica's local overlay -- doing so would
+    self-inflict a routing loss of a freshly repaired healthy account and
+    undermine the CAS guard. The account stays selectable here.
+    """
+    encryptor = TokenEncryptor()
+    rotated_ciphertext = encryptor.encrypt("peer-rotated-refresh")
+    # DB row a peer already repaired: ACTIVE, holding the freshly rotated token.
+    db_account = _make_account("acc-perm-routing-race")
+    db_account.status = AccountStatus.ACTIVE
+    db_account.refresh_token_encrypted = rotated_ciphertext
+
+    accounts_repo = StubAccountsRepository([db_account])
+    usage_repo = StubUsageRepository(primary={}, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+
+    # Stale in-memory object holding the OLD (pre-rotation) ciphertext that just
+    # failed permanently.
+    stale_account = _make_account("acc-perm-routing-race")
+    stale_account.status = AccountStatus.ACTIVE
+    stale_account.refresh_token_encrypted = encryptor.encrypt("old-consumed-refresh")
+
+    downgraded = await balancer.mark_permanent_failure(stale_account, "invalid_grant")
+
+    # Guarded CAS missed: no downgrade, no status write, and crucially the local
+    # routing overlay does NOT exclude the repaired ACTIVE account.
+    assert downgraded is False
+    assert db_account.status == AccountStatus.ACTIVE
+    assert accounts_repo.status_updates == []
+    assert is_account_routing_unavailable(stale_account.id) is False
+
+
+@pytest.mark.asyncio
+async def test_mark_permanent_failure_excludes_routing_on_genuine_failure() -> None:
+    """A genuine permanent failure (guarded CAS applies) both persists the
+    downgrade AND marks the account routing-unavailable locally, as before."""
+    account = _make_account("acc-perm-routing-genuine")
+    account.status = AccountStatus.ACTIVE
+
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(primary={}, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+
+    downgraded = await balancer.mark_permanent_failure(account, "invalid_grant")
+
+    assert downgraded is True
+    assert account.status == AccountStatus.REAUTH_REQUIRED
+    assert is_account_routing_unavailable(account.id) is True

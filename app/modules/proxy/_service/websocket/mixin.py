@@ -454,6 +454,9 @@ def _facade() -> Any:
     return sys.modules["app.modules.proxy.service"]
 
 
+_WEBSOCKET_PINNED_REFRESH_UNAVAILABLE_MESSAGE = "Account refresh is temporarily unavailable; retry later."
+
+
 async def _reject_websocket_owner_switch_blocked(
     proxy: Any,
     websocket: WebSocket,
@@ -2320,6 +2323,35 @@ class _WebSocketMixin:
                 # the connect loop to release this account's stream lease,
                 # exclude it, and fail over to a healthy account.
                 raise _WebSocketTransientRefreshFailover(account.id) from exc
+            elif exc.transport_error:
+                # PINNED transient refresh failure (require_preferred_account:
+                # previous_response_id session continuity or file ownership).
+                # can_transient_failover is False, so the movable failover
+                # branch above is correctly skipped -- a pinned request must
+                # not cross accounts. But the owner account's credentials are
+                # healthy; its refresh claim is merely held by a peer replica,
+                # so a 401 invalid_api_key would be misleading and terminal.
+                # Stay on the owner (no crossing, no permanent mark), release
+                # the acquired stream lease (the caller releases it when this
+                # returns None), and surface a RETRYABLE upstream_unavailable so
+                # the client can retry once the peer replica releases the claim.
+                message = exc.message or _WEBSOCKET_PINNED_REFRESH_UNAVAILABLE_MESSAGE
+                await proxy._emit_websocket_connect_failure(
+                    websocket,
+                    client_send_lock=client_send_lock,
+                    account_id=account.id,
+                    api_key=api_key,
+                    request_state=request_state,
+                    status_code=503,
+                    payload=openai_error(
+                        "upstream_unavailable",
+                        message,
+                        error_type="server_error",
+                    ),
+                    error_code="upstream_unavailable",
+                    error_message=message,
+                )
+                return None
             await proxy._emit_websocket_connect_failure(
                 websocket,
                 client_send_lock=client_send_lock,
@@ -2386,6 +2418,33 @@ class _WebSocketMixin:
                 # replica): fail over to a healthy account instead of surfacing
                 # a bogus 401 invalid_api_key.
                 raise _WebSocketTransientRefreshFailover(account.id) from refresh_exc
+            elif refresh_exc.transport_error:
+                # PINNED transient refresh failure on the post-401 forced
+                # refresh: mirror the pre-open freshness branch. The request is
+                # hard-pinned (can_transient_failover is False), so it must not
+                # cross accounts, but the owner's credentials are healthy (its
+                # refresh claim is merely held by a peer replica). Stay on the
+                # owner (no crossing, no permanent mark), release the acquired
+                # stream lease (the caller releases it when this returns None),
+                # and surface a RETRYABLE upstream_unavailable instead of a
+                # terminal 401 invalid_api_key.
+                message = refresh_exc.message or _WEBSOCKET_PINNED_REFRESH_UNAVAILABLE_MESSAGE
+                await proxy._emit_websocket_connect_failure(
+                    websocket,
+                    client_send_lock=client_send_lock,
+                    account_id=account.id,
+                    api_key=api_key,
+                    request_state=request_state,
+                    status_code=503,
+                    payload=openai_error(
+                        "upstream_unavailable",
+                        message,
+                        error_type="server_error",
+                    ),
+                    error_code="upstream_unavailable",
+                    error_message=message,
+                )
+                return None
             await proxy._emit_websocket_connect_failure(
                 websocket,
                 client_send_lock=client_send_lock,

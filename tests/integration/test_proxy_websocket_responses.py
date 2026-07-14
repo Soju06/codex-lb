@@ -865,6 +865,155 @@ def test_backend_responses_websocket_transient_refresh_exhaustion_emits_error_no
     assert permanent_failures == []
 
 
+def test_backend_responses_websocket_pinned_transient_refresh_claim_emits_retryable_not_401(
+    app_instance,
+    monkeypatch,
+):
+    """Regression for the WebSocket connect path on a PINNED request.
+
+    When a request is hard-pinned to its owner account (``previous_response_id``
+    sets ``preferred_account_id`` and ``require_preferred_account``),
+    ``can_transient_failover`` is False -- a pinned request must never cross
+    accounts. But the owner's credentials are healthy; a transient
+    ``refresh_claim_timeout`` (``transport_error=True``, non-permanent) merely
+    means a peer replica holds the refresh claim. Before the fix, the pinned
+    transient case fell through to a terminal 401 ``invalid_api_key``. It must
+    instead surface a RETRYABLE 503 ``upstream_unavailable`` so the client can
+    retry once the claim clears, while staying on the owner account (no
+    crossing), releasing the acquired stream lease, and never marking a
+    permanent failure.
+    """
+    owner_id = "acct_ws_pinned_owner"
+    selected_accounts: list[str] = []
+    freshened_accounts: list[str] = []
+    opened_accounts: list[str] = []
+    released_lease_account_ids: list[str | None] = []
+    permanent_failures: list[tuple[str, str]] = []
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
+        return None
+
+    async def fake_resolve_owner(self, *, previous_response_id, api_key, session_id=None, surface):
+        del self, previous_response_id, api_key, session_id, surface
+        return owner_id
+
+    async def fake_select_websocket_connect_account(
+        self,
+        deadline,
+        *,
+        request_state,
+        exclude_account_ids,
+        preferred_account_id=None,
+        require_preferred_account=False,
+        **_rest,
+    ):
+        del self, deadline, _rest
+        # A pinned request must never be offered any account other than its
+        # owner, and the owner must never be excluded.
+        assert require_preferred_account is True
+        assert preferred_account_id == owner_id
+        if owner_id in exclude_account_ids:
+            return None
+        selected_accounts.append(owner_id)
+        request_state.websocket_stream_lease = SimpleNamespace(account_id=owner_id)
+        return SimpleNamespace(id=owner_id)
+
+    async def fake_ensure_fresh(self, account, *, force=False, timeout_seconds=None):
+        del self, force, timeout_seconds
+        freshened_accounts.append(account.id)
+        raise RefreshError(
+            "refresh_claim_timeout",
+            "refresh claim held by another replica",
+            False,
+            transport_error=True,
+        )
+
+    async def fake_open_upstream_with_budget(self, account, headers, *, timeout_seconds, request_state=None):
+        del self, headers, timeout_seconds, request_state
+        opened_accounts.append(account.id)
+        raise AssertionError("no upstream should open for a pinned transient-claim account")
+
+    async def spy_release_account_lease(self, lease):
+        del self
+        if lease is not None:
+            released_lease_account_ids.append(getattr(lease, "account_id", None))
+        return None
+
+    async def fake_mark_permanent_failure(self, account, error_code):
+        del self
+        permanent_failures.append((account.id, error_code))
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_resolve_websocket_previous_response_owner",
+        fake_resolve_owner,
+    )
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_select_websocket_connect_account",
+        fake_select_websocket_connect_account,
+    )
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh)
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_open_upstream_websocket_with_budget",
+        fake_open_upstream_with_budget,
+    )
+    monkeypatch.setattr(proxy_module.LoadBalancer, "release_account_lease", spy_release_account_lease)
+    monkeypatch.setattr(proxy_module.LoadBalancer, "mark_permanent_failure", fake_mark_permanent_failure)
+
+    with TestClient(app_instance) as client:
+        with client.websocket_connect(
+            "/backend-api/codex/responses",
+            headers={
+                "Authorization": "Bearer external-token",
+                "session_id": "thread-ws-pinned-1",
+                "openai-beta": "responses_websockets=2026-02-06",
+            },
+        ) as websocket:
+            websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "response.create",
+                        "model": "gpt-5.4",
+                        "instructions": "",
+                        "previous_response_id": "resp_ws_pinned_prev",
+                        "input": [{"role": "user", "content": [{"type": "input_text", "text": "continue"}]}],
+                        "stream": True,
+                    }
+                )
+            )
+            event = json.loads(websocket.receive_text())
+
+    # A pinned transient claim timeout must surface a retryable capacity-style
+    # error, NOT a terminal 401 invalid_api_key.
+    assert event["type"] == "error"
+    error = event["error"]
+    assert event.get("status") == 503
+    assert error["code"] == "upstream_unavailable"
+    assert error["type"] == "server_error"
+    assert error["code"] != "invalid_api_key"
+    # The pinned owner was selected once and never crossed to another account.
+    assert selected_accounts == [owner_id]
+    assert freshened_accounts == [owner_id]
+    # No upstream websocket opened for the held-claim owner.
+    assert opened_accounts == []
+    # The owner's stream lease was released rather than leaked.
+    assert owner_id in released_lease_account_ids
+    # A held refresh claim is transient: never a permanent failure.
+    assert permanent_failures == []
+
+
 def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_instance, monkeypatch):
     upstream_messages = [
         _FakeUpstreamMessage(

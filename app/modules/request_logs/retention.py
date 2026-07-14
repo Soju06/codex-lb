@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import Date, Integer, cast, delete, func, literal_column, select
+from sqlalchemy import BigInteger, Date, Integer, case, cast, delete, func, literal_column, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.utils.time import utcnow
@@ -50,9 +50,16 @@ class _AggregateGroup:
     error_count: int
     input_tokens: int
     output_tokens: int
+    effective_output_tokens: int
     cached_input_tokens: int
     reasoning_tokens: int
     cost_usd: float
+    cost_microdollars: int
+    account_request_count: int
+    account_input_tokens: int
+    account_output_tokens: int
+    account_cached_input_tokens: int
+    account_cost_usd: float
     latency_ms_sum: int
     latency_ms_count: int
     latency_first_token_ms_sum: int
@@ -72,8 +79,7 @@ class RequestLogRetentionService:
     ) -> RequestLogRetentionResult:
         if retention_days < MIN_REQUEST_LOG_RETENTION_DAYS:
             raise ValueError(
-                "request log retention must be at least "
-                f"{MIN_REQUEST_LOG_RETENTION_DAYS} days, got {retention_days}"
+                f"request log retention must be at least {MIN_REQUEST_LOG_RETENTION_DAYS} days, got {retention_days}"
             )
 
         cutoff = _cutoff_for_retention(retention_days=retention_days, now=now or utcnow())
@@ -124,6 +130,12 @@ class RequestLogRetentionService:
             bucket_expr = func.date(RequestLog.requested_at)
         bucket_col = bucket_expr.label("bucket_date")
         is_deleted_col = (RequestLog.deleted_at.is_not(None)).label("is_deleted")
+        latest_request_log_ids = (
+            select(func.max(RequestLog.id).label("request_log_id"))
+            .where(RequestLog.requested_at < cutoff)
+            .group_by(RequestLog.account_id, RequestLog.request_id, RequestLog.requested_at)
+        )
+        account_row_is_latest = RequestLog.id.in_(latest_request_log_ids)
 
         dimensions = (
             bucket_col,
@@ -153,9 +165,57 @@ class RequestLogRetentionService:
                 ).label("error_count"),
                 func.coalesce(func.sum(RequestLog.input_tokens), 0).label("input_tokens"),
                 func.coalesce(func.sum(RequestLog.output_tokens), 0).label("output_tokens"),
+                func.coalesce(
+                    func.sum(func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)),
+                    0,
+                ).label("effective_output_tokens"),
                 func.coalesce(func.sum(RequestLog.cached_input_tokens), 0).label("cached_input_tokens"),
                 func.coalesce(func.sum(RequestLog.reasoning_tokens), 0).label("reasoning_tokens"),
                 func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("cost_usd"),
+                func.coalesce(
+                    func.sum(cast(func.floor(func.coalesce(RequestLog.cost_usd, 0.0) * 1_000_000), BigInteger)),
+                    0,
+                ).label("cost_microdollars"),
+                func.coalesce(func.sum(case((account_row_is_latest, 1), else_=0)), 0).label("account_request_count"),
+                func.coalesce(
+                    func.sum(
+                        case(
+                            (account_row_is_latest, func.coalesce(RequestLog.input_tokens, 0)),
+                            else_=0,
+                        )
+                    ),
+                    0,
+                ).label("account_input_tokens"),
+                func.coalesce(
+                    func.sum(
+                        case(
+                            (
+                                account_row_is_latest,
+                                func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0),
+                            ),
+                            else_=0,
+                        )
+                    ),
+                    0,
+                ).label("account_output_tokens"),
+                func.coalesce(
+                    func.sum(
+                        case(
+                            (account_row_is_latest, func.coalesce(RequestLog.cached_input_tokens, 0)),
+                            else_=0,
+                        )
+                    ),
+                    0,
+                ).label("account_cached_input_tokens"),
+                func.coalesce(
+                    func.sum(
+                        case(
+                            (account_row_is_latest, func.coalesce(RequestLog.cost_usd, 0.0)),
+                            else_=0.0,
+                        )
+                    ),
+                    0.0,
+                ).label("account_cost_usd"),
                 func.coalesce(func.sum(RequestLog.latency_ms), 0).label("latency_ms_sum"),
                 func.coalesce(func.sum(cast(RequestLog.latency_ms.is_not(None), Integer)), 0).label("latency_ms_count"),
                 func.coalesce(func.sum(RequestLog.latency_first_token_ms), 0).label("latency_first_token_ms_sum"),
@@ -213,9 +273,16 @@ class RequestLogRetentionService:
                     error_count=int(row.error_count or 0),
                     input_tokens=int(row.input_tokens or 0),
                     output_tokens=int(row.output_tokens or 0),
+                    effective_output_tokens=int(row.effective_output_tokens or 0),
                     cached_input_tokens=int(row.cached_input_tokens or 0),
                     reasoning_tokens=int(row.reasoning_tokens or 0),
                     cost_usd=float(row.cost_usd or 0.0),
+                    cost_microdollars=int(row.cost_microdollars or 0),
+                    account_request_count=int(row.account_request_count or 0),
+                    account_input_tokens=int(row.account_input_tokens or 0),
+                    account_output_tokens=int(row.account_output_tokens or 0),
+                    account_cached_input_tokens=int(row.account_cached_input_tokens or 0),
+                    account_cost_usd=float(row.account_cost_usd or 0.0),
                     latency_ms_sum=int(row.latency_ms_sum or 0),
                     latency_ms_count=int(row.latency_ms_count or 0),
                     latency_first_token_ms_sum=int(row.latency_first_token_ms_sum or 0),
@@ -254,9 +321,16 @@ class RequestLogRetentionService:
                     error_count=group.error_count,
                     input_tokens=group.input_tokens,
                     output_tokens=group.output_tokens,
+                    effective_output_tokens=group.effective_output_tokens,
                     cached_input_tokens=group.cached_input_tokens,
                     reasoning_tokens=group.reasoning_tokens,
                     cost_usd=group.cost_usd,
+                    cost_microdollars=group.cost_microdollars,
+                    account_request_count=group.account_request_count,
+                    account_input_tokens=group.account_input_tokens,
+                    account_output_tokens=group.account_output_tokens,
+                    account_cached_input_tokens=group.account_cached_input_tokens,
+                    account_cost_usd=group.account_cost_usd,
                     latency_ms_sum=group.latency_ms_sum,
                     latency_ms_count=group.latency_ms_count,
                     latency_first_token_ms_sum=group.latency_first_token_ms_sum,
@@ -269,9 +343,16 @@ class RequestLogRetentionService:
         existing.error_count += group.error_count
         existing.input_tokens += group.input_tokens
         existing.output_tokens += group.output_tokens
+        existing.effective_output_tokens += group.effective_output_tokens
         existing.cached_input_tokens += group.cached_input_tokens
         existing.reasoning_tokens += group.reasoning_tokens
         existing.cost_usd += group.cost_usd
+        existing.cost_microdollars += group.cost_microdollars
+        existing.account_request_count += group.account_request_count
+        existing.account_input_tokens += group.account_input_tokens
+        existing.account_output_tokens += group.account_output_tokens
+        existing.account_cached_input_tokens += group.account_cached_input_tokens
+        existing.account_cost_usd += group.account_cost_usd
         existing.latency_ms_sum += group.latency_ms_sum
         existing.latency_ms_count += group.latency_ms_count
         existing.latency_first_token_ms_sum += group.latency_first_token_ms_sum

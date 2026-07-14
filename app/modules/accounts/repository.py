@@ -177,11 +177,13 @@ class AccountsRepository:
         rollup_stmt = (
             select(
                 RequestLogDailyAggregate.account_id,
-                func.coalesce(func.sum(RequestLogDailyAggregate.request_count), 0).label("request_count"),
-                func.coalesce(func.sum(RequestLogDailyAggregate.input_tokens), 0).label("input_tokens"),
-                func.coalesce(func.sum(RequestLogDailyAggregate.output_tokens), 0).label("output_tokens"),
-                func.coalesce(func.sum(RequestLogDailyAggregate.cached_input_tokens), 0).label("cached_input_tokens"),
-                func.coalesce(func.sum(RequestLogDailyAggregate.cost_usd), 0.0).label("total_cost_usd"),
+                func.coalesce(func.sum(RequestLogDailyAggregate.account_request_count), 0).label("request_count"),
+                func.coalesce(func.sum(RequestLogDailyAggregate.account_input_tokens), 0).label("input_tokens"),
+                func.coalesce(func.sum(RequestLogDailyAggregate.account_output_tokens), 0).label("output_tokens"),
+                func.coalesce(func.sum(RequestLogDailyAggregate.account_cached_input_tokens), 0).label(
+                    "cached_input_tokens"
+                ),
+                func.coalesce(func.sum(RequestLogDailyAggregate.account_cost_usd), 0.0).label("total_cost_usd"),
             )
             .where(*rollup_conditions)
             .group_by(RequestLogDailyAggregate.account_id)

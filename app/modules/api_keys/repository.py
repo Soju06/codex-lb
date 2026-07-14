@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum
 
 from sqlalchemy import BigInteger, Integer, cast, delete, func, select, true, update
@@ -275,7 +275,7 @@ class ApiKeysRepository:
                 RequestLogDailyAggregate.api_key_id,
                 func.coalesce(func.sum(RequestLogDailyAggregate.request_count), 0).label("request_count"),
                 func.coalesce(func.sum(RequestLogDailyAggregate.input_tokens), 0).label("input_tokens"),
-                func.coalesce(func.sum(RequestLogDailyAggregate.output_tokens), 0).label("output_tokens"),
+                func.coalesce(func.sum(RequestLogDailyAggregate.effective_output_tokens), 0).label("output_tokens"),
                 func.coalesce(func.sum(RequestLogDailyAggregate.cached_input_tokens), 0).label("cached_input_tokens"),
                 func.coalesce(func.sum(RequestLogDailyAggregate.cost_usd), 0.0).label("total_cost_usd"),
             )
@@ -321,7 +321,7 @@ class ApiKeysRepository:
         rollup_stmt = select(
             func.coalesce(func.sum(RequestLogDailyAggregate.request_count), 0).label("request_count"),
             func.coalesce(func.sum(RequestLogDailyAggregate.input_tokens), 0).label("input_tokens"),
-            func.coalesce(func.sum(RequestLogDailyAggregate.output_tokens), 0).label("output_tokens"),
+            func.coalesce(func.sum(RequestLogDailyAggregate.effective_output_tokens), 0).label("output_tokens"),
             func.coalesce(func.sum(RequestLogDailyAggregate.cached_input_tokens), 0).label("cached_input_tokens"),
             func.coalesce(func.sum(RequestLogDailyAggregate.cost_usd), 0.0).label("total_cost_usd"),
         ).where(
@@ -379,8 +379,31 @@ class ApiKeysRepository:
             stmt = stmt.where(RequestLog.model == model_filter)
 
         result = await self._session.execute(stmt)
-        value = result.scalar_one()
-        return int(value or 0)
+        raw_value = int(result.scalar_one() or 0)
+
+        if limit_type == LimitType.TOTAL_TOKENS:
+            rollup_value_expr = RequestLogDailyAggregate.input_tokens + RequestLogDailyAggregate.effective_output_tokens
+        elif limit_type == LimitType.INPUT_TOKENS:
+            rollup_value_expr = RequestLogDailyAggregate.input_tokens
+        elif limit_type == LimitType.OUTPUT_TOKENS:
+            rollup_value_expr = RequestLogDailyAggregate.effective_output_tokens
+        elif limit_type == LimitType.COST_USD:
+            rollup_value_expr = RequestLogDailyAggregate.cost_microdollars
+        else:
+            return raw_value
+
+        last_included_date = (until - timedelta(microseconds=1)).date()
+        rollup_stmt = select(func.coalesce(func.sum(rollup_value_expr), 0)).where(
+            RequestLogDailyAggregate.api_key_id == key_id,
+            RequestLogDailyAggregate.status == "success",
+            self._exclude_warmup_rollup_clause(),
+            RequestLogDailyAggregate.bucket_date >= since.date(),
+            RequestLogDailyAggregate.bucket_date <= last_included_date,
+        )
+        if model_filter is not None:
+            rollup_stmt = rollup_stmt.where(RequestLogDailyAggregate.model == model_filter)
+        rollup_result = await self._session.execute(rollup_stmt)
+        return raw_value + int(rollup_result.scalar_one() or 0)
 
     async def update(
         self,

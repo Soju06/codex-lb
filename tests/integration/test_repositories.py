@@ -89,9 +89,16 @@ def _make_request_log_daily_aggregate(
         error_count=0,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
+        effective_output_tokens=output_tokens,
         cached_input_tokens=cached_input_tokens,
         reasoning_tokens=reasoning_tokens,
         cost_usd=cost_usd,
+        cost_microdollars=int(cost_usd * 1_000_000),
+        account_request_count=request_count,
+        account_input_tokens=input_tokens,
+        account_output_tokens=output_tokens,
+        account_cached_input_tokens=cached_input_tokens,
+        account_cost_usd=cost_usd,
         latency_ms_sum=0,
         latency_ms_count=0,
         latency_first_token_ms_sum=0,
@@ -267,9 +274,7 @@ async def test_account_delete_soft_deletes_request_log_rollups(db_setup):
         assert deleted is True
         rollup = (
             await session.execute(
-                select(RequestLogDailyAggregate).where(
-                    RequestLogDailyAggregate.aggregate_key == "soft-delete-rollup"
-                )
+                select(RequestLogDailyAggregate).where(RequestLogDailyAggregate.aggregate_key == "soft-delete-rollup")
             )
         ).scalar_one()
         assert rollup.account_id is None
@@ -300,9 +305,7 @@ async def test_account_delete_hard_deletes_request_log_rollups(db_setup):
         assert deleted is True
         rollup_count = (
             await session.execute(
-                select(RequestLogDailyAggregate).where(
-                    RequestLogDailyAggregate.aggregate_key == "hard-delete-rollup"
-                )
+                select(RequestLogDailyAggregate).where(RequestLogDailyAggregate.aggregate_key == "hard-delete-rollup")
             )
         ).scalar_one_or_none()
         assert rollup_count is None

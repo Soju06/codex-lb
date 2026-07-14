@@ -36,7 +36,10 @@ rows. The aggregate key MUST include the UTC day, API key id, account id,
 model, status, error code, request kind, service tier fields, transport fields,
 source, user-agent group, plan type, and deleted-state bucket. Aggregate values
 MUST include request count, token totals, cost total, and latency count/sum
-fields needed to preserve historical totals.
+fields needed to preserve historical totals. The rollup MUST also preserve
+effective output tokens using the raw API-key/account fallback semantics, exact
+per-row microdollar cost sums, and a latest-row account projection that
+preserves exact duplicate suppression.
 
 #### Scenario: Apply mode preserves old totals
 
@@ -51,6 +54,15 @@ fields needed to preserve historical totals.
 - **WHEN** the raw-row deletion count differs from the grouped request count
 - **THEN** the retention transaction fails before commit
 - **AND** neither aggregate mutations nor raw-row deletions are persisted
+
+#### Scenario: Lifetime projections survive pruning edge cases
+
+- **GIVEN** eligible raw rows include a null output-token row with reasoning tokens
+- **AND** eligible raw rows include exact duplicate account request identities
+- **WHEN** retention runs in apply mode
+- **THEN** API-key lifetime totals retain the reasoning-token fallback
+- **AND** account lifetime totals retain latest-row duplicate suppression
+- **AND** report totals continue to include every raw request-log row
 
 #### Scenario: Dry-run mode reports without mutation
 
@@ -87,6 +99,43 @@ historical report totals.
 - **THEN** report totals include both the aggregate rows and the raw rows
 - **AND** model and account breakdowns include the aggregate rows
 - **AND** comparison coverage can use aggregate history as evidence of prior activity
+
+#### Scenario: User-agent report filters include aggregate history
+
+- **GIVEN** old raw request logs have been rolled up with user-agent groups
+- **WHEN** an operator filters any report aggregate by user-agent group
+- **THEN** matching raw and aggregate rows are combined
+- **AND** non-matching aggregate rows are excluded
+
+### Requirement: Dashboard activity reads aggregate history after pruning
+
+Dashboard activity summaries, daily trend buckets, error summaries,
+earliest-activity coverage, and prior-window comparisons SHALL combine raw
+request logs with complete UTC-day aggregate buckets when the selected
+dashboard window extends beyond raw retention.
+
+#### Scenario: Thirty-day dashboard spans seven-day raw retention
+
+- **GIVEN** raw request logs retain seven days and older complete UTC days are aggregated
+- **WHEN** an operator views the thirty-day dashboard overview
+- **THEN** daily trends and activity totals include both recent raw rows and older rollups
+- **AND** the earliest-activity and top-error calculations include rollup history
+
+### Requirement: API-key limit backfill reads aggregate history conservatively
+
+API-key usage reconstruction SHALL combine raw rows with aggregate rows for
+successful, non-warmup traffic. Aggregate cost usage MUST use the stored sum of
+per-request floored microdollars. Because daily rollups cannot reconstruct
+partial UTC days, any rollup day that overlaps the requested limit interval
+SHALL be included conservatively.
+
+#### Scenario: Long-window limit spans pruned history
+
+- **GIVEN** an API-key limit window starts before the raw retention boundary
+- **WHEN** usage is reconstructed for admission control
+- **THEN** matching successful raw and aggregate usage is combined
+- **AND** effective output-token fallback and per-request microdollar semantics are preserved
+- **AND** a partial boundary day is counted as a whole rollup day rather than undercounted
 
 ### Requirement: Dashboard lifetime usage reads aggregate history after pruning
 

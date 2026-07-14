@@ -388,7 +388,7 @@ class AuthManager:
         if workspace_matches_current_slot and result.seat_type:
             new_seat_type = result.seat_type
 
-        async def _write_tokens(expected_refresh_token_encrypted: bytes) -> bool:
+        async def _write_tokens(expected_refresh_token_encrypted: bytes | None) -> bool:
             return await self._repo.update_tokens(
                 account.id,
                 access_token_encrypted=new_access_token_encrypted,
@@ -431,7 +431,7 @@ class AuthManager:
         self,
         account: Account,
         *,
-        write: Callable[[bytes], Awaitable[bool]],
+        write: Callable[[bytes | None], Awaitable[bool]],
         expected_refresh_token_encrypted: bytes,
         attempted_fingerprint: str,
     ) -> Account | None:
@@ -453,6 +453,18 @@ class AuthManager:
         rotation to adopt; the same fingerprint means our successful exchange
         holds the only valid tokens, and we retry the CAS against the freshly
         observed ciphertext so our rotation wins.
+
+        If the CAS keeps missing on same-plaintext re-encryption until the
+        bounded budget is exhausted, we MUST NOT drop the freshly issued token:
+        the upstream exchange already consumed the single-use refresh token and
+        issued a new one, so leaving the DB holding the consumed token would
+        turn transient contention into a permanent ``refresh_token_reused`` /
+        ``invalid_grant`` failure on the next refresh. After a final re-read that
+        still shows no genuine peer rotation, we escalate to an unconditional
+        write (keyed on account id only) so the DB ends with the usable token.
+        Only when even that forced write cannot land (the row vanished) do we
+        raise a transient error — and then the consumed token is not left as the
+        authoritative stored value because the row no longer exists.
         """
         expected = expected_refresh_token_encrypted
         for _ in range(_TOKEN_CAS_MAX_ATTEMPTS):
@@ -472,22 +484,45 @@ class AuthManager:
             # Same refresh-token plaintext, re-encrypted concurrently: retry the
             # CAS against the observed ciphertext so our rotation lands.
             expected = latest.refresh_token_encrypted
+        # The compare-and-set never landed within the bounded budget, but the
+        # upstream exchange already consumed the single-use refresh token and
+        # issued a new one. The DB still holds the already-consumed token.
+        # Dropping the freshly issued material here (returning ``None`` would
+        # look like success; raising while leaving the consumed token stored
+        # would guarantee a permanent ``refresh_token_reused`` on the next
+        # refresh) would turn transient re-encryption contention into a
+        # permanent account failure. So reconcile toward the NEW token: re-read
+        # once more to adopt a genuine peer rotation if one just landed,
+        # otherwise force an unconditional write of the freshly issued material
+        # (keyed on account id only) so the DB ends with the usable token.
+        latest = await self._repo.get_by_id_fresh(account.id)
+        if latest is None:
+            # Row is gone; nothing to persist or adopt.
+            return None
+        if (
+            _refresh_token_material_fingerprint(self._encryptor, latest.refresh_token_encrypted)
+            != attempted_fingerprint
+        ):
+            # A peer stored genuinely newer refresh-token material after our last
+            # miss; adopt it rather than clobbering it with a forced write.
+            return _adopt_account_row(account, latest)
         logger.warning(
             "Token-refresh compare-and-set for account_id=%s kept missing on re-encrypted "
-            "same-plaintext material after %d attempts; freshly rotated tokens were NOT persisted",
+            "same-plaintext material after %d attempts; forcing an unconditional write of the "
+            "freshly issued tokens so the consumed token is not left stored",
             account.id,
             _TOKEN_CAS_MAX_ATTEMPTS,
         )
-        # The single-use token this attempt exchanged upstream was consumed, but
-        # the CAS never landed, so the DB still holds the already-consumed token.
-        # Returning ``None`` here would be indistinguishable from the success
-        # sentinel: the caller would mirror the new tokens onto its in-memory
-        # ``Account`` and release the refresh claim while the DB retained dead
-        # material, so the next process/request would hit a permanent
-        # refresh-token-reuse failure and de-route the account. Surface a
-        # transient failure instead so the caller retries the whole refresh
-        # rather than proceeding with unpersisted material. ``transport_error``
-        # keeps it out of the permanent-failure cooldown cache.
+        if await write(None):
+            # Forced write landed: the DB now holds the newly issued (usable)
+            # refresh token, never the consumed one. Report success so the
+            # caller mirrors the rotated material onto its in-memory account.
+            return None
+        # The unconditional write only fails when the row no longer exists, so
+        # there is no consumed token left stored to reuse. Surface a transient
+        # (non-permanent) failure so the caller retries the whole refresh rather
+        # than proceeding with unpersisted material. ``transport_error`` keeps it
+        # out of the permanent-failure cooldown cache.
         raise RefreshError(
             "token_persist_conflict",
             (

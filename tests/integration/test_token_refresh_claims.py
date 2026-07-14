@@ -736,6 +736,80 @@ async def test_proxy_preflight_claim_timeout_fails_over_and_releases_lease(async
 
 
 @pytest.mark.asyncio
+async def test_proxy_preflight_claim_timeout_exhaustion_reports_upstream_unavailable(async_client, monkeypatch):
+    """Route-level regression: when EVERY candidate account hits a transient
+    refresh-claim timeout on the proactive freshness check before the stream
+    opens, exhaustion must surface a retryable ``upstream_unavailable`` error,
+    not a misleading generic ``no_accounts`` response.
+
+    Before the fix the transient-claim failover branch released the lease and
+    excluded the account but left ``last_retryable_stream_error`` unset, so after
+    attempts were exhausted the loop fell through to the no-accounts path and the
+    client saw ``no_accounts`` for what is really transient contention.
+    """
+    import json
+
+    import app.modules.proxy.service as proxy_module
+
+    for raw_account_id, email in (
+        ("acc_exhaust_claim_a", "exhaust-claim-a@example.com"),
+        ("acc_exhaust_claim_b", "exhaust-claim-b@example.com"),
+    ):
+        auth_json = _make_auth_json(raw_account_id, email)
+        files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+        response = await async_client.post("/api/accounts/import", files=files)
+        assert response.status_code == 200
+
+    # EVERY account's proactive freshness check raises a transient refresh-claim
+    # timeout (as if a foreign replica holds each account's claim).
+    async def fake_ensure_fresh(self, account, *, force=False, timeout_seconds=None):
+        del self, force, timeout_seconds
+        raise RefreshError(
+            "transport_error",
+            "refresh claim held by another replica",
+            False,
+            transport_error=True,
+        )
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh)
+
+    streamed_account_ids: list[str] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
+        del payload, headers, access_token, base_url, raise_for_status, kwargs
+        streamed_account_ids.append(account_id)
+        yield (
+            'data: {"type":"response.completed","response":{"id":"resp_should_not_open",'
+            '"object":"response","status":"completed","usage":{"input_tokens":2,"output_tokens":1}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        json={"model": "gpt-5.4", "instructions": "hi", "input": [], "stream": True},
+    ) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    events = [json.loads(line[6:]) for line in lines if line.startswith("data: ") and line != "data: [DONE]"]
+    failed_events = [event for event in events if event.get("type") == "response.failed"]
+    assert failed_events, f"expected a response.failed event, got {events}"
+    error_codes = {event["response"]["error"]["code"] for event in failed_events}
+    # Transient contention surfaces as retryable upstream_unavailable, NOT no_accounts.
+    assert error_codes == {"upstream_unavailable"}
+    assert "no_accounts" not in error_codes
+    # No stream ever opened (every candidate failed its freshness check).
+    assert streamed_account_ids == []
+
+    # The transient claim contention is never recorded as a permanent failure.
+    async with SessionLocal() as session:
+        accounts = list((await session.execute(select(Account))).scalars().all())
+        assert {account.status for account in accounts} == {AccountStatus.ACTIVE}
+
+
+@pytest.mark.asyncio
 async def test_compact_preflight_claim_timeout_fails_over_and_releases_lease(async_client, monkeypatch):
     """Route-level regression for the compact freshness-check preflight.
 

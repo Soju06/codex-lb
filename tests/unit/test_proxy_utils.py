@@ -910,6 +910,48 @@ def test_websocket_precreated_retry_error_code_does_not_replay_after_response_ev
     )
 
 
+def test_websocket_precreated_retry_error_code_classifies_exact_account_model_rejection():
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_account_model_unsupported",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        awaiting_response_created=True,
+        request_text='{"type":"response.create","model":"gpt-5.6-sol","input":"hello"}',
+    )
+    payload: dict[str, JsonValue] = {
+        "type": "error",
+        "status": 400,
+        "error": {
+            "type": "invalid_request_error",
+            "message": ("The 'gpt-5.6-sol' model is not supported when using Codex with a ChatGPT account."),
+        },
+    }
+
+    assert (
+        proxy_service._websocket_precreated_retry_error_code(
+            request_state,
+            event_type="error",
+            payload=payload,
+            has_other_pending_requests=False,
+        )
+        == "account_model_unsupported"
+    )
+
+    payload["error"]["message"] = "The 'gpt-5.6-terra' model is not supported when using Codex with a ChatGPT account."
+    assert (
+        proxy_service._websocket_precreated_retry_error_code(
+            request_state,
+            event_type="error",
+            payload=payload,
+            has_other_pending_requests=False,
+        )
+        is None
+    )
+
+
 def _assert_proxy_response_error(exc: BaseException) -> proxy_module.ProxyResponseError:
     assert isinstance(exc, proxy_module.ProxyResponseError)
     return exc
@@ -10086,6 +10128,141 @@ async def test_stream_with_retry_prefers_other_account_before_response_create_ca
 
 
 @pytest.mark.asyncio
+async def test_stream_with_retry_retries_account_model_rejection_on_another_account(monkeypatch):
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    rejected = _make_account("acc_stream_model_rejected")
+    supported = _make_account("acc_stream_model_supported")
+    selection_exclusions: list[set[str]] = []
+    stream_accounts: list[str] = []
+    handle_stream_error = AsyncMock()
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+
+    async def select_account(_deadline: float, **kwargs: object) -> AccountSelection:
+        excluded = set(cast(set[str], kwargs["exclude_account_ids"]))
+        selection_exclusions.append(excluded)
+        account = supported if rejected.id in excluded else rejected
+        return AccountSelection(account=account, error_message=None)
+
+    async def fake_stream_once(account: Account, *_args: object, **_kwargs: object):
+        stream_accounts.append(account.id)
+        if account.id == rejected.id:
+            raise proxy_module.ProxyResponseError(
+                400,
+                proxy_module.openai_error(
+                    "invalid_request_error",
+                    "The 'gpt-5.6-sol' model is not supported when using Codex with a ChatGPT account.",
+                    error_type="invalid_request_error",
+                ),
+            )
+        yield 'data: {"type":"response.completed","response":{"id":"resp_model_supported"}}\n\n'
+
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(
+        service,
+        "_ensure_fresh_with_budget",
+        AsyncMock(side_effect=lambda account, **_kwargs: account),
+    )
+    monkeypatch.setattr(service, "_stream_once", fake_stream_once)
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+
+    payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.6-sol", "instructions": "hi", "input": [], "stream": True}
+    )
+    chunks = [
+        chunk
+        async for chunk in service._stream_with_retry(
+            payload,
+            {"session_id": "sid-account-model-retry"},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            request_transport="http",
+            upstream_stream_transport_override="http",
+        )
+    ]
+
+    assert json.loads(chunks[-1].split("data: ", 1)[1])["type"] == "response.completed"
+    assert stream_accounts == [rejected.id, supported.id]
+    assert selection_exclusions == [set(), {rejected.id}]
+    handle_stream_error.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_stream_with_retry_preserves_account_model_rejection_without_replacement(monkeypatch):
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    rejected = _make_account("acc_stream_model_rejected_only")
+    handle_stream_error = AsyncMock()
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+
+    async def select_account(_deadline: float, **kwargs: object) -> AccountSelection:
+        excluded = set(cast(set[str], kwargs["exclude_account_ids"]))
+        if rejected.id in excluded:
+            return AccountSelection(
+                account=None,
+                error_message="No alternate account advertises gpt-5.6-sol",
+                error_code="no_accounts",
+            )
+        return AccountSelection(account=rejected, error_message=None)
+
+    async def fake_stream_once(*_args: object, **_kwargs: object):
+        raise proxy_module.ProxyResponseError(
+            400,
+            proxy_module.openai_error(
+                "invalid_request_error",
+                "The 'gpt-5.6-sol' model is not supported when using Codex with a ChatGPT account.",
+                error_type="invalid_request_error",
+            ),
+        )
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(
+        service,
+        "_ensure_fresh_with_budget",
+        AsyncMock(side_effect=lambda account, **_kwargs: account),
+    )
+    monkeypatch.setattr(service, "_stream_once", fake_stream_once)
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+
+    payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.6-sol", "instructions": "hi", "input": [], "stream": True}
+    )
+    chunks = [
+        chunk
+        async for chunk in service._stream_with_retry(
+            payload,
+            {"session_id": "sid-account-model-no-replacement"},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            request_transport="http",
+            upstream_stream_transport_override="http",
+        )
+    ]
+
+    failed = json.loads(chunks[-1].split("data: ", 1)[1])
+    assert failed["type"] == "response.failed"
+    assert failed["response"]["error"] == {
+        "message": "The 'gpt-5.6-sol' model is not supported when using Codex with a ChatGPT account.",
+        "type": "invalid_request_error",
+        "code": "invalid_request_error",
+    }
+    handle_stream_error.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("propagate_http_errors", "budget_expires"),
     [(False, False), (True, False), (False, True)],
@@ -14219,6 +14396,75 @@ async def test_connect_proxy_websocket_surfaces_connect_timeout_when_no_failover
     assert sent_payload["error"]["code"] == "upstream_unavailable"
     assert request_logs.calls[0]["account_id"] == first_account.id
     assert request_logs.calls[0]["error_code"] == "upstream_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_connect_proxy_websocket_preserves_account_model_rejection_without_replacement(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    rejected_account = _make_account("acc_ws_rejected_model")
+    select_account = AsyncMock(
+        return_value=AccountSelection(
+            account=None,
+            error_message="No compatible replacement account",
+            error_code="no_accounts",
+        )
+    )
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+
+    message = "The 'gpt-5.6-sol' model is not supported when using Codex with a ChatGPT account."
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_rejected_model_no_replacement",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        request_stage="reattach",
+        request_text='{"type":"response.create","model":"gpt-5.6-sol","input":"hello"}',
+        replay_count=1,
+        excluded_account_ids={rejected_account.id},
+        precreated_replay_reason="account_model_unsupported",
+        precreated_replay_account_id=rejected_account.id,
+        error_code_override="invalid_request_error",
+        error_message_override=message,
+        error_type_override="invalid_request_error",
+        error_http_status_override=400,
+    )
+
+    websocket_send = AsyncMock()
+    selected_account, selected_upstream = await service._connect_proxy_websocket(
+        {},
+        sticky_key=None,
+        sticky_kind=None,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        model="gpt-5.6-sol",
+        request_state=request_state,
+        api_key=None,
+        client_send_lock=anyio.Lock(),
+        websocket=cast(WebSocket, SimpleNamespace(send_text=websocket_send)),
+    )
+
+    assert selected_account is None
+    assert selected_upstream is None
+    call = select_account.await_args
+    assert call is not None
+    assert call.kwargs["exclude_account_ids"] == {rejected_account.id}
+    websocket_send_call = websocket_send.await_args
+    assert websocket_send_call is not None
+    sent = json.loads(websocket_send_call.args[0])
+    assert sent == {
+        "type": "error",
+        "status": 400,
+        "error": {
+            "message": message,
+            "type": "invalid_request_error",
+            "code": "invalid_request_error",
+        },
+    }
+    assert request_logs.calls[0]["account_id"] == rejected_account.id
+    assert request_logs.calls[0]["error_code"] == "invalid_request_error"
 
 
 @pytest.mark.asyncio
@@ -19154,6 +19400,74 @@ async def test_process_upstream_websocket_text_transparently_retries_precreated_
     assert pending_request.error_code_override is None
     assert pending_request.error_message_override is None
     assert pending_request.error_http_status_override is None
+    assert list(pending_requests) == []
+
+
+@pytest.mark.asyncio
+async def test_process_upstream_websocket_text_retries_account_model_rejection_without_health_penalty(
+    monkeypatch,
+):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    finalize_request_state = AsyncMock()
+    handle_stream_error = AsyncMock()
+    account = _make_account("acc_ws_stale_model_route")
+
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize_request_state)
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+
+    request_payload = {
+        "type": "response.create",
+        "model": "gpt-5.6-sol",
+        "input": "retry on an account that actually supports Sol",
+    }
+    pending_request = proxy_service._WebSocketRequestState(
+        request_id="ws_req_stale_model_route",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        awaiting_response_created=True,
+        request_text=json.dumps(request_payload, separators=(",", ":")),
+    )
+    pending_requests = deque([pending_request])
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    upstream_payload = {
+        "type": "error",
+        "status": 400,
+        "error": {
+            "type": "invalid_request_error",
+            "code": "invalid_request_error",
+            "message": ("The 'gpt-5.6-sol' model is not supported when using Codex with a ChatGPT account."),
+        },
+    }
+    upstream_text = json.dumps(upstream_payload, separators=(",", ":"))
+
+    downstream_text = await service._process_upstream_websocket_text(
+        upstream_text,
+        account=account,
+        account_id_value=account.id,
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=upstream_control,
+        response_create_gate=asyncio.Semaphore(1),
+    )
+
+    assert downstream_text == upstream_text
+    finalize_request_state.assert_not_awaited()
+    handle_stream_error.assert_not_awaited()
+    assert upstream_control.reconnect_requested is True
+    assert upstream_control.suppress_downstream_event is True
+    assert upstream_control.replay_request_state is pending_request
+    assert pending_request.replay_count == 1
+    assert pending_request.excluded_account_ids == {account.id}
+    assert pending_request.affinity_policy.reallocate_sticky is True
+    assert pending_request.precreated_replay_reason == "account_model_unsupported"
+    assert pending_request.precreated_replay_account_id == account.id
+    assert pending_request.error_http_status_override == 400
+    assert pending_request.error_code_override == "invalid_request_error"
     assert list(pending_requests) == []
 
 

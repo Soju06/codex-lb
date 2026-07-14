@@ -101,8 +101,10 @@ from app.modules.proxy._service.observability import (
     _truncate_identifier as _truncate_identifier,
 )
 from app.modules.proxy._service.support import (
+    _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE,
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
+    _clear_websocket_request_error_overrides,
     _event_type_from_payload,
     _HTTPBridgeSession,
     _record_response_event,
@@ -761,7 +763,45 @@ class _HTTPBridgeUpstreamEventsMixin:
                         )
                     )
                     event_block = f"data: {rewritten_text}\n\n"
-        elif retry_error_code is not None and not is_previous_response_not_found_event:
+        elif (
+            retry_error_code == _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE
+            and not is_previous_response_not_found_event
+            and status_request_state is not None
+            and _websocket_auth_request_can_switch_account(status_request_state)
+        ):
+            rejected_account_id = session.account.id
+            previous_upstream_turn_state = session.upstream_turn_state
+            previous_downstream_turn_state = session.downstream_turn_state
+            previous_headers = session.headers
+            async with session.pending_lock:
+                if status_request_state not in session.pending_requests:
+                    session.pending_requests.appendleft(status_request_state)
+                    session.queued_request_count += 1
+                status_request_state.awaiting_response_created = True
+                status_request_state.response_id = None
+            retried = await self._retry_http_bridge_precreated_request(session)
+            if retried:
+                logger.info(
+                    "Retried HTTP bridge request after account/model rejection "
+                    "request_id=%s rejected_account_id=%s model=%s",
+                    status_request_state.request_log_id or status_request_state.request_id,
+                    rejected_account_id,
+                    status_request_state.model,
+                )
+                return
+            session.upstream_turn_state = previous_upstream_turn_state
+            session.downstream_turn_state = previous_downstream_turn_state
+            session.headers = previous_headers
+            async with session.pending_lock:
+                if status_request_state in session.pending_requests:
+                    session.pending_requests.remove(status_request_state)
+                    session.queued_request_count = max(0, session.queued_request_count - 1)
+            _clear_websocket_request_error_overrides(status_request_state)
+        elif (
+            retry_error_code is not None
+            and retry_error_code != _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE
+            and not is_previous_response_not_found_event
+        ):
             await self._handle_stream_error(
                 session.account,
                 {"message": _websocket_event_error_message(event_type, payload) or "Upstream error"},

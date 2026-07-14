@@ -307,6 +307,7 @@ from app.modules.proxy._service.observability import (
     _truncate_identifier as _truncate_identifier,
 )
 from app.modules.proxy._service.support import (
+    _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE,
     _FIRST_TOKEN_EVENT_TYPES,
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
     _REQUEST_TRANSPORT_HTTP,
@@ -371,6 +372,7 @@ from app.modules.proxy._service.warmup import (
 from app.modules.proxy._service.websocket.helpers import (
     _app_error_to_websocket_event,
     _assign_websocket_response_id,
+    _clear_websocket_precreated_replay_fallback,
     _find_websocket_request_state_by_response_id,
     _is_websocket_response_create,
     _match_websocket_request_state_for_anonymous_event,
@@ -412,6 +414,7 @@ from app.modules.proxy._service.websocket.helpers import (
     _websocket_input_items_are_self_contained_fresh_replay,
     _websocket_owner_switch_has_other_pending_requests,
     _websocket_precreated_auth_error_code,
+    _websocket_precreated_replay_fallback_error,
     _websocket_precreated_retry_error_code,
     _websocket_receive_timeout_for_pending_requests,
     _websocket_response_id,
@@ -2053,6 +2056,7 @@ class _WebSocketMixin:
                 await proxy._load_balancer.release_account_lease(selected_stream_lease)
                 return None, None
             request_state.websocket_stream_lease = selected_stream_lease
+            _clear_websocket_precreated_replay_fallback(request_state)
             return connect_result
 
         if last_failover_exc is not None and last_failover_account is not None:
@@ -3736,6 +3740,50 @@ class _WebSocketMixin:
                     reallocate_sticky=True,
                 )
                 request_state.request_text = safe_request_text
+        if retry_error_code == _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE:
+            retry_text = None
+            if not request_state.file_required_preferred_account:
+                retry_text = _prepare_websocket_request_state_for_account_switch(request_state)
+            if retry_text is not None:
+                request_state.precreated_replay_reason = _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE
+                request_state.precreated_replay_account_id = account.id
+                request_state.error_code_override = (
+                    _normalize_error_code(
+                        _websocket_event_error_code(event_type, payload),
+                        _websocket_event_error_type(event_type, payload),
+                    )
+                    or "invalid_request_error"
+                )
+                request_state.error_message_override = (
+                    _websocket_event_error_message(event_type, payload) or "Upstream rejected the requested model"
+                )
+                request_state.error_type_override = (
+                    _websocket_event_error_type(event_type, payload) or "invalid_request_error"
+                )
+                request_state.error_param_override = _websocket_event_error_param(event_type, payload)
+                request_state.error_http_status_override = _facade()._http_error_status_from_payload(payload) or 400
+                await proxy._release_request_state_account_response_create_lease(request_state)
+                request_state.excluded_account_ids.add(account.id)
+                request_state.affinity_policy = replace(
+                    request_state.affinity_policy,
+                    reallocate_sticky=True,
+                )
+                request_state.request_text = retry_text
+                request_state.replay_count += 1
+                request_state.awaiting_response_created = True
+                request_state.response_id = None
+                request_state.response_event_count = 0
+                upstream_control.reconnect_requested = True
+                upstream_control.suppress_downstream_event = True
+                upstream_control.replay_request_state = request_state
+                _facade().logger.info(
+                    "Retrying pre-created request after account/model rejection request_id=%s account_id=%s model=%s",
+                    request_state.request_log_id or request_state.request_id,
+                    account.id,
+                    request_state.model,
+                )
+                return downstream_text
+            retry_error_code = None
         if retry_error_code is not None:
             if retry_is_previous_response_not_found:
                 if not (
@@ -4298,6 +4346,10 @@ class _WebSocketMixin:
     ) -> None:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
+        replay_fallback = _websocket_precreated_replay_fallback_error(request_state)
+        if replay_fallback is not None:
+            status_code, payload, error_code, error_message, rejected_account_id = replay_fallback
+            account_id = rejected_account_id
         status_code, payload, error_code, error_message = _sanitize_websocket_connect_failure(
             request_state=request_state,
             status_code=status_code,

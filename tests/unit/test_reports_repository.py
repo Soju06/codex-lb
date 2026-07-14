@@ -56,6 +56,7 @@ def _make_daily_aggregate(
     output_tokens: int = 4,
     cached_input_tokens: int = 2,
     cost_usd: float = 0.25,
+    useragent_group: str | None = "CodexCLI",
 ) -> RequestLogDailyAggregate:
     return RequestLogDailyAggregate(
         aggregate_key=aggregate_key,
@@ -72,16 +73,23 @@ def _make_daily_aggregate(
         transport="websocket",
         upstream_transport="websocket",
         source="codex",
-        useragent_group="CodexCLI",
+        useragent_group=useragent_group,
         plan_type="plus",
         is_deleted=False,
         request_count=request_count,
         error_count=error_count,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
+        effective_output_tokens=output_tokens,
         cached_input_tokens=cached_input_tokens,
         reasoning_tokens=0,
         cost_usd=cost_usd,
+        cost_microdollars=int(cost_usd * 1_000_000),
+        account_request_count=request_count,
+        account_input_tokens=input_tokens,
+        account_output_tokens=output_tokens,
+        account_cached_input_tokens=cached_input_tokens,
+        account_cost_usd=cost_usd,
         latency_ms_sum=0,
         latency_ms_count=0,
         latency_first_token_ms_sum=0,
@@ -332,6 +340,26 @@ async def test_report_filters_apply_to_all_aggregates_including_earliest_activit
                 cached_input_tokens=20,
                 cost_usd=2.5,
             ),
+            _make_daily_aggregate(
+                aggregate_key="report-filter-rollup-match",
+                bucket_date=date(2026, 6, 1),
+                account_id="acc_reports_filters",
+                model="gpt-5.1",
+                request_count=3,
+                input_tokens=30,
+                output_tokens=12,
+                cached_input_tokens=6,
+                cost_usd=0.75,
+                useragent_group="opencode",
+            ),
+            _make_daily_aggregate(
+                aggregate_key="report-filter-rollup-other-useragent",
+                bucket_date=date(2026, 5, 29),
+                account_id="acc_reports_filters",
+                request_count=10,
+                cost_usd=5.0,
+                useragent_group="CodexCLI",
+            ),
         ]
     )
     await async_session.commit()
@@ -359,16 +387,16 @@ async def test_report_filters_apply_to_all_aggregates_including_earliest_activit
     )
     earliest_activity_at = await repo.earliest_report_activity_at(useragent_group="opencode")
 
-    assert summary.total_requests == 1
-    assert summary.total_cost_usd == 0.25
+    assert summary.total_requests == 4
+    assert summary.total_cost_usd == 1.0
     assert len(daily_rows) == 1
-    assert daily_rows[0].requests == 1
+    assert daily_rows[0].requests == 4
     assert by_model[0].model == "gpt-5.1"
-    assert by_model[0].cost_usd == 0.25
-    assert by_model[0].request_count == 1
+    assert by_model[0].cost_usd == 1.0
+    assert by_model[0].request_count == 4
     assert by_account[0].account_id == "acc_reports_filters"
-    assert by_account[0].request_count == 1
-    assert earliest_activity_at == matched_at
+    assert by_account[0].request_count == 4
+    assert earliest_activity_at == datetime(2026, 6, 1, 0, 0)
 
 
 @pytest.mark.asyncio
@@ -440,6 +468,30 @@ async def test_aggregate_by_useragent_separates_real_unknown_from_missing_groups
                 cached_input_tokens=0,
                 cost_usd=0.1,
             ),
+            _make_daily_aggregate(
+                aggregate_key="report-useragent-rollup-opencode",
+                bucket_date=date(2026, 6, 1),
+                model="gpt-5.1",
+                request_count=2,
+                cost_usd=0.2,
+                useragent_group="opencode",
+            ),
+            _make_daily_aggregate(
+                aggregate_key="report-useragent-rollup-missing",
+                bucket_date=date(2026, 6, 1),
+                model="gpt-5.4",
+                request_count=3,
+                cost_usd=0.15,
+                useragent_group=None,
+            ),
+            _make_daily_aggregate(
+                aggregate_key="report-useragent-rollup-blank",
+                bucket_date=date(2026, 6, 1),
+                model="gpt-5.3",
+                request_count=20,
+                cost_usd=3.0,
+                useragent_group="",
+            ),
         ]
     )
     await async_session.commit()
@@ -450,8 +502,8 @@ async def test_aggregate_by_useragent_separates_real_unknown_from_missing_groups
     )
 
     assert [(row.useragent_group, row.cost_usd, row.request_count) for row in rows] == [
-        ("opencode", 0.5, 1),
+        ("opencode", 0.7, 3),
         ("Unknown", 0.4, 1),
         ("CodexCLI", 0.3, 1),
-        ("Missing User-Agent", 0.1, 1),
+        ("Missing User-Agent", 0.25, 4),
     ]

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime, time, timedelta, timezone
 from typing import cast as typing_cast
 
 import anyio
@@ -14,7 +14,7 @@ from app.core.usage.logs import RequestLogLike, calculated_cost_from_log
 from app.core.usage.types import BucketModelAggregate, RequestActivityAggregate
 from app.core.utils.request_id import ensure_request_id
 from app.core.utils.time import utcnow
-from app.db.models import Account, ApiKey, RequestKind, RequestLog
+from app.db.models import Account, ApiKey, RequestKind, RequestLog, RequestLogDailyAggregate
 from app.db.session import sqlite_writer_section
 
 
@@ -31,6 +31,10 @@ class RequestLogsRepository:
     @staticmethod
     def _exclude_warmup_clause() -> ColumnElement[bool]:
         return RequestLog.request_kind.not_in((RequestKind.WARMUP.value, "limit_warmup"))
+
+    @staticmethod
+    def _exclude_warmup_rollup_clause() -> ColumnElement[bool]:
+        return RequestLogDailyAggregate.request_kind.not_in((RequestKind.WARMUP.value, "limit_warmup"))
 
     async def list_since(self, since: datetime) -> list[RequestLog]:
         result = await self._session.execute(
@@ -116,7 +120,7 @@ class RequestLogsRepository:
             .order_by(bucket_col)
         )
         result = await self._session.execute(stmt)
-        return [
+        rows = [
             BucketModelAggregate(
                 bucket_epoch=int(row.bucket_epoch),
                 model=row.model,
@@ -131,12 +135,54 @@ class RequestLogsRepository:
             )
             for row in result.all()
         ]
+        if bucket_seconds == 86400:
+            rollup_result = await self._session.execute(
+                select(
+                    RequestLogDailyAggregate.bucket_date,
+                    RequestLogDailyAggregate.model,
+                    RequestLogDailyAggregate.service_tier,
+                    func.coalesce(func.sum(RequestLogDailyAggregate.request_count), 0).label("request_count"),
+                    func.coalesce(func.sum(RequestLogDailyAggregate.error_count), 0).label("error_count"),
+                    func.coalesce(func.sum(RequestLogDailyAggregate.input_tokens), 0).label("input_tokens"),
+                    func.coalesce(func.sum(RequestLogDailyAggregate.output_tokens), 0).label("output_tokens"),
+                    func.coalesce(func.sum(RequestLogDailyAggregate.cached_input_tokens), 0).label(
+                        "cached_input_tokens"
+                    ),
+                    func.coalesce(func.sum(RequestLogDailyAggregate.reasoning_tokens), 0).label("reasoning_tokens"),
+                    func.coalesce(func.sum(RequestLogDailyAggregate.cost_usd), 0.0).label("cost_usd"),
+                )
+                .where(
+                    RequestLogDailyAggregate.bucket_date >= _first_complete_rollup_date(since),
+                    self._exclude_warmup_rollup_clause(),
+                )
+                .group_by(
+                    RequestLogDailyAggregate.bucket_date,
+                    RequestLogDailyAggregate.model,
+                    RequestLogDailyAggregate.service_tier,
+                )
+            )
+            rows.extend(
+                BucketModelAggregate(
+                    bucket_epoch=_bucket_date_epoch(row.bucket_date),
+                    model=row.model,
+                    service_tier=row.service_tier,
+                    request_count=int(row.request_count or 0),
+                    error_count=int(row.error_count or 0),
+                    input_tokens=int(row.input_tokens or 0),
+                    output_tokens=int(row.output_tokens or 0),
+                    cached_input_tokens=int(row.cached_input_tokens or 0),
+                    reasoning_tokens=int(row.reasoning_tokens or 0),
+                    cost_usd=float(row.cost_usd or 0.0),
+                )
+                for row in rollup_result.all()
+            )
+        return sorted(rows, key=lambda row: (row.bucket_epoch, row.model, row.service_tier or ""))
 
     async def aggregate_activity_since(self, since: datetime) -> RequestActivityAggregate:
         stmt = self._aggregate_activity_stmt(since)
         result = await self._session.execute(stmt)
         row = result.one()
-        return RequestActivityAggregate(
+        raw = RequestActivityAggregate(
             request_count=int(row.request_count),
             error_count=int(row.error_count),
             input_tokens=int(row.input_tokens),
@@ -144,17 +190,50 @@ class RequestLogsRepository:
             cached_input_tokens=int(row.cached_input_tokens),
             cost_usd=float(row.cost_usd or 0.0),
         )
+        return _merge_activity_aggregates(raw, await self._aggregate_rollup_activity(since))
 
     async def aggregate_activity_between(self, since: datetime, until: datetime) -> RequestActivityAggregate:
         stmt = self._aggregate_activity_stmt(since, until)
         result = await self._session.execute(stmt)
         row = result.one()
-        return RequestActivityAggregate(
+        raw = RequestActivityAggregate(
             request_count=int(row.request_count),
             error_count=int(row.error_count),
             input_tokens=int(row.input_tokens),
             output_tokens=int(row.output_tokens),
             cached_input_tokens=int(row.cached_input_tokens),
+            cost_usd=float(row.cost_usd or 0.0),
+        )
+        return _merge_activity_aggregates(raw, await self._aggregate_rollup_activity(since, until))
+
+    async def _aggregate_rollup_activity(
+        self,
+        since: datetime,
+        until: datetime | None = None,
+    ) -> RequestActivityAggregate:
+        conditions = [
+            RequestLogDailyAggregate.bucket_date >= _first_complete_rollup_date(since),
+            self._exclude_warmup_rollup_clause(),
+        ]
+        if until is not None:
+            conditions.append(RequestLogDailyAggregate.bucket_date < _utc_date(until))
+        result = await self._session.execute(
+            select(
+                func.coalesce(func.sum(RequestLogDailyAggregate.request_count), 0).label("request_count"),
+                func.coalesce(func.sum(RequestLogDailyAggregate.error_count), 0).label("error_count"),
+                func.coalesce(func.sum(RequestLogDailyAggregate.input_tokens), 0).label("input_tokens"),
+                func.coalesce(func.sum(RequestLogDailyAggregate.output_tokens), 0).label("output_tokens"),
+                func.coalesce(func.sum(RequestLogDailyAggregate.cached_input_tokens), 0).label("cached_input_tokens"),
+                func.coalesce(func.sum(RequestLogDailyAggregate.cost_usd), 0.0).label("cost_usd"),
+            ).where(*conditions)
+        )
+        row = result.one()
+        return RequestActivityAggregate(
+            request_count=int(row.request_count or 0),
+            error_count=int(row.error_count or 0),
+            input_tokens=int(row.input_tokens or 0),
+            output_tokens=int(row.output_tokens or 0),
+            cached_input_tokens=int(row.cached_input_tokens or 0),
             cost_usd=float(row.cost_usd or 0.0),
         )
 
@@ -178,18 +257,36 @@ class RequestLogsRepository:
         return stmt
 
     async def top_error_since(self, since: datetime) -> str | None:
-        stmt = self._top_error_stmt(since)
-        result = await self._session.execute(stmt)
-        row = result.first()
-        return str(row[0]) if row and row[0] else None
+        return await self._top_error_with_rollups(since)
 
     async def top_error_between(self, since: datetime, until: datetime) -> str | None:
-        stmt = self._top_error_stmt(since, until)
-        result = await self._session.execute(stmt)
-        row = result.first()
-        return str(row[0]) if row and row[0] else None
+        return await self._top_error_with_rollups(since, until)
 
-    def _top_error_stmt(self, since: datetime, until: datetime | None = None):
+    async def _top_error_with_rollups(self, since: datetime, until: datetime | None = None) -> str | None:
+        raw_result = await self._session.execute(self._top_error_stmt(since, until, limit=None))
+        counts = {str(row.error_code): int(row.error_count or 0) for row in raw_result.all() if row.error_code}
+        rollup_conditions = [
+            RequestLogDailyAggregate.bucket_date >= _first_complete_rollup_date(since),
+            self._exclude_warmup_rollup_clause(),
+            RequestLogDailyAggregate.error_code.is_not(None),
+            RequestLogDailyAggregate.error_count > 0,
+        ]
+        if until is not None:
+            rollup_conditions.append(RequestLogDailyAggregate.bucket_date < _utc_date(until))
+        rollup_result = await self._session.execute(
+            select(
+                RequestLogDailyAggregate.error_code,
+                func.coalesce(func.sum(RequestLogDailyAggregate.error_count), 0).label("error_count"),
+            )
+            .where(*rollup_conditions)
+            .group_by(RequestLogDailyAggregate.error_code)
+        )
+        for row in rollup_result.all():
+            if row.error_code:
+                counts[str(row.error_code)] = counts.get(str(row.error_code), 0) + int(row.error_count or 0)
+        return min(counts, key=lambda error_code: (-counts[error_code], error_code)) if counts else None
+
+    def _top_error_stmt(self, since: datetime, until: datetime | None = None, limit: int | None = 1):
         stmt = (
             select(RequestLog.error_code, func.count(RequestLog.id).label("error_count"))
             .where(
@@ -200,17 +297,25 @@ class RequestLogsRepository:
             )
             .group_by(RequestLog.error_code)
             .order_by(func.count(RequestLog.id).desc(), RequestLog.error_code.asc())
-            .limit(1)
         )
         if until is not None:
             stmt = stmt.where(RequestLog.requested_at < until)
+        if limit is not None:
+            stmt = stmt.limit(limit)
         return stmt
 
     async def earliest_activity_at(self) -> datetime | None:
         stmt = select(func.min(RequestLog.requested_at)).where(self._exclude_warmup_clause())
         result = await self._session.execute(stmt)
         value = result.scalar_one_or_none()
-        return value if isinstance(value, datetime) else None
+        raw_datetime = value if isinstance(value, datetime) else None
+        rollup_result = await self._session.execute(
+            select(func.min(RequestLogDailyAggregate.bucket_date)).where(self._exclude_warmup_rollup_clause())
+        )
+        rollup_value = rollup_result.scalar_one_or_none()
+        rollup_datetime = datetime.combine(rollup_value, time.min) if isinstance(rollup_value, date) else None
+        candidates = [candidate for candidate in (raw_datetime, rollup_datetime) if candidate is not None]
+        return min(candidates) if candidates else None
 
     async def add_log(
         self,
@@ -625,6 +730,38 @@ class RequestLogsRepository:
             ApiKey,
             ApiKey.id == RequestLog.api_key_id,
         )
+
+
+def _utc_date(value: datetime) -> date:
+    aware = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    return aware.astimezone(timezone.utc).date()
+
+
+def _first_complete_rollup_date(value: datetime) -> date:
+    aware = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    utc_value = aware.astimezone(timezone.utc)
+    bucket_date = utc_value.date()
+    if utc_value.timetz().replace(tzinfo=None) != time.min:
+        bucket_date += timedelta(days=1)
+    return bucket_date
+
+
+def _bucket_date_epoch(value: date) -> int:
+    return int(datetime.combine(value, time.min, tzinfo=timezone.utc).timestamp())
+
+
+def _merge_activity_aggregates(
+    raw: RequestActivityAggregate,
+    rollup: RequestActivityAggregate,
+) -> RequestActivityAggregate:
+    return RequestActivityAggregate(
+        request_count=raw.request_count + rollup.request_count,
+        error_count=raw.error_count + rollup.error_count,
+        input_tokens=raw.input_tokens + rollup.input_tokens,
+        output_tokens=raw.output_tokens + rollup.output_tokens,
+        cached_input_tokens=raw.cached_input_tokens + rollup.cached_input_tokens,
+        cost_usd=raw.cost_usd + rollup.cost_usd,
+    )
 
 
 async def _safe_rollback(session: AsyncSession) -> None:

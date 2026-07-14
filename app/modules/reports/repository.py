@@ -105,10 +105,12 @@ class ReportsRepository:
                 )
                 for row in result.all()
             )
-        aggregate_rows = (
-            []
-            if useragent_group
-            else await self._aggregate_daily_rollup_rows(start_date, end_date, account_ids, model)
+        aggregate_rows = await self._aggregate_daily_rollup_rows(
+            start_date,
+            end_date,
+            account_ids,
+            model,
+            useragent_group,
         )
         return _merge_daily_rows([*rows, *aggregate_rows])
 
@@ -136,10 +138,12 @@ class ReportsRepository:
             ).where(and_(*conditions))
         )
         raw_row = raw_result.one()
-        aggregate_row = (
-            SummaryAggregateRow(0.0, 0, 0, 0, 0, 0, 0)
-            if useragent_group
-            else await self._aggregate_summary_rollups(start_date, end_date, account_ids, model)
+        aggregate_row = await self._aggregate_summary_rollups(
+            start_date,
+            end_date,
+            account_ids,
+            model,
+            useragent_group,
         )
         return SummaryAggregateRow(
             total_cost_usd=float(raw_row.total_cost_usd or 0.0) + aggregate_row.total_cost_usd,
@@ -189,8 +193,7 @@ class ReportsRepository:
             )
             for row in result.all()
         ]
-        if not useragent_group:
-            rows.extend(await self._aggregate_model_rollups(start_date, end_date, account_ids, model))
+        rows.extend(await self._aggregate_model_rollups(start_date, end_date, account_ids, model, useragent_group))
         return _merge_model_rows(rows)
 
     async def aggregate_by_account(
@@ -215,8 +218,12 @@ class ReportsRepository:
         )
         result = await self._session.execute(stmt)
         rows = result.all()
-        rollup_rows = (
-            [] if useragent_group else await self._aggregate_account_rollups(start_date, end_date, account_ids, model)
+        rollup_rows = await self._aggregate_account_rollups(
+            start_date,
+            end_date,
+            account_ids,
+            model,
+            useragent_group,
         )
 
         account_ids_found = [row.account_id for row in rows if row.account_id]
@@ -273,7 +280,7 @@ class ReportsRepository:
             .order_by(func.coalesce(func.sum(RequestLog.cost_usd), 0.0).desc())
         )
         result = await self._session.execute(stmt)
-        return [
+        rows = [
             UserAgentAggregateRow(
                 useragent_group=row.useragent_group,
                 cost_usd=float(row.cost_usd),
@@ -281,6 +288,8 @@ class ReportsRepository:
             )
             for row in result.all()
         ]
+        rows.extend(await self._aggregate_useragent_rollups(start_date, end_date, account_ids, model, useragent_group))
+        return _merge_useragent_rows(rows)
 
     async def count_active_accounts(
         self,
@@ -311,18 +320,20 @@ class ReportsRepository:
         raw_value = result.scalar_one_or_none()
         aggregate_conditions = [_normal_traffic_rollup_clause()]
         aggregate_datetime = None
-        if not useragent_group:
-            if account_ids:
-                aggregate_conditions.append(RequestLogDailyAggregate.account_id.in_(account_ids))
-            if model:
-                aggregate_conditions.append(RequestLogDailyAggregate.model == model)
-            aggregate_result = await self._session.execute(
-                select(func.min(RequestLogDailyAggregate.bucket_date)).where(and_(*aggregate_conditions))
-            )
-            aggregate_value = aggregate_result.scalar_one_or_none()
-            aggregate_datetime = (
-                datetime.combine(aggregate_value, datetime.min.time()) if isinstance(aggregate_value, date) else None
-            )
+        if account_ids:
+            aggregate_conditions.append(RequestLogDailyAggregate.account_id.in_(account_ids))
+        if model:
+            aggregate_conditions.append(RequestLogDailyAggregate.model == model)
+        rollup_useragent_clause = _useragent_group_rollup_filter_clause(useragent_group)
+        if rollup_useragent_clause is not None:
+            aggregate_conditions.append(rollup_useragent_clause)
+        aggregate_result = await self._session.execute(
+            select(func.min(RequestLogDailyAggregate.bucket_date)).where(and_(*aggregate_conditions))
+        )
+        aggregate_value = aggregate_result.scalar_one_or_none()
+        aggregate_datetime = (
+            datetime.combine(aggregate_value, datetime.min.time()) if isinstance(aggregate_value, date) else None
+        )
         candidates = [value for value in (raw_value, aggregate_datetime) if isinstance(value, datetime)]
         return min(candidates) if candidates else None
 
@@ -332,8 +343,15 @@ class ReportsRepository:
         end_date: date,
         account_ids: list[str] | None,
         model: str | None,
+        useragent_group: str | None,
     ) -> list[DailyReportAggregateRow]:
-        conditions = _report_rollup_conditions_for_dates(start_date, end_date, account_ids, model)
+        conditions = _report_rollup_conditions_for_dates(
+            start_date,
+            end_date,
+            account_ids,
+            model,
+            useragent_group,
+        )
         result = await self._session.execute(
             select(
                 RequestLogDailyAggregate.bucket_date,
@@ -369,8 +387,9 @@ class ReportsRepository:
         end_date: datetime,
         account_ids: list[str] | None,
         model: str | None,
+        useragent_group: str | None,
     ) -> SummaryAggregateRow:
-        conditions = _report_rollup_conditions(start_date, end_date, account_ids, model)
+        conditions = _report_rollup_conditions(start_date, end_date, account_ids, model, useragent_group)
         result = await self._session.execute(
             select(
                 func.coalesce(func.sum(RequestLogDailyAggregate.cost_usd), 0.0).label("total_cost_usd"),
@@ -399,9 +418,10 @@ class ReportsRepository:
         end_date: datetime,
         account_ids: list[str] | None,
         model: str | None,
+        useragent_group: str | None,
     ) -> list[ModelAggregateRow]:
         conditions = [
-            *_report_rollup_conditions(start_date, end_date, account_ids, model),
+            *_report_rollup_conditions(start_date, end_date, account_ids, model, useragent_group),
             RequestLogDailyAggregate.model.is_not(None),
         ]
         result = await self._session.execute(
@@ -428,8 +448,9 @@ class ReportsRepository:
         end_date: datetime,
         account_ids: list[str] | None,
         model: str | None,
+        useragent_group: str | None,
     ) -> list[AccountAggregateRow]:
-        conditions = _report_rollup_conditions(start_date, end_date, account_ids, model)
+        conditions = _report_rollup_conditions(start_date, end_date, account_ids, model, useragent_group)
         result = await self._session.execute(
             select(
                 RequestLogDailyAggregate.account_id,
@@ -449,6 +470,43 @@ class ReportsRepository:
             for row in result.all()
         ]
 
+    async def _aggregate_useragent_rollups(
+        self,
+        start_date: datetime,
+        end_date: datetime,
+        account_ids: list[str] | None,
+        model: str | None,
+        useragent_group: str | None,
+    ) -> list[UserAgentAggregateRow]:
+        conditions = [
+            *_report_rollup_conditions(start_date, end_date, account_ids, model, useragent_group),
+            or_(
+                RequestLogDailyAggregate.useragent_group.is_(None),
+                func.trim(RequestLogDailyAggregate.useragent_group) != "",
+            ),
+        ]
+        bucket = case(
+            (RequestLogDailyAggregate.useragent_group.is_(None), literal(MISSING_USERAGENT_GROUP)),
+            else_=RequestLogDailyAggregate.useragent_group,
+        )
+        result = await self._session.execute(
+            select(
+                bucket.label("useragent_group"),
+                func.coalesce(func.sum(RequestLogDailyAggregate.cost_usd), 0.0).label("cost_usd"),
+                func.coalesce(func.sum(RequestLogDailyAggregate.request_count), 0).label("request_count"),
+            )
+            .where(and_(*conditions))
+            .group_by(bucket)
+        )
+        return [
+            UserAgentAggregateRow(
+                useragent_group=row.useragent_group,
+                cost_usd=float(row.cost_usd or 0.0),
+                request_count=int(row.request_count or 0),
+            )
+            for row in result.all()
+        ]
+
     async def _count_active_accounts_with_rollups(
         self,
         start_date: datetime,
@@ -461,13 +519,8 @@ class ReportsRepository:
             *_report_conditions(start_date, end_date, account_ids, model, useragent_group),
             RequestLog.account_id.is_not(None),
         ]
-        if useragent_group:
-            result = await self._session.execute(
-                select(func.count(func.distinct(RequestLog.account_id))).where(and_(*raw_conditions))
-            )
-            return int(result.scalar_one() or 0)
         rollup_conditions = [
-            *_report_rollup_conditions(start_date, end_date, account_ids, model),
+            *_report_rollup_conditions(start_date, end_date, account_ids, model, useragent_group),
             RequestLogDailyAggregate.account_id.is_not(None),
         ]
         raw_accounts = select(RequestLog.account_id.label("account_id")).where(and_(*raw_conditions))
@@ -516,14 +569,29 @@ def _useragent_group_filter_clause(useragent_group: str | None):
     return RequestLog.useragent_group == useragent_group
 
 
+def _useragent_group_rollup_filter_clause(useragent_group: str | None):
+    if not useragent_group:
+        return None
+    if useragent_group == MISSING_USERAGENT_GROUP:
+        return RequestLogDailyAggregate.useragent_group.is_(None)
+    return RequestLogDailyAggregate.useragent_group == useragent_group
+
+
 def _report_rollup_conditions(
     start_date: datetime,
     end_date: datetime,
     account_ids: list[str] | None,
     model: str | None,
+    useragent_group: str | None,
 ) -> list:
     start_bucket, end_bucket = _rollup_bucket_date_range(start_date, end_date)
-    return _report_rollup_conditions_for_dates(start_bucket, end_bucket, account_ids, model)
+    return _report_rollup_conditions_for_dates(
+        start_bucket,
+        end_bucket,
+        account_ids,
+        model,
+        useragent_group,
+    )
 
 
 def _report_rollup_conditions_for_dates(
@@ -531,6 +599,7 @@ def _report_rollup_conditions_for_dates(
     end_date: date,
     account_ids: list[str] | None,
     model: str | None,
+    useragent_group: str | None,
 ) -> list:
     conditions = [
         RequestLogDailyAggregate.bucket_date >= start_date,
@@ -541,6 +610,9 @@ def _report_rollup_conditions_for_dates(
         conditions.append(RequestLogDailyAggregate.account_id.in_(account_ids))
     if model:
         conditions.append(RequestLogDailyAggregate.model == model)
+    useragent_group_clause = _useragent_group_rollup_filter_clause(useragent_group)
+    if useragent_group_clause is not None:
+        conditions.append(useragent_group_clause)
     return conditions
 
 
@@ -617,6 +689,21 @@ def _merge_account_rows(rows: list[AccountAggregateRow]) -> list[AccountAggregat
         totals[row.account_id] = AccountAggregateRow(
             account_id=row.account_id,
             alias=existing.alias or row.alias,
+            cost_usd=existing.cost_usd + row.cost_usd,
+            request_count=existing.request_count + row.request_count,
+        )
+    return sorted(totals.values(), key=lambda item: item.cost_usd, reverse=True)
+
+
+def _merge_useragent_rows(rows: list[UserAgentAggregateRow]) -> list[UserAgentAggregateRow]:
+    totals: dict[str, UserAgentAggregateRow] = {}
+    for row in rows:
+        existing = totals.get(row.useragent_group)
+        if existing is None:
+            totals[row.useragent_group] = row
+            continue
+        totals[row.useragent_group] = UserAgentAggregateRow(
+            useragent_group=row.useragent_group,
             cost_usd=existing.cost_usd + row.cost_usd,
             request_count=existing.request_count + row.request_count,
         )

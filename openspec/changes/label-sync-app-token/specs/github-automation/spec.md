@@ -10,6 +10,7 @@ The `Codex review labels` workflow MUST execute the label synchronization script
 
 - **WHEN** the repository defines the `CODEX_LABEL_SYNC_APP_ID` variable and the `CODEX_LABEL_SYNC_APP_PRIVATE_KEY` secret
 - **THEN** the workflow mints a short-lived installation token for that App before the sync step
+- **AND** the mint requests only the label-sync permission subset (actions write, checks read, contents read, issues write, pull requests read, statuses read) rather than inheriting all installation permissions
 - **AND** the sync step uses that token ahead of `CODEX_LABEL_SYNC_TOKEN`, `RELEASE_PLEASE_TOKEN`, and `github.token`
 
 #### Scenario: App token mint fails or is not configured

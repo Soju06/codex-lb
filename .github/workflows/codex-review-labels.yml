@@ -51,6 +51,12 @@ jobs:
         with:
           app-id: ${{ vars.CODEX_LABEL_SYNC_APP_ID }}
           private-key: ${{ secrets.CODEX_LABEL_SYNC_APP_PRIVATE_KEY }}
+          permission-actions: write
+          permission-checks: read
+          permission-contents: read
+          permission-issues: write
+          permission-pull-requests: read
+          permission-statuses: read
 
       - name: Sync labels
         env:
@@ -92,6 +98,12 @@ jobs:
         with:
           app-id: ${{ vars.CODEX_LABEL_SYNC_APP_ID }}
           private-key: ${{ secrets.CODEX_LABEL_SYNC_APP_PRIVATE_KEY }}
+          permission-actions: write
+          permission-checks: read
+          permission-contents: read
+          permission-issues: write
+          permission-pull-requests: read
+          permission-statuses: read
 
       - name: Sync labels
         env:

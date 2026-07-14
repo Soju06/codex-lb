@@ -736,6 +736,95 @@ async def test_proxy_preflight_claim_timeout_fails_over_and_releases_lease(async
 
 
 @pytest.mark.asyncio
+async def test_compact_preflight_claim_timeout_fails_over_and_releases_lease(async_client, monkeypatch):
+    """Route-level regression for the compact freshness-check preflight.
+
+    A transient refresh-claim timeout raised by the compact-responses
+    ``_ensure_fresh_with_budget`` preflight (as if a foreign replica holds the
+    account's refresh claim) must release the selected account's
+    ``response_create`` lease, exclude the account, and fail over to another
+    account. Before the fix the compact preflight only translated
+    ``aiohttp.ClientError``/``asyncio.TimeoutError``, so the non-permanent
+    ``RefreshError`` escaped unhandled and the healthy request errored out with
+    an unhandled server error instead of failing over.
+    """
+    import json
+
+    import app.modules.proxy.service as proxy_module
+    from app.core.openai.models import OpenAIResponsePayload
+
+    for raw_account_id, email in (
+        ("acc_compact_claim_a", "compact-claim-a@example.com"),
+        ("acc_compact_claim_b", "compact-claim-b@example.com"),
+    ):
+        auth_json = _make_auth_json(raw_account_id, email)
+        files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+        response = await async_client.post("/api/accounts/import", files=files)
+        assert response.status_code == 200
+
+    # Whichever account the compact loop freshens first fails with a transient
+    # refresh-claim timeout; the other account freshens cleanly.
+    first_seen: dict[str, str | None] = {"internal_id": None}
+
+    async def fake_ensure_fresh(self, account, *, force=False, timeout_seconds=None):
+        del self, force, timeout_seconds
+        if first_seen["internal_id"] is None:
+            first_seen["internal_id"] = account.id
+        if account.id == first_seen["internal_id"]:
+            raise RefreshError(
+                "transport_error",
+                "refresh claim held by another replica",
+                False,
+                transport_error=True,
+            )
+        return account
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh)
+
+    released_lease_account_ids: list[str] = []
+    original_release = proxy_module.LoadBalancer.release_account_lease
+
+    async def spy_release(self, lease):
+        if lease is not None:
+            released_lease_account_ids.append(lease.account_id)
+        return await original_release(self, lease)
+
+    monkeypatch.setattr(proxy_module.LoadBalancer, "release_account_lease", spy_release)
+
+    served_account_ids: list[str] = []
+    released_before_compact: list[str] = []
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token
+        if not served_account_ids:
+            released_before_compact.extend(released_lease_account_ids)
+        served_account_ids.append(account_id)
+        return OpenAIResponsePayload.model_validate({"output": []})
+
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": []}
+    response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
+
+    assert response.status_code == 200
+    assert response.json()["output"] == []
+
+    failed_internal_id = first_seen["internal_id"]
+    assert failed_internal_id is not None
+
+    async with SessionLocal() as session:
+        accounts = {account.id: account for account in (await session.execute(select(Account))).scalars().all()}
+        assert {account.status for account in accounts.values()} == {AccountStatus.ACTIVE}
+        failed_chatgpt_id = accounts[failed_internal_id].chatgpt_account_id
+
+    # The failed account never served the compact request; a different account did.
+    assert served_account_ids
+    assert failed_chatgpt_id not in served_account_ids
+    # Its response_create lease was released before the failover compact call.
+    assert failed_internal_id in released_before_compact
+
+
+@pytest.mark.asyncio
 async def test_claim_coordinator_win_lose_release_semantics(db_setup):
     account_id = "acc_claim_semantics"
     await _create_account(account_id)

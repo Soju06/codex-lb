@@ -913,6 +913,40 @@ class _CompactMixin:
                         request_id,
                         account.id,
                     )
+                except RefreshError as exc:
+                    await proxy._load_balancer.release_account_lease(selected_account_response_create_lease)
+                    selected_account_response_create_lease = None
+                    if exc.is_permanent or not exc.transport_error:
+                        # Permanent or non-transport refresh failures keep their
+                        # prior escalation (they propagate to the caller); only
+                        # transient transport-level failures fail over below.
+                        raise
+                    # Transient, transport-level refresh failure on the freshness
+                    # preflight (for example the account's refresh claim is held
+                    # by another replica): fail over to a healthy account instead
+                    # of letting the non-permanent RefreshError escape unhandled
+                    # and surface a bogus hard auth/server error to the client.
+                    # This is definitionally transient, so — unlike a raw
+                    # transport error whose retriability is inferred from its
+                    # message — it always fails over (matching the streaming and
+                    # WebSocket paths) rather than gating on the message.
+                    message = exc.message or str(exc) or "Request to upstream timed out"
+                    logger.warning(
+                        "Compact refresh transient failure request_id=%s account_id=%s",
+                        request_id,
+                        account.id,
+                        exc_info=True,
+                    )
+                    if preferred_account_id is not None:
+                        _raise_proxy_unavailable(message)
+                    await proxy._handle_stream_error(
+                        account,
+                        {"message": message},
+                        "upstream_unavailable",
+                    )
+                    last_exc = ProxyResponseError(502, openai_error("upstream_unavailable", message))
+                    excluded_account_ids.add(account.id)
+                    continue
                 except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
                     await proxy._load_balancer.release_account_lease(selected_account_response_create_lease)
                     selected_account_response_create_lease = None

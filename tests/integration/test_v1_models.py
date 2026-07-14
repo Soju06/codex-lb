@@ -632,6 +632,44 @@ async def test_codex_catalog_sanitizes_invalid_source_tool_metadata(
     assert alias_entry["experimental_supported_tools"] == expected_tools
 
 
+@pytest.mark.parametrize(
+    ("case", "raw_policy"),
+    [
+        ("null", None),
+        ("non-object", "tokens"),
+        ("missing-limit", {"mode": "tokens"}),
+    ],
+)
+@pytest.mark.asyncio
+async def test_codex_catalog_defaults_invalid_source_truncation_policy(
+    async_client,
+    case: str,
+    raw_policy: JsonValue,
+):
+    model = f"external-{case}-truncation-policy"
+    await _create_model_source(
+        async_client,
+        name=f"codex-source-{case}-truncation-policy",
+        model=model,
+        supports_responses=True,
+        raw_metadata_json=json.dumps({"truncation_policy": raw_policy}),
+    )
+
+    response = await async_client.get("/backend-api/codex/models")
+
+    assert response.status_code == 200
+    entry = next(item for item in response.json()["models"] if item["slug"] == model)
+    assert entry["truncation_policy"] == {"mode": "tokens", "limit": 10_000}
+
+    alias_response = await async_client.get(
+        "/v1/models",
+        params={"client_version": "0.144.3"},
+    )
+    assert alias_response.status_code == 200
+    alias_entry = next(item for item in alias_response.json()["models"] if item["slug"] == model)
+    assert alias_entry["truncation_policy"] == {"mode": "tokens", "limit": 10_000}
+
+
 @pytest.mark.asyncio
 async def test_backend_codex_models_never_exposes_source_request_overrides(async_client):
     await _create_model_source(

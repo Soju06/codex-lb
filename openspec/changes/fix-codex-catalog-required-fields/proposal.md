@@ -15,6 +15,7 @@ fallback metadata.
   fields when legacy bootstrap, retained, or persisted metadata omits them.
 - Use model-appropriate conservative truncation defaults for bundled models and
   an empty experimental-tool list, while preserving wire-valid values supplied
-  by a live upstream or model source and sanitizing invalid tool-list members.
+  by a live upstream or model source and repairing malformed required-field
+  shapes.
 - Add route-level regressions for a partial refresh that leaves older bundled
   models as hidden metadata and for the uninitialized bootstrap catalog.

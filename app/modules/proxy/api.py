@@ -2958,7 +2958,10 @@ def _is_codex_backend_catalog_model(model: UpstreamModel) -> bool:
 
 def _codex_model_truncation_policy(model: UpstreamModel) -> CodexTruncationPolicy:
     if "truncation_policy" in model.raw:
-        return CodexTruncationPolicy.model_validate(model.raw["truncation_policy"])
+        try:
+            return CodexTruncationPolicy.model_validate(model.raw["truncation_policy"])
+        except ValidationError:
+            pass
     mode = "bytes" if model.slug == "gpt-5.2" else "tokens"
     return CodexTruncationPolicy(mode=mode, limit=10_000)
 

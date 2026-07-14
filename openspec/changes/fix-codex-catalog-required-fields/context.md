@@ -21,6 +21,11 @@ rule: for example, `["custom", 42, {"type": "bad"}]` becomes `["custom"]`,
 while a non-list value becomes `[]`. This keeps one malformed optional value
 from turning the atomically decoded catalog into a 500 response.
 
+The same boundary validates explicit truncation policies. Operator metadata
+such as `{"truncation_policy": null}` or an object missing `limit` falls back
+to the model-compatible byte/token policy described above. Valid complete
+policies, including forward-compatible extra fields, remain authoritative.
+
 ## Failure mode
 
 Codex parses the complete `models` array atomically. For example, a visible

@@ -11,3 +11,5 @@
   validation, and the relevant broader gates.
 - [x] 6. Sanitize malformed model-source tool metadata at the Codex wire
   boundary and cover both native catalog aliases.
+- [x] 7. Fall back from malformed model-source truncation policies without
+  failing the complete Codex catalog.

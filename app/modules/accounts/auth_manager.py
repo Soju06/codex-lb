@@ -350,7 +350,8 @@ class AuthManager:
                 != requested_fingerprint
             ):
                 return _adopt_account_row(account, latest)
-            if time.monotonic() >= deadline:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 raise RefreshError(
                     "refresh_claim_timeout",
                     f"Token refresh for account {account.id} is claimed by another replica; "
@@ -358,7 +359,14 @@ class AuthManager:
                     False,
                     transport_error=True,
                 )
-            await asyncio.sleep(poll_seconds)
+            # Cap the per-iteration sleep to the remaining claim-wait budget.
+            # The configured poll interval may exceed what is left of the
+            # caller's deadline; sleeping the full interval would let this
+            # shielded task overrun the caller budget while still holding its
+            # repo session and the inflight singleflight entry that later
+            # callers join. Sleep the smaller of the poll interval and the time
+            # remaining so the claim wait is truly bounded by the caller budget.
+            await asyncio.sleep(min(poll_seconds, remaining))
 
     async def _perform_refresh(self, account: Account, *, refresh_token_encrypted: bytes) -> Account:
         attempted_fingerprint = _refresh_token_material_fingerprint(self._encryptor, refresh_token_encrypted)

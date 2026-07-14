@@ -1021,6 +1021,15 @@ class _StreamingRetryMixin:
                     except RefreshError as refresh_exc:
                         if refresh_exc.is_permanent:
                             await proxy._load_balancer.mark_permanent_failure(account, refresh_exc.code)
+                            # The account is now removed from selection, but its
+                            # stream-concurrency slot is still occupied by the
+                            # lease appended at selection. Release it before the
+                            # failover ``continue`` (matching the transient
+                            # branches) so the dead account's slot is freed
+                            # immediately instead of being held for the entire
+                            # duration of the replacement stream.
+                            await _release_tracked_stream_lease(current_account_lease)
+                            current_account_lease = None
                         elif (
                             refresh_exc.transport_error
                             and not require_preferred_account
@@ -1584,6 +1593,15 @@ class _StreamingRetryMixin:
                         except RefreshError as refresh_exc:
                             if refresh_exc.is_permanent:
                                 await proxy._load_balancer.mark_permanent_failure(account, refresh_exc.code)
+                                # The account is now removed from selection, but
+                                # its stream-concurrency slot is still occupied
+                                # by the lease appended at selection. Release it
+                                # before the failover ``continue`` (matching the
+                                # transient branches) so the dead account's slot
+                                # is freed immediately instead of being held for
+                                # the entire duration of the replacement stream.
+                                await _release_tracked_stream_lease(current_account_lease)
+                                current_account_lease = None
                             elif (
                                 refresh_exc.transport_error
                                 and not require_preferred_account

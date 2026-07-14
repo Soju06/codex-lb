@@ -83,11 +83,13 @@ After a successful upstream exchange, the system MUST persist the newly issued t
 
 ### Requirement: Refresh claim losers wait bounded and never degrade account status
 
-A process that fails to acquire the refresh claim MUST wait by polling within a bounded deadline (configurable cap, additionally bounded by the caller's refresh timeout budget). When it observes rotated refresh-token material it MUST return the stored tokens without an upstream call. When the deadline elapses it MUST fail with a transient (non-permanent) refresh error that is not recorded in the permanent-failure cooldown, and it MUST NOT write `reauth_required` or `deactivated`, so token-refresh recovery fails over to another account instead of blocking.
+A process that fails to acquire the refresh claim MUST wait by polling within a bounded deadline (configurable cap, additionally bounded by the caller's refresh timeout budget). Each per-iteration poll sleep MUST be capped to the time remaining before that deadline (the smaller of the configured poll interval and the remaining budget), and when no time remains the loop MUST stop polling and fail fast with the transient claim-timeout error; a shielded refresh task MUST NOT sleep a full poll interval past the caller's deadline, because doing so would overrun the caller budget while still holding its repo session and the inflight singleflight entry that later callers join. When it observes rotated refresh-token material it MUST return the stored tokens without an upstream call. When the deadline elapses it MUST fail with a transient (non-permanent) refresh error that is not recorded in the permanent-failure cooldown, and it MUST NOT write `reauth_required` or `deactivated`, so token-refresh recovery fails over to another account instead of blocking.
 
 When a process DOES win the claim (either immediately or after waiting on a foreign claim that released), and a caller refresh-timeout budget is in effect, the process MUST recompute the remaining budget (the caller's original deadline minus the elapsed wait) before starting the upstream OAuth exchange. Because the singleflight refresh body is shielded from caller cancellation and outlives a cancelled caller, it MUST NOT proceed into the exchange with the caller's ORIGINAL timeout budget still in force after a long wait: it MUST either fail fast with the transient (non-permanent) claim-timeout error when no budget remains, or cap the exchange timeout to the remaining budget, so a claim wait can never be followed by a full-budget exchange that overruns the request deadline and keeps the repo session and singleflight entry pinned past the budget.
 
 When a proxy stream turn NOT hard-pinned to a required account encounters this transient claim failure, the streaming retry loop MUST exclude the affected account and fail over to a different account rather than reselecting the claimed account until attempts are exhausted. This failover MUST apply to both the proactive freshness check on the first stream attempt (before any upstream 401) and the forced refresh on the post-401 recovery attempt. Before failing over, the loop MUST release the stream lease it already acquired for the skipped account so that account does not continue to consume one of its stream-concurrency slots for a stream that will never open. On this transient-claim failover the loop MUST also record a retryable `upstream_unavailable` stream error (mirroring the transient aiohttp/connect failover and the WebSocket connect loop): when EVERY candidate account hits a transient refresh-claim timeout before the stream opens and attempts are exhausted, the client MUST receive the temporary `upstream_unavailable` (retryable/capacity) condition rather than a misleading generic `no_accounts` response.
+
+When a proxy stream turn's proactive freshness check or post-401 forced (`force=True`) refresh raises a PERMANENT `RefreshError` (not a transient claim contention), the streaming retry loop MUST mark the account permanently failed (removing it from selection) AND MUST release the account's already-acquired stream lease BEFORE failing over to the next candidate. Marking the account failed removes it from future selection but does not itself free the stream-concurrency slot the lease occupies; because the failover streams on a different account for the remaining request duration, an unreleased lease would keep the dead account's slot held for that entire duration. This lease release MUST apply symmetrically to BOTH the proactive freshness check on the first stream attempt (before any upstream 401) AND the post-401 forced refresh, matching the transient branches' immediate release at failover.
 
 When a proxy stream turn IS hard-pinned to a required account — a session-continuity `previous_response_id` bound to a preferred account or a file-required preferred account, which sets `preferred_account_id` (and, for `previous_response_id`, `require_preferred_account`) — the movable failover above is correctly skipped so the request never crosses accounts (preserving the account-ownership invariant). But the streaming retry loop MUST NOT then fall through to an unconditional reselect that reselects the same pinned account until attempts are exhausted: on a transient (transport-level / non-permanent) refresh-claim failure for a hard-pinned stream, the loop MUST release the pinned account's already-acquired stream lease (no leaked slot) and MUST surface a retryable `upstream_unavailable` error promptly rather than spinning pointlessly on the held claim and then surfacing a misleading `no_accounts` result. This hard-pinned handling MUST apply symmetrically to BOTH the proactive freshness check on the first stream attempt (before any upstream 401) AND the forced (`force=True`) refresh on the post-401 recovery attempt, so a hard-pinned stream that opens, receives a 401, and then hits a transient claim timeout on its forced refresh also stays on the owner, releases the lease, and surfaces the retryable `upstream_unavailable` promptly instead of reselecting the same owner until exhaustion. The transient claim contention MUST NOT be recorded as a permanent failure. This does not apply to a locally verified cross-transport fresh-replay body, which may still move off the failed owner as specified elsewhere.
 
@@ -118,6 +120,13 @@ The compact-responses path MUST apply the same failover for a transient, transpo
 - **AND** it fails fast with the transient (non-permanent) claim-timeout error when no budget remains, rather than starting a full-budget exchange that overruns the request deadline
 - **AND** when some budget remains it caps the exchange timeout to that remaining budget
 
+#### Scenario: Claim poll sleep is bounded by the remaining caller budget
+
+- **GIVEN** a caller refresh-timeout budget smaller than the configured poll interval and a live foreign refresh claim that never releases within the budget
+- **WHEN** the losing replica polls for the claim to clear
+- **THEN** each poll sleep is capped to the smaller of the poll interval and the time remaining before the deadline
+- **AND** the loser fails with the transient (non-permanent) claim-timeout error bounded by the caller budget rather than sleeping a full poll interval past the deadline while pinning its repo session and singleflight entry
+
 #### Scenario: Proactive pre-stream claim timeout fails over instead of looping
 
 - **GIVEN** a proxy stream turn whose first-selected account is stale and needs a proactive refresh
@@ -142,6 +151,20 @@ The compact-responses path MUST apply the same failover for a transient, transpo
 - **WHEN** the streaming retry loop releases each account's stream lease, excludes it, and exhausts its attempts
 - **THEN** the client receives a retryable `upstream_unavailable` error rather than a generic `no_accounts` response
 - **AND** the transient claim contention is never recorded as a permanent failure
+
+#### Scenario: Permanent proactive-refresh failure releases the stream lease before failover
+
+- **GIVEN** a movable proxy stream turn whose first-selected account's proactive freshness check raises a PERMANENT `RefreshError`
+- **WHEN** the streaming retry loop marks the account permanently failed and fails over
+- **THEN** the account's already-acquired stream lease is released BEFORE the failover streams on the replacement account
+- **AND** the failed account never serves the stream while a healthy alternate does
+
+#### Scenario: Permanent post-401 forced-refresh failure releases the stream lease before failover
+
+- **GIVEN** a movable proxy stream turn that opens on its account, receives an upstream 401, and whose forced (`force=True`) refresh then raises a PERMANENT `RefreshError`
+- **WHEN** the streaming retry loop marks the account permanently failed and fails over
+- **THEN** the account's already-acquired stream lease is released BEFORE the failover streams on the replacement account
+- **AND** the failed account never serves the replacement stream while a healthy alternate does
 
 #### Scenario: Hard-pinned stream turn stays on its owner account on transient claim timeout
 

@@ -370,6 +370,77 @@ async def test_claim_wait_exhausting_budget_fails_fast_without_exchange(db_setup
 
 
 @pytest.mark.asyncio
+async def test_claim_poll_sleep_capped_to_remaining_caller_budget(db_setup, monkeypatch):
+    """Per-iteration poll sleep must be bounded by the caller budget.
+
+    With a live foreign claim the loser polls until its bounded wait elapses.
+    When the caller supplies a refresh budget SMALLER than the configured poll
+    interval, each poll sleep must be capped to what remains of the caller
+    deadline (``min(poll_interval, remaining)``) instead of sleeping the full
+    interval. The singleflight body is shielded from caller cancellation, so a
+    full-interval sleep would overrun the caller budget while holding the repo
+    session and the inflight singleflight entry that later callers join.
+
+    Before the fix the loop slept the full ~poll interval each iteration, so a
+    0.1s caller budget with a 3.0s poll interval blocked for ~3.0s before the
+    transient claim-timeout surfaced. The fix bounds the wait to the budget.
+    """
+    import time
+
+    from app.core.auth.refresh import (
+        pop_token_refresh_timeout_override,
+        push_token_refresh_timeout_override,
+    )
+
+    # Configured cap and poll interval both far exceed the caller budget so the
+    # only thing that can bound the wait is the per-iteration budget cap.
+    monkeypatch.setenv("CODEX_LB_TOKEN_REFRESH_CLAIM_WAIT_SECONDS", "5.0")
+    monkeypatch.setenv("CODEX_LB_TOKEN_REFRESH_CLAIM_POLL_SECONDS", "3.0")
+    get_settings.cache_clear()
+
+    account_id = "acc_claim_poll_budget_cap"
+    await _create_account(account_id)
+    await _insert_claim(account_id, claimed_by="other-replica", expires_in_seconds=60)
+
+    upstream_calls = 0
+
+    async def fake_refresh(refresh_token: str, **_kwargs: object) -> TokenRefreshResult:
+        nonlocal upstream_calls
+        upstream_calls += 1
+        return _rotated_result(account_id)
+
+    monkeypatch.setattr(auth_manager_module, "refresh_access_token", fake_refresh)
+
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        account = await repo.get_by_id(account_id)
+        assert account is not None
+        manager = AuthManager(repo, refresh_claims=RefreshClaimCoordinator(claimant_id="replica-b"))
+
+        token = push_token_refresh_timeout_override(0.1)
+        started = time.monotonic()
+        try:
+            with pytest.raises(RefreshError) as exc_info:
+                await asyncio.wait_for(manager.ensure_fresh(account, force=True), timeout=5)
+        finally:
+            pop_token_refresh_timeout_override(token)
+        elapsed = time.monotonic() - started
+
+    assert exc_info.value.code == "refresh_claim_timeout"
+    assert exc_info.value.is_permanent is False
+    assert exc_info.value.transport_error is True
+    assert upstream_calls == 0
+    # The wait was bounded by the ~0.1s caller budget, NOT the 3.0s poll
+    # interval. A generous ceiling keeps this deterministic under load while
+    # still failing loudly if the full poll interval is ever slept.
+    assert elapsed < 1.5, f"claim poll overran caller budget: {elapsed:.3f}s"
+    # The foreign claim was never won, so account material is untouched.
+    status, stored_refresh_token, _ = await _account_snapshot(account_id)
+    assert status == AccountStatus.ACTIVE
+    assert stored_refresh_token == "refresh-old"
+
+
+@pytest.mark.asyncio
 async def test_winner_adopts_rotation_committed_before_its_claim(db_setup, monkeypatch):
     """Post-claim fresh re-read: when the material already rotated, the claim
     winner must adopt it with zero upstream calls."""
@@ -860,6 +931,233 @@ async def test_proxy_preflight_claim_timeout_fails_over_and_releases_lease(async
     async with SessionLocal() as session:
         accounts = list((await session.execute(select(Account))).scalars().all())
         assert {account.status for account in accounts} == {AccountStatus.ACTIVE}
+
+
+@pytest.mark.asyncio
+async def test_proxy_preflight_permanent_refresh_releases_lease_before_failover(async_client, monkeypatch):
+    """Route-level regression for the pre-401 proactive-refresh PERMANENT branch.
+
+    A permanent ``RefreshError`` on the FIRST stream attempt (the proactive
+    freshness check, before any upstream 401) marks the account permanently
+    failed and fails over to another account. The failed account is removed from
+    selection, but its already-acquired stream lease must be released BEFORE the
+    failover ``continue`` -- otherwise the dead account's stream-concurrency slot
+    stays occupied for the entire duration of the replacement stream. Before the
+    fix the ``is_permanent`` branch fell through to ``continue`` without
+    releasing ``current_account_lease`` (P2: leaked slot on permanent failover).
+    """
+    import json
+
+    import app.modules.proxy.service as proxy_module
+
+    for raw_account_id, email in (
+        ("acc_preflight_perm_a", "preflight-perm-a@example.com"),
+        ("acc_preflight_perm_b", "preflight-perm-b@example.com"),
+    ):
+        auth_json = _make_auth_json(raw_account_id, email)
+        files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+        response = await async_client.post("/api/accounts/import", files=files)
+        assert response.status_code == 200
+
+    async with SessionLocal() as session:
+        account_ids = list((await session.execute(select(Account.id))).scalars().all())
+        assert len(account_ids) == 2
+        for account_id in account_ids:
+            session.add(
+                StickySession(
+                    key=f"sticky-perm-{account_id}",
+                    kind=StickySessionKind.STICKY_THREAD,
+                    account_id=account_id,
+                )
+            )
+        await session.commit()
+
+    # Whichever account the retry loop freshens first fails PERMANENTLY on the
+    # proactive, pre-401 freshness check; the other account freshens cleanly.
+    first_seen: dict[str, str | None] = {"account_id": None}
+
+    async def fake_ensure_fresh(self, account, *, force=False, timeout_seconds=None):
+        del self, force, timeout_seconds
+        if first_seen["account_id"] is None:
+            first_seen["account_id"] = account.id
+        if account.id == first_seen["account_id"]:
+            raise RefreshError(
+                "refresh_token_reused",
+                "refresh token reused",
+                True,
+            )
+        return account
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh)
+
+    # Track only the tracked stream-concurrency lease (kind == "stream"); the
+    # per-attempt ``response_create`` lease acquired inside ``_stream_once`` is a
+    # DIFFERENT lease and would otherwise mask whether the stream-concurrency
+    # slot was actually freed at failover.
+    released_lease_account_ids: list[str] = []
+    original_release = proxy_module.LoadBalancer.release_account_lease
+
+    async def spy_release(self, lease):
+        if lease is not None and lease.kind == "stream":
+            released_lease_account_ids.append(lease.account_id)
+        return await original_release(self, lease)
+
+    monkeypatch.setattr(proxy_module.LoadBalancer, "release_account_lease", spy_release)
+
+    streamed_account_ids: list[str] = []
+    released_before_stream: list[str] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
+        del payload, headers, access_token, base_url, raise_for_status, kwargs
+        if not streamed_account_ids:
+            released_before_stream.extend(released_lease_account_ids)
+        streamed_account_ids.append(account_id)
+        yield (
+            'data: {"type":"response.completed","response":{"id":"resp_preflight_perm_failover",'
+            '"object":"response","status":"completed","usage":{"input_tokens":2,"output_tokens":1}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        json={"model": "gpt-5.4", "instructions": "hi", "input": [], "stream": True},
+    ) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    events = [json.loads(line[6:]) for line in lines if line.startswith("data: ") and line != "data: [DONE]"]
+    assert any(event.get("type") == "response.completed" for event in events)
+
+    failed_account_id = first_seen["account_id"]
+    assert failed_account_id is not None
+    # The permanent failure removed the failed account from selection and failed
+    # over: it never reached the upstream stream, and a different account served.
+    assert failed_account_id not in streamed_account_ids
+    assert streamed_account_ids
+    assert streamed_account_ids[-1] != failed_account_id
+    # The failed account's stream lease was released BEFORE failover streaming
+    # (no leaked concurrency slot held for the replacement stream's duration).
+    assert failed_account_id in released_before_stream
+
+    # The permanent failure was recorded; the failover account stays ACTIVE.
+    async with SessionLocal() as session:
+        status_by_id = dict((await session.execute(select(Account.id, Account.status))).all())
+    assert status_by_id[failed_account_id] == AccountStatus.REAUTH_REQUIRED
+    other_id = next(account_id for account_id in status_by_id if account_id != failed_account_id)
+    assert status_by_id[other_id] == AccountStatus.ACTIVE
+
+
+@pytest.mark.asyncio
+async def test_proxy_post_401_permanent_refresh_releases_lease_before_failover(async_client, monkeypatch):
+    """Route-level regression for the post-401 forced-refresh PERMANENT branch.
+
+    The proactive freshness check succeeds so the stream opens; the upstream
+    returns a 401 and the subsequent forced (``force=True``) refresh fails
+    PERMANENTLY. The account is marked permanently failed and the request fails
+    over to another account. As with the proactive permanent branch, the failed
+    account's already-acquired stream lease must be released BEFORE the failover
+    ``continue`` so its stream-concurrency slot is not held for the entire
+    duration of the replacement stream.
+    """
+    import json
+
+    import app.modules.proxy.service as proxy_module
+
+    for raw_account_id, email in (
+        ("acc_post401_perm_a", "post401-perm-a@example.com"),
+        ("acc_post401_perm_b", "post401-perm-b@example.com"),
+    ):
+        auth_json = _make_auth_json(raw_account_id, email)
+        files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+        response = await async_client.post("/api/accounts/import", files=files)
+        assert response.status_code == 200
+
+    # The proactive freshness check (force=False) succeeds so the stream opens;
+    # the post-401 forced refresh (force=True) fails PERMANENTLY for the first
+    # account that reaches it. The other account never receives a 401.
+    first_forced: dict[str, str | None] = {"account_id": None}
+
+    async def fake_ensure_fresh(self, account, *, force=False, timeout_seconds=None):
+        del self, timeout_seconds
+        if force:
+            if first_forced["account_id"] is None:
+                first_forced["account_id"] = account.id
+            if account.id == first_forced["account_id"]:
+                raise RefreshError(
+                    "refresh_token_reused",
+                    "refresh token reused",
+                    True,
+                )
+        return account
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh)
+
+    # Track only the tracked stream-concurrency lease (kind == "stream"). The
+    # failed account opens a real stream (to receive the 401), so ``_stream_once``
+    # acquires and releases a separate ``response_create`` lease for it; without
+    # this filter that unrelated release would mask whether the stream-concurrency
+    # slot itself was freed at the permanent-failure failover.
+    released_lease_account_ids: list[str] = []
+    original_release = proxy_module.LoadBalancer.release_account_lease
+
+    async def spy_release(self, lease):
+        if lease is not None and lease.kind == "stream":
+            released_lease_account_ids.append(lease.account_id)
+        return await original_release(self, lease)
+
+    monkeypatch.setattr(proxy_module.LoadBalancer, "release_account_lease", spy_release)
+
+    streamed_account_ids: list[str] = []
+    released_before_failover_stream: list[str] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
+        del payload, headers, access_token, base_url, raise_for_status, kwargs
+        # First account opens then receives a 401 (triggering the forced
+        # refresh that fails permanently). The failover account streams cleanly.
+        if not streamed_account_ids:
+            streamed_account_ids.append(account_id)
+            raise proxy_module.ProxyResponseError(
+                401,
+                {"error": {"code": "invalid_api_key", "message": "token invalidated"}},
+            )
+        released_before_failover_stream.extend(released_lease_account_ids)
+        streamed_account_ids.append(account_id)
+        yield (
+            'data: {"type":"response.completed","response":{"id":"resp_post401_perm_failover",'
+            '"object":"response","status":"completed","usage":{"input_tokens":2,"output_tokens":1}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        json={"model": "gpt-5.4", "instructions": "hi", "input": [], "stream": True},
+    ) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    events = [json.loads(line[6:]) for line in lines if line.startswith("data: ") and line != "data: [DONE]"]
+    assert any(event.get("type") == "response.completed" for event in events)
+
+    failed_account_id = first_forced["account_id"]
+    assert failed_account_id is not None
+    # Two distinct accounts streamed: the one that opened, took the 401, and
+    # permanently failed its forced refresh, then the failover account.
+    assert len(set(streamed_account_ids)) == 2
+    assert streamed_account_ids[0] != streamed_account_ids[-1]
+    # The permanently-failed account's stream-concurrency lease was released
+    # BEFORE the failover account started streaming (no leaked slot held for the
+    # replacement stream's duration).
+    assert failed_account_id in released_before_failover_stream
+
+    async with SessionLocal() as session:
+        status_by_id = dict((await session.execute(select(Account.id, Account.status))).all())
+    assert status_by_id[failed_account_id] == AccountStatus.REAUTH_REQUIRED
+    other_id = next(account_id for account_id in status_by_id if account_id != failed_account_id)
+    assert status_by_id[other_id] == AccountStatus.ACTIVE
 
 
 @pytest.mark.asyncio

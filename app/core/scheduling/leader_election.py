@@ -531,22 +531,29 @@ class LeaderElection:
         """Run ``fn`` only while holding the leader lease.
 
         Heartbeats the lease every ``max(1, ttl // 3)`` seconds while the body
-        runs, except that each sleep is bounded by the time remaining until the
-        locally tracked lease deadline: a lease seeded from a preserved acquire
-        may have less than a renew interval left, and the heartbeat must wake to
-        renew (or demote when already past the deadline) before the database row
-        expires rather than sleeping a full interval past it. Each renewal
-        attempt is time-boxed to ``ttl / 6`` so a hung
-        database call cannot silently extend leadership: two consecutive
-        failed attempts (each costing at most interval + timeout = ttl / 2),
-        or any failed attempt after the locally tracked lease deadline has
-        passed, demote the holder no later than the lease TTL. The time-box is
-        enforced with ``asyncio.wait`` (not ``asyncio.wait_for``) so a renewal
-        whose cancellation cleanup itself stalls — e.g. a blocked rollback in
-        session teardown — cannot pin the heartbeat past the timeout: once the
-        timeout elapses the attempt is abandoned and counted as an error
-        immediately, without awaiting the renewal coroutine's unwinding. On
-        lease loss
+        runs, except that each sleep is capped so the renewal it schedules
+        BEGINS with enough budget to FINISH before the locally tracked lease
+        deadline: the sleep is bounded by ``remaining - renew_timeout`` (clamped
+        to ``[0, renew_interval]``) so that ``sleep + renew_timeout`` lands at or
+        before the deadline. A lease seeded from a preserved acquire may have
+        less than a renew interval — even less than a whole renewal time-box —
+        left; sleeping the full interval (or the whole remaining) would start
+        ``renew()`` at/after the deadline, so its time-box would run while the
+        database row has already expired and the gated body would keep acting as
+        leader for up to ``renew_timeout`` past the DB expiry while a follower is
+        free to acquire the row. Each renewal attempt is time-boxed to
+        ``ttl / 6``, and the wait is additionally bounded so it never extends
+        past the local deadline: a renewal still in flight at the deadline is
+        abandoned and demoted rather than left running, so the gated body is
+        cancelled the instant the deadline is reached with no successful
+        renewal. Two consecutive failed attempts, or any failed attempt at/after
+        the locally tracked lease deadline, demote the holder no later than the
+        lease TTL. The time-box is enforced with ``asyncio.wait`` (not
+        ``asyncio.wait_for``) so a renewal whose cancellation cleanup itself
+        stalls — e.g. a blocked rollback in session teardown — cannot pin the
+        heartbeat past the timeout: once the timeout elapses the attempt is
+        abandoned and counted as an error immediately, without awaiting the
+        renewal coroutine's unwinding. On lease loss
         the body is cancelled and awaited for at most
         ``_CANCEL_GRACE_SECONDS``; a body still draining shielded work after
         the grace is detached (its outcome is logged from a done callback),
@@ -621,14 +628,35 @@ class LeaderElection:
                         self._lease_deadline = None
                         lease_lost = True
                         return
-                    await asyncio.sleep(min(float(renew_interval), remaining))
+                    # Begin the renewal with enough budget to FINISH before the
+                    # deadline: cap the sleep so ``sleep + renew_timeout`` lands
+                    # at or before ``lease_deadline``. A preserved acquire can
+                    # leave less than one renew interval — even less than a whole
+                    # renewal time-box — on the lease; sleeping the full interval
+                    # (or the whole remaining) would start ``renew()`` at/after
+                    # the deadline, so its time-box would run while the database
+                    # row has already expired and the gated body would keep
+                    # acting as leader for up to ``renew_timeout`` past the DB
+                    # expiry (a follower is free to acquire the row in that gap).
+                    # When already within a time-box of the deadline the sleep is
+                    # 0 and the renewal fires immediately.
+                    sleep_budget = min(float(renew_interval), max(0.0, remaining - renew_timeout))
+                    await asyncio.sleep(sleep_budget)
                     inflight = asyncio.ensure_future(self.renew())
-                    # ``asyncio.wait`` returns on the timeout without cancelling
-                    # or awaiting ``inflight``, so a renewal whose cancellation
-                    # cleanup itself hangs cannot pin the heartbeat past the
-                    # time-box the way ``asyncio.wait_for`` (which awaits the
-                    # cancelled coroutine's unwinding) would.
-                    done, _ = await asyncio.wait({inflight}, timeout=renew_timeout)
+                    # Time-box the attempt to ``renew_timeout``, but never wait
+                    # PAST the local deadline: a renewal still in flight at the
+                    # deadline is abandoned and demoted rather than left to keep
+                    # the body running as leader past the lease expiry. Bounding
+                    # the wait this way guarantees the heartbeat wakes AT the
+                    # deadline (not a time-box later) so the gated body is
+                    # cancelled the instant the deadline is reached with no
+                    # successful renewal. ``asyncio.wait`` returns on the timeout
+                    # without cancelling or awaiting ``inflight``, so a renewal
+                    # whose cancellation cleanup itself hangs cannot pin the
+                    # heartbeat past the time-box the way ``asyncio.wait_for``
+                    # (which awaits the cancelled coroutine's unwinding) would.
+                    renew_wait = min(renew_timeout, max(0.0, lease_deadline - loop.time()))
+                    done, _ = await asyncio.wait({inflight}, timeout=renew_wait)
                     renew_task = inflight
                     inflight = None
                     try:

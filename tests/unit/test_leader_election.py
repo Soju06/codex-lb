@@ -1011,15 +1011,17 @@ async def test_run_if_leader_preserved_acquire_does_not_extend_local_deadline(
     assert result is None
     assert election.is_leader is False
     assert body_cancelled.is_set()
-    # With the fix the local deadline stays at the ~0.5s DB-confirmed expiry, so
-    # the first failed renewal (~renew_interval = 2s) already sits past the
-    # deadline and demotes immediately. The buggy full-TTL reset would instead
-    # keep leadership until a second failed renewal (~4s), outrunning the true
-    # DB lease.
+    # With the fix the local deadline stays at the ~0.5s DB-confirmed expiry.
+    # Because that is within one renewal time-box (ttl / 6 = 1s) of the
+    # deadline, the heartbeat renews IMMEDIATELY (capped sleep = 0) rather than
+    # sleeping a renew interval; the two instantly-failing renewals demote via
+    # the consecutive-error cap, all still at ~0s. The buggy full-TTL reset would
+    # instead sleep a full 2s interval between renewals and keep leadership until
+    # ~4s, outrunning the true DB lease.
     assert loop.time() - start < 3.0
-    # One preserved acquire attempt + exactly one renewal attempt before
-    # demotion; leadership was not extended to allow a second renewal window.
-    assert session.execute_calls == 2
+    # One preserved acquire attempt + two instantly-failing renewals (the
+    # consecutive-error cap), never a full-TTL renewal window.
+    assert session.execute_calls == 3
 
 
 @pytest.mark.asyncio
@@ -1202,11 +1204,87 @@ async def test_run_if_leader_bounds_heartbeat_sleep_by_remaining_lease(
     assert election.is_leader is False
     assert body_cancelled.is_set()
     # Bug: the heartbeat sleeps the full 10s renew_interval before its first
-    # renewal, running the body ~10s past the true DB expiry. Fix: it wakes by
-    # the ~0.3s deadline, renews (which fails past the deadline), and demotes.
+    # renewal, running the body ~10s past the true DB expiry. Fix: the ~0.3s
+    # remaining is within one renewal time-box (ttl / 6 = 5s) of the deadline, so
+    # the capped sleep is 0 and the renewals fire immediately; the two
+    # instantly-failing renewals demote via the consecutive-error cap at ~0s,
+    # never sleeping a renew interval.
     assert loop.time() - start < 3.0
-    # One preserved acquire attempt + exactly one renewal attempt before demotion.
+    # One preserved acquire attempt + two instantly-failing renewals.
+    assert session.execute_calls == 3
+
+
+@pytest.mark.asyncio
+async def test_run_if_leader_demotes_by_deadline_when_renewal_stalls_near_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Regression (P1): a preserved acquire can leave LESS than one renewal
+    # time-box (ttl / 6) on the local deadline. Bounding only the sleep by the
+    # remaining lease is not enough: if the renewal DB call / pool checkout then
+    # STALLS, the heartbeat would start renew() at the deadline and let its full
+    # ttl / 6 time-box run AFTER the DB lease has already expired, so the gated
+    # body keeps acting as leader for up to ttl / 6 past expiry while a follower
+    # is free to acquire the row. The heartbeat must instead begin the renewal
+    # early enough to finish before the deadline AND never wait past the
+    # deadline, so a renewal still in flight at the deadline is abandoned and the
+    # body is cancelled the instant the deadline is reached.
+    ttl = 6  # renew_interval = 2s, renew_timeout = ttl / 6 = 1.0s
+
+    class _StallingRenewSession(_FakeSession):
+        # The acquire fails (so try_acquire preserves the already-held lease with
+        # no DB write) and the following renewal hangs forever, modelling a
+        # stalled DB call / pool checkout on renewal.
+        def __init__(self) -> None:
+            super().__init__("postgresql", [])
+            self.execute_calls = 0
+
+        async def execute(self, statement: Any, params: Any = None) -> _FakeResult:
+            self.execute_calls += 1
+            if self.execute_calls == 1:
+                raise RuntimeError("db down")  # acquire fails -> preserve held lease
+            await asyncio.Event().wait()  # renewal stalls indefinitely
+            raise AssertionError("unreachable")
+
+    session = _StallingRenewSession()
+    _install(monkeypatch, session, ttl=ttl)
+
+    election = leader_election_module.LeaderElection(leader_id="node-a")
+    loop = asyncio.get_running_loop()
+    # Held lease with only ~0.5s left — less than the 1.0s renewal time-box.
+    election._is_leader = True
+    election._lease_deadline = loop.time() + 0.5
+
+    body_cancelled = asyncio.Event()
+
+    async def _body() -> str:
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            body_cancelled.set()
+            raise
+        return "ran"
+
+    start = loop.time()
+    result = await election.run_if_leader(_body)
+    elapsed = loop.time() - start
+
+    assert result is None
+    assert election.is_leader is False
+    assert body_cancelled.is_set()
+    # Fix: the stalled renewal is abandoned AT the ~0.5s deadline and the body is
+    # cancelled there. The pre-fix code sleeps to the deadline, then lets the
+    # renewal's full 1.0s time-box run past it (~1.5s total) with the body still
+    # acting as leader after the DB lease expired.
+    assert elapsed < 1.0
+    # One preserved acquire attempt + exactly one renewal: the stalled renewal
+    # consumed the wait budget up to the deadline and was abandoned there, so no
+    # second renewal fires (unlike the instantly-failing case, which retries).
     assert session.execute_calls == 2
+
+    # Drain any still-pending abandoned renewal task so the loop finalizes
+    # cleanly (it may already have been discarded once its cancellation unwound).
+    if election._abandoned_renewals:
+        await asyncio.wait(set(election._abandoned_renewals), timeout=1)
 
 
 @pytest.mark.asyncio

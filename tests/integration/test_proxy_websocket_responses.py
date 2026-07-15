@@ -12,6 +12,8 @@ from starlette.websockets import WebSocketDisconnect
 
 import app.modules.proxy.api as proxy_api_module
 import app.modules.proxy.service as proxy_module
+from app.core.clients.proxy import ProxyResponseError
+from app.core.errors import openai_error
 from app.core.utils.request_id import get_request_id
 
 pytestmark = pytest.mark.integration
@@ -7409,7 +7411,7 @@ async def test_proxy_responses_websocket_prioritizes_precreated_replay_when_both
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("during_idle_recheck", [False, True], ids=["receive-wait", "idle-recheck"])
-@pytest.mark.parametrize("completion_phase", ["prepare", "admission"])
+@pytest.mark.parametrize("completion_phase", ["prepare", "admission", "owner_lookup"])
 async def test_proxy_responses_websocket_defers_prepared_frame_when_replay_completes_late(
     monkeypatch,
     during_idle_recheck,
@@ -7430,6 +7432,7 @@ async def test_proxy_responses_websocket_defers_prepared_frame_when_replay_compl
     deferred_to_idle_wait = False
     third_prepare_calls = 0
     third_admission_calls = 0
+    third_owner_lookup_calls = 0
     quota_reservation_calls = 0
     third_request_state: Any | None = None
 
@@ -7470,6 +7473,8 @@ async def test_proxy_responses_websocket_defers_prepared_frame_when_replay_compl
     first_request = request_payload("first")
     second_request = request_payload("second")
     third_request = request_payload("third")
+    if completion_phase == "owner_lookup":
+        third_request["previous_response_id"] = "resp_ws_late_prepare_owner"
 
     class _CoordinatedDownstreamWebSocket:
         def __init__(self) -> None:
@@ -7621,6 +7626,26 @@ async def test_proxy_responses_websocket_defers_prepared_frame_when_replay_compl
                 await asyncio.sleep(0)
         await original_acquire_admission(self, request_state, **kwargs)
 
+    async def coordinated_resolve_previous_response_owner(self, **kwargs):
+        nonlocal third_owner_lookup_calls
+        del self
+        assert kwargs["previous_response_id"] == "resp_ws_late_prepare_owner"
+        third_owner_lookup_calls += 1
+        if third_owner_lookup_calls == 1:
+            allow_upstream_close.set()
+            await replay_state_ready.wait()
+            await reader_finished.wait()
+            await asyncio.sleep(0)
+            raise ProxyResponseError(
+                502,
+                openai_error(
+                    "previous_response_owner_lookup_failed",
+                    "Previous response owner lookup failed.",
+                    error_type="server_error",
+                ),
+            )
+        return "acct_ws_late_prepare_2"
+
     original_reserve_quota = proxy_module.ProxyService._reserve_websocket_api_key_usage
 
     async def capture_reserve_quota(self, *args, **kwargs):
@@ -7676,6 +7701,11 @@ async def test_proxy_responses_websocket_defers_prepared_frame_when_replay_compl
         "_acquire_request_state_response_create_admission",
         coordinated_acquire_admission,
     )
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_resolve_websocket_previous_response_owner",
+        coordinated_resolve_previous_response_owner,
+    )
     monkeypatch.setattr(proxy_module.ProxyService, "_reserve_websocket_api_key_usage", capture_reserve_quota)
     monkeypatch.setattr(service._load_balancer, "release_account_lease", fake_release_account_lease)
     monkeypatch.setattr(proxy_module.asyncio, "wait", deterministic_wait)
@@ -7723,6 +7753,7 @@ async def test_proxy_responses_websocket_defers_prepared_frame_when_replay_compl
     assert third_prepare_calls == 1
     assert quota_reservation_calls == 3
     assert third_admission_calls == (2 if completion_phase == "admission" else 1)
+    assert third_owner_lookup_calls == (2 if completion_phase == "owner_lookup" else 0)
     assert released_stream_leases == stream_leases
     assert released_response_leases == response_leases
     assert third_request_state is not None
@@ -7737,7 +7768,10 @@ async def test_proxy_responses_websocket_defers_prepared_frame_when_replay_compl
 @pytest.mark.asyncio
 @pytest.mark.parametrize("during_idle_recheck", [False, True], ids=["receive-wait", "idle-recheck"])
 @pytest.mark.parametrize("terminal_outcome", ["disconnect", "failure", "cancelled"])
-@pytest.mark.parametrize("terminal_phase", ["upstream-close", "stream-lease-release", "reconnect"])
+@pytest.mark.parametrize(
+    "terminal_phase",
+    ["upstream-close", "stream-lease-release", "reconnect", "capacity-success", "capacity-error"],
+)
 async def test_proxy_responses_websocket_late_terminal_receive_stops_replay_at_next_safe_boundary(
     monkeypatch,
     during_idle_recheck,
@@ -7755,7 +7789,7 @@ async def test_proxy_responses_websocket_late_terminal_receive_stops_replay_at_n
     deferred_to_idle_wait = False
     captured_request_states: list[Any] = []
     stream_leases = [object(), object()]
-    response_lease = object()
+    response_leases = [object(), object()]
     released_stream_leases: list[object] = []
     released_response_leases: list[object] = []
     response_lease_calls = 0
@@ -7858,7 +7892,21 @@ async def test_proxy_responses_websocket_late_terminal_receive_stops_replay_at_n
         nonlocal response_lease_calls
         del self, kwargs
         response_lease_calls += 1
-        return response_lease
+        if response_lease_calls == 2 and terminal_phase in {"capacity-success", "capacity-error"}:
+            terminal_phase_waiting.set()
+            release_terminal.set()
+            await terminal_completed.wait()
+            await asyncio.sleep(0)
+            if terminal_phase == "capacity-error":
+                raise ProxyResponseError(
+                    429,
+                    openai_error(
+                        "account_response_create_overloaded",
+                        "Account response-create capacity is exhausted.",
+                        error_type="server_error",
+                    ),
+                )
+        return response_leases[response_lease_calls - 1]
 
     async def fake_release_account_lease(lease):
         if lease in stream_leases:
@@ -7872,7 +7920,7 @@ async def test_proxy_responses_websocket_late_terminal_receive_stops_replay_at_n
                 await terminal_completed.wait()
                 await asyncio.sleep(0)
             released_stream_leases.append(lease)
-        elif lease is response_lease:
+        elif lease in response_leases:
             released_response_leases.append(lease)
         elif lease is not None:
             pytest.fail("unexpected account lease released")
@@ -7882,7 +7930,14 @@ async def test_proxy_responses_websocket_late_terminal_receive_stops_replay_at_n
     async def coordinated_relay(self, websocket, upstream, **kwargs):
         await original_relay(self, websocket, upstream, **kwargs)
         if upstream is first_upstream:
-            assert kwargs["upstream_control"].replay_request_state is not None
+            replay_state = kwargs["upstream_control"].replay_request_state
+            assert replay_state is not None
+            if terminal_phase in {"capacity-success", "capacity-error"}:
+                assert replay_state.account_response_create_lease is response_leases[0]
+                assert replay_state.account_response_create_release is not None
+                await replay_state.account_response_create_release(replay_state.account_response_create_lease)
+                replay_state.account_response_create_lease = None
+                replay_state.account_response_create_release = None
             replay_state_ready.set()
 
     original_acquire_admission = proxy_module.ProxyService._acquire_request_state_response_create_admission
@@ -7960,7 +8015,8 @@ async def test_proxy_responses_websocket_late_terminal_receive_stops_replay_at_n
     else:
         await asyncio.wait_for(proxy_call, timeout=2.0)
 
-    expected_connect_calls = 2 if terminal_phase == "reconnect" else 1
+    capacity_phase = terminal_phase in {"capacity-success", "capacity-error"}
+    expected_connect_calls = 2 if terminal_phase == "reconnect" or capacity_phase else 1
     assert forced_upstream_only_wait is True
     assert deferred_to_idle_wait is during_idle_recheck
     assert replay_state_ready.is_set()
@@ -7975,13 +8031,16 @@ async def test_proxy_responses_websocket_late_terminal_receive_stops_replay_at_n
     assert len(captured_request_states) == expected_connect_calls
     assert all(request_state is captured_request_states[0] for request_state in captured_request_states)
     assert replay_upstream.sent_text == []
-    assert replay_upstream.closed is (terminal_phase == "reconnect")
-    assert list(upstreams) == ([] if terminal_phase == "reconnect" else [replay_upstream])
+    assert replay_upstream.closed is (terminal_phase == "reconnect" or capacity_phase)
+    assert list(upstreams) == ([] if terminal_phase == "reconnect" or capacity_phase else [replay_upstream])
     assert admission_calls == 1
     assert quota_reservation_calls == 1
-    assert response_lease_calls == 1
+    assert response_lease_calls == (2 if capacity_phase else 1)
     assert released_stream_leases == stream_leases[:expected_connect_calls]
-    assert released_response_leases == [response_lease]
+    expected_released_response_leases = (
+        response_leases if terminal_phase == "capacity-success" else [response_leases[0]]
+    )
+    assert released_response_leases == expected_released_response_leases
     request_state = captured_request_states[0]
     assert request_state.response_create_gate is None
     assert request_state.response_create_gate_acquired is False

@@ -704,6 +704,7 @@ class _WebSocketMixin:
         upstream_account_id: str | None = None
         downstream_activity = _DownstreamWebSocketActivity()
         downstream_receive_task: asyncio.Task[Any] | None = None
+        downstream_receive_failure_in_progress = False
         replay_request_state: _WebSocketRequestState | None = None
         deferred_prepared_request: _PreparedWebSocketRequest | None = None
 
@@ -736,13 +737,14 @@ class _WebSocketMixin:
             account = None
 
         def completed_downstream_receive_is_terminal() -> bool:
-            nonlocal downstream_receive_task
+            nonlocal downstream_receive_failure_in_progress, downstream_receive_task
             if downstream_receive_task is None or not downstream_receive_task.done():
                 return False
             completed_downstream_receive_task = downstream_receive_task
             if _completed_downstream_receive_failed(completed_downstream_receive_task):
                 downstream_receive_task = None
                 downstream_activity.mark_disconnected()
+                downstream_receive_failure_in_progress = True
                 completed_downstream_receive_task.result()
             completed_message = completed_downstream_receive_task.result()
             if completed_message["type"] != "websocket.disconnect":
@@ -1117,6 +1119,11 @@ class _WebSocketMixin:
                             surface="websocket",
                         )
                     except ProxyResponseError as exc:
+                        await retire_completed_upstream_reader()
+                        if completed_downstream_receive_is_terminal():
+                            break
+                        if defer_prepared_request_for_replay(prepared_request):
+                            continue
                         error = _parse_openai_error(exc.payload)
                         error_code = _normalize_error_code(
                             error.code if error else None,
@@ -1514,6 +1521,10 @@ class _WebSocketMixin:
                         with _websocket_archive_request_context(archive_request_id):
                             await upstream.send_bytes(bytes_data)
                 except ProxyResponseError as exc:
+                    if downstream_receive_failure_in_progress:
+                        raise
+                    if completed_downstream_receive_is_terminal():
+                        break
                     error = _parse_openai_error(exc.payload)
                     error_code = _normalize_error_code(error.code if error else None, error.type if error else None)
                     error_message = error.message if error and error.message else "Upstream error"
@@ -1537,6 +1548,10 @@ class _WebSocketMixin:
                         )
                     continue
                 except Exception:
+                    if downstream_receive_failure_in_progress:
+                        raise
+                    if completed_downstream_receive_is_terminal():
+                        break
                     replay_refusal_reasons: list[str] = []
                     replay_candidate = await _pop_replayable_precreated_websocket_request_state(
                         pending_requests,

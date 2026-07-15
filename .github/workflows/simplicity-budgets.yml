@@ -51,6 +51,9 @@ jobs:
         # labels. push and merge_group runs have no PR — the override never
         # applies there; main must always satisfy the budgets in-file.
         if: github.event_name == 'pull_request'
+        # Explicit bash so the step runs with -o pipefail: a failed label
+        # lookup must fail the step loudly, not silently yield empty labels.
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}

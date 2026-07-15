@@ -36,7 +36,7 @@ from app.core.clients.oauth import (
     generate_pkce_pair,
     request_device_code,
 )
-from app.core.config.settings import get_settings
+from app.core.config.settings import OAUTH_CALLBACK_PORT, OAUTH_REDIRECT_URI, get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError, resolve_upstream_route
@@ -561,7 +561,7 @@ class OauthService:
                 callback_server = OAuthCallbackServer(
                     self._handle_callback,
                     host=settings.oauth_callback_host,
-                    port=settings.oauth_callback_port,
+                    port=OAUTH_CALLBACK_PORT,
                 )
                 self._store._callback_server = callback_server
 
@@ -589,7 +589,7 @@ class OauthService:
             flow_id=flow_id,
             method="browser",
             authorization_url=authorization_url,
-            callback_url=settings.oauth_redirect_uri,
+            callback_url=OAUTH_REDIRECT_URI,
         )
 
     async def manual_callback(self, callback_url: str, flow_id: str | None = None) -> ManualCallbackResponse:

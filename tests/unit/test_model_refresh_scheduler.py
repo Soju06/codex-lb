@@ -113,9 +113,6 @@ async def test_refresh_access_token_marks_transport_errors(monkeypatch: pytest.M
         refresh_module,
         "get_settings",
         lambda: SimpleNamespace(
-            auth_base_url="https://auth.example.test",
-            oauth_client_id="client-id",
-            oauth_scope="openid profile",
             token_refresh_timeout_seconds=15.0,
         ),
     )

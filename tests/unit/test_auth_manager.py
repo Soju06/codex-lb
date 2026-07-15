@@ -2366,7 +2366,7 @@ async def test_permanent_failure_status_cas_exhaustion_surfaces_transient_error(
 async def test_claim_wait_is_capped_by_caller_refresh_budget(monkeypatch):
     """Regression: the shielded singleflight body outlives a cancelled caller,
     so a foreign refresh claim must not keep it polling for the full
-    ``token_refresh_claim_wait_seconds`` (8s default) when the caller's
+    fixed claim wait (``_TOKEN_REFRESH_CLAIM_WAIT_SECONDS``, 8s) when the caller's
     remaining request budget is far smaller."""
 
     class _ForeignClaims:

@@ -25,7 +25,7 @@ from app.core.clients.codex import (
     require_route_or_direct_egress_opt_in,
 )
 from app.core.clients.http import lease_http_session
-from app.core.config.settings import get_settings
+from app.core.config.settings import AUTH_BASE_URL, OAUTH_CLIENT_ID, OAUTH_SCOPE, get_settings
 from app.core.types import JsonObject
 from app.core.upstream_proxy import ResolvedUpstreamRoute
 from app.core.utils.request_id import get_request_id
@@ -199,12 +199,12 @@ async def refresh_access_token(
     allow_direct_egress: bool = False,
 ) -> TokenRefreshResult:
     settings = get_settings()
-    url = f"{settings.auth_base_url.rstrip('/')}/oauth/token"
+    url = f"{AUTH_BASE_URL}/oauth/token"
     payload = {
         "grant_type": "refresh_token",
-        "client_id": settings.oauth_client_id,
+        "client_id": OAUTH_CLIENT_ID,
         "refresh_token": refresh_token,
-        "scope": settings.oauth_scope,
+        "scope": OAUTH_SCOPE,
     }
     timeout = aiohttp.ClientTimeout(total=_effective_token_refresh_timeout(settings.token_refresh_timeout_seconds))
 

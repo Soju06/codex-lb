@@ -618,11 +618,4 @@ def _settings(
         auth_guardian_enabled=auth_guardian_enabled,
         leader_election_enabled=leader_election_enabled,
         http_responses_session_bridge_instance_ring=instance_ring or [],
-        auth_guardian_interval_seconds=21600,
-        auth_guardian_max_refresh_age_seconds=12 * 3600,
-        auth_guardian_batch_size=10,
-        auth_guardian_concurrency=1,
-        auth_guardian_jitter_seconds=0.0,
-        auth_guardian_failure_backoff_base_seconds=300.0,
-        auth_guardian_failure_backoff_max_seconds=3600.0,
     )

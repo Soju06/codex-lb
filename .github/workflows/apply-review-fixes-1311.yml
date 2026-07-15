@@ -1,0 +1,168 @@
+name: Apply PR 1311 review fixes
+
+on:
+  push:
+    branches:
+      - codex/add-native-client-loopback-controls-spec
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: ${{ !contains(github.event.head_commit.message, '[review-fix-applied]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git clone --branch "$GITHUB_REF_NAME" --single-branch \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" repo
+
+      - name: Apply reviewed specification fixes
+        working-directory: repo
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          native = Path("openspec/changes/add-native-client-loopback-controls/specs/native-client-routing/spec.md")
+          text = native.read_text()
+
+          old = """Native OAuth classification SHALL remain bounded and unambiguous. After the
+          `sk-clb-*` reservation requirement has handed API-key requests to their
+          existing path, the feature SHALL treat a remaining request as an OAuth attempt
+          when it carries either a non-API-key Bearer or
+          `chatgpt-account-id`. Once an OAuth attempt exists, classification MUST require
+          all of the following:
+          """
+          new = """Native OAuth classification SHALL remain bounded and unambiguous. After the
+          `sk-clb-*` reservation requirement has handed API-key requests to their
+          existing path, the feature MUST first exclude generic top-level `/v1`, the
+          existing usage/reset-credit utilities, internal replica routes, model-source
+          routes, generic SDK routes, and every other path outside the finite native route
+          table. Those excluded requests retain existing authentication and routing even
+          when they carry a non-API-key Bearer or `chatgpt-account-id`, and MUST NOT read
+          native policy. Only a remaining exact tabled native-route candidate SHALL be
+          treated as an OAuth attempt when it carries either identity field. Once an OAuth
+          attempt exists, classification MUST require all of the following:
+          """
+          assert text.count(old) == 1
+          text = text.replace(old, new)
+
+          old = """Exactly one terminal slash MAY be removed only from `/api/codex/usage/` and
+          `/api/codex/rate-limit-reset-credits/consume/`, matching their existing
+          registered aliases. Other trailing slashes MUST NOT become OAuth aliases.
+          """
+          new = """The existing terminal-slash aliases for `/api/codex/usage/` and
+          `/api/codex/rate-limit-reset-credits/consume/` remain owned by their existing
+          utility routes and outside this classifier. No trailing slash becomes a native
+          OAuth relay alias.
+          """
+          assert text.count(old) == 1
+          text = text.replace(old, new)
+
+          for row in (
+              "| `GET` | `/api/codex/usage` | ChatGPT `/wham/usage` |\n",
+              "| `POST` | `/api/codex/rate-limit-reset-credits/consume` | ChatGPT `/wham/rate-limit-reset-credits/consume` |\n",
+          ):
+              assert text.count(row) == 1
+              text = text.replace(row, "")
+
+          old = """`file_id` MUST be 1..256 ASCII bytes matching `[A-Za-z0-9._:-]+`. Top-level
+          `/v1`, internal replica routes, model-source routes, generic SDK routes, and all
+          unknown method/path pairs MUST retain existing behavior and MUST NOT enter the
+          OAuth relay.
+          """
+          new = """`file_id` MUST be 1..256 ASCII bytes matching `[A-Za-z0-9._:-]+`. Top-level
+          `/v1`, the existing `/api/codex/usage` and reset-credit utilities, internal
+          replica routes, model-source routes, generic SDK routes, and all unknown
+          method/path pairs MUST retain existing behavior and MUST NOT enter the OAuth
+          relay. In particular, the usage/reset-credit utilities preserve their existing
+          ChatGPT-Bearer contract when API-key auth is enabled or disabled; they do not
+          read this policy and MUST NOT receive
+          `native_client_routing_api_key_auth_incompatible` from this feature.
+          """
+          assert text.count(old) == 1
+          text = text.replace(old, new)
+
+          marker = """#### Scenario: Generic top-level v1 request is made
+
+          - **WHEN** any request targets `/v1/<rest>` under either policy
+          - **THEN** it follows existing generic authentication and routing
+          - **AND** native OAuth classification is not invoked
+          """
+          addition = marker + """
+          #### Scenario: Existing usage utility receives ChatGPT OAuth
+
+          - **WHEN** a client calls `/api/codex/usage` or the reset-credit utility with
+            its existing ChatGPT Bearer and account identity while API-key auth is enabled
+          - **THEN** the existing utility-route authentication and upstream behavior apply
+          - **AND** native policy is not read and no native-routing incompatibility is returned
+          """
+          assert text.count(marker) == 1
+          text = text.replace(marker, addition)
+          native.write_text(text)
+
+          frontend = Path("openspec/changes/add-native-client-loopback-controls/specs/frontend-architecture/spec.md")
+          text = frontend.read_text()
+          old = """If provided, static attachment guidance SHALL remain visually secondary and
+          limited to attaching Codex App/CLI and a compatible OpenClaw Codex-native
+          provider to `http://127.0.0.1:2455/backend-api/codex`. It SHALL explain that
+          attachment is a one-time prerequisite distinct from the routine policy action.
+          """
+          new = """If provided, static attachment guidance SHALL remain visually secondary and
+          limited to attaching Codex App/CLI and a compatible OpenClaw Codex-native
+          provider to `http://127.0.0.1:<effective-port>/backend-api/codex`. The page MUST
+          derive `<effective-port>` from the server's effective runtime listen/advertised
+          configuration, whose default is `2455`; it MUST NOT hardcode the default when a
+          non-default port is active. If the effective loopback endpoint cannot be
+          determined, the endpoint-specific guidance MUST be omitted rather than showing a
+          potentially dead address. The guidance SHALL explain that attachment is a
+          one-time prerequisite distinct from the routine policy action.
+          """
+          assert text.count(old) == 1
+          text = text.replace(old, new)
+
+          marker = """#### Scenario: Operator reads attachment guidance
+
+          - **WHEN** the page shows setup information for Codex or OpenClaw
+          - **THEN** it presents instructions and the fixed endpoint without claiming
+            local configuration was inspected
+          - **AND** no action on the page changes files or process state
+          """
+          replacement = """#### Scenario: Operator reads attachment guidance
+
+          - **WHEN** the page shows setup information for Codex or OpenClaw
+          - **THEN** it presents instructions and the runtime-derived loopback endpoint
+            without claiming client configuration was inspected
+          - **AND** no action on the page changes files or process state
+
+          #### Scenario: Server uses a non-default port
+
+          - **WHEN** the effective runtime port is not `2455`
+          - **THEN** attachment guidance shows that effective port
+          - **AND** it does not direct the operator to the inactive default endpoint
+          """
+          assert text.count(marker) == 1
+          text = text.replace(marker, replacement)
+          frontend.write_text(text)
+
+          Path(".github/workflows/apply-review-fixes-1311.yml").unlink()
+          PY
+
+      - name: Validate OpenSpec
+        working-directory: repo
+        run: |
+          npx --yes @fission-ai/openspec@1.6.0 validate add-native-client-loopback-controls --strict
+          npx --yes @fission-ai/openspec@1.6.0 validate --all --strict
+          git diff --check
+
+      - name: Commit reviewed fixes
+        working-directory: repo
+        run: |
+          git config user.name "dmdfami"
+          git config user.email "222630288+dmdfami@users.noreply.github.com"
+          git add -A
+          git commit -m "docs(openspec): address native routing review feedback [review-fix-applied]"
+          git push origin HEAD:"$GITHUB_REF_NAME"

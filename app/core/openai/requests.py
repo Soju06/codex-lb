@@ -44,6 +44,7 @@ _COMPACT_TOOL_CALL_ITEM_TYPES = frozenset({"function_call", "custom_tool_call", 
 _COMPACT_TOOL_CALL_OUTPUT_ITEM_TYPES = frozenset(
     {"function_call_output", "custom_tool_call_output", "apply_patch_call_output"}
 )
+_COMPACT_SIDE_EFFECT_TOOL_ITEM_TYPES = frozenset({"apply_patch_call", "apply_patch_call_output"})
 _GOAL_CONTINUATION_CONTEXT_PREFIX = '<codex_internal_context source="goal">'
 _PLAN_MODE_CONTEXT_PREFIX = "<collaboration_mode># Plan Mode"
 
@@ -920,46 +921,36 @@ def _trim_compact_input_for_upstream(payload: MutableJsonObject) -> None:
 
     head_count = _compact_trim_prefix_count(token_counts)
     preserved_indices = _compact_state_anchor_indices(input_value)
-    required_indices = set(preserved_indices)
-    if input_value:
-        latest_index = len(input_value) - 1
-        latest_item = input_value[latest_index]
-        latest_mapping = _json_mapping_or_none(latest_item)
-        latest_type = latest_mapping.get("type") if latest_mapping is not None else None
-        # A terminal compact trigger commonly follows a very large command
-        # result. Requiring an arbitrary non-state tool item to survive
-        # byte-identical can make compaction impossible; the paired call/output
-        # is safe to omit together and is represented by the trim marker.
-        # User messages and state-tool items remain fail-closed anchors.
-        if latest_type not in _COMPACT_TOOL_CALL_ITEM_TYPES | _COMPACT_TOOL_CALL_OUTPUT_ITEM_TYPES:
-            required_indices.add(latest_index)
-        elif latest_mapping is not None and _compact_item_is_state_anchor(latest_mapping):
-            required_indices.add(latest_index)
-        elif latest_type in _COMPACT_TOOL_CALL_ITEM_TYPES:
-            paired_tail = _compact_reconciled_tool_call_indices(
-                input_value,
-                {latest_index},
-                token_counts=token_counts,
-                token_budget=_MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS,
-            )
-            if latest_index in paired_tail or token_counts[latest_index] <= _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS:
-                required_indices.update(paired_tail or {latest_index})
-        else:
-            paired_tail = _compact_reconciled_tool_call_indices(
-                input_value,
-                {latest_index},
-                token_counts=token_counts,
-                token_budget=_MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS,
-            )
-            if latest_index in paired_tail:
-                required_indices.update(paired_tail)
     required_indices = _compact_reconciled_tool_call_indices(
         input_value,
-        required_indices,
+        preserved_indices,
         token_counts=token_counts,
         token_budget=sum(token_counts),
-        required_indices=required_indices,
+        required_indices=preserved_indices,
     )
+    terminal_indices, terminal_is_required = _compact_terminal_required_indices(
+        input_value,
+        token_counts=token_counts,
+        has_previous_response_anchor=_compact_has_previous_response_anchor(payload),
+    )
+    if terminal_indices:
+        prospective_required_indices = required_indices | terminal_indices
+        prospective_required_indices = _compact_reconciled_tool_call_indices(
+            input_value,
+            prospective_required_indices,
+            token_counts=token_counts,
+            token_budget=sum(token_counts),
+            required_indices=prospective_required_indices,
+        )
+        prospective_required_input = _compact_trimmed_input_with_markers(
+            input_value,
+            token_counts,
+            prospective_required_indices,
+        )
+        if terminal_is_required or (
+            _estimated_json_tokens(prospective_required_input) <= _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS
+        ):
+            required_indices = prospective_required_indices
     required_input = _compact_trimmed_input_with_markers(input_value, token_counts, required_indices)
     required_tokens = _estimated_json_tokens(required_input)
     if required_tokens > _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS:
@@ -1011,6 +1002,66 @@ def _trim_compact_input_for_upstream(payload: MutableJsonObject) -> None:
     if trimmed_input is input_value:
         return
     payload["input"] = trimmed_input
+
+
+def _compact_has_previous_response_anchor(payload: Mapping[str, JsonValue]) -> bool:
+    previous_response_id = payload.get("previous_response_id")
+    return isinstance(previous_response_id, str) and bool(previous_response_id.strip())
+
+
+def _compact_terminal_required_indices(
+    input_value: list[JsonValue],
+    *,
+    token_counts: list[int],
+    has_previous_response_anchor: bool,
+) -> tuple[set[int], bool]:
+    """Return terminal context and whether it must remain even when oversized."""
+
+    if not input_value:
+        return set(), False
+
+    latest_index = len(input_value) - 1
+    latest_mapping = _json_mapping_or_none(input_value[latest_index])
+    latest_type = latest_mapping.get("type") if latest_mapping is not None else None
+    if latest_type not in _COMPACT_TOOL_CALL_ITEM_TYPES | _COMPACT_TOOL_CALL_OUTPUT_ITEM_TYPES:
+        return {latest_index}, True
+    if latest_mapping is not None and _compact_item_is_state_anchor(latest_mapping):
+        return _compact_reconciled_tool_call_indices(
+            input_value,
+            {latest_index},
+            token_counts=token_counts,
+            token_budget=sum(token_counts),
+            required_indices={latest_index},
+        ), True
+    if latest_type in _COMPACT_SIDE_EFFECT_TOOL_ITEM_TYPES:
+        return _compact_reconciled_tool_call_indices(
+            input_value,
+            {latest_index},
+            token_counts=token_counts,
+            token_budget=sum(token_counts),
+            required_indices={latest_index},
+        ), True
+    if latest_type in _COMPACT_TOOL_CALL_OUTPUT_ITEM_TYPES and has_previous_response_anchor:
+        return _compact_reconciled_tool_call_indices(
+            input_value,
+            {latest_index},
+            token_counts=token_counts,
+            token_budget=sum(token_counts),
+            required_indices={latest_index},
+        ), True
+
+    paired_tail = _compact_reconciled_tool_call_indices(
+        input_value,
+        {latest_index},
+        token_counts=token_counts,
+        token_budget=_MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS,
+    )
+    if latest_type in _COMPACT_TOOL_CALL_ITEM_TYPES:
+        if latest_index in paired_tail or token_counts[latest_index] <= _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS:
+            return paired_tail or {latest_index}, False
+    elif latest_index in paired_tail:
+        return paired_tail, False
+    return set(), False
 
 
 def _compact_fit_selected_indices_to_wire_budget(

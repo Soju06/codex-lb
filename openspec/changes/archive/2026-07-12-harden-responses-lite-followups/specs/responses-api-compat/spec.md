@@ -10,17 +10,12 @@ After a request is classified as Responses Lite shaped, the service MUST preserv
 - **THEN** every required `additional_tools` item remains in the upstream input
 - **AND** typed and role-only system/developer state remains in the upstream input
 
-#### Scenario: Compact input keeps a latest tool pair that fits
+#### Scenario: Oversized compact input keeps the latest tool item
 
-- **WHEN** compact trimming is required, the latest input item is a tool call or tool output, and its complete pair fits the wire budget
+- **WHEN** compact trimming is required and the latest input item is a tool call or tool output
 - **THEN** the latest item remains in the upstream input
 - **AND** any matching call or output present in the supplied input is retained with it
-
-#### Scenario: Oversized non-state tool tail does not block compaction
-
-- **WHEN** the latest input item is a non-state tool call or output whose complete pair cannot fit the compact wire budget
-- **THEN** the service omits the call and output together and represents the omission with a compact-trim marker
-- **AND** user messages and state-tool items remain required fail-closed anchors
+- **AND** the service returns `responses_compact_input_too_large` instead of silently dropping the latest item when the required pair cannot fit
 
 #### Scenario: Reused call IDs keep only the required occurrence
 

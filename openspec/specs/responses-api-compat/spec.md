@@ -2230,7 +2230,7 @@ top-level `instructions` unchanged.
 
 ### Requirement: Responses Lite follow-up transformations fail closed
 
-After a request is classified as Responses Lite shaped, the service MUST preserve required Lite state through compact preparation, MUST validate the final transformed compact input against the upstream JSON wire budget, MUST reject policy rewrites to catalog-confirmed non-Lite models, and MUST suppress replayed code-mode side effects without collapsing distinct call identities. These guards MUST NOT weaken the body-derived Lite signal or trusted previous-response linkage rules.
+After a request is classified as Responses Lite shaped, the service MUST preserve required Lite state through compact preparation, MUST validate the final transformed compact input against the upstream JSON wire budget, MUST reject policy rewrites to catalog-confirmed non-Lite models, and MUST suppress replayed code-mode side effects without collapsing distinct call identities. Compact trimming MAY omit a terminal non-state, non-side-effecting tool pair only when the pair plus required anchors and trim markers cannot fit the upstream wire budget. These guards MUST NOT weaken the body-derived Lite signal or trusted previous-response linkage rules.
 
 #### Scenario: Oversized compact input keeps the Lite prelude
 
@@ -2238,12 +2238,29 @@ After a request is classified as Responses Lite shaped, the service MUST preserv
 - **THEN** every required `additional_tools` item remains in the upstream input
 - **AND** typed and role-only system/developer state remains in the upstream input
 
-#### Scenario: Oversized compact input keeps the latest tool item
+#### Scenario: Compact input keeps a latest tool pair that fits
 
-- **WHEN** compact trimming is required and the latest input item is a tool call or tool output
+- **WHEN** compact trimming is required, the latest input item is a non-state, non-side-effecting tool call or tool output, and its complete pair fits with required anchors and trim markers
 - **THEN** the latest item remains in the upstream input
 - **AND** any matching call or output present in the supplied input is retained with it
-- **AND** the service returns `responses_compact_input_too_large` instead of silently dropping the latest item when the required pair cannot fit
+
+#### Scenario: Oversized non-state tool tail leaves room for trim markers
+
+- **WHEN** the latest input item is a non-state, non-side-effecting tool call or output whose complete pair cannot fit with required anchors and trim markers
+- **THEN** the service omits the call and output together and represents the omission with a compact-trim marker
+- **AND** it does not return `responses_compact_input_too_large` solely because the pair fit before marker framing
+
+#### Scenario: Continuity-anchored latest tool output remains required
+
+- **WHEN** a compact request carries `previous_response_id` and its latest input item is a tool output without a matching call in the supplied input
+- **THEN** the output remains in the upstream input because its call belongs to the prior response
+- **AND** the service returns `responses_compact_input_too_large` when that required output cannot fit
+
+#### Scenario: Apply-patch tail remains required
+
+- **WHEN** the latest compact input item is an `apply_patch_call` or `apply_patch_call_output`
+- **THEN** the item and any matching counterpart remain required compact context
+- **AND** the service returns `responses_compact_input_too_large` rather than omitting the side-effecting patch record when they cannot fit
 
 #### Scenario: Reused call IDs keep only the required occurrence
 

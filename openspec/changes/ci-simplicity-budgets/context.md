@@ -53,6 +53,18 @@ a one-line, reviewable diff rather than an argument.
   `.github/simplicity-budgets.toml` must be raised in the same diff.
   Alternative considered and rejected: skipping the check on `merge_group`
   would launder an over-budget `main` into green required checks.
+- **Enforcement chain when merges bypass the queue.** With a plain required
+  `pull_request` check, a maintainer-labeled over-budget PR can merge without
+  the TOML bump; the very next push run on `main` then goes red, which is the
+  intended alarm, not a gap: the label is restricted to maintainers, and the
+  documented policy is that they either bump the TOML in the same diff or fix
+  the exceedance immediately after. Hard pre-merge enforcement of the
+  main-never-over-budget invariant requires routing merges through the merge
+  queue (the `merge_group` run carries no labels by construction) — the
+  required-check rollout note recommends exactly that. Alternative considered
+  and rejected: making the label non-functional on `pull_request` runs would
+  reduce it to decoration and push maintainers toward permanent TOML bumps
+  for temporary states.
 - **Label creation is out of band**: `gh label create simplicity-budget-approved`
   once, by a maintainer. Applying it is a deliberate approval act; no
   automation assigns it.

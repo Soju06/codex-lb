@@ -55,10 +55,11 @@ commits. For native-policy candidates, processing MUST occur in this order:
 
 The native OAuth data plane MUST bypass settings caches for that read. It MUST
 perform the read for every admitted, base-valid OAuth HTTP request, every
-admitted, base-valid recognized identity-free native safety check defined
-below, and after base validation of every new WebSocket turn. The authoritative
-read SHALL be the request or turn's policy linearization point. A request or
-turn rejected by classification, security admission, or route-specific/base
+admitted, base-valid OAuth WebSocket handshake, every admitted, base-valid
+recognized identity-free native safety check defined below, and after base
+validation of every new WebSocket turn. The authoritative read SHALL be the
+request, handshake, or turn's policy linearization point. A request, handshake,
+or turn rejected by classification, security admission, or route-specific/base
 validation MUST NOT read native policy. A data-plane read that begins after a
 successful mutation response MUST observe that revision or a later revision. A
 database read failure, invalid mode, or incomplete row MUST return `503`
@@ -86,6 +87,15 @@ source.
 - **THEN** the OAuth request or new turn receives
   `503 native_client_routing_policy_unavailable`
 - **AND** it is sent to neither the pool nor the direct OAuth upstream
+
+#### Scenario: Base-valid OAuth WebSocket handshake reads policy
+
+- **GIVEN** a native OAuth WebSocket handshake passes classification, security
+  admission, and handshake/base validation
+- **WHEN** the server decides whether to accept that handshake
+- **THEN** it reads authoritative mode, revision, and API-key-auth state
+- **AND** an incompatible or unavailable policy fails before the downstream
+  WebSocket is accepted or an upstream is opened
 
 #### Scenario: Base-invalid native request never reads policy
 
@@ -161,14 +171,9 @@ accounting SHALL remain authoritative for `sk-clb-*` under both policy values.
 
 Native OAuth classification SHALL remain bounded and unambiguous. After the
 `sk-clb-*` reservation requirement has handed API-key requests to their
-existing path, the feature MUST first exclude generic top-level `/v1`, the
-existing usage/reset-credit utilities, internal replica routes, model-source
-routes, generic SDK routes, and every other path outside the finite native route
-table. Those excluded requests retain existing authentication and routing even
-when they carry a non-API-key Bearer or `chatgpt-account-id`, and MUST NOT read
-native policy. Only a remaining exact tabled native-route candidate SHALL be
-treated as an OAuth attempt when it carries either identity field. Once an OAuth
-attempt exists, classification MUST require all of the following:
+existing path, the feature SHALL treat a remaining request as an OAuth attempt
+when it carries either a non-API-key Bearer or `chatgpt-account-id`. Once an
+OAuth attempt exists, classification MUST require all of the following:
 
 - one non-`sk-clb-*` Bearer token whose token is 1..16384 visible-ASCII bytes
   excluding comma and whitespace;
@@ -272,10 +277,9 @@ The only alias is the existing single collapse of
 `/backend-api/codex/<non-empty-rest>`. The classifier MUST reject a missing
 rest, repeated alias prefix, percent-encoded path byte, invalid percent escape,
 backslash, NUL, dot segment, duplicate slash, or raw/decoded disagreement.
-The existing terminal-slash aliases for `/api/codex/usage/` and
-`/api/codex/rate-limit-reset-credits/consume/` remain owned by their existing
-utility routes and outside this classifier. No trailing slash becomes a native
-OAuth relay alias.
+Exactly one terminal slash MAY be removed only from `/api/codex/usage/` and
+`/api/codex/rate-limit-reset-credits/consume/`, matching their existing
+registered aliases. Other trailing slashes MUST NOT become OAuth aliases.
 
 After canonicalization, only this method/path/action table is eligible. A
 `ChatGPT /...` action means that exact path below the fixed
@@ -307,15 +311,20 @@ identity removal.
 | `POST` | `/backend-api/transcribe` | ChatGPT `/transcribe` |
 | `POST` | `/backend-api/files` | ChatGPT `/files` |
 | `POST` | `/backend-api/files/{file_id}/uploaded` | ChatGPT `/files/{file_id}/uploaded` |
+| `GET` | `/api/codex/usage` | ChatGPT `/wham/usage` |
+| `POST` | `/api/codex/rate-limit-reset-credits/consume` | ChatGPT `/wham/rate-limit-reset-credits/consume` |
+
+The two `/api/codex/...` utility rows are explicitly tabled native-policy
+routes. A request on either row that satisfies the same OAuth identity,
+loopback, fingerprint, bounds, and base-validation rules is qualifying OAuth
+and MUST reach the mode-specific utility semantics below. They are not generic
+top-level `/v1` traffic and MUST NOT be excluded from authoritative policy
+reads merely because their local prefix is `/api/codex`.
 
 `file_id` MUST be 1..256 ASCII bytes matching `[A-Za-z0-9._:-]+`. Top-level
-`/v1`, the existing `/api/codex/usage` and reset-credit utilities, internal
-replica routes, model-source routes, generic SDK routes, and all unknown
-method/path pairs MUST retain existing behavior and MUST NOT enter the OAuth
-relay. In particular, the usage/reset-credit utilities preserve their existing
-ChatGPT-Bearer contract when API-key auth is enabled or disabled; they do not
-read this policy and MUST NOT receive
-`native_client_routing_api_key_auth_incompatible` from this feature.
+`/v1`, internal replica routes, model-source routes, generic SDK routes, and all
+unknown method/path pairs MUST retain existing behavior and MUST NOT enter the
+OAuth relay.
 
 The relay MUST reuse existing payload budgets: Responses HTTP uses
 `max_decompressed_responses_body_bytes` (default 128 MiB), other HTTP uses
@@ -335,13 +344,6 @@ WebSocket ingress uses `--ws-max-size` / `UVICORN_WS_MAX_SIZE` (default
 - **WHEN** any request targets `/v1/<rest>` under either policy
 - **THEN** it follows existing generic authentication and routing
 - **AND** native OAuth classification is not invoked
-
-#### Scenario: Existing usage utility receives ChatGPT OAuth
-
-- **WHEN** a client calls `/api/codex/usage` or the reset-credit utility with
-  its existing ChatGPT Bearer and account identity while API-key auth is enabled
-- **THEN** the existing utility-route authentication and upstream behavior apply
-- **AND** native policy is not read and no native-routing incompatibility is returned
 
 #### Scenario: Client-OAuth image alias keeps its compatibility adapter
 

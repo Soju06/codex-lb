@@ -107,13 +107,13 @@ their existing behavior under both policy values.
 
 If provided, static attachment guidance SHALL remain visually secondary and
 limited to attaching Codex App/CLI and a compatible OpenClaw Codex-native
-provider to `http://127.0.0.1:<effective-port>/backend-api/codex`. The page MUST
-derive `<effective-port>` from the server's effective runtime listen/advertised
-configuration, whose default is `2455`; it MUST NOT hardcode the default when a
-non-default port is active. If the effective loopback endpoint cannot be
-determined, the endpoint-specific guidance MUST be omitted rather than showing a
-potentially dead address. The guidance SHALL explain that attachment is a
-one-time prerequisite distinct from the routine policy action.
+provider to `http://127.0.0.1:2455/backend-api/codex`. It SHALL explain that
+attachment is a one-time prerequisite distinct from the routine policy action.
+The literal `2455` endpoint is the fixed attachment contract of this proposal;
+it is not a runtime-derived listen port. The frontend MUST NOT substitute the
+browser URL, guess another port, or require an unadvertised runtime endpoint
+field. Deployments that intentionally advertise a different native endpoint
+require a separate reviewed contract before this guidance can vary.
 
 This proposal MUST NOT expose live attachment/config/proxy-health status,
 backup paths, setup/repair/rollback operations, process restart controls, or
@@ -124,15 +124,9 @@ contract.
 #### Scenario: Operator reads attachment guidance
 
 - **WHEN** the page shows setup information for Codex or OpenClaw
-- **THEN** it presents instructions and the runtime-derived loopback endpoint
-  without claiming client configuration was inspected
+- **THEN** it presents instructions and the fixed endpoint without claiming
+  local configuration was inspected
 - **AND** no action on the page changes files or process state
-
-#### Scenario: Server uses a non-default port
-
-- **WHEN** the effective runtime port is not `2455`
-- **THEN** attachment guidance shows that effective port
-- **AND** it does not direct the operator to the inactive default endpoint
 
 #### Scenario: Client is not actually attached
 

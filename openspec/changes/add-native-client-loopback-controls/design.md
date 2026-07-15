@@ -37,8 +37,9 @@ after a candidate has passed bounded native classification/security admission
 and every applicable route-specific/base request validation. It then reads
 `mode`, settings version, and `api_key_auth_enabled` from the authoritative
 database in one query for every admitted, base-valid OAuth HTTP request, every
-admitted, base-valid recognized identity-free native safety check, and every
-base-valid new WebSocket turn. Processing is therefore classifier/security
+admitted, base-valid OAuth WebSocket handshake, every admitted, base-valid
+recognized identity-free native safety check, and every base-valid new
+WebSocket turn. Processing is therefore classifier/security
 admission -> base validation -> authoritative policy read -> policy routing.
 Other identity-free traffic remains outside the policy, and a candidate rejected
 before the policy stage performs no native-policy read. The read is the request

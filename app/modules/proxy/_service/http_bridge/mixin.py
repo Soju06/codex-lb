@@ -503,6 +503,10 @@ class _HTTPBridgeMixin(
                 and key.affinity_key == durable_lookup.canonical_key
                 and key.affinity_kind != "turn_state_header"
             )
+            preserve_internal_fork_key = key.affinity_kind in {
+                "internal_unanchored_parallel",
+                "internal_model_parallel",
+            }
             require_preferred_account = (previous_response_id is not None and preferred_account_id is not None) or (
                 preferred_account_id is not None
                 and (key.strength == "hard" or not fallback_on_preferred_account_unavailable)
@@ -512,6 +516,7 @@ class _HTTPBridgeMixin(
                     incoming_turn_state is not None
                     and forwarded_affinity is None
                     and not preserve_durable_canonical_key
+                    and not preserve_internal_fork_key
                 ):
                     alias_index_key = _http_bridge_turn_state_alias_key(incoming_turn_state, api_key_id)
                     alias_key = self._http_bridge_turn_state_index.get(alias_index_key)

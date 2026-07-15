@@ -9677,6 +9677,79 @@ async def test_get_or_create_http_bridge_session_isolates_model_transition_from_
 
 
 @pytest.mark.asyncio
+async def test_get_or_create_http_bridge_session_preserves_model_fork_after_session_header_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    requested_key = proxy_service._HTTPBridgeSessionKey("turn_state_header", "http_turn_child", None)
+    parent_key = proxy_service._HTTPBridgeSessionKey("session_header", "shared-root", None)
+    parent = _make_bridge_session(key=parent_key)
+    parent.request_model = "gpt-5.6-terra"
+    child = _make_bridge_session(key=requested_key)
+    child.request_model = "gpt-5.6-sol"
+    service._http_bridge_sessions[parent_key] = parent
+    captured: dict[str, object] = {}
+    model_fork_keys: list[proxy_service._HTTPBridgeSessionKey] = []
+    incompatible_model_fork_key = http_bridge_mixin_module._http_bridge_incompatible_model_fork_key
+
+    def track_incompatible_model_fork_key(**kwargs: Any) -> proxy_service._HTTPBridgeSessionKey | None:
+        fork_key = incompatible_model_fork_key(**kwargs)
+        if fork_key is not None:
+            model_fork_keys.append(fork_key)
+            assert len(model_fork_keys) == 1, "model transition repeated instead of preserving its internal fork"
+        return fork_key
+
+    async def fake_create_http_bridge_session(
+        create_key: proxy_service._HTTPBridgeSessionKey,
+        **_kwargs: Any,
+    ) -> proxy_service._HTTPBridgeSession:
+        captured["key"] = create_key
+        child.key = create_key
+        return child
+
+    monkeypatch.setattr(
+        http_bridge_mixin_module,
+        "_http_bridge_incompatible_model_fork_key",
+        track_incompatible_model_fork_key,
+    )
+    monkeypatch.setattr(service, "_prune_http_bridge_sessions_locked", Mock(return_value=[]))
+    monkeypatch.setattr(service, "_create_http_bridge_session", fake_create_http_bridge_session)
+    monkeypatch.setattr(service, "_claim_durable_http_bridge_session", AsyncMock())
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(proxy_service, "_http_bridge_owner_instance", AsyncMock(return_value="instance-a"))
+    monkeypatch.setattr(
+        proxy_service,
+        "_active_http_bridge_instance_ring",
+        AsyncMock(return_value=("instance-a", ["instance-a"])),
+    )
+
+    resolved = await service._get_or_create_http_bridge_session(
+        requested_key,
+        headers={
+            "x-codex-turn-state": "http_turn_child",
+            "x-codex-session-id": "shared-root",
+        },
+        affinity=proxy_service._AffinityPolicy(
+            key="shared-root",
+            kind=proxy_service.StickySessionKind.CODEX_SESSION,
+        ),
+        api_key=None,
+        request_model="gpt-5.6-sol",
+        idle_ttl_seconds=120.0,
+        max_sessions=8,
+        session_header_fallback_key=parent_key,
+    )
+
+    assert resolved is child
+    assert len(model_fork_keys) == 1
+    assert model_fork_keys[0].affinity_kind == "internal_model_parallel"
+    assert captured["key"] == model_fork_keys[0]
+    assert parent.request_model == "gpt-5.6-terra"
+    assert parent.closed is False
+    assert service._http_bridge_sessions[parent_key] is parent
+
+
+@pytest.mark.asyncio
 async def test_get_or_create_http_bridge_session_closes_stale_session_before_previous_response_recovery(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

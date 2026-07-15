@@ -10506,7 +10506,7 @@ async def test_stream_with_retry_post_refresh_response_create_cap_waits_with_str
 
 @pytest.mark.asyncio
 async def test_stream_with_retry_post_refresh_process_network_failure_recovers_same_owner(monkeypatch):
-    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    settings = _make_proxy_settings()
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     account = _make_account("acc_post_refresh_network")
     stream_once_calls = 0
@@ -10585,7 +10585,7 @@ async def test_stream_with_retry_post_refresh_process_network_failure_recovers_s
 
 @pytest.mark.asyncio
 async def test_stream_post_refresh_network_recovery_exhaustion_uses_request_timeout_contract(monkeypatch):
-    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    settings = _make_proxy_settings()
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     account = _make_account("acc_post_refresh_network_exhausted")
@@ -11421,7 +11421,7 @@ async def test_stream_responses_first_event_connection_reset_fails_over(monkeypa
 
 @pytest.mark.asyncio
 async def test_stream_responses_serialized_dns_failure_is_not_replayed(monkeypatch):
-    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    settings = _make_proxy_settings()
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     account = _make_account("acc_dns_recovery")
@@ -11468,7 +11468,7 @@ async def test_stream_responses_serialized_dns_failure_is_not_replayed(monkeypat
 
 @pytest.mark.asyncio
 async def test_stream_post_dispatch_network_failure_rotates_generation_for_next_request(monkeypatch):
-    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    settings = _make_proxy_settings()
     settings.upstream_base_url = "https://chatgpt.com/backend-api"
     settings.upstream_connect_timeout_seconds = 8.0
     settings.stream_idle_timeout_seconds = 45.0
@@ -11548,7 +11548,7 @@ async def test_stream_post_dispatch_network_failure_rotates_generation_for_next_
 
 @pytest.mark.asyncio
 async def test_stream_websocket_network_drop_rotates_generation_for_next_request(monkeypatch):
-    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    settings = _make_proxy_settings()
     settings.upstream_base_url = "https://chatgpt.com/backend-api"
     settings.upstream_connect_timeout_seconds = 8.0
     settings.stream_idle_timeout_seconds = 45.0
@@ -20098,7 +20098,7 @@ async def test_proxy_responses_websocket_downstream_disconnect_does_not_penalize
 async def test_proxy_responses_websocket_closes_sequenced_client_after_typed_send_failure(monkeypatch):
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     handle_stream_error = AsyncMock()
-    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    settings = _make_proxy_settings()
     settings.stream_idle_timeout_seconds = 300.0
     settings.proxy_downstream_websocket_idle_timeout_seconds = 120.0
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
@@ -24214,7 +24214,7 @@ async def test_stream_post_refresh_401_fails_over_instead_of_retrying_same_accou
 
 @pytest.mark.asyncio
 async def test_stream_post_refresh_dns_event_is_not_replayed(monkeypatch):
-    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    settings = _make_proxy_settings()
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     account = _make_account("acc_stream_post_refresh_dns")
@@ -25319,7 +25319,7 @@ async def test_compact_responses_budget_exhaustion_returns_request_timeout(monke
     ["body_read", "request_client_error", "request_os_error"],
 )
 async def test_compact_unsafe_network_failure_rotates_generation_for_next_request(monkeypatch, failure_path: str):
-    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    settings = _make_proxy_settings()
     settings.upstream_base_url = "https://chatgpt.com/backend-api"
     settings.upstream_connect_timeout_seconds = 8.0
     settings.image_inline_fetch_enabled = False
@@ -25414,7 +25414,7 @@ async def test_compact_unsafe_network_failure_rotates_generation_for_next_reques
 
 @pytest.mark.asyncio
 async def test_compact_initial_refresh_network_error_settles_reservation_before_upstream(monkeypatch):
-    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    settings = _make_proxy_settings()
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     account = _make_account("acc_compact_initial_refresh_network_reservation")
     api_key = _make_api_key_data("key_compact_initial_refresh_network_reservation")
@@ -25466,7 +25466,7 @@ async def test_compact_initial_refresh_network_error_settles_reservation_before_
 
 @pytest.mark.asyncio
 async def test_compact_forced_refresh_network_error_settles_reservation(monkeypatch):
-    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    settings = _make_proxy_settings()
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     account = _make_account("acc_compact_forced_refresh_network_reservation")
     api_key = _make_api_key_data("key_compact_forced_refresh_network_reservation")

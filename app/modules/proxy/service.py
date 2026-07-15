@@ -86,9 +86,7 @@ from app.core.openai.requests import (
     ResponsesCompactRequest,
     ResponsesRequest,
 )
-from app.core.resilience.network_recovery import (
-    PROCESS_NETWORK_UNAVAILABLE_CODE,
-)
+from app.core.resilience.network_recovery import PROCESS_NETWORK_UNAVAILABLE_CODE
 from app.core.resilience.network_recovery import (
     ProcessNetworkRecovery as ProcessNetworkRecovery,
 )

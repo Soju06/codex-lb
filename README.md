@@ -4,8 +4,6 @@ Codex/ChatGPT account load balancer & proxy with usage tracking, dashboard, and 
 
 Topics
 python oauth sqlalchemy dashboard load-balancer openai rate-limit api-proxy codex fastapi usage-tracking chatgpt opencode
-
-Resources
 -->
 
 # codex-lb
@@ -17,50 +15,16 @@ Load balancer for ChatGPT accounts. Pool multiple accounts, track usage, manage 
 | ![dashboard](docs/screenshots/dashboard.jpg) | ![accounts](docs/screenshots/accounts.jpg) |
 |:---:|:---:|
 
-<details>
-<summary>More screenshots</summary>
-
-| Settings | Login |
-|:---:|:---:|
-| ![settings](docs/screenshots/settings.jpg) | ![login](docs/screenshots/login.jpg) |
-
-| Dashboard (dark) | Accounts (dark) | Settings (dark) |
-|:---:|:---:|:---:|
-| ![dashboard-dark](docs/screenshots/dashboard-dark.jpg) | ![accounts-dark](docs/screenshots/accounts-dark.jpg) | ![settings-dark](docs/screenshots/settings-dark.jpg) |
-
-</details>
+**Documentation: <https://soju06.github.io/codex-lb/>** — getting started, client setup, configuration, deployment, troubleshooting, and more screenshots.
 
 ## Features
 
-<table>
-<tr>
-<td><b>Account Pooling</b><br>Load balance across multiple ChatGPT accounts</td>
-<td><b>Usage Tracking</b><br>Per-account tokens, cost, 28-day trends</td>
-<td><b>API Keys</b><br>Per-key rate limits by token, cost, window, model</td>
-</tr>
-<tr>
-<td><b>Dashboard Auth</b><br>Password + optional TOTP</td>
-<td><b>OpenAI-compatible</b><br>Codex CLI, OpenCode, any OpenAI client</td>
-<td><b>Auto Model Sync</b><br>Available models fetched from upstream</td>
-</tr>
-</table>
-
-## Routing Strategy Guide
-
-The dashboard setting **Routing strategy** controls how eligible accounts are selected for each request. No strategy can guarantee account-safety outcomes; conservative use still depends on staying within OpenAI terms, using normal request volumes, and avoiding traffic patterns that would be unusual for your accounts.
-
-For low-volume, policy-compliant personal use, start with **Capacity weighted** or **Relative availability** and keep sticky threads enabled. Those strategies preserve session locality while avoiding sudden all-traffic shifts to a single account.
-
-| Routing strategy | Behavior | Trade-offs and recommended use |
-|---|---|---|
-| Capacity weighted | Prefers accounts with more usable quota headroom. | Good default for mixed pools and normal compliant usage. |
-| Relative availability | Draws from the strongest available accounts with configurable weighting. | Smooths distribution while still preferring healthier accounts. |
-| Usage weighted | Reacts to observed recent usage. | Useful when usage history should influence selection, but less direct than capacity-based routing. |
-| Round robin | Cycles evenly through eligible accounts. | Simple and predictable, but ignores quota shape and reset timing. |
-| Fill first | Uses one account heavily before moving on. | Best for controlled drain tests; less conservative for everyday traffic. |
-| Sequential drain | Drains accounts in a fixed order. | Useful for maintenance or explicit account rotation, not a normal safety-first default. |
-| Reset drain | Prioritizes capacity near reset windows. | Helps consume expiring quota, but can create timing-shaped bursts. |
-| Single account | Pins all traffic to one selected active account. | Useful for isolation and debugging; no load balancing. |
+- **Account pooling** — load balance across multiple ChatGPT accounts
+- **Usage tracking** — per-account tokens, cost, 28-day trends
+- **API keys** — per-key rate limits by token, cost, window, model
+- **Dashboard auth** — password + optional TOTP
+- **OpenAI-compatible** — Codex CLI, OpenCode, any OpenAI client
+- **Auto model sync** — available models fetched from upstream
 
 ## Quick Start
 
@@ -80,76 +44,12 @@ uvx codex-lb
 
 Open [localhost:2455](http://localhost:2455) → Add account → Done.
 
-### Switching Wi-Fi or other networks
-
-When a laptop switches from one Wi-Fi network to another—for example, from home Wi-Fi to a phone hotspot—or when a VPN connects or disconnects, existing internet connections may briefly break. Docker can also keep using a DNS server from the previous network. DNS is the service that finds the network address for names such as `chatgpt.com`; if Docker's copy is out of date, codex-lb may report timeouts while contacting OpenAI even though the host browser works.
-
-codex-lb retries only when the transport can prove that the request failed before it was sent. Merely seeing no output is not enough: if a request may already have reached OpenAI, codex-lb returns the network error without resending it, which avoids accidentally starting the same response twice. In either case, it avoids treating a laptop-wide DNS problem as a problem with an individual account. It cannot, however, repair a Docker DNS service that remains pointed at the old network.
-
-For laptops that switch networks frequently:
-
-- **Simplest on Linux, macOS, and Windows:** run `uvx codex-lb` directly on the host. This avoids Docker's additional DNS layer.
-- **Docker Engine on Linux (verified with `systemd-resolved`):** use host networking so the container shares the host resolver path. This survives network switches only when the host exposes a stable resolver address, such as the `127.0.0.53` `systemd-resolved` stub. If the host's `/etc/resolv.conf` points directly to a DNS server supplied by Wi-Fi or other DHCP, that address can still become stale. In that case, configure a stable host resolver, follow the [bridge-listener runbook](openspec/specs/deployment-networking/context.md#diagnostics-and-recovery), or prefer `uvx`. Use the following command instead of the portable Docker command above.
-- **Docker Desktop on macOS or Windows:** Docker Desktop 4.34 and later offers opt-in host networking, but containers still run through Docker Desktop's virtual machine and its DNS behavior can vary by version and configuration. This setup has not been verified as a reliable fix for switching networks. Keep Docker Desktop current; if failures persist, prefer the native `uvx` installation.
-
-```bash
-docker volume create codex-lb-data
-docker run -d --name codex-lb \
-  --network host \
-  -v codex-lb-data:/var/lib/codex-lb \
-  ghcr.io/soju06/codex-lb:latest
-```
-
-In the verified Docker Engine setup on Linux, host networking does not use `-p`; codex-lb still listens on ports 2455 and 1455. It also removes Docker's network-namespace isolation. The command is an opt-in path to a stable host resolver, not a DNS fix by itself.
-
-## Remote Setup
-
-When accessing the dashboard remotely for the first time, a bootstrap token is required to set the initial password.
-
-**Auto-generated (default):** On first startup (no password configured), the server generates a one-time token and prints it to logs:
-
-```bash
-docker logs codex-lb
-# ============================================
-#   Dashboard bootstrap token (first-run):
-#   <token>
-# ============================================
-```
-
-Open the dashboard → enter the token + new password → done. The token is shared across replicas and remains valid until a password is set. In multi-replica setups, replicas must share the same encryption key (the Helm chart default) for restart recovery to work.
-
-**Manual token:** To use a fixed token instead, set the env var before starting:
-
-```bash
-docker network inspect codex-lb-net >/dev/null 2>&1 || docker network create codex-lb-net
-docker run -d --name codex-lb \
-  --network codex-lb-net \
-  -e CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN=your-secret-token \
-  -p 2455:2455 -p 1455:1455 \
-  -v codex-lb-data:/var/lib/codex-lb \
-  ghcr.io/soju06/codex-lb:latest
-```
-
-**Local access** (localhost) bypasses bootstrap entirely — no token needed.
+Accessing the dashboard remotely for the first time? You need a one-time bootstrap token —
+see [Getting started](https://soju06.github.io/codex-lb/getting-started/).
 
 ## Client Setup
 
-Point any OpenAI-compatible client at codex-lb. If [API key auth](#api-key-authentication) is enabled, pass a key from the dashboard as a Bearer token.
-
-Model availability is discovered from the upstream Codex model catalog and can vary by account plan, workspace, rollout, and upstream deprecation state. Prefer the live `GET /v1/models` or `GET /backend-api/codex/models` response over a copied static table when configuring clients or API-key model allowlists.
-
-| Logo | Client | Endpoint | Config |
-|---|--------|----------|--------|
-| <img src="https://avatars.githubusercontent.com/u/14957082?s=200" width="32" alt="OpenAI"> | **Codex CLI** | `http://127.0.0.1:2455/backend-api/codex` | `~/.codex/config.toml` |
-| <img src="https://avatars.githubusercontent.com/u/208539476?s=200" width="32" alt="OpenCode"> | **OpenCode** | `http://127.0.0.1:2455/v1` | `~/.config/opencode/opencode.json` |
-| <img src="https://avatars.githubusercontent.com/u/252820863?s=200" width="32" alt="OpenClaw"> | **OpenClaw** | `http://127.0.0.1:2455/v1` | `~/.openclaw/openclaw.json` |
-| <img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/python/python-original.svg" width="32" alt="Python"> | **OpenAI Python SDK** | `http://127.0.0.1:2455/v1` | Code |
-
-<details>
-<summary><img src="https://avatars.githubusercontent.com/u/14957082?s=200" width="20" align="center" alt="OpenAI">&ensp;<b>Codex CLI / IDE Extension</b></summary>
-<br>
-
-`~/.codex/config.toml`:
+Point any OpenAI-compatible client at codex-lb. For Codex CLI, `~/.codex/config.toml`:
 
 ```toml
 model = "gpt-5.3-codex"
@@ -164,336 +64,20 @@ supports_websockets = true
 requires_openai_auth = true # required for codex app
 ```
 
-This documented `requires_openai_auth = true` setup uses Codex-backed
-authentication and does not need an `x-openai-actor-authorization` marker to be
-eligible for Codex's built-in `$imagegen` tool. Provider configurations that
-intentionally skip OpenAI login have a different eligibility path; see the
-[Images compatibility context](openspec/specs/images-api-compat/context.md#codex-provider-eligibility).
+| Client | Endpoint | Guide |
+|--------|----------|-------|
+| Codex CLI / IDE | `http://127.0.0.1:2455/backend-api/codex` | [Client setup → Codex CLI](https://soju06.github.io/codex-lb/client-setup/#codex-cli-ide-extension) |
+| OpenCode | `http://127.0.0.1:2455/v1` | [Client setup → OpenCode](https://soju06.github.io/codex-lb/client-setup/#opencode) |
+| OpenClaw | `http://127.0.0.1:2455/v1` | [Client setup → OpenClaw](https://soju06.github.io/codex-lb/client-setup/#openclaw) |
+| OpenAI Python SDK | `http://127.0.0.1:2455/v1` | [Client setup → Python SDK](https://soju06.github.io/codex-lb/client-setup/#openai-python-sdk) |
 
-Optional: enable native upstream WebSockets for Codex streaming while keeping `codex-lb` pooling:
-
-```bash
-export CODEX_LB_UPSTREAM_STREAM_TRANSPORT=websocket
-```
-
-`auto` is the default and uses native WebSockets for native Codex headers or models that prefer them.
-You can also switch this in the dashboard under Settings -> Routing -> Upstream stream transport.
-
-Note: Codex itself does not currently expose a stable documented `wire_api = "websocket"` provider mode.
-If you want to experiment on the Codex side, the current CLI exposes under-development feature flags:
-
-```toml
-[features]
-responses_websockets = true
-# or
-responses_websockets_v2 = true
-```
-
-These flags are experimental and do not replace `wire_api = "responses"`.
-
-Upstream websocket handshakes automatically honor standard proxy environment variables when they are
-present. `wss://` handshakes check `wss_proxy`, `socks_proxy`, `https_proxy`, and `all_proxy`;
-plain `ws://` handshakes also check `ws_proxy` and `http_proxy`. Set
-`CODEX_LB_UPSTREAM_WEBSOCKET_TRUST_ENV=false` only when websocket handshakes must bypass those
-environment proxies and connect directly.
-
-**With [API key auth](#api-key-authentication):**
-
-```toml
-[model_providers.codex-lb]
-name = "openai"
-base_url = "http://127.0.0.1:2455/backend-api/codex"
-wire_api = "responses"
-env_key = "CODEX_LB_API_KEY"
-supports_websockets = true
-requires_openai_auth = true # required for codex app
-```
-
-```bash
-export CODEX_LB_API_KEY="sk-clb-..."   # key from dashboard
-codex
-```
-
-**Verify WebSocket transport**
-
-Use a one-off debug run:
-
-```bash
-RUST_LOG=debug codex exec "Reply with OK only."
-```
-
-Healthy websocket signals:
-
-- CLI logs contain `connecting to websocket` and `successfully connected to websocket`
-- `codex-lb` logs show `WebSocket /backend-api/codex/responses`
-- `codex-lb` logs do **not** show fallback `POST /backend-api/codex/responses` for the same run
-
-If you run `codex-lb` behind a reverse proxy, make sure it forwards WebSocket upgrades.
-
-**Migrating from direct OpenAI** — `codex resume` filters by `model_provider`;
-old sessions won't appear until you re-tag them. Use the built-in retag command
-instead of editing Codex files by hand; see
-[Codex session retagging](openspec/specs/runtime-portability/context.md#codex-session-retagging) for backups, Docker, WSL,
-and rollback details.
-
-```bash
-# Preview what will change first.
-codex-lb codex-sessions retag --from openai --to codex-lb --dry-run
-
-# Then close Codex/Codex CLI and apply the retag.
-codex-lb codex-sessions retag --from openai --to codex-lb --yes
-```
-
-</details>
-
-<details>
-<summary><img src="https://avatars.githubusercontent.com/u/208539476?s=200" width="20" align="center" alt="OpenCode">&ensp;<b>OpenCode</b></summary>
-<br>
-
-> **Important**: Use the built-in `openai` provider with `baseURL` override — not a custom provider with `@ai-sdk/openai-compatible`. Custom providers use the Chat Completions API which **drops reasoning/thinking content**. The built-in `openai` provider uses the Responses API, which properly preserves `encrypted_content` and multi-turn reasoning state.
-
-Before starting, please ensure that all existing OpenAI credentials is cleared in `~/.local/share/opencode/auth.json`
-You can clean the config by using this one-liner
-`jq 'del(.openai)' ~/.local/share/opencode/auth.json > auth.json.tmp && mv auth.json.tmp ~/.local/share/opencode/auth.json`
-
-`~/.config/opencode/opencode.json`:
-
-```jsonc
-{
-  "$schema": "https://opencode.ai/config.json",
-  "provider": {
-    "openai": {
-      "options": {
-        "baseURL": "http://127.0.0.1:2455/v1",
-        "apiKey": "{env:CODEX_LB_API_KEY}"
-      },
-      "models": {
-        "gpt-5.4": {
-          "name": "GPT-5.4",
-          "reasoning": true,
-          "options": { "reasoningEffort": "high", "reasoningSummary": "detailed" },
-          "limit": { "context": 1050000, "output": 128000 }
-        },
-        "gpt-5.3-codex": {
-          "name": "GPT-5.3 Codex",
-          "reasoning": true,
-          "options": { "reasoningEffort": "high", "reasoningSummary": "detailed" },
-          "limit": { "context": 272000, "output": 65536 }
-        },
-        "gpt-5.1-codex-mini": {
-          "name": "GPT-5.1 Codex Mini",
-          "reasoning": true,
-          "options": { "reasoningEffort": "high", "reasoningSummary": "detailed" },
-          "limit": { "context": 272000, "output": 65536 }
-        },
-        "gpt-5.3-codex-spark": {
-          "name": "GPT-5.3 Codex Spark",
-          "reasoning": true,
-          "options": { "reasoningEffort": "xhigh", "reasoningSummary": "detailed" },
-          "limit": { "context": 128000, "output": 65536 }
-        }
-      }
-    }
-  },
-  "model": "openai/gpt-5.3-codex"
-}
-```
-
-This overrides the built-in `openai` provider's endpoint to point at codex-lb while keeping the Responses API code path that handles reasoning properly.
-
-```bash
-export CODEX_LB_API_KEY="sk-clb-..."   # key from dashboard
-opencode
-```
-
-</details>
-
-<details>
-<summary><img src="https://avatars.githubusercontent.com/u/252820863?s=200" width="20" align="center" alt="OpenClaw">&ensp;<b>OpenClaw</b></summary>
-<br>
-
-`~/.openclaw/openclaw.json`:
-
-```jsonc
-{
-  "agents": {
-    "defaults": {
-      "model": { "primary": "codex-lb/gpt-5.4" },
-      "models": {
-        "codex-lb/gpt-5.4": { "params": { "cacheRetention": "short" } }
-        "codex-lb/gpt-5.4-mini": { "params": { "cacheRetention": "short" } }
-        "codex-lb/gpt-5.3-codex": { "params": { "cacheRetention": "short" } }
-      }
-    }
-  },
-  "models": {
-    "mode": "merge",
-    "providers": {
-      "codex-lb": {
-        "baseUrl": "http://127.0.0.1:2455/v1",
-        "apiKey": "${CODEX_LB_API_KEY}",   // or "dummy" if API key auth is disabled
-        "api": "openai-responses",
-        "models": [
-          {
-            "id": "gpt-5.4",
-            "name": "gpt-5.4 (codex-lb)",
-            "contextWindow": 1050000,
-            "contextTokens": 272000,
-            "maxTokens": 4096,
-            "input": ["text"],
-            "reasoning": false
-          },
-          {
-            "id": "gpt-5.4-mini",
-            "name": "gpt-5.4-mini (codex-lb)",
-            "contextWindow": 400000,
-            "contextTokens": 272000,
-            "maxTokens": 4096,
-            "input": ["text"],
-            "reasoning": false
-          },
-          {
-            "id": "gpt-5.3-codex",
-            "name": "gpt-5.3-codex (codex-lb)",
-            "contextWindow": 400000,
-            "contextTokens": 272000,
-            "maxTokens": 4096,
-            "input": ["text"],
-            "reasoning": false
-          }
-        ]
-      }
-    }
-  }
-}
-```
-
-Set the env var or replace `${CODEX_LB_API_KEY}` with a key from the dashboard. If API key auth is disabled,
-local requests can omit the key, but non-local requests are still rejected until proxy authentication is configured.
-
-The `/v1` route is the simplest OpenAI-compatible setup. If your OpenClaw build uses a Codex-native provider path such as `openai-codex-responses` and needs Codex-style usage/accounting behavior, point that provider at `http://127.0.0.1:2455/backend-api/codex` instead. For third-party Codex-compatible backends, the client must allow opaque bearer-token passthrough and should only send `chatgpt-account-id` when it actually decoded one from an official ChatGPT/Codex token.
-
-</details>
-
-<details>
-<summary><img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/python/python-original.svg" width="20" align="center" alt="Python">&ensp;<b>OpenAI Python SDK</b></summary>
-<br>
-
-```python
-from openai import OpenAI
-
-client = OpenAI(
-    base_url="http://127.0.0.1:2455/v1",
-    api_key="sk-clb-...",  # from dashboard, or any non-empty string if auth is disabled
-)
-
-response = client.chat.completions.create(
-    model="gpt-5.3-codex",
-    messages=[{"role": "user", "content": "Hello!"}],
-)
-print(response.choices[0].message.content)
-```
-
-</details>
-
-## API Key Authentication
-
-API key auth is **disabled by default**. In that mode, only local requests to the protected proxy routes can
-proceed without a key; non-local requests are rejected until proxy authentication is configured. Enable it in
-**Settings → API Key Auth** on the dashboard when clients connect remotely or through Docker, VM, or container
-networking that appears non-local to the service.
-
-When enabled, clients must pass a valid API key as a Bearer token:
-
-```
-Authorization: Bearer sk-clb-...
-```
-
-The protected proxy routes covered by this setting are:
-
-- `/v1/*` (except `/v1/usage`, which always requires a valid key)
-- `/backend-api/codex/*`
-- `/backend-api/transcribe`
-
-**Creating keys**: Dashboard → API Keys → Create. The full key is shown **only once** at creation. Keys support optional expiration, model restrictions, and rate limits (tokens / cost per day / week / month).
+Remote clients need an [API key](https://soju06.github.io/codex-lb/api-keys/) created from the dashboard.
 
 ## Configuration
 
-Environment variables with `CODEX_LB_` prefix or `.env.local`. See [`.env.example`](.env.example).
-SQLite is the default database backend; PostgreSQL is optional via `CODEX_LB_DATABASE_URL` (for example `postgresql+asyncpg://...`).
-
-The Docker Compose `postgres` profile uses the Postgres 18 image and mounts the named data volume at
-`/var/lib/postgresql`, the parent of the image's versioned `PGDATA` directory.
-
-Existing Postgres 16 compose volumes must be upgraded before the Postgres 18 container starts:
-
-```bash
-docker compose --profile postgres stop postgres
-docker run --rm -v codex-lb-postgres-data:/var/lib/postgresql -v "$PWD:/backup" alpine \
-  tar -C /var/lib/postgresql -czf /backup/codex-lb-postgres-data-before-pg18.tgz .
-docker compose --profile postgres-upgrade run --rm postgres-upgrade
-docker compose --profile postgres up -d postgres
-```
-
-The `postgres-upgrade` profile runs `pg_upgrade` in one-shot mode against the same named volume and exits after the
-data directory has been upgraded to the Postgres 18 layout. Because that helper mounts and rewrites the operator's
-database volume, Compose pins the helper image by digest; refresh and review the digest deliberately when changing the
-helper image tag. Keep the backup until the application has started and `codex-lb-db check` succeeds against the
-upgraded database.
-
-The normal `postgres` service refuses to start when it detects the old root-level `PG_VERSION` file from a pre-18
-Compose volume. If that guard fires, run the `postgres-upgrade` profile above before starting Postgres again.
-It also refuses nested `/var/lib/postgresql/data` directories that still report a pre-18 major version, because those
-layouts need an explicit pg_upgrade before the Postgres 18 container can safely open them.
-
-### Dashboard authentication modes
-
-`codex-lb` supports three dashboard auth modes via environment variables:
-
-- `CODEX_LB_DASHBOARD_AUTH_MODE=standard` — built-in dashboard password with optional TOTP from the Settings page.
-- `CODEX_LB_DASHBOARD_AUTH_MODE=trusted_header` — trust a reverse-proxy auth header such as Authelia's `Remote-User`, but only from `CODEX_LB_FIREWALL_TRUSTED_PROXY_CIDRS`. Built-in password/TOTP remain available as an optional fallback, and password/TOTP management still requires a fallback password session.
-- `CODEX_LB_DASHBOARD_AUTH_MODE=disabled` — fully bypass dashboard auth. Use only behind network restrictions or external auth. Built-in password/TOTP management is disabled in this mode.
-
-`trusted_header` mode also requires:
-
-```bash
-CODEX_LB_FIREWALL_TRUST_PROXY_HEADERS=true
-CODEX_LB_FIREWALL_TRUSTED_PROXY_CIDRS=172.18.0.0/16
-CODEX_LB_DASHBOARD_AUTH_PROXY_HEADER=Remote-User
-```
-
-If the trusted header is missing and no fallback password is configured, the dashboard fails closed and shows a reverse-proxy-required message instead of loading the UI.
-
-### Docker examples
-
-**Authelia / trusted header**
-
-```bash
-docker network inspect codex-lb-net >/dev/null 2>&1 || docker network create codex-lb-net
-docker run -d --name codex-lb \
-  --network codex-lb-net \
-  -p 2455:2455 -p 1455:1455 \
-  -e CODEX_LB_DASHBOARD_AUTH_MODE=trusted_header \
-  -e CODEX_LB_DASHBOARD_AUTH_PROXY_HEADER=Remote-User \
-  -e CODEX_LB_FIREWALL_TRUST_PROXY_HEADERS=true \
-  -e CODEX_LB_FIREWALL_TRUSTED_PROXY_CIDRS=172.18.0.0/16 \
-  -v codex-lb-data:/var/lib/codex-lb \
-  ghcr.io/soju06/codex-lb:latest
-```
-
-**Hard override / no app-level dashboard auth**
-
-```bash
-docker network inspect codex-lb-net >/dev/null 2>&1 || docker network create codex-lb-net
-docker run -d --name codex-lb \
-  --network codex-lb-net \
-  -p 2455:2455 -p 1455:1455 \
-  -e CODEX_LB_DASHBOARD_AUTH_MODE=disabled \
-  -v codex-lb-data:/var/lib/codex-lb \
-  ghcr.io/soju06/codex-lb:latest
-```
-
-For Helm, pass the same values through `extraEnv`.
+Environment variables with `CODEX_LB_` prefix or `.env.local` — see [`.env.example`](.env.example) and the
+[configuration guide](https://soju06.github.io/codex-lb/configuration/). SQLite is the default database backend;
+PostgreSQL is optional via `CODEX_LB_DATABASE_URL`.
 
 ## Data
 
@@ -504,27 +88,19 @@ For Helm, pass the same values through `extraEnv`.
 
 Backup this directory to preserve your data.
 
-## Troubleshooting
+## Documentation
 
-- [Usage and quota - why does codex-lb still say `rate_limited` when Codex Desktop says reset?](openspec/specs/usage-refresh-policy/context.md)
+Full docs live at **<https://soju06.github.io/codex-lb/>**:
 
-## Kubernetes
-
-```bash
-helm install codex-lb oci://ghcr.io/soju06/charts/codex-lb \
-  --set postgresql.auth.password=changeme \
-  --set config.databaseMigrateOnStartup=true \
-  --set migration.schemaGate.enabled=false
-kubectl port-forward svc/codex-lb 2455:2455
-```
-
-Open [localhost:2455](http://localhost:2455) → Add account → Done.
-
-The Helm chart auto-configures HTTP `/responses` owner handoff for multi-replica installs using a headless-service DNS name per pod. The default cluster domain is `cluster.local`; set Helm `clusterDomain` if your cluster uses a different suffix. Override `config.sessionBridgeAdvertiseBaseUrl` only if pods must be reached through a different internal address.
-
-For external database, production config, ingress, observability, and more see the [Helm chart README](deploy/helm/codex-lb/README.md).
-
-Fast Mode and service-tier behavior is documented in [Responses API compatibility context](openspec/specs/responses-api-compat/context.md#fast-mode-and-service-tiers).
+- [Getting started](https://soju06.github.io/codex-lb/getting-started/) — quick start, remote bootstrap token
+- [Client setup](https://soju06.github.io/codex-lb/client-setup/) — Codex CLI, OpenCode, OpenClaw, Python SDK
+- [Configuration](https://soju06.github.io/codex-lb/configuration/) — the few settings that matter
+- [Authentication](https://soju06.github.io/codex-lb/authentication/) — dashboard auth modes
+- [API keys](https://soju06.github.io/codex-lb/api-keys/) — protecting proxy routes
+- [Routing](https://soju06.github.io/codex-lb/routing/) — strategy guide
+- [Database](https://soju06.github.io/codex-lb/database/) — SQLite / PostgreSQL, Postgres 16 → 18 upgrade
+- [Deployment](https://soju06.github.io/codex-lb/deployment/docker/) — [Docker](https://soju06.github.io/codex-lb/deployment/docker/), [Kubernetes](https://soju06.github.io/codex-lb/deployment/kubernetes/), [remote access](https://soju06.github.io/codex-lb/deployment/remote/)
+- [Troubleshooting](https://soju06.github.io/codex-lb/troubleshooting/)
 
 ## Development
 

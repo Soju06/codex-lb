@@ -122,7 +122,7 @@ async def test_account_update_status_uses_sqlite_writer_section(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_account_update_tokens_uses_sqlite_writer_section(monkeypatch):
+async def test_account_rotate_tokens_uses_sqlite_writer_section(monkeypatch):
     session = MagicMock()
     session.execute = AsyncMock(return_value=_make_result("acc"))
     session.commit = AsyncMock()
@@ -147,12 +147,13 @@ async def test_account_update_tokens_uses_sqlite_writer_section(monkeypatch):
     session.execute.side_effect = execute_with_order
     session.commit.side_effect = commit_with_order
 
-    assert await repo.update_tokens(
+    assert await repo.rotate_tokens(
         "acc",
         b"access",
         b"refresh",
         b"id",
         utcnow(),
+        expected_refresh_token_encrypted=b"refresh",
     )
 
     assert order == ["lock-enter", "execute", "commit", "lock-exit"]

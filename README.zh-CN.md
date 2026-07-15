@@ -10,6 +10,8 @@ python oauth sqlalchemy dashboard load-balancer openai rate-limit api-proxy code
 
 [English](./README.md) | **简体中文**
 
+> **文档站点（英文，权威版本）**: <https://soju06.github.io/codex-lb/> — 本页内容可能滞后，最新使用说明以英文文档站点为准。
+
 ChatGPT 账户负载均衡器。聚合多个账户、追踪用量、管理 API Key，所有内容在仪表盘中查看。
 
 | ![dashboard](docs/screenshots/dashboard.jpg) | ![accounts](docs/screenshots/accounts.jpg) |

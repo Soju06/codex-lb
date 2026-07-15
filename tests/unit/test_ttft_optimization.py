@@ -191,6 +191,143 @@ async def test_stream_responses_tracks_latency_first_token_ms(monkeypatch) -> No
 
 
 @pytest.mark.asyncio
+async def test_stream_responses_ttft_counts_reasoning_delta_as_first_token(monkeypatch) -> None:
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service = ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_ttft_reasoning")
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        del payload, headers, access_token, account_id, base_url, raise_for_status
+        yield 'data: {"type":"response.reasoning_summary_text.delta","delta":"thinking"}\n\n'
+        await asyncio.sleep(0.05)
+        yield 'data: {"type":"response.output_text.delta","delta":"hi"}\n\n'
+        yield (
+            'data: {"type":"response.completed","response":{"id":"resp_ttft_r","usage":'
+            '{"input_tokens":1,"output_tokens":1}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+
+    chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-stream-reasoning"})]
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+    latency_first_token_ms = cast(int, request_logs.calls[0]["latency_first_token_ms"])
+
+    # TTFT anchors to the reasoning delta, not the visible text 50ms later.
+    assert len(chunks) == 3
+    assert latency_first_token_ms < 40
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_pre_attempt_wait_lands_in_queue_not_ttft(monkeypatch) -> None:
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service = ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_ttft_queue")
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+
+    async def slow_selection(*args, **kwargs):
+        del args, kwargs
+        await asyncio.sleep(0.06)
+        return AccountSelection(account=account, error_message=None)
+
+    monkeypatch.setattr(service._load_balancer, "select_account", slow_selection)
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        del payload, headers, access_token, account_id, base_url, raise_for_status
+        yield 'data: {"type":"response.output_text.delta","delta":"hi"}\n\n'
+        yield (
+            'data: {"type":"response.completed","response":{"id":"resp_ttft_q","usage":'
+            '{"input_tokens":1,"output_tokens":1}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+
+    chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-stream-queue"})]
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+    call = request_logs.calls[0]
+    latency_first_token_ms = cast(int, call["latency_first_token_ms"])
+    latency_queue_ms = cast(int, call["latency_queue_ms"])
+    latency_ms = cast(int, call["latency_ms"])
+
+    # Selection wait lands in the queue column; TTFT and latency share the
+    # successful attempt's anchor, so TTFT can never exceed latency.
+    assert len(chunks) == 2
+    assert latency_queue_ms >= 50
+    assert latency_first_token_ms < 50
+    assert latency_first_token_ms <= latency_ms
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_admission_wait_lands_in_queue_not_ttft(monkeypatch) -> None:
+    from app.modules.proxy.work_admission import AdmissionLease
+
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service = ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_ttft_admission")
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
+
+    class _SlowAdmission:
+        async def acquire_response_create(self, *args, **kwargs):
+            del args, kwargs
+            await asyncio.sleep(0.06)
+            return AdmissionLease(None, stage="response_create", request_id="req_admission")
+
+    monkeypatch.setattr(service, "_get_work_admission", lambda: _SlowAdmission())
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        del payload, headers, access_token, account_id, base_url, raise_for_status
+        yield 'data: {"type":"response.output_text.delta","delta":"hi"}\n\n'
+        yield (
+            'data: {"type":"response.completed","response":{"id":"resp_ttft_a","usage":'
+            '{"input_tokens":1,"output_tokens":1}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+
+    chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-stream-admission"})]
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+    call = request_logs.calls[0]
+
+    # The attempt's own response-create admission wait counts as queue time,
+    # not TTFT/latency: the anchor is re-fixed after admission resolves.
+    assert len(chunks) == 2
+    assert cast(int, call["latency_queue_ms"]) >= 50
+    assert cast(int, call["latency_first_token_ms"]) < 50
+    assert cast(int, call["latency_first_token_ms"]) <= cast(int, call["latency_ms"])
+
+
+@pytest.mark.asyncio
 async def test_stream_responses_ttft_ignores_control_frame_before_text_delta(monkeypatch) -> None:
     settings = _make_proxy_settings()
     request_logs = _RequestLogsRecorder()

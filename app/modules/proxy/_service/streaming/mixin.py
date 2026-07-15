@@ -287,6 +287,7 @@ from app.modules.proxy._service.streaming.helpers import (
 from app.modules.proxy._service.streaming.protocol import _StreamingServiceProtocol
 from app.modules.proxy._service.streaming.retry import _StreamingRetryMixin
 from app.modules.proxy._service.support import (
+    _FIRST_TOKEN_EVENT_TYPES,
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
     _REQUEST_TRANSPORT_WEBSOCKET,  # noqa: F401
     _WEBSOCKET_FULL_REPLAY_WAIT_MIN_ITEMS,  # noqa: F401
@@ -499,6 +500,13 @@ class _StreamingMixin(_StreamingRetryMixin):
         reasoning_effort = payload.reasoning.effort if payload.reasoning else None
         session_id = _owner_lookup_session_id_from_headers(headers)
         start = time.monotonic()
+        # Pre-attempt wait: selection, admission waits, and failed failover
+        # attempts. Kept out of latency_ms/TTFT so both share this attempt's
+        # anchor; recorded separately for the queue-wait dashboard trend.
+        # Re-anchored below once this attempt's own admission waits resolve;
+        # admission-failure rows keep this entry-time fallback.
+        attempt_started_at = start
+        latency_queue_ms = max(0, int((start - request_started_at) * 1000))
         status = "success"
         error_code = None
         error_message = None
@@ -539,6 +547,8 @@ class _StreamingMixin(_StreamingRetryMixin):
                 concurrency_caps=concurrency_caps or _facade().effective_account_concurrency_caps(),
             )
             response_create_lease = await proxy._get_work_admission().acquire_response_create()
+            attempt_started_at = time.monotonic()
+            latency_queue_ms = max(0, int((attempt_started_at - request_started_at) * 1000))
             stream_optional_kwargs: dict[str, object] = {
                 "route": route,
                 "allow_direct_egress": route is None,
@@ -754,8 +764,8 @@ class _StreamingMixin(_StreamingRetryMixin):
                 else:
                     if first_payload is not None and not preserve_raw_sse_line:
                         first = format_sse_event(first_payload)
-                    if latency_first_token_ms is None and event_type in _facade()._TEXT_DELTA_EVENT_TYPES:
-                        latency_first_token_ms = int((time.monotonic() - request_started_at) * 1000)
+                    if latency_first_token_ms is None and event_type in _FIRST_TOKEN_EVENT_TYPES:
+                        latency_first_token_ms = int((time.monotonic() - attempt_started_at) * 1000)
                     settlement.downstream_visible = True
                     if event_type in _facade()._TEXT_DELTA_EVENT_TYPES:
                         settlement.downstream_text_visible = True
@@ -921,8 +931,8 @@ class _StreamingMixin(_StreamingRetryMixin):
                     error_message = _facade()._SUPPRESSED_DUPLICATE_TOOL_CALL_MESSAGE
                     settlement.record_success = False
                     settlement.account_health_error = False
-                if latency_first_token_ms is None and event_type in _facade()._TEXT_DELTA_EVENT_TYPES:
-                    latency_first_token_ms = int((time.monotonic() - request_started_at) * 1000)
+                if latency_first_token_ms is None and event_type in _FIRST_TOKEN_EVENT_TYPES:
+                    latency_first_token_ms = int((time.monotonic() - attempt_started_at) * 1000)
                 if mark_duplicate_tool_call_downstream_event(
                     event_payload,
                     seen_tool_call_keys=tool_call_dedupe.seen_tool_call_keys,
@@ -1042,7 +1052,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                 request_id=response_id,
                 archive_request_id=request_id,
                 model=model,
-                latency_ms=int((time.monotonic() - start) * 1000),
+                latency_ms=int((time.monotonic() - attempt_started_at) * 1000),
                 status=status,
                 error_code=error_code,
                 error_message=error_message,
@@ -1057,6 +1067,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                 requested_service_tier=requested_service_tier,
                 actual_service_tier=actual_service_tier,
                 latency_first_token_ms=latency_first_token_ms,
+                latency_queue_ms=latency_queue_ms,
                 session_id=session_id,
                 failure_phase=failure_metadata.failure_phase,
                 failure_detail=failure_metadata.failure_detail,

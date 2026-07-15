@@ -285,6 +285,10 @@ class RequestLog(Base):
     reasoning_effort: Mapped[str | None] = mapped_column(String, nullable=True)
     latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     latency_first_token_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Pre-attempt wait (account selection, admission waits, failed failover
+    # attempts) — kept out of latency_ms/latency_first_token_ms so those two
+    # always share the successful attempt's anchor.
+    latency_queue_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     latency_response_created_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     latency_first_upstream_event_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     latency_response_create_gate_wait_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -1415,6 +1419,30 @@ class ModelRegistrySnapshotRecord(Base):
     payload: Mapped[str] = mapped_column(Text, nullable=False)
     refreshed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     leader_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+
+class AccountRefreshClaim(Base):
+    """Cross-replica, per-account token-refresh claim.
+
+    One row per account marks which claimant (replica/process) currently owns
+    the right to run the upstream OAuth token exchange. Rows are acquired via a
+    conditional upsert that only succeeds when no unexpired claim by another
+    claimant exists, and carry a TTL (`claim_expires_at`) so a crashed claimant
+    can never block refresh indefinitely. The claim is pure coordination state:
+    it holds no token material and is deleted after the refreshed tokens are
+    persisted.
+    """
+
+    __tablename__ = "account_refresh_claims"
+
+    account_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("accounts.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    claimed_by: Mapped[str] = mapped_column(String(128), nullable=False)
+    claimed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    claim_expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
 
 
 class BridgeRingMember(Base):

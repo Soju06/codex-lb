@@ -127,6 +127,7 @@ class StubAccountsRepository(AccountsRepository):
         expected_deactivation_reason: str | None = None,
         expected_reset_at: int | None = None,
         expected_blocked_at: int | None | object = _UNSET,
+        expected_refresh_token_encrypted: bytes | None = None,
     ) -> bool:
         account = self._find_account(account_id)
         if account is None:
@@ -136,6 +137,10 @@ class StubAccountsRepository(AccountsRepository):
             or account.deactivation_reason != expected_deactivation_reason
             or account.reset_at != expected_reset_at
             or (expected_blocked_at is not _UNSET and account.blocked_at != expected_blocked_at)
+            or (
+                expected_refresh_token_encrypted is not None
+                and account.refresh_token_encrypted != expected_refresh_token_encrypted
+            )
         ):
             return False
         return await self.update_status(account_id, status, deactivation_reason, reset_at, blocked_at)
@@ -1633,10 +1638,17 @@ async def test_record_errors_does_not_restore_terminal_status(monkeypatch) -> No
         accounts_repo_arg: AccountsRepository,
         account_arg: Account,
         state_arg: Any,
+        *,
+        expected_refresh_token_encrypted: bytes | None = None,
     ) -> bool:
         persist_started.set()
         await release_persist.wait()
-        return await original_persist_state_if_current(accounts_repo_arg, account_arg, state_arg)
+        return await original_persist_state_if_current(
+            accounts_repo_arg,
+            account_arg,
+            state_arg,
+            expected_refresh_token_encrypted=expected_refresh_token_encrypted,
+        )
 
     monkeypatch.setattr(balancer, "_persist_state_if_current", blocking_persist_state_if_current)
 
@@ -1864,9 +1876,16 @@ async def test_select_account_skips_stale_persistence_after_terminal_status_upda
         expected_deactivation_reason: str | None = None,
         expected_reset_at: int | None = None,
         expected_blocked_at: int | None | object = _UNSET,
+        expected_refresh_token_encrypted: bytes | None = None,
     ) -> bool:
-        persist_blocked.set()
-        await release_persist.wait()
+        # Freeze ONLY the stale selection persist (a non-terminal status). The
+        # concurrent terminal mark_permanent_failure now also routes its guarded
+        # status downgrade through update_status_if_current (finding #4's single
+        # guarded authority), so it must be allowed to complete rather than
+        # deadlocking on the same gate that holds the stale selection write.
+        if status != AccountStatus.REAUTH_REQUIRED:
+            persist_blocked.set()
+            await release_persist.wait()
         return await original_update_status_if_current(
             account_id,
             status,
@@ -1877,6 +1896,7 @@ async def test_select_account_skips_stale_persistence_after_terminal_status_upda
             expected_deactivation_reason=expected_deactivation_reason,
             expected_reset_at=expected_reset_at,
             expected_blocked_at=expected_blocked_at,
+            expected_refresh_token_encrypted=expected_refresh_token_encrypted,
         )
 
     monkeypatch.setattr(accounts_repo, "update_status_if_current", blocking_update_status_if_current)
@@ -3443,3 +3463,118 @@ async def test_persist_selection_state_skips_only_additional_quota_scoped_accoun
     assert gated.status == AccountStatus.ACTIVE
     assert exempt.status == AccountStatus.RATE_LIMITED
     assert [update["account_id"] for update in accounts_repo.status_updates] == [exempt.id]
+
+
+@pytest.mark.asyncio
+async def test_mark_permanent_failure_guards_status_write_against_peer_rotation() -> None:
+    """Regression (finding #4): mark_permanent_failure previously persisted the
+    REAUTH_REQUIRED downgrade through an UNGUARDED update_status. When the proxy
+    caller's in-memory account object is stale (e.g. an intra-process
+    singleflight joiner sharing the winner's permanent RefreshError while a peer
+    replica already re-authed/rotated the account to ACTIVE with a fresh token),
+    that unguarded write clobbered the peer's repaired ACTIVE/rotated row back to
+    REAUTH_REQUIRED and tore down its live sessions. The downgrade MUST now be a
+    compare-and-set guarded on the refresh-token ciphertext, so a peer rotation
+    causes a MISS instead of a clobber."""
+    encryptor = TokenEncryptor()
+    rotated_ciphertext = encryptor.encrypt("peer-rotated-refresh")
+    # DB row a peer already repaired: ACTIVE, holding the freshly rotated token.
+    db_account = _make_account("acc-perm-clobber")
+    db_account.status = AccountStatus.ACTIVE
+    db_account.refresh_token_encrypted = rotated_ciphertext
+
+    accounts_repo = StubAccountsRepository([db_account])
+    usage_repo = StubUsageRepository(primary={}, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+
+    # Stale in-memory object the proxy joiner still holds: same id, still ACTIVE,
+    # but the OLD (pre-rotation) refresh-token ciphertext that just failed.
+    stale_account = _make_account("acc-perm-clobber")
+    stale_account.status = AccountStatus.ACTIVE
+    stale_account.refresh_token_encrypted = encryptor.encrypt("old-consumed-refresh")
+
+    await balancer.mark_permanent_failure(stale_account, "invalid_grant")
+
+    # Guarded CAS missed on the rotated ciphertext: the peer's repaired row is
+    # NOT clobbered back to REAUTH_REQUIRED and no status write was issued.
+    assert db_account.status == AccountStatus.ACTIVE
+    assert accounts_repo.status_updates == []
+
+
+@pytest.mark.asyncio
+async def test_mark_permanent_failure_downgrades_when_token_matches() -> None:
+    """A genuine permanent failure (no concurrent peer rotation) still lands its
+    single guarded REAUTH_REQUIRED downgrade: the in-memory refresh-token
+    ciphertext matches the DB row, so the guarded compare-and-set applies."""
+    account = _make_account("acc-perm-downgrade")
+    account.status = AccountStatus.ACTIVE
+
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(primary={}, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+
+    await balancer.mark_permanent_failure(account, "invalid_grant")
+
+    assert account.status == AccountStatus.REAUTH_REQUIRED
+    assert [update["account_id"] for update in accounts_repo.status_updates] == [account.id]
+    assert [update["status"] for update in accounts_repo.status_updates] == [AccountStatus.REAUTH_REQUIRED]
+
+
+@pytest.mark.asyncio
+async def test_mark_permanent_failure_skips_routing_exclusion_on_peer_rotation() -> None:
+    """Honor the guarded-CAS result before quarantining locally.
+
+    When a peer replica concurrently re-authed/imported and rotated
+    ``refresh_token_encrypted`` (the DB row was REPAIRED and left ACTIVE), the
+    guarded status write MISSES. The caller must NOT then mark the account
+    routing-unavailable in this replica's local overlay -- doing so would
+    self-inflict a routing loss of a freshly repaired healthy account and
+    undermine the CAS guard. The account stays selectable here.
+    """
+    encryptor = TokenEncryptor()
+    rotated_ciphertext = encryptor.encrypt("peer-rotated-refresh")
+    # DB row a peer already repaired: ACTIVE, holding the freshly rotated token.
+    db_account = _make_account("acc-perm-routing-race")
+    db_account.status = AccountStatus.ACTIVE
+    db_account.refresh_token_encrypted = rotated_ciphertext
+
+    accounts_repo = StubAccountsRepository([db_account])
+    usage_repo = StubUsageRepository(primary={}, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+
+    # Stale in-memory object holding the OLD (pre-rotation) ciphertext that just
+    # failed permanently.
+    stale_account = _make_account("acc-perm-routing-race")
+    stale_account.status = AccountStatus.ACTIVE
+    stale_account.refresh_token_encrypted = encryptor.encrypt("old-consumed-refresh")
+
+    downgraded = await balancer.mark_permanent_failure(stale_account, "invalid_grant")
+
+    # Guarded CAS missed: no downgrade, no status write, and crucially the local
+    # routing overlay does NOT exclude the repaired ACTIVE account.
+    assert downgraded is False
+    assert db_account.status == AccountStatus.ACTIVE
+    assert accounts_repo.status_updates == []
+    assert is_account_routing_unavailable(stale_account.id) is False
+
+
+@pytest.mark.asyncio
+async def test_mark_permanent_failure_excludes_routing_on_genuine_failure() -> None:
+    """A genuine permanent failure (guarded CAS applies) both persists the
+    downgrade AND marks the account routing-unavailable locally, as before."""
+    account = _make_account("acc-perm-routing-genuine")
+    account.status = AccountStatus.ACTIVE
+
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(primary={}, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+
+    downgraded = await balancer.mark_permanent_failure(account, "invalid_grant")
+
+    assert downgraded is True
+    assert account.status == AccountStatus.REAUTH_REQUIRED
+    assert is_account_routing_unavailable(account.id) is True

@@ -22,6 +22,7 @@ schema: spec-driven
 context: |
   Process: This repo uses the OpenSpec workflow. Always read AGENTS.md.
   OpenSpec docs: spec.md is requirements-only. Put narrative context in openspec/specs/<capability>/context.md (purpose, rationale, examples, ops notes).
+  User docs: docs/ is a rendered mkdocs site for users; it links back to openspec capabilities and never becomes a second source of truth.
 
 rules:
   context_docs:

@@ -112,8 +112,10 @@ def count_nav_items(path: Path, array: str) -> int:
     # Anchor on the closing `] as const` so nested arrays inside items
     # (e.g. a future `roles: ["admin"]`) cannot truncate the body early.
     # The nav source-of-truth array is required to stay `as const`.
+    # `(?!\w)` pins the exact identifier: a rename to e.g. NAV_ITEMS_V2
+    # must not satisfy a config that still says NAV_ITEMS.
     match = re.search(
-        rf"const\s+{re.escape(array)}[^=]*=\s*\[(?P<body>.*?)\]\s*as\s+const",
+        rf"const\s+{re.escape(array)}(?!\w)[^=]*=\s*\[(?P<body>.*?)\]\s*as\s+const",
         path.read_text(encoding="utf-8"),
         re.DOTALL,
     )
@@ -142,33 +144,40 @@ def main() -> int:
         _config_error(f"budget config '{CONFIG_PATH}' is not valid TOML: {exc}")
     overridden = OVERRIDE_LABEL in _override_labels()
 
-    readme_cfg = config["readme"]
-    readme_path = Path(readme_cfg["path"])
+    try:
+        readme_cfg = config["readme"]
+        readme_path = Path(readme_cfg["path"])
+        readme_max_lines = int(readme_cfg["max_lines"])
+        readme_max_headings = int(readme_cfg["max_top_level_headings"])
+        env_cfg = config["env_example"]
+        env_path = Path(env_cfg["path"])
+        env_max_lines = int(env_cfg["max_lines"])
+        nav_cfg = config["core_nav"]
+        nav_path = Path(nav_cfg["path"])
+        nav_array = str(nav_cfg["array"])
+        nav_max_items = int(nav_cfg["max_items"])
+    except (KeyError, TypeError, ValueError) as exc:
+        _config_error(f"budget config '{CONFIG_PATH}' is missing or has a malformed section/key: {exc!r}")
+
     readme_lines = strip_contributors_block(_read_lines(readme_path, "readme"))
-
-    env_cfg = config["env_example"]
-    env_path = Path(env_cfg["path"])
     env_lines = _read_lines(env_path, "env_example")
-
-    nav_cfg = config["core_nav"]
-    nav_path = Path(nav_cfg["path"])
-    nav_items = count_nav_items(nav_path, nav_cfg["array"])
+    nav_items = count_nav_items(nav_path, nav_array)
 
     metrics: list[tuple[str, Path, int, int]] = [
         (
             "README lines (all-contributors block excluded)",
             readme_path,
             len(readme_lines),
-            readme_cfg["max_lines"],
+            readme_max_lines,
         ),
         (
             "README top-level headings (h1+h2, fenced code excluded)",
             readme_path,
             count_top_level_headings(readme_lines),
-            readme_cfg["max_top_level_headings"],
+            readme_max_headings,
         ),
-        ("env example lines", env_path, len(env_lines), env_cfg["max_lines"]),
-        (f"core nav items ({nav_cfg['array']})", nav_path, nav_items, nav_cfg["max_items"]),
+        ("env example lines", env_path, len(env_lines), env_max_lines),
+        (f"core nav items ({nav_array})", nav_path, nav_items, nav_max_items),
     ]
 
     violations: list[tuple[str, Path, int, int]] = []

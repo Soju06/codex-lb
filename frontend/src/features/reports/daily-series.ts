@@ -46,5 +46,6 @@ function createZeroRow(date: string): DailyReportRow {
     errorCount: 0,
     medianTtftMs: 0,
     medianTps: 0,
+    medianQueueMs: 0,
   };
 }

@@ -12,6 +12,7 @@ import type { CostPerDayChartProps } from "./cost-per-day-chart";
 import type { TokensPerDayChartProps } from "./tokens-per-day-chart";
 import type { TimeToFirstTokenChartProps } from "./time-to-first-token-chart";
 import type { TokensPerSecondChartProps } from "./tokens-per-second-chart";
+import type { QueueWaitChartProps } from "./queue-wait-chart";
 import type { ModelDistributionDonutProps } from "./model-distribution-donut";
 import type { UseragentDistributionDonutProps } from "./useragent-distribution-donut";
 import { DailyDetailTable } from "./daily-detail-table";
@@ -35,6 +36,11 @@ const TimeToFirstTokenChart = lazy(() =>
 const TokensPerSecondChart = lazy(() =>
   import("./tokens-per-second-chart").then((module) => ({
     default: (props: TokensPerSecondChartProps) => <module.TokensPerSecondChart {...props} />,
+  })),
+);
+const QueueWaitChart = lazy(() =>
+  import("./queue-wait-chart").then((module) => ({
+    default: (props: QueueWaitChartProps) => <module.QueueWaitChart {...props} />,
   })),
 );
 const ModelDistributionDonut = lazy(() =>
@@ -253,6 +259,13 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
             </Suspense>
             <Suspense fallback={<div className="h-[270px] rounded-xl border bg-card" />}>
               <TokensPerSecondChart
+                startDate={filters.startDate}
+                endDate={filters.endDate}
+                data={reportsQuery.data.daily}
+              />
+            </Suspense>
+            <Suspense fallback={<div className="h-[270px] rounded-xl border bg-card" />}>
+              <QueueWaitChart
                 startDate={filters.startDate}
                 endDate={filters.endDate}
                 data={reportsQuery.data.daily}

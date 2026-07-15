@@ -38,6 +38,17 @@ logger = logging.getLogger(__name__)
 
 _REQUEST_TRANSPORT_HTTP = "http"
 _REQUEST_TRANSPORT_WEBSOCKET = "websocket"
+# First-token (TTFT) detection: reasoning models stream reasoning deltas long
+# before visible text, so the first model output of ANY kind anchors TTFT.
+# Text-delta semantics elsewhere (visibility, done-suppression) stay text-only.
+_FIRST_TOKEN_EVENT_TYPES = frozenset(
+    {
+        "response.output_text.delta",
+        "response.refusal.delta",
+        "response.reasoning_summary_text.delta",
+        "response.reasoning_text.delta",
+    }
+)
 _WEBSOCKET_FULL_REPLAY_WAIT_MIN_ITEMS = 20
 _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS = 0.05
 _HARD_HTTP_BRIDGE_AFFINITY_KINDS = frozenset(

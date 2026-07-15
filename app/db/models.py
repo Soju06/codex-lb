@@ -285,6 +285,10 @@ class RequestLog(Base):
     reasoning_effort: Mapped[str | None] = mapped_column(String, nullable=True)
     latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     latency_first_token_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Pre-attempt wait (account selection, admission waits, failed failover
+    # attempts) — kept out of latency_ms/latency_first_token_ms so those two
+    # always share the successful attempt's anchor.
+    latency_queue_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     latency_response_created_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     latency_first_upstream_event_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     latency_response_create_gate_wait_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)

@@ -11,8 +11,8 @@ duplicate can silently make a newly created key stricter than configured.
 
 - Validate limit-rule identity uniqueness before creating an API key.
 - Reuse the same validation for create and update paths.
-- Return the existing typed API-key validation error and persist no key when a
-  create payload contains duplicate rules.
+- Return the existing typed API-key validation error, identify the duplicated
+  rule, and persist no key when a create payload contains duplicate rules.
 
 ## Impact
 

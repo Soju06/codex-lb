@@ -1804,9 +1804,12 @@ def _limit_identity_from_input(limit: LimitRuleInput) -> tuple[str, str, str | N
 
 
 def _validate_unique_limit_rule_identities(limits: list[LimitRuleInput]) -> None:
-    identities = {_limit_identity_from_input(limit) for limit in limits}
-    if len(identities) != len(limits):
-        raise ApiKeyValidationError("Duplicate limit rules are not allowed")
+    identities: set[tuple[str, str, str | None]] = set()
+    for limit in limits:
+        identity = _limit_identity_from_input(limit)
+        if identity in identities:
+            raise ApiKeyValidationError(f"Duplicate limit rules are not allowed: {identity!r}")
+        identities.add(identity)
 
 
 def _limit_identity_from_row(limit: ApiKeyLimit) -> tuple[str, str, str | None]:

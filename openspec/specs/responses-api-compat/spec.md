@@ -201,6 +201,13 @@ When `classify_upstream_failure` observes an upstream error envelope whose `code
 - **THEN** the returned `failure_class` is `retryable_transient`
 - **AND** the streaming retry layer is eligible to retry the request before surfacing the terminal overload event
 
+#### Scenario: HTTP bridge retries a pre-created overload event
+
+- **GIVEN** the HTTP responses session bridge is enabled
+- **WHEN** the first upstream `response.failed` or `error` event has `code="overloaded_error"` or `code="server_is_overloaded"`
+- **THEN** the bridge MUST retry the pre-created request before forwarding that terminal event
+- **AND** the bridge MUST preserve its existing no-replay behavior after downstream-visible output or for other fail-fast error codes
+
 ### Requirement: Strict function tool parameter schemas are pre-validated
 
 The service MUST pre-validate the JSON schema attached to a function tool when that tool sets `strict: true`, before opening any upstream connection. The validation rules mirror OpenAI's Structured Outputs strict-mode policy (https://platform.openai.com/docs/guides/structured-outputs) and the existing `enforce_strict_text_format` policy for `text.format.json_schema`:

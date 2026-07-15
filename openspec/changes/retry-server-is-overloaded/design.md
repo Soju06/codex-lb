@@ -14,12 +14,13 @@ request.
 
 1. Treat `server_is_overloaded` as equivalent to `overloaded_error` for failure
    classification.
-2. Add the code to the existing bounded streaming transient retry set rather
-   than introducing a new retry budget or backoff policy.
+2. Add both overload aliases to the existing bounded retry sets used by raw
+   streaming and pre-created HTTP-bridge WebSocket requests, rather than
+   introducing a new retry budget or backoff policy.
 3. Preserve the current replay safety boundary: retry is allowed only before
    downstream-visible output and remains bounded by the existing request budget.
-4. Cover both the classifier and the public routed streaming path so the fix is
-   not limited to a helper-only assertion.
+4. Cover the classifier plus both raw and HTTP-bridge routed streaming paths so
+   the fix is not limited to a helper-only assertion.
 
 ## Risks and Mitigations
 
@@ -34,5 +35,6 @@ request.
 
 - Unit test `classify_upstream_failure` with `http_status=None`.
 - Integration test a first-event `server_is_overloaded` envelope followed by a
-  successful attempt through `/backend-api/codex/responses`.
+  successful attempt through `/backend-api/codex/responses`, with and without
+  the HTTP responses session bridge.
 - Run Ruff, focused pytest, and strict OpenSpec validation.

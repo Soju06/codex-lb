@@ -19,8 +19,10 @@ The volume holds everything under `/var/lib/codex-lb/` (database, encryption key
 
 ## Docker Compose
 
-For a production-shaped Compose setup (optional PostgreSQL profile, watchtower-friendly tags), start from
-[`docker-compose.prod.yml`](https://github.com/Soju06/codex-lb/blob/main/docker-compose.prod.yml):
+For a production-shaped Compose setup (watchtower-friendly tags, external PostgreSQL via env), start from
+[`docker-compose.prod.yml`](https://github.com/Soju06/codex-lb/blob/main/docker-compose.prod.yml) — it defines
+only the `server` service. The optional `postgres` / `postgres-upgrade` profiles live in the root
+[`docker-compose.yml`](https://github.com/Soju06/codex-lb/blob/main/docker-compose.yml) (see [Database](../database.md)):
 
 ```bash
 cp .env.example .env.local   # required: the compose file references .env.local via env_file — an unedited copy still runs with zero config

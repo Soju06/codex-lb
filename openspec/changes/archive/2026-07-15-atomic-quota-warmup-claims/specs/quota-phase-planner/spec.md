@@ -24,8 +24,8 @@ writer lock. When a claim is refused because a budget guard failed, the
 decision MUST be skipped with a reason that distinguishes the exhausted count
 budget from the exhausted credit budget. Final outcomes such as `executed`,
 `failed`, or API-key skip reasons MUST only update decisions that are still
-`executing`. Cancellation MUST only update decisions that are still queued or
-skipped and MUST NOT cancel an in-flight `executing` decision.
+`executing`. Cancellation MUST only update decisions that are still `planned`
+or `skipped` and MUST NOT cancel an in-flight `executing` decision.
 
 #### Scenario: Planned warmup is claimed before probe send
 

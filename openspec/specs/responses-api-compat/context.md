@@ -146,6 +146,25 @@ Cursor-style model alias request:
 
 This forwards upstream as `model: "gpt-5.4-mini"` with `reasoning.effort: "high"`.
 
+## Known Client Integrations (Reference)
+
+Third-party agents that consume the `/v1` Responses surface documented by this
+capability (rendered guide: `docs/client-setup.md`). These are configuration
+examples against the existing contract, not separate compatibility surfaces:
+
+- **OpenCode** — built-in `openai` provider with a `baseURL` override; uses the
+  Responses API path so `encrypted_content` / multi-turn reasoning state is
+  preserved (Chat Completions custom providers drop it).
+- **OpenClaw** — custom provider with `"api": "openai-responses"` against
+  `/v1`; Codex-native provider builds may target `/backend-api/codex` instead.
+- **Hermes Agent** (Nous Research) — named custom provider with
+  `api_mode: codex_responses` against `/v1`; the responses transport carries
+  reasoning state across turns like the OpenCode path.
+
+New client guides added to `docs/client-setup.md` should stay configuration-only
+examples of this contract; anything needing new proxy behavior requires its own
+OpenSpec change first.
+
 ## Operational Notes
 
 - Pre-release: run unit/integration tests and optional OpenAI client compatibility tests.

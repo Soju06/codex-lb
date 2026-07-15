@@ -926,8 +926,8 @@ def _maybe_log_upstream_request_start(
     payload_summary: str,
     payload_json: str | None = None,
 ) -> None:
-    settings = get_settings()
-    if not settings.log_upstream_request_summary and not settings.log_upstream_request_payload:
+    trace_channels = get_settings().trace_channels
+    if "upstream_summary" not in trace_channels and "upstream_payload" not in trace_channels:
         return
 
     request_id = get_request_id()
@@ -935,7 +935,7 @@ def _maybe_log_upstream_request_start(
     account_id = _account_id_for_upstream_log(headers)
     header_keys = _interesting_upstream_header_keys(headers)
 
-    if settings.log_upstream_request_summary:
+    if "upstream_summary" in trace_channels:
         logger.info(
             "upstream_request_start request_id=%s kind=%s method=%s target=%s account_id=%s headers=%s payload=%s",
             request_id,
@@ -946,7 +946,7 @@ def _maybe_log_upstream_request_start(
             header_keys,
             payload_summary,
         )
-    if settings.log_upstream_request_payload and payload_json is not None:
+    if "upstream_payload" in trace_channels and payload_json is not None:
         logger.info(
             "upstream_request_payload request_id=%s kind=%s target=%s payload=%s",
             request_id,
@@ -972,8 +972,7 @@ def _maybe_log_upstream_request_complete(
     failure_exception_type: str | None = None,
     retryable_same_contract: bool | None = None,
 ) -> None:
-    settings = get_settings()
-    if not settings.log_upstream_request_summary:
+    if "upstream_summary" not in get_settings().trace_channels:
         return
 
     level = logging.INFO
@@ -2940,7 +2939,7 @@ async def _stream_responses_with_session(
         headers=upstream_headers,
         method=method,
         payload_summary=_summarize_json_payload(payload_dict),
-        payload_json=payload_json if settings.log_upstream_request_payload else None,
+        payload_json=payload_json if "upstream_payload" in settings.trace_channels else None,
     )
     if transport == "http":
         archive_json(
@@ -3003,7 +3002,7 @@ async def _stream_responses_with_session(
             headers=upstream_headers,
             method=method,
             payload_summary=_summarize_json_payload(payload_dict),
-            payload_json=payload_json if settings.log_upstream_request_payload else None,
+            payload_json=payload_json if "upstream_payload" in settings.trace_channels else None,
         )
         archive_json(
             direction="codex_to_server",
@@ -3553,7 +3552,7 @@ class _CompactCommandTransport:
             method="POST",
             payload_summary=_summarize_json_payload(payload_dict),
             payload_json=json.dumps(payload_dict, ensure_ascii=True, separators=(",", ":"))
-            if settings.log_upstream_request_payload
+            if "upstream_payload" in settings.trace_channels
             else None,
         )
         archive_json(
@@ -4020,7 +4019,7 @@ async def thread_goal_request(
         method=request_method,
         payload_summary=_summarize_json_payload(payload_dict),
         payload_json=json.dumps(payload_dict, ensure_ascii=True, separators=(",", ":"))
-        if settings.log_upstream_request_payload
+        if "upstream_payload" in settings.trace_channels
         else None,
     )
     try:
@@ -4241,7 +4240,7 @@ async def codex_control_request(
         method=request_method,
         payload_summary=_summarize_json_payload(payload_summary or {}),
         payload_json=payload.decode("utf-8", errors="replace")
-        if payload is not None and settings.log_upstream_request_payload
+        if payload is not None and "upstream_payload" in settings.trace_channels
         else None,
     )
     try:
@@ -4476,7 +4475,7 @@ async def _transcribe_audio_with_session(
         method="POST",
         payload_summary=json.dumps(metadata, ensure_ascii=True, separators=(",", ":")),
         payload_json=json.dumps(metadata, ensure_ascii=True, separators=(",", ":"))
-        if settings.log_upstream_request_payload
+        if "upstream_payload" in settings.trace_channels
         else None,
     )
     try:

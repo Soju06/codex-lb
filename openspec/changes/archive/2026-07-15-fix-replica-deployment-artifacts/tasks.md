@@ -33,4 +33,4 @@
 
 ## 7. Follow-up (post-verification)
 
-- [ ] 7.1 Sync delta specs into main specs via `/opsx:sync` after the openspec-sot-sync PR lands (this change's MODIFIED requirement targets the synced SSOT text)
+- [x] 7.1 Sync delta specs into main specs via `/opsx:sync` after the openspec-sot-sync PR lands (this change's MODIFIED requirement targets the synced SSOT text) — done during archive (`openspec archive` synced the delta; the MODIFIED requirement is now present in `openspec/specs/deployment-networking/spec.md`)

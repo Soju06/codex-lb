@@ -20,7 +20,14 @@ from app.core.clients.codex import (
     require_route_or_direct_egress_opt_in,
 )
 from app.core.clients.http import lease_http_session
-from app.core.config.settings import get_settings
+from app.core.config.settings import (
+    AUTH_BASE_URL,
+    OAUTH_CLIENT_ID,
+    OAUTH_ORIGINATOR,
+    OAUTH_REDIRECT_URI,
+    OAUTH_SCOPE,
+    get_settings,
+)
 from app.core.types import JsonObject
 from app.core.upstream_proxy import ResolvedUpstreamRoute
 from app.core.utils.request_id import get_request_id
@@ -72,20 +79,19 @@ def build_authorization_url(
     redirect_uri: str | None = None,
     scope: str | None = None,
 ) -> str:
-    settings = get_settings()
-    auth_base = (base_url or settings.auth_base_url).rstrip("/")
-    authorization_scope = scope or _ensure_offline_access(settings.oauth_scope)
+    auth_base = (base_url or AUTH_BASE_URL).rstrip("/")
+    authorization_scope = scope or _ensure_offline_access(OAUTH_SCOPE)
     params = {
         "response_type": "code",
-        "client_id": client_id or settings.oauth_client_id,
-        "redirect_uri": redirect_uri or settings.oauth_redirect_uri,
+        "client_id": client_id or OAUTH_CLIENT_ID,
+        "redirect_uri": redirect_uri or OAUTH_REDIRECT_URI,
         "scope": authorization_scope,
         "code_challenge": code_challenge,
         "code_challenge_method": "S256",
         "state": state,
         "id_token_add_organizations": "true",
         "codex_cli_simplified_flow": "true",
-        "originator": originator or settings.oauth_originator,
+        "originator": originator or OAUTH_ORIGINATOR,
     }
     query = urlencode(params, quote_via=quote)
     return f"{auth_base}/oauth/authorize?{query}"
@@ -105,13 +111,13 @@ async def exchange_authorization_code(
     allow_direct_egress: bool = False,
 ) -> OAuthTokens:
     settings = get_settings()
-    url = f"{(base_url or settings.auth_base_url).rstrip('/')}/oauth/token"
+    url = f"{(base_url or AUTH_BASE_URL).rstrip('/')}/oauth/token"
     payload = {
         "grant_type": "authorization_code",
-        "client_id": client_id or settings.oauth_client_id,
+        "client_id": client_id or OAUTH_CLIENT_ID,
         "code": code,
         "code_verifier": code_verifier,
-        "redirect_uri": redirect_uri or settings.oauth_redirect_uri,
+        "redirect_uri": redirect_uri or OAUTH_REDIRECT_URI,
     }
     encoded = urlencode(payload, quote_via=quote)
     timeout = aiohttp.ClientTimeout(total=timeout_seconds or settings.oauth_timeout_seconds)
@@ -179,10 +185,10 @@ async def request_device_code(
     allow_direct_egress: bool = False,
 ) -> DeviceCode:
     settings = get_settings()
-    auth_base = (base_url or settings.auth_base_url).rstrip("/")
+    auth_base = (base_url or AUTH_BASE_URL).rstrip("/")
     url = f"{auth_base}/api/accounts/deviceauth/usercode"
     payload = {
-        "client_id": client_id or settings.oauth_client_id,
+        "client_id": client_id or OAUTH_CLIENT_ID,
     }
     timeout = aiohttp.ClientTimeout(total=timeout_seconds or settings.oauth_timeout_seconds)
 
@@ -276,7 +282,7 @@ async def exchange_device_token(
     allow_direct_egress: bool = False,
 ) -> OAuthTokens | None:
     settings = get_settings()
-    url = f"{(base_url or settings.auth_base_url).rstrip('/')}/api/accounts/deviceauth/token"
+    url = f"{(base_url or AUTH_BASE_URL).rstrip('/')}/api/accounts/deviceauth/token"
     payload = {"device_auth_id": device_auth_id, "user_code": user_code}
     timeout = aiohttp.ClientTimeout(total=timeout_seconds or settings.oauth_timeout_seconds)
 
@@ -332,13 +338,13 @@ async def exchange_device_token(
     if payload_data.authorization_code:
         if not payload_data.code_verifier:
             raise OAuthError("invalid_response", "Device auth response missing code verifier")
-        redirect_uri = f"{(base_url or settings.auth_base_url).rstrip('/')}/deviceauth/callback"
+        redirect_uri = f"{(base_url or AUTH_BASE_URL).rstrip('/')}/deviceauth/callback"
         return await exchange_authorization_code(
             code=payload_data.authorization_code,
             code_verifier=payload_data.code_verifier,
             redirect_uri=redirect_uri,
             base_url=base_url,
-            client_id=settings.oauth_client_id,
+            client_id=OAUTH_CLIENT_ID,
             timeout_seconds=timeout_seconds,
             route=route,
             codex_client=codex_client,

@@ -144,6 +144,15 @@ _FINAL_PERSIST_RETRY_BASE_SECONDS = 0.02
 _CLAIM_RELEASE_MAX_ATTEMPTS = 3
 _CLAIM_RELEASE_RETRY_BASE_SECONDS = 0.05
 
+# Cross-replica refresh-claim wait/poll tuning (fixed; issue #1340 /
+# PRINCIPLES.md P2). The wait caps how long a non-claimant polls for the claim
+# winner's rotated tokens before giving up; the poll interval bounds
+# claim-table read pressure while waiting. Note the claim TTL floor
+# (``token_refresh_claim_ttl_seconds``) is derived from the admission wait and
+# refresh timeouts, not from these values.
+_TOKEN_REFRESH_CLAIM_WAIT_SECONDS = 8.0
+_TOKEN_REFRESH_CLAIM_POLL_SECONDS = 0.25
+
 # Terminal account statuses a PRIOR claim holder may have committed while
 # leaving ``refresh_token_encrypted`` UNCHANGED: a permanent refresh failure
 # (e.g. ``invalid_grant``) downgraded through ``_handle_permanent_refresh_failure``
@@ -320,13 +329,13 @@ class AuthManager:
             self._encryptor,
             account.refresh_token_encrypted,
         )
-        # The wait for a foreign claim is bounded by the configured cap AND the
+        # The wait for a foreign claim is bounded by the fixed cap AND the
         # caller's remaining refresh budget: the singleflight body is shielded
         # and outlives a cancelled caller, so without the budget cap a small
         # request budget with a held foreign claim would leave this task
-        # polling for the full configured wait (holding its repo session and
+        # polling for the full fixed wait (holding its repo session and
         # the inflight singleflight entry that later callers join).
-        wait_seconds = max(0.0, float(settings.token_refresh_claim_wait_seconds))
+        wait_seconds = _TOKEN_REFRESH_CLAIM_WAIT_SECONDS
         caller_budget = get_token_refresh_timeout_override()
         start = time.monotonic()
         # Absolute deadline of the caller's ORIGINAL refresh budget (if any).
@@ -339,7 +348,7 @@ class AuthManager:
             caller_deadline = start + caller_budget
             wait_seconds = min(wait_seconds, caller_budget)
         deadline = start + wait_seconds
-        poll_seconds = max(0.01, float(settings.token_refresh_claim_poll_seconds))
+        poll_seconds = _TOKEN_REFRESH_CLAIM_POLL_SECONDS
         # NOTE: comparisons below use the fingerprint captured at entry, not
         # ``account.refresh_token_encrypted``: when ``account`` is attached to
         # the repo's session, ``get_by_id_fresh`` refreshes that very

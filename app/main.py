@@ -25,7 +25,11 @@ from app.core.balancer import configure_replica_salt
 from app.core.bootstrap import ensure_auto_bootstrap_token, log_bootstrap_token
 from app.core.clients.http import close_http_client, init_http_client
 from app.core.config.key_fingerprint import verify_encryption_key_fingerprint
-from app.core.config.settings import _bridge_advertise_hostname_is_replica_specific, get_settings
+from app.core.config.settings import (
+    _bridge_advertise_hostname_is_replica_specific,
+    get_settings,
+    warn_removed_settings,
+)
 from app.core.config.settings_cache import get_settings_cache
 from app.core.handlers import add_exception_handlers
 from app.core.metrics.middleware import MetricsMiddleware
@@ -197,6 +201,7 @@ async def lifespan(app: FastAPI):
     await get_rate_limit_headers_cache().invalidate()
     reload_additional_quota_registry()
     settings = get_settings()
+    warn_removed_settings()
     # Anchor round-robin tie-break decorrelation to this replica's stable bridge
     # instance identity so peer replicas spread exact ties across equally-good
     # accounts instead of all herding onto the lexicographically-first account.
@@ -569,18 +574,14 @@ def create_app() -> FastAPI:
             cast(Any, BackpressureMiddleware),
             max_concurrent=settings.backpressure_max_concurrent_requests,
         )
-    proxy_http_limit = settings.bulkhead_proxy_http_limit
-    proxy_websocket_limit = settings.bulkhead_proxy_websocket_limit
-    proxy_compact_limit = settings.bulkhead_proxy_compact_limit
-    assert proxy_http_limit is not None
-    assert proxy_websocket_limit is not None
-    assert proxy_compact_limit is not None
     app.add_middleware(
         cast(Any, BulkheadMiddleware),
         bulkhead=get_bulkhead(
-            proxy_http_limit=proxy_http_limit,
-            proxy_websocket_limit=proxy_websocket_limit,
-            proxy_compact_limit=proxy_compact_limit,
+            proxy_http_limit=settings.bulkhead_proxy_limit,
+            proxy_websocket_limit=settings.bulkhead_proxy_limit,
+            # Compact limit is derived by BulkheadSemaphore: min(http, 16),
+            # or 0 when the http class is unlimited-off (0).
+            proxy_compact_limit=None,
             dashboard_limit=settings.bulkhead_dashboard_limit,
         ),
     )

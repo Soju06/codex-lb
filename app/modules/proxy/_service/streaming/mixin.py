@@ -503,6 +503,9 @@ class _StreamingMixin(_StreamingRetryMixin):
         # Pre-attempt wait: selection, admission waits, and failed failover
         # attempts. Kept out of latency_ms/TTFT so both share this attempt's
         # anchor; recorded separately for the queue-wait dashboard trend.
+        # Re-anchored below once this attempt's own admission waits resolve;
+        # admission-failure rows keep this entry-time fallback.
+        attempt_started_at = start
         latency_queue_ms = max(0, int((start - request_started_at) * 1000))
         status = "success"
         error_code = None
@@ -544,6 +547,8 @@ class _StreamingMixin(_StreamingRetryMixin):
                 concurrency_caps=concurrency_caps or _facade().effective_account_concurrency_caps(),
             )
             response_create_lease = await proxy._get_work_admission().acquire_response_create()
+            attempt_started_at = time.monotonic()
+            latency_queue_ms = max(0, int((attempt_started_at - request_started_at) * 1000))
             stream_optional_kwargs: dict[str, object] = {
                 "route": route,
                 "allow_direct_egress": route is None,
@@ -760,7 +765,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                     if first_payload is not None and not preserve_raw_sse_line:
                         first = format_sse_event(first_payload)
                     if latency_first_token_ms is None and event_type in _FIRST_TOKEN_EVENT_TYPES:
-                        latency_first_token_ms = int((time.monotonic() - start) * 1000)
+                        latency_first_token_ms = int((time.monotonic() - attempt_started_at) * 1000)
                     settlement.downstream_visible = True
                     if event_type in _facade()._TEXT_DELTA_EVENT_TYPES:
                         settlement.downstream_text_visible = True
@@ -927,7 +932,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                     settlement.record_success = False
                     settlement.account_health_error = False
                 if latency_first_token_ms is None and event_type in _FIRST_TOKEN_EVENT_TYPES:
-                    latency_first_token_ms = int((time.monotonic() - start) * 1000)
+                    latency_first_token_ms = int((time.monotonic() - attempt_started_at) * 1000)
                 if mark_duplicate_tool_call_downstream_event(
                     event_payload,
                     seen_tool_call_keys=tool_call_dedupe.seen_tool_call_keys,
@@ -1047,7 +1052,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                 request_id=response_id,
                 archive_request_id=request_id,
                 model=model,
-                latency_ms=int((time.monotonic() - start) * 1000),
+                latency_ms=int((time.monotonic() - attempt_started_at) * 1000),
                 status=status,
                 error_code=error_code,
                 error_message=error_message,

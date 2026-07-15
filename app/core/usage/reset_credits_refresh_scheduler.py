@@ -356,9 +356,7 @@ def _select_auto_redeem_target_credit(snapshot: RateLimitResetCreditsSnapshot) -
     if snapshot.available_count <= 0:
         return None
     available = [
-        credit
-        for credit in snapshot.credits
-        if credit.status == "available" and credit.expires_at is not None
+        credit for credit in snapshot.credits if credit.status == "available" and credit.expires_at is not None
     ]
     if not available:
         return None

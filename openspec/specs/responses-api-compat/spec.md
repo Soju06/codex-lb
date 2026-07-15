@@ -270,7 +270,7 @@ Read-only function calls and matching operations under different response ids MU
 - **AND** does not forward the duplicate nested operation to the client
 
 ### Requirement: Continuity-dependent Responses follow-ups fail closed with retryable errors
-When a Responses follow-up depends on previously established continuity state, the service MUST return a retryable continuity error if that continuity cannot be reconstructed safely. The service MUST NOT expose raw `previous_response_not_found` for bridge-local metadata loss or similar internal continuity gaps.
+When a Responses follow-up depends on previously established continuity state, the service MUST return a retryable continuity error if that continuity cannot be reconstructed safely. The service MUST NOT expose raw `previous_response_not_found` for bridge-local metadata loss or similar internal continuity gaps. When forwarding a turn-state-anchored follow-up to its bridge owner fails with `bridge_owner_unreachable` and a fresh durable lookup shows the owner no longer holds an active lease (released, expired, or the row is missing or CLOSED), the service MUST recover the follow-up locally through durable takeover instead of returning the retryable error. The fresh durable lookup MUST use the same resolution semantics as request routing, including the latest-turn-state fallback, so a row originally resolved without a registered alias remains takeover-eligible. When the durable lease is still actively held by another instance — including DRAINING rows whose lease has not been released or expired — the service MUST keep failing closed with the retryable error.
 
 #### Scenario: HTTP bridge loses local continuity metadata for a follow-up request
 - **WHEN** an HTTP `/v1/responses` or `/backend-api/codex/responses` follow-up request depends on `previous_response_id` or a hard continuity turn-state
@@ -305,6 +305,14 @@ When a Responses follow-up depends on previously established continuity state, t
 - **THEN** the service still maps that continuity loss to the pending follow-up
 - **AND** it rewrites the downstream terminal event to a retryable continuity error
 - **AND** it does not surface raw `previous_response_not_found` to the client
+
+#### Scenario: turn-state follow-up recovers locally after the owner released its lease
+- **WHEN** a turn-state-anchored follow-up without `previous_response_id` is forwarded to its bridge owner during the post-shutdown ring grace window
+- **AND** the forward fails with `bridge_owner_unreachable`
+- **AND** a fresh durable lookup using the request-routing resolution semantics (registered alias or latest-turn-state fallback) shows the lease is released or expired
+- **THEN** the service retries the follow-up locally through durable takeover instead of returning the retryable 503
+- **AND** the takeover retry carries the fresh durable lookup as its continuity anchor even when the turn-state alias registration was lost
+- **AND** a fresh durable lookup showing a live lease held by another instance — even for a DRAINING row — still fails closed with the retryable `bridge_owner_unreachable` error
 
 ### Requirement: Hard continuity owner lookup fails closed
 

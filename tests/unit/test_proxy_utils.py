@@ -3513,14 +3513,14 @@ async def test_stream_http_bridge_or_retry_bypasses_bridge_for_large_payload(mon
     assert calls == [("retry", oversized_payload, "acc_pinned", 180.0)]
 
 
-def test_stream_request_budget_uses_http_responses_budget_for_http_transport() -> None:
+def test_stream_request_budget_uses_http_responses_budget_for_http_and_websocket_transport() -> None:
     settings = SimpleNamespace(
         proxy_request_budget_seconds=5.0,
         http_responses_stream_request_budget_seconds=180.0,
     )
 
     assert proxy_service._stream_request_budget_seconds(settings, request_transport="http") == 180.0
-    assert proxy_service._stream_request_budget_seconds(settings, request_transport="websocket") == 5.0
+    assert proxy_service._stream_request_budget_seconds(settings, request_transport="websocket") == 180.0
 
 
 def test_response_create_client_metadata_preserves_existing_json_values_and_turn_metadata():
@@ -19275,6 +19275,18 @@ def test_websocket_receive_timeout_honors_idle_when_equal_to_full_budget(monkeyp
     assert timeout.error_code == "stream_idle_timeout"
     assert timeout.error_message == "Upstream stream idle timeout"
     assert timeout.fail_all_pending is False
+
+
+def test_stream_request_budget_falls_back_to_proxy_budget_without_stream_setting():
+    settings = SimpleNamespace(proxy_request_budget_seconds=600.0)
+
+    assert (
+        proxy_service._stream_request_budget_seconds(
+            settings,
+            request_transport="websocket",
+        )
+        == 600.0
+    )
 
 
 @pytest.mark.asyncio

@@ -25,6 +25,7 @@ The websocket responses proxy path MUST record first-upstream-event, response-cr
 - **THEN** first-token latency remains null until a token-bearing output delta arrives
 - **AND** a message, reasoning, or function-call `response.output_item.added` lifecycle event does not record first-token latency
 - **AND** reasoning-summary placeholder deltas that are stripped before delivery do not record first-token latency
+- **AND** metadata-only or empty tool-call delta events do not record first-token latency
 
 ### Requirement: Dashboard TPS excludes reasoning tokens
 

@@ -40,10 +40,9 @@ _TTFT_EVENT_TYPES = frozenset(
     {
         "response.output_text.delta",
         "response.refusal.delta",
-        "response.function_call_arguments.delta",
-        "response.output_tool_call.delta",
     }
 )
+_TTFT_TOOL_DELTA_EVENT_TYPES = frozenset({"response.function_call_arguments.delta", "response.output_tool_call.delta"})
 _TTFT_REASONING_EVENT_TYPES = frozenset(
     {"response.reasoning_summary_text.delta", "response.reasoning_summary_text.done"}
 )
@@ -146,6 +145,10 @@ def _is_ttft_event(
         return bool(combined)
     if event_type == "response.reasoning_summary_text.done" and event_key in pending:
         return bool(_strip_blank_html_comment_lines(pending.pop(event_key)))
+    if event_type in _TTFT_TOOL_DELTA_EVENT_TYPES:
+        if payload is None:
+            return False
+        return any(isinstance(payload.get(key), str) and bool(payload[key]) for key in ("delta", "arguments"))
     if event_type in _TTFT_EVENT_TYPES:
         return True
     if event_type != "response.output_item.added" or not isinstance(payload, dict):

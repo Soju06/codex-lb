@@ -215,8 +215,8 @@ _SECURITY_WORK_RETRY_MESSAGE = (
 )
 _SECURITY_WORK_NO_AUTHORIZED_ACCOUNTS_MESSAGE = (
     "Upstream flagged this request as possible cybersecurity work, but no account is marked as authorized for "
-    "security work. codex-lb is continuing with normal account selection; the upstream request may still fail until "
-    "an account with Trusted Access for Cyber is marked as security-work-authorized."
+    "security work. Mark an account with Trusted Access for Cyber as security-work-authorized before retrying "
+    "security-classified sessions."
 )
 _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS = 5.0
 _HTTP_BRIDGE_BACKGROUND_CLEANUP_WARN_THRESHOLD = 100
@@ -812,6 +812,13 @@ class _HTTPBridgeStreamingMixin:
         previous_response_trimmed_input_fingerprint: str | None = None
         durable_full_resend_anchor_count: int | None = None
         durable_full_resend_anchor_fingerprint: str | None = None
+        require_security_work_authorized = bool(
+            durable_lookup is not None and durable_lookup.requires_security_work_authorized
+        )
+        if not require_security_work_authorized:
+            require_security_work_authorized = await self._security_lineage_requires_security_work_authorized(
+                _sticky_key_from_session_header(headers)
+            )
         durable_model_transition_lookup = (
             durable_lookup
             if durable_lookup is not None and not _http_bridge_models_compatible(durable_lookup.model, payload.model)
@@ -839,6 +846,7 @@ class _HTTPBridgeStreamingMixin:
                 key=bridge_session_key,
                 incoming_turn_state=incoming_turn_state_header,
                 api_key=api_key,
+                require_security_work_authorized=require_security_work_authorized,
             )
             forwards_to_active_owner = await self._http_bridge_can_forward_to_active_owner(durable_lookup)
             durable_anchor_trimmable = _input_prefix_matches_stored_context(
@@ -915,6 +923,7 @@ class _HTTPBridgeStreamingMixin:
             payload=effective_payload,
             durable_lookup=durable_lookup,
         )
+        request_state.require_security_work_authorized = require_security_work_authorized
         request_state.preferred_account_id = (
             durable_lookup.account_id
             if (
@@ -969,11 +978,13 @@ class _HTTPBridgeStreamingMixin:
             if rewritten_file_account_id is not None:
                 request_state.preferred_account_id = rewritten_file_account_id
                 file_required_preferred_account = True
+                request_state.file_required_preferred_account = True
         if request_state.preferred_account_id is None:
             resolved_file_account_id = await self._resolve_file_account_for_responses(effective_payload, headers)
             if resolved_file_account_id is not None:
                 request_state.preferred_account_id = resolved_file_account_id
                 file_required_preferred_account = True
+                request_state.file_required_preferred_account = True
         if proxy_injected_previous_response_id:
             request_state.proxy_injected_previous_response_id = True
             request_state.fresh_upstream_request_text = fresh_upstream_request_text or text_data
@@ -1018,6 +1029,7 @@ class _HTTPBridgeStreamingMixin:
                     request_usage_budget=request_state.request_usage_budget,
                     request_deadline=request_deadline,
                     session_header_fallback_key=session_header_fallback_key,
+                    require_security_work_authorized=request_state.require_security_work_authorized,
                 )
             except ProxyResponseError as exc:
                 if not (
@@ -1059,7 +1071,9 @@ class _HTTPBridgeStreamingMixin:
                     cache_key_family=bridge_session_key.affinity_kind,
                     model_class=_extract_model_class(payload.model) if payload.model else None,
                 )
+                previous_security_requirement = request_state.require_security_work_authorized
                 request_state, text_data = prepare_bridge_request(payload)
+                request_state.require_security_work_authorized = previous_security_requirement
                 request_state.affinity_policy = affinity
                 if downstream_turn_state is not None:
                     request_state.session_id = _normalize_session_id(downstream_turn_state)
@@ -1073,11 +1087,13 @@ class _HTTPBridgeStreamingMixin:
                 if rewritten_file_account_id is not None:
                     request_state.preferred_account_id = rewritten_file_account_id
                     file_required_preferred_account = True
+                    request_state.file_required_preferred_account = True
                 if request_state.preferred_account_id is None:
                     resolved_file_account_id = await self._resolve_file_account_for_responses(payload, headers)
                     if resolved_file_account_id is not None:
                         request_state.preferred_account_id = resolved_file_account_id
                         file_required_preferred_account = True
+                        request_state.file_required_preferred_account = True
                 effective_payload = payload
                 untrimmed_effective_payload = payload
                 proxy_injected_previous_response_id = False
@@ -1236,6 +1252,7 @@ class _HTTPBridgeStreamingMixin:
                             request_usage_budget=request_state.request_usage_budget,
                             session_header_fallback_key=session_header_fallback_key,
                             request_deadline=request_deadline,
+                            require_security_work_authorized=request_state.require_security_work_authorized,
                         )
                     except ProxyResponseError as capacity_exc:
                         wait_plan = _http_bridge_capacity_wait_plan(capacity_exc, request_deadline=request_deadline)
@@ -1395,6 +1412,9 @@ class _HTTPBridgeStreamingMixin:
             and session.last_completed_response_id is not None
             and session_anchor_trimmable
         ):
+            previous_preferred_account_id = request_state.preferred_account_id
+            previous_file_required_preferred_account = request_state.file_required_preferred_account
+            previous_security_requirement = request_state.require_security_work_authorized
             fresh_upstream_request_text = text_data
             effective_payload = effective_payload.model_copy(
                 update={"previous_response_id": session.last_completed_response_id}
@@ -1409,7 +1429,13 @@ class _HTTPBridgeStreamingMixin:
                 payload=effective_payload,
                 durable_lookup=durable_lookup,
             )
-            request_state.preferred_account_id = durable_lookup.account_id if durable_lookup is not None else None
+            request_state.require_security_work_authorized = previous_security_requirement
+            request_state.preferred_account_id = (
+                previous_preferred_account_id
+                if previous_file_required_preferred_account
+                else (durable_lookup.account_id if durable_lookup is not None else previous_preferred_account_id)
+            )
+            request_state.file_required_preferred_account = previous_file_required_preferred_account
             request_state.proxy_injected_previous_response_id = True
             request_state.fresh_upstream_request_text = fresh_upstream_request_text
             # Session-level anchor injection may be attached to a payload
@@ -1491,6 +1517,8 @@ class _HTTPBridgeStreamingMixin:
                 durable_lookup=durable_lookup,
             )
             request_state.preferred_account_id = previous_request_state.preferred_account_id
+            request_state.require_security_work_authorized = previous_request_state.require_security_work_authorized
+            request_state.file_required_preferred_account = previous_request_state.file_required_preferred_account
             if store_context_trim_applied:
                 # Store the full incoming client input as the session context
                 # so the client's next full resend can prefix-match it.
@@ -1705,6 +1733,7 @@ class _HTTPBridgeStreamingMixin:
                             preferred_account_id=None,
                             request_usage_budget=request_state.request_usage_budget,
                             request_deadline=request_deadline,
+                            require_security_work_authorized=request_state.require_security_work_authorized,
                         )
                     except ProxyResponseError as capacity_exc:
                         wait_plan = _http_bridge_capacity_wait_plan(capacity_exc, request_deadline=request_deadline)
@@ -1891,6 +1920,7 @@ class _HTTPBridgeStreamingMixin:
                         ),
                         request_usage_budget=estimate_api_key_request_usage(retry_payload),
                         request_deadline=request_deadline,
+                        require_security_work_authorized=request_state.require_security_work_authorized,
                     )
                 except ProxyResponseError as capacity_exc:
                     wait_plan = _http_bridge_capacity_wait_plan(capacity_exc, request_deadline=request_deadline)
@@ -2123,6 +2153,10 @@ class _HTTPBridgeStreamingMixin:
                     try:
                         event_block = await asyncio.wait_for(event_queue.get(), timeout=wait_timeout)
                     except asyncio.TimeoutError:
+                        # Account-capacity recovery has not sent a
+                        # response.create upstream yet.  Keep reporting that
+                        # wait instead of treating its elapsed local time as a
+                        # failed upstream creation attempt.
                         if request_state.account_capacity_waiting:
                             keepalive_count = 0
                             keepalive_sent = True

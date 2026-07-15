@@ -36,6 +36,7 @@ class DurableBridgeLookup:
     latest_input_item_count: int | None = None
     latest_input_full_fingerprint: str | None = None
     model: str | None = None
+    requires_security_work_authorized: bool = False
 
     def lease_is_active(self, *, now: datetime) -> bool:
         if self.owner_instance_id is None:
@@ -138,6 +139,7 @@ class DurableBridgeSessionCoordinator:
         latest_response_id: str | None,
         allow_takeover: bool,
         force_owner_epoch_advance: bool = False,
+        requires_security_work_authorized: bool = False,
     ) -> DurableBridgeLookup:
         api_key_scope = durable_bridge_api_key_scope(api_key_id)
         async with self._session() as session:
@@ -154,8 +156,19 @@ class DurableBridgeSessionCoordinator:
                 latest_response_id=latest_response_id,
                 allow_takeover=allow_takeover,
                 force_owner_epoch_advance=force_owner_epoch_advance,
+                requires_security_work_authorized=requires_security_work_authorized,
             )
         return _to_lookup(snapshot)
+
+    async def require_security_work_authorized(self, *, session_id: str) -> DurableBridgeLookup | None:
+        async with self._session() as session:
+            snapshot = await DurableBridgeRepository(session).require_security_work_authorized(session_id=session_id)
+        return _to_lookup(snapshot) if snapshot is not None else None
+
+    async def clear_security_work_authorized(self, *, session_id: str) -> DurableBridgeLookup | None:
+        async with self._session() as session:
+            snapshot = await DurableBridgeRepository(session).clear_security_work_authorized(session_id=session_id)
+        return _to_lookup(snapshot) if snapshot is not None else None
 
     async def renew_live_session(
         self,
@@ -170,6 +183,7 @@ class DurableBridgeSessionCoordinator:
         latest_input_item_count: int | None = None,
         latest_input_full_fingerprint: str | None = None,
         state: HttpBridgeSessionState | None = None,
+        requires_security_work_authorized: bool = False,
     ) -> DurableBridgeLookup | None:
         del api_key_id
         async with self._session() as session:
@@ -183,6 +197,7 @@ class DurableBridgeSessionCoordinator:
                 latest_input_item_count=latest_input_item_count,
                 latest_input_full_fingerprint=latest_input_full_fingerprint,
                 state=state,
+                requires_security_work_authorized=requires_security_work_authorized,
             )
         if snapshot is None:
             return None
@@ -302,4 +317,5 @@ def _to_lookup(snapshot: DurableBridgeSessionSnapshot) -> DurableBridgeLookup:
         latest_input_item_count=snapshot.latest_input_item_count,
         latest_input_full_fingerprint=snapshot.latest_input_full_fingerprint,
         model=snapshot.model,
+        requires_security_work_authorized=snapshot.requires_security_work_authorized,
     )

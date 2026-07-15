@@ -232,6 +232,94 @@ async def test_durable_bridge_stale_owner_cannot_register_turn_state_after_epoch
 
 
 @pytest.mark.asyncio
+async def test_security_work_requirement_is_monotonic_and_inherited_by_session_header_alias(
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    claimed = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="root-session",
+        api_key_id="key-1",
+        instance_id="instance-a",
+        lease_ttl_seconds=120.0,
+        account_id="approved-account",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        latest_turn_state="parent-thread",
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    await coordinator.register_session_header(
+        session_id=claimed.session_id,
+        api_key_id="key-1",
+        session_header="root-session",
+    )
+
+    marked = await coordinator.require_security_work_authorized(session_id=claimed.session_id)
+    assert marked is not None
+    assert marked.requires_security_work_authorized is True
+
+    child = await coordinator.lookup_request_targets(
+        session_key_kind="turn_state_header",
+        session_key_value="child-thread",
+        api_key_id="key-1",
+        turn_state="child-thread",
+        session_header="root-session",
+        previous_response_id=None,
+    )
+    assert child is not None
+    assert child.session_id == claimed.session_id
+    assert child.requires_security_work_authorized is True
+
+    recovered = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="root-session",
+        api_key_id="key-1",
+        instance_id="instance-b",
+        lease_ttl_seconds=120.0,
+        account_id="approved-account-2",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        latest_turn_state="child-thread",
+        latest_response_id=None,
+        allow_takeover=True,
+        requires_security_work_authorized=False,
+    )
+    assert recovered.requires_security_work_authorized is True
+
+
+@pytest.mark.asyncio
+async def test_durable_bridge_renew_cannot_clear_security_work_requirement(
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    claimed = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="security-renew-root",
+        api_key_id="key-1",
+        instance_id="instance-a",
+        lease_ttl_seconds=120.0,
+        account_id="approved-account",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+        requires_security_work_authorized=True,
+    )
+
+    renewed = await coordinator.renew_live_session(
+        session_id=claimed.session_id,
+        api_key_id="key-1",
+        instance_id="instance-a",
+        owner_epoch=claimed.owner_epoch,
+        lease_ttl_seconds=120.0,
+        requires_security_work_authorized=False,
+    )
+
+    assert renewed is not None
+    assert renewed.requires_security_work_authorized is True
+
+
+@pytest.mark.asyncio
 async def test_durable_bridge_claim_renews_same_owner_epoch(
     coordinator: DurableBridgeSessionCoordinator,
 ) -> None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 import pytest
+from alembic import command
 from anyio import to_thread
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -29,6 +30,7 @@ except ImportError:
 
 from app.db.migrate import (
     LEGACY_MIGRATION_ORDER,
+    _build_alembic_config,
     check_schema_drift,
     inspect_migration_state,
     run_startup_migrations,
@@ -260,6 +262,74 @@ async def test_run_startup_migrations_handles_legacy_schema_table_and_legacy_ale
     result = await run_startup_migrations(_DATABASE_URL)
     assert result.bootstrap.stamped_revision is None
     assert result.current_revision == _HEAD_REVISION
+
+
+@pytest.mark.asyncio
+async def test_security_lineage_reconcile_preserves_previously_deployed_aggregate_schema(tmp_path):
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'security-lineage-reconcile.sqlite'}"
+    await to_thread.run_sync(
+        lambda: run_upgrade(
+            db_url,
+            "20260716_000000_add_oauth_device_flow_slots",
+            bootstrap_legacy=True,
+        )
+    )
+
+    engine = create_async_engine(db_url, future=True)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with session_factory() as session:
+            await session.execute(
+                text(
+                    "ALTER TABLE http_bridge_sessions "
+                    "ADD COLUMN requires_security_work_authorized BOOLEAN NOT NULL DEFAULT 0"
+                )
+            )
+            await session.execute(
+                text("ALTER TABLE http_bridge_sessions ADD COLUMN latest_pending_function_call_ids TEXT")
+            )
+            await session.execute(
+                text("ALTER TABLE http_bridge_sessions ADD COLUMN latest_pending_custom_tool_call_ids TEXT")
+            )
+            await session.commit()
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+
+        async with session_factory() as session:
+            dashboard_columns = {
+                str(row[1]) for row in (await session.execute(text("PRAGMA table_info('dashboard_settings')"))).all()
+            }
+            sticky_columns = {
+                str(row[1]) for row in (await session.execute(text("PRAGMA table_info('sticky_sessions')"))).all()
+            }
+            revision = (await session.execute(text("SELECT version_num FROM alembic_version"))).scalar_one()
+
+        assert "prohibit_fast_mode" in dashboard_columns
+        assert "requires_security_work_authorized" in sticky_columns
+        assert revision == _HEAD_REVISION
+        assert await to_thread.run_sync(lambda: check_schema_drift(db_url)) == ()
+
+        await to_thread.run_sync(
+            lambda: command.downgrade(
+                _build_alembic_config(db_url),
+                "20260710_010000_add_http_bridge_security_lineage",
+            )
+        )
+
+        async with session_factory() as session:
+            bridge_columns = {
+                str(row[1]) for row in (await session.execute(text("PRAGMA table_info('http_bridge_sessions')"))).all()
+            }
+            sticky_columns = {
+                str(row[1]) for row in (await session.execute(text("PRAGMA table_info('sticky_sessions')"))).all()
+            }
+        assert {
+            "latest_pending_function_call_ids",
+            "latest_pending_custom_tool_call_ids",
+        } <= bridge_columns
+        assert "requires_security_work_authorized" not in sticky_columns
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.asyncio

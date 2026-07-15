@@ -69,6 +69,7 @@ _CompactResponses = Callable[
 class _CompactServiceProtocol(Protocol):
     _encryptor: Any
     _load_balancer: Any
+    _mark_security_lineage_requirement: Any
     _repo_factory: Any
     _http_bridge_lock: Any
     _http_bridge_sessions: Any
@@ -570,6 +571,7 @@ class _CompactMixin:
             sticky_threads_enabled=settings.sticky_threads_enabled,
             api_key=api_key,
         )
+        security_lineage_id = _sticky_key_from_session_header(headers)
         sticky_key_source = "none"
         if affinity.kind == StickySessionKind.CODEX_SESSION:
             sticky_key_source = (
@@ -827,9 +829,13 @@ class _CompactMixin:
                     exclude_account_ids=excluded_account_ids,
                     preferred_account_id=preferred_account_id,
                     require_security_work_authorized=require_security_work_authorized,
+                    security_lineage_id=security_lineage_id,
                     lease_kind="response_create",
                     estimated_lease_tokens=estimated_lease_tokens,
                     fallback_on_preferred_account_unavailable=preferred_account_id is None,
+                )
+                require_security_work_authorized = (
+                    require_security_work_authorized or selection.requires_security_work_authorized
                 )
                 account = selection.account
                 if not account:
@@ -838,8 +844,20 @@ class _CompactMixin:
                         and selection.error_code == _no_security_work_authorized_accounts_code()
                         and last_exc is not None
                     ):
+                        if security_lineage_id:
+                            logger.info(
+                                "No security-work-authorized account available for classified compact request_id=%s",
+                                request_id,
+                            )
+                            await proxy._settle_compact_api_key_usage(
+                                api_key=api_key,
+                                api_key_reservation=api_key_reservation,
+                                response=None,
+                                request_service_tier=request_service_tier,
+                            )
+                            raise last_exc
                         logger.info(
-                            "No security-work-authorized account available for compact retry; "
+                            "No security-work-authorized account available for unrooted compact retry; "
                             "continuing normal account failover request_id=%s",
                             request_id,
                         )
@@ -861,6 +879,7 @@ class _CompactMixin:
                             exclude_account_ids=excluded_account_ids,
                             preferred_account_id=preferred_account_id,
                             require_security_work_authorized=False,
+                            security_lineage_id=None,
                             lease_kind="response_create",
                             estimated_lease_tokens=estimated_lease_tokens,
                             fallback_on_preferred_account_unavailable=preferred_account_id is None,
@@ -1355,6 +1374,10 @@ class _CompactMixin:
                             safe_retry_budget -= 1
                             continue
                         if _is_security_work_authorization_required_error(code, error_message):
+                            await proxy._mark_security_lineage_requirement(
+                                security_lineage_id,
+                                account_id=account.id,
+                            )
                             if (
                                 not account.security_work_authorized
                                 and account.id != preferred_account_id

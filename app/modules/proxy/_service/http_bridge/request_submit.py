@@ -38,9 +38,7 @@ from app.core.errors import (
     openai_error,
 )
 from app.core.openai.parsing import parse_sse_event
-from app.core.openai.requests import (
-    ResponsesRequest,
-)
+from app.core.openai.requests import ResponsesRequest
 from app.core.resilience.overload import is_local_overload_error_code
 from app.core.types import JsonValue
 from app.core.utils.request_id import (
@@ -69,12 +67,18 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_key_strength,
     _http_bridge_precreated_retry_failure_error,
     _http_bridge_prewarm_enabled,
+    _http_bridge_request_contains_input_file_ids,
     _http_bridge_request_counts_against_queue,
     _log_http_bridge_event,
     _record_http_bridge_prewarm_outcome,
     _release_http_bridge_unanchored_handoff,
 )
+from app.modules.proxy._service.http_bridge.registry import (
+    unregister_previous_response_ids_locked,
+    unregister_turn_states_locked,
+)
 from app.modules.proxy._service.http_bridge.service_stubs import (
+    _call_with_supported_optional_kwargs,
     _classify_upstream_close,
     _count_external_image_urls,
     _enforce_response_create_size_limit,
@@ -162,6 +166,7 @@ from app.modules.proxy._service.warmup import (
 from app.modules.proxy.affinity import (
     _extract_model_class,
     _owner_lookup_session_id_from_headers,
+    _sticky_key_from_session_header,
 )
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
 from app.modules.proxy.helpers import (
@@ -187,8 +192,8 @@ _SECURITY_WORK_RETRY_MESSAGE = (
 )
 _SECURITY_WORK_NO_AUTHORIZED_ACCOUNTS_MESSAGE = (
     "Upstream flagged this request as possible cybersecurity work, but no account is marked as authorized for "
-    "security work. codex-lb is continuing with normal account selection; the upstream request may still fail until "
-    "an account with Trusted Access for Cyber is marked as security-work-authorized."
+    "security work. Mark an account with Trusted Access for Cyber as security-work-authorized before retrying "
+    "security-classified sessions."
 )
 _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS = 5.0
 _HTTP_BRIDGE_BACKGROUND_CLEANUP_WARN_THRESHOLD = 100
@@ -201,6 +206,10 @@ async def _send_http_bridge_request_text_with_archive_id(
 ) -> None:
     token = set_request_id(request_state.archive_request_id)
     try:
+        # The response.created watchdog measures the lifetime of this specific
+        # upstream attempt.  Replays reuse the request state, so stamp it in
+        # the shared send helper rather than only on the initial submission.
+        request_state.upstream_sent_at = _service_time().monotonic()
         await session.upstream.send_text(text_data)
     finally:
         reset_request_id(token)
@@ -347,6 +356,7 @@ class _HTTPBridgeRequestSubmitMixin:
             request_usage_budget=estimate_api_key_request_usage(payload),
             previous_response_id=payload.previous_response_id,
             session_id=_normalize_session_id(session_id),
+            security_lineage_id=_sticky_key_from_session_header(headers or {}),
             input_item_count=input_item_count,
             input_full_fingerprint=input_full_fingerprint,
             request_kind=request_kind,
@@ -1093,8 +1103,8 @@ class _HTTPBridgeRequestSubmitMixin:
         async with self._http_bridge_lock:
             if self._http_bridge_sessions.get(session.key) is session:
                 self._http_bridge_sessions.pop(session.key, None)
-                self._unregister_http_bridge_turn_states_locked(session)
-                self._unregister_http_bridge_previous_response_ids_locked(session)
+                unregister_turn_states_locked(self, session)
+                unregister_previous_response_ids_locked(self, session)
         if session.durable_session_id is not None and session.durable_owner_epoch is not None:
             durable_session_id = session.durable_session_id
             durable_owner_epoch = session.durable_owner_epoch
@@ -1403,38 +1413,145 @@ class _HTTPBridgeRequestSubmitMixin:
         self: Any,
         session: "_HTTPBridgeSession",
         request_state: _WebSocketRequestState,
+        *,
+        durable_security_requirement_persisted: bool = False,
     ) -> bool:
-        if session.account.security_work_authorized:
-            return False
-        if request_state.response_id is not None:
-            return False
-        if request_state.replay_count >= 1:
-            return False
+        return await self._retry_http_bridge_owner_failover_request(
+            session,
+            request_state,
+            require_security_work_authorized=True,
+            durable_security_requirement_persisted=durable_security_requirement_persisted,
+        )
+
+    async def _claim_http_bridge_replacement_before_swap(
+        self: Any,
+        session: "_HTTPBridgeSession",
+        *,
+        account_id: str,
+        upstream: Any,
+        release_selected_account_lease: Any,
+    ) -> None:
+        if account_id == session.account.id or session.durable_session_id is None:
+            return
+        try:
+            await _call_with_supported_optional_kwargs(
+                self._claim_durable_http_bridge_session,
+                session,
+                optional_kwargs={"claim_account_id": account_id},
+                allow_takeover=True,
+                force_owner_epoch_advance=True,
+            )
+        except BaseException:
+            try:
+                await upstream.close()
+            except Exception:
+                logger.debug("Failed to close unclaimed HTTP bridge replacement websocket", exc_info=True)
+            await release_selected_account_lease()
+            raise
+
+    async def _retry_http_bridge_owner_failover_request(
+        self: Any,
+        session: "_HTTPBridgeSession",
+        request_state: _WebSocketRequestState,
+        *,
+        require_security_work_authorized: bool,
+        durable_security_requirement_persisted: bool = False,
+    ) -> bool:
         retry_text = request_state.request_text
         if not retry_text:
             return False
         if request_state.file_required_preferred_account:
             return False
         if request_state.previous_response_id is not None:
-            retry_text = _prepare_websocket_request_state_for_account_switch(request_state)
-            if retry_text is None:
+            if not (
+                request_state.proxy_injected_previous_response_id
+                and request_state.fresh_upstream_request_is_retry_safe
+                and request_state.fresh_upstream_request_text
+            ):
+                return False
+            retry_text = request_state.fresh_upstream_request_text
+        if _http_bridge_request_contains_input_file_ids(retry_text):
+            return False
+        # Uploaded file ids are scoped to the account that registered them.
+        # Never mark or migrate the lineage before proving the request is
+        # replayable on another account.
+        if request_state.file_required_preferred_account:
+            return False
+        if not _websocket_request_can_replay_before_visible_output(request_state):
+            return False
+
+        owner_account_id = session.account.id
+        if require_security_work_authorized and getattr(session.account, "security_work_authorized", False):
+            return False
+        if (
+            require_security_work_authorized
+            and not durable_security_requirement_persisted
+            and session.durable_session_id is not None
+        ):
+            durable_lookup = await self._durable_bridge.require_security_work_authorized(
+                session_id=session.durable_session_id
+            )
+            if durable_lookup is None:
+                # A claimed production lineage must be durably marked before
+                # it can move accounts. Fail closed if its record disappeared.
                 return False
 
+        # The retry state must remain atomic from the caller's perspective.
+        # In particular, the terminal-event handler needs the original owner
+        # affinity to rewrite a failed migration as owner-unavailable.  Do not
+        # leave a failed reconnect looking like a successful fresh replay.
+        previous_response_id = request_state.previous_response_id
+        previous_proxy_injected_response_id = request_state.proxy_injected_previous_response_id
+        previous_request_text = request_state.request_text
+        previous_responses_lite_model = request_state.responses_lite_model
+        previous_preferred_account_id = request_state.preferred_account_id
+        previous_excluded_account_ids = set(request_state.excluded_account_ids)
+        previous_replay_count = request_state.replay_count
+        previous_response_id_value = request_state.response_id
+        previous_response_event_count = request_state.response_event_count
+        previous_replay_downstream_response_id = request_state.replay_downstream_response_id
+        previous_suppress_next_created_downstream = request_state.suppress_next_created_downstream
+        previous_awaiting_response_created = request_state.awaiting_response_created
+        previous_force_refresh_account_id = request_state.force_refresh_account_id
+        previous_request_security_requirement = request_state.require_security_work_authorized
+        previous_session_security_requirement = session.requires_security_work_authorized
+        if request_state.previous_response_id is not None:
+            prepared_retry_text = _prepare_websocket_request_state_for_account_switch(request_state)
+            if prepared_retry_text is None:
+                return False
+            retry_text = prepared_retry_text
+        if require_security_work_authorized:
+            session.requires_security_work_authorized = True
+            request_state.require_security_work_authorized = True
+        request_state.preferred_account_id = None
+        request_state.excluded_account_ids.add(owner_account_id)
+
         request_state.replay_count += 1
+        if request_state.response_id is not None and not request_state.awaiting_response_created:
+            # response.created is not user-visible output, so a created-only
+            # denial can still move to another owner.  Keep the id already
+            # emitted downstream, suppress the replacement response.created,
+            # and rewrite the replacement stream to that original id.
+            request_state.replay_downstream_response_id = request_state.response_id
+            request_state.suppress_next_created_downstream = True
         request_state.response_id = None
+        request_state.response_event_count = 0
         request_state.awaiting_response_created = True
         if retry_text != request_state.request_text:
             request_state.previous_response_id = None
             request_state.proxy_injected_previous_response_id = False
             request_state.request_text = retry_text
+            request_state.responses_lite_model = request_state.fresh_upstream_request_responses_lite_model
 
+        appended_pending_request = False
         async with session.pending_lock:
             if request_state not in session.pending_requests:
                 session.pending_requests.append(request_state)
                 session.queued_request_count += 1
+                appended_pending_request = True
 
         _log_http_bridge_event(
-            "retry_security_work_authorized",
+            ("retry_security_work_authorized" if require_security_work_authorized else "retry_owner_failover"),
             session.key,
             account_id=session.account.id,
             model=session.request_model,
@@ -1442,12 +1559,14 @@ class _HTTPBridgeRequestSubmitMixin:
             cache_key_family=session.key.affinity_kind,
             model_class=_extract_model_class(session.request_model) if session.request_model else None,
         )
+        reconnected = False
         try:
             await self._reconnect_http_bridge_session(
                 session,
                 request_state=request_state,
-                require_security_work_authorized=True,
+                require_security_work_authorized=require_security_work_authorized,
             )
+            reconnected = True
             retry_text = self._http_bridge_text_with_account_installation_id(session, request_state, retry_text)
             await _send_http_bridge_request_text_with_archive_id(session, request_state, retry_text)
             session.last_used_at = _service_time().monotonic()
@@ -1455,11 +1574,44 @@ class _HTTPBridgeRequestSubmitMixin:
         except UpstreamWebSocketTransportError:
             raise
         except Exception as exc:
-            logger.warning("HTTP bridge security-work retry failed", exc_info=True)
+            logger.warning(
+                "HTTP bridge owner failover retry failed security_required=%s",
+                require_security_work_authorized,
+                exc_info=True,
+            )
+            # A failed connect leaves the original owner socket live, so
+            # restore its continuity state and let the caller emit the
+            # owner-unavailable rewrite. After a successful reconnect the old
+            # socket is already retired; a later send failure cannot safely
+            # pretend that the owner state is still current.
+            if not reconnected:
+                request_state.previous_response_id = previous_response_id
+                request_state.proxy_injected_previous_response_id = previous_proxy_injected_response_id
+                request_state.request_text = previous_request_text
+                request_state.responses_lite_model = previous_responses_lite_model
+                request_state.preferred_account_id = previous_preferred_account_id
+                request_state.excluded_account_ids = previous_excluded_account_ids
+                request_state.replay_count = previous_replay_count
+                request_state.response_id = previous_response_id_value
+                request_state.response_event_count = previous_response_event_count
+                request_state.replay_downstream_response_id = previous_replay_downstream_response_id
+                request_state.suppress_next_created_downstream = previous_suppress_next_created_downstream
+                request_state.awaiting_response_created = previous_awaiting_response_created
+                request_state.force_refresh_account_id = previous_force_refresh_account_id
+                if require_security_work_authorized:
+                    request_state.require_security_work_authorized = True
+                    session.requires_security_work_authorized = True
+                else:
+                    request_state.require_security_work_authorized = previous_request_security_requirement
+                    session.requires_security_work_authorized = previous_session_security_requirement
             if isinstance(exc, ProxyResponseError):
                 error = _parse_openai_error(exc.payload)
                 code = _normalize_error_code(error.code if error else None, error.type if error else None)
-                if code == _NO_SECURITY_WORK_AUTHORIZED_ACCOUNTS_CODE and request_state.event_queue is not None:
+                if (
+                    require_security_work_authorized
+                    and code == _NO_SECURITY_WORK_AUTHORIZED_ACCOUNTS_CODE
+                    and request_state.event_queue is not None
+                ):
                     await request_state.event_queue.put(
                         format_sse_event(
                             _security_work_advisory_event(
@@ -1471,7 +1623,7 @@ class _HTTPBridgeRequestSubmitMixin:
                         )
                     )
             async with session.pending_lock:
-                if request_state in session.pending_requests:
+                if appended_pending_request and request_state in session.pending_requests:
                     session.pending_requests.remove(request_state)
                     session.queued_request_count = max(0, session.queued_request_count - 1)
             return False

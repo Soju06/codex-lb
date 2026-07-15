@@ -445,7 +445,7 @@ def _classify_upstream_close(
     *,
     response_events_seen: int,
 ) -> Literal["transient", "rejected"]:
-    if close_code == 1000 and response_events_seen == 0:
+    if close_code in {1000, 1003, 1007, 1008} and response_events_seen == 0:
         return "rejected"
     return "transient"
 
@@ -722,6 +722,7 @@ async def _select_account_with_budget_for_stream(proxy: Any, deadline: float, **
     selector = proxy._select_account_with_budget_compatible
     optional_kwargs = (
         "require_security_work_authorized",
+        "security_lineage_id",
         "lease_kind",
         "estimated_lease_tokens",
         "fallback_on_preferred_account_unavailable",

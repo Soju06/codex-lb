@@ -61,6 +61,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_previous_response_alias_key,
     _http_bridge_session_account_active,
     _http_bridge_session_allows_api_key,
+    _http_bridge_session_meets_security_requirement,
     _http_bridge_session_retiring_with_visible_requests,
     _http_bridge_session_reusable_for_request,
     _http_bridge_turn_state_alias_key,
@@ -157,8 +158,8 @@ _SECURITY_WORK_RETRY_MESSAGE = (
 )
 _SECURITY_WORK_NO_AUTHORIZED_ACCOUNTS_MESSAGE = (
     "Upstream flagged this request as possible cybersecurity work, but no account is marked as authorized for "
-    "security work. codex-lb is continuing with normal account selection; the upstream request may still fail until "
-    "an account with Trusted Access for Cyber is marked as security-work-authorized."
+    "security work. Mark an account with Trusted Access for Cyber as security-work-authorized before retrying "
+    "security-classified sessions."
 )
 _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS = 5.0
 _HTTP_BRIDGE_BACKGROUND_CLEANUP_WARN_THRESHOLD = 100
@@ -171,6 +172,7 @@ class _HTTPBridgeOwnerForwardingMixin:
         key: "_HTTPBridgeSessionKey",
         incoming_turn_state: str | None,
         api_key: ApiKeyData | None,
+        require_security_work_authorized: bool = False,
     ) -> bool:
         api_key_id = api_key.id if api_key is not None else None
         async with self._http_bridge_lock:
@@ -187,11 +189,14 @@ class _HTTPBridgeOwnerForwardingMixin:
                     continue
                 if not _http_bridge_session_allows_api_key(session, api_key):
                     continue
+                if not _http_bridge_session_meets_security_requirement(session, require_security_work_authorized):
+                    continue
                 if not _http_bridge_session_reusable_for_request(
                     session=session,
                     key=candidate_key,
                     incoming_turn_state=incoming_turn_state,
                     previous_response_id=None,
+                    require_security_work_authorized=require_security_work_authorized,
                 ) and not _http_bridge_session_retiring_with_visible_requests(session):
                     continue
                 return True

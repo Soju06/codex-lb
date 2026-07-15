@@ -590,7 +590,17 @@ class StickySession(Base):
         server_default=text("'sticky_thread'"),
         nullable=False,
     )
-    account_id: Mapped[str] = mapped_column(String, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False)
+    account_id: Mapped[str | None] = mapped_column(String, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=True)
+    # A CODEX_SESSION root that has received a Trusted Access / cyber-policy
+    # denial must never silently return to the ordinary account pool.  This
+    # lives beside (rather than inside) the per-turn affinity so child turns
+    # with a new x-codex-turn-state inherit the requirement.
+    requires_security_work_authorized: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=false(),
+        nullable=False,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,
@@ -1555,10 +1565,17 @@ class HttpBridgeSessionRecord(Base):
     )
     model: Mapped[str | None] = mapped_column(String, nullable=True)
     service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
+    requires_security_work_authorized: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
     latest_turn_state: Mapped[str | None] = mapped_column(Text, nullable=True)
     latest_response_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     latest_input_item_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     latest_input_full_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Retain columns created by the previously deployed aggregate even though
+    # pending-call replay is outside this focused PR's behavior.
+    latest_pending_function_call_ids: Mapped[str | None] = mapped_column(Text, nullable=True)
+    latest_pending_custom_tool_call_ids: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

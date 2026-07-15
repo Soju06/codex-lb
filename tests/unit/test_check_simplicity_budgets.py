@@ -282,6 +282,55 @@ def test_override_label_ignored_on_null_payload(tmp_path, monkeypatch):
     assert checker.main() == 1
 
 
+def test_heading_count_respects_fence_length():
+    checker = _load_checker_module()
+
+    lines = [
+        "````markdown",
+        "```",
+        "# still inside the four-backtick fence",
+        "```",
+        "````",
+        "# heading after the outer fence",
+    ]
+
+    assert checker.count_top_level_headings(lines) == 1
+
+
+def test_nav_count_ignores_nested_arrays_inside_items(tmp_path):
+    checker = _load_checker_module()
+    nav_file = tmp_path / "nav.tsx"
+    nav_file.write_text(
+        "const NAV_ITEMS = [\n"
+        '  { to: "/dashboard", roles: ["admin"] },\n'
+        '  { to: "/reports", labelKey: "nav.reports" },\n'
+        '  { to: "/settings", labelKey: "nav.settings" },\n'
+        "] as const;\n",
+        encoding="utf-8",
+    )
+
+    assert checker.count_nav_items(nav_file, "NAV_ITEMS") == 3
+
+
+def test_nav_count_stops_at_target_array_when_file_has_multiple(tmp_path):
+    checker = _load_checker_module()
+    nav_file = tmp_path / "nav.tsx"
+    nav_file.write_text(
+        "const CORE_NAV_ITEMS = [\n"
+        '  { to: "/dashboard" },\n'
+        '  { to: "/settings" },\n'
+        "] as const;\n"
+        "\n"
+        "const ADVANCED_NAV_ITEMS = [\n"
+        '  { to: "/automations" },\n'
+        "] as const;\n",
+        encoding="utf-8",
+    )
+
+    assert checker.count_nav_items(nav_file, "CORE_NAV_ITEMS") == 2
+    assert checker.count_nav_items(nav_file, "ADVANCED_NAV_ITEMS") == 1
+
+
 def test_missing_nav_array_exits_2_with_repoint_instruction(tmp_path, monkeypatch, capsys):
     checker = _load_checker_module()
     _write_repo(tmp_path, nav_source="const OTHER_ITEMS = [] as const;\n")

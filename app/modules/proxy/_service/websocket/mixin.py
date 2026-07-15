@@ -3958,16 +3958,17 @@ class _WebSocketMixin:
             )
             terminal_error_message = error.message if error else None
             if _facade()._is_security_work_authorization_required_error(terminal_error_code, terminal_error_message):
-                await proxy._mark_security_lineage_requirement(
-                    request_state.security_lineage_id,
-                    account_id=account.id,
-                )
                 security_retry_text = (
                     request_state.fresh_upstream_request_text
                     if request_state.previous_response_id is not None
                     else request_state.request_text
                 )
                 security_retry_has_file_ids = _websocket_retry_text_contains_input_file_ids(security_retry_text)
+                if not request_state.file_required_preferred_account and not security_retry_has_file_ids:
+                    await proxy._mark_security_lineage_requirement(
+                        request_state.security_lineage_id,
+                        account_id=account.id,
+                    )
                 can_retry_security_work = (
                     not account.security_work_authorized
                     and not has_other_pending_requests

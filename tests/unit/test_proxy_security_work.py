@@ -945,6 +945,8 @@ async def test_process_websocket_security_retry_releases_response_create_gate() 
 async def test_process_websocket_security_retry_never_migrates_file_pinned_owner() -> None:
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     account = _make_account("acc_ws_security_file_owner")
+    mark_security_lineage = AsyncMock()
+    service._mark_security_lineage_requirement = mark_security_lineage
     request_state = proxy_service._WebSocketRequestState(
         request_id="ws_req_security_file_owner",
         model="gpt-5.6-sol",
@@ -996,12 +998,15 @@ async def test_process_websocket_security_retry_never_migrates_file_pinned_owner
     assert upstream_control.replay_request_state is None
     assert upstream_control.reconnect_requested is False
     assert request_state.require_security_work_authorized is False
+    mark_security_lineage.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_process_websocket_security_retry_detects_file_id_in_fresh_retry_text() -> None:
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     account = _make_account("acc_ws_security_file_body")
+    mark_security_lineage = AsyncMock()
+    service._mark_security_lineage_requirement = mark_security_lineage
     request_state = proxy_service._WebSocketRequestState(
         request_id="ws_req_security_file_body",
         model="gpt-5.6-sol",
@@ -1055,3 +1060,4 @@ async def test_process_websocket_security_retry_detects_file_id_in_fresh_retry_t
     assert request_state.require_security_work_authorized is False
     assert request_state.previous_response_id == "resp_ws_file_body"
     assert request_state.fresh_upstream_request_is_retry_safe is True
+    mark_security_lineage.assert_not_awaited()

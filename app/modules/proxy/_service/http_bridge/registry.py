@@ -18,6 +18,7 @@ def unregister_turn_states_locked(service: Any, session: Any) -> None:
         if service._http_bridge_turn_state_index.get(alias_key) == session.key:
             service._http_bridge_turn_state_index.pop(alias_key, None)
     session.downstream_turn_state_aliases.clear()
+    getattr(session, "turn_state_alias_registration_generations", {}).clear()
 
 
 def unregister_previous_response_ids_locked(service: Any, session: Any) -> None:
@@ -30,3 +31,4 @@ def unregister_previous_response_ids_locked(service: Any, session: Any) -> None:
         if service._http_bridge_previous_response_index.get(alias_key) == session.key:
             service._http_bridge_previous_response_index.pop(alias_key, None)
     session.previous_response_ids.clear()
+    getattr(session, "previous_response_alias_registration_generations", {}).clear()

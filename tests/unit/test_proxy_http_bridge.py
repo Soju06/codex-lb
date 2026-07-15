@@ -6415,6 +6415,8 @@ async def test_http_bridge_unregister_aliases_preserves_new_owner_mapping() -> N
     previous_response_id = "resp_shared_alias"
     old_session.downstream_turn_state_aliases.add(turn_state)
     old_session.previous_response_ids.add(previous_response_id)
+    old_session.turn_state_alias_registration_generations[turn_state] = 1
+    old_session.previous_response_alias_registration_generations[previous_response_id] = 2
     turn_state_alias_key = proxy_service._http_bridge_turn_state_alias_key(turn_state, None)
     previous_response_alias_key = proxy_service._http_bridge_previous_response_alias_key(previous_response_id, None)
     service._http_bridge_turn_state_index[turn_state_alias_key] = new_key
@@ -6427,6 +6429,8 @@ async def test_http_bridge_unregister_aliases_preserves_new_owner_mapping() -> N
     assert service._http_bridge_previous_response_index[previous_response_alias_key] == new_key
     assert old_session.downstream_turn_state_aliases == set()
     assert old_session.previous_response_ids == set()
+    assert old_session.turn_state_alias_registration_generations == {}
+    assert old_session.previous_response_alias_registration_generations == {}
 
 
 @pytest.mark.asyncio

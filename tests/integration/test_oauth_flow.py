@@ -106,6 +106,18 @@ async def test_manual_callback_api_preserves_oauth_error():
 async def test_manual_callback_service_sanitizes_unexpected_exception(monkeypatch, caplog):
     await oauth_module._OAUTH_STORE.reset()
     caplog.set_level(logging.ERROR, logger=oauth_module.logger.name)
+    # Persist the flow durably (real flows are written to the shared DB at start)
+    # so the reconciliation gate keeps it rather than dropping it as stale.
+    async with SessionLocal() as session:
+        await OAuthFlowRepository(session, TokenEncryptor()).create(
+            oauth_module.OAuthFlowRecord(
+                flow_id="flow-1",
+                method="browser",
+                status="pending",
+                state_token="state-1",
+                code_verifier="verifier-1",
+            )
+        )
     async with oauth_module._OAUTH_STORE.lock:
         oauth_module._OAUTH_STORE.remember_flow_locked(
             oauth_module.OAuthState(
@@ -2270,4 +2282,154 @@ async def test_expired_local_browser_flow_callback_is_rejected_on_origin_replica
     assert result.status == "error"
     assert result.error_message == "Invalid OAuth callback: state mismatch or missing code."
     # The stale verifier was never used to exchange the code.
+    assert exchange_calls == []
+
+
+@pytest.mark.parametrize("entry_point", ["status", "complete", "manual_callback", "handle_callback", "device_complete"])
+@pytest.mark.asyncio
+async def test_entry_points_honor_durable_terminal_over_local_pending(monkeypatch, entry_point):
+    """Root-consolidation regression: EVERY entry point that resolves a flow from
+    local state must consult the DB-authoritative status first, so a durable
+    terminal written by another replica wins over this replica's stale local
+    ``pending`` -- and a consumed authorization / device code is never replayed.
+    """
+
+    from aiohttp.test_utils import make_mocked_request
+
+    async def fake_callback_server_start(self) -> None:
+        return None
+
+    async def fake_oauth_route():
+        return None
+
+    exchange_calls: list[str | None] = []
+
+    async def fake_exchange_authorization_code(**kwargs):
+        exchange_calls.append(kwargs.get("code"))
+        raise AssertionError("a durable-terminal flow must never re-exchange the code")
+
+    async def fake_device_code(**_):
+        return DeviceCode(
+            verification_url="https://auth.openai.com/codex/device",
+            user_code="TERM-CODE",
+            device_auth_id="dev-term",
+            interval_seconds=30,
+            expires_in_seconds=300,
+        )
+
+    async def fake_exchange_device_token(**_):
+        # The device poll task legitimately calls this once at start; it is not a
+        # replay. Only authorization-code exchanges are tracked in exchange_calls.
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(oauth_module.OAuthCallbackServer, "start", fake_callback_server_start)
+    monkeypatch.setattr(oauth_module, "_oauth_route", fake_oauth_route)
+    monkeypatch.setattr(oauth_module, "exchange_authorization_code", fake_exchange_authorization_code)
+    monkeypatch.setattr(oauth_module, "request_device_code", fake_device_code)
+    monkeypatch.setattr(oauth_module, "exchange_device_token", fake_exchange_device_token)
+
+    replica = _make_replica_service(oauth_module.OAuthStateStore())
+    force_method = "device" if entry_point == "device_complete" else "browser"
+    start = await replica.start_oauth(oauth_module.OauthStartRequest(force_method=force_method))
+    assert start.flow_id is not None
+    state_token = _oauth_state_token(start.authorization_url or "") if force_method == "browser" else None
+
+    # Origin replica still holds the flow as pending in memory.
+    async with replica._store.lock:
+        local = replica._store.get_flow_locked(start.flow_id)
+        assert local is not None and local.status == "pending"
+
+    # Another replica writes the durable terminal success.
+    async with SessionLocal() as session:
+        assert await OAuthFlowRepository(session, TokenEncryptor()).set_status(
+            start.flow_id, status="success", error_message=None
+        )
+
+    if entry_point == "status":
+        resp = await replica.oauth_status(start.flow_id)
+        assert resp.status == "success"
+    elif entry_point in ("complete", "device_complete"):
+        resp = await replica.complete_oauth(oauth_module.OauthCompleteRequest(flow_id=start.flow_id))
+        assert resp.status == "success"
+    elif entry_point == "manual_callback":
+        resp = await replica.manual_callback(
+            f"http://localhost:1455/auth/callback?code=replay-code&state={state_token}",
+            flow_id=start.flow_id,
+        )
+        assert resp.status == "success"
+    elif entry_point == "handle_callback":
+        request = make_mocked_request("GET", f"/auth/callback?code=replay-code&state={state_token}")
+        response = await replica._handle_callback(request)
+        assert response.status == 200
+        assert response.text is not None and "Login failed" not in response.text
+
+    # The origin replica's in-memory flow is reconciled to the durable terminal.
+    async with replica._store.lock:
+        local = replica._store.get_flow_locked(start.flow_id)
+        assert local is not None and local.status == "success"
+
+    # The consumed authorization / device code was never re-exchanged.
+    assert exchange_calls == []
+
+    # Clean up any parked device poll task.
+    async with replica._store.lock:
+        flow = replica._store.get_flow_locked(start.flow_id)
+        task = flow.poll_task if flow is not None else None
+    if task is not None:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_browser_callback_replay_on_origin_does_not_reexchange_consumed_code(monkeypatch):
+    """The reported callback-replay class: replica A starts a browser flow (local
+    pending); another replica completes it (durable success). A second browser
+    redirect / pasted callback for the same state lands back on A. A must observe
+    the durable success instead of reusing the already-consumed authorization
+    code (which upstream would reject, surfacing a spurious error to the user).
+    """
+
+    from aiohttp.test_utils import make_mocked_request
+
+    async def fake_callback_server_start(self) -> None:
+        return None
+
+    async def fake_oauth_route():
+        return None
+
+    exchange_calls: list[str | None] = []
+
+    async def fake_exchange_authorization_code(**kwargs):
+        exchange_calls.append(kwargs.get("code"))
+        raise AssertionError("replayed callback must not re-exchange the consumed code")
+
+    monkeypatch.setattr(oauth_module.OAuthCallbackServer, "start", fake_callback_server_start)
+    monkeypatch.setattr(oauth_module, "_oauth_route", fake_oauth_route)
+    monkeypatch.setattr(oauth_module, "exchange_authorization_code", fake_exchange_authorization_code)
+
+    replica_a = _make_replica_service(oauth_module.OAuthStateStore())
+    start = await replica_a.start_oauth(oauth_module.OauthStartRequest(force_method="browser"))
+    assert start.flow_id is not None
+    state_token = _oauth_state_token(start.authorization_url or "")
+
+    # Another replica completed the flow: durable success in the shared DB.
+    async with SessionLocal() as session:
+        assert await OAuthFlowRepository(session, TokenEncryptor()).set_status(
+            start.flow_id, status="success", error_message=None
+        )
+
+    # Replayed pasted callback on the origin replica.
+    manual = await replica_a.manual_callback(
+        f"http://localhost:1455/auth/callback?code=consumed-code&state={state_token}",
+        flow_id=start.flow_id,
+    )
+    assert manual.status == "success"
+
+    # Replayed browser redirect on the origin replica.
+    request = make_mocked_request("GET", f"/auth/callback?code=consumed-code&state={state_token}")
+    response = await replica_a._handle_callback(request)
+    assert response.status == 200
+    assert response.text is not None and "Login failed" not in response.text
+
     assert exchange_calls == []

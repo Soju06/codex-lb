@@ -119,3 +119,35 @@ the atomic monotonic status write (a durable `success` is never regressed).
 - **THEN** the superseded task's slot consume matches zero rows
 - **AND** it aborts without adding or re-authenticating an account, and writes no
   terminal status for the superseded flow
+
+### Requirement: Durable status is authoritative over local state at every entry point
+
+Each dashboard OAuth entry point MUST consult the DB-authoritative durable status through one reconciliation gate before it branches on local in-memory flow state.
+This covers status polling, `/complete`, the device acknowledgement, the browser
+callback handler, and the manual pasted callback. The durable row SHALL always
+win over a local `pending`: a
+durable terminal (`success` or `error`) overrides local `pending`, and a durable
+row that is absent or expired drops the stale local flow. An entry point MUST
+NOT branch on a local `pending`, reuse a locally cached PKCE verifier, or replay
+a callback without first reconciling against the durable status.
+
+#### Scenario: Replayed callback observes the durable terminal instead of re-exchanging
+
+- **GIVEN** replica A started a browser OAuth flow and still holds it locally as
+  `pending`
+- **AND** the flow was completed on another replica, so the shared DB status is
+  `success` (the authorization code is consumed)
+- **WHEN** a second browser redirect or a pasted callback for the same `state`
+  lands back on replica A
+- **THEN** replica A returns the durable `success` and MUST NOT re-exchange the
+  already-consumed authorization code
+- **AND** replica A reconciles its in-memory flow to `success`
+
+#### Scenario: Every entry point honors a durable terminal over local pending
+
+- **GIVEN** a flow held locally as `pending` on the originating replica whose
+  shared-DB status is a terminal written by another replica
+- **WHEN** any of status polling, `/complete`, the device acknowledgement, the
+  browser callback handler, or the manual callback is invoked for that flow
+- **THEN** that entry point reports the durable terminal (never the stale local
+  `pending`) and reconciles the local in-memory flow to it

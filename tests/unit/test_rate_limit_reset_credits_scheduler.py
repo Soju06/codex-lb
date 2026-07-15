@@ -535,6 +535,8 @@ async def test_auto_redeem_uses_existing_helper_for_soonest_expiring_credit(
     assert isinstance(redeem_calls[0]["redeem_request_id"], str)
     assert redeem_calls[0]["redeem_request_id"].startswith("auto-reset-credit:")
     assert redeem_calls[0]["skip_if_redeem_request_pinned"] is True
+    assert redeem_calls[0]["expected_credit_id"] == "c1"
+    assert redeem_calls[0]["expected_credit_expires_at"] == store.get(account.id).credits[0].expires_at
     assert callable(redeem_calls[0]["refresh_usage"])
 
 

@@ -13,6 +13,7 @@ from typing import Any
 from app.core.clients.rate_limit_reset_credits import (
     RateLimitResetCreditsSnapshot,
     ResetCreditFetchError,
+    ResetCreditItem,
     ResetCreditsResponse,
     build_snapshot,
     fetch_reset_credits,
@@ -291,6 +292,9 @@ async def _auto_redeem_reset_credit(
             pinned_credit_id,
         )
         return
+    target_credit = _select_auto_redeem_target_credit(snapshot)
+    if target_credit is None:
+        return
 
     effective_redeem_fn = redeem_fn or _redeem_soonest_reset_credit
     async with get_background_session() as lock_session:
@@ -321,6 +325,8 @@ async def _auto_redeem_reset_credit(
                 refresh_usage=_refresh_usage_after_auto_redeem,
                 redeem_request_id=redeem_request_id,
                 skip_if_redeem_request_pinned=True,
+                expected_credit_id=target_credit.id,
+                expected_credit_expires_at=target_credit.expires_at,
             )
         except ResetCreditRedeemRequestAlreadyPinned as exc:
             logger.info(
@@ -344,6 +350,19 @@ def _auto_redeem_request_id(account: Account, snapshot: RateLimitResetCreditsSna
     # burning a second coupon over trying to exhaust every expiring credit.
     digest = hashlib.sha256(f"{account.id}:{expires_at.date().isoformat()}".encode("utf-8")).hexdigest()[:32]
     return f"auto-reset-credit:{digest}"
+
+
+def _select_auto_redeem_target_credit(snapshot: RateLimitResetCreditsSnapshot) -> ResetCreditItem | None:
+    if snapshot.available_count <= 0:
+        return None
+    available = [
+        credit
+        for credit in snapshot.credits
+        if credit.status == "available" and credit.expires_at is not None
+    ]
+    if not available:
+        return None
+    return min(available, key=lambda credit: credit.expires_at)
 
 
 async def _refresh_usage_after_auto_redeem(account: Account) -> None:

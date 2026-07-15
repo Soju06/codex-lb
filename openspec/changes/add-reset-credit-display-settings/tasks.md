@@ -12,3 +12,4 @@
 - [x] Verify one live automatic redemption against the approved Funeasy account exactly once.
 - [x] Include reset-credit settings in settings audit `changed_fields`.
 - [x] Re-read account eligibility immediately before automatic redemption.
+- [x] Constrain automatic redemption to the credit id and expiry that triggered the five-minute window.

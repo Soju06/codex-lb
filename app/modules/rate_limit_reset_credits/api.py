@@ -214,6 +214,8 @@ async def _redeem_soonest_reset_credit(
     resolve_route: ResolveRouteFn | None = None,
     redeem_request_id: str | None = None,
     skip_if_redeem_request_pinned: bool = False,
+    expected_credit_id: str | None = None,
+    expected_credit_expires_at: datetime | None = None,
 ) -> _RedeemResetCreditOutcome:
     _assert_account_can_redeem_reset_credit(account)
     effective_fetch_fn = fetch_fn or fetch_reset_credits
@@ -232,6 +234,8 @@ async def _redeem_soonest_reset_credit(
                 resolve_route=resolve_route,
                 redeem_request_id=redeem_request_id,
                 skip_if_redeem_request_pinned=skip_if_redeem_request_pinned,
+                expected_credit_id=expected_credit_id,
+                expected_credit_expires_at=expected_credit_expires_at,
             )
     except RedeemClaimTimeoutError as exc:
         raise DashboardConflictError(
@@ -305,6 +309,8 @@ async def _redeem_soonest_reset_credit_locked(
     resolve_route: ResolveRouteFn | None,
     redeem_request_id: str | None,
     skip_if_redeem_request_pinned: bool,
+    expected_credit_id: str | None,
+    expected_credit_expires_at: datetime | None,
 ) -> _RedeemResetCreditOutcome:
     redeem_account = account
     if auth_manager is not None:
@@ -348,7 +354,11 @@ async def _redeem_soonest_reset_credit_locked(
     except ResetCreditFetchError as exc:
         raise _translate_fetch_error(exc) from exc
 
-    credit = _select_soonest_available_credit_from_response(credits_response)
+    credit = (
+        _select_available_credit_by_id(credits_response, expected_credit_id)
+        if expected_credit_id is not None
+        else _select_soonest_available_credit_from_response(credits_response)
+    )
     if pending_credit_id is not None:
         credit_id = pending_credit_id
     elif credit is None:
@@ -361,6 +371,12 @@ async def _redeem_soonest_reset_credit_locked(
         # with the fresh (empty) one and return a conflict.
         await store.set(account.id, build_snapshot(credits_response))
         raise DashboardConflictError("No available reset credit", code="no_available_reset_credit")
+    elif expected_credit_expires_at is not None and not _same_credit_expiry(
+        credit.expires_at,
+        expected_credit_expires_at,
+    ):
+        await store.set(account.id, build_snapshot(credits_response))
+        raise DashboardConflictError("Target reset credit changed", code="target_reset_credit_changed")
     else:
         # Pin the selected credit before the consume: a synthesized or
         # client-supplied id is now always recorded, so a lost consume response
@@ -531,6 +547,20 @@ def _select_available_credit_by_id(
         if credit.id == credit_id and credit.status == "available":
             return credit
     return None
+
+
+def _same_credit_expiry(left: datetime | None, right: datetime | None) -> bool:
+    if left is None or right is None:
+        return left is right
+    if left.tzinfo is None:
+        left = left.replace(tzinfo=timezone.utc)
+    else:
+        left = left.astimezone(timezone.utc)
+    if right.tzinfo is None:
+        right = right.replace(tzinfo=timezone.utc)
+    else:
+        right = right.astimezone(timezone.utc)
+    return left == right
 
 
 def _select_soonest_available_credit_from_items(

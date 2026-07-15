@@ -4,12 +4,16 @@ name: Simplicity budgets
 # .github/scripts/check_simplicity_budgets.py.
 #
 # This is deliberately a SEPARATE workflow from ci.yml, with different
-# pull_request trigger types: the simplicity-budget-approved override is read
-# from the event payload, and re-running a failed run reuses a stale payload —
-# only a fresh `labeled`/`unlabeled` event sees a just-applied label. Adding
-# those types to ci.yml instead would re-run the full CI matrix on every label
-# churn from codex-review-labels.yml (15-minute cron + workflow_run syncs of
-# the codex labels), which is why they live here on a seconds-long job.
+# pull_request trigger types: `labeled`/`unlabeled` re-evaluate the
+# simplicity-budget-approved override the moment a maintainer toggles it.
+# Adding those types to ci.yml instead would re-run the full CI matrix on
+# every label churn from codex-review-labels.yml (15-minute cron +
+# workflow_run syncs of the codex labels), which is why they live here on a
+# seconds-long job.
+#
+# The override label is fetched live from the API (not read from the event
+# payload): fork PR payloads and re-runs of old runs would otherwise see a
+# stale or empty label set.
 #
 # No `paths:` filter: the job is cheap, and a required check behind a paths
 # filter would leave non-matching PRs pending forever.
@@ -23,6 +27,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -40,9 +45,18 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Check simplicity budgets
+      - name: Resolve current PR labels
+        # Query the live label set instead of trusting the event payload:
+        # fork PR payloads and re-runs of old runs can carry stale/empty
+        # labels. push and merge_group runs have no PR — the override never
+        # applies there; main must always satisfy the budgets in-file.
+        if: github.event_name == 'pull_request'
         env:
-          # Empty/null on push and merge_group; the override never applies
-          # there — main must always satisfy the budgets in-file.
-          PR_LABELS: ${{ toJson(github.event.pull_request.labels.*.name) }}
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          labels="$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/labels" --jq '[.[].name]' | tr -d '\n')"
+          echo "PR_LABELS=${labels}" >> "$GITHUB_ENV"
+
+      - name: Check simplicity budgets
         run: python3 .github/scripts/check_simplicity_budgets.py

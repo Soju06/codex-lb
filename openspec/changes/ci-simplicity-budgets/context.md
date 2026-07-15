@@ -10,12 +10,16 @@ a one-line, reviewable diff rather than an argument.
 
 ## Decisions
 
-- **Separate workflow, never ci.yml.** The override label is read from the
-  event payload, so the workflow must trigger on `labeled`/`unlabeled` to see
-  a just-applied label. Adding those types to ci.yml would re-run the entire
+- **Separate workflow, never ci.yml.** The workflow triggers on
+  `labeled`/`unlabeled` so a just-applied override label re-evaluates the
+  check immediately. Adding those types to ci.yml would re-run the entire
   sharded CI matrix on every `🤖 codex: ok` label sync from
   `codex-review-labels.yml` (15-minute cron + `workflow_run`). The standalone
   budget job costs seconds.
+- **Labels are fetched live from the API, not the event payload.** Fork PR
+  payloads and re-runs of old runs can carry a stale or empty label set; the
+  workflow queries `/issues/<n>/labels` at run time (permissions:
+  `pull-requests: read`) and passes the result to the script via `PR_LABELS`.
 - **No `paths:` filter.** The job is cheap, and a required check behind a
   workflow-level paths filter would leave non-matching PRs pending forever
   (ci.yml solves this with the dorny-filter placeholder pattern — overkill
@@ -38,11 +42,10 @@ a one-line, reviewable diff rather than an argument.
 
 ## Label caveats (operational)
 
-- **Stale payload on re-run.** The event payload is a snapshot from when the
-  event fired. Adding `simplicity-budget-approved` after a failed run and then
-  re-running that run does nothing — the re-run reuses the stale payload.
-  Applying or removing the label fires a fresh `labeled`/`unlabeled` event,
-  and that new run sees the current labels. The failure message says exactly
+- **Re-run after labeling works.** Because the label set is fetched live at
+  run time, adding `simplicity-budget-approved` and then re-running the
+  failed run picks it up; applying/removing the label also fires a fresh
+  `labeled`/`unlabeled` run on its own. The failure message says exactly
   this.
 - **merge_group and push carry no labels.** The override is a review-time
   acknowledgment only. If a PR would leave `main` over budget, the label

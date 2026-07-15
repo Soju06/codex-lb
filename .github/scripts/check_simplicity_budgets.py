@@ -38,9 +38,9 @@ CONFIG_ERROR_EXIT = 2
 
 OVERRIDE_HELP = (
     f"To accept a temporary exceedance during review, a maintainer adds the '{OVERRIDE_LABEL}' "
-    "PR label — adding or removing the label starts a fresh check run that sees it. Do NOT "
-    "re-run this failed run after labeling: re-runs reuse the stale event payload and will not "
-    "see the new label. merge_group runs carry no PR labels, so any merge that leaves main over "
+    "PR label — labeling starts a fresh check run, and because the workflow fetches the live "
+    "label set from the API you may also simply re-run this failed run after labeling. "
+    "merge_group runs carry no PR labels, so any merge that leaves main over "
     f"budget must raise the budget in {CONFIG_PATH} in the same diff."
 )
 

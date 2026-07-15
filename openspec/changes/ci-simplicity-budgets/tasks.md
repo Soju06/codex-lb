@@ -10,7 +10,7 @@
       contributors-block stripping, fence-aware h1+h2 counting, nav `to:`
       counting with exit 2 when the configured nav file/array is missing,
       `PR_LABELS` JSON override via the `simplicity-budget-approved` label,
-      and a failure message covering the label path, the stale re-run caveat,
+      and a failure message covering the label path, the live label fetch,
       and the merge_group bump-the-TOML policy
 
 ## 2. Workflow

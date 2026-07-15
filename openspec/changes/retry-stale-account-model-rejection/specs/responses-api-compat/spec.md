@@ -4,10 +4,7 @@
 
 ### Requirement: Pre-acceptance account-model rejections fail over safely
 
-The proxy MUST classify an upstream Responses request rejection with `invalid_request_error` and the
-exact message `The '<model>' model is not supported when using Codex with a
-ChatGPT account.` before accepting the response, the proxy MUST classify the
-failure internally as `account_model_unsupported`. The quoted model MUST match
+When upstream rejects a Responses request with `invalid_request_error` and the exact message `The '<model>' model is not supported when using Codex with a ChatGPT account.` before accepting the response, the proxy MUST classify the failure internally as `account_model_unsupported`. The quoted model MUST match
 the requested model. For native WebSocket, HTTP responses bridge, and raw
 HTTP/SSE transports, the proxy MUST make at most one transparent attempt on a
 different account that advertises the same model, provided the request can move

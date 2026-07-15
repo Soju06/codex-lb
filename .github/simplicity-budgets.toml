@@ -24,5 +24,5 @@ max_lines = 60
 # renames this array, the checker exits 2 until path/array here are repointed —
 # that coupling is intentional.
 path = "frontend/src/components/layout/app-header.tsx"
-array = "NAV_ITEMS"
-max_items = 6
+array = "CORE_NAV_ITEMS"
+max_items = 5

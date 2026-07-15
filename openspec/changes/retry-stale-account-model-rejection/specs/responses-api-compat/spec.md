@@ -4,7 +4,7 @@
 
 ### Requirement: Pre-acceptance account-model rejections fail over safely
 
-When upstream rejects a Responses request with `invalid_request_error` and the
+The proxy MUST classify an upstream Responses request rejection with `invalid_request_error` and the
 exact message `The '<model>' model is not supported when using Codex with a
 ChatGPT account.` before accepting the response, the proxy MUST classify the
 failure internally as `account_model_unsupported`. The quoted model MUST match
@@ -38,6 +38,14 @@ another proxy-generated failure.
 - **WHEN** transparent failover cannot select a replacement
 - **THEN** the client receives the original HTTP 400 `invalid_request_error`
 - **AND** the error is not rewritten to `no_accounts`, `stream_incomplete`, or HTTP 502
+
+#### Scenario: selected replacement failure is surfaced
+
+- **GIVEN** upstream rejects a pre-acceptance request with the exact account/model unsupported envelope
+- **AND** the proxy selects a different compatible replacement account
+- **WHEN** that replacement attempt fails before acceptance
+- **THEN** the client receives the replacement attempt's failure
+- **AND** the skipped account's original HTTP 400 is not used as a fallback
 
 #### Scenario: accepted or visible request is never replayed
 

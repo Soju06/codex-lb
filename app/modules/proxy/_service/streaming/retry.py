@@ -335,6 +335,7 @@ class _StreamingRetryMixin:
         last_transient_exc: ProxyResponseError | None = None
         last_account_model_rejection: ProxyResponseError | None = None
         last_account_model_rejection_account_id: str | None = None
+        account_model_replay_attempted = False
         current_account_lease: AccountLease | None = None
         last_security_work_retry_error: _RetryableStreamError | None = None
         excluded_account_ids: set[str] = set()
@@ -594,6 +595,7 @@ class _StreamingRetryMixin:
             outcome: str,
         ) -> bool | None:
             nonlocal affinity, current_account_lease
+            nonlocal account_model_replay_attempted
             nonlocal last_account_model_rejection, last_account_model_rejection_account_id
             error = _parse_openai_error(exc.payload)
             error_code = _normalize_error_code(
@@ -612,7 +614,7 @@ class _StreamingRetryMixin:
                 and verified_fresh_replay_payload is not None
             )
             can_try_other_account = bool(
-                last_account_model_rejection is None
+                not account_model_replay_attempted
                 and attempt < max_attempts - 1
                 and (
                     can_move_verified_owner
@@ -629,6 +631,7 @@ class _StreamingRetryMixin:
                 outcome,
                 _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE,
             )
+            account_model_replay_attempted = True
             last_account_model_rejection = exc
             last_account_model_rejection_account_id = account.id
             await _release_tracked_stream_lease(current_account_lease)
@@ -1096,6 +1099,15 @@ class _StreamingRetryMixin:
                     return
 
                 account_id_value = account.id
+                if last_account_model_rejection is not None and account.id != last_account_model_rejection_account_id:
+                    # The original 400 is only the fallback when account
+                    # selection cannot produce a replacement. Once this
+                    # replacement attempt starts, its own failure is the one
+                    # that must reach the client. Keep the separate replay
+                    # budget so another account/model rejection cannot trigger
+                    # a second transparent replay.
+                    last_account_model_rejection = None
+                    last_account_model_rejection_account_id = None
                 if (
                     require_preferred_account
                     and preferred_account_id is not None
@@ -1552,6 +1564,10 @@ class _StreamingRetryMixin:
                                 if account_model_retry is not None:
                                     if not account_model_retry:
                                         raise
+                                    # Leaving the same-account loop reaches
+                                    # the outer account-selection ``continue``
+                                    # below, where the rejected account is
+                                    # already excluded by the helper.
                                     break
                                 if _facade()._is_security_work_authorization_required_error(code, error_message):
                                     if (

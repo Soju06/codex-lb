@@ -1967,6 +1967,15 @@ class _WebSocketMixin:
                 if request_state.preferred_account_id == forced_refresh_account_id:
                     request_state.preferred_account_id = None
 
+            if (
+                request_state.precreated_replay_reason == _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE
+                and account.id != request_state.precreated_replay_account_id
+            ):
+                # Preserve the rejected account's 400 only when selection
+                # cannot find a replacement. Once this replacement attempt
+                # starts, a connection/open failure belongs to the replacement.
+                _clear_websocket_precreated_replay_fallback(request_state)
+
             try:
                 connect_result = await proxy._try_open_websocket_connect_attempt(
                     account,

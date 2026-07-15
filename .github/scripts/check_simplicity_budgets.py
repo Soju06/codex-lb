@@ -85,20 +85,22 @@ def count_top_level_headings(lines: list[str]) -> int:
     """Count h1/h2 headings, ignoring lines inside fenced code blocks.
 
     Fences may use ``` or ~~~ and be indented up to 3 spaces (CommonMark);
-    a fence is closed only by a fence line using the same character.
+    a fence is closed only by a fence line using the same character and at
+    least the same length (so a ``` line inside a ```` block is content).
     """
-    fence_char: str | None = None
+    fence_open: tuple[str, int] | None = None
     count = 0
     for line in lines:
         fence = FENCE_RE.match(line)
         if fence is not None:
-            char = fence.group("fence")[0]
-            if fence_char is None:
-                fence_char = char
-            elif char == fence_char:
-                fence_char = None
+            fence_str = fence.group("fence")
+            char, length = fence_str[0], len(fence_str)
+            if fence_open is None:
+                fence_open = (char, length)
+            elif char == fence_open[0] and length >= fence_open[1]:
+                fence_open = None
             continue
-        if fence_char is None and HEADING_RE.match(line):
+        if fence_open is None and HEADING_RE.match(line):
             count += 1
     return count
 
@@ -107,8 +109,11 @@ def count_nav_items(path: Path, array: str) -> int:
     """Count `to:` entries in the configured nav array; exit 2 loudly if it is missing."""
     if not path.is_file():
         _config_error(f"[core_nav] nav file '{path}' not found")
+    # Anchor on the closing `] as const` so nested arrays inside items
+    # (e.g. a future `roles: ["admin"]`) cannot truncate the body early.
+    # The nav source-of-truth array is required to stay `as const`.
     match = re.search(
-        rf"const\s+{re.escape(array)}[^=]*=\s*\[(?P<body>.*?)\]",
+        rf"const\s+{re.escape(array)}[^=]*=\s*\[(?P<body>.*?)\]\s*as\s+const",
         path.read_text(encoding="utf-8"),
         re.DOTALL,
     )

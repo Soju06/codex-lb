@@ -261,9 +261,11 @@ every PR (budget checks are enforced by CI as of the
    The PR body answers "why can't this be a hardcoded default?" for
    each new setting; internals-only knobs stay out of `.env.example`.
 3. **README, `.env.example`, and dashboard nav are budgeted.** The
-   caps live in `.github/simplicity-budgets.toml`; exceeding one
-   requires the maintainer-applied `simplicity-budget-approved` label
-   before merge.
+   caps live in `.github/simplicity-budgets.toml` (introduced by the
+   `ci-simplicity-budgets` change; until that manifest exists on
+   `main`, reviewers judge growth of these surfaces directionally
+   rather than against numeric caps). Exceeding a cap requires the
+   maintainer-applied `simplicity-budget-approved` label before merge.
 4. **Feature docs go to `docs/` + OpenSpec, never new README
    sections.** Each spec-governed docs page links back to its
    `openspec/specs/<capability>/` entry.

@@ -11,8 +11,22 @@
 
 - [x] 2.1 Add `OAuthFlowRepository` (`app/modules/oauth/repository.py`) with
       create / get-by-flow-id / get-by-state-token / latest / set-status /
-      delete-pending-device / purge-expired methods.
+      purge-expired methods.
 - [x] 2.2 Encrypt the PKCE verifier at rest; expose a typed record dataclass.
+
+## 6. Cross-replica hardening (review-driven)
+
+- [x] 6.1 Make terminal status writes atomically monotonic (durable `success`
+      is sticky) via a conditional SQL UPDATE, safe under two-session concurrency.
+- [x] 6.2 Enforce the pending-flow TTL uniformly, including on the originating
+      replica that still holds local state (prune expired local flows before
+      trusting the cached verifier on callback/manual-callback).
+- [x] 6.3 Coordinate device flows through a single atomic active slot
+      (`oauth_device_flow_slots`): device `start` claims the slot with one
+      conditional UPSERT (atomic replacement, exactly one current flow); the
+      poller atomically consumes the slot before persisting tokens and aborts
+      if superseded. Migration `20260716_000000_add_oauth_device_flow_slots`
+      parented on the current single head.
 
 ## 3. Service wiring
 

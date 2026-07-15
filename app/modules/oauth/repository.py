@@ -5,13 +5,21 @@ from datetime import datetime, timezone
 from typing import Any, cast
 
 from sqlalchemy import CursorResult, delete, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import to_utc_naive, utcnow
-from app.db.models import OAuthFlowState
+from app.db.models import OAuthDeviceFlowSlot, OAuthFlowState
 
 _TERMINAL_OAUTH_STATUSES = {"error", "success"}
+
+# Fixed key for the single-active dashboard device-code OAuth flow slot. The
+# dashboard runs at most one device flow at a time (a new device ``start``
+# supersedes any prior one), so a single global slot models "which device flow
+# is current" across replicas.
+DEVICE_FLOW_SLOT_KEY = "dashboard"
 
 
 def epoch_to_naive_utc(value: float | None) -> datetime | None:
@@ -146,16 +154,6 @@ class OAuthFlowRepository:
         await self._session.commit()
         return int(result.rowcount or 0) > 0
 
-    async def delete_pending_device(self) -> list[str]:
-        result = await self._session.execute(
-            select(OAuthFlowState.flow_id).where(OAuthFlowState.method == "device", OAuthFlowState.status == "pending")
-        )
-        flow_ids = [row[0] for row in result.all()]
-        if flow_ids:
-            await self._session.execute(delete(OAuthFlowState).where(OAuthFlowState.flow_id.in_(flow_ids)))
-            await self._session.commit()
-        return flow_ids
-
     async def purge_expired(self, *, terminal_keep: int) -> None:
         now = utcnow()
         await self._session.execute(
@@ -175,3 +173,66 @@ class OAuthFlowRepository:
         if stale_terminal:
             await self._session.execute(delete(OAuthFlowState).where(OAuthFlowState.flow_id.in_(stale_terminal)))
         await self._session.commit()
+
+    # ------------------------------------------------------------------
+    # Single-active device-flow slot (atomic cross-replica coordination)
+    # ------------------------------------------------------------------
+
+    async def claim_device_slot(self, flow_id: str) -> None:
+        """Atomically make ``flow_id`` the single current device flow.
+
+        A single conditional UPSERT on the fixed slot key: two replicas starting
+        device OAuth simultaneously serialize on the slot row (PostgreSQL row
+        lock / SQLite single-writer lock), so the slot ends up naming exactly one
+        ``flow_id`` -- not two orphaned pending rows. ``generation`` is bumped on
+        every replacement so the slot is never silently left unchanged.
+        """
+
+        now = utcnow()
+        dialect = self._session.get_bind().dialect.name
+        if dialect == "postgresql":
+            insert_stmt = pg_insert(OAuthDeviceFlowSlot)
+        elif dialect == "sqlite":
+            insert_stmt = sqlite_insert(OAuthDeviceFlowSlot)
+        else:  # pragma: no cover - only sqlite/postgres are supported backends
+            raise RuntimeError(f"device-flow slot unsupported for dialect={dialect!r}")
+        statement = insert_stmt.values(
+            slot_key=DEVICE_FLOW_SLOT_KEY, flow_id=flow_id, generation=1, updated_at=now
+        ).on_conflict_do_update(
+            index_elements=[OAuthDeviceFlowSlot.slot_key],
+            set_={
+                "flow_id": flow_id,
+                "generation": OAuthDeviceFlowSlot.generation + 1,
+                "updated_at": now,
+            },
+        )
+        await self._session.execute(statement)
+        await self._session.commit()
+
+    async def consume_device_slot(self, flow_id: str) -> bool:
+        """Atomically consume the slot iff ``flow_id`` still holds it.
+
+        This is the poller's point of no return before persisting tokens: the
+        conditional delete removes the slot only when it still names this flow,
+        so a superseded poller (the slot was UPSERTed to a newer ``flow_id``)
+        matches zero rows and MUST abort without persisting an account. Atomic on
+        both backends (single conditional DELETE).
+        """
+
+        result = cast(
+            CursorResult[Any],
+            await self._session.execute(
+                delete(OAuthDeviceFlowSlot).where(
+                    OAuthDeviceFlowSlot.slot_key == DEVICE_FLOW_SLOT_KEY,
+                    OAuthDeviceFlowSlot.flow_id == flow_id,
+                )
+            ),
+        )
+        await self._session.commit()
+        return int(result.rowcount or 0) > 0
+
+    async def current_device_slot_flow_id(self) -> str | None:
+        result = await self._session.execute(
+            select(OAuthDeviceFlowSlot.flow_id).where(OAuthDeviceFlowSlot.slot_key == DEVICE_FLOW_SLOT_KEY)
+        )
+        return result.scalar_one_or_none()

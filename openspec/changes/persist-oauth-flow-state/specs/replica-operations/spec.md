@@ -13,10 +13,7 @@ the flow. The PKCE `code_verifier` MUST be encrypted at rest with the same
 encryption key material used for account tokens, and abandoned pending flows
 MUST expire via a short TTL. The TTL MUST be enforced uniformly on every
 replica, including the originating replica that still holds the flow in local
-memory. A device-code poll task MUST re-verify that its flow is still the
-active pending record in the shared database before persisting an account, so a
-flow superseded by a newer device `start` (whose poll task cannot be cancelled
-cross-process) cannot add or re-authenticate an account for a consumed code.
+memory.
 
 #### Scenario: Callback completes on a replica that did not start the flow
 
@@ -88,13 +85,37 @@ cross-process) cannot add or re-authenticate an account for a consumed code.
 - **AND** the outcome matches a replica without local state (where the durable
   row is classified expired on read), so the TTL holds uniformly
 
-#### Scenario: Superseded device poller does not persist an account
+### Requirement: At most one device-code OAuth flow is active, enforced atomically
 
-- **GIVEN** replica A is running an in-process device-code poll task for a flow
-- **AND** a newer device `start` (on any replica) deletes that pending device row
-  before inserting its replacement
-- **WHEN** replica A's poll task later exchanges the now-superseded device code
-- **THEN** replica A re-reads the durable row, finds it absent or no longer
-  `pending`, and aborts WITHOUT adding or re-authenticating an account
-- **AND** no terminal status is written for the superseded flow (the atomic
-  status write also rejects a write to the deleted row)
+The dashboard device-code OAuth flow SHALL be coordinated as a single active
+"slot" in the shared database so that at most one device flow is current at a
+time, and replacement SHALL be atomic. A device `start` MUST claim the slot with
+a single conditional UPSERT (not a delete-then-insert), so two replicas starting
+device OAuth simultaneously leave exactly ONE current `flow_id` rather than two
+orphaned pending records that both believe they are current.
+
+Because a poll task running on another replica cannot be cancelled
+cross-process, a device poll task MUST atomically consume the slot as its point
+of no return immediately before persisting tokens, and MUST persist the account
+only if that consume succeeded. A poll task whose flow was superseded (the slot
+now names a different `flow_id`) MUST lose the consume and abort WITHOUT adding
+or re-authenticating an account, leaving no window between the liveness check
+and the account write through which a replacement can slip. This composes with
+the atomic monotonic status write (a durable `success` is never regressed).
+
+#### Scenario: Simultaneous device starts leave exactly one current flow
+
+- **GIVEN** two replicas sharing one database
+- **WHEN** both start a device-code OAuth flow at the same time
+- **THEN** the slot names exactly one of the two `flow_id`s as current
+- **AND** only the poll task holding the current slot can consume it and persist;
+  the other's consume matches zero rows and it cannot persist
+
+#### Scenario: Superseded device poll task cannot persist (liveness race)
+
+- **GIVEN** a device poll task has exchanged its code and is about to persist
+- **AND** a newer device `start` atomically re-claims the slot to a different
+  `flow_id` before the first task's account write commits
+- **THEN** the superseded task's slot consume matches zero rows
+- **AND** it aborts without adding or re-authenticating an account, and writes no
+  terminal status for the superseded flow

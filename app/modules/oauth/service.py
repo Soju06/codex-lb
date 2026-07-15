@@ -42,7 +42,7 @@ from app.core.plan_types import coerce_account_plan_type
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError, resolve_upstream_route
 from app.core.utils.time import naive_utc_to_epoch, utcnow
 from app.db.models import Account, AccountProxyBinding, AccountStatus
-from app.db.session import get_background_session
+from app.db.session import get_background_session, sqlite_writer_section
 from app.modules.accounts.repository import AccountIdentityConflictError, AccountsRepository
 from app.modules.oauth.repository import (
     OAuthFlowRecord,
@@ -330,13 +330,34 @@ class OauthService:
     # Shared DB-backed flow persistence (cross-replica source of truth)
     # ------------------------------------------------------------------
 
-    async def _persist_flow_record(self, record: OAuthFlowRecord, *, purge_pending_device: bool = False) -> None:
+    async def _persist_flow_record(self, record: OAuthFlowRecord) -> None:
         async with get_background_session() as session:
             repo = OAuthFlowRepository(session, self._encryptor)
-            if purge_pending_device:
-                await repo.delete_pending_device()
             await repo.purge_expired(terminal_keep=_MAX_RETAINED_TERMINAL_OAUTH_FLOWS)
             await repo.create(record)
+
+    async def _claim_device_slot(self, flow_id: str) -> None:
+        """Atomically make ``flow_id`` the single current device flow, superseding
+        any prior one. Serialized in-process for SQLite; the single UPSERT is
+        atomic across replicas/processes on both backends."""
+
+        async with sqlite_writer_section():
+            async with get_background_session() as session:
+                await OAuthFlowRepository(session, self._encryptor).claim_device_slot(flow_id)
+
+    async def _consume_device_slot(self, flow_id: str | None) -> bool:
+        """Atomically consume the device slot iff ``flow_id`` still holds it.
+
+        The poller's point of no return before persisting tokens: returns False
+        (and the poller aborts without persisting) when the flow was superseded
+        by a newer device start, which atomically UPSERTed the slot to a
+        different ``flow_id``."""
+
+        if flow_id is None:
+            return False
+        async with sqlite_writer_section():
+            async with get_background_session() as session:
+                return await OAuthFlowRepository(session, self._encryptor).consume_device_slot(flow_id)
 
     async def _persist_flow_status(self, flow_id: str, *, status: str, error_message: str | None) -> None:
         async with get_background_session() as session:
@@ -356,26 +377,6 @@ class OauthService:
             if state_token is not None:
                 return await repo.get_by_state_token(state_token)
         return None
-
-    async def _device_flow_is_current(self, flow_id: str | None) -> bool:
-        """Return whether ``flow_id`` is still the active pending device flow in
-        the shared DB.
-
-        A second device ``start`` (possibly on another replica) deletes the
-        previous pending device row before inserting the replacement, so this
-        replica's still-running poll task cannot be cancelled cross-process. The
-        poller therefore re-reads the durable row before persisting: if the row
-        is gone (superseded/deleted) or no longer ``pending`` (already terminal,
-        or expired -> classified absent by ``get_by_flow_id``), the poller must
-        abort without adding/reauthing an account. Combined with the atomic
-        monotonic ``set_status``, an abandoned poller can neither persist an
-        account nor write a terminal status once its row was replaced.
-        """
-
-        if flow_id is None:
-            return False
-        record = await self._load_flow_record(flow_id=flow_id)
-        return record is not None and record.status == "pending"
 
     @staticmethod
     def _record_to_state(record: OAuthFlowRecord) -> OAuthState:
@@ -723,12 +724,13 @@ class OauthService:
             self._store.remove_pending_device_flows_locked()
             self._store.remember_flow_locked(flow)
 
-        # Persist the durable row (and supersede any prior pending device row)
-        # BEFORE starting the in-process poll task. The poller re-reads its
-        # durable row before persisting an account (see ``_device_flow_is_current``),
-        # so the row must already exist when the poll task can first run;
-        # otherwise an instant token exchange could abort against a not-yet
-        # -written row.
+        # Persist the durable row and atomically claim the single-active device
+        # slot (superseding any prior device flow) BEFORE starting the in-process
+        # poll task. The poller consumes the slot before persisting an account
+        # (see ``_consume_device_slot``), so the slot must already name this flow
+        # when the poll task can first run; otherwise an instant token exchange
+        # could abort against a not-yet-claimed slot. The single-statement UPSERT
+        # makes two simultaneous starts leave exactly one current flow.
         await self._persist_flow_record(
             OAuthFlowRecord(
                 flow_id=flow_id,
@@ -739,9 +741,9 @@ class OauthService:
                 interval_seconds=device.interval_seconds,
                 intended_account_id=intended_account_id,
                 expires_at=epoch_to_naive_utc(expires_at),
-            ),
-            purge_pending_device=True,
+            )
         )
+        await self._claim_device_slot(flow_id)
 
         async with self._store.lock:
             # The flow may have been superseded/cleared while the row was being
@@ -820,12 +822,15 @@ class OauthService:
                     allow_direct_egress=route is None,
                 )
                 if tokens:
-                    # A replacement device start may have superseded/deleted this
-                    # flow's durable row while the exchange was in flight. Confirm
-                    # this flow is still the active pending record before doing any
-                    # durable damage; otherwise abort so an abandoned poller cannot
-                    # add or reauth an account for a consumed code.
-                    if not await self._device_flow_is_current(flow_id):
+                    # Point of no return: atomically consume the single-active
+                    # device-flow slot. Only the flow that still holds the slot
+                    # may persist; if a newer device start superseded this flow
+                    # (the slot now names a different flow_id), the consume
+                    # matches zero rows and we abort WITHOUT adding/reauthing an
+                    # account. This is a single conditional statement performed
+                    # immediately before the account write, so no replacement can
+                    # slip through a check->persist window.
+                    if not await self._consume_device_slot(flow_id):
                         return
                     await self._persist_tokens(tokens, intended_account_id=context.intended_account_id)
                     await self._set_success(flow_id)

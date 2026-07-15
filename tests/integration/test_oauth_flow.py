@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import json
 import logging
 import time
@@ -24,6 +25,7 @@ from app.db.models import Account, AccountStatus, OAuthFlowState
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.oauth import api as oauth_api_module
+from app.modules.oauth.repository import OAuthFlowRepository
 from app.modules.oauth.schemas import ManualCallbackRequest
 
 pytestmark = pytest.mark.integration
@@ -2075,10 +2077,11 @@ async def test_device_complete_ack_stays_pending_when_own_poller_already_succeed
 
 @pytest.mark.asyncio
 async def test_superseded_device_poller_does_not_persist_account(monkeypatch):
-    """A device flow's in-process poller whose durable row is superseded by a
-    newer device start (the old pending row is deleted, possibly on another
-    replica) must abort before doing durable damage: no account is added and no
-    terminal status is written for the abandoned attempt.
+    """Liveness race: a device flow's in-process poller is superseded by a newer
+    device start (which atomically re-claims the single-active slot) in the
+    window between the exchange and the account write. The abandoned poller must
+    lose the atomic slot consume and abort before doing durable damage: no
+    account is added and no terminal status is written for the abandoned attempt.
     """
 
     email = "superseded-device@example.com"
@@ -2123,15 +2126,15 @@ async def test_superseded_device_poller_does_not_persist_account(monkeypatch):
     assert start.flow_id is not None
 
     # The poller is now blocked mid-exchange, holding the (about-to-be-consumed)
-    # device code.
+    # device code, and it holds the single-active device slot.
     await asyncio.wait_for(exchange_started.wait(), timeout=2)
-
-    # A replacement device start supersedes the in-flight flow by deleting the
-    # previous pending device row (exactly what _start_device_flow does before
-    # inserting the replacement).
     async with SessionLocal() as session:
-        superseded = await oauth_module.OAuthFlowRepository(session, TokenEncryptor()).delete_pending_device()
-    assert start.flow_id in superseded
+        assert await OAuthFlowRepository(session, TokenEncryptor()).current_device_slot_flow_id() == start.flow_id
+
+    # A replacement device start (another replica) atomically re-claims the slot
+    # in the window between the exchange and the abandoned poller's account write.
+    async with SessionLocal() as session:
+        await OAuthFlowRepository(session, TokenEncryptor()).claim_device_slot("replacement-flow")
 
     async with replica._store.lock:
         flow = replica._store.get_flow_locked(start.flow_id)
@@ -2139,8 +2142,8 @@ async def test_superseded_device_poller_does_not_persist_account(monkeypatch):
         poll_task = flow.poll_task
         assert poll_task is not None
 
-    # Let the abandoned exchange complete; the poller must abort on its "still
-    # current?" re-read rather than persist the account.
+    # Let the abandoned exchange complete; the poller must lose the atomic slot
+    # consume and abort rather than persist the account.
     release_exchange.set()
     await asyncio.wait_for(poll_task, timeout=2)
 
@@ -2149,10 +2152,78 @@ async def test_superseded_device_poller_does_not_persist_account(monkeypatch):
         stored = await AccountsRepository(session).get_by_id(expected_account_id)
     assert stored is None
 
-    # No terminal status was written for the superseded (deleted) flow.
+    # No terminal status was written for the superseded flow; the replacement
+    # still holds the slot.
     async with SessionLocal() as session:
-        record = await oauth_module.OAuthFlowRepository(session, TokenEncryptor()).get_by_flow_id(start.flow_id)
-    assert record is None
+        repo = OAuthFlowRepository(session, TokenEncryptor())
+        record = await repo.get_by_flow_id(start.flow_id)
+        assert record is not None and record.status == "pending"
+        assert await repo.current_device_slot_flow_id() == "replacement-flow"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_device_starts_leave_exactly_one_current_flow(monkeypatch):
+    """Two replicas starting device OAuth "simultaneously" must leave exactly ONE
+    current device flow (the atomic slot UPSERT), and only the poller that still
+    holds the slot may persist -- the other's consume matches zero rows.
+    """
+
+    async def fake_device_code(**_):
+        return DeviceCode(
+            verification_url="https://auth.openai.com/codex/device",
+            user_code="RACE-CODE",
+            device_auth_id="dev-race",
+            interval_seconds=30,
+            expires_in_seconds=300,
+        )
+
+    # Never returns tokens: keep both pollers pending so we can assert the slot
+    # invariant deterministically without either completing.
+    async def fake_exchange_device_token(**_):
+        await asyncio.Event().wait()
+
+    async def fake_oauth_route():
+        return None
+
+    monkeypatch.setattr(oauth_module, "request_device_code", fake_device_code)
+    monkeypatch.setattr(oauth_module, "exchange_device_token", fake_exchange_device_token)
+    monkeypatch.setattr(oauth_module, "_oauth_route", fake_oauth_route)
+
+    replica_a = _make_replica_service(oauth_module.OAuthStateStore())
+    replica_b = _make_replica_service(oauth_module.OAuthStateStore())
+
+    start_a, start_b = await asyncio.gather(
+        replica_a.start_oauth(oauth_module.OauthStartRequest(force_method="device")),
+        replica_b.start_oauth(oauth_module.OauthStartRequest(force_method="device")),
+    )
+    assert start_a.flow_id is not None and start_b.flow_id is not None
+    assert start_a.flow_id != start_b.flow_id
+
+    # Exactly one flow holds the single-active slot.
+    async with SessionLocal() as session:
+        current = await OAuthFlowRepository(session, TokenEncryptor()).current_device_slot_flow_id()
+    assert current in {start_a.flow_id, start_b.flow_id}
+
+    # Only the current flow can consume the slot; the other loses.
+    async with SessionLocal() as session:
+        repo = OAuthFlowRepository(session, TokenEncryptor())
+        other = start_b.flow_id if current == start_a.flow_id else start_a.flow_id
+        assert await repo.consume_device_slot(other) is False
+    async with SessionLocal() as session:
+        repo = OAuthFlowRepository(session, TokenEncryptor())
+        assert await repo.consume_device_slot(current) is True
+        # Once consumed, neither can consume again (no double-persist).
+        assert await repo.consume_device_slot(current) is False
+
+    # Clean up the parked poll tasks.
+    for replica, start in ((replica_a, start_a), (replica_b, start_b)):
+        async with replica._store.lock:
+            flow = replica._store.get_flow_locked(start.flow_id)
+            task = flow.poll_task if flow is not None else None
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
 
 
 @pytest.mark.asyncio

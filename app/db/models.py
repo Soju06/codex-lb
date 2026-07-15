@@ -547,6 +547,29 @@ class OAuthFlowState(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class OAuthDeviceFlowSlot(Base):
+    """Single-active-device-flow coordination slot (cross-replica).
+
+    At most one dashboard device-code OAuth flow is "current" at a time. A
+    device ``start`` atomically REPLACES the slot via a single conditional
+    UPSERT on the fixed ``slot_key``, so two replicas starting device OAuth
+    simultaneously leave exactly one current ``flow_id`` instead of two orphaned
+    pending rows that both believe they are current. A poller atomically
+    CONSUMES the slot (delete-if-mine) as its point of no return immediately
+    before persisting tokens: a poller whose flow was superseded (the slot now
+    names a different ``flow_id``) loses the consume and MUST abort without
+    adding or re-authenticating an account. ``generation`` is a monotonic claim
+    token bumped on every replacement, retained for observability.
+    """
+
+    __tablename__ = "oauth_device_flow_slots"
+
+    slot_key: Mapped[str] = mapped_column(String, primary_key=True)
+    flow_id: Mapped[str] = mapped_column(String, nullable=False)
+    generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class StickySession(Base):
     __tablename__ = "sticky_sessions"
 

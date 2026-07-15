@@ -345,6 +345,33 @@ def test_nav_count_stops_at_target_array_when_file_has_multiple(tmp_path):
     assert checker.count_nav_items(nav_file, "ADVANCED_NAV_ITEMS") == 1
 
 
+def test_heading_count_includes_indented_headings():
+    checker = _load_checker_module()
+
+    lines = [
+        "# Title",
+        "  ## indented but still a heading (up to 3 spaces)",
+        "    # 4+ spaces is an indented code block, not a heading",
+    ]
+
+    assert checker.count_top_level_headings(lines) == 2
+
+
+def test_nav_count_survives_nested_as_const_inside_items(tmp_path):
+    checker = _load_checker_module()
+    nav_file = tmp_path / "nav.tsx"
+    nav_file.write_text(
+        "const NAV_ITEMS = [\n"
+        '  { to: "/dashboard", matches: ["/foo"] as const },\n'
+        '  { to: "/reports" },\n'
+        '  { to: "/settings" },\n'
+        "] as const;\n",
+        encoding="utf-8",
+    )
+
+    assert checker.count_nav_items(nav_file, "NAV_ITEMS") == 3
+
+
 def test_nav_count_rejects_suffixed_identifier(tmp_path, capsys):
     checker = _load_checker_module()
     nav_file = tmp_path / "nav.tsx"

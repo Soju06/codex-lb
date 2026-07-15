@@ -32,7 +32,8 @@ CONTRIBUTORS_START = "<!-- ALL-CONTRIBUTORS-LIST:START"
 CONTRIBUTORS_END = "<!-- ALL-CONTRIBUTORS-LIST:END"
 # CommonMark code fences: ``` or ~~~ (3+ characters), indented up to 3 spaces.
 FENCE_RE = re.compile(r"^ {0,3}(?P<fence>```+|~~~+)")
-HEADING_RE = re.compile(r"^#{1,2}\s")
+# CommonMark ATX headings may be indented up to 3 spaces, like fences.
+HEADING_RE = re.compile(r"^ {0,3}#{1,2}\s")
 
 CONFIG_ERROR_EXIT = 2
 
@@ -111,15 +112,17 @@ def count_nav_items(path: Path, array: str) -> int:
     """Count `to:` entries in the configured nav array; exit 2 loudly if it is missing."""
     if not path.is_file():
         _config_error(f"[core_nav] nav file '{path}' not found")
-    # Anchor on the closing `] as const` so nested arrays inside items
-    # (e.g. a future `roles: ["admin"]`) cannot truncate the body early.
-    # The nav source-of-truth array is required to stay `as const`.
+    # Anchor on a line-start `] as const` close: the top-level array close
+    # sits at column 0, while nested arrays inside items (e.g. a future
+    # `roles: ["admin"]` or `matches: ["/foo"] as const`) are indented, so
+    # they cannot truncate the body early. The nav source-of-truth array is
+    # required to stay `as const` with its close bracket at column 0.
     # `(?!\w)` pins the exact identifier: a rename to e.g. NAV_ITEMS_V2
     # must not satisfy a config that still says NAV_ITEMS.
     match = re.search(
-        rf"const\s+{re.escape(array)}(?!\w)[^=]*=\s*\[(?P<body>.*?)\]\s*as\s+const",
+        rf"const\s+{re.escape(array)}(?!\w)[^=]*=\s*\[(?P<body>.*?)^\]\s*as\s+const",
         path.read_text(encoding="utf-8"),
-        re.DOTALL,
+        re.DOTALL | re.MULTILINE,
     )
     if match is None:
         _config_error(f"[core_nav] array '{array}' not found in '{path}'")

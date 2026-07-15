@@ -1,0 +1,242 @@
+name: Fix PR 1311 review round 2
+
+on:
+  push:
+    branches:
+      - codex/add-native-client-loopback-controls-spec
+
+permissions:
+  contents: write
+
+jobs:
+  fix-validate-squash:
+    if: ${{ contains(github.event.head_commit.message, '[review-round-2]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git clone --branch "$GITHUB_REF_NAME" --single-branch \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" repo
+
+      - name: Apply specification fixes
+        working-directory: repo
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(text: str, old: str, new: str, label: str) -> str:
+              count = text.count(old)
+              if count != 1:
+                  raise AssertionError(f"{label}: expected one match, found {count}")
+              return text.replace(old, new)
+
+          native = Path("openspec/changes/add-native-client-loopback-controls/specs/native-client-routing/spec.md")
+          text = native.read_text()
+
+          text = replace_once(
+              text,
+              """The native OAuth data plane MUST bypass settings caches for that read. It MUST
+perform the read for every admitted, base-valid OAuth HTTP request, every
+admitted, base-valid recognized identity-free native safety check defined
+below, and after base validation of every new WebSocket turn. The authoritative
+read SHALL be the request or turn's policy linearization point. A request or
+turn rejected by classification, security admission, or route-specific/base
+validation MUST NOT read native policy. A data-plane read that begins after a
+successful mutation response MUST observe that revision or a later revision. A
+database read failure, invalid mode, or incomplete row MUST return `503`
+`native_client_routing_policy_unavailable` without using a cached or default
+source.
+""",
+              """The native OAuth data plane MUST bypass settings caches for that read. It MUST
+perform the read for every admitted, base-valid OAuth HTTP request, every
+admitted, base-valid native OAuth WebSocket handshake, every admitted,
+base-valid recognized identity-free native safety check defined below, and
+after base validation of every new WebSocket turn. The handshake read decides
+whether the OAuth WebSocket may be accepted; an accepted socket MUST NOT cache
+that result for later turns, which each perform their own authoritative read.
+The authoritative read SHALL be the request, handshake, or turn's policy
+linearization point. A request, handshake, or turn rejected by classification,
+security admission, or route-specific/base validation MUST NOT read native
+policy. A data-plane read that begins after a successful mutation response MUST
+observe that revision or a later revision. A database read failure, invalid
+mode, or incomplete row MUST return `503`
+`native_client_routing_policy_unavailable` without using a cached or default
+source.
+""",
+              "handshake policy read",
+          )
+
+          marker = """#### Scenario: Successful write is visible to a later turn
+
+- **WHEN** a valid policy write returns success before a new turn starts its
+  authoritative read
+- **THEN** that turn observes the committed revision or a later one
+- **AND** it cannot use an older cached policy
+"""
+          addition = marker + """
+#### Scenario: OAuth WebSocket handshake reads policy before acceptance
+
+- **GIVEN** a tabled native OAuth WebSocket handshake passed bounded
+  classification, security admission, and handshake validation
+- **WHEN** its authoritative read observes API-key auth enabled or unavailable
+  policy state
+- **THEN** the handshake fails with the corresponding stable `409` or `503`
+  before the downstream WebSocket is accepted
+- **AND** an accepted handshake does not substitute for the mandatory read on
+  each later turn
+"""
+          text = replace_once(text, marker, addition, "handshake scenario")
+
+          text = replace_once(
+              text,
+              """Every successful read/write response SHALL contain exactly `mode`, `revision`,
+`app_restart_required`, `oauth_switching_available`, and
+`incompatibility_code`. `app_restart_required` MUST be `false`.
+`oauth_switching_available` MUST equal `!api_key_auth_enabled`, and
+`incompatibility_code` MUST be null when available or
+`native_client_routing_api_key_auth_incompatible` otherwise. A write that
+would set `client_oauth` while unavailable MUST return the stable `409` without
+mutation. A same-value compatible update MAY avoid a write but MUST return the
+complete committed projection.
+""",
+              """Every successful read/write response SHALL contain exactly `mode`, `revision`,
+`app_restart_required`, `oauth_switching_available`, `incompatibility_code`,
+and `native_endpoint`. `app_restart_required` MUST be `false`.
+`oauth_switching_available` MUST equal `!api_key_auth_enabled`, and
+`incompatibility_code` MUST be null when available or
+`native_client_routing_api_key_auth_incompatible` otherwise. `native_endpoint`
+MUST be either null or the authoritative server-advertised loopback native base
+URL `http://127.0.0.1:<effective-port>/backend-api/codex`, derived from effective
+runtime listen/advertised configuration rather than a frontend guess. It MUST
+be null when the server cannot determine a truthful loopback endpoint. A write
+that would set `client_oauth` while unavailable MUST return the stable `409`
+without mutation. A same-value compatible update MAY avoid a write but MUST
+return the complete committed projection.
+""",
+              "policy endpoint projection",
+          )
+
+          text = replace_once(
+              text,
+              "### Requirement: OAuth pool mode and account-specific utility semantics",
+              "### Requirement: OAuth pool-mode identity removal",
+              "pool requirement title",
+          )
+          text = replace_once(
+              text,
+              """
+For qualifying OAuth only, `GET /api/codex/usage` SHALL relay direct signed-in
+account usage in `client_oauth`; in `pool` it SHALL use the existing aggregate
+pool-usage path after identity removal. Qualifying OAuth
+`POST /api/codex/rate-limit-reset-credits/consume` SHALL relay with the
+request-local identity in `client_oauth`; in `pool` it MUST return HTTP `409`
+with code `native_pool_reset_credit_unavailable` before account selection or
+upstream I/O. None of these mode rules SHALL apply to `sk-clb-*`.
+""",
+              "",
+              "remove unreachable utility mode rules",
+          )
+          text = replace_once(
+              text,
+              """
+#### Scenario: Pool-mode OAuth usage is aggregate
+
+- **WHEN** qualifying OAuth fetches `/api/codex/usage` under `pool`
+- **THEN** it enters the existing aggregate pool-usage path
+- **AND** its client OAuth bearer/account header is neither validated against
+  nor forwarded to an upstream pool account
+
+#### Scenario: Pool-mode OAuth reset-credit consume is unavailable
+
+- **WHEN** qualifying OAuth posts reset-credit consume under `pool`
+- **THEN** it receives sanitized `409 native_pool_reset_credit_unavailable`
+- **AND** no client or pool credential is sent upstream
+""",
+              "",
+              "remove unreachable utility scenarios",
+          )
+          native.write_text(text)
+
+          frontend = Path("openspec/changes/add-native-client-loopback-controls/specs/frontend-architecture/spec.md")
+          text = frontend.read_text()
+          text = replace_once(
+              text,
+              """If provided, static attachment guidance SHALL remain visually secondary and
+limited to attaching Codex App/CLI and a compatible OpenClaw Codex-native
+provider to `http://127.0.0.1:<effective-port>/backend-api/codex`. The page MUST
+derive `<effective-port>` from the server's effective runtime listen/advertised
+configuration, whose default is `2455`; it MUST NOT hardcode the default when a
+non-default port is active. If the effective loopback endpoint cannot be
+determined, the endpoint-specific guidance MUST be omitted rather than showing a
+potentially dead address. The guidance SHALL explain that attachment is a
+one-time prerequisite distinct from the routine policy action.
+""",
+              """If provided, static attachment guidance SHALL remain visually secondary and
+limited to attaching Codex App/CLI and a compatible OpenClaw Codex-native
+provider to the `native_endpoint` returned by the authenticated policy API. The
+frontend MUST treat that field as the sole authoritative endpoint source; it
+MUST NOT infer a port from the browser URL or hardcode the default. When
+`native_endpoint` is null, endpoint-specific guidance MUST be omitted rather
+than showing a potentially dead address. The guidance SHALL explain that
+attachment is a one-time prerequisite distinct from the routine policy action.
+""",
+              "frontend endpoint source",
+          )
+          text = replace_once(
+              text,
+              """#### Scenario: Server uses a non-default port
+
+- **WHEN** the effective runtime port is not `2455`
+- **THEN** attachment guidance shows that effective port
+- **AND** it does not direct the operator to the inactive default endpoint
+""",
+              """#### Scenario: Server advertises a non-default native endpoint
+
+- **WHEN** the policy API returns a non-default `native_endpoint`
+- **THEN** attachment guidance shows that exact endpoint
+- **AND** it does not infer or display the inactive default endpoint
+""",
+              "frontend non-default scenario",
+          )
+          frontend.write_text(text)
+          PY
+
+      - name: Validate and record result
+        working-directory: repo
+        run: |
+          set +e
+          {
+            npx --yes @fission-ai/openspec@1.6.0 validate add-native-client-loopback-controls --strict
+            one=$?
+            npx --yes @fission-ai/openspec@1.6.0 validate --all --strict
+            two=$?
+            git diff --check
+            three=$?
+            echo "statuses: change=${one} all=${two} diff=${three}"
+            exit $((one || two || three))
+          } > /tmp/validation-1311.txt 2>&1
+          status=$?
+          rm -f .review-fix-1311-error.txt
+          if [ "$status" -ne 0 ]; then
+            cp /tmp/validation-1311.txt .review-fix-1311-error.txt
+          fi
+          echo "VALIDATION_STATUS=$status" >> "$GITHUB_ENV"
+          cat /tmp/validation-1311.txt
+          exit 0
+
+      - name: Squash review fixes into one clean commit
+        working-directory: repo
+        run: |
+          rm -f .github/workflows/fix-review-round-2-1311.yml
+          git config user.name "dmdfami"
+          git config user.email "222630288+dmdfami@users.noreply.github.com"
+          git reset --soft 3c712b0e07bda602aa4218666d514514b9ecbc75
+          git add -A
+          if [ "$VALIDATION_STATUS" = "0" ]; then
+            git commit -m "docs(openspec): address native routing review feedback"
+          else
+            git commit -m "docs(openspec): address native routing review feedback (validation failed)"
+          fi
+          git push --force-with-lease origin HEAD:"$GITHUB_REF_NAME"

@@ -165,6 +165,7 @@ from app.modules.proxy._service.observability import (
 from app.modules.proxy._service.support import (
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
+    _clear_websocket_precreated_replay_fallback,
     _copy_websocket_route_metadata_to_session,
     _http_bridge_session_supports_service_tier,
     _HTTPBridgeOwnerForward,
@@ -2275,6 +2276,8 @@ class _HTTPBridgeMixin(
                 if reuse_current_account_lease and account.id == session.account.id
                 else selection.lease
             )
+            if account.id != request_state.precreated_replay_account_id:
+                _clear_websocket_precreated_replay_fallback(request_state)
             selected_is_preferred = account.id == session.account.id
             force_refresh = forced_refresh_account_id == account.id
             if forced_refresh_account_id is not None and account.id != forced_refresh_account_id:

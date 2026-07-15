@@ -104,7 +104,7 @@ from app.modules.proxy._service.support import (
     _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE,
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
-    _clear_websocket_request_error_overrides,
+    _clear_websocket_precreated_replay_fallback,
     _event_type_from_payload,
     _HTTPBridgeSession,
     _record_response_event,
@@ -770,9 +770,12 @@ class _HTTPBridgeUpstreamEventsMixin:
             and _websocket_auth_request_can_switch_account(status_request_state)
         ):
             rejected_account_id = session.account.id
+            status_request_state.precreated_replay_reason = _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE
+            status_request_state.precreated_replay_account_id = rejected_account_id
             previous_upstream_turn_state = session.upstream_turn_state
             previous_downstream_turn_state = session.downstream_turn_state
             previous_headers = session.headers
+            await self._release_request_state_account_response_create_lease(status_request_state)
             async with session.pending_lock:
                 if status_request_state not in session.pending_requests:
                     session.pending_requests.appendleft(status_request_state)
@@ -796,7 +799,8 @@ class _HTTPBridgeUpstreamEventsMixin:
                 if status_request_state in session.pending_requests:
                     session.pending_requests.remove(status_request_state)
                     session.queued_request_count = max(0, session.queued_request_count - 1)
-            _clear_websocket_request_error_overrides(status_request_state)
+            if status_request_state.precreated_replay_reason == _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE:
+                _clear_websocket_precreated_replay_fallback(status_request_state)
         elif (
             retry_error_code is not None
             and retry_error_code != _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE

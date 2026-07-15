@@ -722,14 +722,6 @@ def _websocket_precreated_replay_fallback_error(
     )
 
 
-def _clear_websocket_precreated_replay_fallback(request_state: _WebSocketRequestState) -> None:
-    if request_state.precreated_replay_reason != _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE:
-        return
-    request_state.precreated_replay_reason = None
-    request_state.precreated_replay_account_id = None
-    _clear_websocket_request_error_overrides(request_state)
-
-
 def _websocket_precreated_auth_error_code(
     request_state: _WebSocketRequestState | None,
     *,

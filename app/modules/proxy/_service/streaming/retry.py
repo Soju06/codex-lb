@@ -1825,6 +1825,7 @@ class _StreamingRetryMixin:
                     if _facade()._is_proxy_budget_exhausted_error(exc):
                         await _settle_process_network_budget_exhaustion(account, settlement)
                         yield format_sse_event(_facade()._proxy_request_timeout_event(request_id))
+                        return
                     account_model_retry = await _retry_account_model_rejection(
                         exc,
                         account,

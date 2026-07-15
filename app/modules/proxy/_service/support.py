@@ -808,6 +808,14 @@ def _clear_websocket_request_error_overrides(request_state: _WebSocketRequestSta
     request_state.error_http_status_override = None
 
 
+def _clear_websocket_precreated_replay_fallback(request_state: _WebSocketRequestState) -> None:
+    if request_state.precreated_replay_reason != _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE:
+        return
+    request_state.precreated_replay_reason = None
+    request_state.precreated_replay_account_id = None
+    _clear_websocket_request_error_overrides(request_state)
+
+
 def _record_response_event(request_state: _WebSocketRequestState | None, event_type: str | None) -> None:
     if request_state is None or event_type is None or not event_type.startswith("response."):
         return

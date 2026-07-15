@@ -314,6 +314,7 @@ from app.modules.proxy._service.support import (
     _REQUEST_TRANSPORT_WEBSOCKET,
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
     _account_capacity_wait_payload,
+    _clear_websocket_precreated_replay_fallback,
     _clear_websocket_request_error_overrides,
     _DownstreamWebSocketActivity,
     _event_type_from_payload,
@@ -372,7 +373,6 @@ from app.modules.proxy._service.warmup import (
 from app.modules.proxy._service.websocket.helpers import (
     _app_error_to_websocket_event,
     _assign_websocket_response_id,
-    _clear_websocket_precreated_replay_fallback,
     _find_websocket_request_state_by_response_id,
     _is_websocket_response_create,
     _match_websocket_request_state_for_anonymous_event,
@@ -3772,6 +3772,7 @@ class _WebSocketMixin:
                 request_state.error_param_override = _websocket_event_error_param(event_type, payload)
                 request_state.error_http_status_override = _facade()._http_error_status_from_payload(payload) or 400
                 await proxy._release_request_state_account_response_create_lease(request_state)
+                await _release_websocket_response_create_gate(request_state, response_create_gate)
                 request_state.excluded_account_ids.add(account.id)
                 request_state.affinity_policy = replace(
                     request_state.affinity_policy,

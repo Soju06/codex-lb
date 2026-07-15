@@ -10,3 +10,4 @@
 - [x] Perform non-test verification: code-path inspection, static grep checks, and OpenSpec validation.
 - [x] Tighten automatic redemption to a fixed five-minute window with duplicate-consume safeguards and matching UI copy.
 - [x] Verify one live automatic redemption against the approved Funeasy account exactly once.
+- [x] Include reset-credit settings in settings audit `changed_fields`.

@@ -144,6 +144,16 @@ _FINAL_PERSIST_RETRY_BASE_SECONDS = 0.02
 _CLAIM_RELEASE_MAX_ATTEMPTS = 3
 _CLAIM_RELEASE_RETRY_BASE_SECONDS = 0.05
 
+# Terminal account statuses a PRIOR claim holder may have committed while
+# leaving ``refresh_token_encrypted`` UNCHANGED: a permanent refresh failure
+# (e.g. ``invalid_grant``) downgraded through ``_handle_permanent_refresh_failure``
+# or the safe-terminal persist-conflict path (``_flag_persist_conflict_reauth``),
+# both of which flag REAUTH_REQUIRED/DEACTIVATED without rotating the token. A
+# waiter that wins the RELEASED claim and re-reads one of these on the SAME
+# (unchanged) refresh material must NOT re-exchange the stored consumed/dead
+# token; it must fail closed and surface the terminal state instead.
+_TERMINAL_REFRESH_STATUSES = frozenset({AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED})
+
 
 _RefreshSingleflightKey: TypeAlias = tuple[str, str]
 
@@ -360,11 +370,30 @@ class AuthManager:
                     # Post-claim fresh re-read: another replica may have rotated
                     # the material between the caller's read and our claim.
                     latest = await self._repo.get_by_id_fresh(account.id)
-                    if latest is not None and (
-                        _refresh_token_material_fingerprint(self._encryptor, latest.refresh_token_encrypted)
-                        != requested_fingerprint
-                    ):
-                        return _adopt_account_row(account, latest)
+                    if latest is not None:
+                        if (
+                            _refresh_token_material_fingerprint(self._encryptor, latest.refresh_token_encrypted)
+                            != requested_fingerprint
+                        ):
+                            # A peer genuinely rotated/repaired the material; adopt
+                            # it and proceed without an upstream call.
+                            return _adopt_account_row(account, latest)
+                        if latest.status in _TERMINAL_REFRESH_STATUSES:
+                            # A PRIOR claim holder finished by committing a terminal
+                            # status (a permanent ``invalid_grant`` downgrade, or the
+                            # safe-terminal persist-conflict path) WITHOUT rotating
+                            # ``refresh_token_encrypted``. The fresh row therefore
+                            # still holds the SAME consumed/dead token: re-exchanging
+                            # it would just repeat a permanent refresh failure and
+                            # defeat the fail-closed behavior the terminal flag exists
+                            # to enforce. Adopt the terminal row (so the caller's
+                            # object mirrors the committed state) and surface it as a
+                            # PERMANENT failure instead of starting another upstream
+                            # exchange. A GENUINE peer rotation is handled by the
+                            # fingerprint branch above, so a repaired account never
+                            # reaches here.
+                            _adopt_account_row(account, latest)
+                            raise _terminal_status_refresh_error(account)
                     fresh_material = (
                         latest.refresh_token_encrypted if latest is not None else account.refresh_token_encrypted
                     )
@@ -1227,6 +1256,30 @@ def _adopt_account_row(target: Account, source: Account) -> Account:
             continue
         setattr(target, column.name, getattr(source, column.name))
     return target
+
+
+def _terminal_status_refresh_error(account: Account) -> RefreshError:
+    """Build the PERMANENT ``RefreshError`` that surfaces a prior holder's terminal status.
+
+    Reached only when a claim waiter wins the released claim and re-reads a row
+    whose refresh material is UNCHANGED but whose status is already terminal
+    (a prior holder committed REAUTH_REQUIRED/DEACTIVATED without rotating the
+    token). The chosen code maps back to the SAME committed status through
+    :func:`account_status_for_permanent_failure`, so a downstream
+    ``LoadBalancer.mark_permanent_failure`` re-affirms the terminal state rather
+    than flipping REAUTH_REQUIRED to DEACTIVATED (or vice versa).
+    """
+    code = "account_deactivated" if account.status == AccountStatus.DEACTIVATED else "refresh_token_invalidated"
+    reason = account.deactivation_reason or PERMANENT_FAILURE_CODES.get(code, "re-login required")
+    return RefreshError(
+        code,
+        (
+            f"Token refresh for account {account.id} not attempted: a prior refresh-claim holder "
+            f"already flagged the account {account.status.value} without rotating the refresh token "
+            f"({reason}); reusing the unchanged consumed token would repeat a permanent failure"
+        ),
+        True,
+    )
 
 
 def _refresh_token_material_fingerprint(encryptor: TokenEncryptor, refresh_token_encrypted: bytes) -> str:

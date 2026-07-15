@@ -1410,7 +1410,10 @@ class _WebSocketMixin:
                             upstream_control=upstream_control,
                             response_create_gate=response_create_gate,
                             continuity_state=continuity_state,
-                            proxy_request_budget_seconds=runtime_settings.proxy_request_budget_seconds,
+                            proxy_request_budget_seconds=_facade()._stream_request_budget_seconds(
+                                runtime_settings,
+                                request_transport="websocket",
+                            ),
                             stream_idle_timeout_seconds=runtime_settings.stream_idle_timeout_seconds,
                             downstream_activity=downstream_activity,
                             codex_session_affinity=codex_session_affinity,

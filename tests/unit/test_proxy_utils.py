@@ -15208,6 +15208,69 @@ async def test_connect_proxy_websocket_passes_sticky_kind_to_load_balancer(monke
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stream_budget_seconds", "request_stage", "now", "expected_deadline"),
+    [
+        pytest.param(7200.0, "reattach", 701.0, 7300.0, id="stream-specific-reconnect"),
+        pytest.param(None, "first_turn", 101.0, 700.0, id="generic-fallback"),
+    ],
+)
+async def test_connect_proxy_websocket_uses_transport_aware_request_deadline(
+    monkeypatch,
+    stream_budget_seconds,
+    request_stage,
+    now,
+    expected_deadline,
+):
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    settings = _make_proxy_settings()
+    settings.proxy_request_budget_seconds = 600.0
+    if stream_budget_seconds is not None:
+        settings.http_responses_stream_request_budget_seconds = stream_budget_seconds
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+
+    account = _make_account(f"acc_ws_connect_budget_{request_stage}")
+    upstream = SimpleNamespace()
+    select_account = AsyncMock(return_value=account)
+    open_attempt = AsyncMock(return_value=(account, upstream))
+    monkeypatch.setattr(service, "_select_websocket_connect_account", select_account)
+    monkeypatch.setattr(service, "_try_open_websocket_connect_attempt", open_attempt)
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id=f"ws_req_connect_budget_{request_stage}",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=100.0,
+        request_stage=request_stage,
+    )
+    websocket = cast(WebSocket, SimpleNamespace(send_text=AsyncMock()))
+
+    selected_account, selected_upstream = await service._connect_proxy_websocket(
+        {},
+        sticky_key=None,
+        sticky_kind=None,
+        prefer_earlier_reset=False,
+        prefer_earlier_reset_window="secondary",
+        routing_strategy="usage_weighted",
+        model="gpt-5.1",
+        request_state=request_state,
+        api_key=None,
+        client_send_lock=anyio.Lock(),
+        websocket=websocket,
+    )
+
+    assert selected_account is account
+    assert selected_upstream is upstream
+    select_args = select_account.await_args
+    assert select_args is not None
+    assert select_args.args[0] == expected_deadline
+    if request_stage == "reattach":
+        assert request_state.started_at + settings.proxy_request_budget_seconds < now < expected_deadline
+
+
+@pytest.mark.asyncio
 async def test_connect_proxy_websocket_logs_preconnect_failure(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))

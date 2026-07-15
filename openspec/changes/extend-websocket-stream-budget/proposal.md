@@ -15,6 +15,9 @@ downstream client was still alive and receiving keepalives.
 - `_stream_request_budget_seconds` now applies
   `http_responses_stream_request_budget_seconds` to both HTTP and WebSocket
   Responses streams.
+- Native WebSocket initial connection and reconnect account selection use that
+  same stream-specific deadline instead of expiring at the generic request
+  budget.
 - The existing fallback to `proxy_request_budget_seconds` is preserved for old
   settings objects that do not define the stream-specific budget.
 - Unit coverage updates the previous HTTP-only budget expectation and keeps
@@ -23,5 +26,6 @@ downstream client was still alive and receiving keepalives.
 ## Impact
 
 - Affected spec: `responses-api-compat`
-- Affected code: `app/modules/proxy/_service/streaming/helpers.py`
+- Affected code: `app/modules/proxy/_service/streaming/helpers.py`,
+  `app/modules/proxy/_service/websocket/mixin.py`
 - Affected tests: `tests/unit/test_proxy_utils.py`

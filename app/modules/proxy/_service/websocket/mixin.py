@@ -2018,8 +2018,14 @@ class _WebSocketMixin:
                 request_state.useragent_group,
                 request_state.conversation_id,
             ) = _request_log_client_fields(headers)
-        deadline = _websocket_connect_deadline(request_state, _facade().get_settings().proxy_request_budget_seconds)
         base_settings = _facade().get_settings()
+        deadline = _websocket_connect_deadline(
+            request_state,
+            _facade()._stream_request_budget_seconds(
+                base_settings,
+                request_transport="websocket",
+            ),
+        )
         max_attempts = _facade()._WEBSOCKET_MAX_ACCOUNT_ATTEMPTS
         excluded_account_ids: set[str] = set(request_state.excluded_account_ids)
         last_failover_exc: ProxyResponseError | None = None

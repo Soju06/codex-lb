@@ -14,3 +14,11 @@ The default compact request budget MUST be at least 180 seconds, and the default
 - **WHEN** a native WebSocket Responses stream computes its request deadline
 - **THEN** the stream budget is 7200 seconds
 - **AND** the generic 600 second proxy request budget does not terminate the turn
+
+#### Scenario: WebSocket reconnect keeps the stream-specific deadline
+- **GIVEN** `proxy_request_budget_seconds = 600`
+- **AND** `http_responses_stream_request_budget_seconds = 7200`
+- **AND** a native WebSocket Responses request needs to reconnect after more than 600 seconds but less than 7200 seconds
+- **WHEN** the reconnect performs account selection and opens its replacement upstream WebSocket
+- **THEN** both operations remain bounded by the original 7200-second stream deadline
+- **AND** the reconnect does not fail solely because the generic 600-second budget elapsed

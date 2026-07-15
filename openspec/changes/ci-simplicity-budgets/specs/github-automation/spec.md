@@ -66,28 +66,32 @@ file from the budget).
 ### Requirement: Simplicity budget override label
 
 The checker SHALL read PR label names from the `PR_LABELS` environment
-variable (a JSON array injected by the workflow from the pull-request event
-payload). When the `simplicity-budget-approved` label is present, budget
-violations SHALL be downgraded to warning annotations and the check SHALL
-exit 0 while still printing every measured metric. Because the event payload
-is a snapshot, the workflow MUST trigger on `labeled` and `unlabeled` so that
-applying the label starts a fresh run; the failure message MUST explain that
-re-running a failed run reuses the stale payload. Push and merge-group runs
-carry no pull-request labels, so the override MUST NOT apply there: a change
-that would leave `main` over budget MUST raise the budget in
+variable, a JSON array the workflow resolves by querying the pull request's
+current labels from the GitHub API at run time (never from the event
+payload, which can be stale or empty on fork pull requests and re-runs).
+When the `simplicity-budget-approved` label is present, budget violations
+SHALL be downgraded to warning annotations and the check SHALL exit 0 while
+still printing every measured metric. The workflow MUST trigger on `labeled`
+and `unlabeled` so that toggling the label re-evaluates the check
+immediately, and the failure message MUST explain the override path,
+including that re-running a failed run after labeling also works because
+labels are fetched live. Push and merge-group runs carry no pull-request
+labels, so the override MUST NOT apply there: a change that would leave
+`main` over budget MUST raise the budget in
 `.github/simplicity-budgets.toml` in the same diff.
 
 #### Scenario: Maintainer approves a temporary exceedance
 
 - **GIVEN** a pull request over budget
 - **WHEN** a maintainer applies the `simplicity-budget-approved` label
-- **THEN** the `labeled` event starts a fresh check run whose payload includes
-  the label
+- **THEN** the `labeled` event starts a fresh check run that resolves the
+  live label set from the API and sees the label (as would a manual re-run
+  of the failed run)
 - **AND** the run reports the violations as warning annotations and exits 0
 
 #### Scenario: Label override does not launder main
 
 - **GIVEN** a run triggered by a push to `main` or a `merge_group` event
 - **WHEN** a budget is exceeded
-- **THEN** no label payload is available and the check fails regardless of any
-  label on the originating pull request
+- **THEN** no pull-request label set is resolved and the check fails
+  regardless of any label on the originating pull request

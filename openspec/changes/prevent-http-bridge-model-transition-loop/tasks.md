@@ -5,5 +5,5 @@
 
 ## 2. Validation
 
-- [x] 2.1 Add regressions for an unmatched generated turn state with an incompatible session-header fallback, missing previous-response lookup, and full-cache eviction.
+- [x] 2.1 Add regressions for an unmatched generated turn state with an incompatible session-header fallback, missing previous-response lookup, full-cache eviction, and an in-flight parent completing before isolation.
 - [x] 2.2 Run focused and full repository validation, including strict OpenSpec validation.

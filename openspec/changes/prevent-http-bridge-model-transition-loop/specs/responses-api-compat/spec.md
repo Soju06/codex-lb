@@ -27,6 +27,12 @@ When an HTTP bridge request cannot reuse the session selected by its incoming af
 - **THEN** the incompatible session-header parent MUST NOT be selected for that eviction
 - **AND** ordinary LRU eviction remains eligible for other idle sessions
 
+#### Scenario: In-flight parent completes before model isolation
+
+- **GIVEN** a request waits for an in-flight session-header parent whose completed bridge uses an incompatible model
+- **WHEN** the request isolates itself with an internal model-parallel key after that wait
+- **THEN** the completed parent MUST receive the same capacity-eviction protection as an immediately available parent
+
 #### Scenario: Compatible session fallback remains reusable
 
 - **GIVEN** a request carries a fresh generated turn-state header and a session header whose active bridge uses a compatible model

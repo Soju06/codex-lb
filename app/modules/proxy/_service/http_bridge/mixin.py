@@ -1329,7 +1329,7 @@ class _HTTPBridgeMixin(
                     request_scope_id=request_scope_id,
                 )
                 if model_fork_key is not None:
-                    key = model_fork_key
+                    model_transition_parent_key, key = key, model_fork_key
                     durable_lookup = None
                     force_durable_takeover_after_detach = False
                     continue

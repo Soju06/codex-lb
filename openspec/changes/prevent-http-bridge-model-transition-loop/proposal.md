@@ -6,7 +6,7 @@ When a request carries a fresh generated turn-state header plus a session header
 
 - Preserve an internal parallel bridge key and its session-header fallback state once lookup has selected it instead of resolving the original turn-state/session headers again on the next creation-loop iteration.
 - Protect the incompatible session-header parent from capacity eviction while the isolated child is created.
-- Cover follow-up requests without a previous-response/durable lookup and full-cache model transitions.
+- Cover follow-up requests without a previous-response/durable lookup and full-cache model transitions, including parent sessions that finish creation while the child waits.
 
 ## Capabilities
 

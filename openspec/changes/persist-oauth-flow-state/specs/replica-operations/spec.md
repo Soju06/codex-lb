@@ -34,6 +34,18 @@ MUST expire via a short TTL.
 - **THEN** replica A returns the authoritative `success` status from the shared
   database rather than its stale in-memory `pending`
 
+#### Scenario: Complete honors a durable terminal written by another replica
+
+- **GIVEN** replica A started a browser OAuth flow and still holds it in memory
+  as `pending`
+- **AND** replica B completed the same flow and wrote `success` (or `error`) to
+  the shared database
+- **WHEN** the dashboard calls `POST /api/oauth/complete` for that `flow_id` and
+  the request lands on replica A
+- **THEN** replica A returns the authoritative terminal status from the shared
+  database rather than its stale in-memory `pending`
+- **AND** replica A reconciles its in-memory flow state to that terminal status
+
 #### Scenario: Abandoned pending flow expires
 
 - **GIVEN** a persisted pending flow whose `expires_at` is in the past

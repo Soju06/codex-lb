@@ -5,6 +5,7 @@ import base64
 import json
 import logging
 import time
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock
@@ -19,7 +20,7 @@ from app.core.clients.oauth import DeviceCode, OAuthError, OAuthTokens
 from app.core.crypto import TokenEncryptor
 from app.core.upstream_proxy import UpstreamProxyRouteError
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus
+from app.db.models import Account, AccountStatus, OAuthFlowState
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.oauth import api as oauth_api_module
@@ -1817,3 +1818,114 @@ async def test_oauth_status_reads_completion_written_by_another_replica(monkeypa
 
     status = await replica_a.oauth_status(start.flow_id)
     assert status.status == "success"
+
+
+def test_is_expired_pending_normalizes_tz_aware_expiry():
+    """Finding 1 (dialect-agnostic): on PostgreSQL asyncpg returns an
+    offset-AWARE ``expires_at`` for the ``DateTime(timezone=True)`` column while
+    ``utcnow()`` is naive UTC. The expiry comparison must normalize before
+    comparing instead of raising ``TypeError: can't compare offset-naive and
+    offset-aware datetimes``.
+    """
+
+    from app.modules.oauth.repository import OAuthFlowRepository
+
+    now = utcnow()  # naive UTC, as returned by ``utcnow``
+    live_aware = cast(
+        OAuthFlowState,
+        SimpleNamespace(status="pending", expires_at=datetime.now(timezone.utc) + timedelta(hours=1)),
+    )
+    expired_aware = cast(
+        OAuthFlowState,
+        SimpleNamespace(status="pending", expires_at=datetime.now(timezone.utc) - timedelta(hours=1)),
+    )
+
+    # Must not raise, and must classify correctly.
+    assert OAuthFlowRepository._is_expired_pending(live_aware, now) is False
+    assert OAuthFlowRepository._is_expired_pending(expired_aware, now) is True
+
+
+@pytest.mark.asyncio
+async def test_get_by_flow_id_survives_tz_aware_expiry_from_asyncpg():
+    """Finding 1 (read path): ``get_by_flow_id`` / ``get_by_state_token`` must
+    not raise when the ORM row carries an offset-aware ``expires_at`` (asyncpg's
+    representation for ``DateTime(timezone=True)`` on PostgreSQL) and must still
+    correctly classify live vs expired pending flows.
+    """
+
+    encryptor = TokenEncryptor()
+    async with SessionLocal() as session:
+        repo = oauth_module.OAuthFlowRepository(session, encryptor)
+        await repo.create(
+            oauth_module.OAuthFlowRecord(
+                flow_id="tz-aware-flow",
+                method="browser",
+                status="pending",
+                state_token="tz-aware-state",
+                code_verifier="tz-aware-verifier",
+                expires_at=utcnow() + timedelta(hours=1),
+            )
+        )
+
+    async with SessionLocal() as session:
+        repo = oauth_module.OAuthFlowRepository(session, encryptor)
+        row = await session.get(OAuthFlowState, "tz-aware-flow")
+        assert row is not None
+
+        # Simulate asyncpg: replace the naive value with an offset-aware one.
+        row.expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
+        live = await repo.get_by_flow_id("tz-aware-flow")
+        assert live is not None
+        live_by_state = await repo.get_by_state_token("tz-aware-state")
+        assert live_by_state is not None
+
+        # Aware + expired must be filtered out, still without raising.
+        row.expires_at = datetime.now(timezone.utc) - timedelta(hours=1)
+        assert await repo.get_by_flow_id("tz-aware-flow") is None
+        assert await repo.get_by_state_token("tz-aware-state") is None
+
+
+@pytest.mark.asyncio
+async def test_complete_on_origin_replica_honors_durable_success_from_other_replica(monkeypatch):
+    """Finding 2: replica A starts a browser flow; replica B completes it and
+    writes durable success to the shared DB. The dashboard on A polls status
+    (success) then immediately calls ``/complete`` with the same ``flowId``.
+
+    Before the fix, ``complete_oauth`` used A's stale local ``pending`` browser
+    flow (hydration skips existing flows) and returned ``pending``, so the UI
+    flipped back to pending and never invalidated accounts. Now the durable
+    terminal status is authoritative: ``/complete`` returns success and A's
+    in-memory flow is reconciled.
+    """
+
+    async def fake_callback_server_start(self) -> None:
+        return None
+
+    monkeypatch.setattr(oauth_module.OAuthCallbackServer, "start", fake_callback_server_start)
+
+    replica_a = _make_replica_service(oauth_module.OAuthStateStore())
+    start = await replica_a.start_oauth(oauth_module.OauthStartRequest(force_method="browser"))
+    assert start.flow_id is not None
+
+    # Replica A's in-memory flow is still pending.
+    async with replica_a._store.lock:
+        local = replica_a._store.get_flow_locked(start.flow_id)
+        assert local is not None and local.status == "pending"
+
+    # Another replica completes the flow and writes durable success.
+    async with SessionLocal() as session:
+        repo = oauth_module.OAuthFlowRepository(session, TokenEncryptor())
+        assert await repo.set_status(start.flow_id, status="success", error_message=None)
+
+    # poll(): status returns the durable success ...
+    status = await replica_a.oauth_status(start.flow_id)
+    assert status.status == "success"
+
+    # ... then the frontend immediately calls /complete with the same flowId.
+    complete = await replica_a.complete_oauth(oauth_module.OauthCompleteRequest(flow_id=start.flow_id))
+    assert complete.status == "success"
+
+    # The origin replica's in-memory flow converges on the durable terminal.
+    async with replica_a._store.lock:
+        local = replica_a._store.get_flow_locked(start.flow_id)
+        assert local is not None and local.status == "success"

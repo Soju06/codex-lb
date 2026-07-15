@@ -431,6 +431,25 @@ class OauthService:
                 return await self._start_device_flow(intended_account_id=intended_account_id)
             return await self._start_device_flow()
 
+    async def _reconcile_local_flow_from_db_terminal(self, record: OAuthFlowRecord) -> None:
+        """Once a flow reaches a terminal status in the shared DB that status is
+        authoritative across replicas. Reconcile the origin replica's stale
+        in-memory ``OAuthState`` so a subsequent ``/complete`` (or later status
+        poll) on this replica converges on the durable terminal instead of
+        regressing to its local ``pending``.
+        """
+
+        if record.status not in _TERMINAL_OAUTH_STATUSES:
+            return
+        async with self._store.lock:
+            flow = self._store.get_flow_locked(record.flow_id)
+            if flow is not None and flow.status != record.status:
+                self._store.set_flow_status_locked(
+                    flow,
+                    status=record.status,
+                    error_message=record.error_message,
+                )
+
     async def oauth_status(self, flow_id: str | None = None) -> OauthStatusResponse:
         if flow_id is not None:
             # The shared DB is authoritative: another replica may have completed
@@ -438,6 +457,10 @@ class OauthService:
             # not shadow a durable success/error.
             record = await self._load_flow_record(flow_id=flow_id)
             if record is not None:
+                # Sync the origin replica's in-memory flow before returning the
+                # durable terminal, so the follow-up ``/complete`` call does not
+                # read a stale ``pending``.
+                await self._reconcile_local_flow_from_db_terminal(record)
                 status = record.status if record.status != "idle" else "pending"
                 return OauthStatusResponse(status=status, error_message=record.error_message)
         async with self._store.lock:
@@ -450,6 +473,15 @@ class OauthService:
     async def complete_oauth(self, request: OauthCompleteRequest | None = None) -> OauthCompleteResponse:
         payload = request or OauthCompleteRequest()
         if payload.flow_id is not None:
+            # The shared DB is authoritative once a flow is terminal. If another
+            # replica already completed this browser flow, honor that durable
+            # success/error here instead of the origin replica's stale local
+            # ``pending`` (which would flip the dashboard back to pending and
+            # skip account invalidation).
+            record = await self._load_flow_record(flow_id=payload.flow_id)
+            if record is not None and record.status in _TERMINAL_OAUTH_STATUSES:
+                await self._reconcile_local_flow_from_db_terminal(record)
+                return OauthCompleteResponse(status=record.status)
             # The device poll runs in-process; if this replica did not start the
             # flow, hydrate it from the shared DB so it can resume polling.
             await self._hydrate_flow_locked_from_db(flow_id=payload.flow_id)

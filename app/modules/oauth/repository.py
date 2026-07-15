@@ -7,7 +7,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.crypto import TokenEncryptor
-from app.core.utils.time import utcnow
+from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import OAuthFlowState
 
 _TERMINAL_OAUTH_STATUSES = {"error", "success"}
@@ -72,7 +72,13 @@ class OAuthFlowRepository:
 
     @staticmethod
     def _is_expired_pending(row: OAuthFlowState, now: datetime) -> bool:
-        return row.status == "pending" and row.expires_at is not None and row.expires_at <= now
+        if row.status != "pending" or row.expires_at is None:
+            return False
+        # ``expires_at`` is ``DateTime(timezone=True)``: on PostgreSQL asyncpg
+        # returns an offset-AWARE datetime, while ``now`` (``utcnow``) is naive
+        # UTC. Normalize the row value to naive UTC before comparing so the
+        # comparison never raises ``TypeError`` for offset-naive vs -aware.
+        return to_utc_naive(row.expires_at) <= now
 
     async def create(self, record: OAuthFlowRecord) -> None:
         encrypted = None

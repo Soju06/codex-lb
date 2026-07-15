@@ -331,6 +331,39 @@ def test_nav_count_stops_at_target_array_when_file_has_multiple(tmp_path):
     assert checker.count_nav_items(nav_file, "ADVANCED_NAV_ITEMS") == 1
 
 
+def test_nav_count_rejects_suffixed_identifier(tmp_path, capsys):
+    checker = _load_checker_module()
+    nav_file = tmp_path / "nav.tsx"
+    nav_file.write_text(
+        'const NAV_ITEMS_V2 = [\n  { to: "/dashboard" },\n  { to: "/reports" },\n] as const;\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        checker.count_nav_items(nav_file, "NAV_ITEMS")
+
+    assert excinfo.value.code == 2
+    assert "NAV_ITEMS" in capsys.readouterr().out
+
+
+def test_main_config_missing_key_exits_2(tmp_path, monkeypatch, capsys):
+    checker = _load_checker_module()
+    _write_repo(tmp_path)
+    config_path = tmp_path / ".github" / "simplicity-budgets.toml"
+    config = config_path.read_text(encoding="utf-8").replace("max_top_level_headings", "typo_key")
+    config_path.write_text(config, encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PR_LABELS", raising=False)
+
+    with pytest.raises(SystemExit) as excinfo:
+        checker.main()
+
+    assert excinfo.value.code == 2
+    out = capsys.readouterr().out
+    assert "::error::" in out
+    assert "section/key" in out
+
+
 def test_missing_nav_array_exits_2_with_repoint_instruction(tmp_path, monkeypatch, capsys):
     checker = _load_checker_module()
     _write_repo(tmp_path, nav_source="const OTHER_ITEMS = [] as const;\n")

@@ -4,6 +4,7 @@ import hashlib
 import logging
 import math
 import random
+import socket
 import time
 from dataclasses import dataclass
 from typing import Collection, Iterable, Literal
@@ -374,6 +375,7 @@ def select_account(
     bypass_quota_exceeded_account_ids: Collection[str] | None = None,
     primary_first_usage_weighted: bool = False,
     routing_costs: RoutingCostsByAccount | None = None,
+    replica_salt: str | None = None,
 ) -> SelectionResult:
     """Select an eligible account by applying availability checks and routing strategy.
 
@@ -422,6 +424,12 @@ def select_account(
             rank by primary-window pressure before secondary-window pressure.
         routing_costs: Optional request-scoped planner costs. Lower cost wins
             after hard eligibility, health tier, and reset-bucket filtering.
+        replica_salt: Optional per-replica salt mixed into the final
+            ``round_robin`` tie-break so peer replicas break exact ties toward
+            different accounts. When ``None``, the process-wide salt configured
+            via ``configure_replica_salt`` (else the host identity) is used. It
+            affects only the final tie-break; the primary usage/health/cost
+            ordering is unchanged.
 
     Returns:
         A ``SelectionResult`` containing the selected ``AccountState`` and no
@@ -579,9 +587,18 @@ def select_account(
         secondary_used, primary_used, last_selected, account_id = _usage_sort_key(state)
         return _planner_cost(state, routing_costs), secondary_used, primary_used, last_selected, account_id
 
+    round_robin_salt = _effective_replica_salt(replica_salt)
+
     def _round_robin_sort_key(state: AccountState) -> tuple[float, float, str]:
-        # Pick the least recently selected account, then stabilize by account_id.
-        return _planner_cost(state, routing_costs), state.last_selected_at or 0.0, state.account_id
+        # Primary ordering: lowest planner cost, then least-recently-selected.
+        # The final tie-break is decorrelated per replica (keyed hash of the
+        # account id) so peers spread exact ties across equally-good accounts
+        # instead of all herding onto the lexicographically-first account.
+        return (
+            _planner_cost(state, routing_costs),
+            state.last_selected_at or 0.0,
+            _decorrelated_tie_breaker(state.account_id, round_robin_salt),
+        )
 
     if routing_strategy == "single_account":
         selected = min(available, key=lambda state: state.account_id)
@@ -868,6 +885,71 @@ def _select_relative_availability(
 
 def _stable_tie_breaker(account_id: str) -> str:
     return hashlib.sha256(account_id.encode("utf-8")).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# Cross-replica round-robin decorrelation
+#
+# ``round_robin`` orders candidates by planner cost, then least-recently-
+# selected time, then a stable final tie-break. In a multi-replica deployment
+# every replica shares one account set and computes the identical key, so an
+# *exact* tie on the primary keys (for example a cold start where every account
+# is never-selected, or several accounts whose ``last_selected_at`` reset to
+# ``0.0``) makes every replica break the tie toward the same account -- herding
+# load onto it. Mixing a stable per-replica salt into the final tie-break
+# decorrelates that choice so peers spread across equally-good accounts, without
+# touching the primary ordering.
+# ---------------------------------------------------------------------------
+
+_configured_replica_salt: str | None = None
+_process_replica_salt: str | None = None
+
+
+def configure_replica_salt(salt: str | None) -> None:
+    """Set the process-wide replica salt used to decorrelate round-robin ties.
+
+    Called once during proxy start-up with the replica's stable identity (the
+    HTTP responses-session bridge instance id). An empty or ``None`` value
+    clears the override and restores the lazily-resolved host default. The salt
+    is process-stable by design: it must not change between selections so a
+    replica breaks a given tie the same way every time.
+    """
+    global _configured_replica_salt
+    normalized = salt.strip() if salt else ""
+    _configured_replica_salt = normalized or None
+
+
+def _default_replica_salt() -> str:
+    """Return the cached host-identity fallback salt.
+
+    Resolved once per process so the salt never varies between calls within a
+    replica, keeping single-replica selection deterministic. Matches the HTTP
+    bridge instance-id default (the host name) so an unconfigured process still
+    decorrelates by pod/host.
+    """
+    global _process_replica_salt
+    if _process_replica_salt is None:
+        hostname = socket.gethostname().strip()
+        _process_replica_salt = hostname or "codex-lb"
+    return _process_replica_salt
+
+
+def _effective_replica_salt(explicit: str | None) -> str:
+    if explicit is not None and explicit.strip():
+        return explicit.strip()
+    if _configured_replica_salt is not None:
+        return _configured_replica_salt
+    return _default_replica_salt()
+
+
+def _decorrelated_tie_breaker(account_id: str, salt: str) -> str:
+    """Keyed hash of ``account_id`` under a per-replica ``salt``.
+
+    Deterministic for a given ``(salt, account_id)`` pair -- a replica always
+    breaks the same tie the same way -- while distinct salts yield independent
+    orderings across replicas.
+    """
+    return hashlib.sha256(f"{salt}\x00{account_id}".encode("utf-8")).hexdigest()
 
 
 def _configured_capacity_credits(state: AccountState) -> float:

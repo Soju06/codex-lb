@@ -1,0 +1,48 @@
+name: Simplicity budgets
+
+# Enforces .github/simplicity-budgets.toml via
+# .github/scripts/check_simplicity_budgets.py.
+#
+# This is deliberately a SEPARATE workflow from ci.yml, with different
+# pull_request trigger types: the simplicity-budget-approved override is read
+# from the event payload, and re-running a failed run reuses a stale payload —
+# only a fresh `labeled`/`unlabeled` event sees a just-applied label. Adding
+# those types to ci.yml instead would re-run the full CI matrix on every label
+# churn from codex-review-labels.yml (15-minute cron + workflow_run syncs of
+# the codex labels), which is why they live here on a seconds-long job.
+#
+# No `paths:` filter: the job is cheap, and a required check behind a paths
+# filter would leave non-matching PRs pending forever.
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, labeled, unlabeled]
+  push:
+    branches: ["main"]
+  merge_group:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  budgets:
+    name: Simplicity budgets
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+
+      - name: Check simplicity budgets
+        env:
+          # Empty/null on push and merge_group; the override never applies
+          # there — main must always satisfy the budgets in-file.
+          PR_LABELS: ${{ toJson(github.event.pull_request.labels.*.name) }}
+        run: python3 .github/scripts/check_simplicity_budgets.py

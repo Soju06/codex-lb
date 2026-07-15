@@ -296,3 +296,36 @@ def test_settings_upstream_websocket_proxy_env_can_be_explicitly_disabled(monkey
     settings = Settings()
 
     assert settings.upstream_websocket_trust_env is False
+
+
+def test_settings_workers_per_instance_defaults_to_one(monkeypatch):
+    # The default (one worker per instance) requires no operator action and is
+    # accepted exactly as before: caps are partitioned per replica via the ring.
+    monkeypatch.delenv("CODEX_LB_WORKERS_PER_INSTANCE", raising=False)
+
+    settings = Settings()
+
+    assert settings.workers_per_instance == 1
+
+
+def test_settings_workers_per_instance_explicit_one_is_accepted(monkeypatch):
+    monkeypatch.setenv("CODEX_LB_WORKERS_PER_INSTANCE", "1")
+
+    settings = Settings()
+
+    assert settings.workers_per_instance == 1
+
+
+def test_settings_rejects_multiple_workers_per_instance(monkeypatch):
+    # Multi-worker per instance is unsupported for shared per-account caps and
+    # MUST fail fast: intra-pod worker cap partitioning cannot be made reliable,
+    # so operators run one worker per pod/container and scale via replicas.
+    monkeypatch.setenv("CODEX_LB_WORKERS_PER_INSTANCE", "2")
+
+    with pytest.raises(ValidationError) as exc_info:
+        Settings()
+
+    message = str(exc_info.value)
+    assert "CODEX_LB_WORKERS_PER_INSTANCE" in message
+    assert "not supported" in message
+    assert "scale horizontally via replicas" in message

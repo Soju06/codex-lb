@@ -355,6 +355,16 @@ class Settings(BaseSettings):
     proxy_account_lease_ttl_seconds: float = Field(default=900.0, gt=0)
     proxy_account_caps_scope: Literal["partitioned", "replica"] = "partitioned"
     proxy_account_cap_partition_scale_down_seconds: int = Field(default=60, ge=30)
+    # Explicit operator declaration of how many worker processes
+    # (uvicorn/gunicorn) this instance runs behind a single bridge-ring instance
+    # id. Only ``1`` (the default) is supported: per-account concurrency caps are
+    # partitioned per REPLICA via the bridge ring, and intra-pod multi-worker
+    # cap partitioning cannot be made reliable (there is no portable per-worker
+    # index — standard multi-worker launches inherit the same environment into
+    # every child). A declared value greater than 1 is rejected at startup by
+    # ``_validate_workers_per_instance``; operators scale horizontally via
+    # replicas instead. Default 1 is a no-op requiring zero operator action.
+    workers_per_instance: int = Field(default=1, ge=1)
     proxy_refresh_failure_cooldown_seconds: float = Field(default=5.0, ge=0.0)
     usage_refresh_auth_failure_cooldown_seconds: float = Field(default=300.0, ge=0.0)
 
@@ -645,6 +655,28 @@ class Settings(BaseSettings):
             raise ValueError("dashboard_auth_mode=trusted_header requires firewall_trust_proxy_headers=true")
         if not self.firewall_trusted_proxy_cidrs:
             raise ValueError("dashboard_auth_mode=trusted_header requires non-empty firewall_trusted_proxy_cidrs")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_workers_per_instance(self) -> "Settings":
+        # Only one worker process per instance is supported. Per-account
+        # concurrency caps are partitioned per REPLICA via the bridge ring, which
+        # is correct only when a single process runs behind each ring instance
+        # id. Running multiple worker processes per instance cannot be made
+        # reliable for shared caps: there is no portable per-worker index, and a
+        # standard uvicorn/gunicorn multi-worker launch inherits the SAME
+        # environment into every child, so the workers cannot self-partition. Fail
+        # fast on the explicit declaration rather than silently over-admitting.
+        if self.workers_per_instance > 1:
+            raise ValueError(
+                "workers_per_instance (CODEX_LB_WORKERS_PER_INSTANCE="
+                f"{self.workers_per_instance}) is not supported: running more than one worker "
+                "process per instance would multiply per-account concurrency caps, because those "
+                "caps are partitioned per replica via the bridge ring and intra-pod worker "
+                "partitioning cannot be made reliable. Run ONE worker per pod/container and scale "
+                "horizontally via replicas (the bridge ring partitions caps per replica); set "
+                "CODEX_LB_WORKERS_PER_INSTANCE=1 (the default)."
+            )
         return self
 
 

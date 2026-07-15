@@ -86,6 +86,10 @@ from app.core.openai.requests import (
     ResponsesCompactRequest,
     ResponsesRequest,
 )
+from app.core.resilience.network_recovery import PROCESS_NETWORK_UNAVAILABLE_CODE
+from app.core.resilience.network_recovery import (
+    ProcessNetworkRecovery as ProcessNetworkRecovery,
+)
 from app.core.resilience.overload import is_local_overload_error_code
 from app.core.types import JsonValue
 from app.core.upstream_proxy import UpstreamProxyRouteError
@@ -162,6 +166,10 @@ from app.modules.proxy._service.http_bridge.helpers import (
 )
 from app.modules.proxy._service.http_bridge.helpers import (
     _has_http_bridge_response_output_marker as _has_http_bridge_response_output_marker,
+)
+from app.modules.proxy._service.http_bridge.helpers import (
+    _http_bridge_admission_timeout_seconds,
+    _http_bridge_should_attempt_local_previous_response_recovery,  # noqa: F401
 )
 from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_allow_durable_takeover as _http_bridge_allow_durable_takeover,
@@ -260,9 +268,6 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_should_attempt_local_bootstrap_rebind as _http_bridge_should_attempt_local_bootstrap_rebind,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
-    _http_bridge_should_attempt_local_previous_response_recovery,  # noqa: F401
-)
-from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_should_attempt_soft_affinity_reroute as _http_bridge_should_attempt_soft_affinity_reroute,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
@@ -357,6 +362,9 @@ from app.modules.proxy._service.observability import (
 )
 from app.modules.proxy._service.rate_limit import (
     _RateLimitMixin,
+)
+from app.modules.proxy._service.refresh import (
+    ensure_fresh_with_budget as _recover_fresh_account,
 )
 from app.modules.proxy._service.request_log import (
     _RequestLogMixin,
@@ -510,9 +518,6 @@ from app.modules.proxy._service.streaming.helpers import (
 )
 from app.modules.proxy._service.streaming.helpers import (
     _push_stream_attempt_timeout_overrides as _push_stream_attempt_timeout_overrides,
-)
-from app.modules.proxy._service.streaming.helpers import (
-    _refresh_upstream_proxy_fail_closed_reason as _refresh_upstream_proxy_fail_closed_reason,
 )
 from app.modules.proxy._service.streaming.helpers import (
     _resolve_upstream_stream_transport as _resolve_upstream_stream_transport,
@@ -1290,16 +1295,7 @@ class ProxyService(
     ) -> None:
         timeout_seconds = _proxy_admission_wait_timeout_seconds()
         if bridge_session is not None:
-            # Bridged requests retry gate acquisition within the bridge
-            # request budget; a final attempt must not run past it, so each
-            # acquisition wait is clamped to the remaining budget. Retry
-            # states carry the original deadline because their started_at
-            # is reset when they are re-prepared.
-            deadline = request_state.bridge_request_deadline
-            if deadline is None:
-                deadline = request_state.started_at + _http_bridge_request_budget_seconds(get_settings())
-            remaining_budget = deadline - time.monotonic()
-            timeout_seconds = max(0.0, min(timeout_seconds, remaining_budget))
+            timeout_seconds = _http_bridge_admission_timeout_seconds(request_state, timeout_seconds, get_settings())
         request_state.response_create_gate = response_create_gate
         request_state.response_create_gate_wait_started_at = time.monotonic()
         if account_id is not None:
@@ -1499,13 +1495,15 @@ class ProxyService(
         force: bool = False,
         timeout_seconds: float | None = None,
     ) -> Account:
-        try:
-            return await self._ensure_fresh(account, force=force, timeout_seconds=timeout_seconds)
-        except RefreshError as exc:
-            reason = _refresh_upstream_proxy_fail_closed_reason(exc)
-            if reason is not None:
-                raise UpstreamProxyRouteError(reason, account_id=account.id) from exc
-            raise
+        deadline = None if timeout_seconds is None else time.monotonic() + timeout_seconds
+        return await _recover_fresh_account(
+            self,
+            account,
+            force=force,
+            deadline=deadline,
+            remaining_budget_seconds=_remaining_budget_seconds,
+            request_id=get_request_id(),
+        )
 
     async def _ensure_previsible_unary_fresh_with_failover(
         self,
@@ -2016,6 +2014,7 @@ class ProxyService(
 
 def _is_account_neutral_error_code(code: str | None) -> bool:
     return is_local_overload_error_code(code) or code in {
+        PROCESS_NETWORK_UNAVAILABLE_CODE,
         "proxy_unavailable",
         "responses_compact_input_too_large",
     }

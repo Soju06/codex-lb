@@ -63,12 +63,14 @@ class _FakeUpstreamMessage:
         data: bytes | None = None,
         close_code: int | None = None,
         error: str | None = None,
+        error_code: str | None = None,
     ) -> None:
         self.kind = kind
         self.text = text
         self.data = data
         self.close_code = close_code
         self.error = error
+        self.error_code = error_code
 
 
 class _FakeUpstreamWebSocket:

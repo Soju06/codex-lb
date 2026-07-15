@@ -56,6 +56,7 @@ from app.core.clients.proxy import compact_responses as core_compact_responses  
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
 from app.core.clients.proxy_websocket import (
     UpstreamResponsesWebSocket,
+    UpstreamWebSocketTransportError,
     filter_inbound_websocket_headers,
 )
 from app.core.errors import (
@@ -69,6 +70,11 @@ from app.core.openai.models import OpenAIEvent
 from app.core.openai.parsing import parse_sse_event
 from app.core.openai.requests import (
     ResponsesRequest,
+)
+from app.core.resilience.network_recovery import (
+    NetworkRecoveryDecision,
+    ProcessNetworkRecovery,
+    process_network_error_code,
 )
 from app.core.resilience.overload import is_local_overload_error_code
 from app.core.types import JsonValue
@@ -511,6 +517,23 @@ async def _reject_websocket_owner_switch_blocked(
     await _release_websocket_response_create_gate(request_state, response_create_gate)
 
 
+async def _close_downstream_after_sequenced_replay_refusal(
+    websocket: WebSocket,
+    downstream_activity: _DownstreamWebSocketActivity,
+) -> None:
+    # Once a sequence-numbered frame is visible, a synthetic terminal frame
+    # would violate the upstream sequence. Closing is therefore the only
+    # client-visible terminal signal whenever replay is refused.
+    downstream_activity.mark_disconnected()
+    try:
+        await websocket.close(code=1011, reason="upstream replay requires a fresh request")
+    except Exception:
+        _facade().logger.debug(
+            "Failed to close downstream websocket after sequenced replay refusal",
+            exc_info=True,
+        )
+
+
 @contextmanager
 def _websocket_archive_request_context(request_id: str | None) -> Iterator[None]:
     token = set_request_id(request_id)
@@ -620,6 +643,25 @@ async def _websocket_archive_request_id_for_message(
 def _raise_proxy_budget_exhausted() -> NoReturn:
     _facade()._raise_proxy_budget_exhausted()
     raise AssertionError("proxy budget exhaustion helper returned")
+
+
+async def _wait_for_process_network_recovery(
+    recovery: ProcessNetworkRecovery,
+    exc: ProxyResponseError,
+    *,
+    deadline: float,
+) -> NetworkRecoveryDecision:
+    error = _parse_openai_error(exc.payload)
+    return await recovery.wait(
+        error_code=_normalize_error_code(
+            error.code if error else None,
+            error.type if error else None,
+        ),
+        retryable_same_contract=exc.retryable_same_contract,
+        deadline=deadline,
+        rotate_shared_client=True,
+        failed_session=exc.failed_session,
+    )
 
 
 def _websocket_text_with_account_installation_id(text_data: str, account: Account) -> str:
@@ -1343,6 +1385,50 @@ class _WebSocketMixin:
                             downstream_activity=downstream_activity,
                         )
                     continue
+                except UpstreamWebSocketTransportError as exc:
+                    # send_str/send_bytes may fail after handing bytes to the
+                    # kernel. Delivery is uncertain, so replay could duplicate
+                    # a response.create even when no output is visible yet.
+                    async with pending_lock:
+                        sequenced_downstream_replay_refused = any(
+                            state.last_downstream_sequence_number is not None for state in pending_requests
+                        )
+                    await proxy._fail_pending_websocket_requests(
+                        account=account,
+                        account_id_value=account.id if account else None,
+                        pending_requests=pending_requests,
+                        pending_lock=pending_lock,
+                        error_code=exc.error_code,
+                        error_message=str(exc),
+                        api_key=api_key,
+                        websocket=websocket,
+                        client_send_lock=client_send_lock,
+                        response_create_gate=response_create_gate,
+                        downstream_activity=downstream_activity,
+                        penalize_account=exc.error_code != "proxy_network_unavailable",
+                        suppress_sequenced_downstream_errors=sequenced_downstream_replay_refused,
+                    )
+                    if sequenced_downstream_replay_refused:
+                        await _close_downstream_after_sequenced_replay_refusal(
+                            websocket,
+                            downstream_activity,
+                        )
+                    if upstream_reader is not None:
+                        await _facade()._await_cancelled_task(upstream_reader, label="proxy websocket upstream reader")
+                        upstream_reader = None
+                    upstream_control = None
+                    if upstream is not None:
+                        try:
+                            await upstream.close()
+                        except Exception:
+                            _facade().logger.debug(
+                                "Failed to close upstream websocket after transport send failure",
+                                exc_info=True,
+                            )
+                    upstream = None
+                    await release_current_account_lease()
+                    account = None
+                    continue
                 except Exception:
                     replay_refusal_reasons: list[str] = []
                     replay_candidate = await _pop_replayable_precreated_websocket_request_state(
@@ -1390,14 +1476,10 @@ class _WebSocketMixin:
                         suppress_sequenced_downstream_errors=sequenced_downstream_replay_refused,
                     )
                     if sequenced_downstream_replay_refused:
-                        downstream_activity.mark_disconnected()
-                        try:
-                            await websocket.close(code=1011, reason="upstream replay requires a fresh request")
-                        except Exception:
-                            _facade().logger.debug(
-                                "Failed to close downstream websocket after sequenced send failure",
-                                exc_info=True,
-                            )
+                        await _close_downstream_after_sequenced_replay_refusal(
+                            websocket,
+                            downstream_activity,
+                        )
                     if upstream_reader is not None:
                         await _facade()._await_cancelled_task(upstream_reader, label="proxy websocket upstream reader")
                         upstream_reader = None
@@ -2273,6 +2355,51 @@ class _WebSocketMixin:
         force_refresh: bool = False,
         can_transient_failover: bool = False,
     ) -> tuple[Account, UpstreamResponsesWebSocket] | None:
+        recovery = ProcessNetworkRecovery(
+            transport="websocket",
+            request_id=request_state.request_log_id or request_state.request_id,
+            account_id=account.id,
+        )
+        while True:
+            try:
+                result = await self._try_open_websocket_connect_attempt_once(
+                    account,
+                    headers,
+                    deadline=deadline,
+                    api_key=api_key,
+                    request_state=request_state,
+                    client_send_lock=client_send_lock,
+                    websocket=websocket,
+                    force_refresh=force_refresh,
+                    can_transient_failover=can_transient_failover,
+                )
+                recovery.log_recovered()
+                return result
+            except ProxyResponseError as exc:
+                decision = await _wait_for_process_network_recovery(
+                    recovery,
+                    exc,
+                    deadline=deadline,
+                )
+                if decision == "retry":
+                    continue
+                if decision == "exhausted":
+                    _raise_proxy_budget_exhausted()
+                raise
+
+    async def _try_open_websocket_connect_attempt_once(
+        self,
+        account: Account,
+        headers: dict[str, str],
+        *,
+        deadline: float,
+        api_key: ApiKeyData | None,
+        request_state: _WebSocketRequestState,
+        client_send_lock: anyio.Lock,
+        websocket: WebSocket,
+        force_refresh: bool = False,
+        can_transient_failover: bool = False,
+    ) -> tuple[Account, UpstreamResponsesWebSocket] | None:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
         try:
@@ -2418,10 +2545,11 @@ class _WebSocketMixin:
             return None
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             message = str(exc) or "Request to upstream timed out"
+            error_code = process_network_error_code(exc, fallback="upstream_unavailable")
             raise ProxyResponseError(
                 502,
                 openai_error(
-                    "upstream_unavailable",
+                    error_code,
                     message,
                     error_type="server_error",
                 ),
@@ -2636,13 +2764,36 @@ class _WebSocketMixin:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
         started_at = time.monotonic()
-        try:
-            with anyio.fail_after(timeout_seconds):
-                return await proxy._open_upstream_websocket(account, headers, request_state=request_state)
-        except TimeoutError:
-            if time.monotonic() - started_at < timeout_seconds:
+        deadline = started_at + timeout_seconds
+        recovery = ProcessNetworkRecovery(
+            transport="websocket",
+            request_id=None if request_state is None else request_state.request_log_id or request_state.request_id,
+            account_id=account.id,
+        )
+        while True:
+            remaining_seconds = deadline - time.monotonic()
+            if remaining_seconds <= 0:
+                _raise_proxy_budget_exhausted()
+            try:
+                with anyio.fail_after(remaining_seconds):
+                    upstream = await proxy._open_upstream_websocket(account, headers, request_state=request_state)
+                recovery.log_recovered()
+                return upstream
+            except ProxyResponseError as exc:
+                decision = await _wait_for_process_network_recovery(
+                    recovery,
+                    exc,
+                    deadline=deadline,
+                )
+                if decision == "retry":
+                    continue
+                if decision == "exhausted":
+                    _raise_proxy_budget_exhausted()
                 raise
-            _raise_proxy_budget_exhausted()
+            except TimeoutError:
+                if time.monotonic() - started_at < timeout_seconds:
+                    raise
+                _raise_proxy_budget_exhausted()
 
     async def _open_upstream_websocket(
         self,
@@ -3135,11 +3286,16 @@ class _WebSocketMixin:
                         break
                     continue
                 replay_refusal_reasons: list[str] = []
-                replay_request_state = await _pop_replayable_precreated_websocket_request_state(
-                    pending_requests,
-                    pending_lock=pending_lock,
-                    replay_refusal_reasons=replay_refusal_reasons,
-                )
+                replay_request_state = None
+                # A classified route/DNS receive failure happens after a
+                # completed send. Surface it account-neutrally rather than
+                # guessing that the upstream did not accept the request.
+                if message.error_code != "proxy_network_unavailable":
+                    replay_request_state = await _pop_replayable_precreated_websocket_request_state(
+                        pending_requests,
+                        pending_lock=pending_lock,
+                        replay_refusal_reasons=replay_refusal_reasons,
+                    )
                 if replay_request_state is not None:
                     upstream_control.reconnect_requested = True
                     upstream_control.replay_request_state = replay_request_state
@@ -3159,24 +3315,21 @@ class _WebSocketMixin:
                     account_id_value=account_id_value,
                     pending_requests=pending_requests,
                     pending_lock=pending_lock,
-                    error_code="stream_incomplete",
+                    error_code=message.error_code or "stream_incomplete",
                     error_message=_upstream_websocket_disconnect_message(message),
                     api_key=api_key,
                     websocket=websocket,
                     client_send_lock=client_send_lock,
                     response_create_gate=response_create_gate,
                     downstream_activity=downstream_activity,
+                    penalize_account=message.error_code != "proxy_network_unavailable",
                     suppress_sequenced_downstream_errors=sequenced_downstream_replay_refused,
                 )
                 if sequenced_downstream_replay_refused:
-                    downstream_activity.mark_disconnected()
-                    try:
-                        await websocket.close(code=1011, reason="upstream replay requires a fresh request")
-                    except Exception:
-                        _facade().logger.debug(
-                            "Failed to close downstream websocket after sequenced replay refusal",
-                            exc_info=True,
-                        )
+                    await _close_downstream_after_sequenced_replay_refusal(
+                        websocket,
+                        downstream_activity,
+                    )
                 break
         except asyncio.CancelledError:
             raise

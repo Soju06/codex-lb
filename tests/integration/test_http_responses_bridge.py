@@ -280,11 +280,13 @@ class _FakeUpstreamMessage:
         text: str | None = None,
         close_code: int | None = None,
         error: str | None = None,
+        error_code: str | None = None,
     ) -> None:
         self.kind = kind
         self.text = text
         self.close_code = close_code
         self.error = error
+        self.error_code = error_code
         self.data = None
 
 
@@ -8801,7 +8803,10 @@ async def test_v1_responses_http_bridge_cancellation_releases_queued_slot(async_
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_http_bridge_send_retry_restarts_reader(async_client, monkeypatch):
+async def test_v1_responses_http_bridge_ambiguous_send_failure_does_not_restart_reader(
+    async_client,
+    monkeypatch,
+):
     _install_bridge_settings(monkeypatch, enabled=True)
     account_id = await _import_account(
         async_client,
@@ -8918,9 +8923,9 @@ async def test_v1_responses_http_bridge_send_retry_restarts_reader(async_client,
         },
     )
 
-    assert response.status_code == 200
-    assert response.json()["id"] == "resp_retry_send"
-    assert connect_count == 2
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "stream_incomplete"
+    assert connect_count == 1
 
 
 @pytest.mark.asyncio
@@ -10327,7 +10332,7 @@ async def test_v1_responses_http_bridge_stream_masks_anonymous_previous_response
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_http_bridge_send_retry_keeps_session_open_for_followup_request(
+async def test_v1_responses_http_bridge_ambiguous_send_failure_retires_session_for_followup_request(
     async_client,
     app_instance,
     monkeypatch,
@@ -10452,7 +10457,8 @@ async def test_v1_responses_http_bridge_send_retry_keeps_session_open_for_follow
     first = await async_client.post("/v1/responses", json=payload)
     second = await async_client.post("/v1/responses", json=payload)
 
-    assert first.status_code == 200
+    assert first.status_code == 502
+    assert first.json()["error"]["code"] == "stream_incomplete"
     assert second.status_code == 200
     assert connect_count == 2
 

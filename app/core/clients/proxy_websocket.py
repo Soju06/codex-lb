@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 from dataclasses import dataclass
-from typing import Any, Mapping, Protocol, cast
+from typing import Any, Mapping, NoReturn, Protocol, cast
 from urllib.parse import urlparse, urlunparse
 
 import aiohttp
@@ -41,6 +42,11 @@ from app.core.conversation_archive import archive_bytes, archive_text
 from app.core.errors import OpenAIErrorDetail, OpenAIErrorEnvelope, openai_error
 from app.core.openai.models import OpenAIError
 from app.core.openai.parsing import parse_error_payload
+from app.core.resilience.network_recovery import (
+    PROCESS_NETWORK_UNAVAILABLE_CODE,
+    process_network_error_code,
+    rotate_shared_http_transport,
+)
 from app.core.upstream_proxy import ResolvedUpstreamRoute
 from app.core.utils.proxy_env import resolve_websocket_proxy_from_env
 from app.core.utils.request_id import get_request_id
@@ -58,6 +64,8 @@ _WEBSOCKET_HOP_BY_HOP_HEADERS = _HOP_BY_HOP_HEADER_NAMES | frozenset(
 _RESPONSES_WEBSOCKET_BETA_HEADER = "responses_websockets=2026-02-06"
 _RESPONSES_WEBSOCKET_INCOMPATIBLE_BETA_HEADERS = frozenset({"responses=experimental"})
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass(slots=True)
 class UpstreamWebSocketMessage:
@@ -66,6 +74,58 @@ class UpstreamWebSocketMessage:
     data: bytes | None = None
     close_code: int | None = None
     error: str | None = None
+    error_code: str | None = None
+
+
+class UpstreamWebSocketTransportError(RuntimeError):
+    """Credential-safe post-connect transport failure with stable classification."""
+
+    def __init__(self, message: str, *, error_code: str) -> None:
+        super().__init__(message)
+        self.error_code = error_code
+
+
+def _websocket_transport_error_code(exc: BaseException, *, uses_proxy: bool) -> str:
+    return process_network_error_code(
+        exc,
+        fallback="upstream_unavailable",
+        include_permanent_dns=not uses_proxy,
+    )
+
+
+def _relay_receive_error_code(error_code: str) -> str | None:
+    """Expose only account-neutral process failures across the adapter boundary."""
+
+    # Relay owners map an absent code to their established stream_incomplete
+    # contract. Leaking the adapter's generic fallback would bypass that path.
+    return error_code if error_code == PROCESS_NETWORK_UNAVAILABLE_CODE else None
+
+
+async def _rotate_after_websocket_network_failure(error_code: str) -> None:
+    if error_code != PROCESS_NETWORK_UNAVAILABLE_CODE:
+        return
+    try:
+        await rotate_shared_http_transport(transport="websocket", request_id=get_request_id())
+    except Exception:
+        # Rotation is best-effort here: never replace the credential-safe
+        # socket failure that the owning request must surface.
+        logger.warning("Failed to rotate shared HTTP state after websocket network failure", exc_info=True)
+
+
+async def _raise_websocket_send_error(
+    exc: Exception,
+    *,
+    endpoint_id: str | None = None,
+    uses_proxy: bool,
+) -> NoReturn:
+    error_code = _websocket_transport_error_code(exc, uses_proxy=uses_proxy)
+    await _rotate_after_websocket_network_failure(error_code)
+    # A send exception does not prove whether the peer received the complete
+    # frame. The typed error lets every caller fail closed instead of replaying.
+    raise UpstreamWebSocketTransportError(
+        codex_transport_error_message("websocket send", endpoint_id, exc),
+        error_code=error_code,
+    ) from None
 
 
 class UpstreamResponsesWebSocket(Protocol):
@@ -81,14 +141,21 @@ class UpstreamResponsesWebSocket(Protocol):
 
 
 class WebsocketsResponsesWebSocket:
-    def __init__(self, connection: ClientConnection) -> None:
+    def __init__(self, connection: ClientConnection, *, uses_proxy: bool = False) -> None:
         self._connection = connection
+        self._uses_proxy = uses_proxy
 
     async def send_text(self, text: str) -> None:
-        await self._connection.send(text)
+        try:
+            await self._connection.send(text)
+        except Exception as exc:
+            await _raise_websocket_send_error(exc, uses_proxy=self._uses_proxy)
 
     async def send_bytes(self, data: bytes) -> None:
-        await self._connection.send(data)
+        try:
+            await self._connection.send(data)
+        except Exception as exc:
+            await _raise_websocket_send_error(exc, uses_proxy=self._uses_proxy)
 
     async def receive(self) -> UpstreamWebSocketMessage:
         try:
@@ -96,10 +163,24 @@ class WebsocketsResponsesWebSocket:
         except ConnectionClosedOK as exc:
             return UpstreamWebSocketMessage(kind="close", close_code=_close_code_from_exception(exc))
         except ConnectionClosedError as exc:
+            error_code = _websocket_transport_error_code(exc, uses_proxy=self._uses_proxy)
+            await _rotate_after_websocket_network_failure(error_code)
+            # ConnectionClosedError describes an incomplete close handshake,
+            # not generic transport provenance. Let relay owners map ordinary
+            # closes to stream_incomplete while preserving classified network failures.
             return UpstreamWebSocketMessage(
                 kind="error",
                 close_code=_close_code_from_exception(exc),
                 error=str(exc),
+                error_code=_relay_receive_error_code(error_code),
+            )
+        except Exception as exc:
+            error_code = _websocket_transport_error_code(exc, uses_proxy=self._uses_proxy)
+            await _rotate_after_websocket_network_failure(error_code)
+            return UpstreamWebSocketMessage(
+                kind="error",
+                error=codex_transport_error_message("websocket receive", None, exc),
+                error_code=_relay_receive_error_code(error_code),
             )
 
         if isinstance(message, str):
@@ -146,7 +227,7 @@ class CodexResponsesWebSocket:
             if asyncio.iscoroutine(result):
                 await result
         except Exception as exc:
-            raise RuntimeError(codex_transport_error_message("websocket send", self._endpoint_id, exc)) from None
+            await _raise_websocket_send_error(exc, endpoint_id=self._endpoint_id, uses_proxy=True)
 
     async def send_bytes(self, data: bytes) -> None:
         try:
@@ -154,15 +235,18 @@ class CodexResponsesWebSocket:
             if asyncio.iscoroutine(result):
                 await result
         except Exception as exc:
-            raise RuntimeError(codex_transport_error_message("websocket send", self._endpoint_id, exc)) from None
+            await _raise_websocket_send_error(exc, endpoint_id=self._endpoint_id, uses_proxy=True)
 
     async def receive(self) -> UpstreamWebSocketMessage:
         try:
             msg = await self._websocket.receive()
         except Exception as exc:
+            error_code = _websocket_transport_error_code(exc, uses_proxy=True)
+            await _rotate_after_websocket_network_failure(error_code)
             return UpstreamWebSocketMessage(
                 kind="error",
                 error=codex_transport_error_message("websocket receive", self._endpoint_id, exc),
+                error_code=_relay_receive_error_code(error_code),
             )
         if msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSING, aiohttp.WSMsgType.CLOSED):
             return UpstreamWebSocketMessage(
@@ -171,6 +255,12 @@ class CodexResponsesWebSocket:
             )
         if msg.type == aiohttp.WSMsgType.ERROR:
             exception = msg.data if isinstance(msg.data, BaseException) else None
+            error_code = (
+                _websocket_transport_error_code(exception, uses_proxy=True)
+                if exception is not None
+                else "upstream_unavailable"
+            )
+            await _rotate_after_websocket_network_failure(error_code)
             return UpstreamWebSocketMessage(
                 kind="error",
                 error=(
@@ -178,6 +268,7 @@ class CodexResponsesWebSocket:
                     if exception is not None
                     else "Upstream websocket error"
                 ),
+                error_code=_relay_receive_error_code(error_code),
             )
         if msg.type == aiohttp.WSMsgType.TEXT:
             text = msg.data if isinstance(msg.data, str) else str(msg.data)
@@ -192,10 +283,14 @@ class CodexResponsesWebSocket:
             if asyncio.iscoroutine(result):
                 await result
         finally:
-            if self._context is not None:
-                await self._context.__aexit__(None, None, None)
-            if self._owns_codex_client and self._codex_client is not None:
-                await self._codex_client.close()
+            try:
+                if self._context is not None:
+                    await self._context.__aexit__(None, None, None)
+            finally:
+                # Context and client ownership are independent: a failed
+                # websocket exit must not leak the session this wrapper owns.
+                if self._owns_codex_client and self._codex_client is not None:
+                    await self._codex_client.close()
 
     def response_header(self, name: str) -> str | None:
         return self._response_headers.get(name.lower())
@@ -451,9 +546,12 @@ async def connect_responses_websocket(
         except CodexTransportError as exc:
             if owns_codex_client:
                 await active_codex_client.close()
+            error_code = exc.error_code or "upstream_unavailable"
             raise ProxyResponseError(
                 502,
-                openai_error("upstream_unavailable", str(exc), error_type="server_error"),
+                openai_error(error_code, str(exc), error_type="server_error"),
+                failure_phase="connect",
+                retryable_same_contract=error_code == PROCESS_NETWORK_UNAVAILABLE_CODE,
             ) from exc
         except Exception:
             if owns_codex_client:
@@ -521,13 +619,20 @@ async def connect_responses_websocket(
             openai_error("upstream_unavailable", message, error_type="server_error"),
         ) from exc
     except OSError as exc:
+        error_code = process_network_error_code(
+            exc,
+            fallback="upstream_unavailable",
+            include_permanent_dns=proxy_url is None,
+        )
         raise ProxyResponseError(
             502,
-            openai_error("upstream_unavailable", str(exc)),
+            openai_error(error_code, str(exc)),
+            failure_phase="connect",
+            retryable_same_contract=error_code == PROCESS_NETWORK_UNAVAILABLE_CODE,
         ) from exc
 
     return ArchivingResponsesWebSocket(
-        WebsocketsResponsesWebSocket(response),
+        WebsocketsResponsesWebSocket(response, uses_proxy=proxy_url is not None),
         url=url,
         headers=upstream_headers,
         account_id=account_id,

@@ -72,4 +72,3 @@ The retention job MUST run on at most one instance at a time and MUST delete in 
 - **GIVEN** more prunable rows than one batch
 - **WHEN** a retention pass runs
 - **THEN** rows are deleted across multiple bounded transactions until no prunable rows remain
-

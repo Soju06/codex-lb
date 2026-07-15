@@ -33,6 +33,7 @@ from app.core.clients.proxy import (  # noqa: F401  # noqa: F401
 from app.core.clients.proxy import codex_control_request as core_codex_control_request  # noqa: F401
 from app.core.clients.proxy import compact_responses as core_compact_responses  # noqa: F401
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
+from app.core.clients.proxy_websocket import UpstreamWebSocketTransportError
 from app.core.errors import (
     openai_error,
 )
@@ -712,7 +713,14 @@ class _HTTPBridgeRequestSubmitMixin:
                     session.admission_waiter_count = max(0, session.admission_waiter_count - 1)
                     admission_waiter_registered = False
                 request_enqueued = True
-                await _send_http_bridge_request_text_with_archive_id(session, request_state, text_data)
+                try:
+                    await _send_http_bridge_request_text_with_archive_id(session, request_state, text_data)
+                except BaseException:
+                    # Publish retirement while lifecycle ownership is still
+                    # held; a gate waiter must never reuse an ambiguously sent
+                    # response.create socket between unlock and cleanup.
+                    session.closed = True
+                    raise
                 session.last_used_at = _service_time().monotonic()
         except ProxyResponseError:
             await self._cleanup_http_bridge_submit_interruption(
@@ -744,13 +752,11 @@ class _HTTPBridgeRequestSubmitMixin:
                 cache_key_family=session.key.affinity_kind,
                 model_class=_extract_model_class(session.request_model) if session.request_model else None,
             )
-            retried = await self._retry_http_bridge_request_on_fresh_upstream(
-                session,
-                request_state=request_state,
-                text_data=text_data,
-            )
-            if retried:
-                return
+            # send_text may fail after the complete response.create frame was
+            # handed to the kernel. Never reconnect-and-resend from this path;
+            # only failures proven to precede dispatch may be replayed.
+            error_code = exc.error_code if isinstance(exc, UpstreamWebSocketTransportError) else "stream_incomplete"
+            account_neutral = error_code == "proxy_network_unavailable"
             await self._cleanup_http_bridge_submit_interruption(
                 session,
                 request_state=request_state,
@@ -764,10 +770,11 @@ class _HTTPBridgeRequestSubmitMixin:
                 account_id_value=session.account.id,
                 pending_requests=deque([request_state]),
                 pending_lock=anyio.Lock(),
-                error_code="stream_incomplete",
-                error_message="Upstream websocket closed before response.completed",
+                error_code=error_code,
+                error_message=str(exc) or "Upstream websocket closed before response.completed",
                 api_key=None,
                 response_create_gate=session.response_create_gate,
+                penalize_account=not account_neutral,
             )
             session.closed = True
             try:
@@ -781,7 +788,7 @@ class _HTTPBridgeRequestSubmitMixin:
             # history, inflating per-turn context by ~20x.
             raise ProxyResponseError(
                 502,
-                openai_error("upstream_unavailable", str(exc) or "Upstream websocket closed"),
+                openai_error(error_code, str(exc) or "Upstream websocket closed"),
             ) from exc
 
     async def _maybe_prewarm_http_bridge_session(
@@ -1195,6 +1202,11 @@ class _HTTPBridgeRequestSubmitMixin:
             _clear_websocket_request_error_overrides(request_state)
             session.last_used_at = _service_time().monotonic()
             return True
+        except UpstreamWebSocketTransportError:
+            # The new socket may have accepted response.create. Let the reader
+            # owner retire the whole session with the typed, non-replayable
+            # failure instead of falling back to the earlier close reason.
+            raise
         except Exception:
             logger.warning("HTTP bridge retry on fresh upstream failed", exc_info=True)
             return False
@@ -1291,6 +1303,8 @@ class _HTTPBridgeRequestSubmitMixin:
             await _send_http_bridge_request_text_with_archive_id(session, request_state, request_text)
             session.last_used_at = _service_time().monotonic()
             return True
+        except UpstreamWebSocketTransportError:
+            raise
         except Exception as exc:
             request_state.error_code_override, request_state.error_message_override = (
                 _http_bridge_precreated_retry_failure_error(exc)
@@ -1358,6 +1372,8 @@ class _HTTPBridgeRequestSubmitMixin:
             await _send_http_bridge_request_text_with_archive_id(session, request_state, request_text)
             session.last_used_at = _service_time().monotonic()
             return "retried"
+        except UpstreamWebSocketTransportError:
+            raise
         except Exception as exc:
             request_state.error_code_override, request_state.error_message_override = (
                 _http_bridge_precreated_retry_failure_error(exc)
@@ -1425,6 +1441,8 @@ class _HTTPBridgeRequestSubmitMixin:
             await _send_http_bridge_request_text_with_archive_id(session, request_state, retry_text)
             session.last_used_at = _service_time().monotonic()
             return True
+        except UpstreamWebSocketTransportError:
+            raise
         except Exception as exc:
             logger.warning("HTTP bridge security-work retry failed", exc_info=True)
             if isinstance(exc, ProxyResponseError):

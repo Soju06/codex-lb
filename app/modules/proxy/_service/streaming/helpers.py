@@ -695,10 +695,10 @@ def _call_stream_with_supported_optional_kwargs(
 
 
 def _stream_request_budget_seconds(settings: object, *, request_transport: str) -> float:
-    if request_transport == _REQUEST_TRANSPORT_HTTP:
-        budget = getattr(settings, "http_responses_stream_request_budget_seconds", None)
-        if budget is not None:
-            return float(budget)
+    del request_transport
+    budget = getattr(settings, "http_responses_stream_request_budget_seconds", None)
+    if budget is not None:
+        return float(budget)
     return float(getattr(settings, "proxy_request_budget_seconds"))
 
 

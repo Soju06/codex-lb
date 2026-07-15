@@ -887,6 +887,15 @@ class _CompactMixin:
                 if remaining_budget <= 0:
                     logger.warning("Compact request budget exhausted before freshness check request_id=%s", request_id)
                     await proxy._load_balancer.release_account_lease(selected_account_response_create_lease)
+                    # Forwarded compact requests do not own their reservation at
+                    # the caller, and this terminal bypasses the retry-loop
+                    # settlement handlers. Release the held quota before raising.
+                    await proxy._settle_compact_api_key_usage(
+                        api_key=api_key,
+                        api_key_reservation=api_key_reservation,
+                        response=None,
+                        request_service_tier=request_service_tier,
+                    )
                     _raise_proxy_budget_exhausted()
                 freshness_budget = _compact_freshness_budget_seconds(remaining_budget)
                 if freshness_budget <= 0:
@@ -897,6 +906,12 @@ class _CompactMixin:
                         remaining_budget,
                     )
                     await proxy._load_balancer.release_account_lease(selected_account_response_create_lease)
+                    await proxy._settle_compact_api_key_usage(
+                        api_key=api_key,
+                        api_key_reservation=api_key_reservation,
+                        response=None,
+                        request_service_tier=request_service_tier,
+                    )
                     _raise_proxy_budget_exhausted()
                 try:
                     logger.info(
@@ -1042,6 +1057,12 @@ class _CompactMixin:
                         account.id,
                     )
                     await proxy._load_balancer.release_account_lease(selected_account_response_create_lease)
+                    await proxy._settle_compact_api_key_usage(
+                        api_key=api_key,
+                        api_key_reservation=api_key_reservation,
+                        response=None,
+                        request_service_tier=request_service_tier,
+                    )
                     _raise_proxy_budget_exhausted()
                 request_service_tier = _service_tier_from_compact_payload(payload)
 
@@ -1105,6 +1126,12 @@ class _CompactMixin:
                                         "account_id=%s",
                                         request_id,
                                         account.id,
+                                    )
+                                    await proxy._settle_compact_api_key_usage(
+                                        api_key=api_key,
+                                        api_key_reservation=api_key_reservation,
+                                        response=None,
+                                        request_service_tier=request_service_tier,
                                     )
                                     _raise_proxy_budget_exhausted()
                                 account = await proxy._ensure_fresh_with_budget(

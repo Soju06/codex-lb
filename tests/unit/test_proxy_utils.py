@@ -24300,6 +24300,48 @@ async def test_compact_responses_budget_exhaustion_returns_request_timeout(monke
 
 
 @pytest.mark.asyncio
+async def test_compact_responses_inner_budget_exhaustion_settles_once(monkeypatch):
+    """The inner upstream-call budget terminal is already settled by its
+    enclosing retry handler and must not gain a second terminal-site settle."""
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_compact_inner_budget")
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
+
+    remaining_budgets = iter((10.0, 10.0, 0.0))
+    monkeypatch.setattr(
+        proxy_compact_service,
+        "_remaining_budget_seconds",
+        lambda _deadline: next(remaining_budgets),
+    )
+    settle_compact_usage = AsyncMock()
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", settle_compact_usage)
+    upstream_compact = AsyncMock()
+    monkeypatch.setattr(proxy_service, "core_compact_responses", upstream_compact)
+
+    payload = ResponsesCompactRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service.compact_responses(payload, {"session_id": "sid-compact-inner-budget"})
+
+    exc = _assert_proxy_response_error(exc_info.value)
+    assert exc.status_code == 502
+    assert _proxy_error_code(exc) == "upstream_request_timeout"
+    settle_compact_usage.assert_awaited_once()
+    upstream_compact.assert_not_awaited()
+    assert list(remaining_budgets) == []
+
+
+@pytest.mark.asyncio
 async def test_compact_responses_refresh_connection_reset_fails_over(monkeypatch):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     request_logs = _RequestLogsRecorder()

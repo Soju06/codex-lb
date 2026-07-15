@@ -16,11 +16,12 @@ from app.core.auth import generate_unique_account_id
 from app.core.clients.proxy import ProxyResponseError
 from app.core.errors import openai_error
 from app.core.openai.models import CompactResponsePayload, OpenAIResponsePayload
+from app.core.openai.requests import ResponsesCompactRequest
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal
 from app.modules.api_keys.repository import ApiKeysRepository
-from app.modules.api_keys.service import ApiKeyCreateData, ApiKeysService
+from app.modules.api_keys.service import ApiKeyCreateData, ApiKeysService, LimitRuleInput
 from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 
@@ -1048,6 +1049,146 @@ async def test_proxy_compact_preflight_permanent_refresh_settles_reservation(asy
         await async_client.post("/backend-api/codex/responses/compact", json=payload)
 
     settle_compact_usage.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    ("terminal", "remaining_budgets", "zero_freshness_budget", "expected_freshness_calls", "expected_upstream_calls"),
+    [
+        pytest.param("before_freshness", (0.0,), False, 0, 0, id="before-freshness"),
+        pytest.param("before_freshness_reserve", (10.0,), True, 0, 0, id="before-freshness-reserve"),
+        pytest.param("after_freshness", (10.0, 0.0), False, 1, 0, id="after-freshness"),
+        pytest.param("before_forced_refresh", (10.0, 10.0, 10.0, 10.0, 0.0), False, 1, 1, id="post-401"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_proxy_compact_budget_exhausted_preflight_settles_reservation(
+    async_client,
+    monkeypatch,
+    terminal,
+    remaining_budgets,
+    zero_freshness_budget,
+    expected_freshness_calls,
+    expected_upstream_calls,
+):
+    """Every budget terminal that bypasses the retry-loop handlers settles
+    before preserving the public ``502 upstream_request_timeout`` contract."""
+    import app.modules.proxy._service.compact as compact_module
+
+    email = f"compact-budget-{terminal}@example.com"
+    raw_account_id = f"acc_compact_budget_{terminal}"
+    auth_json = _make_auth_json(raw_account_id, email)
+    response = await async_client.post(
+        "/api/accounts/import",
+        files={"auth_json": ("auth.json", json.dumps(auth_json), "application/json")},
+    )
+    assert response.status_code == 200
+
+    budget_values = iter(remaining_budgets)
+    monkeypatch.setattr(compact_module, "_remaining_budget_seconds", lambda _deadline: next(budget_values))
+    if zero_freshness_budget:
+        monkeypatch.setattr(compact_module, "_compact_freshness_budget_seconds", lambda _remaining: 0.0)
+
+    freshness_calls: list[bool] = []
+
+    async def fake_ensure_fresh(self, account, *, force: bool = False, timeout_seconds=None):
+        del self, timeout_seconds
+        freshness_calls.append(force)
+        return account
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh)
+
+    upstream_compact = AsyncMock()
+    if terminal == "before_forced_refresh":
+        upstream_compact.side_effect = ProxyResponseError(
+            401,
+            openai_error("invalid_api_key", "token expired", error_type="authentication_error"),
+        )
+    monkeypatch.setattr(proxy_module, "core_compact_responses", upstream_compact)
+
+    settle_compact_usage = AsyncMock()
+    monkeypatch.setattr(proxy_module.ProxyService, "_settle_compact_api_key_usage", settle_compact_usage)
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": []}
+    response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
+
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "upstream_request_timeout"
+    settle_compact_usage.assert_awaited_once()
+    settle_call = settle_compact_usage.await_args
+    assert settle_call is not None
+    assert settle_call.kwargs["response"] is None
+    assert freshness_calls == [False] * expected_freshness_calls
+    assert upstream_compact.await_count == expected_upstream_calls
+    assert list(budget_values) == []
+
+
+@pytest.mark.asyncio
+async def test_compact_service_budget_exhaustion_releases_forwarded_reservation(
+    async_client,
+    app_instance,
+    monkeypatch,
+):
+    """A service-owned forwarded reservation is released in the database, so
+    the same API key can reserve its quota again immediately instead of 429ing."""
+    import app.modules.proxy._service.compact as compact_module
+    from app.dependencies import get_proxy_service_for_app
+
+    auth_json = _make_auth_json(
+        "acc_compact_forwarded_reservation",
+        "compact-forwarded-reservation@example.com",
+    )
+    response = await async_client.post(
+        "/api/accounts/import",
+        files={"auth_json": ("auth.json", json.dumps(auth_json), "application/json")},
+    )
+    assert response.status_code == 200
+
+    async with SessionLocal() as session:
+        api_keys = ApiKeysService(ApiKeysRepository(session))
+        created = await api_keys.create_key(
+            ApiKeyCreateData(
+                name="compact-forwarded-reservation",
+                allowed_models=None,
+                limits=[
+                    LimitRuleInput(
+                        limit_type="total_tokens",
+                        limit_window="weekly",
+                        max_value=100,
+                    )
+                ],
+            )
+        )
+        api_key = await api_keys.get_key_by_id(created.id)
+        reservation = await api_keys.enforce_limits_for_request(created.id, request_model="gpt-5.1")
+
+    proxy_service = get_proxy_service_for_app(app_instance)
+    monkeypatch.setattr(compact_module, "_remaining_budget_seconds", lambda _deadline: 0.0)
+    payload = ResponsesCompactRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await proxy_service.compact_responses(
+            payload,
+            {"session_id": "sid-compact-forwarded-reservation"},
+            api_key=api_key,
+            api_key_reservation=reservation,
+        )
+
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.payload["error"]["code"] == "upstream_request_timeout"
+
+    async with SessionLocal() as session:
+        api_keys_repo = ApiKeysRepository(session)
+        released = await api_keys_repo.get_usage_reservation(reservation.reservation_id)
+        limits = await api_keys_repo.get_limits_by_key(created.id)
+        assert released is not None
+        assert released.status == "released"
+        assert len(limits) == 1
+        assert limits[0].current_value == 0
+
+        api_keys = ApiKeysService(api_keys_repo)
+        next_reservation = await api_keys.enforce_limits_for_request(created.id, request_model="gpt-5.1")
+        assert next_reservation.reservation_id != reservation.reservation_id
+        await api_keys.release_usage_reservation(next_reservation.reservation_id)
 
 
 @pytest.mark.asyncio

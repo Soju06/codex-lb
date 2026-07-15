@@ -36,9 +36,18 @@ def test_standalone_docker_examples_use_named_bridge() -> None:
     assert "--dns " not in readme
 
 
+def test_docker_docs_basic_run_uses_named_bridge() -> None:
+    docker_docs = (_REPO_ROOT / "docs/deployment/docker.md").read_text(encoding="utf-8")
+    basic_run = docker_docs.split("## Basic run", 1)[1].split("## Switching Wi-Fi or other networks", 1)[0]
+
+    assert "docker network inspect codex-lb-net >/dev/null 2>&1 || docker network create codex-lb-net" in basic_run
+    assert "--network codex-lb-net" in basic_run
+    assert "--dns " not in basic_run
+
+
 def test_network_switching_guidance_is_cross_platform_and_approachable() -> None:
-    readme = (_REPO_ROOT / "README.md").read_text(encoding="utf-8")
-    switching_section = readme.split("### Switching Wi-Fi or other networks", 1)[1].split("## Remote Setup", 1)[0]
+    docker_docs = (_REPO_ROOT / "docs/deployment/docker.md").read_text(encoding="utf-8")
+    switching_section = docker_docs.split("## Switching Wi-Fi or other networks", 1)[1].split("## Docker Compose", 1)[0]
 
     assert "home Wi-Fi to a phone hotspot" in switching_section
     assert "Linux, macOS, and Windows" in switching_section

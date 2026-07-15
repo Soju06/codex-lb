@@ -5894,6 +5894,7 @@ async def test_stream_responses_maps_typed_dns_failure_with_failed_session_prove
         log_upstream_request_payload = False
         proxy_request_budget_seconds = 5.0
         upstream_stream_transport = "http"
+        trace_channels = frozenset()
 
     class _DnsFailureSseSession:
         def post(
@@ -5947,6 +5948,7 @@ async def test_stream_responses_raw_route_oserror_is_neutral_but_not_replayed(mo
         log_upstream_request_payload = False
         proxy_request_budget_seconds = 5.0
         upstream_stream_transport = "http"
+        trace_channels = frozenset()
 
     class _AmbiguousRouteFailureSession:
         def post(self, url: str, **kwargs: object):
@@ -5989,6 +5991,7 @@ async def test_stream_responses_keeps_missing_environment_proxy_hostname_endpoin
         log_upstream_request_payload = False
         proxy_request_budget_seconds = 5.0
         upstream_stream_transport = "http"
+        trace_channels = frozenset()
 
     class _MissingProxySession:
         def post(

@@ -13,6 +13,20 @@ When an HTTP bridge request cannot reuse the session selected by its incoming af
 - **THEN** lookup emits at most one model-transition fork for that request scope
 - **AND** bridge creation continues under the internal key without closing or reusing the incompatible session
 
+#### Scenario: Follow-up fallback has no previous-response lookup
+
+- **GIVEN** a request carries a fresh generated turn-state header, a `previous_response_id` without a local or durable lookup, and a session header whose active bridge uses an incompatible model
+- **WHEN** lookup isolates the request with an internal model-parallel key
+- **THEN** the session-header fallback remains an anchored continuation for the rest of that lookup/create operation
+- **AND** bridge creation continues under the internal key without a `continuity_lost` error
+
+#### Scenario: Full cache preserves the incompatible parent
+
+- **GIVEN** the HTTP bridge cache is at its session limit and a model transition isolates a session-header fallback into a child key
+- **WHEN** creation needs to evict an idle session
+- **THEN** the incompatible session-header parent MUST NOT be selected for that eviction
+- **AND** ordinary LRU eviction remains eligible for other idle sessions
+
 #### Scenario: Compatible session fallback remains reusable
 
 - **GIVEN** a request carries a fresh generated turn-state header and a session header whose active bridge uses a compatible model

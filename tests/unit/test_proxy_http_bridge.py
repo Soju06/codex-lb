@@ -9677,7 +9677,7 @@ async def test_get_or_create_http_bridge_session_isolates_model_transition_from_
 
 
 @pytest.mark.asyncio
-async def test_get_or_create_http_bridge_session_preserves_model_fork_after_session_header_fallback(
+async def test_get_or_create_http_bridge_session_preserves_session_header_fallback_for_model_fork_follow_up(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
@@ -9737,6 +9737,7 @@ async def test_get_or_create_http_bridge_session_preserves_model_fork_after_sess
         request_model="gpt-5.6-sol",
         idle_ttl_seconds=120.0,
         max_sessions=8,
+        previous_response_id="resp_missing_lookup",
         session_header_fallback_key=parent_key,
     )
 
@@ -9747,6 +9748,72 @@ async def test_get_or_create_http_bridge_session_preserves_model_fork_after_sess
     assert parent.request_model == "gpt-5.6-terra"
     assert parent.closed is False
     assert service._http_bridge_sessions[parent_key] is parent
+
+
+@pytest.mark.asyncio
+async def test_get_or_create_http_bridge_session_preserves_model_transition_parent_during_capacity_eviction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    requested_key = proxy_service._HTTPBridgeSessionKey("turn_state_header", "http_turn_child", None)
+    parent_key = proxy_service._HTTPBridgeSessionKey("session_header", "shared-root", None)
+    parent = _make_bridge_session(key=parent_key)
+    parent.request_model = "gpt-5.6-terra"
+    parent.last_used_at = 1.0
+    evictable_key = proxy_service._HTTPBridgeSessionKey("session_header", "evictable", None)
+    evictable = _make_bridge_session(key=evictable_key)
+    evictable.last_used_at = 2.0
+    child = _make_bridge_session(key=requested_key)
+    child.request_model = "gpt-5.6-sol"
+    service._http_bridge_sessions[parent_key] = parent
+    service._http_bridge_sessions[evictable_key] = evictable
+    closed_sessions: list[proxy_service._HTTPBridgeSession] = []
+
+    async def fake_create_http_bridge_session(
+        create_key: proxy_service._HTTPBridgeSessionKey,
+        **_kwargs: Any,
+    ) -> proxy_service._HTTPBridgeSession:
+        child.key = create_key
+        return child
+
+    async def track_close(session: proxy_service._HTTPBridgeSession, *, reason: str) -> None:
+        assert reason == "registry_detach"
+        closed_sessions.append(session)
+
+    monkeypatch.setattr(service, "_prune_http_bridge_sessions_locked", Mock(return_value=[]))
+    monkeypatch.setattr(service, "_create_http_bridge_session", fake_create_http_bridge_session)
+    monkeypatch.setattr(service, "_close_http_bridge_session_bounded", track_close)
+    monkeypatch.setattr(service, "_claim_durable_http_bridge_session", AsyncMock())
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(proxy_service, "_http_bridge_owner_instance", AsyncMock(return_value="instance-a"))
+    monkeypatch.setattr(
+        proxy_service,
+        "_active_http_bridge_instance_ring",
+        AsyncMock(return_value=("instance-a", ["instance-a"])),
+    )
+
+    resolved = await service._get_or_create_http_bridge_session(
+        requested_key,
+        headers={
+            "x-codex-turn-state": "http_turn_child",
+            "x-codex-session-id": "shared-root",
+        },
+        affinity=proxy_service._AffinityPolicy(
+            key="shared-root",
+            kind=proxy_service.StickySessionKind.CODEX_SESSION,
+        ),
+        api_key=None,
+        request_model="gpt-5.6-sol",
+        idle_ttl_seconds=120.0,
+        max_sessions=2,
+        session_header_fallback_key=parent_key,
+    )
+
+    assert resolved is child
+    assert parent.closed is False
+    assert service._http_bridge_sessions[parent_key] is parent
+    assert evictable_key not in service._http_bridge_sessions
+    assert closed_sessions == [evictable]
 
 
 @pytest.mark.asyncio

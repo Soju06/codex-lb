@@ -37,6 +37,7 @@ export type AccountActionsProps = {
   onReauth: () => void;
   onExportAuth: (accountId: string) => void;
   onResetCredit: (accountId: string) => void;
+  showResetCreditExpiryBadge?: boolean;
   onSecurityWorkAuthorizedChange: (accountId: string, enabled: boolean) => void;
   onLimitWarmupChange: (accountId: string, enabled: boolean) => void;
   onRoutingPolicyChange: (
@@ -56,6 +57,7 @@ export function AccountActions({
   onReauth,
   onExportAuth,
   onResetCredit,
+  showResetCreditExpiryBadge = true,
   onSecurityWorkAuthorizedChange,
   onLimitWarmupChange,
   onRoutingPolicyChange,
@@ -64,7 +66,7 @@ export function AccountActions({
     account.status === "reauth_required" || account.status === "deactivated";
   const probeDisabled =
     busy || readOnly || account.status === "paused" || showOperatorRecoveryAction;
-  const resetCountdown = account.resetCreditNearestExpiresAt
+  const resetCountdown = showResetCreditExpiryBadge && account.resetCreditNearestExpiresAt
     ? formatSingleUnitRemaining(account.resetCreditNearestExpiresAt)
     : null;
   const availableResetCredits = account.availableResetCredits ?? 0;

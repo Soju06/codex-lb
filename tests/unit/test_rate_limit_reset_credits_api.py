@@ -30,6 +30,7 @@ from app.db.models import Account, AccountStatus
 from app.modules.rate_limit_reset_credits import api as reset_credits_api
 from app.modules.rate_limit_reset_credits.api import (
     ConsumeResetCreditResponseSchema,
+    ResetCreditRedeemRequestAlreadyPinned,
     _assert_account_can_redeem_reset_credit,
     _build_refresh_usage_callback,
     _redeem_soonest_reset_credit,
@@ -447,6 +448,30 @@ async def test_redeem_retries_same_request_id_after_local_credit_vanishes_with_d
     assert store.get("acc_1") is None
     # The pre-existing durable pin is preserved.
     assert fake_redeem_ledger == {("acc_1", "retry-id"): "cached"}
+
+
+@pytest.mark.asyncio
+async def test_redeem_skip_if_request_pinned_avoids_upstream_retry(
+    fake_redeem_ledger: dict[tuple[str, str], str],
+) -> None:
+    store = RateLimitResetCreditsStore()
+    fake_redeem_ledger[("acc_1", "auto-id")] = "cached"
+    await store.set("acc_1", _snapshot([_credit("cached")], available_count=1))
+
+    with pytest.raises(ResetCreditRedeemRequestAlreadyPinned) as excinfo:
+        await _redeem_soonest_reset_credit(
+            account=_account(),
+            store=store,
+            encryptor=StubEncryptor(),
+            fetch_fn=_raise_not_called,  # type: ignore[arg-type]
+            consume_fn=_raise_not_called,  # type: ignore[arg-type]
+            redeem_request_id="auto-id",
+            skip_if_redeem_request_pinned=True,
+        )
+
+    assert excinfo.value.account_id == "acc_1"
+    assert excinfo.value.credit_id == "cached"
+    assert fake_redeem_ledger == {("acc_1", "auto-id"): "cached"}
 
 
 @pytest.mark.asyncio

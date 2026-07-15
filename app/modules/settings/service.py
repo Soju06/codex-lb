@@ -24,6 +24,9 @@ class DashboardSettingsData:
     upstream_proxy_default_pool_id: str | None
     prefer_earlier_reset_accounts: bool
     prefer_earlier_reset_window: str
+    show_reset_credit_badges: bool
+    auto_redeem_reset_credits_before_expiry: bool
+    show_reset_credit_expiry_badge: bool
     routing_strategy: str
     relative_availability_power: float
     relative_availability_top_k: int
@@ -71,6 +74,9 @@ class DashboardSettingsUpdateData:
     upstream_proxy_default_pool_id: str | None
     prefer_earlier_reset_accounts: bool
     prefer_earlier_reset_window: str
+    show_reset_credit_badges: bool
+    auto_redeem_reset_credits_before_expiry: bool
+    show_reset_credit_expiry_badge: bool
     routing_strategy: str
     relative_availability_power: float
     relative_availability_top_k: int
@@ -124,6 +130,9 @@ class SettingsService:
             upstream_proxy_default_pool_id=row.upstream_proxy_default_pool_id,
             prefer_earlier_reset_accounts=row.prefer_earlier_reset_accounts,
             prefer_earlier_reset_window=row.prefer_earlier_reset_window,
+            show_reset_credit_badges=row.show_reset_credit_badges,
+            auto_redeem_reset_credits_before_expiry=row.auto_redeem_reset_credits_before_expiry,
+            show_reset_credit_expiry_badge=row.show_reset_credit_expiry_badge,
             routing_strategy=row.routing_strategy,
             relative_availability_power=row.relative_availability_power,
             relative_availability_top_k=row.relative_availability_top_k,
@@ -184,6 +193,9 @@ class SettingsService:
             upstream_proxy_default_pool_id=payload.upstream_proxy_default_pool_id,
             prefer_earlier_reset_accounts=payload.prefer_earlier_reset_accounts,
             prefer_earlier_reset_window=payload.prefer_earlier_reset_window,
+            show_reset_credit_badges=payload.show_reset_credit_badges,
+            auto_redeem_reset_credits_before_expiry=payload.auto_redeem_reset_credits_before_expiry,
+            show_reset_credit_expiry_badge=payload.show_reset_credit_expiry_badge,
             routing_strategy=payload.routing_strategy,
             relative_availability_power=payload.relative_availability_power,
             relative_availability_top_k=payload.relative_availability_top_k,
@@ -234,6 +246,9 @@ class SettingsService:
             upstream_proxy_default_pool_id=row.upstream_proxy_default_pool_id,
             prefer_earlier_reset_accounts=row.prefer_earlier_reset_accounts,
             prefer_earlier_reset_window=row.prefer_earlier_reset_window,
+            show_reset_credit_badges=row.show_reset_credit_badges,
+            auto_redeem_reset_credits_before_expiry=row.auto_redeem_reset_credits_before_expiry,
+            show_reset_credit_expiry_badge=row.show_reset_credit_expiry_badge,
             routing_strategy=row.routing_strategy,
             relative_availability_power=row.relative_availability_power,
             relative_availability_top_k=row.relative_availability_top_k,

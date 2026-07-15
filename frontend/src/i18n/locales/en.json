@@ -328,6 +328,25 @@
         "ariaLabel": "Allow import without overwrite"
       }
     },
+    "resetCredits": {
+      "title": "Reset credits",
+      "description": "Control where reset-credit signals appear and how expiring credits are handled.",
+      "badges": {
+        "label": "Show reset-credit badges",
+        "description": "Show available reset-credit counts in Accounts and the top navigation.",
+        "ariaLabel": "Show reset-credit badges"
+      },
+      "autoRedeem": {
+        "label": "Auto-redeem before expiry",
+        "description": "Attempts to redeem the soonest reset credit about 5 minutes before it expires.",
+        "ariaLabel": "Auto-redeem reset credits before expiry"
+      },
+      "expiryBadge": {
+        "label": "Show reset action expiry",
+        "description": "Show the compact remaining-time label on Accounts reset buttons.",
+        "ariaLabel": "Show reset action expiry"
+      }
+    },
     "session": {
       "title": "Session",
       "description": "Control how long newly issued password-backed dashboard sessions stay signed in.",

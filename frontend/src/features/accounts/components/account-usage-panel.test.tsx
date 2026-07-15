@@ -127,6 +127,31 @@ describe("AccountUsagePanel", () => {
     expect(screen.getByText("3 available")).toBeInTheDocument();
   });
 
+  it("shows the nearest reset-credit expiry when provided", () => {
+    const account = createAccountSummary({
+      resetCreditNearestExpiresAt: "2026-01-01T02:00:00.000Z",
+    });
+
+    render(
+      <AccountUsagePanel
+        account={account}
+        trends={null}
+        resetCredits={{ availableCount: 3 }}
+      />,
+    );
+
+    expect(
+      screen.getByText((_, element) => {
+        const text = element?.textContent ?? "";
+        return text.startsWith("Expires ") && text.includes("(2h)") && !text.includes("available");
+      }),
+    ).toBeInTheDocument();
+    const row = screen.getByText("Usage resets").closest("div");
+    const rowText = row?.textContent ?? "";
+    expect(rowText.indexOf("Expires ")).toBeGreaterThan(-1);
+    expect(rowText.indexOf("Expires ")).toBeLessThan(rowText.indexOf("3 available"));
+  });
+
   it("renders a usage reset action when provided", () => {
     const account = createAccountSummary({ accountId: "acc_reset" });
     const onReset = vi.fn();

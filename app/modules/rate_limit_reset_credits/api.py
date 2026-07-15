@@ -112,6 +112,16 @@ class _RedeemResetCreditOutcome:
     available_count_after: int
 
 
+class ResetCreditRedeemRequestAlreadyPinned(Exception):
+    """Automatic redeem request already has a durable pin and should not retry upstream."""
+
+    def __init__(self, *, account_id: str, redeem_request_id: str, credit_id: str) -> None:
+        self.account_id = account_id
+        self.redeem_request_id = redeem_request_id
+        self.credit_id = credit_id
+        super().__init__(f"reset-credit redeem request already pinned for account {account_id}")
+
+
 @router.get(
     "/{account_id}/rate-limit-reset-credits",
     response_model=RateLimitResetCreditsSnapshotResponse | None,
@@ -203,6 +213,7 @@ async def _redeem_soonest_reset_credit(
     refresh_usage: RefreshUsageFn | None = None,
     resolve_route: ResolveRouteFn | None = None,
     redeem_request_id: str | None = None,
+    skip_if_redeem_request_pinned: bool = False,
 ) -> _RedeemResetCreditOutcome:
     _assert_account_can_redeem_reset_credit(account)
     effective_fetch_fn = fetch_fn or fetch_reset_credits
@@ -220,6 +231,7 @@ async def _redeem_soonest_reset_credit(
                 refresh_usage=refresh_usage,
                 resolve_route=resolve_route,
                 redeem_request_id=redeem_request_id,
+                skip_if_redeem_request_pinned=skip_if_redeem_request_pinned,
             )
     except RedeemClaimTimeoutError as exc:
         raise DashboardConflictError(
@@ -292,6 +304,7 @@ async def _redeem_soonest_reset_credit_locked(
     refresh_usage: RefreshUsageFn | None,
     resolve_route: ResolveRouteFn | None,
     redeem_request_id: str | None,
+    skip_if_redeem_request_pinned: bool,
 ) -> _RedeemResetCreditOutcome:
     redeem_account = account
     if auth_manager is not None:
@@ -311,6 +324,12 @@ async def _redeem_soonest_reset_credit_locked(
     cached_snapshot = store.get(account.id)
     cached_credit = _select_soonest_available_credit(cached_snapshot)
     pending_credit_id = await get_pinned_redeem_credit_id(account.id, redeem_request_id) if client_supplied_id else None
+    if skip_if_redeem_request_pinned and pending_credit_id is not None:
+        raise ResetCreditRedeemRequestAlreadyPinned(
+            account_id=account.id,
+            redeem_request_id=redeem_request_id,
+            credit_id=pending_credit_id,
+        )
     if cached_credit is None and pending_credit_id is None:
         raise DashboardConflictError("No available reset credit", code="no_available_reset_credit")
 

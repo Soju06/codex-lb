@@ -33,6 +33,7 @@ export type AccountListProps = {
   onOpenOauth: () => void;
   sortMode?: AccountSortMode;
   onSortModeChange?: (sortMode: AccountSortMode) => void;
+  showResetCreditBadges?: boolean;
   readOnly?: boolean;
 };
 
@@ -44,6 +45,7 @@ export function AccountList({
   onOpenOauth,
   sortMode,
   onSortModeChange,
+  showResetCreditBadges = true,
   readOnly = false,
 }: AccountListProps) {
   const [search, setSearch] = useState("");
@@ -162,6 +164,7 @@ export function AccountList({
               account={account}
               selected={account.accountId === selectedAccountId}
               showAccountId={account.isEmailDuplicate === true}
+              showResetCreditBadge={showResetCreditBadges}
               onSelect={onSelect}
             />
           ))
